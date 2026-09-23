@@ -431,19 +431,91 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
             provisioned.append(entry.name)
 
     # Ensure .webmanager_api_key file is provisioned in config directory
-    api_key_file = cfg_dir / ".webmanager_api_key"
-    if not api_key_file.exists():
-        try:
-            token = secrets.token_hex(32)
-            api_key_file.write_text(token + "\n", encoding="utf-8")
-            try:
-                os.chmod(api_key_file, 0o600)
-            except Exception:
-                pass
-        except Exception as ex:
-            log.warning("Could not create .webmanager_api_key in %s: %s", cfg_dir, ex)
+    provision_api_key_file(cfg_dir)
 
     return provisioned
+
+
+def provision_api_key_file(config_dir: Path) -> bool:
+    """Securely provision /config/.webmanager_api_key at mode 0600 with 256 bits entropy.
+
+    Invariants:
+    - Exactly 64 hex characters (256 bits entropy via secrets.token_hex(32))
+    - Created with 0o600 permissions from the start (no world/group readable window)
+    - Rejects existing symlinks (does not follow or overwrite symlinks)
+    - Does not overwrite an existing valid 64-hex key
+    - Atomic file creation via O_CREAT | O_EXCL + fsync + atomic rename
+    - Sets PUID/PGID ownership when configured on POSIX
+    - Never logs token
+    """
+    import secrets
+    import os
+
+    api_key_file = config_dir / ".webmanager_api_key"
+    key_str_path = str(api_key_file)
+
+    # 1. Reject symlinks immediately
+    if os.path.islink(key_str_path):
+        log.error("Rejecting symlinked API key file at %s", key_str_path)
+        return False
+
+    hex_pattern = re.compile(r"^[0-9a-fA-F]{64}$")
+
+    # 2. Check if valid key already exists
+    if api_key_file.is_file():
+        try:
+            existing = api_key_file.read_text(encoding="utf-8").strip()
+            if hex_pattern.match(existing):
+                return True
+        except Exception:
+            pass
+
+    # 3. Generate 256-bit token (64 hex characters)
+    token = secrets.token_hex(32)
+    payload = (token + "\n").encode("utf-8")
+
+    # 4. Low-level file creation with mode 0o600 from the start
+    tmp_path = config_dir / f".webmanager_api_key.tmp.{secrets.token_hex(8)}"
+    tmp_str_path = str(tmp_path)
+
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+
+        fd = os.open(tmp_str_path, flags, 0o600)
+        try:
+            os.write(fd, payload)
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+
+        # Chown to configured PUID/PGID if running as root on POSIX
+        if hasattr(os, "chown") and os.name == "posix":
+            puid_str = os.environ.get("PUID")
+            pgid_str = os.environ.get("PGID")
+            if puid_str and pgid_str:
+                try:
+                    puid = int(puid_str)
+                    pgid = int(pgid_str)
+                    os.chown(tmp_str_path, puid, pgid)
+                except Exception:
+                    pass
+
+        # Atomic replace
+        os.replace(tmp_str_path, key_str_path)
+        return True
+    except Exception as ex:
+        log.warning("Could not provision .webmanager_api_key in %s: %s", config_dir, type(ex).__name__)
+        try:
+            if os.path.exists(tmp_str_path):
+                os.unlink(tmp_str_path)
+        except Exception:
+            pass
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

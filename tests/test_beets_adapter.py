@@ -22,7 +22,7 @@ def mock_beets_server():
         lib = Library(dbpath, directory=td)
 
         key_file = os.path.join(td, ".webmanager_api_key")
-        token = "test_adapter_secret_token"
+        token = "b" * 64
         with open(key_file, "w", encoding="utf-8") as f:
             f.write(token + "\n")
         set_api_key_file(key_file)

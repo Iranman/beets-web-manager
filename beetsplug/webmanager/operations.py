@@ -1,25 +1,23 @@
 """Operation implementations for the WebManager Beets integration plugin."""
 
 import os
-import sys
 import time
 import uuid
 import logging
 import threading
-from typing import Dict, Any, Optional, List
+import hashlib
+import json
+from typing import Dict, Any, Optional, List, Tuple
 from flask import Blueprint, request, jsonify, g
 import beets
 from beets import config as beets_config
 from beets import util
 from .schemas import (
-    is_path_safe_and_allowed,
+    is_strict_descendant,
     validate_fields,
     ALLOWED_DUPLICATE_ACTIONS,
     DEFAULT_ALLOWED_ROOTS,
 )
-
-import hashlib
-import json
 
 log = logging.getLogger("beets.webmanager")
 
@@ -29,6 +27,9 @@ mutation_lock = threading.RLock()
 # Async operations registry
 _operations: Dict[str, Dict[str, Any]] = {}
 _operations_lock = threading.Lock()
+
+DEFAULT_RETENTION_SECONDS = 3600
+MAX_COMPLETED_OPERATIONS = 1000
 
 webmanager_bp = Blueprint("webmanager", __name__, url_prefix="/webmanager")
 
@@ -42,31 +43,58 @@ def compute_fingerprint(data: Dict[str, Any]) -> str:
         return ""
 
 
+def _prune_operations_locked():
+    """Prune expired completed/failed operations from registry (must hold _operations_lock)."""
+    now = time.time()
+    to_delete = []
+    completed = []
+
+    for op_id, op in _operations.items():
+        if op.get("status") in ("succeeded", "failed"):
+            if now - op.get("updated_at", now) > DEFAULT_RETENTION_SECONDS:
+                to_delete.append(op_id)
+            else:
+                completed.append((op.get("updated_at", 0), op_id))
+
+    for op_id in to_delete:
+        del _operations[op_id]
+
+    # Enforce hard upper bound on completed operations
+    if len(completed) > MAX_COMPLETED_OPERATIONS:
+        completed.sort(key=lambda x: x[0])  # oldest first
+        overflow = len(completed) - MAX_COMPLETED_OPERATIONS
+        for _, op_id in completed[:overflow]:
+            if op_id in _operations and _operations[op_id].get("status") != "running":
+                del _operations[op_id]
+
+
 def register_operation(
     op_type: str, op_id: Optional[str] = None, fingerprint: Optional[str] = None
-) -> tuple[str, str]:
+) -> Tuple[str, str]:
     """Register a new operation in the registry with collision check.
-    
+
     Returns (op_id, status_code) where status_code is 'created', 'exists', or 'collision'.
     """
     if not op_id:
         op_id = str(uuid.uuid4())
     with _operations_lock:
+        _prune_operations_locked()
         if op_id in _operations:
             existing = _operations[op_id]
-            if fingerprint and existing.get("fingerprint") and existing.get("fingerprint") != fingerprint:
+            if fingerprint and existing.get("_fingerprint") and existing.get("_fingerprint") != fingerprint:
                 return op_id, "collision"
             return op_id, "exists"
 
         _operations[op_id] = {
-            "id": op_id,
+            "operation_id": op_id,
             "type": op_type,
-            "fingerprint": fingerprint,
+            "_fingerprint": fingerprint,
             "status": "running",
             "created_at": time.time(),
             "updated_at": time.time(),
             "result": None,
             "error": None,
+            "error_code": None,
         }
         return op_id, "created"
 
@@ -76,6 +104,7 @@ def update_operation(
     status: str,
     result: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
+    error_code: Optional[str] = None,
 ):
     """Update an operation's status, result, or error."""
     with _operations_lock:
@@ -86,12 +115,28 @@ def update_operation(
                 _operations[op_id]["result"] = result
             if error is not None:
                 _operations[op_id]["error"] = error
+            if error_code is not None:
+                _operations[op_id]["error_code"] = error_code
 
 
 def get_operation(op_id: str) -> Optional[Dict[str, Any]]:
-    """Get operation data by ID."""
+    """Get public operation data by ID, hiding internal fingerprints."""
     with _operations_lock:
-        return _operations.get(op_id)
+        _prune_operations_locked()
+        op = _operations.get(op_id)
+        if not op:
+            return None
+        # Return sanitized public copy without _fingerprint
+        return {
+            "operation_id": op["operation_id"],
+            "type": op["type"],
+            "status": op["status"],
+            "created_at": op["created_at"],
+            "updated_at": op["updated_at"],
+            "result": op["result"],
+            "error": op["error"],
+            "error_code": op["error_code"],
+        }
 
 
 _CUSTOM_ALLOWED_ROOTS: Optional[List[str]] = None
@@ -127,56 +172,73 @@ def get_allowed_roots() -> List[str]:
 
 @webmanager_bp.route("/status", methods=["GET"])
 def get_status():
-    """Healthcheck and capability status endpoint."""
+    """Healthcheck and capability status handshake endpoint."""
+    lib_ready = hasattr(g, "lib") and g.lib is not None
     return jsonify(
         {
-            "status": "ok",
-            "version": "1.0.0",
+            "protocol_version": "1.0",
+            "plugin_version": "0.1.0",
             "beets_version": getattr(beets, "__version__", "unknown"),
-            "readonly": False,
-            "allowed_roots": get_allowed_roots(),
+            "capabilities": ["import", "modify", "operations", "status"],
+            "library_ready": lib_ready,
+            "upstream_web_readonly": True,
+            "plugin_mutations_enabled": True,
         }
     )
 
 
 @webmanager_bp.route("/operations/<string:op_id>", methods=["GET"])
 def get_operation_status(op_id: str):
-    """Retrieve status and results of a long-running operation."""
+    """Retrieve status and results of an operation."""
     op = get_operation(op_id)
     if not op:
-        return jsonify({"error": "Operation not found", "operation_id": op_id}), 404
+        return jsonify({"error": "Operation not found", "error_code": "NOT_FOUND"}), 404
     return jsonify(op)
 
 
 @webmanager_bp.route("/import", methods=["POST"])
 def run_import():
-    """Non-interactive confirmed import execution inside Beets."""
+    """Confirmed non-interactive import execution inside Beets."""
     data = request.get_json(force=True, silent=True) or {}
     paths = data.get("paths", [])
     if isinstance(paths, str):
         paths = [paths]
 
-    if not paths:
-        return jsonify({"error": "Missing 'paths' parameter"}), 400
+    if not paths or not isinstance(paths, list):
+        return jsonify({"error": "Missing or invalid 'paths' parameter", "error_code": "INVALID_PATHS"}), 400
 
+    # Policy 1: Autotag must be disabled for confirmed non-interactive imports
+    if bool(data.get("autotag", False)):
+        return jsonify({
+            "error": "autotag must be disabled for confirmed import",
+            "error_code": "AUTOTAG_NOT_ALLOWED",
+        }), 400
+
+    # Policy 2: Validate duplicate_action strictly
+    raw_dup = data.get("duplicate_action", "skip")
+    if raw_dup is not None:
+        duplicate_action = str(raw_dup).lower()
+        if duplicate_action not in ALLOWED_DUPLICATE_ACTIONS:
+            return jsonify({
+                "error": f"Invalid duplicate_action '{duplicate_action}'",
+                "error_code": "INVALID_DUPLICATE_ACTION",
+            }), 400
+    else:
+        duplicate_action = "skip"
+
+    # Policy 3: Path containment — source paths must be strict descendants of allowed roots (e.g. /downloads)
     allowed_roots = get_allowed_roots()
     for p in paths:
-        if not is_path_safe_and_allowed(p, allowed_roots):
+        if not is_strict_descendant(p, allowed_roots):
             return (
                 jsonify(
                     {
-                        "error": "Path traversal or disallowed root",
-                        "path": p,
-                        "allowed_roots": allowed_roots,
+                        "error": "Source path must be a strict child of allowed roots",
+                        "error_code": "PATH_NOT_ALLOWED",
                     }
                 ),
                 400,
             )
-
-    autotag = bool(data.get("autotag", False))
-    duplicate_action = str(data.get("duplicate_action", "skip")).lower()
-    if duplicate_action not in ALLOWED_DUPLICATE_ACTIONS:
-        duplicate_action = "skip"
 
     copy = bool(data.get("copy", False))
     move = bool(data.get("move", True))
@@ -184,7 +246,8 @@ def run_import():
     incremental = bool(data.get("incremental", False))
     singletons = bool(data.get("singletons", False))
     pretend = bool(data.get("pretend", False))
-    set_fields = data.get("set_fields") or {}
+    raw_set_fields = data.get("set_fields") or {}
+    set_fields = validate_fields(raw_set_fields, is_album=False) if isinstance(raw_set_fields, dict) else {}
 
     is_async = request.headers.get("Prefer") == "respond-async" or data.get("async", False)
     op_id = request.headers.get("Idempotency-Key") or str(uuid.uuid4())
@@ -196,7 +259,7 @@ def run_import():
             jsonify(
                 {
                     "error": "Operation ID collision: payload does not match existing operation",
-                    "operation_id": op_id,
+                    "error_code": "OPERATION_COLLISION",
                 }
             ),
             409,
@@ -225,10 +288,26 @@ def run_import():
                             "operation_id": op_id,
                             "status": "failed",
                             "error": existing.get("error"),
+                            "error_code": existing.get("error_code", "IMPORT_FAILED"),
                         }
                     ),
                     500,
                 )
+
+    # For newly created operations, verify source path existence
+    for p in paths:
+        resolved_p = os.path.realpath(os.path.abspath(p))
+        if not os.path.exists(resolved_p):
+            update_operation(op_id, "failed", error="Source path does not exist", error_code="SOURCE_NOT_FOUND")
+            return (
+                jsonify(
+                    {
+                        "error": "Source path does not exist",
+                        "error_code": "SOURCE_NOT_FOUND",
+                    }
+                ),
+                400,
+            )
 
     def _execute_import(lib, op_id_arg: Optional[str] = None):
         with mutation_lock:
@@ -244,16 +323,18 @@ def run_import():
             orig_incremental = beets_config["import"]["incremental"].get()
             orig_singletons = beets_config["import"]["singletons"].get()
             orig_set_fields = beets_config["import"]["set_fields"].get()
+            orig_resume = beets_config["import"]["resume"].get()
 
             try:
                 beets_config["import"]["pretend"] = pretend
                 beets_config["import"]["copy"] = copy
                 beets_config["import"]["move"] = move
                 beets_config["import"]["write"] = write
-                beets_config["import"]["autotag"] = autotag
+                beets_config["import"]["autotag"] = False
                 beets_config["import"]["duplicate_action"] = duplicate_action
                 beets_config["import"]["quiet"] = True
                 beets_config["import"]["timid"] = False
+                beets_config["import"]["resume"] = False
                 beets_config["import"]["incremental"] = incremental
                 beets_config["import"]["singletons"] = singletons
                 if set_fields:
@@ -269,20 +350,21 @@ def run_import():
                 result = {
                     "success": True,
                     "imported_paths": paths,
-                    "autotag": autotag,
+                    "autotag": False,
                     "duplicate_action": duplicate_action,
                 }
                 if op_id_arg:
                     update_operation(op_id_arg, "succeeded", result=result)
                 return result
-            except Exception as ex:
+            except Exception:
                 log.exception("Error executing non-interactive import")
-                err_msg = str(ex)
+                sanitized_err = "Import failed"
+                sanitized_code = "IMPORT_FAILED"
                 if op_id_arg:
-                    update_operation(op_id_arg, "failed", error=err_msg)
+                    update_operation(op_id_arg, "failed", error=sanitized_err, error_code=sanitized_code)
                 raise
             finally:
-                # Restore original importer config
+                # Restore original importer config unconditionally
                 beets_config["import"]["pretend"] = orig_pretend
                 beets_config["import"]["copy"] = orig_copy
                 beets_config["import"]["move"] = orig_move
@@ -291,6 +373,7 @@ def run_import():
                 beets_config["import"]["duplicate_action"] = orig_duplicate_action
                 beets_config["import"]["quiet"] = orig_quiet
                 beets_config["import"]["timid"] = orig_timid
+                beets_config["import"]["resume"] = orig_resume
                 beets_config["import"]["incremental"] = orig_incremental
                 beets_config["import"]["singletons"] = orig_singletons
                 beets_config["import"]["set_fields"] = orig_set_fields
@@ -311,8 +394,8 @@ def run_import():
     try:
         res = _execute_import(g.lib, op_id)
         return jsonify(res)
-    except Exception as ex:
-        return jsonify({"error": str(ex)}), 500
+    except Exception:
+        return jsonify({"error": "Import failed", "error_code": "IMPORT_FAILED"}), 500
 
 
 @webmanager_bp.route("/modify", methods=["POST"])
@@ -322,424 +405,91 @@ def run_modify():
     item_ids = data.get("item_ids") or []
     album_ids = data.get("album_ids") or []
     query = data.get("query")
-    fields = data.get("fields") or {}
+    raw_fields = data.get("fields") or {}
     write = bool(data.get("write", True))
     move = bool(data.get("move", True))
 
     if not item_ids and not album_ids and not query:
-        return jsonify({"error": "Must specify item_ids, album_ids, or query"}), 400
+        return jsonify({
+            "error": "Must specify item_ids, album_ids, or query",
+            "error_code": "MISSING_TARGET",
+        }), 400
 
-    if not fields:
-        return jsonify({"error": "Must specify fields to modify"}), 400
-
-    lib = g.lib
-    with mutation_lock:
-        item_fields = validate_fields(fields, is_album=False)
-        album_fields = validate_fields(fields, is_album=True)
-
-        modified_items = 0
-        modified_albums = 0
-
-        # Process Items
-        items_to_modify = []
-        if item_ids:
-            for iid in item_ids:
-                item = lib.get_item(iid)
-                if item:
-                    items_to_modify.append(item)
-        elif query and not album_ids:
-            items_to_modify.extend(lib.items(query))
-
-        for item in items_to_modify:
-            if item_fields:
-                item.update(item_fields)
-                item.store()
-                if write:
-                    try:
-                        item.try_write()
-                    except Exception as e:
-                        log.warning("Failed to write tags to %s: %s", item.path, e)
-                if move:
-                    try:
-                        item.move()
-                    except Exception as e:
-                        log.warning("Failed to move item %s: %s", item.path, e)
-                modified_items += 1
-
-        # Process Albums
-        albums_to_modify = []
-        if album_ids:
-            for aid in album_ids:
-                alb = lib.get_album(aid)
-                if alb:
-                    albums_to_modify.append(alb)
-        elif query and album_ids:
-            albums_to_modify.extend(lib.albums(query))
-
-        for alb in albums_to_modify:
-            if album_fields:
-                alb.update(album_fields)
-                alb.store()
-                if move:
-                    try:
-                        alb.move()
-                    except Exception as e:
-                        log.warning("Failed to move album %s: %s", alb.id, e)
-                modified_albums += 1
-
-        return jsonify(
-            {
-                "success": True,
-                "modified_items": modified_items,
-                "modified_albums": modified_albums,
-            }
-        )
-
-
-@webmanager_bp.route("/remove", methods=["POST"])
-def run_remove():
-    """Remove items or albums from the library."""
-    data = request.get_json(force=True, silent=True) or {}
-    item_ids = data.get("item_ids") or []
-    album_ids = data.get("album_ids") or []
-    query = data.get("query")
-    delete_files = bool(data.get("delete_files", False))
-
-    if not item_ids and not album_ids and not query:
-        return jsonify({"error": "Must specify item_ids, album_ids, or query"}), 400
+    if not raw_fields or not isinstance(raw_fields, dict):
+        return jsonify({
+            "error": "Must specify fields to modify",
+            "error_code": "MISSING_FIELDS",
+        }), 400
 
     lib = g.lib
-    with mutation_lock:
-        removed_items = 0
-        removed_albums = 0
+    try:
+        with mutation_lock:
+            item_fields = validate_fields(raw_fields, is_album=False)
+            album_fields = validate_fields(raw_fields, is_album=True)
 
-        if album_ids:
-            for aid in album_ids:
-                alb = lib.get_album(aid)
-                if alb:
-                    alb.remove(delete=delete_files, with_items=True)
-                    removed_albums += 1
-        elif item_ids:
-            for iid in item_ids:
-                item = lib.get_item(iid)
-                if item:
-                    item.remove(delete=delete_files)
-                    removed_items += 1
-        elif query:
-            for alb in lib.albums(query):
-                alb.remove(delete=delete_files, with_items=True)
-                removed_albums += 1
+            if not item_fields and not album_fields:
+                return jsonify({
+                    "error": "No valid fields provided for modification",
+                    "error_code": "INVALID_FIELDS",
+                }), 400
 
-        return jsonify(
-            {
-                "success": True,
-                "removed_items": removed_items,
-                "removed_albums": removed_albums,
-                "delete_files": delete_files,
-            }
-        )
+            modified_items = 0
+            modified_albums = 0
 
+            # Process Items
+            items_to_modify = []
+            if item_ids:
+                for iid in item_ids:
+                    item = lib.get_item(iid)
+                    if item:
+                        items_to_modify.append(item)
+            elif query and not album_ids:
+                items_to_modify.extend(lib.items(query))
 
-@webmanager_bp.route("/move", methods=["POST"])
-def run_move():
-    """Move items or albums to match directory structure."""
-    data = request.get_json(force=True, silent=True) or {}
-    item_ids = data.get("item_ids") or []
-    album_ids = data.get("album_ids") or []
-    query = data.get("query")
-
-    lib = g.lib
-    with mutation_lock:
-        moved_count = 0
-        if album_ids:
-            for aid in album_ids:
-                alb = lib.get_album(aid)
-                if alb:
-                    alb.move()
-                    moved_count += 1
-        elif item_ids:
-            for iid in item_ids:
-                item = lib.get_item(iid)
-                if item:
-                    item.move()
-                    moved_count += 1
-        elif query:
-            for alb in lib.albums(query):
-                alb.move()
-                moved_count += 1
-
-        return jsonify({"success": True, "moved_count": moved_count})
-
-
-@webmanager_bp.route("/fetchart", methods=["POST"])
-def run_fetchart():
-    """Fetch and set artwork for albums."""
-    data = request.get_json(force=True, silent=True) or {}
-    album_ids = data.get("album_ids") or []
-    art_url = data.get("art_url")
-    force = bool(data.get("force", False))
-
-    if not album_ids:
-        return jsonify({"error": "Must specify album_ids"}), 400
-
-    lib = g.lib
-    updated_albums = 0
-    with mutation_lock:
-        for aid in album_ids:
-            alb = lib.get_album(aid)
-            if not alb:
-                continue
-
-            if art_url:
-                try:
-                    import requests
-
-                    resp = requests.get(art_url, timeout=15)
-                    if resp.status_code == 200:
-                        art_path = os.path.join(
-                            util.syspath(alb.item_dir()), "cover.jpg"
-                        )
-                        with open(art_path, "wb") as f:
-                            f.write(resp.content)
-                        alb.set_art(art_path, copy=False)
-                        alb.store()
-                        updated_albums += 1
-                except Exception as ex:
-                    log.warning("Failed to fetch art from url for album %s: %s", aid, ex)
-            else:
-                # Try using beets fetchart plugin if available
-                try:
-                    from beetsplug.fetchart import FetchArtPlugin
-
-                    # Perform art fetch using beets fetchart logic
-                    # If fetchart is available, invoke it
-                except ImportError:
-                    pass
-
-        return jsonify({"success": True, "updated_albums": updated_albums})
-
-
-@webmanager_bp.route("/embedart", methods=["POST"])
-def run_embedart():
-    """Embed album art into constituent audio files."""
-    data = request.get_json(force=True, silent=True) or {}
-    album_ids = data.get("album_ids") or []
-    item_ids = data.get("item_ids") or []
-
-    lib = g.lib
-    embedded_items = 0
-    with mutation_lock:
-        try:
-            import mediafile
-
-            for aid in album_ids:
-                alb = lib.get_album(aid)
-                if alb and alb.artpath and os.path.isfile(util.syspath(alb.artpath)):
-                    with open(util.syspath(alb.artpath), "rb") as f:
-                        art_bytes = f.read()
-                    image = mediafile.Image(art_bytes)
-                    for item in alb.items():
+            for item in items_to_modify:
+                if item_fields:
+                    item.update(item_fields)
+                    item.store()
+                    if write:
                         try:
-                            mf = mediafile.MediaFile(util.syspath(item.path))
-                            mf.images = [image]
-                            mf.save()
-                            embedded_items += 1
+                            item.try_write()
                         except Exception as e:
-                            log.warning("Failed to embed art into %s: %s", item.path, e)
-        except ImportError:
-            pass
+                            log.warning("Failed to write tags to %s: %s", item.path, e)
+                    if move:
+                        try:
+                            item.move()
+                        except Exception as e:
+                            log.warning("Failed to move item %s: %s", item.path, e)
+                    modified_items += 1
 
-        return jsonify({"success": True, "embedded_items": embedded_items})
+            # Process Albums
+            albums_to_modify = []
+            if album_ids:
+                for aid in album_ids:
+                    alb = lib.get_album(aid)
+                    if alb:
+                        albums_to_modify.append(alb)
+            elif query and album_ids:
+                albums_to_modify.extend(lib.albums(query))
 
+            for alb in albums_to_modify:
+                if album_fields:
+                    alb.update(album_fields)
+                    alb.store()
+                    if move:
+                        try:
+                            alb.move()
+                        except Exception as e:
+                            log.warning("Failed to move album %s: %s", alb.id, e)
+                    modified_albums += 1
 
-@webmanager_bp.route("/merge-album", methods=["POST"])
-def run_merge_album():
-    """Merge multiple album entities into a single target album."""
-    data = request.get_json(force=True, silent=True) or {}
-    target_album_id = data.get("target_album_id")
-    source_album_ids = data.get("source_album_ids") or []
-    track_reassignments = data.get("track_reassignments") or {}
-    move = bool(data.get("move", True))
-    write = bool(data.get("write", True))
-
-    if not target_album_id:
-        return jsonify({"error": "Missing target_album_id"}), 400
-    if not source_album_ids:
-        return jsonify({"error": "Missing source_album_ids"}), 400
-
-    lib = g.lib
-    with mutation_lock:
-        target_album = lib.get_album(target_album_id)
-        if not target_album:
-            return jsonify({"error": f"Target album {target_album_id} not found"}), 404
-
-        transferred_tracks = 0
-        merged_source_count = 0
-
-        for s_id in source_album_ids:
-            if s_id == target_album_id:
-                continue
-            s_album = lib.get_album(s_id)
-            if not s_album:
-                continue
-
-            for item in s_album.items():
-                item.album_id = target_album.id
-                item.album = target_album.album
-                item.albumartist = target_album.albumartist
-                if target_album.get("mb_albumid"):
-                    item.mb_albumid = target_album.get("mb_albumid")
-                if target_album.get("mb_albumartistid"):
-                    item.mb_albumartistid = target_album.get("mb_albumartistid")
-                if target_album.get("year"):
-                    item.year = target_album.get("year")
-                if target_album.get("genre"):
-                    item.genre = target_album.get("genre")
-
-                # Apply track reassignments if provided
-                iid_str = str(item.id)
-                if iid_str in track_reassignments:
-                    reassign = track_reassignments[iid_str]
-                    if "disc" in reassign:
-                        item.disc = int(reassign["disc"])
-                    if "track" in reassign:
-                        item.track = int(reassign["track"])
-                    if "title" in reassign:
-                        item.title = str(reassign["title"])
-
-                item.store()
-                if write:
-                    try:
-                        item.try_write()
-                    except Exception as e:
-                        log.warning("Failed writing track tags during merge: %s", e)
-                if move:
-                    try:
-                        item.move()
-                    except Exception as e:
-                        log.warning("Failed moving track file during merge: %s", e)
-
-                transferred_tracks += 1
-
-            # Remove source album record without deleting files
-            s_album.remove(delete=False, with_items=False)
-            merged_source_count += 1
-
-        # Update target album store and sync
-        target_album.store()
-        target_album.try_sync(write, move)
-
-        return jsonify(
-            {
-                "success": True,
-                "target_album_id": target_album_id,
-                "transferred_tracks": transferred_tracks,
-                "merged_source_albums": merged_source_count,
-            }
-        )
-
-
-@webmanager_bp.route("/mbsync", methods=["POST"])
-def run_mbsync():
-    """Sync track and album metadata from MusicBrainz using existing MBIDs."""
-    data = request.get_json(force=True, silent=True) or {}
-    album_ids = data.get("album_ids") or []
-    item_ids = data.get("item_ids") or []
-    write = bool(data.get("write", True))
-    move = bool(data.get("move", True))
-
-    lib = g.lib
-    synced_items = 0
-    synced_albums = 0
-
-    with mutation_lock:
-        try:
-            from beets.autotag import mb
-
-            # Sync albums
-            for aid in album_ids:
-                alb = lib.get_album(aid)
-                if alb and alb.mb_albumid:
-                    try:
-                        info = mb.album_for_id(alb.mb_albumid)
-                        if info:
-                            # Apply release metadata
-                            alb.album = info.album
-                            alb.albumartist = info.artist
-                            alb.year = info.year
-                            alb.store()
-                            synced_albums += 1
-                    except Exception as e:
-                        log.warning("mbsync failed for album %s: %s", aid, e)
-
-            # Sync items
-            for iid in item_ids:
-                item = lib.get_item(iid)
-                if item and item.mb_trackid:
-                    try:
-                        info = mb.track_for_id(item.mb_trackid)
-                        if info:
-                            item.title = info.title
-                            item.artist = info.artist
-                            item.store()
-                            if write:
-                                item.try_write()
-                            if move:
-                                item.move()
-                            synced_items += 1
-                    except Exception as e:
-                        log.warning("mbsync failed for item %s: %s", iid, e)
-
-        except ImportError:
-            pass
-
-        return jsonify(
-            {
-                "success": True,
-                "synced_albums": synced_albums,
-                "synced_items": synced_items,
-            }
-        )
-
-
-@webmanager_bp.route("/lastgenre", methods=["POST"])
-def run_lastgenre():
-    """Fetch genres from Last.fm using beets lastgenre plugin if loaded."""
-    data = request.get_json(force=True, silent=True) or {}
-    album_ids = data.get("album_ids") or []
-    item_ids = data.get("item_ids") or []
-    force = bool(data.get("force", False))
-
-    lib = g.lib
-    updated_count = 0
-
-    with mutation_lock:
-        try:
-            from beetsplug.lastgenre import LastGenrePlugin
-
-            # Find active lastgenre plugin instance if registered
-            # or execute lastgenre logic directly
-        except ImportError:
-            pass
-
-        return jsonify({"success": True, "updated_count": updated_count})
-
-
-@webmanager_bp.route("/submit", methods=["POST"])
-def run_submit():
-    """Submit AcoustID fingerprints for library items."""
-    data = request.get_json(force=True, silent=True) or {}
-    item_ids = data.get("item_ids") or []
-
-    lib = g.lib
-    submitted_count = 0
-
-    with mutation_lock:
-        try:
-            from beetsplug.chroma import ChromaPlugin
-
-            # Trigger chroma fingerprint submission if available
-        except ImportError:
-            pass
-
-        return jsonify({"success": True, "submitted_count": submitted_count})
+            return jsonify(
+                {
+                    "success": True,
+                    "modified_items": modified_items,
+                    "modified_albums": modified_albums,
+                }
+            )
+    except Exception:
+        log.exception("Error during modify operation")
+        return jsonify({"error": "Modify operation failed", "error_code": "MODIFY_FAILED"}), 500

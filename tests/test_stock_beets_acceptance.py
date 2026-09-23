@@ -63,13 +63,13 @@ def in_process_acceptance_env():
         dbpath = os.path.join(config_dir, "musiclibrary.blb")
         lib = Library(dbpath, directory=music_dir)
 
-        # Set up API key
+        # Set up 64-hex API key (256-bit entropy)
         key_file = os.path.join(config_dir, ".webmanager_api_key")
-        token = "stock_beets_test_key_xyz987"
+        token = "a" * 64
         with open(key_file, "w", encoding="utf-8") as f:
             f.write(token + "\n")
         set_api_key_file(key_file)
-        ops_mod.set_allowed_roots([music_dir, downloads_dir, td])
+        ops_mod.set_allowed_roots([music_dir, downloads_dir])
 
         # Configure Beets web app
         plugin = WebManagerPlugin()
@@ -198,7 +198,7 @@ def test_native_file_stream(in_process_acceptance_env):
 
 
 def test_webmanager_plugin_security_and_operations(in_process_acceptance_env):
-    """Verify WebManager plugin authentication, status, modification, and path containment."""
+    """Verify WebManager plugin authentication, status handshake, modification, and path containment."""
     client = in_process_acceptance_env["client"]
     token = in_process_acceptance_env["token"]
     item = in_process_acceptance_env["item"]
@@ -207,14 +207,19 @@ def test_webmanager_plugin_security_and_operations(in_process_acceptance_env):
     # 1. Unauthenticated request must fail
     res = client.get("/webmanager/status")
     assert res.status_code == 401
+    assert res.get_json()["error_code"] == "UNAUTHORIZED"
 
     # 2. Authenticated status check
     auth_headers = {"Authorization": f"Bearer {token}"}
     res = client.get("/webmanager/status", headers=auth_headers)
     assert res.status_code == 200
     status_data = res.get_json()
-    assert status_data["status"] == "ok"
-    assert status_data["readonly"] is False
+    assert status_data["protocol_version"] == "1.0"
+    assert status_data["plugin_version"] == "0.1.0"
+    assert status_data["upstream_web_readonly"] is True
+    assert status_data["plugin_mutations_enabled"] is True
+    assert "import" in status_data["capabilities"]
+    assert "allowed_roots" not in status_data  # Internal paths not exposed
 
     # 3. Path containment verification on /webmanager/import
     outside_path = os.path.join(dirs["root"], "..", "etc", "passwd")
@@ -224,7 +229,16 @@ def test_webmanager_plugin_security_and_operations(in_process_acceptance_env):
         json={"paths": [outside_path]},
     )
     assert res.status_code == 400
-    assert "Path traversal or disallowed root" in res.get_json()["error"]
+    assert res.get_json()["error_code"] == "PATH_NOT_ALLOWED"
+
+    # Root self-import rejected
+    res_root = client.post(
+        "/webmanager/import",
+        headers=auth_headers,
+        json={"paths": [dirs["downloads"]]},
+    )
+    assert res_root.status_code == 400
+    assert res_root.get_json()["error_code"] == "PATH_NOT_ALLOWED"
 
     # 4. Modify tags
     res = client.post(
@@ -254,13 +268,15 @@ def test_real_stock_docker_container_acceptance():
     Tests:
     1. Stock image startup with web & webmanager plugins mounted in /config
     2. Native Beets GET /stats and GET /item/
-    3. WebManager plugin authentication (rejecting invalid token, accepting valid token)
-    4. Non-interactive import of a synthetic tagged MP3 file from /downloads into /music
-    5. Idempotency test (lost response replay returning same result without duplicate import)
+    3. WebManager plugin authentication (rejecting invalid token, accepting 64-hex token)
+    4. Non-interactive import of a synthetic tagged audio file from /downloads into /music
+    5. Concurrent idempotency test (two simultaneous requests with same key converging safely)
     6. Operation ID collision safety (rejecting conflicting payload with 409 Conflict)
     7. Upstream native verification of the imported file and fields
     8. Disposable mutation modification and upstream verification
     """
+    import concurrent.futures
+
     container_name = f"stock-beets-acc-{uuid.uuid4().hex[:8]}"
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -279,8 +295,8 @@ def test_real_stock_docker_container_acceptance():
         for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py"]:
             shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
-        # 2. Provision secret API key file
-        token = "real_docker_acceptance_secret_token_abcdef123456"
+        # 2. Provision 64-hex secret API key file (256-bit entropy)
+        token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         key_file = os.path.join(config_dir, ".webmanager_api_key")
         with open(key_file, "w", encoding="utf-8") as f:
             f.write(token + "\n")
@@ -321,18 +337,17 @@ webmanager:
             album="Docker Test LP",
         )
 
-        # 5. Start stock Beets container
-        # Choose a random high port
+        # 5. Start stock Beets container bound strictly to loopback 127.0.0.1
         import socket
         sock = socket.socket()
-        sock.bind(("", 0))
+        sock.bind(("127.0.0.1", 0))
         host_port = sock.getsockname()[1]
         sock.close()
 
         run_cmd = [
             "docker", "run", "-d",
             "--name", container_name,
-            "-p", f"{host_port}:8337",
+            "-p", f"127.0.0.1:{host_port}:8337",
             "-v", f"{config_dir}:/config",
             "-v", f"{music_dir}:/music",
             "-v", f"{downloads_dir}:/downloads",
@@ -367,27 +382,31 @@ webmanager:
                 assert "items" in stats
 
             # Step 2: WebManager Auth Check
-            # Invalid key must return 401
+            # Invalid token must return 401
             try:
                 req = urllib.request.Request(
                     f"{base_url}/webmanager/status",
-                    headers={"Authorization": "Bearer wrong_token"},
+                    headers={"Authorization": "Bearer 0000000000000000000000000000000000000000000000000000000000000000"},
                 )
                 urllib.request.urlopen(req, timeout=5)
                 pytest.fail("Expected 401 for wrong token")
             except urllib.error.HTTPError as ex:
                 assert ex.code == 401
 
-            # Valid key must return 200 OK
+            # Valid token must return 200 OK with handshake schema
             auth_header = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             req = urllib.request.Request(f"{base_url}/webmanager/status", headers=auth_header)
             with urllib.request.urlopen(req, timeout=5) as resp:
                 status_res = json.loads(resp.read().decode("utf-8"))
-                assert status_res["status"] == "ok"
-                assert "beets_version" in status_res
+                assert status_res["protocol_version"] == "1.0"
+                assert status_res["plugin_version"] == "0.1.0"
+                assert status_res["upstream_web_readonly"] is True
+                assert status_res["plugin_mutations_enabled"] is True
+                assert "import" in status_res["capabilities"]
 
-            # Step 3: Non-interactive Import of synthetic media with Idempotency Key
-            idemp_key = "test-idemp-key-docker-001"
+            # Step 3: Concurrent Idempotency Test
+            # Execute two simultaneous POST requests with same key and payload
+            idemp_key = "test-concurrent-idemp-docker-001"
             import_payload = {
                 "paths": [f"/downloads/{track_name}"],
                 "autotag": False,
@@ -397,38 +416,48 @@ webmanager:
                 "move": True,
                 "write": True,
             }
-            import_headers = dict(auth_header)
-            import_headers["Idempotency-Key"] = idemp_key
 
-            req = urllib.request.Request(
-                f"{base_url}/webmanager/import",
-                data=json.dumps(import_payload).encode("utf-8"),
-                headers=import_headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                assert resp.status in (200, 202)
-                import_res = json.loads(resp.read().decode("utf-8"))
-                assert import_res.get("success") is True or "operation_id" in import_res
+            def _send_concurrent_import():
+                h = dict(auth_header)
+                h["Idempotency-Key"] = idemp_key
+                r = urllib.request.Request(
+                    f"{base_url}/webmanager/import",
+                    data=json.dumps(import_payload).encode("utf-8"),
+                    headers=h,
+                    method="POST",
+                )
+                with urllib.request.urlopen(r, timeout=15) as resp_obj:
+                    return resp_obj.status, json.loads(resp_obj.read().decode("utf-8"))
 
-            # Step 4: Idempotency Replay (Lost Response Scenario)
-            # Re-issue exact same request with same Idempotency-Key
-            req_replay = urllib.request.Request(
-                f"{base_url}/webmanager/import",
-                data=json.dumps(import_payload).encode("utf-8"),
-                headers=import_headers,
-                method="POST",
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(_send_concurrent_import)
+                f2 = executor.submit(_send_concurrent_import)
+                status1, res1 = f1.result()
+                status2, res2 = f2.result()
+
+            assert status1 in (200, 202)
+            assert status2 in (200, 202)
+
+            # Step 4: Verify Operation Status Polling and Public Schema
+            req_op = urllib.request.Request(
+                f"{base_url}/webmanager/operations/{idemp_key}",
+                headers=auth_header,
             )
-            with urllib.request.urlopen(req_replay, timeout=15) as resp:
-                assert resp.status in (200, 202)
+            with urllib.request.urlopen(req_op, timeout=5) as resp:
+                op_data = json.loads(resp.read().decode("utf-8"))
+                assert op_data["operation_id"] == idemp_key
+                assert op_data["status"] == "succeeded"
+                assert "_fingerprint" not in op_data  # internal fingerprint hidden
 
             # Step 5: Collision Check (Same Idempotency-Key with DIFFERENT Payload)
             conflicting_payload = dict(import_payload)
             conflicting_payload["duplicate_action"] = "remove"
+            conflicting_headers = dict(auth_header)
+            conflicting_headers["Idempotency-Key"] = idemp_key
             req_conflict = urllib.request.Request(
                 f"{base_url}/webmanager/import",
                 data=json.dumps(conflicting_payload).encode("utf-8"),
-                headers=import_headers,
+                headers=conflicting_headers,
                 method="POST",
             )
             try:

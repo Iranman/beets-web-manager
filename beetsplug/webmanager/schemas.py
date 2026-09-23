@@ -78,12 +78,11 @@ ALLOWED_DUPLICATE_ACTIONS: Set[str] = {
     "keep",
     "merge",
     "remove",
-    "upgrade",
 }
 
 
 def is_path_safe_and_allowed(target_path: str, allowed_roots: List[str]) -> bool:
-    """Check if target_path resolves cleanly inside one of allowed_roots.
+    """Check if target_path resolves cleanly inside or equal to one of allowed_roots.
 
     Rejects:
     - Null bytes, control characters, or non-string inputs
@@ -107,7 +106,6 @@ def is_path_safe_and_allowed(target_path: str, allowed_roots: List[str]) -> bool
             if norm_target == norm_root:
                 return True
             try:
-                # commonpath raises ValueError if paths are on different drives on Windows
                 if os.path.commonpath([norm_target, norm_root]) == norm_root:
                     return True
             except ValueError:
@@ -117,8 +115,48 @@ def is_path_safe_and_allowed(target_path: str, allowed_roots: List[str]) -> bool
         return False
 
 
+def is_strict_descendant(target_path: str, allowed_roots: List[str]) -> bool:
+    """Check if target_path is a strict child/descendant of one of allowed_roots.
+
+    Rejects:
+    - The root directory itself (e.g. /downloads)
+    - Path traversal (e.g. /downloads/../config)
+    - Symlinks pointing outside allowed roots
+    - Prefix confusion (e.g. /downloads2 matching /downloads)
+    - Null bytes or non-string inputs
+    """
+    if not target_path or not isinstance(target_path, str):
+        return False
+    if "\x00" in target_path:
+        return False
+
+    try:
+        norm_target = os.path.realpath(os.path.abspath(target_path))
+        for root in allowed_roots:
+            if not root or not isinstance(root, str):
+                continue
+            if "\x00" in root:
+                continue
+            norm_root = os.path.realpath(os.path.abspath(root))
+            if norm_target == norm_root:
+                # Root itself is not a strict child
+                continue
+            try:
+                if os.path.commonpath([norm_target, norm_root]) == norm_root:
+                    rel = os.path.relpath(norm_target, norm_root)
+                    if not rel.startswith("..") and rel != ".":
+                        return True
+            except ValueError:
+                continue
+        return False
+    except Exception:
+        return False
+
+
 def validate_fields(fields: dict, is_album: bool = False) -> dict:
     """Filter dictionary of fields against allowlist and return safe fields."""
+    if not isinstance(fields, dict):
+        return {}
     allowed = ALLOWED_ALBUM_FIELDS if is_album else ALLOWED_ITEM_FIELDS
     safe = {}
     for k, v in fields.items():

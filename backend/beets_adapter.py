@@ -295,96 +295,6 @@ class BeetsAdapter:
         }
         return self._request("POST", "/webmanager/modify", json_data=payload)
 
-    def remove(
-        self,
-        item_ids: Optional[List[int]] = None,
-        album_ids: Optional[List[int]] = None,
-        query: Optional[str] = None,
-        delete_files: bool = False,
-    ) -> Dict[str, Any]:
-        """Remove items or albums from Beets library."""
-        payload = {
-            "item_ids": item_ids or [],
-            "album_ids": album_ids or [],
-            "query": query,
-            "delete_files": delete_files,
-        }
-        return self._request("POST", "/webmanager/remove", json_data=payload)
-
-    def move(
-        self,
-        item_ids: Optional[List[int]] = None,
-        album_ids: Optional[List[int]] = None,
-        query: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Move items or albums to target directory structure."""
-        payload = {
-            "item_ids": item_ids or [],
-            "album_ids": album_ids or [],
-            "query": query,
-        }
-        return self._request("POST", "/webmanager/move", json_data=payload)
-
-    def merge_albums(
-        self,
-        target_album_id: int,
-        source_album_ids: List[int],
-        track_reassignments: Optional[Dict[str, Dict[str, Any]]] = None,
-        write: bool = True,
-        move: bool = True,
-    ) -> Dict[str, Any]:
-        """Merge multiple source albums into a target album."""
-        payload = {
-            "target_album_id": target_album_id,
-            "source_album_ids": source_album_ids,
-            "track_reassignments": track_reassignments or {},
-            "write": write,
-            "move": move,
-        }
-        return self._request("POST", "/webmanager/merge-album", json_data=payload)
-
-    def fetch_art(
-        self,
-        album_ids: List[int],
-        art_url: Optional[str] = None,
-        force: bool = False,
-    ) -> Dict[str, Any]:
-        """Fetch and associate album art."""
-        payload = {
-            "album_ids": album_ids,
-            "art_url": art_url,
-            "force": force,
-        }
-        return self._request("POST", "/webmanager/fetchart", json_data=payload)
-
-    def embed_art(
-        self,
-        album_ids: Optional[List[int]] = None,
-        item_ids: Optional[List[int]] = None,
-    ) -> Dict[str, Any]:
-        """Embed album art into audio files."""
-        payload = {
-            "album_ids": album_ids or [],
-            "item_ids": item_ids or [],
-        }
-        return self._request("POST", "/webmanager/embedart", json_data=payload)
-
-    def sync_mbsync(
-        self,
-        album_ids: Optional[List[int]] = None,
-        item_ids: Optional[List[int]] = None,
-        write: bool = True,
-        move: bool = True,
-    ) -> Dict[str, Any]:
-        """Sync metadata with MusicBrainz using existing MBIDs."""
-        payload = {
-            "album_ids": album_ids or [],
-            "item_ids": item_ids or [],
-            "write": write,
-            "move": move,
-        }
-        return self._request("POST", "/webmanager/mbsync", json_data=payload)
-
     # -------------------------------------------------------------------------
     # Caller Compatibility Helpers
     # -------------------------------------------------------------------------
@@ -423,10 +333,6 @@ class BeetsAdapter:
             write=force_write_tags,
             move=force_write_tags,
         )
-
-    def relocate_album(self, album_id: int, mode: str = "move") -> Dict[str, Any]:
-        """Compatibility helper for moving album files to match path rules."""
-        return self.move(album_ids=[album_id])
 
 
 # Global singleton instance

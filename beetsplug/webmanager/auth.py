@@ -2,32 +2,36 @@
 
 import hmac
 import os
-from functools import wraps
-from flask import request, jsonify, current_app
+import re
+from typing import Optional
+from flask import request, jsonify
 
-_CACHED_KEY = None
-_CACHED_MTIME = 0
-_KEY_FILE_PATH = None
+_HEX_KEY_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+_KEY_FILE_PATH: Optional[str] = None
+
+
+def _is_valid_key_format(key: str) -> bool:
+    """Validate that the API key has at least 256 bits entropy (64 hex characters)."""
+    return bool(key and _HEX_KEY_PATTERN.match(key))
 
 
 def set_api_key_file(path: str):
     """Set the API key file path configured for this plugin."""
-    global _KEY_FILE_PATH, _CACHED_KEY, _CACHED_MTIME
+    global _KEY_FILE_PATH
     _KEY_FILE_PATH = path
-    _CACHED_KEY = None
-    _CACHED_MTIME = 0
 
 
 def get_expected_api_key() -> str:
     """Read API key from configured file or environment variable.
-    
-    Fails closed if the key file is a symlink, missing, empty, or too short.
+
+    Fails closed if the key file is a symlink, missing, empty, or not 64 hex characters.
+    Reads directly from the file to eliminate cache staleness on key rotation.
     """
-    global _CACHED_KEY, _CACHED_MTIME, _KEY_FILE_PATH
+    global _KEY_FILE_PATH
 
     env_key = os.environ.get("BEETS_WEBMANAGER_API_KEY", "").strip()
-    if env_key and len(env_key) >= 16:
-        return env_key
+    if env_key:
+        return env_key if _is_valid_key_format(env_key) else ""
 
     file_path = _KEY_FILE_PATH or os.environ.get(
         "BEETS_WEBMANAGER_API_KEY_FILE", "/config/.webmanager_api_key"
@@ -40,24 +44,19 @@ def get_expected_api_key() -> str:
         return ""
 
     try:
-        mtime = os.path.getmtime(file_path)
-        if _CACHED_KEY is not None and mtime == _CACHED_MTIME:
-            return _CACHED_KEY
         with open(file_path, "r", encoding="utf-8") as f:
             key = f.read().strip()
-        if len(key) < 16:
-            return ""
-        _CACHED_KEY = key
-        _CACHED_MTIME = mtime
-        return key
+        if _is_valid_key_format(key):
+            return key
+        return ""
     except Exception:
         return ""
 
 
 def verify_token(token: str) -> bool:
-    """Verify provided bearer token against expected API key."""
+    """Verify provided bearer token against expected API key using constant-time comparison."""
     expected = get_expected_api_key()
-    if not expected or not token:
+    if not expected or not token or not _is_valid_key_format(token):
         return False
     return hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
@@ -74,8 +73,8 @@ def require_webmanager_auth():
         return (
             jsonify(
                 {
-                    "error": "Unauthorized",
-                    "message": "WebManager API key is not provisioned on Beets server.",
+                    "error": "WebManager API key is not configured or invalid on Beets server",
+                    "error_code": "AUTH_NOT_CONFIGURED",
                 }
             ),
             401,
@@ -85,8 +84,8 @@ def require_webmanager_auth():
         return (
             jsonify(
                 {
-                    "error": "Unauthorized",
-                    "message": "Invalid or missing Bearer token.",
+                    "error": "Invalid or missing Bearer token",
+                    "error_code": "UNAUTHORIZED",
                 }
             ),
             401,
