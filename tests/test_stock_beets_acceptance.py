@@ -292,7 +292,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
             os.makedirs(target_plugin_dir, exist_ok=True)
             src_plugin_dir = os.path.join(repo_root, "beetsplug", "webmanager")
-            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py"]:
+            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py"]:
                 shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
             # 2. Provision 64-hex secret API key file (256-bit entropy)

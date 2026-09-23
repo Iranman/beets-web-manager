@@ -21,6 +21,7 @@ from .schemas import (
     DEFAULT_IMPORT_ROOTS,
 )
 from .version import PLUGIN_VERSION, PROTOCOL_VERSION
+from . import plugin_ops
 
 log = logging.getLogger("beets.webmanager")
 
@@ -224,6 +225,31 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "operations", "status"]
+_PLUGIN_GATED_CAPABILITIES = ["mbsync", "fetchart", "embedart", "lastgenre"]
+
+
+def get_capabilities() -> List[str]:
+    """Capabilities this process can actually execute right now.
+
+    Core capabilities (import/modify/remove/move/operations/status) are
+    always listed -- they use only Beets' own library API, never a
+    third-party plugin. Plugin-gated capabilities (mbsync/fetchart/
+    embedart/lastgenre) are listed only when the corresponding Beets
+    plugin is genuinely loaded/configured in this process, so Web Manager
+    can disable/report those actions cleanly rather than discovering the
+    failure only when a user tries to use them.
+    """
+    caps = list(_CORE_CAPABILITIES)
+    for name in _PLUGIN_GATED_CAPABILITIES:
+        try:
+            if plugin_ops.is_capability_available(name):
+                caps.append(name)
+        except Exception:
+            pass
+    return caps
+
+
 @webmanager_bp.route("/status", methods=["GET"])
 def get_status():
     """Healthcheck and capability status handshake endpoint."""
@@ -233,7 +259,7 @@ def get_status():
             "protocol_version": PROTOCOL_VERSION,
             "plugin_version": PLUGIN_VERSION,
             "beets_version": getattr(beets, "__version__", "unknown"),
-            "capabilities": ["import", "modify", "operations", "status"],
+            "capabilities": get_capabilities(),
             "library_ready": lib_ready,
             "upstream_web_readonly": get_upstream_web_readonly(),
             "plugin_mutations_enabled": True,
@@ -563,3 +589,311 @@ def run_modify():
     except Exception:
         log.exception("Error during modify operation")
         return jsonify({"error": "Modify operation failed", "error_code": "MODIFY_FAILED"}), 500
+
+
+def _idempotency_precheck(op_type: str, data: Dict[str, Any]):
+    """Shared idempotency/collision handling for destructive/long operations.
+
+    Returns (op_id, fingerprint, early_response) -- early_response is a
+    Flask response tuple to return immediately (collision, or a replay of
+    an existing running/succeeded/failed operation), or None if this is a
+    genuinely new operation the caller should now execute.
+    """
+    op_id = request.headers.get("Idempotency-Key") or str(uuid.uuid4())
+    fingerprint = compute_fingerprint(data)
+    reg_id, reg_status = register_operation(op_type, op_id, fingerprint=fingerprint)
+
+    if reg_status == "collision":
+        return op_id, fingerprint, (
+            jsonify({
+                "error": "Operation ID collision: payload does not match existing operation",
+                "error_code": "OPERATION_COLLISION",
+            }),
+            409,
+        )
+
+    if reg_status == "exists":
+        existing = get_operation(op_id)
+        if existing:
+            if existing["status"] == "running":
+                return op_id, fingerprint, (jsonify({"operation_id": op_id, "status": "running"}), 202)
+            if existing["status"] == "succeeded":
+                return op_id, fingerprint, (
+                    jsonify({"operation_id": op_id, "status": "succeeded", "result": existing.get("result")}),
+                    200,
+                )
+            if existing["status"] == "failed":
+                return op_id, fingerprint, (
+                    jsonify({
+                        "operation_id": op_id,
+                        "status": "failed",
+                        "error": existing.get("error"),
+                        "error_code": existing.get("error_code", "OPERATION_FAILED"),
+                    }),
+                    500,
+                )
+
+    return op_id, fingerprint, None
+
+
+def _parse_id_list(data: Dict[str, Any], key: str) -> List[int]:
+    raw = data.get(key) or []
+    if not isinstance(raw, list):
+        raise ValueError(f"{key} must be a list")
+    out = []
+    for v in raw:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} contains a non-integer value")
+    return out
+
+
+@webmanager_bp.route("/remove", methods=["POST"])
+def run_remove():
+    """Remove explicit items/albums from the library using Beets' own
+    Item.remove()/Album.remove(). Never deletes physical files unless
+    delete_files is explicitly true (default false) -- the caller (Web
+    Manager) is responsible for having already obtained user/workflow
+    confirmation before setting it."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        item_ids = _parse_id_list(data, "item_ids")
+        album_ids = _parse_id_list(data, "album_ids")
+    except ValueError as ex:
+        return jsonify({"error": str(ex), "error_code": "INVALID_IDS"}), 400
+
+    if not item_ids and not album_ids:
+        return jsonify({"error": "Must specify item_ids or album_ids", "error_code": "MISSING_TARGET"}), 400
+
+    delete_files = bool(data.get("delete_files", False))
+
+    op_id, fingerprint, early = _idempotency_precheck("remove", data)
+    if early is not None:
+        return early
+
+    lib = g.lib
+    removed_items = 0
+    removed_albums = 0
+    missing_item_ids: List[int] = []
+    missing_album_ids: List[int] = []
+    try:
+        with mutation_lock:
+            for iid in item_ids:
+                item = lib.get_item(iid)
+                if not item:
+                    missing_item_ids.append(iid)
+                    continue
+                item.remove(delete=delete_files, with_album=True)
+                removed_items += 1
+
+            for aid in album_ids:
+                album = lib.get_album(aid)
+                if not album:
+                    missing_album_ids.append(aid)
+                    continue
+                album.remove(delete=delete_files, with_items=True)
+                removed_albums += 1
+
+        result = {
+            "success": True,
+            "removed_items": removed_items,
+            "removed_albums": removed_albums,
+            "delete_files": delete_files,
+            "missing_item_ids": missing_item_ids,
+            "missing_album_ids": missing_album_ids,
+        }
+        update_operation(op_id, "succeeded", result=result)
+        return jsonify({"operation_id": op_id, **result})
+    except Exception:
+        log.exception("Error during remove operation")
+        update_operation(op_id, "failed", error="Remove failed", error_code="REMOVE_FAILED")
+        return jsonify({"error": "Remove failed", "error_code": "REMOVE_FAILED"}), 500
+
+
+@webmanager_bp.route("/move", methods=["POST"])
+def run_move():
+    """Move explicit items/albums using Beets' own Item.move()/Album.move()
+    and configured path templates. Never accepts an arbitrary destination
+    path -- Beets' own config remains the sole authority for where files
+    land."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        item_ids = _parse_id_list(data, "item_ids")
+        album_ids = _parse_id_list(data, "album_ids")
+    except ValueError as ex:
+        return jsonify({"error": str(ex), "error_code": "INVALID_IDS"}), 400
+
+    if not item_ids and not album_ids:
+        return jsonify({"error": "Must specify item_ids or album_ids", "error_code": "MISSING_TARGET"}), 400
+
+    op_id, fingerprint, early = _idempotency_precheck("move", data)
+    if early is not None:
+        return early
+
+    lib = g.lib
+    moved_items = 0
+    moved_albums = 0
+    missing_item_ids: List[int] = []
+    missing_album_ids: List[int] = []
+    try:
+        with mutation_lock:
+            for iid in item_ids:
+                item = lib.get_item(iid)
+                if not item:
+                    missing_item_ids.append(iid)
+                    continue
+                item.move()
+                moved_items += 1
+
+            for aid in album_ids:
+                album = lib.get_album(aid)
+                if not album:
+                    missing_album_ids.append(aid)
+                    continue
+                album.move()
+                moved_albums += 1
+
+        result = {
+            "success": True,
+            "moved_items": moved_items,
+            "moved_albums": moved_albums,
+            "missing_item_ids": missing_item_ids,
+            "missing_album_ids": missing_album_ids,
+        }
+        update_operation(op_id, "succeeded", result=result)
+        return jsonify({"operation_id": op_id, **result})
+    except Exception:
+        log.exception("Error during move operation")
+        update_operation(op_id, "failed", error="Move failed", error_code="MOVE_FAILED")
+        return jsonify({"error": "Move failed", "error_code": "MOVE_FAILED"}), 500
+
+
+def _run_plugin_gated_operation(op_type: str, capability_name: str, validate_and_build_fn):
+    """Shared async-capable transport for plugin-gated operations (mbsync,
+    fetchart, embedart, lastgenre): request validation happens up front
+    (before any operation is registered) so a malformed request gets a
+    clean 400, not a registered-then-failed operation; idempotency/
+    collision handling; a capability pre-check so an unavailable plugin
+    fails with a stable error rather than a generic 500; and the Phase 1
+    async/operation-poll pattern for calls that could outlive a normal
+    request. `validate_and_build_fn(data)` must return a zero-argument
+    callable to execute, or raise ValueError for a bad request.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        fn = validate_and_build_fn(data)
+    except ValueError as ex:
+        return jsonify({"error": str(ex), "error_code": "INVALID_REQUEST"}), 400
+
+    if not plugin_ops.is_capability_available(capability_name):
+        return jsonify({
+            "error": f"{capability_name} plugin is not loaded or configured on this Beets server",
+            "error_code": "CAPABILITY_UNAVAILABLE",
+        }), 409
+
+    op_id, fingerprint, early = _idempotency_precheck(op_type, data)
+    if early is not None:
+        return early
+
+    is_async = request.headers.get("Prefer") == "respond-async" or bool(data.get("async", False))
+
+    def _execute():
+        with mutation_lock:
+            return fn()
+
+    if is_async:
+        def _bg():
+            try:
+                result = _execute()
+                update_operation(op_id, "succeeded", result=result)
+            except (plugin_ops.PluginCapabilityError, plugin_ops.PluginIncompatibleError) as ex:
+                update_operation(op_id, "failed", error=str(ex), error_code="CAPABILITY_UNAVAILABLE")
+            except Exception:
+                log.exception("Error executing async %s operation", op_type)
+                update_operation(op_id, "failed", error=f"{op_type} failed", error_code=f"{op_type.upper()}_FAILED")
+
+        t = threading.Thread(target=_bg, daemon=True)
+        t.start()
+        return jsonify({"operation_id": op_id, "status": "running"}), 202
+
+    try:
+        result = _execute()
+        update_operation(op_id, "succeeded", result=result)
+        return jsonify({"operation_id": op_id, "status": "succeeded", "result": result})
+    except (plugin_ops.PluginCapabilityError, plugin_ops.PluginIncompatibleError) as ex:
+        update_operation(op_id, "failed", error=str(ex), error_code="CAPABILITY_UNAVAILABLE")
+        return jsonify({"error": str(ex), "error_code": "CAPABILITY_UNAVAILABLE"}), 409
+    except Exception:
+        log.exception("Error executing %s operation", op_type)
+        update_operation(op_id, "failed", error=f"{op_type} failed", error_code=f"{op_type.upper()}_FAILED")
+        return jsonify({"error": f"{op_type} failed", "error_code": f"{op_type.upper()}_FAILED"}), 500
+
+
+@webmanager_bp.route("/mbsync", methods=["POST"])
+def run_mbsync_route():
+    """Sync metadata from MusicBrainz for explicit items/albums using the
+    real Beets mbsync plugin (never a hand-rolled reimplementation)."""
+    lib = g.lib
+
+    def _build(data):
+        item_ids = _parse_id_list(data, "item_ids")
+        album_ids = _parse_id_list(data, "album_ids")
+        if not item_ids and not album_ids:
+            raise ValueError("Must specify item_ids or album_ids")
+        move = bool(data.get("move", False))
+        pretend = bool(data.get("pretend", False))
+        write = bool(data.get("write", True))
+        return lambda: plugin_ops.run_mbsync(
+            lib, item_ids=item_ids, album_ids=album_ids, move=move, pretend=pretend, write=write
+        )
+
+    return _run_plugin_gated_operation("mbsync", "mbsync", _build)
+
+
+@webmanager_bp.route("/fetchart", methods=["POST"])
+def run_fetchart_route():
+    """Fetch cover art for explicit albums using the real Beets fetchart
+    plugin and its own configured sources (never an arbitrary user URL)."""
+    lib = g.lib
+
+    def _build(data):
+        album_ids = _parse_id_list(data, "album_ids")
+        if not album_ids:
+            raise ValueError("Must specify album_ids")
+        force = bool(data.get("force", False))
+        return lambda: plugin_ops.run_fetchart(lib, album_ids, force=force)
+
+    return _run_plugin_gated_operation("fetchart", "fetchart", _build)
+
+
+@webmanager_bp.route("/embedart", methods=["POST"])
+def run_embedart_route():
+    """Embed each album's existing artwork into its items' tags using the
+    real Beets embedart plugin."""
+    lib = g.lib
+
+    def _build(data):
+        album_ids = _parse_id_list(data, "album_ids")
+        if not album_ids:
+            raise ValueError("Must specify album_ids")
+        return lambda: plugin_ops.run_embedart(lib, album_ids)
+
+    return _run_plugin_gated_operation("embedart", "embedart", _build)
+
+
+@webmanager_bp.route("/lastgenre", methods=["POST"])
+def run_lastgenre_route():
+    """Repair genre tags for explicit albums using the real Beets lastgenre
+    plugin."""
+    lib = g.lib
+
+    def _build(data):
+        album_ids = _parse_id_list(data, "album_ids")
+        if not album_ids:
+            raise ValueError("Must specify album_ids")
+        force = bool(data.get("force", False))
+        return lambda: plugin_ops.run_lastgenre(lib, album_ids, force=force)
+
+    return _run_plugin_gated_operation("lastgenre", "lastgenre", _build)

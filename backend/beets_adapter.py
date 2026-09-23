@@ -495,6 +495,116 @@ class BeetsAdapter:
         }
         return self._request("POST", "/webmanager/modify", json_data=payload)
 
+    def remove(
+        self,
+        item_ids: Optional[List[int]] = None,
+        album_ids: Optional[List[int]] = None,
+        delete_files: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove explicit items/albums via the stock-Beets integration
+        plugin. delete_files defaults False -- physical file deletion is
+        never implicit."""
+        payload = {
+            "item_ids": item_ids or [],
+            "album_ids": album_ids or [],
+            "delete_files": delete_files,
+        }
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/remove", json_data=payload, headers=headers)
+
+    def move(
+        self,
+        item_ids: Optional[List[int]] = None,
+        album_ids: Optional[List[int]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move explicit items/albums to their configured library location
+        via the stock-Beets integration plugin. Never accepts an arbitrary
+        destination path -- Beets' own path templates remain authoritative."""
+        payload = {"item_ids": item_ids or [], "album_ids": album_ids or []}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/move", json_data=payload, headers=headers)
+
+    def mbsync(
+        self,
+        item_ids: Optional[List[int]] = None,
+        album_ids: Optional[List[int]] = None,
+        move: bool = False,
+        pretend: bool = False,
+        write: bool = True,
+        is_async: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Sync metadata from MusicBrainz for explicit items/albums via the
+        real Beets mbsync plugin, through the stock-Beets integration
+        plugin."""
+        payload = {
+            "item_ids": item_ids or [],
+            "album_ids": album_ids or [],
+            "move": move,
+            "pretend": pretend,
+            "write": write,
+            "async": is_async,
+        }
+        headers = {}
+        if is_async:
+            headers["Prefer"] = "respond-async"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return self._request("POST", "/webmanager/mbsync", json_data=payload, headers=headers)
+
+    def fetch_art(
+        self,
+        album_ids: List[int],
+        force: bool = False,
+        is_async: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fetch cover art for explicit albums via the real Beets fetchart
+        plugin, through the stock-Beets integration plugin."""
+        payload = {"album_ids": album_ids, "force": force, "async": is_async}
+        headers = {}
+        if is_async:
+            headers["Prefer"] = "respond-async"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return self._request("POST", "/webmanager/fetchart", json_data=payload, headers=headers)
+
+    def embed_art(
+        self,
+        album_ids: List[int],
+        is_async: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Embed each album's existing artwork into its items' tags via the
+        real Beets embedart plugin, through the stock-Beets integration
+        plugin."""
+        payload = {"album_ids": album_ids, "async": is_async}
+        headers = {}
+        if is_async:
+            headers["Prefer"] = "respond-async"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return self._request("POST", "/webmanager/embedart", json_data=payload, headers=headers)
+
+    def lastgenre(
+        self,
+        album_ids: List[int],
+        force: bool = False,
+        is_async: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Repair genre tags for explicit albums via the real Beets
+        lastgenre plugin, through the stock-Beets integration plugin."""
+        payload = {"album_ids": album_ids, "force": force, "async": is_async}
+        headers = {}
+        if is_async:
+            headers["Prefer"] = "respond-async"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return self._request("POST", "/webmanager/lastgenre", json_data=payload, headers=headers)
+
     # -------------------------------------------------------------------------
     # Caller Compatibility Helpers
     # -------------------------------------------------------------------------

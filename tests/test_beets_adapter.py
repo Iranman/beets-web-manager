@@ -133,7 +133,13 @@ class BeetsAdapterTests(unittest.TestCase):
             if resp.status_code == 404:
                 raise BeetsAdapterNotFoundError("Not found", status_code=404, response_data=resp.get_json())
             if resp.status_code >= 400:
-                raise Exception(f"HTTP {resp.status_code}: {resp.data}")
+                body = resp.get_json() or {}
+                raise BeetsAdapterError(
+                    f"Beets request failed on {path} (status {resp.status_code})",
+                    status_code=resp.status_code,
+                    response_data=body,
+                    error_code=body.get("error_code") or "BEETS_UPSTREAM_ERROR",
+                )
             return resp.get_json()
 
         self.adapter._request = mock_request
@@ -306,6 +312,27 @@ class BeetsAdapterTests(unittest.TestCase):
         # Verify
         refreshed = self.lib.get_item(self.item.id)
         self.assertEqual(refreshed.title, "Aerodynamic")
+
+    def test_adapter_remove(self):
+        singleton_id = self.singleton_item.id
+        res = self.adapter.remove(item_ids=[singleton_id])
+        self.assertTrue(res["success"])
+        self.assertEqual(res["removed_items"], 1)
+        self.assertFalse(res["delete_files"])
+        self.assertIsNone(self.lib.get_item(singleton_id))
+
+    def test_adapter_move(self):
+        res = self.adapter.move(item_ids=[self.item2.id])
+        self.assertTrue(res["success"])
+        self.assertEqual(res["moved_items"], 1)
+
+    def test_adapter_mbsync_reports_capability_unavailable(self):
+        """The mbsync plugin isn't loaded in this test fixture -- the
+        adapter must surface a stable CAPABILITY_UNAVAILABLE error, not a
+        generic failure or a silent no-op."""
+        with self.assertRaises(BeetsAdapterError) as ctx:
+            self.adapter.mbsync(item_ids=[self.singleton_item.id])
+        self.assertEqual(ctx.exception.error_code, "CAPABILITY_UNAVAILABLE")
 
     def test_adapter_auth_failure(self):
         self.adapter._api_key = "invalid_bad_token"
