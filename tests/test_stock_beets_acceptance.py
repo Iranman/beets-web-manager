@@ -264,6 +264,14 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             os.makedirs(config_dir, exist_ok=True)
             os.makedirs(music_dir, exist_ok=True)
             os.makedirs(downloads_dir, exist_ok=True)
+            if os.name != "nt":
+                try:
+                    os.chmod(td, 0o777)
+                    os.chmod(config_dir, 0o777)
+                    os.chmod(music_dir, 0o777)
+                    os.chmod(downloads_dir, 0o777)
+                except Exception:
+                    pass
 
             # 1. Provision webmanager plugin into config_dir/beetsplug/webmanager
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
@@ -277,6 +285,11 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             key_file = os.path.join(config_dir, ".webmanager_api_key")
             with open(key_file, "w", encoding="utf-8") as f:
                 f.write(token + "\n")
+            if os.name != "nt":
+                try:
+                    os.chmod(key_file, 0o666)
+                except Exception:
+                    pass
 
             # 3. Write config.yaml
             config_yaml = f"""plugins: web webmanager
@@ -303,6 +316,11 @@ webmanager:
 """
             with open(os.path.join(config_dir, "config.yaml"), "w", encoding="utf-8") as f:
                 f.write(config_yaml)
+            if os.name != "nt":
+                try:
+                    os.chmod(os.path.join(config_dir, "config.yaml"), 0o666)
+                except Exception:
+                    pass
 
             # 4. Generate synthetic tagged audio file in downloads
             track_name = "Synthetic_Acceptance_Track.wav"
@@ -313,8 +331,15 @@ webmanager:
                 artist="Acceptance Bot",
                 album="Docker Test LP",
             )
+            if os.name != "nt":
+                try:
+                    os.chmod(track_path, 0o666)
+                except Exception:
+                    pass
 
-            # 5. Start stock Beets container bound strictly to loopback 127.0.0.1
+            # 5. Pre-pull image and start stock Beets container bound strictly to loopback 127.0.0.1
+            subprocess.run(["docker", "pull", STOCK_BEETS_IMAGE], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
             import socket
             sock = socket.socket()
             sock.bind(("127.0.0.1", 0))
@@ -350,7 +375,9 @@ webmanager:
                     except Exception:
                         pass
 
-                self.assertTrue(responsive, f"Timed out waiting for stock Beets container at {base_url}")
+                if not responsive:
+                    logs = subprocess.run(["docker", "logs", container_name], capture_output=True, text=True)
+                    self.fail(f"Timed out waiting for stock Beets container at {base_url}.\nContainer logs:\nSTDOUT:\n{logs.stdout}\nSTDERR:\n{logs.stderr}")
 
                 # Step 1: Upstream Native Read Check
                 req = urllib.request.Request(f"{base_url}/stats")
