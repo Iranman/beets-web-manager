@@ -131,10 +131,17 @@ something the old Beets binary can be expected to read.
 
 ## Retaining Beets 2.4.0 compatibility
 
-The 2.4.0 patch path and pin remain explicitly supported and tested (see
-the `beets-engine-verification` CI matrix in
-`.github/workflows/docker-build.yml`), specifically so a deployment that
-has not yet migrated can still build and verify a working 2.4.0 engine.
-This is a deliberate choice, not leftover dead code — remove it only when
-no supported deployment still needs it, and note that removal here as its
-own repository change.
+As of the stock-Beets migration (Phase 1, see
+`docs/CONFIGURATION.md`), Beets Web Manager no longer builds, tests, or
+publishes any custom Beets engine image in active CI -- the only Beets
+runtime this repository builds/verifies against is the unmodified,
+official `lscr.io/linuxserver/beets` image (see the `stock-beets-acceptance`
+job in `.github/workflows/docker-build.yml`). The 2.4.0 patch path
+(`docker/beets/apply_patches.py`, `Dockerfile.beets`) remains present in
+source as migration scaffolding for deployments that have not yet cut
+over to the stock-Beets architecture, but it is **not** built or verified
+by any active CI job. Do not reintroduce a custom-engine CI build/test job
+to "restore" this coverage -- that would recreate the custom engine this
+migration removes. Remove the legacy 2.4.0 source entirely only once no
+supported deployment still depends on it, and note that removal here as
+its own repository change.

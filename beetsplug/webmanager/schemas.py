@@ -6,6 +6,14 @@ from typing import List, Set, Optional
 DEFAULT_API_KEY_FILE = "/config/.webmanager_api_key"
 DEFAULT_ALLOWED_ROOTS = ["/music", "/downloads", "/web-manager-data"]
 
+# Import sources are intentionally a *separate, narrower* concept from
+# allowed_roots: allowed_roots also covers /music (a Beets-managed
+# destination, not a valid import intake point) and /web-manager-data
+# (unrelated app state). Only import_roots may be used as the source of a
+# POST /webmanager/import -- do not fall back to allowed_roots for import
+# path validation.
+DEFAULT_IMPORT_ROOTS = ["/downloads"]
+
 ALLOWED_ITEM_FIELDS: Set[str] = {
     "title",
     "artist",

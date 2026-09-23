@@ -7,7 +7,7 @@ and metadata management.
 
 from beets.plugins import BeetsPlugin
 from .compat import register_webmanager_blueprint
-from .schemas import DEFAULT_ALLOWED_ROOTS, DEFAULT_API_KEY_FILE
+from .schemas import DEFAULT_ALLOWED_ROOTS, DEFAULT_API_KEY_FILE, DEFAULT_IMPORT_ROOTS
 
 __version__ = "1.0.0"
 
@@ -21,6 +21,7 @@ class WebManagerPlugin(BeetsPlugin):
             {
                 "api_key_file": DEFAULT_API_KEY_FILE,
                 "allowed_roots": DEFAULT_ALLOWED_ROOTS,
+                "import_roots": DEFAULT_IMPORT_ROOTS,
                 "async_retention_seconds": 3600,
             }
         )

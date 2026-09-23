@@ -15,6 +15,7 @@ from beetsplug.webmanager import WebManagerPlugin
 from beetsplug.webmanager.schemas import (
     is_path_safe_and_allowed,
     is_strict_descendant,
+    resolve_safe_descendant,
     validate_fields,
     ALLOWED_ITEM_FIELDS,
     ALLOWED_ALBUM_FIELDS,
@@ -45,6 +46,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.plugin = WebManagerPlugin()
         set_api_key_file(self.key_file)
         ops_mod.set_allowed_roots([self.td, "/music", "/downloads", self.music_dir, self.downloads_dir])
+        ops_mod.set_import_roots(None)
 
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["TESTING"] = True
@@ -52,7 +54,12 @@ class BeetsplugWebManagerTests(unittest.TestCase):
 
     def tearDown(self):
         ops_mod.set_allowed_roots(None)
+        ops_mod.set_import_roots(None)
         set_api_key_file(None)
+        try:
+            beets_config["web"]["readonly"] = True
+        except Exception:
+            pass
         try:
             self.lib._connection().close()
         except Exception:
@@ -168,16 +175,82 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
         self.assertEqual(data["plugin_version"], "0.1.0")
-        self.assertTrue(data["upstream_web_readonly"])
         self.assertTrue(data["plugin_mutations_enabled"])
         self.assertNotIn("allowed_roots", data)
+
+    def test_status_endpoint_reports_actual_readonly_true(self):
+        """upstream_web_readonly must reflect the real beets_config['web']['readonly'] value, not a hardcoded constant."""
+        beets_config["web"]["readonly"] = True
+        res = self.client.get(
+            "/webmanager/status",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        self.assertTrue(res.get_json()["upstream_web_readonly"])
+
+    def test_status_endpoint_reports_actual_readonly_false(self):
+        """When Beets' own config says readonly: no, status must report False, not a hidden/hardcoded True."""
+        beets_config["web"]["readonly"] = False
+        res = self.client.get(
+            "/webmanager/status",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        self.assertFalse(res.get_json()["upstream_web_readonly"])
+
+    def test_import_roots_separate_from_allowed_roots(self):
+        """import_roots must gate /webmanager/import; allowed_roots (which includes /music) must not."""
+        ops_mod.set_import_roots([self.downloads_dir])
+        auth = {"Authorization": f"Bearer {self.token}"}
+
+        # ACCEPT: a strict child of the configured import root
+        accepted_album = os.path.join(self.downloads_dir, "Artist - Album")
+        os.makedirs(accepted_album, exist_ok=True)
+        res = self.client.post("/webmanager/import", headers=auth, json={"paths": [accepted_album]})
+        self.assertIn(res.status_code, (200, 202))
+
+        # REJECT: the import root itself
+        res = self.client.post("/webmanager/import", headers=auth, json={"paths": [self.downloads_dir]})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "PATH_NOT_ALLOWED")
+
+        # REJECT: /music is an allowed_root (per setUp) but is NOT an import_root --
+        # it must never become a valid import source just because it's allowed elsewhere.
+        music_child = os.path.join(self.music_dir, "Some Album")
+        os.makedirs(music_child, exist_ok=True)
+        res = self.client.post("/webmanager/import", headers=auth, json={"paths": [music_child]})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "PATH_NOT_ALLOWED")
+
+        # REJECT: prefix confusion (a sibling directory that merely starts with the same prefix)
+        confused_dir = self.downloads_dir + "2"
+        os.makedirs(os.path.join(confused_dir, "album"), exist_ok=True)
+        res = self.client.post(
+            "/webmanager/import", headers=auth, json={"paths": [os.path.join(confused_dir, "album")]}
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "PATH_NOT_ALLOWED")
+
+        # REJECT: path traversal out of the import root
+        traversal_path = os.path.join(self.downloads_dir, "..", "music")
+        res = self.client.post("/webmanager/import", headers=auth, json={"paths": [traversal_path]})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "PATH_NOT_ALLOWED")
+
+        # REJECT: a symlink under the import root that resolves outside it
+        outside_target = os.path.join(self.td, "outside_target")
+        os.makedirs(outside_target, exist_ok=True)
+        symlink_path = os.path.join(self.downloads_dir, "escape_link")
+        try:
+            os.symlink(outside_target, symlink_path)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported on this platform")
+        self.assertIsNone(resolve_safe_descendant(symlink_path, [self.downloads_dir]))
 
     def test_import_policy_validations(self):
         """Verify autotag=true rejected, root-self import rejected, invalid duplicate_action rejected."""
         auth = {"Authorization": f"Bearer {self.token}"}
         sample_album = os.path.join(self.downloads_dir, "album1")
         os.makedirs(sample_album, exist_ok=True)
-        ops_mod.set_allowed_roots([self.downloads_dir])
+        ops_mod.set_import_roots([self.downloads_dir])
 
         # 1. autotag: True must be rejected with 400
         res = self.client.post(
@@ -220,7 +293,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         auth = {"Authorization": f"Bearer {self.token}"}
         sample_album = os.path.join(self.downloads_dir, "album1")
         os.makedirs(sample_album, exist_ok=True)
-        ops_mod.set_allowed_roots([self.downloads_dir])
+        ops_mod.set_import_roots([self.downloads_dir])
 
         beets_config["import"]["quiet"] = False
         beets_config["import"]["timid"] = True
@@ -245,7 +318,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         auth = {"Authorization": f"Bearer {self.token}"}
         sample_album = os.path.join(self.downloads_dir, "album1")
         os.makedirs(sample_album, exist_ok=True)
-        ops_mod.set_allowed_roots([self.downloads_dir])
+        ops_mod.set_import_roots([self.downloads_dir])
 
         secret_leak_message = "CRITICAL_SECRET_PASSWORD_999 at /etc/shadow/path"
         with patch("beets.importer.ImportSession.run", side_effect=Exception(secret_leak_message)):
@@ -318,7 +391,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         auth = {"Authorization": f"Bearer {self.token}", "Idempotency-Key": "idemp-unique-12345"}
         sample_album = os.path.join(self.downloads_dir, "album1")
         os.makedirs(sample_album, exist_ok=True)
-        ops_mod.set_allowed_roots([self.downloads_dir])
+        ops_mod.set_import_roots([self.downloads_dir])
 
         # First request
         payload_a = {"paths": [sample_album], "autotag": False, "duplicate_action": "skip"}

@@ -63,6 +63,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
             f.write(self.token + "\n")
         set_api_key_file(self.key_file)
         ops_mod.set_allowed_roots([self.music_dir, self.downloads_dir])
+        ops_mod.set_import_roots([self.downloads_dir])
 
         # Configure Beets web app
         self.plugin = WebManagerPlugin()
@@ -70,6 +71,8 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["READONLY"] = True
         beets_web_app.config["TESTING"] = True
+        from beets import config as beets_config
+        beets_config["web"]["readonly"] = True
 
         # Pre-populate sample library data
         self.album = Album(
@@ -102,6 +105,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
 
     def tearDown(self):
         ops_mod.set_allowed_roots(None)
+        ops_mod.set_import_roots(None)
         set_api_key_file(None)
         try:
             self.lib._connection().close()
@@ -206,6 +210,17 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(res_root.status_code, 400)
         self.assertEqual(res_root.get_json()["error_code"], "PATH_NOT_ALLOWED")
+
+        # /music is an allowed_root but NOT an import_root -- must be rejected as an import source
+        music_child = os.path.join(self.music_dir, "not_a_valid_import_source")
+        os.makedirs(music_child, exist_ok=True)
+        res_music = self.client.post(
+            "/webmanager/import",
+            headers=auth_headers,
+            json={"paths": [music_child]},
+        )
+        self.assertEqual(res_music.status_code, 400)
+        self.assertEqual(res_music.get_json()["error_code"], "PATH_NOT_ALLOWED")
 
         # 4. Modify tags
         res = self.client.post(
@@ -313,6 +328,8 @@ webmanager:
   allowed_roots:
     - /music
     - /downloads
+  import_roots:
+    - /downloads
 """
             with open(os.path.join(config_dir, "config.yaml"), "w", encoding="utf-8") as f:
                 f.write(config_yaml)
@@ -412,6 +429,24 @@ webmanager:
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
+
+                # Step 2b: import_roots must reject the bare import root itself and any
+                # /music child, even though /music is an allowed_root for other
+                # operations -- it must never become a valid import source.
+                for rejected_path in ("/downloads", f"/music/{track_name}"):
+                    req_reject = urllib.request.Request(
+                        f"{base_url}/webmanager/import",
+                        data=json.dumps({"paths": [rejected_path]}).encode("utf-8"),
+                        headers=auth_header,
+                        method="POST",
+                    )
+                    try:
+                        _raw_urlopen(req_reject, timeout=10)
+                        self.fail(f"Expected import from {rejected_path!r} to be rejected")
+                    except urllib.error.HTTPError as ex:
+                        self.assertEqual(ex.code, 400)
+                        body = json.loads(ex.read().decode("utf-8"))
+                        self.assertEqual(body["error_code"], "PATH_NOT_ALLOWED")
 
                 # Step 3: Concurrent Idempotency Test
                 # Execute two simultaneous POST requests with same key and payload

@@ -18,6 +18,7 @@ from .schemas import (
     validate_fields,
     ALLOWED_DUPLICATE_ACTIONS,
     DEFAULT_ALLOWED_ROOTS,
+    DEFAULT_IMPORT_ROOTS,
 )
 
 log = logging.getLogger("beets.webmanager")
@@ -171,10 +172,61 @@ def get_allowed_roots() -> List[str]:
     return DEFAULT_ALLOWED_ROOTS
 
 
+_CUSTOM_IMPORT_ROOTS: Optional[List[str]] = None
+
+
+def set_import_roots(roots: Optional[List[str]]):
+    """Explicitly override import roots (for testing or runtime override)."""
+    global _CUSTOM_IMPORT_ROOTS
+    _CUSTOM_IMPORT_ROOTS = roots
+
+
+def get_import_roots() -> List[str]:
+    """Get configured import roots or defaults.
+
+    Distinct from get_allowed_roots(): import_roots is the narrower set of
+    directories a POST /webmanager/import source path may live under. It
+    must never fall back to allowed_roots, since allowed_roots also
+    includes /music (a Beets-managed destination) and /web-manager-data
+    (unrelated app state) -- neither is a valid import intake point.
+    """
+    global _CUSTOM_IMPORT_ROOTS
+    if _CUSTOM_IMPORT_ROOTS is not None:
+        return _CUSTOM_IMPORT_ROOTS
+
+    env_roots = os.environ.get("BEETS_WEBMANAGER_IMPORT_ROOTS", "").strip()
+    if env_roots:
+        return [r.strip() for r in env_roots.split(",") if r.strip()]
+
+    try:
+        from beets import config
+
+        if "webmanager" in config and "import_roots" in config["webmanager"]:
+            roots = config["webmanager"]["import_roots"].as_str_seq()
+            if roots:
+                return list(roots)
+    except Exception:
+        pass
+    return DEFAULT_IMPORT_ROOTS
+
+
+def get_upstream_web_readonly() -> bool:
+    """Read Beets' own web.readonly setting, normalized to a safe bool.
+
+    Fails closed (reports readonly=True) on any missing/malformed config
+    rather than silently reporting a permissive default -- do not hide an
+    unsafe or unexpected upstream configuration state.
+    """
+    try:
+        return bool(beets_config["web"]["readonly"].get(bool))
+    except Exception:
+        return True
+
+
 @webmanager_bp.route("/status", methods=["GET"])
 def get_status():
     """Healthcheck and capability status handshake endpoint."""
-    lib_ready = hasattr(g, "lib") and g.lib is not None
+    lib_ready = hasattr(g, "lib") and g.lib is not None and hasattr(g.lib, "items")
     return jsonify(
         {
             "protocol_version": "1.0",
@@ -182,7 +234,7 @@ def get_status():
             "beets_version": getattr(beets, "__version__", "unknown"),
             "capabilities": ["import", "modify", "operations", "status"],
             "library_ready": lib_ready,
-            "upstream_web_readonly": True,
+            "upstream_web_readonly": get_upstream_web_readonly(),
             "plugin_mutations_enabled": True,
         }
     )
@@ -227,42 +279,30 @@ def run_import():
     else:
         duplicate_action = "skip"
 
-    # Policy 3: Path containment — source paths must be strict descendants of allowed roots (e.g. /downloads)
-    allowed_roots = get_allowed_roots()
+    # Policy 3: Path containment — import source paths must be strict
+    # descendants of import_roots (e.g. /downloads), never allowed_roots.
+    # import_roots is deliberately narrower: /music (a Beets-managed
+    # destination) and /web-manager-data must never be valid import
+    # sources just because they are allowed roots for another operation.
+    import_roots = get_import_roots()
     safe_paths: List[str] = []
     for p in paths:
         if not p or not isinstance(p, str) or "\x00" in p:
             return (
                 jsonify(
                     {
-                        "error": "Source path must be a strict child of allowed roots",
+                        "error": "Source path must be a strict child of an import root",
                         "error_code": "PATH_NOT_ALLOWED",
                     }
                 ),
                 400,
             )
-        norm_target = os.path.realpath(os.path.abspath(p))
-        safe_p: Optional[str] = None
-        for root in allowed_roots:
-            if not root or not isinstance(root, str) or "\x00" in root:
-                continue
-            norm_root = os.path.realpath(os.path.abspath(root))
-            root_prefix = norm_root if norm_root.endswith(os.sep) else norm_root + os.sep
-            if norm_target.startswith(root_prefix) and norm_target != norm_root:
-                try:
-                    if os.path.commonpath([norm_target, norm_root]) == norm_root:
-                        rel = os.path.relpath(norm_target, norm_root)
-                        if not rel.startswith("..") and rel != ".":
-                            safe_p = norm_target
-                            break
-                except ValueError:
-                    continue
-
+        safe_p = resolve_safe_descendant(p, import_roots)
         if safe_p is None:
             return (
                 jsonify(
                     {
-                        "error": "Source path must be a strict child of allowed roots",
+                        "error": "Source path must be a strict child of an import root",
                         "error_code": "PATH_NOT_ALLOWED",
                     }
                 ),
