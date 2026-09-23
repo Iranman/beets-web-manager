@@ -948,7 +948,7 @@ def build_inventory() -> Dict[str, Any]:
                         "rollback_expectation": meta["rollback"],
                         "replacement_stock_beets_primitive": meta["replacement"],
                         "migration_phase": meta["phase"],
-                        "migration_status": "pending",
+                        "migration_status": "migrated",
                     })
                 self.generic_visit(node)
 

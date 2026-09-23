@@ -325,6 +325,7 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "render_index": ("READ_ONLY_FALSE_POSITIVE", "none", "in-memory-template-string-replace"),
     "_prune_empty_review_dirs": ("NON_MEDIA_FILESYSTEM", "infra_v1", "prune-empty-review-staging-dirs"),
     "_delete_no_audio_folders": ("NON_MEDIA_FILESYSTEM", "infra_v1", "delete-no-audio-staging-folders"),
+    "_probe_js_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "js-runtime-version-probe"),
 }
 
 
