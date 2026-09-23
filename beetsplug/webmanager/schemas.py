@@ -103,13 +103,13 @@ def is_path_safe_and_allowed(target_path: str, allowed_roots: List[str]) -> bool
             if "\x00" in root:
                 continue
             norm_root = os.path.realpath(os.path.abspath(root))
-            if norm_target == norm_root:
-                return True
-            try:
-                if os.path.commonpath([norm_target, norm_root]) == norm_root:
-                    return True
-            except ValueError:
-                continue
+            root_prefix = norm_root if norm_root.endswith(os.sep) else norm_root + os.sep
+            if norm_target == norm_root or norm_target.startswith(root_prefix):
+                try:
+                    if os.path.commonpath([norm_target, norm_root]) == norm_root:
+                        return True
+                except ValueError:
+                    continue
         return False
     except Exception:
         return False
@@ -138,16 +138,15 @@ def resolve_safe_descendant(target_path: str, allowed_roots: List[str]) -> Optio
             if "\x00" in root:
                 continue
             norm_root = os.path.realpath(os.path.abspath(root))
-            if norm_target == norm_root:
-                # Root itself is not a strict child
-                continue
-            try:
-                if os.path.commonpath([norm_target, norm_root]) == norm_root:
-                    rel = os.path.relpath(norm_target, norm_root)
-                    if not rel.startswith("..") and rel != ".":
-                        return norm_target
-            except ValueError:
-                continue
+            root_prefix = norm_root if norm_root.endswith(os.sep) else norm_root + os.sep
+            if norm_target.startswith(root_prefix) and norm_target != norm_root:
+                try:
+                    if os.path.commonpath([norm_target, norm_root]) == norm_root:
+                        rel = os.path.relpath(norm_target, norm_root)
+                        if not rel.startswith("..") and rel != ".":
+                            return norm_target
+                except ValueError:
+                    continue
         return None
     except Exception:
         return None

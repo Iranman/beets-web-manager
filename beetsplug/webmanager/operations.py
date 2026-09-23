@@ -242,23 +242,23 @@ def run_import():
                 400,
             )
         norm_target = os.path.realpath(os.path.abspath(p))
-        is_safe = False
+        safe_p: Optional[str] = None
         for root in allowed_roots:
             if not root or not isinstance(root, str) or "\x00" in root:
                 continue
             norm_root = os.path.realpath(os.path.abspath(root))
-            if norm_target == norm_root:
-                continue
-            try:
-                if os.path.commonpath([norm_target, norm_root]) == norm_root:
-                    rel = os.path.relpath(norm_target, norm_root)
-                    if not rel.startswith("..") and rel != ".":
-                        is_safe = True
-                        break
-            except ValueError:
-                continue
+            root_prefix = norm_root if norm_root.endswith(os.sep) else norm_root + os.sep
+            if norm_target.startswith(root_prefix) and norm_target != norm_root:
+                try:
+                    if os.path.commonpath([norm_target, norm_root]) == norm_root:
+                        rel = os.path.relpath(norm_target, norm_root)
+                        if not rel.startswith("..") and rel != ".":
+                            safe_p = norm_target
+                            break
+                except ValueError:
+                    continue
 
-        if not is_safe:
+        if safe_p is None:
             return (
                 jsonify(
                     {
@@ -268,7 +268,7 @@ def run_import():
                 ),
                 400,
             )
-        safe_paths.append(norm_target)
+        safe_paths.append(safe_p)
 
     copy = bool(data.get("copy", False))
     move = bool(data.get("move", True))
