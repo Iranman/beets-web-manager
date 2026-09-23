@@ -231,8 +231,7 @@ def run_import():
     allowed_roots = get_allowed_roots()
     safe_paths: List[str] = []
     for p in paths:
-        safe_p = resolve_safe_descendant(p, allowed_roots)
-        if safe_p is None:
+        if not p or not isinstance(p, str) or "\x00" in p:
             return (
                 jsonify(
                     {
@@ -242,7 +241,34 @@ def run_import():
                 ),
                 400,
             )
-        safe_paths.append(safe_p)
+        norm_target = os.path.realpath(os.path.abspath(p))
+        is_safe = False
+        for root in allowed_roots:
+            if not root or not isinstance(root, str) or "\x00" in root:
+                continue
+            norm_root = os.path.realpath(os.path.abspath(root))
+            if norm_target == norm_root:
+                continue
+            try:
+                if os.path.commonpath([norm_target, norm_root]) == norm_root:
+                    rel = os.path.relpath(norm_target, norm_root)
+                    if not rel.startswith("..") and rel != ".":
+                        is_safe = True
+                        break
+            except ValueError:
+                continue
+
+        if not is_safe:
+            return (
+                jsonify(
+                    {
+                        "error": "Source path must be a strict child of allowed roots",
+                        "error_code": "PATH_NOT_ALLOWED",
+                    }
+                ),
+                400,
+            )
+        safe_paths.append(norm_target)
 
     copy = bool(data.get("copy", False))
     move = bool(data.get("move", True))
