@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,8 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+log = logging.getLogger("beets.plugins.manifest")
 
 ROOT = Path(__file__).resolve().parents[1]
 
