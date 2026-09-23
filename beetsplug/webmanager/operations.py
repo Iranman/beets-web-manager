@@ -20,6 +20,7 @@ from .schemas import (
     DEFAULT_ALLOWED_ROOTS,
     DEFAULT_IMPORT_ROOTS,
 )
+from .version import PLUGIN_VERSION, PROTOCOL_VERSION
 
 log = logging.getLogger("beets.webmanager")
 
@@ -229,8 +230,8 @@ def get_status():
     lib_ready = hasattr(g, "lib") and g.lib is not None and hasattr(g.lib, "items")
     return jsonify(
         {
-            "protocol_version": "1.0",
-            "plugin_version": "0.1.0",
+            "protocol_version": PROTOCOL_VERSION,
+            "plugin_version": PLUGIN_VERSION,
             "beets_version": getattr(beets, "__version__", "unknown"),
             "capabilities": ["import", "modify", "operations", "status"],
             "library_ready": lib_ready,

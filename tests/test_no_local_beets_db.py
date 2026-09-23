@@ -26,13 +26,13 @@ class NoLocalBeetsDatabaseTests(unittest.TestCase):
         self.assertNotIn(":/config", web_manager_block)
 
     def test_beets_unavailable_returns_503(self):
-        """When Beets control agent is unavailable, routes return 503 rather than attempting local DB fallback."""
+        """When stock Beets read transport is unavailable, routes return 503 rather than attempting local DB fallback."""
         import app as app_module
-        from backend.beets_client import BeetsUnavailableError
+        from backend.beets_adapter import BeetsAdapterConnectionError
 
         with mock.patch.dict("os.environ", {"BEETS_WEB_AUTH_DISABLED": "1"}):
             with app_module.app.test_client() as client:
-                with mock.patch.object(app_module.beets_client, "get_items_page", side_effect=BeetsUnavailableError("Unavailable")):
+                with mock.patch.object(app_module.beets_adapter, "get_items_page", side_effect=BeetsAdapterConnectionError("Unavailable")):
                     res = client.get("/api/library?limit=1")
                     self.assertEqual(res.status_code, 503)
                     data = res.get_json()

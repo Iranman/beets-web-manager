@@ -31,7 +31,7 @@ class LibraryPaginationTests(unittest.TestCase):
                 "total": 3144,
             }
 
-        with mock.patch.object(app_module.beets_client, "get_items_page", side_effect=fake_get_items_page):
+        with mock.patch.object(app_module.beets_adapter, "get_items_page", side_effect=fake_get_items_page):
             t0 = time.time()
             res = self.client.get("/api/library?limit=1")
             elapsed = time.time() - t0
@@ -56,7 +56,7 @@ class LibraryPaginationTests(unittest.TestCase):
                 "total": 3144,
             }
 
-        with mock.patch.object(app_module.beets_client, "get_items_page", side_effect=fake_get_items_page) as mock_page:
+        with mock.patch.object(app_module.beets_adapter, "get_items_page", side_effect=fake_get_items_page) as mock_page:
             res = self.client.get("/api/library?limit=9999")
             self.assertEqual(res.status_code, 200)
             mock_page.assert_called_once_with(offset=0, limit=500)

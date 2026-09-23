@@ -430,6 +430,11 @@ from backend.beets_client import (
     beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError,
     BeetsBadRequestError, BeetsNotFoundError,
 )
+from backend.beets_adapter import (
+    beets_adapter, BeetsAdapterError, BeetsAdapterAuthError,
+    BeetsAdapterNotFoundError, BeetsAdapterConnectionError,
+    BeetsAdapterTimeoutError, StockBeetsLibrary,
+)
 
 
 def _read_file_media_tags(path: Any) -> Dict[str, Any]:
@@ -3369,17 +3374,37 @@ def ytdlp_test_youtube():
 def _health_checks() -> Dict[str, bool]:
     checks = {
         "app": True,
+        "beets_web": False,
+        "beets_webmanager_plugin": False,
         "beets_control_agent": False,
         "lidarr_key": bool(LIDARR_KEY),
         "discogs_token": bool(DISCOGS_TOKEN),
         "slskd_key": bool(SLSKD_API_KEY),
         "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
     }
+    # 1. Probe stock Beets Web REST API (:8337)
+    try:
+        stats_data = beets_adapter.get_stats()
+        checks["beets_web"] = isinstance(stats_data, dict) and "items" in stats_data
+    except Exception:
+        checks["beets_web"] = False
+
+    # 2. Probe WebManager integration plugin
+    try:
+        plugin_status = beets_adapter.get_plugin_status()
+        checks["beets_webmanager_plugin"] = (
+            isinstance(plugin_status, dict) and plugin_status.get("library_ready") is not False
+        )
+    except Exception:
+        checks["beets_webmanager_plugin"] = False
+
+    # 3. Probe legacy control agent (temporary mutation transport)
     try:
         agent_health = beets_client.health()
         checks["beets_control_agent"] = agent_health.get("status") == "ok"
     except Exception:
         checks["beets_control_agent"] = False
+
     return checks
 
 
@@ -3394,7 +3419,7 @@ def health():
 def health_detail():
     """Authenticated dependency diagnostics for the web manager."""
     checks = _health_checks()
-    ok = checks["app"] and checks["beets_control_agent"]
+    ok = checks["app"] and (checks["beets_web"] or checks["beets_control_agent"])
     return jsonify({"ok": ok, "checks": checks})
 
 @app.post("/api/restart")
@@ -3419,10 +3444,20 @@ def restart_app():
 
 @app.get("/api/stats")
 def stats():
-    albums_list = list(lib.albums([]))
-    tracks  = sum(1 for _ in lib.items([]))
-    artists = len({a.albumartist for a in albums_list if a.albumartist})
-    return jsonify({"tracks": tracks, "albums": len(albums_list), "artists": artists})
+    try:
+        s = beets_adapter.get_stats()
+        tracks = s.get("items", 0)
+        albums_count = s.get("albums", 0)
+        artists = len(beets_adapter.get_artists())
+        return jsonify({"tracks": tracks, "albums": albums_count, "artists": artists})
+    except Exception as ex:
+        app.logger.warning("Beets /stats unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets library unavailable",
+            "error_code": "ENGINE_OFFLINE",
+            "status": "unavailable",
+        }), 503
 
 
 # -- Transaction helpers for item metadata changes ---------------------------
@@ -3637,21 +3672,121 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
 
 @app.get("/api/items")
 def items():
-    q     = request.args.get("q", "").strip()
+    q = request.args.get("q", "").strip()
     limit = min(int(request.args.get("limit", 100)), 500)
-    rows  = []
-    for item in lib.items(q.split() if q else []):
-        rows.append(item_dict(item))
-        if len(rows) >= limit:
-            break
-    return jsonify({"count": len(rows), "items": rows})
+    rows = []
+    try:
+        for item in lib.items(q.split() if q else []):
+            rows.append(item_dict(item))
+            if len(rows) >= limit:
+                break
+        return jsonify({"count": len(rows), "items": rows})
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
+        app.logger.warning("Beets items query unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets library unavailable",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
+
 
 @app.get("/api/items/<int:iid>")
 def get_item(iid):
-    item = lib.get_item(iid)
+    try:
+        item = lib.get_item(iid)
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
+        app.logger.warning("Beets get_item unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets library unavailable",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
     if not item:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, "item": item_dict_full(item)})
+
+
+@app.get("/api/artists")
+def get_artists_list():
+    """Fetch all artist names directly from Stock Beets Web API."""
+    try:
+        artists = beets_adapter.get_artists()
+        return jsonify({"ok": True, "count": len(artists), "artists": artists})
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
+        app.logger.warning("Beets get_artists unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets library unavailable",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
+
+
+@app.get("/api/search")
+def api_search():
+    """Search items and albums across stock Beets library."""
+    q = request.args.get("q", "").strip()
+    limit = min(int(request.args.get("limit", 100)), 500)
+    try:
+        items_rows = [item_dict(item) for item in lib.items(q.split() if q else [])[:limit]]
+        albums_rows = [album_dict(album) for album in lib.albums(q.split() if q else [])[:limit]]
+        return jsonify({
+            "ok": True,
+            "query": q,
+            "items": items_rows,
+            "albums": albums_rows,
+            "items_count": len(items_rows),
+            "albums_count": len(albums_rows),
+        })
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
+        app.logger.warning("Beets search unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets library unavailable",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
+
+
+@app.get("/api/items/<int:iid>/file")
+@app.get("/api/items/<int:iid>/audio")
+@app.get("/api/item/<int:iid>/file")
+def item_audio_file(iid: int):
+    """Proxy audio file stream from stock Beets to browser without buffering in memory."""
+    try:
+        upstream_resp = beets_adapter.open_item_file(iid)
+    except BeetsAdapterNotFoundError:
+        return jsonify({"ok": False, "error": "Item audio file not found"}), 404
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError) as ex:
+        app.logger.warning("Beets audio stream connection error for item %d: %s", iid, ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets audio streaming unavailable",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
+    except Exception as ex:
+        app.logger.warning("Beets audio stream error for item %d: %s", iid, ex)
+        return jsonify({"ok": False, "error": "Audio stream failed"}), 500
+
+    def generate_stream():
+        try:
+            while True:
+                chunk = upstream_resp.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            upstream_resp.close()
+
+    headers = {}
+    content_type = upstream_resp.headers.get("Content-Type", "audio/mpeg")
+    if "Content-Length" in upstream_resp.headers:
+        headers["Content-Length"] = upstream_resp.headers["Content-Length"]
+    if "Accept-Ranges" in upstream_resp.headers:
+        headers["Accept-Ranges"] = upstream_resp.headers["Accept-Ranges"]
+    if "Content-Disposition" in upstream_resp.headers:
+        headers["Content-Disposition"] = upstream_resp.headers["Content-Disposition"]
+
+    from flask import Response as _FlaskResponse
+    return _FlaskResponse(generate_stream(), status=upstream_resp.status, mimetype=content_type, headers=headers)
 
 def _metadata_transaction_pending_fields(tx: Dict[str, Any]) -> Dict[str, Any]:
     metadata = tx.get("metadata") or {}
@@ -11356,16 +11491,38 @@ def library_art_repair_report():
 
 @app.get("/api/albums/<int:aid>/art")
 def album_art(aid):
-    """Serve local album art or redirect to Cover Art Archive."""
-    _MROOT_ART = "/data/media/music"
+    """Serve album art via stock Beets proxy, local cache, or Cover Art Archive fallback."""
+    # 1. Try stock Beets web endpoint proxy first
+    try:
+        upstream_resp = beets_adapter.open_album_art(aid)
+
+        def generate_art():
+            try:
+                while True:
+                    chunk = upstream_resp.read(32 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                upstream_resp.close()
+
+        headers = {"Cache-Control": "public, max-age=86400"}
+        content_type = upstream_resp.headers.get("Content-Type", "image/jpeg")
+        if "Content-Length" in upstream_resp.headers:
+            headers["Content-Length"] = upstream_resp.headers["Content-Length"]
+        from flask import Response as _Resp
+        return _Resp(generate_art(), status=upstream_resp.status, mimetype=content_type, headers=headers)
+    except (BeetsAdapterNotFoundError, Exception):
+        pass
+
+    # 2. Local filesystem / artpath fallback
+    _MROOT_ART = str(MUSIC_ROOT)
     album = lib.get_album(aid)
     if not album:
         return ("", 404)
     artpath = _s(getattr(album, "artpath", "") or "")
-    # Beets stores artpath relative to the music root — resolve to absolute
     if artpath and not artpath.startswith("/"):
         artpath = _MROOT_ART + "/" + artpath
-    # Strip null bytes that sometimes appear in stored paths
     artpath = artpath.replace("\x00", "").strip()
     if artpath and _usable_album_art_file(Path(artpath)):
         mime = "image/jpeg"
@@ -11375,9 +11532,8 @@ def album_art(aid):
         elif low.endswith(".gif"):
             mime = "image/gif"
         return send_file(artpath, mimetype=mime)
-    # Fallback 1: look for albumart.jpg in the album folder by scanning items.
-    # Check both item's direct parent AND grandparent — beets path template puts
-    # audio files in Artist/Album/Disc 01/ so art lives one level up at Artist/Album/.
+
+    # 3. Scan track items for folder art
     _DISC_RE = re.compile(r'^(?:disc|cd|disk)\s*\d+$', re.I)
     _ART_NAMES = ("albumart.jpg", "albumart.png", "folder.jpg",
                   "cover.jpg", "front.jpg", "cover.png")
@@ -11387,11 +11543,9 @@ def album_art(aid):
             if p and not p.startswith("/"):
                 p = _MROOT_ART + "/" + p
             item_dir = Path(p).parent
-            # Build candidate directories to search (item dir + walk up past disc subdir)
             dirs_to_check = [item_dir]
             if _DISC_RE.match(item_dir.name):
                 dirs_to_check.append(item_dir.parent)
-            # Also always check the grandparent in case of deeper nesting
             if item_dir.parent.parent != item_dir.parent:
                 dirs_to_check.append(item_dir.parent)
             for check_dir in dirs_to_check:
@@ -11400,12 +11554,11 @@ def album_art(aid):
                     if _usable_album_art_file(candidate):
                         mime = "image/png" if aname.endswith(".png") else "image/jpeg"
                         return send_file(str(candidate), mimetype=mime)
-            break   # only need first item's folder
+            break
     except Exception:
         pass
-    # Fallback 2: Cover Art Archive (or Discogs) via MB release group or
-    # release ID, downloaded and cached locally so the browser only ever
-    # loads a same-origin URL (external image hosts are blocked by CSP).
+
+    # 4. Fallback: Cover Art Archive via MB release group or release ID
     mbid = (_s(getattr(album, "mb_releasegroupid", "") or "")
             or _s(getattr(album, "mb_albumid", "") or ""))
     if mbid:
@@ -11416,7 +11569,8 @@ def album_art(aid):
         )
         if art_result.get("ok") and art_result.get("url"):
             return redirect(art_result["url"])
-    # Fallback 3: return a transparent placeholder so the browser doesn't log a 404
+
+    # 5. Transparent placeholder
     _SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
     from flask import Response as _Resp
     return _Resp(_SVG, status=200, mimetype="image/svg+xml")
@@ -14020,7 +14174,7 @@ def library_full():
             offset = 0
 
         try:
-            res = beets_client.get_items_page(offset=offset, limit=limit)
+            res = beets_adapter.get_items_page(offset=offset, limit=limit)
             raw_items = res.get("items", [])
             items = [_library_track_dict(r) for r in raw_items]
             return jsonify({
@@ -14033,14 +14187,10 @@ def library_full():
                 }
             })
         except Exception as ex:
-            if isinstance(ex, (BeetsUnavailableError, TimeoutError)):
-                # SEC-002 CodeQL repository-wide closure finding: never
-                # interpolate the raw exception text into a client-facing
-                # response -- matches the established ENGINE_OFFLINE
-                # pattern used elsewhere (e.g. library_art_repair_report()).
+            if isinstance(ex, (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError, TimeoutError)):
                 app.logger.warning("get_items_page unavailable: %s: %s", type(ex).__name__, ex)
                 return jsonify({
-                    "error": "Beets Control Agent is unavailable.",
+                    "error": "Beets library is unavailable.",
                     "error_code": "ENGINE_OFFLINE",
                     "status": "unavailable"
                 }), 503
@@ -33305,7 +33455,7 @@ def _mb_canonical_for_artist_entries(entries: List[Dict[str, Any]], key: str) ->
 
 def _artist_folder_db_counts() -> Dict[str, Dict[str, int]]:
     try:
-        return beets_client.get_artist_counts()
+        return beets_adapter.get_artist_counts()
     except Exception:
         return {}
 
@@ -34594,7 +34744,7 @@ def _scan_leaked_db_paths(progress: Optional[Any] = None,
     """
     results: List[Dict[str, Any]] = []
     try:
-        rows = beets_client.list_item_paths(details=True)
+        rows = beets_adapter.list_item_paths(details=True)
     except Exception as ex:
         return [{"error": str(ex)}]
 
@@ -34995,7 +35145,7 @@ def _scan_folder_name_placeholders(progress: Optional[Any] = None,
     # Build folder -> DB info map from items table
     folder_db: Dict[str, Dict[str, Any]] = {}
     try:
-        rows = beets_client.list_item_paths(details=True)
+        rows = beets_adapter.list_item_paths(details=True)
         for row in rows:
             p = _s(row.get("path"))
             d = os.path.dirname(p) if p else ""
@@ -51265,7 +51415,7 @@ def music_format_replacement_statuses():
 
 def _music_format_library_rows(limit: int = 0) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    cleanup_rows = beets_client.get_album_cleanup_index()
+    cleanup_rows = beets_adapter.get_album_cleanup_index()
 
     cleanup_rows.sort(key=lambda r: (
         int(r.get("item_album_id") or r.get("album_id") or 0),

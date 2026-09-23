@@ -8,8 +8,10 @@ and metadata management.
 from beets.plugins import BeetsPlugin
 from .compat import register_webmanager_blueprint
 from .schemas import DEFAULT_ALLOWED_ROOTS, DEFAULT_API_KEY_FILE, DEFAULT_IMPORT_ROOTS
+from .version import PLUGIN_VERSION, PROTOCOL_VERSION
 
-__version__ = "1.0.0"
+__version__ = PLUGIN_VERSION
+__all__ = ["WebManagerPlugin", "PLUGIN_VERSION", "PROTOCOL_VERSION"]
 
 
 class WebManagerPlugin(BeetsPlugin):

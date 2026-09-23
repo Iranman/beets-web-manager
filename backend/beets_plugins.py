@@ -862,14 +862,21 @@ def verify_all_plugins(
 
     configured = set(parse_configured_plugins(config_text))
 
-    # ── [MIGRATION STATUS: REPLACE IN PHASE 2] ──────────────────────────────
-    # Try to get live loaded plugins from supplied args, or remote beets_client, or in-process
-    # In Phase 2, this will query BeetsAdapter.get_plugin_status() on stock Beets.
+    # Query stock Beets plugin integration status via BeetsAdapter
     loaded: Set[str] = set(loaded_plugins) if loaded_plugins is not None else set()
     if not loaded and remote_status is not None:
         if isinstance(remote_status, dict):
             raw_loaded = remote_status.get("loaded_plugins") or remote_status.get("plugins") or []
             loaded = set(raw_loaded)
+
+    if not loaded and remote_status is None and loaded_plugins is None:
+        try:
+            from backend.beets_adapter import beets_adapter
+            plugin_res = beets_adapter.get_plugin_status()
+            if isinstance(plugin_res, dict) and plugin_res.get("protocol_version"):
+                loaded = {"web", "webmanager"}
+        except Exception:
+            pass
 
     if not loaded and remote_status is None and loaded_plugins is None:
         try:
