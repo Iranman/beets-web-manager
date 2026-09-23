@@ -351,10 +351,45 @@ class AuthAndSetupTests(unittest.TestCase):
 
         headers = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
         remote_status = {"status": "ok", "beets_version": "2.13.1", "beetsdir": "/config"}
-        with mock.patch.object(routes_setup.beets_client, "get_status", return_value=remote_status):
+        from backend.beets_adapter import beets_adapter
+        with mock.patch.object(routes_setup.beets_client, "get_status", return_value=remote_status), \
+             mock.patch.object(beets_adapter, "get_stats", return_value={"items": 5, "albums": 1}):
             ok_resp = self.client.post("/api/setup/test/beets", headers=headers)
         self.assertEqual(ok_resp.status_code, 200)
         self.assertTrue(ok_resp.get_json()["ok"])
+
+    def test_stock_beets_down_fails_even_if_legacy_agent_up(self):
+        """A2 fail-closed requirement: the primary stock Beets read test must
+        FAIL when stock Beets (:8337) is unreachable, even if the legacy
+        mutation transport (:8338) is reachable. The legacy agent must never
+        be able to make this test pass."""
+        headers = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
+        remote_status = {"status": "ok", "beets_version": "2.13.1", "beetsdir": "/config"}
+        from backend.beets_adapter import beets_adapter, BeetsAdapterConnectionError
+        with mock.patch.object(routes_setup.beets_client, "get_status", return_value=remote_status), \
+             mock.patch.object(beets_adapter, "get_stats", side_effect=BeetsAdapterConnectionError("stock Beets unreachable")):
+            resp = self.client.post("/api/setup/test/beets", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["status"], "failed")
+        # The legacy agent being up must be visible only in its own
+        # informational sub-object, never used to flip the top-level result.
+        self.assertTrue(data["legacy_mutation_status"]["available"])
+
+    def test_stock_beets_up_but_plugin_unreachable_still_reports_connected(self):
+        """The integration plugin handshake is independent: a plugin failure
+        must not fail the primary stock Beets read test, but must be visible
+        in its own sub-object."""
+        headers = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
+        from backend.beets_adapter import beets_adapter, BeetsAdapterAuthError
+        with mock.patch.object(beets_adapter, "get_stats", return_value={"items": 5, "albums": 1}), \
+             mock.patch.object(beets_adapter, "get_plugin_status", side_effect=BeetsAdapterAuthError("bad token")):
+            resp = self.client.post("/api/setup/test/beets", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["plugin_status"]["ok"])
 
     def test_beets_unreachable_blocks_setup_completion_in_production(self):
         """If Beets engine is unreachable and not in testing mode, setup completion is blocked."""

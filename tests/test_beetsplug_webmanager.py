@@ -174,9 +174,27 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "0.1.0")
+        self.assertEqual(data["plugin_version"], "1.0.0")
         self.assertTrue(data["plugin_mutations_enabled"])
         self.assertNotIn("allowed_roots", data)
+
+    def test_version_consistency(self):
+        """Plugin version must be identical in __init__.__version__, version.py, and status endpoint."""
+        import beetsplug.webmanager
+        from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
+
+        self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
+        self.assertEqual(PLUGIN_VERSION, "1.0.0")
+        self.assertEqual(PROTOCOL_VERSION, "1.0")
+
+        res = self.client.get(
+            "/webmanager/status",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertEqual(data["plugin_version"], PLUGIN_VERSION)
+        self.assertEqual(data["protocol_version"], PROTOCOL_VERSION)
 
     def test_status_endpoint_reports_actual_readonly_true(self):
         """upstream_web_readonly must reflect the real beets_config['web']['readonly'] value, not a hardcoded constant."""
@@ -417,6 +435,267 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         # Should safely return boolean without raising
         res = register_webmanager_blueprint(MockPlugin())
         self.assertIsInstance(res, bool)
+
+
+class WebManagerPhase3MutationTests(unittest.TestCase):
+    """Phase 3: remove/move (core, always available) and mbsync/fetchart/
+    embedart/lastgenre (plugin-gated, dynamic capability handshake)."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.music_dir = os.path.join(self.td, "music")
+        os.makedirs(self.music_dir, exist_ok=True)
+
+        self.dbpath = os.path.join(self.td, "test_library.blb")
+        self.lib = Library(self.dbpath, directory=self.music_dir)
+
+        self.key_file = os.path.join(self.td, ".webmanager_api_key")
+        self.token = TEST_64_HEX_TOKEN
+        with open(self.key_file, "w", encoding="utf-8") as f:
+            f.write(self.token + "\n")
+
+        self.plugin = WebManagerPlugin()
+        set_api_key_file(self.key_file)
+
+        beets_web_app.config["lib"] = self.lib
+        beets_web_app.config["TESTING"] = True
+        self.client = beets_web_app.test_client()
+        self.auth = {"Authorization": f"Bearer {self.token}"}
+
+        import beets.plugins as beets_plugins_mod
+        self._plugins_mod = beets_plugins_mod
+        self._saved_instances = list(beets_plugins_mod._instances)
+        beets_plugins_mod._instances.clear()
+
+    def tearDown(self):
+        self._plugins_mod._instances[:] = self._saved_instances
+        set_api_key_file(None)
+        try:
+            self.lib._connection().close()
+        except Exception:
+            pass
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _add_item(self, filename="track1.mp3", with_album=False, **overrides):
+        path = os.path.join(self.music_dir, filename)
+        with open(path, "wb") as f:
+            f.write(b"FAKE_AUDIO_BYTES")
+        fields = dict(
+            title="Test Track",
+            artist="Test Artist",
+            album="Test Album",
+            albumartist="Test Artist",
+            path=path.encode("utf-8"),
+        )
+        fields.update(overrides)
+        item = Item(**fields)
+        if with_album:
+            self.lib.add_album([item])
+        else:
+            self.lib.add(item)
+        self.lib._connection().commit()
+        return item, path
+
+    # ---- remove ----
+
+    def test_remove_requires_explicit_ids(self):
+        res = self.client.post("/webmanager/remove", headers=self.auth, json={})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "MISSING_TARGET")
+
+    def test_remove_defaults_to_no_file_deletion(self):
+        item, path = self._add_item()
+        self.assertTrue(os.path.exists(path))
+        res = self.client.post("/webmanager/remove", headers=self.auth, json={"item_ids": [item.id]})
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertTrue(body["success"])
+        self.assertEqual(body["removed_items"], 1)
+        self.assertFalse(body["delete_files"])
+        self.assertIsNone(self.lib.get_item(item.id))
+        # File must survive -- delete_files defaulted to False.
+        self.assertTrue(os.path.exists(path))
+
+    def test_remove_with_delete_files_true_deletes_physical_file(self):
+        item, path = self._add_item()
+        res = self.client.post(
+            "/webmanager/remove",
+            headers=self.auth,
+            json={"item_ids": [item.id], "delete_files": True},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.get_json()["delete_files"])
+        self.assertFalse(os.path.exists(path))
+
+    def test_remove_missing_id_reported_not_silently_ignored(self):
+        res = self.client.post("/webmanager/remove", headers=self.auth, json={"item_ids": [999999]})
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertEqual(body["removed_items"], 0)
+        self.assertIn(999999, body["missing_item_ids"])
+
+    def test_remove_idempotency_collision(self):
+        item, _ = self._add_item()
+        headers = {**self.auth, "Idempotency-Key": "remove-key-1"}
+        payload_a = {"item_ids": [item.id]}
+        res_a = self.client.post("/webmanager/remove", headers=headers, json=payload_a)
+        self.assertEqual(res_a.status_code, 200)
+
+        # Same idempotency key, genuinely different payload (differing
+        # delete_files) -- must collide regardless of item.id, which SQLite
+        # can reuse after a delete, so the payload difference must not
+        # depend on a second freshly-inserted row's id.
+        payload_b = {"item_ids": [item.id], "delete_files": True}
+        res_b = self.client.post("/webmanager/remove", headers=headers, json=payload_b)
+        self.assertEqual(res_b.status_code, 409)
+        self.assertEqual(res_b.get_json()["error_code"], "OPERATION_COLLISION")
+
+    # ---- move ----
+
+    def test_move_requires_explicit_ids(self):
+        res = self.client.post("/webmanager/move", headers=self.auth, json={})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "MISSING_TARGET")
+
+    def test_move_relocates_file_under_configured_directory(self):
+        item, old_path = self._add_item(filename="messy name.mp3")
+        res = self.client.post("/webmanager/move", headers=self.auth, json={"item_ids": [item.id]})
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertTrue(body["success"])
+        self.assertEqual(body["moved_items"], 1)
+        refreshed = self.lib.get_item(item.id)
+        new_path = refreshed.path.decode("utf-8") if isinstance(refreshed.path, bytes) else refreshed.path
+        self.assertTrue(new_path.startswith(self.music_dir))
+
+    # ---- capability handshake ----
+
+    def test_status_reports_plugin_gated_capabilities_as_unavailable_by_default(self):
+        res = self.client.get("/webmanager/status", headers=self.auth)
+        caps = res.get_json()["capabilities"]
+        self.assertIn("remove", caps)
+        self.assertIn("move", caps)
+        for gated in ("mbsync", "fetchart", "embedart", "lastgenre"):
+            self.assertNotIn(gated, caps)
+
+    def test_status_reports_plugin_gated_capability_available_when_loaded(self):
+        from beetsplug.mbsync import MBSyncPlugin
+
+        self._plugins_mod._instances.append(MBSyncPlugin())
+        res = self.client.get("/webmanager/status", headers=self.auth)
+        self.assertIn("mbsync", res.get_json()["capabilities"])
+
+    def test_mbsync_endpoint_returns_stable_error_when_capability_unavailable(self):
+        res = self.client.post("/webmanager/mbsync", headers=self.auth, json={"item_ids": [1]})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "CAPABILITY_UNAVAILABLE")
+
+    def test_fetchart_endpoint_returns_stable_error_when_capability_unavailable(self):
+        res = self.client.post("/webmanager/fetchart", headers=self.auth, json={"album_ids": [1]})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "CAPABILITY_UNAVAILABLE")
+
+    def test_embedart_endpoint_returns_stable_error_when_capability_unavailable(self):
+        res = self.client.post("/webmanager/embedart", headers=self.auth, json={"album_ids": [1]})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "CAPABILITY_UNAVAILABLE")
+
+    def test_lastgenre_endpoint_returns_stable_error_when_capability_unavailable(self):
+        res = self.client.post("/webmanager/lastgenre", headers=self.auth, json={"album_ids": [1]})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "CAPABILITY_UNAVAILABLE")
+
+    def test_mbsync_missing_ids_rejected_before_any_operation_registered(self):
+        from beetsplug.mbsync import MBSyncPlugin
+
+        self._plugins_mod._instances.append(MBSyncPlugin())
+        res = self.client.post("/webmanager/mbsync", headers=self.auth, json={})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "INVALID_REQUEST")
+
+    def test_mbsync_runs_against_real_plugin_and_skips_items_without_mbid(self):
+        from beetsplug.mbsync import MBSyncPlugin
+
+        self._plugins_mod._instances.append(MBSyncPlugin())
+        item, _ = self._add_item(mb_trackid="")
+        res = self.client.post(
+            "/webmanager/mbsync", headers=self.auth, json={"item_ids": [item.id]}
+        )
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertEqual(body["status"], "succeeded")
+        self.assertEqual(body["result"]["requested_items"], 1)
+        self.assertEqual(body["result"]["skipped_items"], 1)
+        self.assertEqual(body["result"]["processed_items"], 0)
+        self.assertEqual(body["result"]["changed_items"], 0)
+        self.assertEqual(body["result"]["synced_items"], 0)
+
+    def test_mbsync_album_and_singleton_target_queries(self):
+        """Prove that mbsync targets exact item id and album id (not album_id)."""
+        from beetsplug.mbsync import MBSyncPlugin
+
+        self._plugins_mod._instances.append(MBSyncPlugin())
+        singleton, _ = self._add_item(mb_trackid="track-mbid-1234")
+        singleton.singleton = True
+        singleton.store()
+
+        album_item, path = self._add_item(with_album=True, mb_trackid="track-mbid-5678")
+        album = self.lib.get_album(album_item.album_id)
+        album.mb_albumid = "album-mbid-9999"
+        album.store()
+
+        res = self.client.post(
+            "/webmanager/mbsync",
+            headers=self.auth,
+            json={"item_ids": [singleton.id], "album_ids": [album.id]},
+        )
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertEqual(body["status"], "succeeded")
+        self.assertEqual(body["result"]["requested_items"], 1)
+        self.assertEqual(body["result"]["requested_albums"], 1)
+        self.assertEqual(body["result"]["skipped_items"], 0)
+        self.assertEqual(body["result"]["skipped_albums"], 0)
+
+    def test_fetchart_runs_against_real_plugin_with_filesystem_source(self):
+        """Real, deterministic, network-free acceptance: fetchart's default
+        `filesystem` source picks up a local cover file already present in
+        the album directory -- no network call involved."""
+        from beetsplug.fetchart import FetchArtPlugin
+
+        item, path = self._add_item(with_album=True)
+        album_dir = os.path.dirname(path)
+        with open(os.path.join(album_dir, "cover.jpg"), "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0FAKEJPEGDATA")
+
+        beets_config["fetchart"]["sources"] = ["filesystem"]
+        self._plugins_mod._instances.append(FetchArtPlugin())
+
+        album = self.lib.get_album(item.album_id) if item.album_id else None
+        self.assertIsNotNone(album, "item must have an album for fetchart to target")
+
+        res = self.client.post(
+            "/webmanager/fetchart", headers=self.auth, json={"album_ids": [album.id]}
+        )
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertEqual(body["status"], "succeeded")
+        self.assertEqual(body["result"]["albums_with_art"], 1)
+        refreshed_album = self.lib.get_album(album.id)
+        self.assertTrue(refreshed_album.artpath)
+
+    def test_lastgenre_missing_album_reported_not_silently_ignored(self):
+        try:
+            from beetsplug.lastgenre import LastGenrePlugin
+        except ImportError as ex:
+            self.skipTest(f"lastgenre plugin dependency not installed in this environment: {ex}")
+
+        self._plugins_mod._instances.append(LastGenrePlugin())
+        res = self.client.post(
+            "/webmanager/lastgenre", headers=self.auth, json={"album_ids": [999999]}
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["result"]["processed_albums"], 0)
 
 
 if __name__ == "__main__":

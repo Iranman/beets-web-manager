@@ -39,6 +39,59 @@ class MigrationInvariantsTests(unittest.TestCase):
         if phase5_active:
             self.assertNotIn("beets==", content, "Phase 5 Invariant Violation: beets runtime must be removed from requirements.txt")
 
+    def test_version_consistency(self):
+        """Verify version.py exists and matches version strings across plugin."""
+        from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
+        from beetsplug.webmanager import PLUGIN_VERSION as INIT_PV, PROTOCOL_VERSION as INIT_PROT
+        from beetsplug.webmanager.operations import PLUGIN_VERSION as OP_PV, PROTOCOL_VERSION as OP_PROT
+
+        self.assertEqual(PLUGIN_VERSION, "1.0.0")
+        self.assertEqual(PROTOCOL_VERSION, "1.0")
+        self.assertEqual(INIT_PV, PLUGIN_VERSION)
+        self.assertEqual(INIT_PROT, PROTOCOL_VERSION)
+        self.assertEqual(OP_PV, PLUGIN_VERSION)
+        self.assertEqual(OP_PROT, PROTOCOL_VERSION)
+
+    def test_phase2_reads_use_stock_beets_adapter(self):
+        """Verify that lib in backend.beets_client uses StockBeetsLibrary with BeetsAdapter."""
+        from backend.beets_client import lib
+        from backend.beets_adapter import StockBeetsLibrary, BeetsAdapter
+
+        self.assertIsInstance(lib, StockBeetsLibrary)
+        self.assertIsInstance(lib.adapter, BeetsAdapter)
+
+    def test_phase2_read_outage_fails_closed(self):
+        """Verify that when stock Beets is unreachable, read routes fail closed with 503 ENGINE_OFFLINE without fallback."""
+        import app as app_module
+        from backend.beets_adapter import BeetsAdapterConnectionError, StockBeetsLibrary
+        from unittest import mock
+
+        orig_lib = getattr(app_module, "lib", None)
+        app_module.lib = StockBeetsLibrary(app_module.beets_adapter)
+        try:
+            with mock.patch.dict("os.environ", {"BEETS_WEB_AUTH_DISABLED": "1"}):
+                with app_module.app.test_client() as client:
+                    with mock.patch.object(app_module.beets_adapter, "get_stats", side_effect=BeetsAdapterConnectionError("Down")):
+                        res = client.get("/api/stats")
+                        self.assertEqual(res.status_code, 503)
+                        data = res.get_json()
+                        self.assertEqual(data.get("error_code"), "ENGINE_OFFLINE")
+                        self.assertEqual(data.get("status"), "unavailable")
+
+                    with mock.patch.object(app_module.beets_adapter, "get_items", side_effect=BeetsAdapterConnectionError("Down")):
+                        res = client.get("/api/items")
+                        self.assertEqual(res.status_code, 503)
+                        data = res.get_json()
+                        self.assertEqual(data.get("error_code"), "ENGINE_OFFLINE")
+
+                    with mock.patch.object(app_module.beets_adapter, "get_artists", side_effect=BeetsAdapterConnectionError("Down")):
+                        res = client.get("/api/artists")
+                        self.assertEqual(res.status_code, 503)
+                        data = res.get_json()
+                        self.assertEqual(data.get("error_code"), "ENGINE_OFFLINE")
+        finally:
+            app_module.lib = orig_lib
+
 
 if __name__ == "__main__":
     unittest.main()

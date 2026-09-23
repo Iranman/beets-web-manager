@@ -65,7 +65,7 @@ def check_plugin_structure():
     """Verify beetsplug.webmanager plugin structure and files."""
     print("Checking beetsplug.webmanager plugin integrity...")
     plugin_dir = ROOT / "beetsplug" / "webmanager"
-    required_files = ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py"]
+    required_files = ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py"]
     for rf in required_files:
         if not (plugin_dir / rf).exists():
             print(f"FAILED: Missing plugin file {rf}", file=sys.stderr)
