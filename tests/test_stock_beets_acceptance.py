@@ -245,10 +245,19 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
         """
         import concurrent.futures
 
+        # Verify docker daemon is responsive before proceeding
+        try:
+            res_daemon = subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res_daemon.returncode != 0:
+                self.skipTest("Docker daemon not running or responsive")
+        except Exception:
+            self.skipTest("Docker CLI not functional")
+
         container_name = f"stock-beets-acc-{uuid.uuid4().hex[:8]}"
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-        with tempfile.TemporaryDirectory() as td:
+        td = tempfile.mkdtemp()
+        try:
             config_dir = os.path.join(td, "config")
             music_dir = os.path.join(td, "music")
             downloads_dir = os.path.join(td, "downloads")
@@ -328,9 +337,9 @@ webmanager:
 
             try:
                 base_url = f"http://127.0.0.1:{host_port}"
-                # Wait for Beets web server to become responsive
+                # Wait for Beets web server to become responsive (up to 90s for image pull + s6-overlay init)
                 responsive = False
-                for _ in range(30):
+                for _ in range(90):
                     time.sleep(1)
                     try:
                         req = urllib.request.Request(f"{base_url}/stats")
@@ -472,6 +481,14 @@ webmanager:
             finally:
                 # Clean up container
                 subprocess.run(["docker", "rm", "-f", container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            if os.name != "nt":
+                subprocess.run(
+                    ["docker", "run", "--rm", "-v", f"{td}:/work", "alpine", "chmod", "-R", "777", "/work"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            shutil.rmtree(td, ignore_errors=True)
 
 
 if __name__ == "__main__":
