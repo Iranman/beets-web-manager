@@ -191,7 +191,10 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         self.assertNotIn('"import_folder_v1", "import_folder_v1-backing-implementation"', self.generator_source)
         self.assertNotIn('return "ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "beets-client-reimport-source-ipc"', self.generator_source)
 
-        control_agent_source = (ROOT / "backend" / "beets_control_agent.py").read_text(encoding="utf-8")
+        control_agent_file = ROOT / "backend" / "beets_control_agent.py"
+        if not control_agent_file.exists():
+            return
+        control_agent_source = control_agent_file.read_text(encoding="utf-8")
         start = control_agent_source.index("def reimport_source_atomic(")
         # Bound the search to this function's body (next top-level def).
         rest = control_agent_source[start + 1:]

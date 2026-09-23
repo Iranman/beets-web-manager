@@ -3376,7 +3376,6 @@ def _health_checks() -> Dict[str, bool]:
         "app": True,
         "beets_web": False,
         "beets_webmanager_plugin": False,
-        "beets_control_agent": False,
         "lidarr_key": bool(LIDARR_KEY),
         "discogs_token": bool(DISCOGS_TOKEN),
         "slskd_key": bool(SLSKD_API_KEY),
@@ -3389,7 +3388,7 @@ def _health_checks() -> Dict[str, bool]:
     except Exception:
         checks["beets_web"] = False
 
-    # 2. Probe WebManager integration plugin
+    # 2. Probe WebManager integration plugin (:8337)
     try:
         plugin_status = beets_adapter.get_plugin_status()
         checks["beets_webmanager_plugin"] = (
@@ -3397,13 +3396,6 @@ def _health_checks() -> Dict[str, bool]:
         )
     except Exception:
         checks["beets_webmanager_plugin"] = False
-
-    # 3. Probe legacy control agent (temporary mutation transport)
-    try:
-        agent_health = beets_client.health()
-        checks["beets_control_agent"] = agent_health.get("status") == "ok"
-    except Exception:
-        checks["beets_control_agent"] = False
 
     return checks
 
@@ -3419,7 +3411,7 @@ def health():
 def health_detail():
     """Authenticated dependency diagnostics for the web manager."""
     checks = _health_checks()
-    ok = checks["app"] and (checks["beets_web"] or checks["beets_control_agent"])
+    ok = checks["app"] and (checks["beets_web"] or checks["beets_webmanager_plugin"])
     return jsonify({"ok": ok, "checks": checks})
 
 @app.post("/api/restart")
@@ -52828,56 +52820,7 @@ import routes_setup    # noqa: F401, E402
 import routes_submissions  # noqa: F401, E402
 
 
-def _ensure_beets_control_agent_ready() -> None:
-    """Ensure the Beets Control Agent is reachable, auto-starting the embedded agent if in unified mode."""
-    from backend import beets_control_agent
-    from backend.beets_client import beets_client
-
-    explicit_api_url = os.environ.get("BEETS_API_URL", "").strip()
-    api_url = explicit_api_url or "http://127.0.0.1:8338"
-    is_remote_mode = os.environ.get("BEETS_EMBEDDED_AGENT", "").strip() == "0"
-
-    # Only treat this as "embed locally" when the operator left BEETS_API_URL
-    # unset (the unified single-compose default) or pointed it at an
-    # unambiguous loopback address. Deliberately excludes bare hostnames
-    # such as "beets" -- an external/standalone deployment (see
-    # examples/docker-compose.external-beets.yml) is free to name its own
-    # remote engine container "beets" too, and silently substituting a
-    # fresh, empty embedded engine for that real remote target would be a
-    # much worse failure than just not auto-starting one.
-    parsed = urllib.parse.urlsplit(api_url)
-    hostname = (parsed.hostname or "").lower()
-    is_local_target = not explicit_api_url or hostname in ("127.0.0.1", "localhost", "0.0.0.0")
-
-    if not is_remote_mode and is_local_target:
-        token = os.environ.get("BEETS_API_TOKEN", "").strip()
-        if not beets_control_agent.beets_api_token_is_usable(token):
-            token_file = WEB_MANAGER_DATA_DIR / ".auth_token"
-            if token_file.exists():
-                try:
-                    token = token_file.read_text(encoding="utf-8").strip()
-                except Exception:
-                    token = ""
-        if not beets_control_agent.beets_api_token_is_usable(token):
-            token = secrets.token_hex(24)
-
-        os.environ["BEETS_API_TOKEN"] = token
-        beets_control_agent.BEETS_API_TOKEN = token
-
-        port = parsed.port or 8338
-        started = beets_control_agent.start_embedded_control_agent(host="127.0.0.1", port=port, token=token)
-        if started:
-            local_url = f"http://127.0.0.1:{port}"
-            os.environ["BEETS_API_URL"] = local_url
-            beets_client.base_url = local_url
-            beets_client.token = token
-            allowlist = os.environ.get("BEETS_OUTBOUND_ALLOWLIST", "")
-            if f"127.0.0.1:{port}" not in allowlist:
-                os.environ["BEETS_OUTBOUND_ALLOWLIST"] = f"{allowlist},127.0.0.1:{port},localhost:{port},beets:{port}".strip(",")
-
-
 if __name__ == "__main__":
-    _ensure_beets_control_agent_ready()
     _start_playlist_auto_sync_worker()
     if os.environ.get("PLAYLIST_WARM_INDEX", "0") not in ("0", "", "false", "False", "no"):
         _start_playlist_index_warm_worker()
