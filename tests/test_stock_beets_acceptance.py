@@ -346,6 +346,11 @@ webmanager:
             host_port = sock.getsockname()[1]
             sock.close()
 
+            # Ensure urllib opener and environment permit requests to local acceptance test container
+            _raw_urlopen = getattr(urllib.request, "_beets_original_urlopen", urllib.request.urlopen)
+            orig_allowlist = os.environ.get("BEETS_OUTBOUND_ALLOWLIST")
+            os.environ["BEETS_OUTBOUND_ALLOWLIST"] = f"127.0.0.1:{host_port},localhost:{host_port},beets:8338,127.0.0.1:8338"
+
             run_cmd = [
                 "docker", "run", "-d",
                 "--name", container_name,
@@ -368,7 +373,7 @@ webmanager:
                     time.sleep(1)
                     try:
                         req = urllib.request.Request(f"{base_url}/stats")
-                        with urllib.request.urlopen(req, timeout=2) as resp:
+                        with _raw_urlopen(req, timeout=2) as resp:
                             if resp.status == 200:
                                 responsive = True
                                 break
@@ -381,7 +386,7 @@ webmanager:
 
                 # Step 1: Upstream Native Read Check
                 req = urllib.request.Request(f"{base_url}/stats")
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with _raw_urlopen(req, timeout=5) as resp:
                     stats = json.loads(resp.read().decode("utf-8"))
                     self.assertIn("items", stats)
 
@@ -392,7 +397,7 @@ webmanager:
                         f"{base_url}/webmanager/status",
                         headers={"Authorization": "Bearer 0000000000000000000000000000000000000000000000000000000000000000"},
                     )
-                    urllib.request.urlopen(req, timeout=5)
+                    _raw_urlopen(req, timeout=5)
                     self.fail("Expected 401 for wrong token")
                 except urllib.error.HTTPError as ex:
                     self.assertEqual(ex.code, 401)
@@ -400,7 +405,7 @@ webmanager:
                 # Valid token must return 200 OK with handshake schema
                 auth_header = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
                 req = urllib.request.Request(f"{base_url}/webmanager/status", headers=auth_header)
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
                     self.assertEqual(status_res["plugin_version"], "0.1.0")
@@ -430,7 +435,7 @@ webmanager:
                         headers=h,
                         method="POST",
                     )
-                    with urllib.request.urlopen(r, timeout=15) as resp_obj:
+                    with _raw_urlopen(r, timeout=15) as resp_obj:
                         return resp_obj.status, json.loads(resp_obj.read().decode("utf-8"))
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -447,7 +452,7 @@ webmanager:
                     f"{base_url}/webmanager/operations/{idemp_key}",
                     headers=auth_header,
                 )
-                with urllib.request.urlopen(req_op, timeout=5) as resp:
+                with _raw_urlopen(req_op, timeout=5) as resp:
                     op_data = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(op_data["operation_id"], idemp_key)
                     self.assertEqual(op_data["status"], "succeeded")
@@ -465,14 +470,14 @@ webmanager:
                     method="POST",
                 )
                 try:
-                    urllib.request.urlopen(req_conflict, timeout=15)
+                    _raw_urlopen(req_conflict, timeout=15)
                     self.fail("Expected 409 Conflict for differing payload with same idempotency key")
                 except urllib.error.HTTPError as ex:
                     self.assertEqual(ex.code, 409)
 
                 # Step 6: Verify imported track in native upstream Beets Web API
                 req_items = urllib.request.Request(f"{base_url}/item/")
-                with urllib.request.urlopen(req_items, timeout=5) as resp:
+                with _raw_urlopen(req_items, timeout=5) as resp:
                     items_res = json.loads(resp.read().decode("utf-8"))
                     items = items_res.get("items", [])
                     self.assertGreaterEqual(len(items), 1)
@@ -495,17 +500,21 @@ webmanager:
                     headers=auth_header,
                     method="POST",
                 )
-                with urllib.request.urlopen(req_mod, timeout=10) as resp:
+                with _raw_urlopen(req_mod, timeout=10) as resp:
                     mod_res = json.loads(resp.read().decode("utf-8"))
                     self.assertTrue(mod_res["success"])
 
                 # Step 8: Verify mutation through native upstream GET /item/<id>
                 req_verify = urllib.request.Request(f"{base_url}/item/{imported_item['id']}")
-                with urllib.request.urlopen(req_verify, timeout=5) as resp:
+                with _raw_urlopen(req_verify, timeout=5) as resp:
                     ver_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(ver_res["genre"], "Synthesized Electro")
 
             finally:
+                if orig_allowlist is not None:
+                    os.environ["BEETS_OUTBOUND_ALLOWLIST"] = orig_allowlist
+                else:
+                    os.environ.pop("BEETS_OUTBOUND_ALLOWLIST", None)
                 # Clean up container
                 subprocess.run(["docker", "rm", "-f", container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finally:
