@@ -479,6 +479,22 @@ export interface SetupTestBeetsResponse {
   beetsdir?: string;
   message?: string;
   error?: string;
+  /** Integration plugin (/webmanager/status) handshake, tested independently of the primary stock Beets read test. */
+  plugin_status?: {
+    ok: boolean;
+    beets_version?: string;
+    plugin_version?: string;
+    protocol_version?: string;
+    library_ready?: boolean;
+    error?: string;
+  };
+  /** Legacy mutation transport (temporary during migration) -- informational only, never affects `ok` above. */
+  legacy_mutation_status?: {
+    available: boolean;
+    beets_version?: string;
+    beetsdir?: string;
+    message?: string;
+  };
 }
 
 export interface SetupStatusResponse {

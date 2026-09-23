@@ -2,12 +2,14 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 from beets.library import Library, Item, Album
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
 from beetsplug.webmanager.auth import set_api_key_file
 from backend.beets_adapter import (
     BeetsAdapter,
+    BeetsAdapterError,
     BeetsAdapterAuthError,
     BeetsAdapterNotFoundError,
     BeetsAdapterConnectionError,
@@ -189,13 +191,44 @@ class BeetsAdapterTests(unittest.TestCase):
         artists = self.adapter.list_distinct_albumartists()
         self.assertEqual(artists, ["Daft Punk"])
 
-        # Artist counts
+        # Artist counts -- contract-compatible with the legacy BeetsClient:
+        # {artist: {"albums": N, "tracks": N}}, not a bare int.
         counts = self.adapter.get_artist_counts()
-        self.assertEqual(counts.get("Daft Punk"), 2)
+        self.assertEqual(counts.get("Daft Punk"), {"albums": 2, "tracks": 2})
 
         # Item paths
         paths = self.adapter.list_distinct_item_paths()
         self.assertEqual(len(paths), 3)
+
+    def test_get_artist_counts_contract_compatibility(self):
+        """A3: get_artist_counts() must return {artist: {"albums", "tracks"}},
+        matching the legacy BeetsClient contract exactly -- not a bare int."""
+        counts = self.adapter.get_artist_counts()
+        self.assertIsInstance(counts, dict)
+        daft_punk = counts["Daft Punk"]
+        self.assertIsInstance(daft_punk, dict)
+        self.assertEqual(daft_punk["albums"], 2)
+        self.assertEqual(daft_punk["tracks"], 2)
+
+    def test_list_item_paths_details_compatibility(self):
+        """A3: list_item_paths(details=...) must support both legacy modes:
+        details=False -> list of distinct path strings;
+        details=True -> one {"id", "album_id", "path"} record per item."""
+        plain_paths = self.adapter.list_item_paths()
+        self.assertIsInstance(plain_paths, list)
+        self.assertTrue(all(isinstance(p, str) for p in plain_paths))
+        self.assertEqual(len(plain_paths), 3)
+
+        plain_paths_explicit = self.adapter.list_item_paths(details=False)
+        self.assertEqual(sorted(plain_paths_explicit), sorted(plain_paths))
+
+        detailed = self.adapter.list_item_paths(details=True)
+        self.assertEqual(len(detailed), 3)
+        record = next(r for r in detailed if r["id"] == self.item.id)
+        self.assertEqual(record["album_id"], self.album.id)
+        self.assertTrue(record["path"].endswith("track1.mp3"))
+        singleton_record = next(r for r in detailed if r["id"] == self.singleton_item.id)
+        self.assertIsNone(singleton_record["album_id"])
 
         # Cleanup index
         cleanup_idx = self.adapter.get_album_cleanup_index()
@@ -296,6 +329,140 @@ class BeetsAdapterTests(unittest.TestCase):
 
         with self.assertRaises(BeetsAdapterConnectionError):
             broken_lib.items()
+
+
+class BeetsAdapterPaginationCacheTests(unittest.TestCase):
+    """A5: get_items_page() genuinely has no real upstream pagination --
+    verify it stays truthful (real slicing, real total) while avoiding a
+    fresh full-library fetch on every single page request within its
+    short TTL, using a realistically sized synthetic library."""
+
+    def setUp(self):
+        self.adapter = BeetsAdapter(base_url="http://mock-beets:8337")
+        self._synthetic_items = [
+            {"id": i, "title": f"Track {i}", "album_id": (i % 50) + 1, "path": f"/music/track{i}.mp3"}
+            for i in range(1, 2001)
+        ]
+        self.get_items_calls = 0
+
+        def _fake_get_items(query=None):
+            self.get_items_calls += 1
+            return list(self._synthetic_items)
+
+        self.adapter.get_items = _fake_get_items
+
+    def test_pagination_is_real_slicing_over_full_synthetic_library(self):
+        page = self.adapter.get_items_page(offset=500, limit=25)
+        self.assertEqual(page["total"], 2000)
+        self.assertEqual(len(page["items"]), 25)
+        self.assertEqual(page["items"][0]["id"], 501)
+        self.assertEqual(page["items"][-1]["id"], 525)
+
+    def test_repeated_page_requests_within_ttl_do_not_refetch_full_library(self):
+        for offset in range(0, 500, 25):
+            self.adapter.get_items_page(offset=offset, limit=25)
+        # 20 page requests across the same short window must cost exactly
+        # one real full-library fetch, not 20 -- this is the whole point of
+        # the bounded cache (a genuine latency/load mitigation, not fake
+        # pagination: get_items() itself is still a full fetch each time
+        # it's actually called).
+        self.assertEqual(self.get_items_calls, 1)
+
+    def test_cache_expires_and_refetches_after_ttl(self):
+        self.adapter.get_items_page(offset=0, limit=10)
+        self.assertEqual(self.get_items_calls, 1)
+        # Force the cached entry to look stale without a real sleep.
+        self.adapter._items_page_cache_ts -= (
+            self.adapter._ITEMS_PAGE_CACHE_TTL_SECONDS + 1
+        )
+        self.adapter.get_items_page(offset=0, limit=10)
+        self.assertEqual(self.get_items_calls, 2)
+
+
+class BeetsAdapterErrorSanitizationTests(unittest.TestCase):
+    """A4: BeetsAdapter exceptions must never leak raw upstream HTTP bodies,
+    HTML, or stack traces into str(ex) -- only stable sanitized fields."""
+
+    def _http_error(self, status: int, body: bytes):
+        import io
+        import urllib.error
+
+        return urllib.error.HTTPError(
+            url="http://mock-beets:8337/item/1",
+            code=status,
+            msg="error",
+            hdrs=None,
+            fp=io.BytesIO(body),
+        )
+
+    def test_raw_html_body_never_in_exception_message(self):
+        sensitive = (
+            b"<html><body>Traceback (most recent call last):\n"
+            b"  File \"/config/secret_internal_path.py\", line 42\n"
+            b"KeyError: 'SUPER_SECRET_TOKEN_VALUE'</body></html>"
+        )
+        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
+        with unittest.mock.patch(
+            "urllib.request.urlopen", side_effect=self._http_error(500, sensitive)
+        ):
+            with self.assertRaises(BeetsAdapterError) as ctx:
+                adapter.get_stats()
+
+        message = str(ctx.exception)
+        self.assertNotIn("SUPER_SECRET_TOKEN_VALUE", message)
+        self.assertNotIn("secret_internal_path.py", message)
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("<html>", message)
+        self.assertEqual(ctx.exception.error_code, "BEETS_UPSTREAM_ERROR")
+        self.assertEqual(ctx.exception.status_code, 500)
+
+    def test_bad_request_error_sanitized_with_stable_error_code(self):
+        body = b'{"error": "Source path must be a strict child of an import root", "error_code": "PATH_NOT_ALLOWED"}'
+        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
+        with unittest.mock.patch(
+            "urllib.request.urlopen", side_effect=self._http_error(400, body)
+        ):
+            with self.assertRaises(BeetsAdapterBadRequestError) as ctx:
+                adapter._request("POST", "/webmanager/import", json_data={})
+
+        # Our own plugin's structured error_code is carried forward as a
+        # sanitized, stable field -- but the raw body text is not embedded
+        # in the exception message itself.
+        self.assertEqual(ctx.exception.error_code, "PATH_NOT_ALLOWED")
+        self.assertNotIn("strict child", str(ctx.exception))
+
+    def test_auth_error_sanitized(self):
+        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
+        with unittest.mock.patch(
+            "urllib.request.urlopen", side_effect=self._http_error(401, b'{"error": "nope"}')
+        ):
+            with self.assertRaises(BeetsAdapterAuthError) as ctx:
+                adapter.get_plugin_status()
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertNotIn("nope", str(ctx.exception))
+
+    def test_connection_error_message_excludes_raw_os_error_text(self):
+        adapter = BeetsAdapter(base_url="http://mock-beets:8337", timeout=0.1)
+        with unittest.mock.patch(
+            "urllib.request.urlopen",
+            side_effect=OSError("some very specific internal socket detail xyz123"),
+        ):
+            with self.assertRaises(BeetsAdapterConnectionError) as ctx:
+                adapter.get_stats()
+        self.assertNotIn("xyz123", str(ctx.exception))
+
+    def test_to_public_dict_has_stable_sanitized_fields(self):
+        body = b'{"error": "boom"}'
+        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
+        with unittest.mock.patch(
+            "urllib.request.urlopen", side_effect=self._http_error(404, body)
+        ):
+            with self.assertRaises(BeetsAdapterNotFoundError) as ctx:
+                adapter.get_stats()
+        public = ctx.exception.to_public_dict()
+        self.assertEqual(set(public.keys()), {"error", "error_code", "status_code"})
+        self.assertEqual(public["status_code"], 404)
+        self.assertNotIn("boom", public["error"])
 
 
 if __name__ == "__main__":

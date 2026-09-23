@@ -33455,7 +33455,7 @@ def _mb_canonical_for_artist_entries(entries: List[Dict[str, Any]], key: str) ->
 
 def _artist_folder_db_counts() -> Dict[str, Dict[str, int]]:
     try:
-        return beets_client.get_artist_counts()
+        return beets_adapter.get_artist_counts()
     except Exception:
         return {}
 
@@ -34744,7 +34744,7 @@ def _scan_leaked_db_paths(progress: Optional[Any] = None,
     """
     results: List[Dict[str, Any]] = []
     try:
-        rows = beets_client.list_item_paths(details=True)
+        rows = beets_adapter.list_item_paths(details=True)
     except Exception as ex:
         return [{"error": str(ex)}]
 
@@ -35145,7 +35145,7 @@ def _scan_folder_name_placeholders(progress: Optional[Any] = None,
     # Build folder -> DB info map from items table
     folder_db: Dict[str, Dict[str, Any]] = {}
     try:
-        rows = beets_client.list_item_paths(details=True)
+        rows = beets_adapter.list_item_paths(details=True)
         for row in rows:
             p = _s(row.get("path"))
             d = os.path.dirname(p) if p else ""

@@ -9,6 +9,8 @@ import os
 import json
 import logging
 import re
+import threading
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -24,47 +26,70 @@ log = logging.getLogger("beets.adapter")
 
 
 class BeetsAdapterError(Exception):
-    """Base exception for Beets adapter errors."""
+    """Base exception for Beets adapter errors.
+
+    The message passed here becomes str(ex) and must be a stable, sanitized
+    string safe to reach an HTTP response -- never raw upstream HTTP bodies,
+    HTML, stack traces, filesystem paths, credentials, or plugin secrets.
+    Raw upstream diagnostic detail belongs only in the server log (see
+    `_request()`'s log.warning calls), never in this message or in
+    `response_data`, which callers may also surface to users.
+    """
 
     def __init__(
         self,
         message: str,
         status_code: int = 0,
         response_data: Optional[Any] = None,
+        error_code: str = "BEETS_ADAPTER_ERROR",
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_data = response_data
+        self.error_code = error_code
+
+    def to_public_dict(self) -> Dict[str, Any]:
+        """Stable, sanitized fields safe to return directly in an HTTP error response."""
+        return {
+            "error": str(self),
+            "error_code": self.error_code,
+            "status_code": self.status_code,
+        }
 
 
 class BeetsAdapterAuthError(BeetsAdapterError):
     """Raised when authentication with Beets webmanager plugin fails (401)."""
 
-    pass
+    def __init__(self, message: str, status_code: int = 401, response_data: Optional[Any] = None, error_code: str = "BEETS_AUTH_FAILED"):
+        super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
 class BeetsAdapterNotFoundError(BeetsAdapterError):
     """Raised when a resource is not found (404)."""
 
-    pass
+    def __init__(self, message: str, status_code: int = 404, response_data: Optional[Any] = None, error_code: str = "BEETS_NOT_FOUND"):
+        super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
 class BeetsAdapterConnectionError(BeetsAdapterError):
     """Raised when Beets web server is unreachable."""
 
-    pass
+    def __init__(self, message: str, status_code: int = 0, response_data: Optional[Any] = None, error_code: str = "BEETS_UNREACHABLE"):
+        super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
 class BeetsAdapterTimeoutError(BeetsAdapterConnectionError):
     """Raised when a request to Beets web server times out."""
 
-    pass
+    def __init__(self, message: str, status_code: int = 0, response_data: Optional[Any] = None, error_code: str = "BEETS_TIMEOUT"):
+        super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
 class BeetsAdapterBadRequestError(BeetsAdapterError):
     """Raised when Beets returns HTTP 400 Bad Request."""
 
-    pass
+    def __init__(self, message: str, status_code: int = 400, response_data: Optional[Any] = None, error_code: str = "BEETS_BAD_REQUEST"):
+        super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
 class BeetsAdapter:
@@ -90,6 +115,13 @@ class BeetsAdapter:
             or "/config/.webmanager_api_key"
         )
         self.timeout = timeout
+
+        # Bounded cache for get_items_page() -- see the note on
+        # _ITEMS_PAGE_CACHE_TTL_SECONDS above get_items_page() for why this
+        # exists (no real upstream pagination) and why the TTL is short.
+        self._items_page_cache: Optional[List[Dict[str, Any]]] = None
+        self._items_page_cache_ts: float = 0.0
+        self._items_page_cache_lock = threading.Lock()
 
     @property
     def api_key(self) -> str:
@@ -158,49 +190,66 @@ class BeetsAdapter:
             except Exception:
                 err_json = {"raw": err_body}
 
+            # Raw upstream response bodies (potentially raw HTML error pages,
+            # internal stack traces, or unexpected content) are logged
+            # server-side ONLY -- never embedded in the exception message,
+            # which callers may surface directly in an HTTP response.
+            log.warning("Beets upstream error %s on %s: %s", status, path, err_body[:2000])
+
+            # If our own webmanager plugin returned a structured error_code,
+            # carry it forward -- it is already a sanitized, stable field.
+            upstream_error_code = err_json.get("error_code") if isinstance(err_json, dict) else None
+
             if status == 400:
                 raise BeetsAdapterBadRequestError(
-                    f"Beets bad request on {path}: {err_body}",
+                    f"Beets rejected the request on {path} (bad request)",
                     status_code=status,
                     response_data=err_json,
+                    error_code=upstream_error_code or "BEETS_BAD_REQUEST",
                 )
             if status == 401:
                 raise BeetsAdapterAuthError(
-                    f"Beets auth failed on {path}: {err_body}",
+                    f"Beets authentication failed on {path}",
                     status_code=status,
                     response_data=err_json,
+                    error_code=upstream_error_code or "BEETS_AUTH_FAILED",
                 )
             if status == 404:
                 raise BeetsAdapterNotFoundError(
-                    f"Beets resource not found on {path}: {err_body}",
+                    f"Beets resource not found on {path}",
                     status_code=status,
                     response_data=err_json,
+                    error_code=upstream_error_code or "BEETS_NOT_FOUND",
                 )
             raise BeetsAdapterError(
-                f"Beets request error {status} on {path}: {err_body}",
+                f"Beets request failed on {path} (status {status})",
                 status_code=status,
                 response_data=err_json,
+                error_code=upstream_error_code or "BEETS_UPSTREAM_ERROR",
             )
         except TimeoutError as ex:
+            log.warning("Timeout connecting to Beets server at %s (%s): %s", self.base_url, path, ex)
             raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                f"Timeout connecting to Beets server at {self.base_url}"
             ) from ex
         except urllib.error.URLError as ex:
             reason = getattr(ex, "reason", None)
+            log.warning("Beets connection error at %s (%s): %s", self.base_url, path, ex)
             if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                    f"Timeout connecting to Beets server at {self.base_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}: {ex}"
+                f"Cannot connect to Beets server at {self.base_url}"
             ) from ex
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
+            log.warning("Beets connection error at %s (%s): %s", self.base_url, path, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                    f"Timeout connecting to Beets server at {self.base_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}: {ex}"
+                f"Cannot connect to Beets server at {self.base_url}"
             ) from ex
 
     # -------------------------------------------------------------------------
@@ -307,29 +356,33 @@ class BeetsAdapter:
                     f"Audio file for item {item_id} not found", status_code=404
                 ) from ex
             raise BeetsAdapterError(
-                f"Error retrieving audio file for item {item_id}: {ex.code}",
+                f"Error retrieving audio file for item {item_id}",
                 status_code=ex.code,
+                error_code="BEETS_UPSTREAM_ERROR",
             ) from ex
         except TimeoutError as ex:
+            log.warning("Timeout streaming item %s file from %s: %s", item_id, self.base_url, ex)
             raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                f"Timeout connecting to Beets server at {self.base_url}"
             ) from ex
         except urllib.error.URLError as ex:
             reason = getattr(ex, "reason", None)
+            log.warning("Connection error streaming item %s file from %s: %s", item_id, self.base_url, ex)
             if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                    f"Timeout connecting to Beets server at {self.base_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}: {ex}"
+                f"Cannot connect to Beets server at {self.base_url}"
             ) from ex
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
+            log.warning("Connection error streaming item %s file from %s: %s", item_id, self.base_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                    f"Timeout connecting to Beets server at {self.base_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}: {ex}"
+                f"Cannot connect to Beets server at {self.base_url}"
             ) from ex
 
     def open_album_art(self, album_id: int):
@@ -344,29 +397,33 @@ class BeetsAdapter:
                     f"Art for album {album_id} not found", status_code=404
                 ) from ex
             raise BeetsAdapterError(
-                f"Error retrieving art for album {album_id}: {ex.code}",
+                f"Error retrieving art for album {album_id}",
                 status_code=ex.code,
+                error_code="BEETS_UPSTREAM_ERROR",
             ) from ex
         except TimeoutError as ex:
+            log.warning("Timeout streaming album %s art from %s: %s", album_id, self.base_url, ex)
             raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                f"Timeout connecting to Beets server at {self.base_url}"
             ) from ex
         except urllib.error.URLError as ex:
             reason = getattr(ex, "reason", None)
+            log.warning("Connection error streaming album %s art from %s: %s", album_id, self.base_url, ex)
             if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                    f"Timeout connecting to Beets server at {self.base_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}: {ex}"
+                f"Cannot connect to Beets server at {self.base_url}"
             ) from ex
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
+            log.warning("Connection error streaming album %s art from %s: %s", album_id, self.base_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}: {ex}"
+                    f"Timeout connecting to Beets server at {self.base_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}: {ex}"
+                f"Cannot connect to Beets server at {self.base_url}"
             ) from ex
 
     # -------------------------------------------------------------------------
@@ -442,9 +499,49 @@ class BeetsAdapter:
     # Caller Compatibility Helpers
     # -------------------------------------------------------------------------
 
+    # Upstream limitation (A5): stock beetsplug.web has no real server-side
+    # pagination -- GET /item/ always returns the whole library. This is not
+    # something Web Manager can fix without building a custom SQL/pagination
+    # endpoint against Beets' own database, which the architecture invariant
+    # forbids (Beets Web Manager does not become a second owner of
+    # musiclibrary.blb). get_items_page() therefore genuinely fetches the
+    # full item list and slices it in Python -- it does not pretend
+    # otherwise. To avoid repeating that full-library fetch on every single
+    # page request within one browsing session/workflow (e.g. a UI paging
+    # through results, or a job iterating pages), the full list is cached
+    # for a short, bounded TTL. This is a latency/load mitigation, not real
+    # pagination, and it intentionally stays short so a concurrent
+    # import/modify is reflected again within a few seconds.
+    _ITEMS_PAGE_CACHE_TTL_SECONDS = 5.0
+
+    def _get_all_items_cached(self) -> List[Dict[str, Any]]:
+        with self._items_page_cache_lock:
+            now = time.monotonic()
+            if (
+                self._items_page_cache is not None
+                and (now - self._items_page_cache_ts) < self._ITEMS_PAGE_CACHE_TTL_SECONDS
+            ):
+                return self._items_page_cache
+
+        # Fetch outside the lock -- get_items() is a network call and must
+        # not block other threads' cache reads while it's in flight.
+        fresh_items = self.get_items()
+
+        with self._items_page_cache_lock:
+            self._items_page_cache = fresh_items
+            self._items_page_cache_ts = time.monotonic()
+            return self._items_page_cache
+
     def get_items_page(self, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
-        """Fetch a paginated page of items."""
-        all_items = self.get_items()
+        """Fetch a paginated page of items.
+
+        Upstream beetsplug.web does not expose real pagination (see the
+        note above _ITEMS_PAGE_CACHE_TTL_SECONDS) -- this slices a
+        short-TTL-cached full item list in Python rather than issuing a
+        genuine bounded query, and is truthful about that rather than
+        pretending otherwise.
+        """
+        all_items = self._get_all_items_cached()
         total = len(all_items)
         off = max(0, offset)
         lim = max(1, limit)
@@ -528,19 +625,83 @@ class BeetsAdapter:
                 paths.append(str(p))
         return paths
 
-    def list_item_paths(self) -> List[str]:
-        """Alias for list_distinct_item_paths."""
-        return self.list_distinct_item_paths()
+    @staticmethod
+    def _decode_path(value: Any) -> str:
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", errors="replace")
+        return str(value or "")
 
-    def get_artist_counts(self) -> Dict[str, int]:
-        """Compatibility helper returning album counts grouped by artist."""
+    def list_item_paths(self, details: bool = False) -> Any:
+        """Fetch distinct item paths, or full item id/album_id/path dicts if details=True.
+
+        Contract-compatible with the legacy BeetsClient.list_item_paths():
+        details=False returns a list of distinct path strings; details=True
+        returns one {"id", "album_id", "path"} record per item (not
+        deduplicated by path).
+        """
+        items = self.get_items()
+        if details:
+            records: List[Dict[str, Any]] = []
+            for it in items:
+                aid = it.get("album_id")
+                records.append({
+                    "id": it.get("id"),
+                    "album_id": int(aid) if aid is not None else None,
+                    "path": self._decode_path(it.get("path")),
+                })
+            return records
+
+        seen = set()
+        paths: List[str] = []
+        for it in items:
+            p = self._decode_path(it.get("path"))
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+        return paths
+
+    def get_artist_counts(self) -> Dict[str, Dict[str, int]]:
+        """Fetch album and track counts grouped by albumartist.
+
+        Contract-compatible with the legacy BeetsClient.get_artist_counts():
+        {albumartist: {"albums": <distinct album count>, "tracks": <item count>}},
+        matching the legacy control agent's
+        "SELECT albumartist, COUNT(DISTINCT albums.id), COUNT(items.id) FROM
+        albums LEFT JOIN items ON items.album_id = albums.id WHERE
+        albumartist != '' GROUP BY albumartist" semantics: track counts are
+        items belonging to an album with that albumartist, not items whose
+        own artist field happens to match.
+        """
         albums = self.get_albums()
-        counts: Dict[str, int] = {}
+        items = self.get_items()
+
+        albumartist_by_album_id: Dict[int, str] = {}
+        album_counts: Dict[str, int] = {}
         for a in albums:
-            name = (a.get("albumartist") or a.get("artist") or "").strip()
+            name = (a.get("albumartist") or "").strip()
+            if not name:
+                continue
+            album_counts[name] = album_counts.get(name, 0) + 1
+            aid = a.get("id")
+            if aid is not None:
+                albumartist_by_album_id[int(aid)] = name
+
+        track_counts: Dict[str, int] = {}
+        for it in items:
+            aid = it.get("album_id")
+            if aid is None:
+                continue
+            name = albumartist_by_album_id.get(int(aid))
             if name:
-                counts[name] = counts.get(name, 0) + 1
-        return counts
+                track_counts[name] = track_counts.get(name, 0) + 1
+
+        result: Dict[str, Dict[str, int]] = {}
+        for name in set(album_counts) | set(track_counts):
+            result[name] = {
+                "albums": album_counts.get(name, 0),
+                "tracks": track_counts.get(name, 0),
+            }
+        return result
 
     def find_all_orphan_albums(self) -> List[Dict[str, Any]]:
         """Find albums that have no item tracks."""
