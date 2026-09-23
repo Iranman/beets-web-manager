@@ -115,8 +115,8 @@ def is_path_safe_and_allowed(target_path: str, allowed_roots: List[str]) -> bool
         return False
 
 
-def is_strict_descendant(target_path: str, allowed_roots: List[str]) -> bool:
-    """Check if target_path is a strict child/descendant of one of allowed_roots.
+def resolve_safe_descendant(target_path: str, allowed_roots: List[str]) -> Optional[str]:
+    """Validate that target_path is a strict child of one of allowed_roots and return canonical path.
 
     Rejects:
     - The root directory itself (e.g. /downloads)
@@ -126,9 +126,9 @@ def is_strict_descendant(target_path: str, allowed_roots: List[str]) -> bool:
     - Null bytes or non-string inputs
     """
     if not target_path or not isinstance(target_path, str):
-        return False
+        return None
     if "\x00" in target_path:
-        return False
+        return None
 
     try:
         norm_target = os.path.realpath(os.path.abspath(target_path))
@@ -145,12 +145,17 @@ def is_strict_descendant(target_path: str, allowed_roots: List[str]) -> bool:
                 if os.path.commonpath([norm_target, norm_root]) == norm_root:
                     rel = os.path.relpath(norm_target, norm_root)
                     if not rel.startswith("..") and rel != ".":
-                        return True
+                        return norm_target
             except ValueError:
                 continue
-        return False
+        return None
     except Exception:
-        return False
+        return None
+
+
+def is_strict_descendant(target_path: str, allowed_roots: List[str]) -> bool:
+    """Check if target_path is a strict child/descendant of one of allowed_roots."""
+    return resolve_safe_descendant(target_path, allowed_roots) is not None
 
 
 def validate_fields(fields: dict, is_album: bool = False) -> dict:

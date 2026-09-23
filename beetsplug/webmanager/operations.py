@@ -13,6 +13,7 @@ import beets
 from beets import config as beets_config
 from beets import util
 from .schemas import (
+    resolve_safe_descendant,
     is_strict_descendant,
     validate_fields,
     ALLOWED_DUPLICATE_ACTIONS,
@@ -228,8 +229,10 @@ def run_import():
 
     # Policy 3: Path containment — source paths must be strict descendants of allowed roots (e.g. /downloads)
     allowed_roots = get_allowed_roots()
+    safe_paths: List[str] = []
     for p in paths:
-        if not is_strict_descendant(p, allowed_roots):
+        safe_p = resolve_safe_descendant(p, allowed_roots)
+        if safe_p is None:
             return (
                 jsonify(
                     {
@@ -239,6 +242,7 @@ def run_import():
                 ),
                 400,
             )
+        safe_paths.append(safe_p)
 
     copy = bool(data.get("copy", False))
     move = bool(data.get("move", True))
@@ -295,9 +299,8 @@ def run_import():
                 )
 
     # For newly created operations, verify source path existence
-    for p in paths:
-        resolved_p = os.path.realpath(os.path.abspath(p))
-        if not os.path.exists(resolved_p):
+    for safe_p in safe_paths:
+        if not os.path.exists(safe_p):
             update_operation(op_id, "failed", error="Source path does not exist", error_code="SOURCE_NOT_FOUND")
             return (
                 jsonify(
@@ -343,13 +346,13 @@ def run_import():
                 from beets.importer import ImportSession
 
                 # Convert paths to bytestrings for Beets importer
-                path_bytes = [util.bytestring_path(p) for p in paths]
+                path_bytes = [util.bytestring_path(p) for p in safe_paths]
                 session = ImportSession(lib, loghandler=None, paths=path_bytes, query=None)
                 session.run()
 
                 result = {
                     "success": True,
-                    "imported_paths": paths,
+                    "imported_paths": safe_paths,
                     "autotag": False,
                     "duplicate_action": duplicate_action,
                 }
