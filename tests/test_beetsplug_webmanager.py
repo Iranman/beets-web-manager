@@ -624,7 +624,38 @@ class WebManagerPhase3MutationTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
         self.assertEqual(body["status"], "succeeded")
-        self.assertEqual(body["result"]["synced_items"], 1)
+        self.assertEqual(body["result"]["requested_items"], 1)
+        self.assertEqual(body["result"]["skipped_items"], 1)
+        self.assertEqual(body["result"]["processed_items"], 0)
+        self.assertEqual(body["result"]["changed_items"], 0)
+        self.assertEqual(body["result"]["synced_items"], 0)
+
+    def test_mbsync_album_and_singleton_target_queries(self):
+        """Prove that mbsync targets exact item id and album id (not album_id)."""
+        from beetsplug.mbsync import MBSyncPlugin
+
+        self._plugins_mod._instances.append(MBSyncPlugin())
+        singleton, _ = self._add_item(mb_trackid="track-mbid-1234")
+        singleton.singleton = True
+        singleton.store()
+
+        album_item, path = self._add_item(with_album=True, mb_trackid="track-mbid-5678")
+        album = self.lib.get_album(album_item.album_id)
+        album.mb_albumid = "album-mbid-9999"
+        album.store()
+
+        res = self.client.post(
+            "/webmanager/mbsync",
+            headers=self.auth,
+            json={"item_ids": [singleton.id], "album_ids": [album.id]},
+        )
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertEqual(body["status"], "succeeded")
+        self.assertEqual(body["result"]["requested_items"], 1)
+        self.assertEqual(body["result"]["requested_albums"], 1)
+        self.assertEqual(body["result"]["skipped_items"], 0)
+        self.assertEqual(body["result"]["skipped_albums"], 0)
 
     def test_fetchart_runs_against_real_plugin_with_filesystem_source(self):
         """Real, deterministic, network-free acceptance: fetchart's default

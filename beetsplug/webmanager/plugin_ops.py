@@ -68,6 +68,42 @@ def _require_plugin(name: str):
     return plugin
 
 
+# =============================================================================
+# Upstream Symbol Reference & Version Coupling Documentation
+# =============================================================================
+#
+# Tested against: Upstream Beets 2.14.x / 2.13.x / LinuxServer Beets :latest
+#
+# 1. mbsync:
+#    - Upstream Class: `beetsplug.mbsync.MBSyncPlugin`
+#    - Symbols Used:
+#      * `MBSyncPlugin.singletons(lib, query, move, pretend, write)`
+#      * `MBSyncPlugin.albums(lib, query, move, pretend, write)`
+#    - Query Semantics:
+#      * singletons: `id:<item id>` (MBSyncPlugin internally adds `singleton:true`)
+#      * albums: `id:<album id>` (Album query uses `id`, NOT `album_id`)
+#    - Coupling Type: Direct method invocation on loaded Beets plugin instance.
+#
+# 2. fetchart:
+#    - Upstream Class: `beetsplug.fetchart.FetchArtPlugin`
+#    - Symbols Used:
+#      * `FetchArtPlugin.batch_fetch_art(lib, albums, force, quiet)`
+#    - Coupling Type: Direct method invocation on loaded Beets plugin instance.
+#
+# 3. embedart:
+#    - Upstream Class: `beetsplug.embedart.EmbedCoverArtPlugin`
+#    - Symbols Used:
+#      * `beetsplug._utils.art.embed_album(log, album, maxwidth, quiet, compare_threshold, ifempty, quality)`
+#    - Coupling Type: Direct invocation of Beets internal art embedding helper.
+#
+# 4. lastgenre:
+#    - Upstream Class: `beetsplug.lastgenre.LastGenrePlugin`
+#    - Symbols Used:
+#      * `LastGenrePlugin._get_genre(album)`
+#    - Coupling Type: Internal helper invocation on loaded Beets plugin instance.
+# =============================================================================
+
+
 def run_mbsync(
     lib,
     item_ids: Optional[List[int]] = None,
@@ -78,10 +114,16 @@ def run_mbsync(
 ) -> Dict[str, Any]:
     """Sync metadata from MusicBrainz using the real mbsync plugin.
 
-    Targets explicit item_ids (singleton tracks) and/or album_ids. Neither
-    reimplements nor bypasses the plugin's own singletons()/albums() logic
-    -- this only selects which items/albums it runs against, via exact-ID
+    Targets explicit item_ids (singleton tracks) and/or album_ids.
+    Neither reimplements nor bypasses the plugin's own singletons()/albums()
+    logic -- this only selects which items/albums it runs against via exact-ID
     queries (never a caller-supplied free-form query).
+
+    Album queries target `id:<album id>` (Beets Album primary key is `id`).
+    Item queries target `id:<item id>`.
+
+    Results report truthful counters distinguishing requested, processed,
+    changed, and skipped targets.
     """
     plugin = _require_plugin("mbsync")
     if not hasattr(plugin, "singletons") or not hasattr(plugin, "albums"):
@@ -89,19 +131,73 @@ def run_mbsync(
             "mbsync plugin does not expose the expected singletons()/albums() methods"
         )
 
-    synced_items = 0
-    synced_albums = 0
+    requested_items = len(item_ids or [])
+    requested_albums = len(album_ids or [])
+    processed_items = 0
+    processed_albums = 0
+    changed_items = 0
+    changed_albums = 0
+    skipped_items = 0
+    skipped_albums = 0
+
     try:
         for iid in item_ids or []:
+            item = lib.get_item(int(iid))
+            if not item:
+                skipped_items += 1
+                continue
+            if not getattr(item, "mb_trackid", ""):
+                # Upstream mbsync skips singletons without mb_trackid
+                skipped_items += 1
+                continue
+
+            # Capture baseline values to accurately detect changes
+            before_vals = {k: item[k] for k in ("title", "artist", "album", "year", "track", "mb_trackid") if k in item}
             plugin.singletons(lib, [f"id:{int(iid)}"], move, pretend, write)
-            synced_items += 1
+            processed_items += 1
+
+            refreshed = lib.get_item(int(iid))
+            if refreshed:
+                after_vals = {k: refreshed[k] for k in before_vals}
+                if after_vals != before_vals:
+                    changed_items += 1
+
         for aid in album_ids or []:
-            plugin.albums(lib, [f"album_id:{int(aid)}"], move, pretend, write)
-            synced_albums += 1
+            album = lib.get_album(int(aid))
+            if not album:
+                skipped_albums += 1
+                continue
+            if not getattr(album, "mb_albumid", ""):
+                # Upstream mbsync skips albums without mb_albumid
+                skipped_albums += 1
+                continue
+
+            # Capture baseline album values
+            before_vals = {k: album[k] for k in ("album", "albumartist", "year", "mb_albumid") if k in album}
+            plugin.albums(lib, [f"id:{int(aid)}"], move, pretend, write)
+            processed_albums += 1
+
+            refreshed_album = lib.get_album(int(aid))
+            if refreshed_album:
+                after_vals = {k: refreshed_album[k] for k in before_vals}
+                if after_vals != before_vals:
+                    changed_albums += 1
+
     except Exception as ex:
         raise PluginIncompatibleError(f"mbsync plugin call failed: {type(ex).__name__}") from ex
 
-    return {"synced_items": synced_items, "synced_albums": synced_albums}
+    return {
+        "requested_items": requested_items,
+        "requested_albums": requested_albums,
+        "processed_items": processed_items,
+        "processed_albums": processed_albums,
+        "changed_items": changed_items,
+        "changed_albums": changed_albums,
+        "skipped_items": skipped_items,
+        "skipped_albums": skipped_albums,
+        "synced_items": changed_items,
+        "synced_albums": changed_albums,
+    }
 
 
 def run_fetchart(lib, album_ids: List[int], force: bool = False) -> Dict[str, Any]:
