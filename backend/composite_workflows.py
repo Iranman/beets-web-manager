@@ -65,7 +65,8 @@ def get_default_store() -> TransactionStore:
     """Resolve the global default TransactionStore instance."""
     global _default_store
     if _default_store is None:
-        tx_dir = os.environ.get("BEETS_TRANSACTION_DIR", "/web-manager-data/transactions")
+        data_root = os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")
+        tx_dir = os.environ.get("BEETS_TRANSACTION_DIR", f"{data_root}/transactions")
         _default_store = TransactionStore(tx_dir)
     return _default_store
 
@@ -700,7 +701,7 @@ def plan_track_replacement(
             "item_id": item_id,
             "target_path": target_path,
             "source_path": source_path,
-            "backup_dir": "/web-manager-data/quarantine",
+            "backup_dir": str(Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "quarantine"),
         },
     )
 
@@ -729,7 +730,7 @@ def apply_track_replacement(
     item_id = meta.get("item_id")
     target_path = meta.get("target_path")
     source_path = meta.get("source_path")
-    backup_dir = Path(meta.get("backup_dir", "/web-manager-data/quarantine"))
+    backup_dir = Path(meta.get("backup_dir") or (Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "quarantine"))
 
     if not os.path.exists(source_path):
         raise FileNotFoundError(f"Candidate source file missing: {source_path}")

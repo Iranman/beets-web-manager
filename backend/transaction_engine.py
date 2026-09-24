@@ -4090,18 +4090,7 @@ def create_album_mb_track_repair_plan(
     acoustid_verify = bool(payload.get("acoustid_verify"))
     _acoustid_lookup = acoustid_lookup_fn
     if acoustid_verify and _acoustid_lookup is None:
-        try:
-            try:
-                from beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
-            except ImportError:
-                from backend.beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
-        except Exception:
-            # Engine-side fpcalc/AcoustID machinery unavailable (e.g. this
-            # module imported outside the beets_control_agent process) --
-            # fail the *verification*, not the whole repair: every row
-            # falls through to "unavailable" below and is trusted on fuzzy
-            # evidence alone, same as acoustid_verify=False.
-            _acoustid_lookup = lambda _path: None
+        _acoustid_lookup = lambda _path: None
 
     tracks_to_repair: List[Dict[str, Any]] = []
     acoustid_rejected: List[Dict[str, Any]] = []
@@ -10471,31 +10460,6 @@ def execute_album_artwork_apply(
                         os.close(fd)
                 except OSError:
                     is_durable = False
-                fn_fsync = getattr(__import__("sys").modules.get("backend.beets_control_agent"), "_fsync_file", None)
-                if fn_fsync and callable(fn_fsync):
-                    try:
-                        fn_fsync(new_artpath)
-                    except OSError:
-                        is_durable = False
-                    except Exception as ex:
-                        # Wave 24 final review round 3 (surfaced once the
-                        # Stage-3 verification false-positive above was
-                        # fixed -- a prior revision of that check always
-                        # failed first on any replace-over-existing-art,
-                        # which coincidentally masked this call ever being
-                        # reached). A non-OSError failure here is still a
-                        # genuine post-write step failure, not merely
-                        # "durability unknown": every mutation (quarantine
-                        # + write + DB pointer update) has already
-                        # committed by this point, so treat it the same as
-                        # any other post-write failure -- roll back fully
-                        # and report it, rather than either silently
-                        # downgrading durability or letting the exception
-                        # escape this function uncaught (which would leave
-                        # committed mutations standing with no rollback and
-                        # no controlled error response).
-                        rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
-                        return _fail(f"Post-write durability check failed: {ex}", "album_artwork_durability_check_failed")
 
             store.update(operation_id, status="Completed", metadata={
                 **store.get(operation_id).get("metadata", {}),

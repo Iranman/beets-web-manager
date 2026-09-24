@@ -40,11 +40,14 @@ from backend.transaction_engine import TransactionStore
 class TestCompositeWorkflows(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.env_patcher = patch.dict("os.environ", {"WEB_MANAGER_DATA_DIR": self.tmpdir.name})
+        self.env_patcher.start()
         self.tx_dir = Path(self.tmpdir.name) / "transactions"
         self.store = TransactionStore(str(self.tx_dir))
         self.mock_adapter = MagicMock(spec=BeetsAdapter)
 
     def tearDown(self):
+        self.env_patcher.stop()
         self.tmpdir.cleanup()
 
     def test_merge_album_plan_apply_rollback(self):
