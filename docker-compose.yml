@@ -1,12 +1,15 @@
 # Production Docker Compose file for Beets Web Manager stack.
-# Deploys both Beets and Beets Web Manager using published images.
+# Deploys the stock LinuxServer Beets image alongside Beets Web Manager
+# using published images. No builds, no custom Beets image, no control
+# agent, no Docker socket, no port 8338 -- Beets Web Manager talks to
+# stock Beets only over its own :8337 web/webmanager plugins.
 #
 # Usage:
 #   docker compose up -d
 
 services:
   beets:
-    image: lscr.io/linuxserver/beets:2.13.1
+    image: lscr.io/linuxserver/beets:latest
     container_name: beets
     restart: unless-stopped
     environment:
@@ -17,6 +20,19 @@ services:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
       - ${MUSIC_PATH:-./music}:/music
       - ${DOWNLOADS_PATH:-./downloads}:/downloads
+    expose:
+      - "8337"
+    # Web Manager provisions the webmanager plugin's files and config.yaml
+    # entries at its own process startup, before it opens its HTTP port
+    # (see app.py's _bootstrap_beets_plugins(), which runs at import time --
+    # strictly before Waitress binds). Waiting for that healthcheck here,
+    # rather than starting both containers in parallel, is what lets a
+    # brand new/empty config.yaml already have `plugins: ... webmanager`
+    # by the time stock Beets reads it on its own first boot -- with no
+    # third "wait for it" service and no Docker socket involved.
+    depends_on:
+      beets-web-manager:
+        condition: service_healthy
 
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:stable
@@ -29,6 +45,17 @@ services:
       PGID: ${PGID:-1000}
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
+
+      # Stock Beets's web/webmanager plugins listen on :8337 inside the
+      # Docker network only -- Web Manager is the sole service that
+      # publishes a port to the host.
+      BEETS_WEB_URL: http://beets:8337
+      BEETS_OUTBOUND_ALLOWLIST: beets:8337
+
+      # Single canonical root for all of Web Manager's own durable state
+      # (job history, transaction/rollback audit logs, submission drafts).
+      WEB_MANAGER_DATA_DIR: /web-manager-data
+      BEETS_TRANSACTION_DIR: /web-manager-data/transactions
 
       # All of the following are optional -- .env.example documents them,
       # and every one is blank/inert by default. None is required to reach
@@ -63,8 +90,16 @@ services:
       DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-./music}:/music
+      - ${MUSIC_PATH:-./music}:/music:ro
       - ${DOWNLOADS_PATH:-./downloads}:/downloads
-      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/data
-    depends_on:
-      - beets
+      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/web-manager-data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

@@ -21,11 +21,11 @@
 #    completely fresh /data mount (PermissionError creating .auth_token /
 #    .flask_secret_key) even with no PUID/PGID override in play at all.
 #
-# /data and /web-manager-data are exclusively Web Manager's own state
-# (settings, tokens, session keys, audit logs) and /config is shared only
+# /web-manager-data is exclusively Web Manager's own state (settings,
+# tokens, session keys, audit/transaction logs) and /config is shared only
 # with the beets sibling container's own equivalent PUID/PGID-driven
-# ownership fix -- all three are small, so a full recursive chown on every
-# start is safe and fast. /music and /downloads can be enormous real media
+# ownership fix -- both are small, so a full recursive chown on every start
+# is safe and fast. /music and /downloads can be enormous real media
 # libraries: only the top-level directory's own ownership is fixed (so the
 # app can create new files/subdirectories there), never a recursive walk
 # over existing files.
@@ -47,7 +47,7 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     chown -R beets:beets /app
 fi
 
-chown -R beets:beets /data /web-manager-data /config
+chown -R beets:beets /web-manager-data /config
 chown beets:beets /music /downloads 2>/dev/null || true
 
 exec gosu beets "$@"

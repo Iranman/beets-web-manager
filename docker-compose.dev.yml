@@ -7,7 +7,7 @@
 
 services:
   beets:
-    image: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
+    image: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:latest}
     container_name: beets-dev
     restart: unless-stopped
     environment:
@@ -18,6 +18,14 @@ services:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
       - ${MUSIC_PATH:-./music}:/music
       - ${DOWNLOADS_PATH:-./downloads}:/downloads
+    expose:
+      - "8337"
+    # See the primary docker-compose.yml: Web Manager provisions the
+    # webmanager plugin into config.yaml at its own startup, before this
+    # dev build of stock Beets ever reads that file.
+    depends_on:
+      beets-web-manager:
+        condition: service_healthy
 
   beets-web-manager:
     build:
@@ -37,6 +45,11 @@ services:
       PGID: ${PGID:-1000}
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
+
+      BEETS_WEB_URL: http://beets:8337
+      BEETS_OUTBOUND_ALLOWLIST: beets:8337
+      WEB_MANAGER_DATA_DIR: /web-manager-data
+      BEETS_TRANSACTION_DIR: /web-manager-data/transactions
 
       BEETS_WEB_USERNAME: ${BEETS_WEB_USERNAME:-}
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
@@ -68,8 +81,16 @@ services:
       DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-./music}:/music
+      - ${MUSIC_PATH:-./music}:/music:ro
       - ${DOWNLOADS_PATH:-./downloads}:/downloads
-      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/data
-    depends_on:
-      - beets
+      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/web-manager-data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
