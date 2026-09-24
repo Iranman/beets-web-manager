@@ -325,7 +325,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
 
     def test_outside_root_aldir_rejected_with_generic_error_not_existence_leak(self):
         missing_outside = self.outside / "does_not_exist_either"
-        with mock.patch.object(APP.beets_client, "inspect_import_source",
+        with mock.patch.object(APP.composite_workflows, "inspect_import_source",
                                 side_effect=APP.BeetsError("Beets API request error: invalid_path")):
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": str(missing_outside), "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -335,7 +335,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         self.assertNotIn(str(self.outside), str(data.get("error", "")))
 
     def test_existing_outside_root_aldir_rejected(self):
-        with mock.patch.object(APP.beets_client, "inspect_import_source",
+        with mock.patch.object(APP.composite_workflows, "inspect_import_source",
                                 side_effect=APP.BeetsError("Beets API request error: invalid_path")):
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": str(self.outside), "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -348,7 +348,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
             link.symlink_to(self.outside, target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest("platform/user cannot create symlinks")
-        with mock.patch.object(APP.beets_client, "inspect_import_source",
+        with mock.patch.object(APP.composite_workflows, "inspect_import_source",
                                 side_effect=APP.BeetsError("Beets API request error: invalid_path")):
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": str(link), "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -356,7 +356,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         self.assertEqual(res.status_code, 400)
 
     def test_engine_unavailable_returns_502_not_500(self):
-        with mock.patch.object(APP.beets_client, "inspect_import_source",
+        with mock.patch.object(APP.composite_workflows, "inspect_import_source",
                                 side_effect=APP.BeetsUnavailableError("Beets Control Agent is unavailable")):
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": "/data/torrents/music/some_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -367,7 +367,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         # A successful inspection response must be accepted and its
         # canonical_path used -- proving the route reaches past the
         # (now engine-side) validation gate for a legitimate source.
-        with mock.patch.object(APP.beets_client, "inspect_import_source", return_value={
+        with mock.patch.object(APP.composite_workflows, "inspect_import_source", return_value={
                     "ok": True, "canonical_path": "/data/torrents/music/real_album",
                     "audio_count": 3, "audio_files": [], "source_signature": "abc",
                 }), \
@@ -391,7 +391,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
             '  File "/opt/beets-web-manager-agent/beets_control_agent.py", line 999\n'
             "  ZeroDivisionError: division by zero"
         )
-        with mock.patch.object(APP.beets_client, "inspect_import_source",
+        with mock.patch.object(APP.composite_workflows, "inspect_import_source",
                                 side_effect=APP.BeetsError(f"Beets API request error: HTTP 500: {fake_traceback}")):
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": "/data/torrents/music/some_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",

@@ -14,7 +14,7 @@ import ast
 import unittest
 from unittest import mock
 
-from backend.beets_client import BeetsUnavailableError
+from backend.beets_adapter import BeetsUnavailableError
 import app as app_module
 
 
@@ -46,25 +46,30 @@ class LibraryTablesFixture(unittest.TestCase):
 
 class LibraryMbsyncAllTests(LibraryTablesFixture):
     def test_no_orphans_is_a_clean_no_op(self):
-        with mock.patch.object(app_module, "beets_client") as mock_client:
-            mock_client.find_all_orphan_albums.return_value = []
-            mock_client.mbsync.return_value = {"ok": True, "success": True, "returncode": 0, "stdout": "mbsync ok"}
+        with mock.patch.object(
+            app_module.composite_workflows, "find_all_orphan_albums", return_value=[]
+        ) as mock_find, mock.patch.object(
+            app_module.composite_workflows, "delete_album"
+        ) as mock_delete, mock.patch.object(
+            app_module.composite_workflows, "mbsync",
+            return_value={"ok": True, "success": True, "returncode": 0, "stdout": "mbsync ok"},
+        ) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
-        mock_client.delete_album.assert_not_called()
-        mock_client.mbsync.assert_called_once_with(query="", async_job=True)
+        mock_delete.assert_not_called()
+        mock_mbsync.assert_called_once_with(query="", async_job=True)
         self.assertFalse(any("Orphan lookup failed" in line for line in log))
         self.assertFalse(any("Pruned" in line for line in log))
         self.assertTrue(any("mbsync complete" in line for line in log))
 
     def test_prunes_orphaned_album_via_engine_not_raw_sql(self):
         with mock.patch.object(
-            app_module.beets_client, "find_all_orphan_albums",
+            app_module.composite_workflows, "find_all_orphan_albums",
             return_value=[{"id": 2, "albumartist": "Some Artist"}],
         ) as mock_find, mock.patch.object(
-            app_module.beets_client, "delete_album", return_value={"ok": True},
+            app_module.composite_workflows, "delete_album", return_value={"ok": True},
         ) as mock_delete, mock.patch.object(
-            app_module.beets_client, "mbsync", return_value={"ok": True, "success": True, "returncode": 0},
+            app_module.composite_workflows, "mbsync", return_value={"ok": True, "success": True, "returncode": 0},
         ) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
@@ -80,12 +85,12 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
             return {"ok": True}
 
         with mock.patch.object(
-            app_module.beets_client, "find_all_orphan_albums",
+            app_module.composite_workflows, "find_all_orphan_albums",
             return_value=[{"id": 2, "albumartist": "A"}, {"id": 3, "albumartist": "B"}],
         ), mock.patch.object(
-            app_module.beets_client, "delete_album", side_effect=fake_delete,
+            app_module.composite_workflows, "delete_album", side_effect=fake_delete,
         ) as mock_delete, mock.patch.object(
-            app_module.beets_client, "mbsync", return_value={"ok": True, "success": True, "returncode": 0},
+            app_module.composite_workflows, "mbsync", return_value={"ok": True, "success": True, "returncode": 0},
         ) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
@@ -96,10 +101,10 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
 
     def test_orphan_lookup_engine_unavailable_is_non_fatal_mbsync_still_runs(self):
         with mock.patch.object(
-            app_module.beets_client, "find_all_orphan_albums",
+            app_module.composite_workflows, "find_all_orphan_albums",
             side_effect=BeetsUnavailableError("engine offline"),
-        ), mock.patch.object(app_module.beets_client, "delete_album") as mock_delete, \
-             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": True, "success": True, "returncode": 0}) as mock_mbsync:
+        ), mock.patch.object(app_module.composite_workflows, "delete_album") as mock_delete, \
+             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "success": True, "returncode": 0}) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
         mock_delete.assert_not_called()
@@ -107,14 +112,14 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
         self.assertTrue(any("Orphan lookup failed (non-fatal)" in line for line in log))
 
     def test_mbsync_engine_offline_fails_closed(self):
-        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "mbsync", side_effect=BeetsUnavailableError("engine offline")):
+        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "mbsync", side_effect=BeetsUnavailableError("engine offline")):
             with self.assertRaises(RuntimeError):
                 self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
     def test_mbsync_nonzero_returncode_raises(self):
-        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": False, "success": False, "returncode": 2, "stderr": "fatal error"}):
+        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": False, "success": False, "returncode": 2, "stderr": "fatal error"}):
             with self.assertRaises(RuntimeError):
                 self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
@@ -132,16 +137,16 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
 class LibraryMoveAllTests(LibraryTablesFixture):
     def test_candidate_dirs_derived_from_engine_then_cleaned_via_engine(self):
         with mock.patch.object(
-            app_module.beets_client, "list_distinct_item_paths",
+            app_module.composite_workflows, "list_distinct_item_paths",
             return_value=["ArtistA/AlbumA/track1.mp3", "ArtistA/AlbumA/track2.mp3"],
         ) as mock_paths, mock.patch.object(
-            app_module.beets_client, "move_library",
+            app_module.composite_workflows, "move_library",
             return_value={"ok": True, "success": True, "returncode": 0, "updated": True, "moved": True, "stdout": "moved 2"},
         ) as mock_move, mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
+            app_module.composite_workflows, "plan_folder_cleanup",
             return_value={"ok": True, "operation_id": "op-1"},
         ) as mock_plan, mock.patch.object(
-            app_module.beets_client, "apply_folder_cleanup",
+            app_module.composite_workflows, "apply_folder_cleanup",
             return_value={"ok": True},
         ) as mock_apply:
             log = self._run(app_module.library_move_all, "/api/library/move-all")
@@ -154,13 +159,13 @@ class LibraryMoveAllTests(LibraryTablesFixture):
 
     def test_path_scan_engine_unavailable_is_non_fatal_move_still_runs(self):
         with mock.patch.object(
-            app_module.beets_client, "list_distinct_item_paths",
+            app_module.composite_workflows, "list_distinct_item_paths",
             side_effect=BeetsUnavailableError("engine offline"),
         ), mock.patch.object(
-            app_module.beets_client, "move_library",
+            app_module.composite_workflows, "move_library",
             return_value={"ok": True, "success": True, "returncode": 0, "updated": True, "moved": True},
         ) as mock_move, mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
+            app_module.composite_workflows, "plan_folder_cleanup",
         ) as mock_plan:
             log = self._run(app_module.library_move_all, "/api/library/move-all")
 
@@ -169,15 +174,15 @@ class LibraryMoveAllTests(LibraryTablesFixture):
         self.assertTrue(any("Could not enumerate pre-move directories" in line for line in log))
 
     def test_move_library_engine_offline_fails_closed(self):
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "move_library", side_effect=BeetsUnavailableError("engine offline")):
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", side_effect=BeetsUnavailableError("engine offline")):
             with self.assertRaises(RuntimeError):
                 self._run(app_module.library_move_all, "/api/library/move-all")
 
     def test_move_library_rescan_failure_aborts_cleanup(self):
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
-             mock.patch.object(app_module.beets_client, "move_library", return_value={"ok": False, "success": False, "returncode": 1, "error": "update failed"}), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan:
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", return_value={"ok": False, "success": False, "returncode": 1, "error": "update failed"}), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup") as mock_plan:
             with self.assertRaises(RuntimeError):
                 self._run(app_module.library_move_all, "/api/library/move-all")
         mock_plan.assert_not_called()

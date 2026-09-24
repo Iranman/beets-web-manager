@@ -151,7 +151,7 @@ class RgidGroupAlbumsHelperTests(unittest.TestCase):
 
     def test_rgid_group_albums_helper_groups_by_release_group_id(self):
         self.assertIn("def _rgid_group_albums(rgid: str)", self._section)
-        self.assertIn("beets_client.get_rgid_group_detail(rgid)", self._section)
+        self.assertIn("composite_workflows.get_rgid_group_detail(rgid)", self._section)
 
 
 

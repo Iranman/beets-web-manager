@@ -91,8 +91,8 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         end = self.app_source.index("\ndef ", start + 10)
         relabel_source = self.app_source[start:end]
         self.assertIn('"acoustid_verify": True', relabel_source)
-        self.assertIn("beets_client.plan_album_mb_track_repair(payload)", relabel_source)
-        self.assertIn("beets_client.apply_album_mb_track_repair(op_id", relabel_source)
+        self.assertIn("composite_workflows.plan_album_mb_track_repair(payload)", relabel_source)
+        self.assertIn("composite_workflows.apply_album_mb_track_repair(op_id", relabel_source)
 
     def test_artist_folder_name_merge_fingerprint_verified(self):
         # The plain-named-folder -> same-named-stamped-folder merge candidate

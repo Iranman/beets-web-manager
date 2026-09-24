@@ -641,10 +641,10 @@ class RealProductionPathTests(Wave21BaseTest):
         def mock_apply(op_id, **kw):
             return self._apply(op_id)
 
-        self._plan_patch = mock.patch.object(app_module.beets_client, "plan_artist_folder_reconcile", side_effect=mock_plan)
+        self._plan_patch = mock.patch.object(app_module.composite_workflows, "plan_artist_folder_reconcile", side_effect=mock_plan)
         self._plan_patch.start()
         self.addCleanup(self._plan_patch.stop)
-        self._apply_patch = mock.patch.object(app_module.beets_client, "apply_artist_folder_reconcile", side_effect=mock_apply)
+        self._apply_patch = mock.patch.object(app_module.composite_workflows, "apply_artist_folder_reconcile", side_effect=mock_apply)
         self._apply_patch.start()
         self.addCleanup(self._apply_patch.stop)
 
@@ -750,10 +750,10 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def test_apply_success_on_the_first_call_never_polls(self):
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             return_value={"ok": True, "operation_id": "op-1", "status": "Completed"},
         ))
-        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+        get_tx_mock = self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction"))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-1", log)
@@ -768,12 +768,12 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         mutation. Apply must be called exactly once; the real outcome must
         come from polling the transaction, not from a second apply call."""
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
         statuses = iter(["Running", "Running", "Completed"])
         get_tx_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             side_effect=lambda op_id: {"ok": True, "transaction": {"status": next(statuses), "operation_id": op_id}},
         ))
 
@@ -791,11 +791,11 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def test_lost_apply_response_then_confirmed_failed_is_reported_as_failed(self):
         self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
         self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             return_value={"ok": True, "transaction": {"status": "Failed", "operation_id": "op-3"}},
         ))
 
@@ -808,11 +808,11 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def test_apply_never_called_a_second_time_even_across_many_poll_iterations(self):
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
         self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             return_value={"ok": True, "transaction": {"status": "Running", "operation_id": "op-4"}},
         ))
 
@@ -829,7 +829,7 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         """A poll that itself fails to reach the engine (still recovering)
         must be retried within the bound, not treated as a final failure."""
         self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
         responses = iter([
@@ -844,7 +844,7 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
                 raise item
             return item
 
-        self._patch(mock.patch.object(app_module.beets_client, "get_transaction", side_effect=_get_transaction))
+        self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction", side_effect=_get_transaction))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-5", log)
@@ -856,10 +856,10 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         cancel_event = mock.MagicMock()
         cancel_event.is_set.return_value = True
         self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
-        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+        get_tx_mock = self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction"))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-6", log, cancel_event=cancel_event)
@@ -879,13 +879,13 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
                 app_module, "_stamp_artist_folder_scan",
                 return_value={"candidates": [{"source": "x"}], "skipped": []},
             ), mock.patch.object(
-                app_module.beets_client, "plan_artist_folder_reconcile",
+                app_module.composite_workflows, "plan_artist_folder_reconcile",
                 return_value={"ok": True, "operation_id": "op-7"},
             ), mock.patch.object(
-                app_module.beets_client, "apply_artist_folder_reconcile",
+                app_module.composite_workflows, "apply_artist_folder_reconcile",
                 side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
             ) as apply_mock, mock.patch.object(
-                app_module.beets_client, "get_transaction",
+                app_module.composite_workflows, "get_transaction",
                 return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-7", "renamed": 2, "merged": 1}},
             ):
                 with app_module.app.test_request_context(
@@ -927,13 +927,13 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         operation_id/payload) -- not that the response was lost. Must never
         enter the transaction poll loop, and must never call Apply again."""
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsBadRequestError(
                 "Beets API bad request: operation not in Pending/Approved state",
                 error_code="INVALID_STATE", status_code=400,
             ),
         ))
-        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+        get_tx_mock = self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction"))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-400", log)
@@ -947,13 +947,13 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def test_auth_error_fails_immediately_without_polling(self):
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsAuthError(
                 "Authentication with Beets Control Agent failed: HTTP 401",
                 error_code="ENGINE_AUTH_FAILED", status_code=401,
             ),
         ))
-        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+        get_tx_mock = self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction"))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-401", log)
@@ -965,13 +965,13 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def test_not_found_fails_immediately_without_polling(self):
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsNotFoundError(
                 "Beets API resource not found: operation_id unknown",
                 error_code="NOT_FOUND", status_code=404,
             ),
         ))
-        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+        get_tx_mock = self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction"))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-404", log)
@@ -983,13 +983,13 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def test_forbidden_403_fails_immediately_without_polling(self):
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsAuthError(
                 "Access to Beets Control Agent forbidden: HTTP 403",
                 error_code="FORBIDDEN", status_code=403,
             ),
         ))
-        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+        get_tx_mock = self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction"))
 
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-403", log)
@@ -1006,13 +1006,13 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         and must still recover via the transaction poll like a
         BeetsUnavailableError does."""
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsError(
                 "Beets Control Agent server error: HTTP 500", error_code="ENGINE_SERVER_ERROR", status_code=500,
             ),
         ))
         get_tx_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-500"}},
         ))
 
@@ -1101,7 +1101,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
 
     def test_beets_unavailable_reports_ok_false_not_empty_success(self):
         with mock.patch.object(
-            app_module.beets_client, "get_artist_folder_inventory",
+            app_module.composite_workflows, "get_artist_folder_inventory",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ):
             result = app_module._stamp_artist_folder_scan(self.root)
@@ -1117,7 +1117,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         responses, job logs, and job results."""
         sensitive = "http://internal-secret-host.example:9999/beets-agent?token=abc123secret"
         with mock.patch.object(
-            app_module.beets_client, "get_artist_folder_inventory",
+            app_module.composite_workflows, "get_artist_folder_inventory",
             side_effect=app_module.BeetsUnavailableError(f"Beets Control Agent is unavailable at {sensitive}: refused"),
         ):
             result = app_module._stamp_artist_folder_scan(self.root)
@@ -1128,7 +1128,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
 
     def test_beets_auth_error_reports_ok_false_with_error_code(self):
         with mock.patch.object(
-            app_module.beets_client, "get_artist_folder_inventory",
+            app_module.composite_workflows, "get_artist_folder_inventory",
             side_effect=app_module.BeetsAuthError(
                 "Authentication with Beets Control Agent failed: HTTP 401",
                 error_code="ENGINE_AUTH_FAILED", status_code=401,
@@ -1146,7 +1146,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
     def test_beets_auth_error_does_not_expose_raw_exception_text(self):
         sensitive = "/config/.beet_secret_token_file"
         with mock.patch.object(
-            app_module.beets_client, "get_artist_folder_inventory",
+            app_module.composite_workflows, "get_artist_folder_inventory",
             side_effect=app_module.BeetsAuthError(f"Authentication failed reading {sensitive}: permission denied"),
         ):
             result = app_module._stamp_artist_folder_scan(self.root)
@@ -1156,7 +1156,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
     def test_unexpected_exception_does_not_expose_raw_text(self):
         sensitive = "/home/runner/work/secret-internal-path/credentials.json"
         with mock.patch.object(
-            app_module.beets_client, "get_artist_folder_inventory",
+            app_module.composite_workflows, "get_artist_folder_inventory",
             side_effect=RuntimeError(f"unexpected failure reading {sensitive}"),
         ):
             result = app_module._stamp_artist_folder_scan(self.root)
@@ -1166,8 +1166,8 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         self.assertEqual(result.get("error"), "Artist-folder inventory failed.")
 
     def test_genuine_empty_inventory_reports_ok_true(self):
-        with mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+        with mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "get_artist_folder_album_mbids", return_value=[]):
             result = app_module._stamp_artist_folder_scan(self.root)
         self.assertTrue(result.get("ok"))
         self.assertEqual(result["candidates"], [])
@@ -1177,7 +1177,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         artist_dir = self.root / "Some Artist"
         artist_dir.mkdir()
         with mock.patch.object(
-            app_module.beets_client, "get_artist_folder_inventory",
+            app_module.composite_workflows, "get_artist_folder_inventory",
             return_value=[{"name": "Some Artist", "path": str(artist_dir), "audio_files": 1, "subfolders": 0}],
         ), mock.patch.object(
             app_module, "_stamp_artist_folder_album_mbid_counts",
@@ -1197,7 +1197,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
             # Failure case: the real job must raise (fail closed), not
             # report "no artist folders need MB ID stamping".
             with mock.patch.object(
-                app_module.beets_client, "get_artist_folder_inventory",
+                app_module.composite_workflows, "get_artist_folder_inventory",
                 side_effect=app_module.BeetsUnavailableError("engine unreachable"),
             ):
                 with app_module.app.test_request_context(
@@ -1224,8 +1224,8 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
 
             # Genuine success case: an empty inventory legitimately produces
             # the "no folders need stamping" outcome.
-            with mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", return_value=[]), \
-                 mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+            with mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", return_value=[]), \
+                 mock.patch.object(app_module.composite_workflows, "get_artist_folder_album_mbids", return_value=[]):
                 with app_module.app.test_request_context(
                     "/api/clean/artist-folders/stamp-mbid", method="POST",
                     json={"root": str(self.root), "dry_run": False},
@@ -1252,7 +1252,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         with mock.patch.object(app_module, "MUSIC_ROOT", self.root), \
              mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
              mock.patch.object(
-                 app_module.beets_client, "get_artist_folder_inventory",
+                 app_module.composite_workflows, "get_artist_folder_inventory",
                  side_effect=app_module.BeetsAuthError(
                      f"Authentication with Beets Control Agent failed via {sensitive}: HTTP 401",
                      error_code="ENGINE_AUTH_FAILED", status_code=401,
@@ -1280,7 +1280,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         with mock.patch.object(app_module, "MUSIC_ROOT", self.root), \
              mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
              mock.patch.object(
-                 app_module.beets_client, "get_artist_folder_inventory",
+                 app_module.composite_workflows, "get_artist_folder_inventory",
                  side_effect=app_module.BeetsUnavailableError(f"connection to {sensitive} failed"),
              ):
             with app_module.app.test_request_context(
@@ -1333,7 +1333,7 @@ class ResilientApplySanitizedErrorTests(unittest.TestCase):
     def test_rejected_apply_does_not_expose_raw_exception_text(self):
         sensitive = "http://engine-internal.local:8338/artists/reconcile/apply?token=zzz"
         self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsBadRequestError(
                 f"Beets API bad request via {sensitive}: operation not in Pending/Approved state",
                 error_code="INVALID_STATE", status_code=400,
@@ -1353,11 +1353,11 @@ class ResilientApplySanitizedErrorTests(unittest.TestCase):
     def test_lost_response_poll_does_not_expose_raw_exception_text(self):
         sensitive = "/var/lib/beets/private/musiclibrary.blb"
         self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError(f"Timed out reaching {sensitive}"),
         ))
         self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-sanitize-2"}},
         ))
         log = []
@@ -1369,7 +1369,7 @@ class ResilientApplySanitizedErrorTests(unittest.TestCase):
     def test_transaction_poll_failure_does_not_expose_raw_exception_text(self):
         sensitive = "postgresql://user:swordfish@10.1.2.3/beets"
         self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
         responses = iter([
@@ -1383,7 +1383,7 @@ class ResilientApplySanitizedErrorTests(unittest.TestCase):
                 raise item
             return item
 
-        self._patch(mock.patch.object(app_module.beets_client, "get_transaction", side_effect=_get_transaction))
+        self._patch(mock.patch.object(app_module.composite_workflows, "get_transaction", side_effect=_get_transaction))
         log = []
         result = app_module._apply_artist_folder_reconcile_resilient("op-sanitize-3", log)
         self.assertTrue(result.get("ok"), result)
@@ -1402,7 +1402,7 @@ class SavedOperationLookupSanitizedErrorTests(unittest.TestCase):
     def test_lookup_failure_does_not_expose_raw_exception_text(self):
         sensitive = "http://internal-agent.local:8338/transactions/op-abc?key=topsecret"
         with mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             side_effect=app_module.BeetsUnavailableError(f"Timed out reaching {sensitive}"),
         ):
             log = []

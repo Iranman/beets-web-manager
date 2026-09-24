@@ -42,7 +42,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn('def _safe_artist_folder_name', app_source)
         self.assertIn('def _stamp_folder_for_item_path', app_source)
         self.assertIn('def _stamp_artist_folder_album_mbid_counts', app_source)
-        self.assertIn('beets_client.get_artist_folder_album_mbids', app_source)
+        self.assertIn('composite_workflows.get_artist_folder_album_mbids', app_source)
         self.assertIn('folder_id_album_sets, folder_album_totals, scan_error = _stamp_artist_folder_album_mbid_counts(root, folders)', app_source)
         self.assertIn('album_total = int(folder_album_totals.get(folder_key) or 0)', app_source)
         self.assertIn('match_ratio = best_count / album_total if album_total else 0.0', app_source)
@@ -56,7 +56,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
         # Path.exists() call -- Web Manager has no media mount in the
         # supported two-service deployment.
         self.assertIn('"target_exists": new_path.name in existing_names', app_source)
-        self.assertIn('beets_client.get_artist_folder_inventory', app_source)
+        self.assertIn('composite_workflows.get_artist_folder_inventory', app_source)
         self.assertIn('action = "merge into" if c.get("target_exists") else "rename to"', app_source)
         self.assertIn('"skipped_total": len(skipped)', stamp_route)
         self.assertIn('_append_stamp_candidate_log(log, candidates)', stamp_route)
@@ -66,7 +66,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn('return f"{base} ({mbid})"', app_source)
         self.assertIn("Example: 'Celia Cruz' -> 'Celia Cruz (7b8e1188-...)'", stamp_route)
         self.assertIn('compact_log = bool(payload.get("compact_log", False))', stamp_route)
-        self.assertIn('beets_client.plan_artist_folder_reconcile', stamp_route)
+        self.assertIn('composite_workflows.plan_artist_folder_reconcile', stamp_route)
         # Hotfix v0.1.17 (BUG-4): the apply step is now routed through the
         # shared resilient helper (poll-on-lost-response instead of a bare
         # apply call) rather than calling beets_client.apply_artist_folder_reconcile
@@ -78,7 +78,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
             app_source.index("def _apply_artist_folder_reconcile_resilient("):
             app_source.index("def _run_artist_folder_reconcile_for_alias_merge(")
         ]
-        self.assertIn('beets_client.apply_artist_folder_reconcile', helper_source)
+        self.assertIn('composite_workflows.apply_artist_folder_reconcile', helper_source)
         self.assertNotIn("Skip (target exists)", stamp_route)
 
         self.assertIn("Promise<JobStartResponse>", client_scan)

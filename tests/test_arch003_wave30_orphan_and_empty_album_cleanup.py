@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 
 
 class RemoveOrphanedItemsTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class RemoveOrphanedItemsTests(unittest.TestCase):
 
     def test_dry_run_never_calls_engine_mutation(self):
         with mock.patch.object(
-            app_module.beets_client, "clean_orphaned_items",
+            app_module.composite_workflows, "clean_orphaned_items",
             return_value={"ok": True, "dry_run": True, "selected": 1, "removed_count": 0, "orphaned_items": [{"id": 101, "artist": "Artist", "title": "Title"}]},
         ) as mock_clean:
             log = []
@@ -34,7 +34,7 @@ class RemoveOrphanedItemsTests(unittest.TestCase):
 
     def test_orphaned_item_routes_through_clean_orphaned_items(self):
         with mock.patch.object(
-            app_module.beets_client, "clean_orphaned_items",
+            app_module.composite_workflows, "clean_orphaned_items",
             return_value={"ok": True, "dry_run": False, "selected": 1, "removed_count": 1, "orphaned_items": [{"id": 101, "artist": "Artist", "title": "Title"}]},
         ) as mock_clean:
             log = []
@@ -45,7 +45,7 @@ class RemoveOrphanedItemsTests(unittest.TestCase):
         self.assertEqual(res["removed"], 1)
 
     def test_empty_item_ids_is_noop(self):
-        with mock.patch.object(app_module.beets_client, "clean_orphaned_items") as mock_clean:
+        with mock.patch.object(app_module.composite_workflows, "clean_orphaned_items") as mock_clean:
             log = []
             res = app_module._clean_remove_orphaned_items([], dry_run=False, log=log)
         mock_clean.assert_not_called()
@@ -54,7 +54,7 @@ class RemoveOrphanedItemsTests(unittest.TestCase):
 
     def test_engine_unavailable_is_logged_and_raises(self):
         with mock.patch.object(
-            app_module.beets_client, "clean_orphaned_items",
+            app_module.composite_workflows, "clean_orphaned_items",
             side_effect=BeetsUnavailableError("offline"),
         ):
             log = []
@@ -76,13 +76,13 @@ class RemoveEmptyAlbumsTests(unittest.TestCase):
 
     def test_dry_run_never_calls_engine(self):
         with mock.patch.object(
-            app_module.beets_client, "get_album",
+            app_module.composite_workflows, "get_album",
             return_value={"id": 1, "albumartist": "Artist", "album": "Album"},
         ), mock.patch.object(
-            app_module.beets_client, "find_all_items_by_album_id",
+            app_module.composite_workflows, "find_all_items_by_album_id",
             return_value=[],
         ), mock.patch.object(
-            app_module.beets_client, "delete_album",
+            app_module.composite_workflows, "delete_album",
         ) as mock_del:
             log = []
             res = app_module._clean_remove_empty_albums([1], dry_run=True, log=log)
@@ -91,13 +91,13 @@ class RemoveEmptyAlbumsTests(unittest.TestCase):
 
     def test_non_empty_album_is_skipped_not_deleted(self):
         with mock.patch.object(
-            app_module.beets_client, "get_album",
+            app_module.composite_workflows, "get_album",
             return_value={"id": 1, "albumartist": "Artist", "album": "Album"},
         ), mock.patch.object(
-            app_module.beets_client, "find_all_items_by_album_id",
+            app_module.composite_workflows, "find_all_items_by_album_id",
             return_value=[{"id": 101}],
         ), mock.patch.object(
-            app_module.beets_client, "delete_album",
+            app_module.composite_workflows, "delete_album",
         ) as mock_del:
             log = []
             res = app_module._clean_remove_empty_albums([1], dry_run=False, log=log)
@@ -107,13 +107,13 @@ class RemoveEmptyAlbumsTests(unittest.TestCase):
 
     def test_empty_album_routes_through_delete_album(self):
         with mock.patch.object(
-            app_module.beets_client, "get_album",
+            app_module.composite_workflows, "get_album",
             return_value={"id": 1, "albumartist": "Artist", "album": "Album"},
         ), mock.patch.object(
-            app_module.beets_client, "find_all_items_by_album_id",
+            app_module.composite_workflows, "find_all_items_by_album_id",
             return_value=[],
         ), mock.patch.object(
-            app_module.beets_client, "delete_album",
+            app_module.composite_workflows, "delete_album",
             return_value={"ok": True, "status": "completed"},
         ) as mock_del:
             log = []
@@ -124,13 +124,13 @@ class RemoveEmptyAlbumsTests(unittest.TestCase):
 
     def test_engine_rejection_is_logged_and_does_not_raise(self):
         with mock.patch.object(
-            app_module.beets_client, "get_album",
+            app_module.composite_workflows, "get_album",
             return_value={"id": 1, "albumartist": "Artist", "album": "Album"},
         ), mock.patch.object(
-            app_module.beets_client, "find_all_items_by_album_id",
+            app_module.composite_workflows, "find_all_items_by_album_id",
             return_value=[],
         ), mock.patch.object(
-            app_module.beets_client, "delete_album",
+            app_module.composite_workflows, "delete_album",
             return_value={"ok": False, "error": "boom"},
         ):
             log = []
@@ -141,13 +141,13 @@ class RemoveEmptyAlbumsTests(unittest.TestCase):
 
     def test_engine_unavailable_is_logged_and_does_not_raise(self):
         with mock.patch.object(
-            app_module.beets_client, "get_album",
+            app_module.composite_workflows, "get_album",
             return_value={"id": 1, "albumartist": "Artist", "album": "Album"},
         ), mock.patch.object(
-            app_module.beets_client, "find_all_items_by_album_id",
+            app_module.composite_workflows, "find_all_items_by_album_id",
             return_value=[],
         ), mock.patch.object(
-            app_module.beets_client, "delete_album",
+            app_module.composite_workflows, "delete_album",
             side_effect=BeetsError("down"),
         ):
             log = []

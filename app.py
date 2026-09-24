@@ -426,15 +426,14 @@ from helpers_mb import (
     _resolve_mb_release_id, _JUNK_TITLE_RE, _fetch_mb_release_candidate,
     _mb_release_group_candidates,
 )
-from backend.beets_client import (
-    beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError,
-    BeetsBadRequestError, BeetsNotFoundError,
-)
 from backend.beets_adapter import (
-    beets_adapter, BeetsAdapterError, BeetsAdapterAuthError,
-    BeetsAdapterNotFoundError, BeetsAdapterConnectionError,
-    BeetsAdapterTimeoutError, StockBeetsLibrary,
+    beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError,
+    BeetsBadRequestError, BeetsNotFoundError, BeetsCommandError, BeetsClientError,
+    BeetsAdapterError, BeetsAdapterAuthError, BeetsAdapterNotFoundError,
+    BeetsAdapterConnectionError, BeetsAdapterTimeoutError, StockBeetsLibrary,
 )
+import backend.composite_workflows as composite_workflows
+import backend.config_manager as config_manager
 
 
 def _read_file_media_tags(path: Any) -> Dict[str, Any]:
@@ -1656,7 +1655,7 @@ def _stamp_album_release_id(album_id: int, mb_albumid: str,
     if aid <= 0 or not _MB_UUID_RE.match(mbid):
         return 0
     try:
-        res = beets_client.update_album_metadata(aid, {"mb_albumid": mbid})
+        res = composite_workflows.update_album_metadata(aid, {"mb_albumid": mbid})
         changed = int(res.get("items_changed") or 0)
         if log is not None and changed:
             log.append(f"  Stamped mb_albumid on {changed} item row(s).")
@@ -1691,7 +1690,7 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
     album_changed = False
     if repair_tracks:
         try:
-            plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+            plan_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
             if plan_res.get("ok"):
                 op_id = plan_res.get("operation_id")
                 updated_count = int(plan_res.get("updated") or 0)
@@ -1707,7 +1706,7 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
                     or int(plan_res.get("release_stamp_rows") or 0) > 0
                 )
                 if needs_apply:
-                    apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=write_tags)
+                    apply_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=write_tags)
                     if apply_res.get("ok"):
                         summary["track_rows"] = updated_count
                         summary["release_item_rows"] = int(apply_res.get("release_stamp_rows") or 0)
@@ -3512,7 +3511,7 @@ def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[s
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = beets_client.update_item_metadata(item_id, restore_fields, force_write_tags=False)
+        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=False)
         _require_attach_stage_success(result, "rollback metadata restore")
         _invalidate_lib_cache()
         log.append(f"  [rollback] Restored metadata for item {item_id}.")
@@ -3570,7 +3569,7 @@ def _compensate_committed_metadata_or_raise(
         raise downstream_exc
     log.append(f"{failed_stage} failed after a committed metadata update; rolling back metadata (operation_id={meta_op_id})...")
     try:
-        rollback_result = beets_client.rollback_album_metadata(meta_op_id)
+        rollback_result = composite_workflows.rollback_album_metadata(meta_op_id)
         _require_attach_stage_success(rollback_result, "album metadata rollback")
     except Exception as rollback_exc:
         # Compensating rollback itself failed: the album is left with
@@ -3603,7 +3602,7 @@ def _run_attach_relocation_stage(aid: int, meta_op_id: Optional[str], stage: str
     attempted in that case; a relocation failure is simply surfaced as-is,
     matching pre-existing behavior for that path."""
     try:
-        relocate_result = beets_client.relocate_album(aid)
+        relocate_result = composite_workflows.relocate_album(aid)
         _require_attach_stage_success(relocate_result, stage)
     except Exception as relocate_exc:
         _compensate_committed_metadata_or_raise(aid, meta_op_id, stage, relocate_exc, log)
@@ -3640,7 +3639,7 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = beets_client.update_item_metadata(item_id, restore_fields, force_write_tags=True)
+        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True)
         _require_attach_stage_success(result, "rollback recording identity restore")
         album_id = 0
         try:
@@ -3649,7 +3648,7 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
         except Exception:
             album_id = 0
         if album_id > 0:
-            relocate_result = beets_client.relocate_album(album_id)
+            relocate_result = composite_workflows.relocate_album(album_id)
             _require_attach_stage_success(relocate_result, "rollback recording relocation")
         _invalidate_lib_cache()
         log.append(f"  [rollback] Restored recording identity for item {item_id}.")
@@ -3819,7 +3818,7 @@ def _start_metadata_apply_transaction(transaction_id: str):
     def _do(log, cancel_event=None):
         transactions.update(transaction_id, status="Running", dry_run=False)
         try:
-            result = beets_client.update_item_metadata(item_id, fields)
+            result = composite_workflows.update_item_metadata(item_id, fields)
             _require_attach_stage_success(result, "metadata update")
             _invalidate_lib_cache()
             transactions.update(transaction_id, status="Completed", logs=list(log)[-500:], counts={"items": 1, "changes": len(changed_fields)})
@@ -3925,9 +3924,9 @@ def retag_item(iid):
         if has_mb and aid > 0:
             log.append("[1/3] Syncing metadata from MusicBrainz via engine transaction…")
             try:
-                p_res = beets_client.plan_album_mb_track_repair({"album_id": aid})
+                p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid})
                 if p_res.get("ok") and p_res.get("operation_id"):
-                    beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+                    composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
             except Exception as ex:
                 log.append(f"  WARN: mb_track_repair failed: {ex} — continuing")
         else:
@@ -3944,7 +3943,7 @@ def retag_item(iid):
                 # resync (current DB values -> file tags) regardless of
                 # whether any field differs, which is the actual "write
                 # current metadata to tags" semantics retag intends.
-                res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+                res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
                 if not res.get("ok"):
                     log.append(f"  WARN: tag write failed: {res.get('error')}")
             except Exception as ex:
@@ -3953,7 +3952,7 @@ def retag_item(iid):
         log.append("[3/3] Moving file into library structure via engine transaction…")
         if aid > 0:
             try:
-                res = beets_client.relocate_album(aid, mode="rename")
+                res = composite_workflows.relocate_album(aid, mode="rename")
                 if res.get("ok"):
                     log.append(f"✓ Relocated album {aid}")
             except Exception as ex:
@@ -3980,7 +3979,7 @@ def item_mbsubmit(iid: int):
         if not item:
             raise RuntimeError(f"Item {iid} not found in library")
         query = f"album_id:{item.album_id}" if item.album_id else f"id:{iid}"
-        res = beets_client.run_command("mbsubmit", [query], timeout=60.0)
+        res = composite_workflows.run_command("mbsubmit", [query], timeout=60.0)
         _require_attach_stage_success(res, "mbsubmit")
         output = _ANSI_RE.sub("", str(res.get("stdout") or res.get("output") or "")).strip()
         for line in output.splitlines():
@@ -3995,7 +3994,7 @@ def item_mbsubmit(iid: int):
 def album_mbsubmit(aid: int):
     """Run beet mbsubmit for an album; return submission text."""
     def _do(log, cancel_event=None):
-        res = beets_client.run_command("mbsubmit", [f"album_id:{aid}"], timeout=60.0)
+        res = composite_workflows.run_command("mbsubmit", [f"album_id:{aid}"], timeout=60.0)
         _require_attach_stage_success(res, "mbsubmit")
         output = _ANSI_RE.sub("", str(res.get("stdout") or res.get("output") or "")).strip()
         for line in output.splitlines():
@@ -4025,7 +4024,7 @@ def album_add_mbids(aid: int):
         }
         if mb_albumid and _MB_UUID_RE.match(mb_albumid):
             fields["mb_albumid"] = mb_albumid
-        meta_result = beets_client.update_album_metadata(aid, fields)
+        meta_result = composite_workflows.update_album_metadata(aid, fields)
         _require_attach_stage_success(meta_result, "album MBID metadata update")
         # update_album_metadata() commits through its own rollback-capable
         # album_metadata_repair_v1 transaction and returns that operation_id
@@ -4374,11 +4373,11 @@ def item_attach_recording(iid: int):
                     acceptance_failpoint = _s(payload.get("_acceptance_failpoint") or "").strip()
                     if acceptance_failpoint:
                         repair_payload["_acceptance_failpoint"] = acceptance_failpoint
-                    p_res = beets_client.plan_album_mb_track_repair(repair_payload)
+                    p_res = composite_workflows.plan_album_mb_track_repair(repair_payload)
                     if p_res.get("ok"):
                         op_id = p_res.get("operation_id")
                         if op_id:
-                            a_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
+                            a_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=True)
                             if a_res.get("ok"):
                                 applied = True
                             else:
@@ -4403,7 +4402,7 @@ def item_attach_recording(iid: int):
                     raise RuntimeError(f"Engine track repair transaction failed, refusing local fallback mutation: {safe_engine_error}")
 
                 if aid > 0:
-                    relocate_result = beets_client.relocate_album(aid, mode="rename")
+                    relocate_result = composite_workflows.relocate_album(aid, mode="rename")
                     _require_attach_stage_success(relocate_result, "attach recording relocation")
 
                 # Truthfulness: never claim the candidate-expected identity
@@ -5957,7 +5956,7 @@ def _album_folder_for_album_id(album_id: int) -> str:
     if not album_id:
         return ""
     try:
-        items = beets_client.find_all_items_by_album_id(int(album_id))
+        items = composite_workflows.find_all_items_by_album_id(int(album_id))
     except BeetsUnavailableError:
         raise
     except Exception:
@@ -6028,7 +6027,7 @@ def _source_audio_missing_track_scan(folder_path: str, existing_album_id: int,
 
     if not audio_files and folder_path:
         try:
-            inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
+            inspect_res = composite_workflows.inspect_import_source(folder_path, "reimport")
             if inspect_res.get("ok"):
                 inspect_evidence = inspect_res
         except Exception as ex:
@@ -6232,11 +6231,11 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         # function, and not aborting the preflight) -- a folder outside
         # MUSIC_ROOT/DOWNLOADS_ROOT is a normal, expected case here, not
         # necessarily an attack: this container frequently has no local
-        # media mount at all (see beets_client.inspect_import_source's own
+        # media mount at all (see composite_workflows.inspect_import_source's own
         # docstring), and the code a few lines below already has a real
         # fallback for exactly that case -- when the local scan finds
         # nothing, it asks the *engine* to inspect the source instead
-        # (beets_client.inspect_import_source), which independently
+        # (composite_workflows.inspect_import_source), which independently
         # re-validates folder_path against its own resolve_safe_path()
         # allowed-root policy on the engine side (backend/beets_control_agent.py
         # inspect_import_source()) regardless of what this function passes
@@ -6259,7 +6258,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     scan_exception_reason = ""
     if not audio_files and folder_path:
         try:
-            inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
+            inspect_res = composite_workflows.inspect_import_source(folder_path, "reimport")
             if inspect_res.get("ok"):
                 inspect_evidence = inspect_res
             else:
@@ -6360,7 +6359,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
 
     if existing_album_id:
         try:
-            rows = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            rows = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
             sorted_rows = sorted(
                 rows,
                 key=lambda r: (
@@ -6463,7 +6462,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     # through to review_required rather than silently reading local state.
     if existing_album_id:
         try:
-            album_row = beets_client.get_album(existing_album_id)
+            album_row = composite_workflows.get_album(existing_album_id)
         except Exception:
             album_row = None
         if album_row:
@@ -6684,7 +6683,7 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
         )
 
     try:
-        items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+        items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
         rows = sorted(
             items,
             key=lambda r: (int(r.get("disc") or 1), int(r.get("track") or 0), int(r.get("id") or 0)),
@@ -6698,7 +6697,7 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
                 continue
             if raw_path:
                 try:
-                    if beets_client.find_item_by_path(raw_path):
+                    if composite_workflows.find_item_by_path(raw_path):
                         continue
                 except (BeetsUnavailableError, BeetsError):
                     raise
@@ -6713,10 +6712,10 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
             )
         if not delete_ids:
             return 0
-        p_res = beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})
+        p_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": delete_ids})
         if not p_res.get("ok") or not p_res.get("operation_id"):
             raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for stale wanted rows")
-        app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+        app_res = composite_workflows.apply_playlist_media_cleanup(p_res["operation_id"])
         if not app_res.get("ok"):
             raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for stale wanted rows")
         label_text = ", ".join(labels[:5])
@@ -6817,7 +6816,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         # caller to reach for.
 
         try:
-            existing = beets_client.get_album(int(existing_album_id))
+            existing = composite_workflows.get_album(int(existing_album_id))
         except BeetsUnavailableError as ex:
             log.append(f"  [merge] Engine unavailable fetching album {existing_album_id}: {ex}")
             raise
@@ -6826,8 +6825,8 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
             return imported_album_id
 
         try:
-            existing_items = beets_client.find_all_items_by_album_id(int(existing_album_id))
-            imported_items = beets_client.find_all_items_by_album_id(int(imported_album_id))
+            existing_items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
+            imported_items = composite_workflows.find_all_items_by_album_id(int(imported_album_id))
         except BeetsUnavailableError as ex:
             log.append(f"  [merge] Engine unavailable fetching items: {ex}")
             raise
@@ -6936,7 +6935,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         if replace_rows:
             replace_ids = sorted({int(r["id"]) for r in replace_rows})
             try:
-                plan_res = beets_client.plan_bulk_import_replacement({
+                plan_res = composite_workflows.plan_bulk_import_replacement({
                     "existing_album_id": existing_album_id,
                     "old_item_ids": replace_ids,
                     "mappings": mapping_pairs,
@@ -6946,7 +6945,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 })
                 if plan_res.get("ok"):
                     op_id = plan_res.get("operation_id")
-                    apply_res = beets_client.apply_bulk_import_replacement(op_id)
+                    apply_res = composite_workflows.apply_bulk_import_replacement(op_id)
                     if apply_res.get("ok"):
                         log.append(
                             f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
@@ -6980,7 +6979,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 })
 
             try:
-                plan_res = beets_client.plan_existing_album_reconcile({
+                plan_res = composite_workflows.plan_existing_album_reconcile({
                     "imported_album_id": imported_album_id,
                     "existing_album_id": existing_album_id,
                     "dup_item_ids": dup_item_ids,
@@ -6991,7 +6990,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 })
                 if plan_res.get("ok"):
                     op_id = plan_res.get("operation_id")
-                    apply_res = beets_client.apply_existing_album_reconcile(op_id)
+                    apply_res = composite_workflows.apply_existing_album_reconcile(op_id)
                     if apply_res.get("ok"):
                         log.append(
                             f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
@@ -8760,7 +8759,7 @@ def _folder_import_track_count(source_folder: str, existing_album_id: int = 0) -
     """Best known track count for a source folder before selecting an MB release."""
     if existing_album_id:
         try:
-            items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
             if items:
                 return len(items)
         except BeetsUnavailableError:
@@ -8787,7 +8786,7 @@ def _folder_track_search_titles(source_folder: str, existing_album_id: int = 0,
     raw_entries: List[tuple] = []
     if existing_album_id:
         try:
-            items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
             sorted_items = sorted(
                 items,
                 key=lambda r: (
@@ -10626,7 +10625,7 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
     target_dir: Optional[Path] = None
     for aid in album_ids:
         try:
-            items = beets_client.find_all_items_by_album_id(int(aid))
+            items = composite_workflows.find_all_items_by_album_id(int(aid))
             for item in items:
                 raw = item.get("path")
                 if raw:
@@ -10673,7 +10672,7 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
 
     try:
         aid = album_ids[0] if album_ids else 0
-        plan_res = beets_client.plan_album_artwork({
+        plan_res = composite_workflows.plan_album_artwork({
             "mode": "move",
             "album_id": aid,
             "target_dir": str(target_dir),
@@ -10685,7 +10684,7 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
         op_id = plan_res.get("operation_id")
         if not op_id:
             return target_dir  # nothing eligible to move
-        apply_res = beets_client.apply_album_artwork(op_id)
+        apply_res = composite_workflows.apply_album_artwork(op_id)
         if not apply_res.get("ok"):
             log.append(f"  [artwork] Engine relocation apply failed: {apply_res.get('error')} — artwork left in source.")
             return target_dir
@@ -10914,7 +10913,7 @@ def _validate_import_source_evidence(evidence: Dict[str, Any], log: list, *, rej
     already-computed engine-side audio evidence instead of walking the
     source locally (SEC-002 Wave 8 ARCH-003: reimport_disk()'s source lives
     on the Beets engine, not the web manager, so audio properties must come
-    from beets_client.inspect_import_source(), not a local ffprobe/rglob
+    from composite_workflows.inspect_import_source(), not a local ffprobe/rglob
     pass this container cannot perform).
 
     Uses validate_audio_properties() directly -- the pure, already-existing
@@ -11302,14 +11301,14 @@ def _art_repair_attach_last_run(report: Dict[str, Any],
 
 def _album_art_clear_pointer(aid: int, album, log: List[str]) -> None:
     try:
-        beets_client.clear_album_artpath(aid)
+        composite_workflows.clear_album_artpath(aid)
     except Exception as ex:
         log.append(f"  artpath clear warning: {ex}")
 
 
 def _album_art_set_pointer(aid: int, path: str, log: List[str]) -> None:
     try:
-        beets_client.set_album_artpath(aid, _s(path))
+        composite_workflows.set_album_artpath(aid, _s(path))
     except Exception as ex:
         log.append(f"  artpath restore warning: {ex}")
 
@@ -11341,12 +11340,12 @@ def _album_art_quarantine_current(aid: int, album, trash_root: Path, log: List[s
         "candidates": cand_list,
     }
     try:
-        plan_res = beets_client.plan_album_artwork(payload)
+        plan_res = composite_workflows.plan_album_artwork(payload)
         if not plan_res.get("ok"):
             log.append(f"  art quarantine engine plan warning: {plan_res.get('error')}")
             return {"original_artpath": str(current) if current else "", "quarantined_art": [], "quarantined_count": 0}
         op_id = plan_res["operation_id"]
-        apply_res = beets_client.apply_album_artwork(op_id)
+        apply_res = composite_workflows.apply_album_artwork(op_id)
         if not apply_res.get("ok"):
             log.append(f"  art quarantine engine apply warning: {apply_res.get('error')}")
             return {"original_artpath": str(current) if current else "", "quarantined_art": [], "quarantined_count": 0}
@@ -11370,7 +11369,7 @@ def _album_art_restore_quarantine(aid: int, quarantine: Dict[str, Any], log: Lis
     op_id = quarantine.get("operation_id")
     if op_id:
         try:
-            res = beets_client.rollback_album_artwork(op_id)
+            res = composite_workflows.rollback_album_artwork(op_id)
             if res.get("ok"):
                 restored = int(res.get("files_restored") or 0)
                 log.append(f"  restored previous art: {restored} file(s)")
@@ -11620,13 +11619,13 @@ def album_fetch_embed_artwork(aid):
     real, standalone engineering not attempted in this pass (see
     docs/TECHNICAL_DEBT.md). This route is the actual, directly reachable
     production entry point for the new controlled family
-    (beets_client.fetch_and_embed_album_art -> POST
+    (composite_workflows.fetch_and_embed_album_art -> POST
     /albums/artwork/fetch/plan + /apply on the engine), used by
     reimport_disk's post-import artwork step and independently callable
     here so it has its own real HTTP surface, not just an internal
     function call."""
     def _do(log, cancel_event=None):
-        res = beets_client.fetch_and_embed_album_art(aid)
+        res = composite_workflows.fetch_and_embed_album_art(aid)
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "artwork fetch/embed failed")
         log.append(f"  Artwork saved: {res.get('artpath')}")
@@ -11740,7 +11739,7 @@ def album_delete_art(aid):
     if not album:
         return jsonify({"ok": False, "error": "Album not found"}), 404
     try:
-        result = beets_client.delete_album_art(aid)
+        result = composite_workflows.delete_album_art(aid)
     except BeetsError as ex:
         app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not delete album artwork."}), 400
@@ -11774,7 +11773,7 @@ def album_remove(aid):
         log.append(f"Removing album '{_s(album_obj.album)}' (id={aid}) via engine controlled transaction…")
 
         try:
-            plan_res = beets_client.plan_album_maintenance({
+            plan_res = composite_workflows.plan_album_maintenance({
                 "mode": "remove_tracks",
                 "album_id": aid,
                 "item_ids": item_ids,
@@ -11793,7 +11792,7 @@ def album_remove(aid):
             return
 
         try:
-            apply_res = beets_client.apply_album_maintenance(op_id)
+            apply_res = composite_workflows.apply_album_maintenance(op_id)
         except (BeetsUnavailableError, BeetsError) as ex:
             raise RuntimeError(f"engine unreachable: {ex}")
 
@@ -11823,7 +11822,7 @@ def album_rename(aid):
 
     def _do(log, cancel_event=None):
         log.append(f"Executing album rename for album {aid} via engine transaction…")
-        res = beets_client.relocate_album(aid, mode="rename")
+        res = composite_workflows.relocate_album(aid, mode="rename")
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Album rename failed")
         log.append(f"Album {aid} renamed and relocated to: {res.get('dest_dir')}")
@@ -11842,7 +11841,7 @@ def album_move_to_library(aid):
 
     def _do(log, cancel_event=None):
         log.append(f"Moving album {aid} into library via engine transaction…")
-        res = beets_client.move_album_to_library(aid)
+        res = composite_workflows.move_album_to_library(aid)
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Move to library failed")
         log.append(f"Album {aid} relocated to: {res.get('dest_dir')}")
@@ -11911,7 +11910,7 @@ def album_fix_metadata(aid):
                 # albumartist/year now go through the same controlled
                 # boundary -- allowlisted fields, Plan/Apply/Verify, and a
                 # real rollback path.
-                res = beets_client.update_album_metadata(aid, updates)
+                res = composite_workflows.update_album_metadata(aid, updates)
                 if res.get("ok"):
                     log.append(f"  Engine album fields updated: {updates}")
                 else:
@@ -11924,12 +11923,12 @@ def album_fix_metadata(aid):
         if new_mbid:
             log.append("Syncing metadata from MusicBrainz via engine transaction…")
             try:
-                plan_res = beets_client.plan_album_mb_track_repair({
+                plan_res = composite_workflows.plan_album_mb_track_repair({
                     "album_id": aid,
                     "mb_albumid": new_mbid,
                 })
                 if plan_res.get("ok") and plan_res.get("operation_id"):
-                    apply_res = beets_client.apply_album_mb_track_repair(plan_res["operation_id"])
+                    apply_res = composite_workflows.apply_album_mb_track_repair(plan_res["operation_id"])
                     if not apply_res.get("ok"):
                         log.append(f"  MB track repair failed: {apply_res.get('error')}")
                         failures.append(f"mb track repair: {apply_res.get('error')}")
@@ -11957,7 +11956,7 @@ def album_deduplicate(aid):
     SEC-002 / ARCH-003 Wave 24 final review (re-verified against the
     actual current source, not inferred from an earlier docstring):
     duplicate-file DELETION (Step 4 below) genuinely runs through the
-    engine transaction boundary -- `beets_client.plan_album_maintenance` /
+    engine transaction boundary -- `composite_workflows.plan_album_maintenance` /
     `apply_album_maintenance` with `mode: "deduplicate"`, not local
     filesystem mutation. What remains local is track MATCHING/renumbering
     (Step 1, `_match_tracks_from_mb` -> `_match_tracks_from_mb_shared`),
@@ -11994,7 +11993,7 @@ def album_deduplicate(aid):
         mb_albumid = mb_override
         if not mb_albumid:
             try:
-                album_data = beets_client.get_album(int(aid))
+                album_data = composite_workflows.get_album(int(aid))
                 mb_albumid = (album_data.get("mb_albumid") or "").strip() if album_data else ""
             except BeetsUnavailableError as ex:
                 log.append(f"ERROR: Engine unavailable reading album {aid}: {ex}")
@@ -12007,7 +12006,7 @@ def album_deduplicate(aid):
         # `beet mbsync` (Step 6) can read it from the DB.
         if mb_albumid and _MB_UUID_RE.match(mb_albumid):
             try:
-                beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+                composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
                 log.append(f"  Stored mb_albumid in DB")
             except Exception as ex:
                 log.append(f"  WARN storing mb_albumid: {ex}")
@@ -12039,7 +12038,7 @@ def album_deduplicate(aid):
             return int(m.group(1)) if m else 0
 
         try:
-            raw_items = beets_client.find_all_items_by_album_id(int(aid))
+            raw_items = composite_workflows.find_all_items_by_album_id(int(aid))
             sorted_items = sorted(
                 raw_items,
                 key=lambda it: (int(it.get("track") or 0), int(it.get("disc") or 1)),
@@ -12136,9 +12135,9 @@ def album_deduplicate(aid):
                 "to_delete": to_delete_payload,
             }
             try:
-                plan_res = beets_client.plan_album_maintenance(dedup_payload)
+                plan_res = composite_workflows.plan_album_maintenance(dedup_payload)
                 if plan_res.get("ok"):
-                    apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
+                    apply_res = composite_workflows.apply_album_maintenance(plan_res["operation_id"])
                     if apply_res.get("ok"):
                         log.append(f"  Removed {apply_res.get('deleted_items', len(to_delete))} duplicate item(s) via engine boundary")
                     else:
@@ -12153,7 +12152,7 @@ def album_deduplicate(aid):
 
         # ── Step 6: Relocate album via engine ──────────────────────────────────
         try:
-            rel_res = beets_client.relocate_album(aid, mode="rename")
+            rel_res = composite_workflows.relocate_album(aid, mode="rename")
             if rel_res.get("ok"):
                 log.append(f"  Album relocated to: {rel_res.get('dest_dir')}")
             else:
@@ -12164,7 +12163,7 @@ def album_deduplicate(aid):
         # ── Step 7: Final track listing ───────────────────────────────────────
         _invalidate_lib_cache()
         try:
-            final_items = beets_client.find_all_items_by_album_id(int(aid))
+            final_items = composite_workflows.find_all_items_by_album_id(int(aid))
             sorted_final = sorted(final_items, key=lambda it: int(it.get("track") or 0))
             log.append(f"Final: {len(sorted_final)} track(s)")
             for it in sorted_final:
@@ -12364,7 +12363,7 @@ def unmatched_tracks():
     limit = min(int(request.args.get("limit", 300)), 2000)
 
     try:
-        review_data = beets_client.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
+        review_data = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
     except BeetsUnavailableError as ex:
         app.logger.warning("unmatched_tracks: Beets engine unavailable: %s", ex)
         return jsonify({
@@ -12376,7 +12375,7 @@ def unmatched_tracks():
     tracks = []
     for a in review_data.get("albums", []):
         aid = int(a["id"])
-        items = beets_client.find_all_items_by_album_id(aid)
+        items = composite_workflows.find_all_items_by_album_id(aid)
         for item in items:
             if (item.get("mb_trackid") or "").strip():
                 continue
@@ -12463,7 +12462,7 @@ def match_album(aid):
 
         # 2 ── set mb_albumid on both items AND the album record
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
-        metadata_result = beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+        metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
         _require_attach_stage_success(metadata_result, "match album metadata update")
         meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
         log.append(f"  albums.mb_albumid set to {mb_albumid}")
@@ -12481,11 +12480,11 @@ def match_album(aid):
         # 4 ── sync all metadata (titles, track numbers, artist, year...) from MusicBrainz
         log.append("[4/6] Syncing metadata from MusicBrainz (mbsync) ...")
         try:
-            repair_plan = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            repair_plan = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
             _require_attach_stage_success(repair_plan, "match album MB track repair plan")
             operation_id = repair_plan.get("operation_id")
             if operation_id:
-                repair_apply = beets_client.apply_album_mb_track_repair(operation_id, write_tags=True)
+                repair_apply = composite_workflows.apply_album_mb_track_repair(operation_id, write_tags=True)
                 _require_attach_stage_success(repair_apply, "match album MB track repair apply")
         except Exception as repair_exc:
             _compensate_committed_metadata_or_raise(aid, meta_op_id, "match album MB track repair", repair_exc, log)
@@ -12495,7 +12494,7 @@ def match_album(aid):
 
         # 5 ── write tags to audio files
         log.append("[5/6] Writing tags to audio files ...")
-        write_result = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+        write_result = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
         _require_attach_stage_success(write_result, "match album tag write")
         # A relocation failure after this point should compensate the most
         # recently committed metadata operation (this tag write), not the
@@ -12930,10 +12929,10 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
         return False
 
     try:
-        album_row = beets_client.get_album(aid)
+        album_row = composite_workflows.get_album(aid)
         if not album_row or _s(album_row.get("mb_albumid")).strip():
             return False
-        rows = beets_client.find_all_items_by_album_id(aid)
+        rows = composite_workflows.find_all_items_by_album_id(aid)
     except BeetsUnavailableError:
         raise
     except Exception:
@@ -12967,12 +12966,12 @@ def _delete_review_source_folder(src_path: str, log: list,
         "album_id": album_id,
         "confirmed_wrong_library_folder": confirmed_wrong_library_folder,
     }
-    plan_res = beets_client.plan_import_review_cleanup(plan_req)
+    plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
     if not plan_res.get("ok"):
         raise ValueError(plan_res.get("error", "Failed to create folder deletion plan."))
 
     op_id = plan_res.get("operation_id")
-    apply_res = beets_client.apply_import_review_cleanup(op_id)
+    apply_res = composite_workflows.apply_import_review_cleanup(op_id)
     if not apply_res.get("ok"):
         raise ValueError(apply_res.get("error", "Failed to apply folder deletion plan."))
 
@@ -13128,12 +13127,12 @@ def cleanup_import_review_files():
         "allow_delete": allow_delete,
     }
     try:
-        plan_res = beets_client.plan_import_review_cleanup(plan_req)
+        plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
         if not plan_res.get("ok"):
             return jsonify({"ok": False, "error": plan_res.get("error", "Failed to create file cleanup plan."), "log": log}), 400
 
         op_id = plan_res.get("operation_id")
-        apply_res = beets_client.apply_import_review_cleanup(op_id)
+        apply_res = composite_workflows.apply_import_review_cleanup(op_id)
         if not apply_res.get("ok"):
             return jsonify({"ok": False, "error": apply_res.get("error", "Failed to apply cleanup plan."), "log": apply_res.get("log", log)}), 400
 
@@ -13206,7 +13205,7 @@ def plan_album_cleanup_route(album_id: int = 0):
         return jsonify({"ok": False, "error": "album_id required"}), 400
 
     try:
-        res = beets_client.plan_album_cleanup(target_album_id)
+        res = composite_workflows.plan_album_cleanup(target_album_id)
         status_code = 200 if res.get("ok") else 400
         return jsonify(res), status_code
     except BeetsUnavailableError as ex:
@@ -13226,7 +13225,7 @@ def apply_album_cleanup_route():
         return jsonify({"ok": False, "error": "operation_id required"}), 400
 
     try:
-        res = beets_client.apply_album_cleanup(op_id)
+        res = composite_workflows.apply_album_cleanup(op_id)
         if not res.get("ok"):
             kind, message = _classify_album_cleanup_apply_failure(res)
             return jsonify({
@@ -13308,7 +13307,7 @@ def _delete_album_ids_from_db(album_ids: list, log: list, *,
     removed_albums = 0
     for aid in ids:
         try:
-            res = beets_client.delete_album(aid, delete_files=delete_files)
+            res = composite_workflows.delete_album(aid, delete_files=delete_files)
         except BeetsUnavailableError as ex:
             log.append(f"  Engine unavailable during failed-import cleanup for album_id {aid}: {ex}")
             continue
@@ -13340,7 +13339,7 @@ def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list)
     """Delete DB items for one album whose files are still under a staging folder.
 
     Wave 25 round (independent review): this previously (1) deleted each
-    item's media file via the generic, DB-unaware beets_client.delete_file()
+    item's media file via the generic, DB-unaware composite_workflows.delete_file()
     -- which /files/delete will happily perform on a real library-root
     path, with no Plan/Apply/Verify/rollback -- and then (2) called
     plan_folder_cleanup(action="delete_stale_items", item_ids=...), a
@@ -13358,7 +13357,7 @@ def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list)
         return 0
     folder = Path(folder_path).resolve(strict=False)
     try:
-        rows = beets_client.find_all_items_by_album_id(int(album_id))
+        rows = composite_workflows.find_all_items_by_album_id(int(album_id))
     except BeetsUnavailableError as ex:
         log.append(f"  Staged-file cleanup failed: engine unavailable: {ex}")
         raise
@@ -13384,10 +13383,10 @@ def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list)
     if not delete_ids:
         return 0
     try:
-        p_res = beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})
+        p_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": delete_ids})
         if not p_res.get("ok") or not p_res.get("operation_id"):
             raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for staged items")
-        app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+        app_res = composite_workflows.apply_playlist_media_cleanup(p_res["operation_id"])
         if not app_res.get("ok"):
             raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for staged items")
     except Exception as ex:
@@ -13418,7 +13417,7 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
         if folder == downloads_root:
             return False
         if folder.exists():
-            beets_client.delete_file(str(folder))
+            composite_workflows.delete_file(str(folder))
             log.append(f"  [import] Removed failed staging folder: {folder}")
             return True
     except Exception as ex:
@@ -13456,13 +13455,13 @@ def _strip_year_from_album_name(aid: int, log: list) -> str:
     Returns the (possibly cleaned) album name.
     Updates metadata via the engine-owned album_metadata_repair_v1 transaction family."""
     try:
-        album_dict = beets_client.get_album(aid)
+        album_dict = composite_workflows.get_album(aid)
         if not album_dict:
             return ""
         raw_name = str(album_dict.get("album") or "")
         clean_name = _YEAR_SFXRE.sub("", raw_name).strip()
         if clean_name and clean_name != raw_name:
-            update_res = beets_client.update_album_metadata(aid, {"album": clean_name})
+            update_res = composite_workflows.update_album_metadata(aid, {"album": clean_name})
             _require_attach_stage_success(update_res, "album year-strip metadata update")
             log.append(f"  ↳ Cleaned album name: {raw_name!r} → {clean_name!r}")
         elif not clean_name and raw_name:
@@ -13657,7 +13656,7 @@ def _replace_album_art_bytes(album_id: int, data: bytes, *, source: str,
     _validate_album_art_bytes(data)
     encoded = base64.b64encode(data).decode("ascii")
     try:
-        result = beets_client.replace_album_art(
+        result = composite_workflows.replace_album_art(
             album_id,
             encoded,
             source=source,
@@ -15914,7 +15913,7 @@ def batch_ai_suggest():
 
     def _do(log, cancel_event=None):
         try:
-            unmatched_res = beets_client.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=False)
+            unmatched_res = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=False)
             album_ids = [int(r["id"]) for r in unmatched_res.get("albums", [])]
         except BeetsUnavailableError as ex:
             raise RuntimeError(f"Could not load unlinked albums: Beets engine unavailable: {ex}")
@@ -16149,19 +16148,19 @@ def album_merge_split_album(target_aid):
             f"({len(item_ids)} selected row(s))"
         )
         try:
-            target = beets_client.get_album(target_id)
-            source = beets_client.get_album(source_id)
+            target = composite_workflows.get_album(target_id)
+            source = composite_workflows.get_album(source_id)
             if not target:
                 raise RuntimeError(f"Target album_id {target_id} was not found")
             if not source:
                 raise RuntimeError(f"Source album_id {source_id} was not found")
 
-            target_rows = beets_client.find_all_items_by_album_id(target_id)
+            target_rows = composite_workflows.find_all_items_by_album_id(target_id)
             target_dir = _album_db_folder_from_item_paths(target_rows)
             if not target_dir:
                 raise RuntimeError(f"Could not resolve the target folder for album_id {target_id}")
 
-            source_items = beets_client.find_all_items_by_album_id(source_id)
+            source_items = composite_workflows.find_all_items_by_album_id(source_id)
             source_items_by_id = {int(it["id"]): it for it in source_items if it.get("id")}
             selected = [source_items_by_id[iid] for iid in item_ids if iid in source_items_by_id]
             found_ids = {int(row["id"]) for row in selected}
@@ -16213,7 +16212,7 @@ def album_merge_split_album(target_aid):
         # actually reachable from the web-manager container in the
         # supported two-service deployment, so that backup step never
         # really worked there anyway.
-        merge_res = beets_client.merge_split_album_items(target_id, source_id, move_ids)
+        merge_res = composite_workflows.merge_split_album_items(target_id, source_id, move_ids)
         if not merge_res.get("ok"):
             raise RuntimeError(merge_res.get("error") or "Engine rejected split-album merge")
         source_album_deleted = bool(merge_res.get("source_album_deleted"))
@@ -16439,7 +16438,7 @@ def _library_album_ids_for_folder(folder_path: str) -> List[int]:
     if not raw or "\x00" in raw or "\\" in raw:
         return []
     try:
-        res = beets_client.resolve_folder_to_albums(raw)
+        res = composite_workflows.resolve_folder_to_albums(raw)
         return res.get("album_ids", [])
     except BeetsUnavailableError:
         raise
@@ -16455,10 +16454,10 @@ def _library_album_ids_for_musicbrainz(mb_albumid: str = "", mb_releasegroupid: 
     album_ids: List[int] = []
     try:
         if release_id:
-            albums = beets_client.find_all_albums_by_mb_albumid(release_id)
+            albums = composite_workflows.find_all_albums_by_mb_albumid(release_id)
             album_ids.extend(int(a["id"]) for a in albums if a.get("id"))
         if release_group_id:
-            rg_albums = beets_client.find_all_albums_by_releasegroupid(release_group_id)
+            rg_albums = composite_workflows.find_all_albums_by_releasegroupid(release_group_id)
             for a in rg_albums[:25]:
                 aid = int(a.get("id") or 0)
                 if aid and aid not in album_ids:
@@ -16478,10 +16477,10 @@ def _review_album_is_resolved(album_id: int) -> bool:
         return False
 
     try:
-        album_row = beets_client.get_album(aid)
+        album_row = composite_workflows.get_album(aid)
         if not album_row:
             return True
-        rows = beets_client.find_all_items_by_album_id(aid)
+        rows = composite_workflows.find_all_items_by_album_id(aid)
     except BeetsUnavailableError:
         raise
     except Exception:
@@ -16497,7 +16496,7 @@ def _review_album_is_resolved(album_id: int) -> bool:
     if not _s(album_row.get("mb_albumid")).strip():
         return False
     try:
-        return all(beets_client.find_item_by_path(raw_path) is not None for raw_path in music_rows)
+        return all(composite_workflows.find_item_by_path(raw_path) is not None for raw_path in music_rows)
     except BeetsUnavailableError:
         raise
     except Exception:
@@ -16973,7 +16972,7 @@ def import_review_queue():
                 pass
 
     try:
-        unmatched_data = beets_client.get_unmatched_review_items(limit=limit, offset=0, include_singletons=True)
+        unmatched_data = composite_workflows.get_unmatched_review_items(limit=limit, offset=0, include_singletons=True)
     except BeetsUnavailableError as ex:
         app.logger.warning("import_review_queue: Beets engine unavailable: %s", ex)
         return jsonify({
@@ -19360,7 +19359,7 @@ def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -
 
     if existing_album_id:
         try:
-            items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
             sorted_items = sorted(
                 items,
                 key=lambda it: (
@@ -21355,7 +21354,7 @@ def import_folder_with_id():
         # to import" phrase-matching fallback (_delete_if_already_in_library
         # searches raw beet CLI stdout for phrases like "already in the
         # library"). That mechanism predates the import_folder_v1 engine
-        # migration -- the controlled beets_client.plan_import_folder /
+        # migration -- the controlled composite_workflows.plan_import_folder /
         # apply_import_folder path no longer exposes raw beet stdout to
         # app.py at all, so there is no text left to phrase-match, and
         # fabricating a signal here would be dishonest. Defaulting both
@@ -21391,9 +21390,9 @@ def import_folder_with_id():
             mb_albumid = resolved_release
 
         def _find_ids_in_db(path_prefix: str, since: float = 0.0):
-            """Return (album_ids, item_ids) from beets SQLite via beets_client."""
+            """Return (album_ids, item_ids) from beets SQLite via composite_workflows."""
             try:
-                res = beets_client.resolve_folder_to_albums(path_prefix, since=since if since else None)
+                res = composite_workflows.resolve_folder_to_albums(path_prefix, since=since if since else None)
                 return res.get("album_ids", []), res.get("item_ids", [])
             except Exception as ex:
                 log.append(f"  DB query warning: {ex}")
@@ -21406,7 +21405,7 @@ def import_folder_with_id():
                 raise RuntimeError(mb.get("error") or "MusicBrainz release lookup failed")
             mb_tracks = mb.get("tracks") or []
             try:
-                raw_items = beets_client.find_all_items_by_album_id(album_db_id)
+                raw_items = composite_workflows.find_all_items_by_album_id(album_db_id)
                 rows = sorted(
                     raw_items,
                     key=lambda it: (
@@ -21416,7 +21415,7 @@ def import_folder_with_id():
                         int(it.get("id") or 0),
                     ),
                 )
-                album_row = beets_client.get_album(album_db_id)
+                album_row = composite_workflows.get_album(album_db_id)
             except Exception as ex:
                 raise RuntimeError(f"Could not validate imported album: {ex}")
 
@@ -21575,7 +21574,7 @@ def import_folder_with_id():
                 log.append("  Failed import cleanup skipped: source folder is not safely preserved")
                 return
             try:
-                rows = beets_client.find_all_items_by_album_id(album_db_id)
+                rows = composite_workflows.find_all_items_by_album_id(album_db_id)
                 if not rows:
                     return
                 stale = [
@@ -21586,10 +21585,10 @@ def import_folder_with_id():
                     log.append(
                         "  Failed import cleanup skipped: album rows were not created by this job")
                     return
-                p_res = beets_client.plan_album_cleanup(album_db_id)
+                p_res = composite_workflows.plan_album_cleanup(album_db_id)
                 if not p_res.get("ok") or not p_res.get("operation_id"):
                     raise RuntimeError(p_res.get("error") or f"Engine plan_album_cleanup failed for album {album_db_id}")
-                app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
+                app_res = composite_workflows.apply_album_cleanup(p_res["operation_id"])
                 if not app_res.get("ok"):
                     raise RuntimeError(app_res.get("error") or f"Engine apply_album_cleanup failed for album {album_db_id}")
                 deleted_files = len(app_res.get("deleted") or [])
@@ -21603,7 +21602,7 @@ def import_folder_with_id():
                 return False
             source_root = Path(folder_path).resolve(strict=False)
             try:
-                rows = beets_client.find_all_items_by_album_id(album_db_id)
+                rows = composite_workflows.find_all_items_by_album_id(album_db_id)
                 if not rows:
                     return False
                 for row in rows:
@@ -21629,10 +21628,10 @@ def import_folder_with_id():
                             f"item path is outside source folder ({fpath})"
                         )
                         return False
-                p_res = beets_client.plan_album_cleanup(album_db_id)
+                p_res = composite_workflows.plan_album_cleanup(album_db_id)
                 if not p_res.get("ok") or not p_res.get("operation_id"):
                     raise RuntimeError(f"Engine plan_album_cleanup failed for album {album_db_id}")
-                app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
+                app_res = composite_workflows.apply_album_cleanup(p_res["operation_id"])
                 if not app_res.get("ok"):
                     raise RuntimeError(f"Engine apply_album_cleanup failed for album {album_db_id}")
                 log.append(
@@ -21930,7 +21929,7 @@ def import_folder_with_id():
         # authorization to an immutable source manifest digest (re-checked
         # at Apply), this already-resolved concrete Release ID + Release
         # Group, and best-effort track/fingerprint alignment.
-        plan_res = beets_client.plan_confirmed_import({
+        plan_res = composite_workflows.plan_confirmed_import({
             "source_folder": import_folder_path,
             "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
@@ -21955,7 +21954,7 @@ def import_folder_with_id():
         # visible to whoever is debugging a real failure, including the
         # Docker acceptance script's own [FAIL] report.
         try:
-            apply_res = beets_client.apply_confirmed_import(
+            apply_res = composite_workflows.apply_confirmed_import(
                 plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
             )
         except (BeetsError, BeetsUnavailableError) as ex:
@@ -22032,10 +22031,10 @@ def import_folder_with_id():
         artist_guess = Path(folder_path).parent.name
         if not album_ids and not item_ids:
             try:
-                found_items = beets_client.find_items_by_query(f"album:{album_guess}", limit=200)
+                found_items = composite_workflows.find_items_by_query(f"album:{album_guess}", limit=200)
                 if not found_items and artist_guess.lower() not in {
                         "music","torrents","downloads","data","failed_imports"}:
-                    found_items = beets_client.find_items_by_query(f"album:{album_guess} artist:{artist_guess}", limit=200)
+                    found_items = composite_workflows.find_items_by_query(f"album:{album_guess} artist:{artist_guess}", limit=200)
                 for row in found_items:
                     row_aid = row.get("album_id")
                     row_id = row.get("id")
@@ -22051,7 +22050,7 @@ def import_folder_with_id():
         # F: search by the target mb_albumid itself (album was already correctly tagged)
         if not album_ids and not item_ids:
             try:
-                _e_rows = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
+                _e_rows = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
                 for _row in _e_rows:
                     _aid = int(_row.get("id") or 0)
                     if _aid and _aid not in album_ids:
@@ -22064,7 +22063,7 @@ def import_folder_with_id():
         # G: LIKE fuzzy on album name (handles "(Taped Over)" suffix mismatches)
         if not album_ids and not item_ids:
             try:
-                found_items = beets_client.find_items_by_query(f"album:{album_guess}", limit=200)
+                found_items = composite_workflows.find_items_by_query(f"album:{album_guess}", limit=200)
                 if found_items and artist_guess.lower() not in {
                         "music","torrents","downloads","data","failed_imports","ye","kanye"}:
                     found_items = [r for r in found_items if r.get("album_id") is not None]
@@ -22084,9 +22083,9 @@ def import_folder_with_id():
         if not album_ids and not item_ids and already_present and \
                 artist_guess.lower() not in {"music","torrents","downloads","data","failed_imports"}:
             try:
-                found_items = beets_client.find_items_by_query(f"albumartist:{artist_guess}", limit=50)
+                found_items = composite_workflows.find_items_by_query(f"albumartist:{artist_guess}", limit=50)
                 if not found_items:
-                    found_items = beets_client.find_items_by_query(f"artist:{artist_guess}", limit=50)
+                    found_items = composite_workflows.find_items_by_query(f"artist:{artist_guess}", limit=50)
                 for row in found_items:
                     row_aid = row.get("album_id")
                     if row_aid and row_aid not in album_ids:
@@ -22098,7 +22097,7 @@ def import_folder_with_id():
                         try:
                             best, best_score = album_ids[0], 0
                             for aid in album_ids:
-                                _ag_row = beets_client.get_album(aid)
+                                _ag_row = composite_workflows.get_album(aid)
                                 _ag_name = (_ag_row.get("album") if _ag_row else "") or ""
                                 from difflib import SequenceMatcher as _SM2
                                 sc = _SM2(None, album_guess.lower(),
@@ -22120,7 +22119,7 @@ def import_folder_with_id():
             # already moved to the library by a previous import.
             if already_present and mb_albumid:
                 try:
-                    _h_rows = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
+                    _h_rows = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
                     for _row in _h_rows:
                         _aid = int(_row.get("id") or 0)
                         if _aid and _aid not in album_ids:
@@ -22265,7 +22264,7 @@ def import_folder_with_id():
                 return 0
             updated = 0
             try:
-                item_rows = beets_client.find_all_items_by_album_id(album_db_id)
+                item_rows = composite_workflows.find_all_items_by_album_id(album_db_id)
             except Exception as ex:
                 log.append(f"  Verified review mapping warning: {ex}")
                 return 0
@@ -22292,7 +22291,7 @@ def import_folder_with_id():
                     if not clean:
                         continue
                     try:
-                        res = beets_client.update_item_metadata(
+                        res = composite_workflows.update_item_metadata(
                             int(item_row["id"]),
                             clean,
                             force_write_tags=False,
@@ -22324,7 +22323,7 @@ def import_folder_with_id():
             if album_db_id is not None:
                 aid = int(album_db_id)
                 try:
-                    beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+                    composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
                 except Exception as _mbe:
                     log.append(f"  update_album_metadata warning: {_mbe}")
 
@@ -22343,9 +22342,9 @@ def import_folder_with_id():
 
                 log.append("[3/4] Syncing album metadata from MusicBrainz via engine transaction…")
                 try:
-                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid})
+                    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid})
                     if p_res.get("ok") and p_res.get("operation_id"):
-                        beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+                        composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
                 except Exception as _se:
                     log.append(f"  mbsync transaction warning: {_se}")
 
@@ -22356,7 +22355,7 @@ def import_folder_with_id():
                     # Wave 24 final review section 30: force_write_tags
                     # requests a real Beets Item.write() resync -- an
                     # empty diff-based update here was a silent no-op.
-                    res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+                    res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
                     if not res.get("ok"):
                         log.append(f"  write tags warning: {res.get('error')}")
                 except Exception as _we:
@@ -22364,7 +22363,7 @@ def import_folder_with_id():
 
                 log.append("[4/4] Renaming files to match library path template via engine transaction…")
                 try:
-                    rel_res = beets_client.relocate_album(aid, mode="rename")
+                    rel_res = composite_workflows.relocate_album(aid, mode="rename")
                     if rel_res.get("ok"):
                         log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
                 except Exception as _me:
@@ -22391,7 +22390,7 @@ def import_folder_with_id():
                         continue
                     except Exception:
                         pass
-                    beets_client.delete_file(str(resolved_src))
+                    composite_workflows.delete_file(str(resolved_src))
                     removed_selected += 1
                 except Exception as ex:
                     log.append(f"  [cleanup] WARN could not remove imported source file {src}: {ex}")
@@ -22443,10 +22442,10 @@ def import_folder_with_id():
                         # remove_empty is the correct action: Apply only
                         # rmdir()s if the directory is verified truly empty,
                         # failing closed (not raising) otherwise.
-                        p_cl = beets_client.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
+                        p_cl = composite_workflows.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
                         if not p_cl.get("ok") or not p_cl.get("operation_id"):
                             raise RuntimeError(p_cl.get("error") or f"Engine plan_folder_cleanup failed for {src_dir}")
-                        app_cl = beets_client.apply_folder_cleanup(p_cl["operation_id"])
+                        app_cl = composite_workflows.apply_folder_cleanup(p_cl["operation_id"])
                         if not app_cl.get("ok"):
                             raise RuntimeError(app_cl.get("error") or f"Engine apply_folder_cleanup failed for {src_dir}")
                         log.append(f"  [cleanup] Source folder removed: {src_dir.name}")
@@ -22455,7 +22454,7 @@ def import_folder_with_id():
 
         if selected_subset_import and import_folder_path != source_folder_path:
             try:
-                beets_client.delete_file(import_folder_path)
+                composite_workflows.delete_file(import_folder_path)
             except Exception as ex:
                 log.append(f"  [cleanup] WARN staging cleanup skipped: {ex}")
         for aid in album_ids:
@@ -22586,7 +22585,7 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
 
     ARCH-003 Wave 33 continuation: migrated from raw local
     UPDATE items/UPDATE albums SQL onto album_mb_track_repair_v1 (through
-    beets_client), using the target_tracks/acoustid_verify/zero_unmatched/
+    composite_workflows), using the target_tracks/acoustid_verify/zero_unmatched/
     allow_establish_release_group/stamp_release_metadata options built
     this same wave specifically to close this migration, and the family's
     alignment procedure (backend/mb_alignment.greedy_album_track_alignment),
@@ -22626,7 +22625,7 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
         payload["zero_unmatched"] = True
 
     try:
-        plan_res = beets_client.plan_album_mb_track_repair(payload)
+        plan_res = composite_workflows.plan_album_mb_track_repair(payload)
     except Exception as ex:
         log.append(f"  MB fetch warning: {ex}")
         return -1
@@ -22660,7 +22659,7 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
     )
 
     try:
-        apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
+        apply_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=True)
     except Exception as ex:
         log.append(f"  DB write warning: {ex}")
         return 0
@@ -22746,7 +22745,7 @@ def reimport_disk():
     # the same way) and returns only the canonical path plus bounded audio
     # evidence, never letting the caller pick its own trusted root.
     try:
-        import_source_evidence = beets_client.inspect_import_source(aldir, operation="reimport")
+        import_source_evidence = composite_workflows.inspect_import_source(aldir, operation="reimport")
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed."}), 502
     except BeetsUnavailableError:
@@ -22871,19 +22870,19 @@ def reimport_disk():
                         f"Existing album repair did not match enough tracks: "
                         f"{matched}/{expected_tracks}"
                     )
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
+            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
-            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
             if not app_res.get("ok"):
                 raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
 
             log.append("[3/3] Writing tags and moving existing album...")
             _strip_year_from_album_name(aid, log)
-            up_res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+            up_res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
             if not up_res.get("ok"):
                 raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
-            rel_res = beets_client.relocate_album(aid, mode="rename")
+            rel_res = composite_workflows.relocate_album(aid, mode="rename")
             if not rel_res.get("ok"):
                 raise RuntimeError(f"Engine relocate_album failed for album {aid}")
             _repair_album_mbid_sticking_once(
@@ -22900,15 +22899,15 @@ def reimport_disk():
 
         if existing_album_id:
             try:
-                exists = beets_client.get_album(existing_album_id)
+                exists = composite_workflows.get_album(existing_album_id)
                 if not exists:
                     replacement_id = None
                     if mb_albumid:
-                        mb_matches = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
+                        mb_matches = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
                         if mb_matches:
                             replacement_id = int(mb_matches[0]["id"])
                     if not replacement_id and _guess_album:
-                        q_albums = beets_client.find_albums_by_query(f"album:{_guess_album}")
+                        q_albums = composite_workflows.find_albums_by_query(f"album:{_guess_album}")
                         if q_albums:
                             replacement_id = int(q_albums[0]["id"])
                     if replacement_id:
@@ -23168,7 +23167,7 @@ def reimport_disk():
                             if _disk_audio:
                                 _db_abs: set = set()
                                 try:
-                                    _existing_items = beets_client.find_all_items_by_album_id(existing_album_id)
+                                    _existing_items = composite_workflows.find_all_items_by_album_id(existing_album_id)
                                     for _it in _existing_items:
                                         _p = _s(_it.get("path"))
                                         _abs = (
@@ -23374,7 +23373,7 @@ def reimport_disk():
                         while new_path.exists():
                             new_path = f.parent / f"{base_new}.{n}{ext_new}"
                             n += 1
-                        beets_client.move_file(str(f), str(new_path))
+                        composite_workflows.move_file(str(f), str(new_path))
                         log.append(f"  Pre-rename: {f.name!r} → {new_path.name!r}")
                         renamed_count += 1
         except Exception as ex:
@@ -23396,7 +23395,7 @@ def reimport_disk():
                     existing_album_id, mb_albumid, wanted_tracks, log)
         else:
             try:
-                res0 = beets_client.resolve_folder_to_albums(aldir)
+                res0 = composite_workflows.resolve_folder_to_albums(aldir)
                 orphan_ids: list = [int(x) for x in res0.get("item_ids", [])]
                 orphan_album_ids: set = {int(x) for x in res0.get("album_ids", [])}
                 if orphan_ids:
@@ -23410,19 +23409,19 @@ def reimport_disk():
                     # "quarantine these items' files (if still present) and
                     # retire their DB rows -- and any album row left empty
                     # -- as one transaction."
-                    p_res = beets_client.plan_playlist_media_cleanup({"item_ids": orphan_ids})
+                    p_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": orphan_ids})
                     if not p_res.get("ok") or not p_res.get("operation_id"):
                         raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for orphan items")
-                    app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+                    app_res = composite_workflows.apply_playlist_media_cleanup(p_res["operation_id"])
                     if not app_res.get("ok"):
                         raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for orphan items")
                     log.append(f"  Cleared {len(orphan_ids)} existing DB item(s) for this folder "
                                f"(album_ids: {sorted(orphan_album_ids)})")
                 # Remove album rows that now have zero items
                 for aid0 in orphan_album_ids:
-                    p_ac = beets_client.plan_album_cleanup(aid0)
+                    p_ac = composite_workflows.plan_album_cleanup(aid0)
                     if p_ac.get("ok") and p_ac.get("operation_id"):
-                        beets_client.apply_album_cleanup(p_ac["operation_id"])
+                        composite_workflows.apply_album_cleanup(p_ac["operation_id"])
             except Exception as ex:
                 log.append(f"  DB cleanup warning: {ex}")
 
@@ -23463,7 +23462,7 @@ def reimport_disk():
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("cancelled")
         try:
-            atomic_res = beets_client.reimport_source(
+            atomic_res = composite_workflows.reimport_source(
                 aldir,
                 expected_source_signature=import_source_evidence.get("source_signature"),
                 expected_deterministic_identity=expected_identity,
@@ -23548,15 +23547,15 @@ def reimport_disk():
         else:
             # Soft-timeout recovery: the mutation call itself reported a
             # timeout, so fall back to a direct, deterministic lookup by
-            # mb_albumid via beets_client (the same authoritative key the
+            # mb_albumid via composite_workflows (the same authoritative key the
             # engine's own atomic endpoint uses), never a heuristic path/name guess.
             time.sleep(1)
             try:
-                mb_albums = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
+                mb_albums = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
                 for malb in mb_albums:
                     m_aid = int(malb.get("id") or 0)
                     if m_aid:
-                        items = beets_client.find_all_items_by_album_id(m_aid)
+                        items = composite_workflows.find_all_items_by_album_id(m_aid)
                         if items:
                             album_ids = [m_aid]
                             strategy = "post-timeout mb_albumid lookup"
@@ -23589,10 +23588,10 @@ def reimport_disk():
                         f"{labels or len(still_missing_before_retag)}"
                     )
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
+            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
-            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
             if not app_res.get("ok"):
                 raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
             log.append(f"  Set albums.mb_albumid (id={aid})")
@@ -23641,10 +23640,10 @@ def reimport_disk():
                     replace_existing_item_ids=replace_existing_item_ids)
                 if merged_aid != aid:
                     aid = merged_aid
-                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
+                    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
                     if not p_res.get("ok") or not p_res.get("operation_id"):
                         raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid} after merge")
-                    app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+                    app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
                     if not app_res.get("ok"):
                         raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid} after merge")
                     log.append(f"  Set albums.mb_albumid (id={aid}) after merge")
@@ -23667,7 +23666,7 @@ def reimport_disk():
                 )
             actual_tracks = 0
             try:
-                actual_tracks = len(beets_client.find_all_items_by_album_id(aid))
+                actual_tracks = len(composite_workflows.find_all_items_by_album_id(aid))
             except Exception:
                 pass
             if existing_album_id and aid == existing_album_id and wanted_tracks:
@@ -23757,22 +23756,22 @@ def reimport_disk():
                 except Exception:
                     pass
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
+            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
-            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
             if not app_res.get("ok"):
                 raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
 
             # ── Restore albumartist if mbsync changed it ──────────────────────
             if _intended_albumartist:
                 try:
-                    _cur_album = beets_client.get_album(aid)
+                    _cur_album = composite_workflows.get_album(aid)
                     _cur_aa = (_cur_album.get("albumartist") if _cur_album else "") or ""
                 except Exception:
                     _cur_aa = ""
                 if _cur_aa != _intended_albumartist:
-                    up_aa = beets_client.update_album_metadata(aid, {"albumartist": _intended_albumartist}, force_write_tags=True)
+                    up_aa = composite_workflows.update_album_metadata(aid, {"albumartist": _intended_albumartist}, force_write_tags=True)
                     if not up_aa.get("ok"):
                         raise RuntimeError(f"Engine update albumartist failed for album {aid}")
                     log.append(
@@ -23782,10 +23781,10 @@ def reimport_disk():
             # path template $album (%left{$year,4}) doesn't produce "Album (2022) (2022)"
             _strip_year_from_album_name(aid, log)
 
-            up_res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+            up_res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
             if not up_res.get("ok"):
                 raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
-            rel_res = beets_client.relocate_album(aid, mode="rename")
+            rel_res = composite_workflows.relocate_album(aid, mode="rename")
             if not rel_res.get("ok"):
                 raise RuntimeError(f"Engine relocate_album failed for album {aid}")
             log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
@@ -23800,7 +23799,7 @@ def reimport_disk():
 
             # Report final filenames
             try:
-                items3 = beets_client.find_all_items_by_album_id(aid)
+                items3 = composite_workflows.find_all_items_by_album_id(aid)
                 rows3 = sorted(items3, key=lambda it: int(it.get("track") or 0))
                 log.append(f"  ✓ Final file names ({len(rows3)} tracks):")
                 for it in rows3:
@@ -23842,7 +23841,7 @@ def reimport_disk():
         _item_repaired_album_ids: set = set()
         for iid in item_ids:
             try:
-                _item_data = beets_client.get_item(iid)
+                _item_data = composite_workflows.get_item(iid)
                 _real_aid = int(_item_data.get("album_id") or 0) if _item_data else 0
             except Exception:
                 _real_aid = 0
@@ -23857,16 +23856,16 @@ def reimport_disk():
 
             _strip_year_from_album_name(_real_aid, log)
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
+            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {_real_aid}")
-            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
             if not app_res.get("ok"):
                 raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {_real_aid}")
-            up_res = beets_client.update_album_metadata(_real_aid, {}, force_write_tags=True)
+            up_res = composite_workflows.update_album_metadata(_real_aid, {}, force_write_tags=True)
             if not up_res.get("ok"):
                 raise RuntimeError(f"Engine update_album_metadata failed for album {_real_aid}")
-            rel_res = beets_client.relocate_album(_real_aid, mode="rename")
+            rel_res = composite_workflows.relocate_album(_real_aid, mode="rename")
             if not rel_res.get("ok"):
                 raise RuntimeError(f"Engine relocate_album failed for album {_real_aid}")
             if _real_aid not in final_album_ids:
@@ -23895,7 +23894,7 @@ def reimport_disk():
         # real, checked result rather than a guaranteed no-op.
         for _art_aid in album_ids:
             try:
-                _art_res = beets_client.fetch_and_embed_album_art(int(_art_aid))
+                _art_res = composite_workflows.fetch_and_embed_album_art(int(_art_aid))
                 if not _art_res.get("ok"):
                     log.append(f"  [artwork] Warning: {_art_res.get('error')}")
             except Exception as _ae:
@@ -23907,8 +23906,8 @@ def reimport_disk():
             _aid_for_rec = album_ids[0] if album_ids else None
             if _aid_for_rec:
                 try:
-                    _rrow = beets_client.get_album(_aid_for_rec)
-                    _ri_items = beets_client.find_all_items_by_album_id(_aid_for_rec)
+                    _rrow = composite_workflows.get_album(_aid_for_rec)
+                    _ri_items = composite_workflows.find_all_items_by_album_id(_aid_for_rec)
                     _ri_tracks = len(_ri_items)
                 except Exception:
                     _rrow = None
@@ -25247,7 +25246,7 @@ def _ai_batch_find_audio_dirs(root: str) -> List[str]:
     cursor = None
     try:
         while True:
-            res = beets_client.discover_import_sources(root, operation="ai_batch_discovery", cursor=cursor)
+            res = composite_workflows.discover_import_sources(root, operation="ai_batch_discovery", cursor=cursor)
             if not res.get("ok"):
                 raise RuntimeError(f"Engine discovery failed for {root}: {res.get('error_code', 'unknown_error')}")
             candidates = res.get("candidates") or []
@@ -25265,7 +25264,7 @@ def _ai_batch_find_audio_dirs(root: str) -> List[str]:
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
     try:
-        res = beets_client.resolve_folder_to_albums(folder_path)
+        res = composite_workflows.resolve_folder_to_albums(folder_path)
         return bool(int(res.get("track_count") or 0) > 0 or res.get("item_ids"))
     except BeetsUnavailableError:
         raise
@@ -26500,7 +26499,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
 
     # ── Step 1: confirmed_import_v1 (Plan -> Apply) with the AI-reviewed,
     # human/AI-approved release ──────────────────────────────────────────
-    # Wave 26 correction: this previously called beets_client.reimport_source
+    # Wave 26 correction: this previously called composite_workflows.reimport_source
     # (POST /imports/reimport, reimport_source_atomic's
     # verify_deterministic_identity() gate) -- the exact same trust-model
     # mismatch Wave 25 already fixed for import_folder_with_id.
@@ -26538,7 +26537,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     if resolved_releasegroupid:
         log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
 
-    plan_res = beets_client.plan_confirmed_import({
+    plan_res = composite_workflows.plan_confirmed_import({
         "source_folder": folder_path,
         "mb_albumid": mb_albumid,
         "mb_releasegroupid": resolved_releasegroupid,
@@ -26549,7 +26548,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     if not plan_res.get("ok"):
         raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
     try:
-        atomic_res = beets_client.apply_confirmed_import(plan_res["operation_id"])
+        atomic_res = composite_workflows.apply_confirmed_import(plan_res["operation_id"])
     except (BeetsError, BeetsUnavailableError) as ex:
         diag = getattr(ex, "diagnostics", None) or {}
         if diag.get("returncode") is not None:
@@ -26590,21 +26589,21 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     if cancel_event and cancel_event.is_set():
         raise RuntimeError("cancelled")
 
-    p_res = beets_client.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mb_albumid})
+    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mb_albumid})
     if not p_res.get("ok") or not p_res.get("operation_id"):
         raise RuntimeError(f"beet mbsync/track repair plan failed: {p_res.get('error', 'plan failed')}")
-    app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+    app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
     if not app_res.get("ok"):
         raise RuntimeError(f"beet mbsync/track repair apply failed: {app_res.get('error')}")
 
     if cancel_event and cancel_event.is_set():
         raise RuntimeError("cancelled")
 
-    up_res = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+    up_res = composite_workflows.update_album_metadata(int(aid), {}, force_write_tags=True)
     if not up_res.get("ok"):
         raise RuntimeError(f"beet write failed: {up_res.get('error')}")
 
-    rel_res = beets_client.relocate_album(int(aid), mode="rename")
+    rel_res = composite_workflows.relocate_album(int(aid), mode="rename")
     if not rel_res.get("ok"):
         raise RuntimeError(f"beet relocate failed: {rel_res.get('error')}")
     log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
@@ -26674,7 +26673,7 @@ def start_ai_batch_import():
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
     # scan_path feeds _ai_batch_find_audio_dirs(), which now discovers
-    # candidate folders via the real engine (beets_client.discover_import_sources()),
+    # candidate folders via the real engine (composite_workflows.discover_import_sources()),
     # not a local os.walk() -- it must still be confined to the same
     # trusted import-source roots as the rest of the import-review/AI-suggest
     # flow (a fast, local, pure-string root-containment check), but
@@ -26763,7 +26762,7 @@ def _do_scan_job() -> str:
         log.append("phase:read-db")
         _check_cancelled()
         try:
-            stats_res = beets_client.get_library_stats()
+            stats_res = composite_workflows.get_library_stats()
             total_tracks = int(stats_res.get("tracks", 0))
             total_albums = int(stats_res.get("albums", 0))
             log.append(f"phase:read-db rows:{total_tracks}")
@@ -26773,11 +26772,11 @@ def _do_scan_job() -> str:
 
             log.append("phase:check-missing")
             _check_cancelled()
-            sync_res = beets_client.sync_deleted_files(dry_run=False, limit=50000)
+            sync_res = composite_workflows.sync_deleted_files(dry_run=False, limit=50000)
             missing_count = int(sync_res.get("missing_count", 0))
             removed_items = int(sync_res.get("removed_from_db", 0))
 
-            empty_res = beets_client.clean_empty_albums(dry_run=False)
+            empty_res = composite_workflows.clean_empty_albums(dry_run=False)
             removed_empty = int(empty_res.get("removed_count", 0))
             removed_count = removed_items + removed_empty
 
@@ -26850,11 +26849,11 @@ def library_merge_artist():
 
     def _do(log, cancel_event=None):
         # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
-        # see backend.beets_client.find_all_albums_by_albumartist()'s own
+        # see backend.composite_workflows.find_all_albums_by_albumartist()'s own
         # docstring for why this is an exact-match query, not a substring
         # LIKE match.
         try:
-            album_rows = beets_client.find_all_albums_by_albumartist(from_artist)
+            album_rows = composite_workflows.find_all_albums_by_albumartist(from_artist)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"ERROR: Engine unavailable looking up artist '{from_artist}': {ex}")
             return
@@ -26874,7 +26873,7 @@ def library_merge_artist():
         renamed_ids: List[int] = []
         for aid in album_ids:
             try:
-                res = beets_client.update_album_metadata(aid, {"albumartist": to_artist}, force_write_tags=True)
+                res = composite_workflows.update_album_metadata(aid, {"albumartist": to_artist}, force_write_tags=True)
             except (BeetsUnavailableError, BeetsError) as ex:
                 log.append(f"  Engine unavailable renaming album_id {aid}: {ex}")
                 continue
@@ -26887,7 +26886,7 @@ def library_merge_artist():
         for i, aid in enumerate(renamed_ids, 1):
             log.append(f"[{i}/{len(renamed_ids)}] Moving files for album_id={aid}…")
             try:
-                rel_res = beets_client.relocate_album(aid, mode="rename")
+                rel_res = composite_workflows.relocate_album(aid, mode="rename")
                 if rel_res.get("ok"):
                     log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
                 else:
@@ -26972,7 +26971,7 @@ def library_sync_deleted():
             return
 
         try:
-            sync_res = beets_client.sync_deleted_files(dry_run=dry_run, limit=50000)
+            sync_res = composite_workflows.sync_deleted_files(dry_run=dry_run, limit=50000)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"ERROR: Sync deleted failed: {ex}")
             raise RuntimeError(f"Sync deleted failed: {ex}") from ex
@@ -27201,7 +27200,7 @@ def library_move_all():
     def _do(log, cancel_event=None):
         candidate_dirs: set = set()
         try:
-            path_values = beets_client.list_distinct_item_paths()
+            path_values = composite_workflows.list_distinct_item_paths()
             for p in path_values:
                 if not p:
                     continue
@@ -27222,7 +27221,7 @@ def library_move_all():
         log.append("Rescanning and moving library files via engine IPC…")
         deadline = time.time() + 5400.0  # 1.5-hour hard cap
         try:
-            move_res = beets_client.move_library(query="", rescan_first=True, async_job=True, timeout=5400.0)
+            move_res = composite_workflows.move_library(query="", rescan_first=True, async_job=True, timeout=5400.0)
         except Exception as ex:
             raise RuntimeError(f"Failed to execute move_library on engine: {ex}") from ex
 
@@ -27234,7 +27233,7 @@ def library_move_all():
             while True:
                 if cancel_event and cancel_event.is_set():
                     try:
-                        beets_client.cancel_job(remote_job_id)
+                        composite_workflows.cancel_job(remote_job_id)
                     except Exception:
                         pass
                     log.append("[cancelled]")
@@ -27242,14 +27241,14 @@ def library_move_all():
 
                 if time.time() > deadline:
                     try:
-                        beets_client.cancel_job(remote_job_id)
+                        composite_workflows.cancel_job(remote_job_id)
                     except Exception:
                         pass
                     log.append("⚠ move_library timed out.")
                     return
 
                 try:
-                    job_info = beets_client.get_job(remote_job_id)
+                    job_info = composite_workflows.get_job(remote_job_id)
                 except Exception:
                     time.sleep(0.5)
                     continue
@@ -27307,7 +27306,7 @@ def library_move_all():
             if cancel_event and cancel_event.is_set():
                 log.append("[cancelled]"); return
             try:
-                plan_res = beets_client.plan_folder_cleanup({"source": cdir, "action": "remove_empty"})
+                plan_res = composite_workflows.plan_folder_cleanup({"source": cdir, "action": "remove_empty"})
             except Exception as ex:
                 log.append(f"  [warn] Folder cleanup plan failed for {cdir}: {ex}")
                 continue
@@ -27320,7 +27319,7 @@ def library_move_all():
             if not op_id:
                 continue
             try:
-                apply_res = beets_client.apply_folder_cleanup(op_id)
+                apply_res = composite_workflows.apply_folder_cleanup(op_id)
             except Exception as ex:
                 log.append(f"  [warn] Folder cleanup apply failed for {cdir}: {ex}")
                 continue
@@ -27345,7 +27344,7 @@ def library_mbsync_all():
     """Sync all library tracks against MusicBrainz metadata (beet mbsync)."""
     def _do(log, cancel_event=None):
         try:
-            orphan_rows = beets_client.find_all_orphan_albums()
+            orphan_rows = composite_workflows.find_all_orphan_albums()
             orphan_ids = [int(r["id"]) for r in orphan_rows]
         except Exception as ex:
             log.append(f"  [warn] Orphan lookup failed (non-fatal): {ex}")
@@ -27356,7 +27355,7 @@ def library_mbsync_all():
             if cancel_event and cancel_event.is_set():
                 log.append("[cancelled]"); return
             try:
-                res = beets_client.delete_album(oid, delete_files=True)
+                res = composite_workflows.delete_album(oid, delete_files=True)
                 if res.get("ok"):
                     pruned += 1
                 else:
@@ -27369,7 +27368,7 @@ def library_mbsync_all():
         log.append("Running beet mbsync on full library via engine IPC — this may take several minutes…")
         deadline = time.time() + 7200.0  # 2-hour hard cap
         try:
-            mbsync_res = beets_client.mbsync(query="", async_job=True)
+            mbsync_res = composite_workflows.mbsync(query="", async_job=True)
         except Exception as ex:
             raise RuntimeError(f"Failed to start beet mbsync on engine: {ex}") from ex
 
@@ -27381,7 +27380,7 @@ def library_mbsync_all():
             while True:
                 if cancel_event and cancel_event.is_set():
                     try:
-                        beets_client.cancel_job(remote_job_id)
+                        composite_workflows.cancel_job(remote_job_id)
                     except Exception:
                         pass
                     log.append("[cancelled]")
@@ -27389,14 +27388,14 @@ def library_mbsync_all():
 
                 if time.time() > deadline:
                     try:
-                        beets_client.cancel_job(remote_job_id)
+                        composite_workflows.cancel_job(remote_job_id)
                     except Exception:
                         pass
                     log.append("⚠ mbsync timed out after 2 hours.")
                     return
 
                 try:
-                    job_info = beets_client.get_job(remote_job_id)
+                    job_info = composite_workflows.get_job(remote_job_id)
                 except Exception:
                     time.sleep(0.5)
                     continue
@@ -27455,12 +27454,12 @@ def _album_genre_value_by_id(album_id: int) -> str:
     if not album_id:
         return ""
     try:
-        alb = beets_client.get_album(int(album_id))
+        alb = composite_workflows.get_album(int(album_id))
         if alb:
             g = _s(alb.get("genre") or alb.get("genres") or "").strip()
             if g:
                 return g
-        items = beets_client.find_all_items_by_album_id(int(album_id))
+        items = composite_workflows.find_all_items_by_album_id(int(album_id))
         counts: Counter = Counter()
         for it in items:
             ig = _s(it.get("genre") or it.get("genres") or "").strip()
@@ -27579,7 +27578,7 @@ def _apply_genre_to_album(album_id: int, genre: str, log: list, env: Optional[di
                            cancel_event=None) -> bool:
     """Write genre to every track via album_metadata_repair_v1 family."""
     try:
-        res = beets_client.update_album_metadata(album_id, {"genre": genre})
+        res = composite_workflows.update_album_metadata(album_id, {"genre": genre})
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "genre update failed")
     except Exception as ex:
@@ -27602,7 +27601,7 @@ def _lastgenre_cmd(force: bool, query: str, log: list, env: Optional[dict] = Non
             stderr="lastgenre repair requires an album_id query",
         )
     try:
-        result = beets_client.repair_album_genre(int(match.group(1)), force=force, timeout=float(timeout))
+        result = composite_workflows.repair_album_genre(int(match.group(1)), force=force, timeout=float(timeout))
     except Exception as ex:
         result = {"ok": False, "error": str(ex)}
     return SimpleNamespace(
@@ -27755,7 +27754,7 @@ def library_normalize_artists():
     def _do(log, cancel_event=None):
         # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL.
         try:
-            aa_values = beets_client.list_distinct_albumartists()
+            aa_values = composite_workflows.list_distinct_albumartists()
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"ERROR: Engine unavailable listing artist names: {ex}")
             return
@@ -27783,14 +27782,14 @@ def library_normalize_artists():
         affected_ids: List[int] = []
         for old_aa, new_aa in to_fix:
             try:
-                rows = beets_client.find_all_albums_by_albumartist(old_aa)
+                rows = composite_workflows.find_all_albums_by_albumartist(old_aa)
             except (BeetsUnavailableError, BeetsError) as ex:
                 log.append(f"  Engine unavailable looking up albums for {old_aa!r}: {ex}")
                 continue
             for row in rows:
                 aid = int(row["id"])
                 try:
-                    res = beets_client.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
+                    res = composite_workflows.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
                 except (BeetsUnavailableError, BeetsError) as ex:
                     log.append(f"  Engine unavailable normalizing album_id {aid}: {ex}")
                     continue
@@ -27803,7 +27802,7 @@ def library_normalize_artists():
         for i, aid in enumerate(affected_ids, 1):
             log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
             try:
-                rel_res = beets_client.relocate_album(aid, mode="rename")
+                rel_res = composite_workflows.relocate_album(aid, mode="rename")
                 if rel_res.get("ok"):
                     log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
                 else:
@@ -27862,7 +27861,7 @@ def _artist_alias_write_rejected_map(rejected: Dict[str, Dict[str, Any]]) -> Non
 
 def _artist_id_alias_groups(include_rejected: bool = False) -> List[Dict[str, Any]]:
     try:
-        res = beets_client.get_artist_alias_groups()
+        res = composite_workflows.get_artist_alias_groups()
         alias_groups = res.get("alias_groups") or res.get("groups") or []
     except Exception:
         return []
@@ -27893,7 +27892,7 @@ def _resolve_artist_alias_mbid(source: str, canonical: str, mb_artistid: str,
         for name in names:
             if not name:
                 continue
-            albums = beets_client.find_all_albums_by_albumartist(name.strip())
+            albums = composite_workflows.find_all_albums_by_albumartist(name.strip())
             for alb in albums:
                 ids = _split_beets_multi(alb.get("mb_albumartistids")) or _split_beets_multi(alb.get("mb_albumartistid"))
                 for candidate in ids:
@@ -28047,7 +28046,7 @@ def _apply_artist_folder_reconcile_resilient(
     apply_artist_folder_reconcile() itself under any circumstance.
 
     _acceptance_failpoint is test-only infrastructure passed straight
-    through to beets_client.apply_artist_folder_reconcile() -- the engine
+    through to composite_workflows.apply_artist_folder_reconcile() -- the engine
     ignores it entirely unless booted with BEETS_ACCEPTANCE_MODE=1, which
     no real deployment ever sets. Always None in real production calls.
 
@@ -28073,7 +28072,7 @@ def _apply_artist_folder_reconcile_resilient(
         # error_code/status_code/diagnostics are agent-controlled structured
         # fields, not exception text, and remain safe to expose.
         try:
-            return beets_client.apply_artist_folder_reconcile(
+            return composite_workflows.apply_artist_folder_reconcile(
                 op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
             )
         except (BeetsBadRequestError, BeetsAuthError, BeetsNotFoundError) as ex:
@@ -28122,7 +28121,7 @@ def _apply_artist_folder_reconcile_resilient(
             return {"ok": False, "operation_id": op_id, "status": last_status or "unknown",
                     "error": "Monitoring cancelled locally; engine operation may still be running.", "still_running": True}
         try:
-            tx_res = beets_client.get_transaction(op_id)
+            tx_res = composite_workflows.get_transaction(op_id)
             tx = tx_res.get("transaction") or {}
             last_status = str(tx.get("status") or "")
         except Exception as ex:
@@ -28189,7 +28188,7 @@ def _run_artist_folder_reconcile_for_alias_merge(
 
     op_payload = {"root": str(MUSIC_ROOT), "mode": "scan_merge", "candidates": candidates}
     try:
-        plan_res = beets_client.plan_artist_folder_reconcile(op_payload)
+        plan_res = composite_workflows.plan_artist_folder_reconcile(op_payload)
     except (BeetsUnavailableError, BeetsError) as ex:
         raise RuntimeError(f"Engine unavailable; artist folder move was not performed: {ex}") from ex
     if not plan_res.get("ok"):
@@ -28319,7 +28318,7 @@ def _run_normalize_artists_if_needed():
         # topology before this fix (found tracing this function as the
         # "sibling" of library_normalize_artists(), per its own comment
         # above, while fixing that function's identical defect).
-        aa_values = beets_client.list_distinct_albumartists()
+        aa_values = composite_workflows.list_distinct_albumartists()
         to_fix = [
             (aa, _normalize_albumartist(aa))
             for aa in aa_values
@@ -28339,7 +28338,7 @@ def _run_normalize_artists_if_needed():
             affected_ids: List[int] = []
             for old_aa, new_aa in to_fix:
                 try:
-                    rows = beets_client.find_all_albums_by_albumartist(old_aa)
+                    rows = composite_workflows.find_all_albums_by_albumartist(old_aa)
                 except (BeetsUnavailableError, BeetsError) as ex:
                     log.append(f"  Engine unavailable looking up albums for {old_aa!r}: {ex}")
                     continue
@@ -28347,7 +28346,7 @@ def _run_normalize_artists_if_needed():
                 for row in rows:
                     aid = int(row["id"])
                     try:
-                        res = beets_client.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
+                        res = composite_workflows.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
                     except (BeetsUnavailableError, BeetsError) as ex:
                         log.append(f"  Engine unavailable normalizing album_id {aid}: {ex}")
                         continue
@@ -28358,7 +28357,7 @@ def _run_normalize_artists_if_needed():
             for i, aid in enumerate(affected_ids, 1):
                 log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
                 try:
-                    rel_res = beets_client.relocate_album(aid, mode="rename")
+                    rel_res = composite_workflows.relocate_album(aid, mode="rename")
                     if rel_res.get("ok"):
                         log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
                 except Exception as _ex:
@@ -28439,7 +28438,7 @@ def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]
     causing arbitrary-directory creation (mkdir) and filesystem-layout
     enumeration (os.walk) outside the intended torrent-source/library
     roots. This validator must run before any of those operations, not
-    just before the eventual beets_client hand-off (the engine-side
+    just before the eventual composite_workflows hand-off (the engine-side
     reimport_source_atomic() validation is a separate, later boundary and
     does not protect the web-manager-side probes made before it runs).
     """
@@ -28500,7 +28499,7 @@ def start_import():
         beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source}
         if search_id:
             beets_options["search_id"] = search_id
-        res = beets_client.reimport_source(path, beets_options=beets_options, timeout=300.0)
+        res = composite_workflows.reimport_source(path, beets_options=beets_options, timeout=300.0)
         if not res.get("ok"):
             raise RuntimeError(f"Engine import failed: {res.get('error', 'reimport_source failed')}")
         combined = ""
@@ -28553,7 +28552,7 @@ def import_preflight():
 
     tracked_dirs: set = set()
     try:
-        paths = beets_client.list_distinct_item_paths()
+        paths = composite_workflows.list_distinct_item_paths()
         root_s = str(root_res)
         for raw_path in paths:
             p = _s(raw_path)
@@ -29742,7 +29741,7 @@ def dedup_cleanup():
         "requested_root": root,
     }
     try:
-        plan_res = beets_client.plan_library_cleanup(plan_payload)
+        plan_res = composite_workflows.plan_library_cleanup(plan_payload)
     except BeetsUnavailableError as ex:
         return jsonify({
             "ok": False,
@@ -29785,7 +29784,7 @@ def dedup_cleanup():
         return jsonify({"ok": False, "error": "Engine did not return a cleanup operation_id", "results": results}), 502
 
     try:
-        apply_res = beets_client.apply_library_cleanup(op_id)
+        apply_res = composite_workflows.apply_library_cleanup(op_id)
     except BeetsUnavailableError as ex:
         return jsonify({
             "ok": False,
@@ -29816,13 +29815,13 @@ def dedup_cleanup():
                     break
                 seen.add(key)
                 try:
-                    folder_plan = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": key})
+                    folder_plan = composite_workflows.plan_folder_cleanup({"action": "remove_empty", "source": key})
                     if not folder_plan.get("ok") or int(folder_plan.get("removals_count") or 0) <= 0:
                         break
                     folder_op = _s(folder_plan.get("operation_id")).strip()
                     if not folder_op:
                         break
-                    folder_apply = beets_client.apply_folder_cleanup(folder_op)
+                    folder_apply = composite_workflows.apply_folder_cleanup(folder_op)
                     if not folder_apply.get("ok") or not folder_apply.get("mutated"):
                         break
                     removed_dirs = [_s(p) for p in folder_apply.get("removed_dirs") or [key] if _s(p)]
@@ -30242,7 +30241,7 @@ def _album_source_folder(aid: int) -> str:
     if not aid:
         return ""
     try:
-        items = beets_client.find_all_items_by_album_id(int(aid))
+        items = composite_workflows.find_all_items_by_album_id(int(aid))
     except Exception:
         return ""
     dirs = [os.path.dirname(_s(it.get("path"))) for it in items if _s(it.get("path"))]
@@ -30315,7 +30314,7 @@ def _library_health_payload(orphan_sample_limit: int = 100,
             "current_task": "Reading Beets database health",
             "current_result": "Fetching health report from Beets engine",
         })
-    res = beets_client.get_library_health(
+    res = composite_workflows.get_library_health(
         orphan_sample_limit=orphan_sample_limit,
         duplicate_limit=duplicate_limit,
         empty_limit=empty_limit,
@@ -30375,7 +30374,7 @@ def clean_library_health():
     # fallback is the literal int 100) -- _library_health_payload() below
     # now does its own local Python-level list slicing with duplicate_limit
     # (unlike before this fix, where it only ever passed the value through
-    # to beets_client.get_library_health(), which just stringifies it into
+    # to composite_workflows.get_library_health(), which just stringifies it into
     # a URL query string and lets the engine's own _parse_bounded_int_param
     # validate/cast it). A raw string reaching a `list[:duplicate_limit]`
     # slice raises TypeError, so these must be real ints before being used
@@ -30412,7 +30411,9 @@ def clean_library_health():
         }), 503
     except BeetsError as ex:
         status_code = getattr(ex, "status_code", 0) or 500
-        error_code = getattr(ex, "error_code", "") or "LIBRARY_HEALTH_FAILED"
+        error_code = getattr(ex, "error_code", "")
+        if not error_code or error_code in ("BEETS_ADAPTER_ERROR", "BEETS_ERROR"):
+            error_code = "LIBRARY_HEALTH_FAILED"
         app.logger.error("Library health scan failed: %s (code=%s, status=%s)", type(ex).__name__, error_code, status_code)
         if error_code == "INVALID_QUERY_PARAMETER":
             client_msg = "Invalid library health query parameters."
@@ -30502,10 +30503,10 @@ def clean_merge_duplicate_album():
     if target_id == source_id:
         return jsonify({"ok": False, "error": "target and source must be different album IDs"}), 400
 
-    target_album = beets_client.get_album(target_id)
-    source_album = beets_client.get_album(source_id)
-    target_items = beets_client.find_all_items_by_album_id(target_id) if target_album else []
-    source_items = beets_client.find_all_items_by_album_id(source_id) if source_album else []
+    target_album = composite_workflows.get_album(target_id)
+    source_album = composite_workflows.get_album(source_id)
+    target_items = composite_workflows.find_all_items_by_album_id(target_id) if target_album else []
+    source_items = composite_workflows.find_all_items_by_album_id(source_id) if source_album else []
 
     safety_rows = []
     if target_album:
@@ -30564,8 +30565,8 @@ def clean_merge_duplicate_album():
         }), 409
 
     def _do(log, cancel_event=None):
-        target_row = beets_client.get_album(target_id)
-        source_row = beets_client.get_album(source_id)
+        target_row = composite_workflows.get_album(target_id)
+        source_row = composite_workflows.get_album(source_id)
         if not target_row:
             raise RuntimeError(f"Target album_id {target_id} not found")
         if not source_row:
@@ -30575,7 +30576,7 @@ def clean_merge_duplicate_album():
         s_label = f"{_s(source_row['albumartist'])} — {_s(source_row['album'])} (id={source_id})"
         log.append(f"Merging: {s_label}  →  {t_label}")
 
-        merge_res = beets_client.merge_duplicate_albums(target_id, source_id)
+        merge_res = composite_workflows.merge_duplicate_albums(target_id, source_id)
         if not merge_res.get("ok"):
             raise RuntimeError(merge_res.get("error") or "Engine rejected duplicate album merge")
         moved = int(merge_res.get("moved") or 0)
@@ -30609,7 +30610,7 @@ def _rgid_group_albums(rgid: str) -> List[Any]:
     if not rgid:
         return []
     try:
-        res = beets_client.get_rgid_group_detail(rgid)
+        res = composite_workflows.get_rgid_group_detail(rgid)
         if res.get("ok"):
             return res.get("albums") or []
     except Exception:
@@ -30630,7 +30631,7 @@ def clean_rgid_group_detail(rgid):
     items_by_album: Dict[int, List[Any]] = {}
     for r in rows:
         aid = int(r["id"])
-        items_by_album[aid] = r.get("tracks") or beets_client.find_all_items_by_album_id(aid)
+        items_by_album[aid] = r.get("tracks") or composite_workflows.find_all_items_by_album_id(aid)
 
     def _folder_for(aid: int) -> str:
         dirs = [os.path.dirname(_s(it["path"])) for it in items_by_album.get(aid, []) if _s(it["path"])]
@@ -30687,8 +30688,8 @@ def clean_rgid_group_merge():
         return jsonify({"ok": False, "error": "target/source album must belong to this release-group id"}), 409
 
     items_by_album: Dict[int, List[Any]] = {}
-    items_by_album[target_id] = beets_client.find_all_items_by_album_id(target_id)
-    items_by_album[source_id] = beets_client.find_all_items_by_album_id(source_id)
+    items_by_album[target_id] = composite_workflows.find_all_items_by_album_id(target_id)
+    items_by_album[source_id] = composite_workflows.find_all_items_by_album_id(source_id)
     pair_rows = [r for r in rows if int(r["id"]) in (target_id, source_id)]
     safety = _library_duplicate_merge_safety(pair_rows, items_by_album)
     if not safety.get("merge_safe"):
@@ -30705,13 +30706,13 @@ def clean_rgid_group_merge():
         }), 409
 
     def _do(log, cancel_event=None):
-        target_row = beets_client.get_album(target_id)
-        source_row = beets_client.get_album(source_id)
+        target_row = composite_workflows.get_album(target_id)
+        source_row = composite_workflows.get_album(source_id)
         if not target_row or not source_row:
             raise RuntimeError("album row(s) not found")
 
         log.append(f"Merging release-group {rgid} cluster: album {source_id} → {target_id}")
-        merge_res = beets_client.merge_duplicate_albums(target_id, source_id)
+        merge_res = composite_workflows.merge_duplicate_albums(target_id, source_id)
         if not merge_res.get("ok"):
             raise RuntimeError(merge_res.get("error") or "Engine rejected release-group duplicate merge")
         moved = int(merge_res.get("moved") or 0)
@@ -30772,7 +30773,7 @@ def clean_rgid_group_assign_release():
     mb_albumid = _s(payload.get("mb_albumid") or "").strip().lower()
     if not album_id or not _MB_UUID_RE.match(mb_albumid):
         return jsonify({"ok": False, "error": "album_id and a valid mb_albumid are required"}), 400
-    alb = beets_client.get_album(album_id)
+    alb = composite_workflows.get_album(album_id)
     if not alb:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
     rgid = _s(alb.get("mb_releasegroupid") or "").strip().lower()
@@ -30810,7 +30811,7 @@ def clean_rgid_group_relink():
     mb_releasegroupid = _s(payload.get("mb_releasegroupid") or "").strip().lower()
     if not album_id:
         return jsonify({"ok": False, "error": "album_id is required"}), 400
-    row = beets_client.get_album(album_id)
+    row = composite_workflows.get_album(album_id)
     if not row:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
 
@@ -30840,7 +30841,7 @@ def clean_rgid_group_relink():
         relink_updates: Dict[str, Any] = {"mb_albumid": target_mbid}
         if target_rgid:
             relink_updates["mb_releasegroupid"] = target_rgid
-        relink_res = beets_client.update_album_metadata(album_id, relink_updates)
+        relink_res = composite_workflows.update_album_metadata(album_id, relink_updates)
         if not relink_res.get("ok"):
             raise RuntimeError(relink_res.get("error") or "Engine rejected release relink")
         log.append(
@@ -30868,10 +30869,10 @@ def clean_rgid_group_send_to_repair():
     album_id = int(payload.get("album_id") or 0)
     if not album_id:
         return jsonify({"ok": False, "error": "album_id is required"}), 400
-    alb = beets_client.get_album(album_id)
+    alb = composite_workflows.get_album(album_id)
     if not alb:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
-    items = beets_client.find_all_items_by_album_id(album_id)
+    items = composite_workflows.find_all_items_by_album_id(album_id)
     row = {
         "id": alb["id"],
         "albumartist": alb.get("albumartist", ""),
@@ -30926,7 +30927,7 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
         return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "skipped": 0}
 
     try:
-        res = beets_client.clean_orphaned_items(item_ids=ids, dry_run=dry_run)
+        res = composite_workflows.clean_orphaned_items(item_ids=ids, dry_run=dry_run)
     except (BeetsUnavailableError, BeetsError) as ex:
         log.append(f"  Engine unavailable/error for orphaned-item cleanup: {ex}")
         raise
@@ -30984,9 +30985,9 @@ def _clean_remove_empty_albums(album_ids: List[int], *,
     rows = []
     for aid in ids:
         try:
-            alb = beets_client.get_album(aid)
+            alb = composite_workflows.get_album(aid)
             if alb:
-                a_items = beets_client.find_all_items_by_album_id(aid)
+                a_items = composite_workflows.find_all_items_by_album_id(aid)
                 rows.append({
                     "id": alb["id"],
                     "albumartist": alb.get("albumartist", ""),
@@ -31017,7 +31018,7 @@ def _clean_remove_empty_albums(album_ids: List[int], *,
     removed = 0
     for aid in removable:
         try:
-            res = beets_client.delete_album(aid, delete_files=False)
+            res = composite_workflows.delete_album(aid, delete_files=False)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"  Engine unavailable removing empty album_id {aid}: {ex}")
             continue
@@ -31547,7 +31548,7 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         return {"ok": True, "checked": 0, "mismatches": []}
 
     try:
-        raw_items = beets_client.find_all_items_by_album_id(int(album_id))
+        raw_items = composite_workflows.find_all_items_by_album_id(int(album_id))
         rows = sorted(
             raw_items,
             key=lambda it: (
@@ -31761,7 +31762,7 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
     mb_tracks = mb["tracks"]
 
     try:
-        raw_items = beets_client.find_all_items_by_album_id(aid)
+        raw_items = composite_workflows.find_all_items_by_album_id(aid)
         rows = sorted(
             raw_items,
             key=lambda it: (
@@ -31944,7 +31945,7 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
         raise RuntimeError("MusicBrainz release has no tracks")
 
     try:
-        raw_items = beets_client.find_all_items_by_album_id(album_id)
+        raw_items = composite_workflows.find_all_items_by_album_id(album_id)
         rows = sorted(
             raw_items,
             key=lambda it: (
@@ -32014,7 +32015,7 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
 def _album_mb_completeness(album_id: int, mb_override: str = "",
                            log: Optional[List[str]] = None) -> Dict[str, Any]:
     try:
-        album_row = beets_client.get_album(album_id)
+        album_row = composite_workflows.get_album(album_id)
     except Exception as ex:
         raise RuntimeError(f"Could not read album {album_id}: {ex}")
     if not album_row:
@@ -32051,7 +32052,7 @@ def _album_mb_completeness(album_id: int, mb_override: str = "",
     mb_tracks = mb["tracks"]
 
     try:
-        raw_items = beets_client.find_all_items_by_album_id(album_id)
+        raw_items = composite_workflows.find_all_items_by_album_id(album_id)
         rows = sorted(
             raw_items,
             key=lambda it: (
@@ -32242,7 +32243,7 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
     ]
 
     try:
-        raw_items = beets_client.find_all_items_by_album_id(int(album_id))
+        raw_items = composite_workflows.find_all_items_by_album_id(int(album_id))
         selected_rows = sorted(
             raw_items,
             key=lambda it: (
@@ -32270,7 +32271,7 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
         }
 
     try:
-        rows = beets_client.get_folder_items(prefixes[:30])
+        rows = composite_workflows.get_folder_items(prefixes[:30])
     except Exception as ex:
         raise RuntimeError(f"Could not read album-folder items: {ex}") from ex
 
@@ -32560,7 +32561,7 @@ def apply_album_duplicate_resolver(aid):
                         "item_field_overrides": item_field_overrides,
                     }
                     try:
-                        plan_res = beets_client.plan_album_duplicate_merge(merge_payload)
+                        plan_res = composite_workflows.plan_album_duplicate_merge(merge_payload)
                     except Exception as ex:
                         retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
                         log.append(f"  Retag from album {src_aid} failed (plan): {ex}")
@@ -32571,7 +32572,7 @@ def apply_album_duplicate_resolver(aid):
                         log.append(f"  Retag from album {src_aid} failed (plan): {err}")
                         continue
                     try:
-                        apply_res = beets_client.apply_album_duplicate_merge(plan_res["operation_id"])
+                        apply_res = composite_workflows.apply_album_duplicate_merge(plan_res["operation_id"])
                     except Exception as ex:
                         retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
                         log.append(f"  Retag from album {src_aid} failed (apply): {ex}")
@@ -32607,16 +32608,16 @@ def apply_album_duplicate_resolver(aid):
                     # route already uses.
                     stamp_mbid = _s(plan.get("mb_albumid") or "")
                     if stamp_mbid:
-                        stamp_res = beets_client.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
+                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
                         if not stamp_res.get("ok"):
                             log.append(f"  WARN: could not stamp target album mb_albumid: {stamp_res.get('error')}")
 
                     if write_tags:
                         if cancel_event is not None and cancel_event.is_set():
                             raise RuntimeError("cancelled")
-                        tag_result = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+                        tag_result = composite_workflows.update_album_metadata(int(aid), {}, force_write_tags=True)
                         _require_attach_stage_success(tag_result, "duplicate resolver tag write")
-                        relocate_result = beets_client.relocate_album(int(aid), mode="rename")
+                        relocate_result = composite_workflows.relocate_album(int(aid), mode="rename")
                         _require_attach_stage_success(relocate_result, "duplicate resolver relocation")
 
         if not dry_run and retagged:
@@ -32672,7 +32673,7 @@ def repair_album_mb_tracks(aid):
     def _do(log, cancel_event=None):
         log.append(f"[1/3] Planning MusicBrainz track repair for album_id {aid}...")
         try:
-            plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+            plan_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
         except Exception as ex:
             log.append(f"  ERROR: Plan request failed: {ex}")
             return {"ok": False, "error": f"Repair plan failed: {ex}"}
@@ -32709,7 +32710,7 @@ def repair_album_mb_tracks(aid):
 
         log.append(f"[2/3] Applying controlled repair transaction {op_id} for {updated_count} track(s)...")
         try:
-            apply_res = beets_client.apply_album_mb_track_repair(op_id)
+            apply_res = composite_workflows.apply_album_mb_track_repair(op_id)
         except Exception as ex:
             log.append(f"  ERROR: Apply request failed: {ex}")
             return {"ok": False, "error": f"Repair apply failed: {ex}", "operation_id": op_id}
@@ -32786,7 +32787,7 @@ def _start_library_mbid_sticking_repair(
         # If item rows have a single release ID but the album row is blank,
         # restore the album-level release ID first.
         try:
-            cand_res = beets_client.get_mbid_sticking_candidates(mode="inferred", limit=limit)
+            cand_res = composite_workflows.get_mbid_sticking_candidates(mode="inferred", limit=limit)
             inferred = cand_res.get("inferred") or cand_res.get("candidates") or []
             for row in inferred:
                 if cancel_event is not None and cancel_event.is_set():
@@ -32798,7 +32799,7 @@ def _start_library_mbid_sticking_repair(
                     log.append(f"  Would restore album mb_albumid for album_id {aid}: {label} -> {mbid}")
                     summary["inferred_album_rows"] += 1
                 else:
-                    beets_client.update_album_metadata(aid, {"mb_albumid": mbid})
+                    composite_workflows.update_album_metadata(aid, {"mb_albumid": mbid})
                     log.append(f"  Restored album mb_albumid for album_id {aid}: {label}")
                     summary["inferred_album_rows"] += 1
                     summary["albums_changed"] += 1
@@ -32814,7 +32815,7 @@ def _start_library_mbid_sticking_repair(
         # or prior partial matching), otherwise search MB by artist+album+year and
         # validate against the album's own folder tracklist before accepting.
         try:
-            cand_res = beets_client.get_mbid_sticking_candidates(mode="blank", limit=limit)
+            cand_res = composite_workflows.get_mbid_sticking_candidates(mode="blank", limit=limit)
             blank_rows = cand_res.get("blank") or cand_res.get("candidates") or []
         except Exception as ex:
             blank_rows = []
@@ -32877,7 +32878,7 @@ def _start_library_mbid_sticking_repair(
                     meta_opts = {"mb_albumid": resolved_mbid}
                     if resolved_rgid and not rgid:
                         meta_opts["mb_releasegroupid"] = resolved_rgid
-                    beets_client.update_album_metadata(aid, meta_opts)
+                    composite_workflows.update_album_metadata(aid, meta_opts)
                     log.append(
                         f"  [album_id {aid}] linked to release {resolved_mbid} "
                         f"(written via IPC: albums.mb_albumid"
@@ -32901,7 +32902,7 @@ def _start_library_mbid_sticking_repair(
         summary["unresolved_count"] = len(summary["unresolved_albums"])
 
         try:
-            cand_res = beets_client.get_mbid_sticking_candidates(mode="track_gaps", limit=limit)
+            cand_res = composite_workflows.get_mbid_sticking_candidates(mode="track_gaps", limit=limit)
             rows = cand_res.get("track_gaps") or cand_res.get("candidates") or []
         except Exception as ex:
             raise RuntimeError(f"Could not scan Beets DB for stuck MBIDs: {ex}") from ex
@@ -32967,10 +32968,10 @@ def _start_library_mbid_sticking_repair(
                     )
                     summary["track_rows"] += len(track_updates)
                 else:
-                    plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+                    plan_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
                     if plan_res.get("ok"):
                         op_id = plan_res.get("operation_id") or ""
-                        apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=write_tags)
+                        apply_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=write_tags)
                         if apply_res.get("ok"):
                             log.append(f"  Repaired {len(track_updates)} recording ID(s) via IPC: album_id {aid} {label}")
                             summary["track_rows"] += len(track_updates)
@@ -33077,7 +33078,7 @@ def _remove_album_track_items(album_id: int, item_ids: List[int], *,
     }
 
     try:
-        plan_res = beets_client.plan_album_maintenance(payload)
+        plan_res = composite_workflows.plan_album_maintenance(payload)
         if not plan_res.get("ok"):
             raise RuntimeError(plan_res.get("error") or "Plan creation failed")
         op_id = plan_res["operation_id"]
@@ -33091,7 +33092,7 @@ def _remove_album_track_items(album_id: int, item_ids: List[int], *,
                 "operation_id": op_id,
             }
 
-        apply_res = beets_client.apply_album_maintenance(op_id)
+        apply_res = composite_workflows.apply_album_maintenance(op_id)
         if not apply_res.get("ok"):
             raise RuntimeError(apply_res.get("error") or "Apply failed")
 
@@ -33122,12 +33123,12 @@ def clean_album_tracks_scan():
     try:
         if album_id:
             try:
-                alb = beets_client.get_album(album_id)
+                alb = composite_workflows.get_album(album_id)
                 rows = [alb] if alb else []
             except Exception:
                 rows = []
         else:
-            rows = beets_client.find_albums_with_mbid(limit=limit, sort="desc")
+            rows = composite_workflows.find_albums_with_mbid(limit=limit, sort="desc")
     except Exception as ex:
         app.logger.warning("Could not read MusicBrainz-tagged albums: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not read albums."}), 500
@@ -33465,7 +33466,7 @@ def _scan_artist_folder_groups(root: str, *, use_musicbrainz: bool = False,
     # Web Manager has no local media mount in the supported two-service
     # deployment and must never walk MUSIC_ROOT itself.
     entries = sorted(
-        beets_client.get_artist_folder_inventory(str(root_path)),
+        composite_workflows.get_artist_folder_inventory(str(root_path)),
         key=lambda f: _s(f.get("name")).casefold(),
     )
     for entry in entries:
@@ -33715,7 +33716,7 @@ def _library_file_candidates_for_qbit(file_name: str, size: int) -> List[Dict[st
         return []
     rows: List[Dict[str, Any]] = []
     try:
-        rows = beets_client.find_files_for_hardlink(filename=basename, limit=100)
+        rows = composite_workflows.find_files_for_hardlink(filename=basename, limit=100)
     except Exception:
         return []
 
@@ -33841,7 +33842,7 @@ def _library_file_candidates_for_qbit_metadata(file_name: str, size: int,
         meta["track"] = track_no
     rows: List[Dict[str, Any]] = []
     try:
-        rows = beets_client.find_files_for_hardlink(metadata=meta, limit=100)
+        rows = composite_workflows.find_files_for_hardlink(metadata=meta, limit=100)
     except Exception:
         return []
 
@@ -34126,7 +34127,7 @@ def _qbit_hardlink_missing_impl(*, dry_run: bool, category: str,
                 log.append(f"  would link: {target.name}")
                 continue
             try:
-                res = beets_client.create_hardlink(str(src), str(target), expected_size=size)
+                res = composite_workflows.create_hardlink(str(src), str(target), expected_size=size)
                 if res and res.get("ok"):
                     touched_hashes.add(thash)
                     if res.get("already_present"):
@@ -34283,7 +34284,7 @@ def _album_item_abs_paths(album_id: int) -> List[Path]:
         return []
     paths: List[Path] = []
     try:
-        items = beets_client.find_all_items_by_album_id(aid)
+        items = composite_workflows.find_all_items_by_album_id(aid)
         for item in items:
             raw = _s(item.get("path")).strip()
             if not raw:
@@ -34390,7 +34391,7 @@ def _album_template_token_cleanup_candidates(album_id: int) -> List[Dict[str, An
     candidates: List[Dict[str, Any]] = []
     seen: set[str] = set()
     try:
-        rows = beets_client.find_all_items_by_album_id(aid)
+        rows = composite_workflows.find_all_items_by_album_id(aid)
     except Exception:
         return []
     for row in rows:
@@ -34531,12 +34532,12 @@ def _apply_filename_cleanup_candidate(rec: Dict[str, Any], *,
                 "conflict": bool(rec.get("conflict")),
             }]
         }
-        plan_res = beets_client.plan_album_maintenance(plan_payload)
+        plan_res = composite_workflows.plan_album_maintenance(plan_payload)
         if not plan_res.get("ok"):
             log.append(f"  WARN planning filename cleanup for {old_path.name}: {plan_res.get('error')}")
             return {"renamed": 0, "quarantined": 0, "db_updates": 0, "db_deletes": 0, "skipped": 1}
 
-        apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
+        apply_res = composite_workflows.apply_album_maintenance(plan_res["operation_id"])
         if not apply_res.get("ok"):
             log.append(f"  WARN applying filename cleanup for {old_path.name}: {apply_res.get('error')}")
             return {"renamed": 0, "quarantined": 0, "db_updates": 0, "db_deletes": 0, "skipped": 1}
@@ -35015,7 +35016,7 @@ def fix_leaked_db_paths():
                     log.append(f"  ERROR item {item_id}: has no album_id; cannot repair through album_maintenance_v1")
                     continue
                 try:
-                    res = beets_client.repoint_item_db_path(item_id, album_id, old_path, db_val)
+                    res = composite_workflows.repoint_item_db_path(item_id, album_id, old_path, db_val)
                 except (BeetsUnavailableError, BeetsError) as ex:
                     errors += 1
                     log.append(f"  ERROR item {item_id}: engine unavailable: {ex}")
@@ -35464,7 +35465,7 @@ def _maintenance_safe_folder_renames(rows: List[Dict[str, Any]], log: List[str],
                 skipped += 1
                 log.append(f"  [folder-safe-rename] skipped existing target: {target}")
                 continue
-            res = beets_client.move_file(str(source), str(target))
+            res = composite_workflows.move_file(str(source), str(target))
             if not res.get("ok"):
                 raise RuntimeError(res.get("error") or "move failed")
             renamed += 1
@@ -35693,7 +35694,7 @@ def _maintenance_artist_folder_merge_step(
     """
     if resume_operation_id:
         try:
-            tx_res = beets_client.get_transaction(resume_operation_id)
+            tx_res = composite_workflows.get_transaction(resume_operation_id)
             tx = tx_res.get("transaction") or {}
             status = str(tx.get("status") or "")
         except Exception as ex:
@@ -35797,7 +35798,7 @@ def _maintenance_artist_folder_merge_step(
     payload = {"root": str(root_path), "mode": "stamp_mbid"}
     # SEC-002 Wave 21 final review: no local in-process fallback.
     try:
-        plan_res = beets_client.plan_artist_folder_reconcile(payload)
+        plan_res = composite_workflows.plan_artist_folder_reconcile(payload)
     except (BeetsUnavailableError, BeetsError) as ex:
         # CodeQL: information exposure through an exception -- str(ex) must
         # not flow into this "error" field (job-visible result). Log the
@@ -36386,7 +36387,7 @@ def _maintenance_artwork_collision_leftovers(root: Path, limit: int = 10000) -> 
 
 def _maintenance_duplicate_recording_mbid_groups() -> int:
     try:
-        res = beets_client.scan_library_integrity()
+        res = composite_workflows.scan_library_integrity()
         return int(res.get("duplicate_recording_mbids_count") or res.get("duplicate_recording_groups") or 0)
     except Exception:
         return 0
@@ -37065,7 +37066,7 @@ def _folder_cleanup_db_items(folder: Path) -> List[Dict[str, Any]]:
     except Exception:
         folder_resolved = folder
     try:
-        items = beets_client.get_folder_items([str(folder_resolved)])
+        items = composite_workflows.get_folder_items([str(folder_resolved)])
         for row in items:
             raw_path = row.get("path")
             path_text = _s(raw_path)
@@ -37102,7 +37103,7 @@ def _folder_cleanup_known_release_group_id(album_ids: Iterable[int]) -> str:
         return ""
     for aid in ids:
         try:
-            alb = beets_client.get_album(aid)
+            alb = composite_workflows.get_album(aid)
             if alb:
                 rgid = _s(alb.get("mb_releasegroupid")).strip()
                 if _is_valid_mb_uuid(rgid):
@@ -37447,7 +37448,7 @@ def apply_folder_placeholder_action_api():
                 "ok": False,
                 "error": "Beets engine is unavailable; folder cleanup was not performed.",
                 "error_code": "ENGINE_OFFLINE",
-                "code": getattr(exc, "error_code", "") or "ENGINE_OFFLINE",
+                "code": "ENGINE_OFFLINE",
                 "operation_id": operation_id,
             }), 503
         app.logger.warning("Folder cleanup %s rejected by engine: %s", phase, getattr(exc, "error_code", "") or type(exc).__name__)
@@ -37469,7 +37470,7 @@ def apply_folder_placeholder_action_api():
         # error JSON. Wrap the success case in a distinct, unambiguous type
         # so callers can tell success from a Flask error response reliably.
         try:
-            plan_res = beets_client.plan_folder_cleanup(engine_payload)
+            plan_res = composite_workflows.plan_folder_cleanup(engine_payload)
         except (BeetsUnavailableError, BeetsError) as exc:
             return _engine_exception(exc, phase="plan")
         if not plan_res.get("ok"):
@@ -37478,7 +37479,7 @@ def apply_folder_placeholder_action_api():
         if not op_id:
             return jsonify({"ok": True, "action": engine_payload.get("action"), "changed_count": 0})
         try:
-            apply_res = beets_client.apply_folder_cleanup(op_id)
+            apply_res = composite_workflows.apply_folder_cleanup(op_id)
         except (BeetsUnavailableError, BeetsError) as exc:
             return _engine_exception(exc, phase="apply", operation_id=op_id)
         if not apply_res.get("ok"):
@@ -37646,14 +37647,14 @@ def apply_safe_folder_placeholder_renames_job():
                 continue
 
             try:
-                plan_res = beets_client.plan_folder_cleanup({
+                plan_res = composite_workflows.plan_folder_cleanup({
                     "action": "safe_rename",
                     "source": str(src),
                     "target": str(dst),
                 })
                 if not plan_res.get("ok"):
                     raise RuntimeError(plan_res.get("error") or "Folder cleanup planning failed")
-                apply_res = beets_client.apply_folder_cleanup(plan_res["operation_id"])
+                apply_res = composite_workflows.apply_folder_cleanup(plan_res["operation_id"])
                 if not apply_res.get("ok"):
                     raise RuntimeError(apply_res.get("error") or "Folder cleanup execution failed")
 
@@ -37887,7 +37888,7 @@ def _album_cleanup_db_index(root: Path) -> Dict[str, Any]:
     folder_db: Dict[str, Dict[str, Any]] = {}
     file_db: Dict[str, Dict[str, Any]] = {}
     try:
-        rows = beets_client.get_album_cleanup_index()
+        rows = composite_workflows.get_album_cleanup_index()
     except BeetsUnavailableError as ex:
         app.logger.warning("Beets engine unavailable in _album_cleanup_db_index: %s", ex)
         rows = []
@@ -38641,20 +38642,20 @@ def _root_folder_repair_apply_safe(log: List[str], cancel_event: Optional[Any] =
                 # so both are now logged and counted, never discarded.
                 if has_mb:
                     mbid = getattr(item, "mb_albumid", "")
-                    plan_res = beets_client.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mbid})
+                    plan_res = composite_workflows.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mbid})
                     if not plan_res.get("ok"):
                         summary["errors"] += 1
                         log.append(f"  WARN: mbsync plan failed for album_id {aid}: {plan_res.get('error')}")
                     else:
-                        track_res = beets_client.apply_album_mb_track_repair(plan_res.get("operation_id"), write_tags=True)
+                        track_res = composite_workflows.apply_album_mb_track_repair(plan_res.get("operation_id"), write_tags=True)
                         if not track_res.get("ok"):
                             summary["errors"] += 1
                             log.append(f"  WARN: mbsync apply failed for album_id {aid}: {track_res.get('error')}")
-                meta_res = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+                meta_res = composite_workflows.update_album_metadata(int(aid), {}, force_write_tags=True)
                 if not meta_res.get("ok"):
                     summary["errors"] += 1
                     log.append(f"  WARN: tag rewrite failed for album_id {aid}: {meta_res.get('error')}")
-                rel_res = beets_client.relocate_album(int(aid), mode="move")
+                rel_res = composite_workflows.relocate_album(int(aid), mode="move")
                 if not rel_res.get("ok"):
                     summary["items_failed"] += 1
                     summary["errors"] += 1
@@ -38665,7 +38666,7 @@ def _root_folder_repair_apply_safe(log: List[str], cancel_event: Optional[Any] =
         # The move above should have emptied this folder; clean it up if so.
         # Wave 26 correction (sections 16-17): this used to check emptiness
         # via a LOCAL folder.iterdir() call and then delete via the generic
-        # beets_client.delete_file() passthrough -- both the precondition
+        # composite_workflows.delete_file() passthrough -- both the precondition
         # check and the mutation itself belong on the engine side, which
         # actually owns this mount; the Web Manager has no reliable local
         # view of it in the two-service topology. Reuses
@@ -38925,7 +38926,7 @@ def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
             continue
         seen.add(key)
         try:
-            plan_res = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": key})
+            plan_res = composite_workflows.plan_folder_cleanup({"action": "remove_empty", "source": key})
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"  SKIP empty-folder cleanup; engine rejected {candidate}: {ex}")
             continue
@@ -38935,7 +38936,7 @@ def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
         if not op_id:
             continue
         try:
-            apply_res = beets_client.apply_folder_cleanup(op_id)
+            apply_res = composite_workflows.apply_folder_cleanup(op_id)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"  SKIP empty-folder cleanup; engine apply failed for {candidate}: {ex}")
             continue
@@ -39130,7 +39131,7 @@ def _album_cleanup_item_id_for_path(path: Path) -> int:
     touches anything, which is why the local fallback below always used
     to run in practice."""
     try:
-        item = beets_client.find_item_by_path(str(path))
+        item = composite_workflows.find_item_by_path(str(path))
         return int(item.get("id") or 0) if item else 0
     except Exception:
         return 0
@@ -39206,7 +39207,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 # engine Plan/Apply failure is a real error, not a signal
                 # to mutate the filesystem locally instead.
                 try:
-                    plan_res = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": str(folder)})
+                    plan_res = composite_workflows.plan_folder_cleanup({"action": "remove_empty", "source": str(folder)})
                 except (BeetsUnavailableError, BeetsError) as ex:
                     issue_errors.append(f"engine unreachable: {ex}")
                     break
@@ -39217,7 +39218,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 if not op_id:
                     continue  # nothing eligible to remove; not an error
                 try:
-                    apply_res = beets_client.apply_folder_cleanup(op_id)
+                    apply_res = composite_workflows.apply_folder_cleanup(op_id)
                 except (BeetsUnavailableError, BeetsError) as ex:
                     issue_errors.append(f"engine unreachable: {ex}")
                     break
@@ -39269,7 +39270,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     if src_item_id <= 0:
                         raise RuntimeError("duplicate file is not a tracked Beets item")
                     try:
-                        plan_res = beets_client.plan_album_maintenance({
+                        plan_res = composite_workflows.plan_album_maintenance({
                             "mode": "deduplicate",
                             "album_id": aid,
                             "to_delete": [{"id": src_item_id, "path": str(src)}],
@@ -39282,7 +39283,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     if not op_id:
                         raise RuntimeError("duplicate cleanup plan produced nothing actionable")
                     try:
-                        apply_res = beets_client.apply_album_maintenance(op_id)
+                        apply_res = composite_workflows.apply_album_maintenance(op_id)
                     except (BeetsUnavailableError, BeetsError) as ex:
                         raise RuntimeError(f"engine unreachable: {ex}")
                     if not apply_res.get("ok"):
@@ -39318,7 +39319,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 # fallback.
                 if is_artwork and aid > 0:
                     try:
-                        plan_res = beets_client.plan_album_artwork({
+                        plan_res = composite_workflows.plan_album_artwork({
                             "mode": "move",
                             "album_id": aid,
                             "target_dir": str(canonical),
@@ -39332,7 +39333,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     if not op_id:
                         raise RuntimeError("artwork move plan produced nothing actionable")
                     try:
-                        apply_res = beets_client.apply_album_artwork(op_id)
+                        apply_res = composite_workflows.apply_album_artwork(op_id)
                     except (BeetsUnavailableError, BeetsError) as ex:
                         raise RuntimeError(f"engine unreachable: {ex}")
                     if not apply_res.get("ok"):
@@ -39347,7 +39348,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 if src_item_id <= 0:
                     raise RuntimeError("file is not a tracked Beets item")
                 try:
-                    plan_res = beets_client.plan_album_maintenance({
+                    plan_res = composite_workflows.plan_album_maintenance({
                         "mode": "filename_cleanup",
                         "candidates": [{"item_id": src_item_id, "source": str(src), "destination": str(dst)}],
                     })
@@ -39359,7 +39360,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 if not op_id:
                     raise RuntimeError("filename cleanup plan produced nothing actionable")
                 try:
-                    apply_res = beets_client.apply_album_maintenance(op_id)
+                    apply_res = composite_workflows.apply_album_maintenance(op_id)
                 except (BeetsUnavailableError, BeetsError) as ex:
                     raise RuntimeError(f"engine unreachable: {ex}")
                 if not apply_res.get("ok"):
@@ -39398,14 +39399,14 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
             if current.is_symlink() or _path_has_symlink_component_under(current, stop_res):
                 break
             try:
-                plan_res = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": str(current)})
+                plan_res = composite_workflows.plan_folder_cleanup({"action": "remove_empty", "source": str(current)})
             except (BeetsUnavailableError, BeetsError):
                 break
             op_id = plan_res.get("operation_id")
             if not plan_res.get("ok") or not op_id:
                 break
             try:
-                apply_res = beets_client.apply_folder_cleanup(op_id)
+                apply_res = composite_workflows.apply_folder_cleanup(op_id)
             except (BeetsUnavailableError, BeetsError):
                 break
             if not apply_res.get("ok"):
@@ -39868,7 +39869,7 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
     """Scan and compute artist directory merge moves without local direct filesystem mutations.
 
     All real mutations are delegated to the Beets engine via
-    beets_client.plan_artist_folder_reconcile and apply_artist_folder_reconcile (SEC-002 Wave 21).
+    composite_workflows.plan_artist_folder_reconcile and apply_artist_folder_reconcile (SEC-002 Wave 21).
     """
     stats = stats if stats is not None else {}
     for key in ("files_moved", "duplicate_files_removed", "artwork_collisions_resolved", "filename_conflicts_preserved", "folders_removed"):
@@ -40062,7 +40063,7 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
     # SEC-002 Wave 21 final review: the previous implementation fell back to
     # importing and directly executing backend.transaction_engine's Plan/
     # Apply functions IN-PROCESS inside the Web Manager whenever the
-    # beets_client IPC call raised any exception -- meaning the Web Manager
+    # composite_workflows IPC call raised any exception -- meaning the Web Manager
     # silently became the mutation authority (bypassing every engine-side
     # TOCTOU/root/symlink/identity check) any time the engine was
     # unreachable, authentication failed, DNS failed, or the response
@@ -40071,7 +40072,7 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
     # cannot be reached, this fails closed and reports a stable error --
     # nothing is mutated locally, ever.
     try:
-        plan_res = beets_client.plan_artist_folder_reconcile(op_payload)
+        plan_res = composite_workflows.plan_artist_folder_reconcile(op_payload)
     except (BeetsUnavailableError, BeetsError) as ex:
         log.append("Engine unavailable; artist folder merge was not performed.")
         app.logger.error("Artist folder merge: engine unavailable: %s", ex)
@@ -40356,7 +40357,7 @@ def _stamp_artist_folder_album_mbid_counts(
     album_ids_by_folder: Dict[str, set] = {}
     mbid_album_ids_by_folder: Dict[str, Dict[str, set]] = {}
     try:
-        rows = beets_client.get_artist_folder_album_mbids()
+        rows = composite_workflows.get_artist_folder_album_mbids()
     except Exception as ex:
         app.logger.error("Artist folder MBID counts: engine call failed: %s", ex, exc_info=True)
         return {}, {}, _safe_inventory_error_message(ex)
@@ -40450,7 +40451,7 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
         # the path to actually exist locally.
         folders = sorted(
             (Path(_s(entry.get("path")) or str(root / _s(entry.get("name"))))
-             for entry in beets_client.get_artist_folder_inventory(str(root))
+             for entry in composite_workflows.get_artist_folder_inventory(str(root))
              if _s(entry.get("name")) and not _s(entry.get("name")).startswith(".")),
             key=lambda p: p.name.casefold(),
         )
@@ -40751,7 +40752,7 @@ def clean_artist_folders_stamp_mbid():
     dry_run = bool(payload.get("dry_run", True))
     compact_log = bool(payload.get("compact_log", False))
     # Test-only acceptance failpoint passthrough (hotfix v0.1.17 pattern,
-    # see beets_client.apply_artist_folder_reconcile()'s docstring): a
+    # see composite_workflows.apply_artist_folder_reconcile()'s docstring): a
     # no-op in real deployments, since the engine only honors it when that
     # container was booted with BEETS_ACCEPTANCE_MODE=1.
     acceptance_failpoint = _s(payload.get("_acceptance_failpoint")) or None
@@ -40791,7 +40792,7 @@ def clean_artist_folders_stamp_mbid():
             log.append("No artist folders need MB ID stamping.")
             _append_stamp_skipped_log(log, skipped, include_examples=False)
             return {"renamed": 0, "merged": 0, "skipped": 0}
-        # Formerly performed direct disk merge via _merge_artist_dir_contents(; now delegated to beets_client.plan_artist_folder_reconcile
+        # Formerly performed direct disk merge via _merge_artist_dir_contents(; now delegated to composite_workflows.plan_artist_folder_reconcile
         log.append(f"Stamping MB IDs on {len(candidates)} artist folder(s)…")
         payload = {
             "root": str(root_path),
@@ -40800,7 +40801,7 @@ def clean_artist_folders_stamp_mbid():
         # SEC-002 Wave 21 final review: no local in-process fallback -- see
         # the identical correction and rationale in _apply_artist_folder_groups.
         try:
-            plan_res = beets_client.plan_artist_folder_reconcile(payload)
+            plan_res = composite_workflows.plan_artist_folder_reconcile(payload)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append("Engine unavailable; MBID stamping was not performed.")
             app.logger.error("MBID stamping: engine unavailable: %s", ex)
@@ -42115,9 +42116,8 @@ def _playlist_existing_key(name: str,
 
 
 def _valid_playlist_key(value: Any) -> bool:
-    """Format check mirroring backend/beets_control_agent.py's
-    _valid_playlist_key. Used to make sure web-manager never treats a raw
-    playlist_id (or any other unvalidated string) as if it were already a
+    """Format check for valid playlist key. Used to make sure web-manager never
+    treats a raw playlist_id (or any other unvalidated string) as if it were already a
     derived, filesystem-safe playlist_key."""
     text = _s(value).strip()
     return bool(text) and bool(re.fullmatch(r"[a-zA-Z0-9_.-]{1,160}", text)) and ".." not in text
@@ -42230,7 +42230,7 @@ def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) 
         raise ValueError("Playlist staging root is outside allowed staging directory")
 
     try:
-        res = beets_client.ensure_playlist_staging(key, playlist_id or "", name)
+        res = composite_workflows.ensure_playlist_staging(key, playlist_id or "", name)
     except Exception as exc:
         raise PlaylistStagingUnavailableError(
             "Engine is unavailable; cannot ensure playlist staging directories"
@@ -44325,7 +44325,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
     m3u = f"engine:{key}.m3u"
 
     try:
-        export_result = beets_client.export_playlist_m3u(key, name, items)
+        export_result = composite_workflows.export_playlist_m3u(key, name, items)
     except Exception as ex:
         if log is not None:
             log.append(f"  [playlist] Engine M3U export failed: {type(ex).__name__}")
@@ -44786,7 +44786,7 @@ def _playlist_m3u_items(name: str, index: Dict[str, Any]) -> Tuple[List[Dict[str
     raw_items = []
 
     try:
-        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        res = composite_workflows.read_playlist_m3u(key, fallback_name=clean_name)
         if isinstance(res, dict) and res.get("ok") and res.get("exists"):
             raw_items = res.get("items") or []
     except Exception:
@@ -44966,7 +44966,7 @@ def _playlist_sync_all(log: list, names: Optional[List[str]] = None) -> Dict[str
     local_names = []
     _playlist_ensure_state_dirs()
     try:
-        res = beets_client.list_playlist_m3u()
+        res = composite_workflows.list_playlist_m3u()
         if isinstance(res, dict) and res.get("ok") and isinstance(res.get("playlists"), list):
             for pl in res.get("playlists") or []:
                 n = _s(pl.get("name") or pl.get("key") or "").strip()
@@ -45431,7 +45431,7 @@ def playlist_create():
             _playlist_ensure_state_dirs()
             pid = _playlist_ensure_stable_id(name, playlist_id=requested_playlist_id or _playlist_new_internal_id())
             key = _playlist_key(name, playlist_id=pid, allocate=False)
-            export_result = beets_client.export_playlist_m3u(key, name, [])
+            export_result = composite_workflows.export_playlist_m3u(key, name, [])
             if not (isinstance(export_result, dict) and export_result.get("ok")):
                 raise RuntimeError("m3u_export_failed")
             manifest = _playlist_write_manifest(
@@ -45890,7 +45890,7 @@ def _playlist_saved_playlist_exists(name: str) -> bool:
     key = _playlist_existing_key(clean_name)
     if key:
         try:
-            res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+            res = composite_workflows.read_playlist_m3u(key, fallback_name=clean_name)
             if isinstance(res, dict) and res.get("ok") and res.get("exists"):
                 return True
         except Exception:
@@ -46163,7 +46163,7 @@ def _playlist_stamp_download_tags(path_value: str, artist: str, title: str, log)
         if artist:
             tags["artist"] = artist
             tags["albumartist"] = artist
-        beets_client.write_tags(str(path_value), tags)
+        composite_workflows.write_tags(str(path_value), tags)
     except Exception as ex:
         log(f"  warning: could not stamp playlist tags on {Path(path_value).name}: {ex}")
 
@@ -46188,7 +46188,7 @@ def _playlist_validate_downloaded_files(paths: Iterable[str], artist: str, title
             if action == "reject":
                 if key:
                     try:
-                        beets_client.delete_playlist_staged_track(key, "", path_value)
+                        composite_workflows.delete_playlist_staged_track(key, "", path_value)
                     except Exception:
                         pass
                 else:
@@ -46282,7 +46282,7 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
             )
             if _s(identity.get("final_action") or "review") == "reject":
                 try:
-                    beets_client.delete_file(path_value)
+                    composite_workflows.delete_file(path_value)
                 except Exception:
                     pass
             detail = _playlist_identity_log(best_any_match) if best_any_match else "no identity evidence"
@@ -46336,7 +46336,7 @@ def _playlist_inspect_staged_file(name: str,
     if not _playlist_valid_internal_id(pid):
         return {"ok": True, "exists": False, "authorized": False, "status": "missing_playlist_id"}
     playlist_key = _playlist_key(clean_name, playlist_id=pid, allocate=False)
-    return beets_client.inspect_playlist_staged_track(playlist_key, track_id, staged_path)
+    return composite_workflows.inspect_playlist_staged_track(playlist_key, track_id, staged_path)
 
 
 def _is_safe_playlist_staged_file(path_str: str,
@@ -46434,7 +46434,7 @@ def _playlist_download_missing_tracks(
         # engine as "here is the ground truth from a local directory" is
         # not.
         try:
-            res = beets_client.list_playlist_staged_files(playlist_key, playlist_id)
+            res = composite_workflows.list_playlist_staged_files(playlist_key, playlist_id)
             if isinstance(res, dict) and res.get("ok"):
                 return [f["path"] for f in res.get("files", []) if isinstance(f, dict) and f.get("path")]
         except Exception as ex:
@@ -47411,7 +47411,7 @@ def _playlist_quality_cleanup_candidates(limit: int = 200,
                                          item_ids: Optional[List[int]] = None,
                                          filter_mode: str = "all") -> List[Dict[str, Any]]:
     try:
-        res = beets_client.get_playlist_quality_candidates(filter_mode=filter_mode, limit=limit, item_ids=item_ids)
+        res = composite_workflows.get_playlist_quality_candidates(filter_mode=filter_mode, limit=limit, item_ids=item_ids)
     except Exception as ex:
         raise PlaylistQualityCandidatesUnavailableError(
             f"Engine quality candidates query failed: {ex}"
@@ -48360,7 +48360,7 @@ def _playlist_reusable_download_files(track: Dict[str, Any],
         return []
     candidates: List[str] = []
     try:
-        res = beets_client.list_playlist_staged_files(key, playlist_id)
+        res = composite_workflows.list_playlist_staged_files(key, playlist_id)
         if isinstance(res, dict) and res.get("ok"):
             candidates = [f["path"] for f in res.get("files", []) if isinstance(f, dict) and f.get("path")]
         else:
@@ -48467,7 +48467,7 @@ def _playlist_validate_staged_download(path_value: str, artist: str, title: str,
             "reason": "could not resolve the playlist for this download",
         }
     try:
-        res = beets_client.validate_playlist_staged_track(
+        res = composite_workflows.validate_playlist_staged_track(
             playlist_key=key,
             requested_path=path_value,
             artist=artist,
@@ -48519,7 +48519,7 @@ def _playlist_apply_album_placement(con, candidate: Dict[str, Any],
     # Wave 13 Engine Ownership: Placement mutations and post-import validation
     # are executed in the engine container via BeetsClient IPC.
     try:
-        res = beets_client.place_playlist_imported_item(
+        res = composite_workflows.place_playlist_imported_item(
             playlist_key=key,
             item_id=item_id,
             placement=placement,
@@ -48736,7 +48736,7 @@ def _playlist_move_singleton_candidate(candidate: Dict[str, Any],
         }
 
     try:
-        res = beets_client.place_playlist_imported_item(
+        res = composite_workflows.place_playlist_imported_item(
             playlist_key=key,
             item_id=item_id,
             placement={},
@@ -48960,10 +48960,10 @@ def _playlist_run_quality_cleanup_job(action: str,
                 )
     elif action == "delete_preview":
         try:
-            plan_res = beets_client.plan_playlist_media_cleanup({"item_ids": candidate_ids})
+            plan_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": candidate_ids})
             if plan_res.get("ok"):
                 op_id = plan_res["operation_id"]
-                apply_res = beets_client.apply_playlist_media_cleanup(op_id)
+                apply_res = composite_workflows.apply_playlist_media_cleanup(op_id)
                 if apply_res.get("ok"):
                     files_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
                     rows_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
@@ -49184,7 +49184,7 @@ def _playlist_m3u_track_rows(name: str, index: Dict[str, Any]) -> Tuple[List[Dic
     raw_items = []
 
     try:
-        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        res = composite_workflows.read_playlist_m3u(key, fallback_name=clean_name)
         if isinstance(res, dict) and res.get("ok") and res.get("exists"):
             raw_items = res.get("items") or []
     except Exception:
@@ -49377,7 +49377,7 @@ def _playlist_checkpoint_list_summary(name: str,
     key = _playlist_existing_key(clean_name)
     if key:
         try:
-            res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+            res = composite_workflows.read_playlist_m3u(key, fallback_name=clean_name)
             if isinstance(res, dict) and res.get("ok") and res.get("exists"):
                 return None
         except Exception:
@@ -49414,7 +49414,7 @@ def _playlist_engine_m3u_count_summary(name: str,
     if not key:
         return None
     try:
-        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        res = composite_workflows.read_playlist_m3u(key, fallback_name=clean_name)
     except Exception:
         return None
     if not (isinstance(res, dict) and res.get("ok") and res.get("exists")):
@@ -49537,7 +49537,7 @@ def _playlist_saved_playlist_records(checkpoint_states: List[Dict[str, Any]]) ->
         return row
 
     try:
-        res = beets_client.list_playlist_m3u()
+        res = composite_workflows.list_playlist_m3u()
         files = []
         if isinstance(res, dict) and res.get("ok"):
             files = res.get("playlists") if isinstance(res.get("playlists"), list) else res.get("files")
@@ -49700,7 +49700,7 @@ def playlist_delete(name):
     plex_error = ""
 
     try:
-        res = beets_client.delete_playlist_m3u(key, fallback_name=clean_name)
+        res = composite_workflows.delete_playlist_m3u(key, fallback_name=clean_name)
         if not (isinstance(res, dict) and res.get("ok")):
             return jsonify({
                 "ok": False,
@@ -49815,7 +49815,7 @@ def _playlist_write_local_membership(name: str,
         )
     else:
         key = _playlist_key(clean_name, manifest)
-        export_result = beets_client.export_playlist_m3u(key, clean_name, [])
+        export_result = composite_workflows.export_playlist_m3u(key, clean_name, [])
         if not (isinstance(export_result, dict) and export_result.get("ok")):
             raise RuntimeError("m3u_export_failed")
     return _playlist_detail_payload(clean_name, index)
@@ -49891,7 +49891,7 @@ def _playlist_delete_staged_track_file(name: str,
     # symlinks, and root-self on its own side under an OS lock (SEC-002
     # Wave 9 continuation -- no local Path.unlink() fallback here).
     try:
-        res = beets_client.delete_playlist_staged_track(playlist_key, track_key, str(resolved_path))
+        res = composite_workflows.delete_playlist_staged_track(playlist_key, track_key, str(resolved_path))
     except Exception as exc:
         raise RuntimeError("Engine is unavailable; cannot delete staged track file") from exc
     if not (isinstance(res, dict) and res.get("ok")):
@@ -50123,7 +50123,7 @@ def _playlist_m3u_reference_track_rows(name: str) -> List[Dict[str, Any]]:
     raw_items = []
 
     try:
-        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        res = composite_workflows.read_playlist_m3u(key, fallback_name=clean_name)
         if isinstance(res, dict) and res.get("ok") and res.get("exists"):
             raw_items = res.get("items") or []
     except Exception:
@@ -50848,7 +50848,7 @@ def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]
                 )
 
         if tags_to_write:
-            beets_client.write_tags(str(path), tags_to_write)
+            composite_workflows.write_tags(str(path), tags_to_write)
     except Exception as exc:
         log.append(f"  [tag] Error enriching playlist file tags: {exc}")
         log.append(f"  [tag] Warning: could not enrich tags on {path.name}: {exc}")
@@ -50907,7 +50907,7 @@ def _playlist_run_import_downloaded(name: str,
     log.append(f"Starting engine Beets singleton import for {len(imported_tracks)} track(s)...")
     import_started_at = time.time()
     try:
-        res = beets_client.import_playlist_staged(
+        res = composite_workflows.import_playlist_staged(
             key, pid, tracks_payload, operation_id=operation_id
         )
     except Exception as exc:
@@ -51062,7 +51062,7 @@ def _playlist_sync_items_from_m3u(clean_name: str) -> List[Dict[str, Any]]:
     if not key:
         return []
     try:
-        res = beets_client.read_playlist_m3u(key, fallback_name=_clean_playlist_name(clean_name))
+        res = composite_workflows.read_playlist_m3u(key, fallback_name=_clean_playlist_name(clean_name))
     except Exception:
         return []
     if not (isinstance(res, dict) and res.get("ok") and res.get("exists")):
@@ -51767,17 +51767,17 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
     try:
         if mb_trackid:
             try:
-                _add_candidates(beets_client.find_all_items_by_mbid(mb_trackid))
+                _add_candidates(composite_workflows.find_all_items_by_mbid(mb_trackid))
             except Exception:
                 pass
         if album_id:
             try:
-                _add_candidates(beets_client.find_all_items_by_album_id(album_id))
+                _add_candidates(composite_workflows.find_all_items_by_album_id(album_id))
             except Exception:
                 pass
         if not candidates:
             try:
-                _add_candidates(beets_client.get_items_page(offset=0, limit=100).get("items", []))
+                _add_candidates(composite_workflows.get_items_page(offset=0, limit=100).get("items", []))
             except Exception:
                 pass
     except Exception:
@@ -51890,7 +51890,7 @@ def _music_format_remove_original_after_replacement(original_path: str, final_pa
     matching_contract = _music_format_replacement_matching_contract(resolved or {}, replacement or {})
 
     try:
-        plan_res = beets_client.plan_track_replacement({
+        plan_res = composite_workflows.plan_track_replacement({
             "original_item_id": int(original_item_id or 0),
             "original_path": original_path,
             "replacement_path": final_path,
@@ -51904,7 +51904,7 @@ def _music_format_remove_original_after_replacement(original_path: str, final_pa
             return result
 
         op_id = plan_res.get("operation_id")
-        apply_res = beets_client.apply_track_replacement(op_id)
+        apply_res = composite_workflows.apply_track_replacement(op_id)
         if not apply_res.get("ok"):
             error_msg = apply_res.get("error") or "track replacement apply failed"
             log.append(f"Track replacement apply failed: {error_msg}")
@@ -51999,7 +51999,7 @@ def item_replacement_plan(iid: int):
     )
 
     try:
-        res = beets_client.plan_track_replacement({
+        res = composite_workflows.plan_track_replacement({
             "original_item_id": iid,
             "original_path": original_path,
             "replacement_path": str(cand_p),
@@ -52017,7 +52017,8 @@ def item_replacement_plan(iid: int):
         # established precedent as get_config()/_config_error_response()
         # above. error_code is a short, fixed identifier string, never
         # free text, so it's safe to echo.
-        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+        err_code = "beets_unavailable" if not exc.error_code or exc.error_code in ("BEETS_UNREACHABLE", "BEETS_TIMEOUT", "BEETS_ADAPTER_ERROR") else exc.error_code
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": err_code}), 503
     except BeetsError as exc:
         return jsonify({"ok": False, "error": "Track replacement planning failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
@@ -52037,11 +52038,12 @@ def item_replacement_apply(iid: int):
     if not op_id:
         return jsonify({"ok": False, "error": "operation_id required"}), 400
     try:
-        res = beets_client.apply_track_replacement(op_id)
+        res = composite_workflows.apply_track_replacement(op_id)
         status_code = 200 if res.get("ok") else 400
         return jsonify(res), status_code
     except BeetsUnavailableError as exc:
-        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+        err_code = "beets_unavailable" if not exc.error_code or exc.error_code in ("BEETS_UNREACHABLE", "BEETS_TIMEOUT", "BEETS_ADAPTER_ERROR") else exc.error_code
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": err_code}), 503
     except BeetsError as exc:
         return jsonify({"ok": False, "error": "Track replacement apply failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
@@ -52218,7 +52220,7 @@ def start_music_format_replacement_retry():
 # local /config/config.yaml path that never existed in the web-manager
 # container in the real deployed topology, so every call 500'd (BUG-1,
 # found during the v0.1.11 TrueNAS rollout). Routes now proxy through
-# beets_client -> the control agent's /config endpoints (BEETSDIR-relative
+# composite_workflows -> the control agent's /config endpoints (BEETSDIR-relative
 # on the engine side), matching the same architecture already used for
 # library reads/writes. Redaction stays here (unchanged) rather than moving
 # to the agent: the agent is the trusted internal boundary and returns raw
@@ -52288,7 +52290,7 @@ def _contains_redacted_config_secret(text: str) -> bool:
 # Stable (error_code, http_status, message) mapping shared by all three
 # routes below -- keeps status codes/messages consistent without
 # interpolating raw exception text (which may embed up to 200 characters of
-# an unrecognized upstream error body; see beets_client._request()) into
+# an unrecognized upstream error body; see composite_workflows._request()) into
 # any browser-facing response.
 _CONFIG_ERROR_RESPONSES = {
     "config_not_found":             (404, "Beets config.yaml not found on the engine."),
@@ -52319,15 +52321,15 @@ def _config_error_response(exc: "BeetsError"):
 @app.get("/api/config")
 def get_config():
     try:
-        result = beets_client.get_config()
+        result = composite_workflows.get_config()
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
     except BeetsUnavailableError as exc:
-        if exc.error_code:
-            return _config_error_response(exc)
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
     except BeetsError as exc:
         return _config_error_response(exc)
+    except ConfigError as exc:
+        return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_read_failed")}), getattr(exc, "status_code", 502)
     text = str(result.get("content") or "")
     return jsonify({
         "ok": True,
@@ -52357,7 +52359,7 @@ def save_config():
     if not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "config_missing_revision"}), 428
     try:
-        result = beets_client.save_config(content, expected_revision=expected_revision)
+        result = composite_workflows.save_config(content, expected_revision=expected_revision)
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
     except BeetsUnavailableError as exc:
@@ -52366,6 +52368,12 @@ def save_config():
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
     except BeetsError as exc:
         return _config_error_response(exc)
+    except ConfigConflictError:
+        return jsonify({"ok": False, "error": "Config was changed by another writer; reload before saving.", "code": "config_revision_conflict"}), 409
+    except ConfigValidationError as exc:
+        return jsonify({"ok": False, "error": "Invalid Beets configuration YAML.", "code": "config_invalid_yaml"}), 400
+    except ConfigError as exc:
+        return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_write_failed")}), getattr(exc, "status_code", 502)
     return jsonify({"ok": True, "backed_up": bool(result.get("backed_up")), "revision": result.get("revision")})
 
 
@@ -52376,7 +52384,7 @@ def revert_config():
     if not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "config_missing_revision"}), 428
     try:
-        result = beets_client.revert_config(expected_revision=expected_revision)
+        result = composite_workflows.revert_config(expected_revision=expected_revision)
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
     except BeetsUnavailableError as exc:
@@ -52385,6 +52393,12 @@ def revert_config():
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
     except BeetsError as exc:
         return _config_error_response(exc)
+    except ConfigConflictError:
+        return jsonify({"ok": False, "error": "Config was changed by another writer; reload before saving.", "code": "config_revision_conflict"}), 409
+    except ConfigValidationError as exc:
+        return jsonify({"ok": False, "error": "Invalid Beets configuration YAML.", "code": "config_invalid_yaml"}), 400
+    except ConfigError as exc:
+        return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_revert_failed")}), getattr(exc, "status_code", 502)
     return jsonify({"ok": True, "revision": result.get("revision")})
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -52522,7 +52536,7 @@ def api_transaction_settings_save():
 @app.get("/api/transactions")
 def api_transactions_list():
     # SEC-002 Wave 16 final review: this previously fell back to
-    # beets_client.list_transactions() (browsing the ENTIRE engine
+    # composite_workflows.list_transactions() (browsing the ENTIRE engine
     # TransactionStore, across every mutation family and every
     # operation ever run, not just this session's own) whenever the local
     # list was empty. Nothing in the frontend calls this fallback --
@@ -52615,7 +52629,7 @@ def api_transaction_rollback(transaction_id):
         # so this dispatch is a UX/correctness improvement, not the sole
         # security boundary.
         try:
-            detail = beets_client.get_transaction(transaction_id)
+            detail = composite_workflows.get_transaction(transaction_id)
         except BeetsUnavailableError as exc:
             # Never interpolate the raw exception text: BeetsClient._request()
             # falls back to embedding up to 200 raw response-body characters
@@ -52633,29 +52647,29 @@ def api_transaction_rollback(transaction_id):
 
         try:
             if mutation_family == "track_replacement_v1":
-                res = beets_client.rollback_track_replacement(transaction_id)
+                res = composite_workflows.rollback_track_replacement(transaction_id)
             elif mutation_family == "import_review_cleanup_v1":
-                res = beets_client.rollback_import_review_cleanup(transaction_id)
+                res = composite_workflows.rollback_import_review_cleanup(transaction_id)
             elif mutation_family == "bulk_import_replacement_v1":
                 # SEC-002 Wave 18 final review: explicit, known dispatch --
                 # no "unknown family -> try bulk replacement" fallback.
-                res = beets_client.rollback_bulk_import_replacement(transaction_id)
+                res = composite_workflows.rollback_bulk_import_replacement(transaction_id)
             elif mutation_family == "album_mb_track_repair_v1":
-                res = beets_client.rollback_album_mb_track_repair(transaction_id)
+                res = composite_workflows.rollback_album_mb_track_repair(transaction_id)
             elif mutation_family == "existing_album_reconcile_v1":
-                res = beets_client.rollback_existing_album_reconcile(transaction_id)
+                res = composite_workflows.rollback_existing_album_reconcile(transaction_id)
             elif mutation_family == "artist_folder_reconcile_v1":
-                res = beets_client.rollback_artist_folder_reconcile(transaction_id)
+                res = composite_workflows.rollback_artist_folder_reconcile(transaction_id)
             elif mutation_family == "album_maintenance_v1":
-                res = beets_client.rollback_album_maintenance(transaction_id)
+                res = composite_workflows.rollback_album_maintenance(transaction_id)
             elif mutation_family == "album_artwork_v1":
-                res = beets_client.rollback_album_artwork(transaction_id)
+                res = composite_workflows.rollback_album_artwork(transaction_id)
             elif mutation_family == "import_folder_v1":
-                res = beets_client.rollback_import_folder(transaction_id)
+                res = composite_workflows.rollback_import_folder(transaction_id)
             elif mutation_family == "folder_cleanup_v1":
-                res = beets_client.rollback_folder_cleanup(transaction_id)
+                res = composite_workflows.rollback_folder_cleanup(transaction_id)
             elif mutation_family == "playlist_media_cleanup_v1":
-                res = beets_client.rollback_playlist_media_cleanup(transaction_id)
+                res = composite_workflows.rollback_playlist_media_cleanup(transaction_id)
             elif mutation_family:
                 return jsonify({
                     "ok": False,

@@ -89,7 +89,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
             tmp_root.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
                  _patched_playlist_state(Path(tmp) / "state"), \
-                 mock.patch.object(app_module.beets_client, "ensure_playlist_staging",
+                 mock.patch.object(app_module.composite_workflows, "ensure_playlist_staging",
                                     return_value={"ok": True}) as mock_ensure:
                 app_module._playlist_ensure_staging_dirs("../../../outside")
                 created_root = app_module.get_playlist_staging_root("../../../outside").resolve(strict=False)
@@ -106,7 +106,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
             tmp_root.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
                  _patched_playlist_state(Path(tmp) / "state"), \
-                 mock.patch.object(app_module.beets_client, "ensure_playlist_staging",
+                 mock.patch.object(app_module.composite_workflows, "ensure_playlist_staging",
                                     side_effect=ConnectionError("engine unreachable")):
                 with self.assertRaises(app_module.PlaylistStagingUnavailableError):
                     app_module._playlist_ensure_staging_dirs("Some Playlist")
@@ -119,7 +119,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
             tmp_root.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
                  _patched_playlist_state(Path(tmp) / "state"), \
-                 mock.patch.object(app_module.beets_client, "ensure_playlist_staging",
+                 mock.patch.object(app_module.composite_workflows, "ensure_playlist_staging",
                                     return_value={"ok": False, "error": "staging_unavailable"}):
                 with self.assertRaises(app_module.PlaylistStagingUnavailableError):
                     app_module._playlist_ensure_staging_dirs("Some Playlist")
@@ -306,7 +306,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
                         p.unlink()
                     return {"ok": True, "deleted": existed, "already_absent": not existed, "path": requested_path}
 
-                with mock.patch.object(app_module.beets_client, "delete_playlist_staged_track",
+                with mock.patch.object(app_module.composite_workflows, "delete_playlist_staged_track",
                                         side_effect=_fake_engine_delete) as mock_delete:
                     res = app_module._playlist_delete_staged_track_file(
                         "MyPlaylist",
@@ -337,7 +337,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
                 track = {"id": "tr5"}
                 _record_staged_path("MyPlaylist", track, staged_mp3)
 
-                with mock.patch.object(app_module.beets_client, "delete_playlist_staged_track",
+                with mock.patch.object(app_module.composite_workflows, "delete_playlist_staged_track",
                                         side_effect=ConnectionError("engine unreachable")):
                     with self.assertRaises(RuntimeError) as cm:
                         app_module._playlist_delete_staged_track_file(
@@ -368,7 +368,7 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
             with _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", playlist_dir), \
                  mock.patch.object(app_module, "_plex_settings", return_value={"token": ""}), \
-                 mock.patch.object(app_module.beets_client, "export_playlist_m3u", return_value={"ok": True, "playlist_key": "engine_key"}) as mock_export:
+                 mock.patch.object(app_module.composite_workflows, "export_playlist_m3u", return_value={"ok": True, "playlist_key": "engine_key"}) as mock_export:
                 result = app_module._create_playlist_outputs("CleanPlaylist", items, sync_plex=False)
 
             mock_export.assert_called_once()
@@ -516,38 +516,30 @@ class Wave9StableIdentityAndEngineOwnershipTests(unittest.TestCase):
                 self.assertNotEqual(key_a, key_b, "Long distinct names must yield distinct keys")
 
     def test_beets_client_engine_staging_ipc(self):
-        client = app_module.beets_client
-        with mock.patch.object(client, "_request", return_value={"ok": True, "staged": True}) as mock_req:
-            res = client.ensure_playlist_staging("test--key123", "pl-123", "Test Playlist")
-            self.assertTrue(res.get("ok"))
-            mock_req.assert_called_once_with(
-                "POST",
-                "/playlists/staging/ensure",
-                {"playlist_key": "test--key123", "playlist_id": "pl-123", "name": "Test Playlist"},
-            )
+        client = app_module.composite_workflows
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp}):
+                res = client.ensure_playlist_staging("test--key123", "pl-123", "Test Playlist")
+                self.assertTrue(res.get("ok"))
+                self.assertTrue(Path(res.get("path")).exists())
 
     def test_beets_client_engine_delete_track_ipc(self):
-        client = app_module.beets_client
-        with mock.patch.object(client, "_request", return_value={"ok": True, "deleted": True}) as mock_req:
-            res = client.delete_playlist_staged_track("test--key123", "track-456", "/data/staging/01.mp3")
-            self.assertTrue(res.get("deleted"))
-            mock_req.assert_called_once_with(
-                "POST",
-                "/playlists/staging/delete-track",
-                {"playlist_key": "test--key123", "track_id": "track-456", "requested_path": "/data/staging/01.mp3"},
-            )
+        client = app_module.composite_workflows
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp, "BEETS_IMPORT_ROOTS": tmp}):
+                f = Path(tmp) / "01.mp3"
+                f.write_text("audio")
+                res = client.delete_playlist_staged_track("test--key123", "track-456", str(f))
+                self.assertTrue(res.get("ok"))
+                self.assertFalse(f.exists())
 
     def test_beets_client_engine_export_m3u_ipc(self):
-        client = app_module.beets_client
+        client = app_module.composite_workflows
         items = [{"artist": "Art", "title": "Song", "path": "/data/music/01.mp3"}]
-        with mock.patch.object(client, "_request", return_value={"ok": True, "exported": True}) as mock_req:
-            res = client.export_playlist_m3u("test--key123", "Test Playlist", items)
-            self.assertTrue(res.get("exported"))
-            mock_req.assert_called_once_with(
-                "POST",
-                "/playlists/export_m3u",
-                {"playlist_key": "test--key123", "display_name": "Test Playlist", "items": items},
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp}):
+                res = client.export_playlist_m3u("test--key123", "Test Playlist", items)
+                self.assertTrue(res.get("ok"))
 
 
 if __name__ == "__main__":

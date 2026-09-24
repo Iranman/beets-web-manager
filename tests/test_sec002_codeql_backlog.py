@@ -147,7 +147,7 @@ class AlbumArtDeleteExceptionSanitizationTests(unittest.TestCase):
         leak = "LEAK_MARKER /internal/host/path errno=13 token=abc123"
         with app_module.app.test_request_context("/api/albums/42/art", method="DELETE"), \
              mock.patch.object(app_module.lib, "get_album", return_value=object()), \
-             mock.patch.object(app_module.beets_client, "delete_album_art", side_effect=RuntimeError(leak)):
+             mock.patch.object(app_module.composite_workflows, "delete_album_art", side_effect=RuntimeError(leak)):
             response, status = app_module.album_delete_art(42)
         data = response.get_json()
         self.assertEqual(status, 500)

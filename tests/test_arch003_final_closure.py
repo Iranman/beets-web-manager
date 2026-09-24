@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from backend.beets_client import BeetsClient, BeetsUnavailableError
+from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from verify_arch003_mutation_inventory import verify_mutation_inventory  # noqa: E402
@@ -29,10 +29,10 @@ class TestArch003FinalClosure(unittest.TestCase):
     def setUp(self):
         self.repo_root = Path(__file__).parent.parent.resolve()
         self.app_path = self.repo_root / "app.py"
-        self.beets_client_path = self.repo_root / "backend" / "beets_client.py"
+        self.beets_adapter_path = self.repo_root / "backend" / "beets_adapter.py"
 
         self.app_source = self.app_path.read_text(encoding="utf-8")
-        self.beets_client_source = self.beets_client_path.read_text(encoding="utf-8")
+        self.beets_adapter_source = self.beets_adapter_path.read_text(encoding="utf-8")
 
     def _function_source(self, name: str) -> str:
         tree = ast.parse(self.app_source)
@@ -46,13 +46,13 @@ class TestArch003FinalClosure(unittest.TestCase):
         self.assertNotIn("subprocess.run(\n                base_import + [\"import\"", self.app_source)
 
     def test_beets_client_has_no_in_process_fallback(self):
-        self.assertNotIn("_local_engine_fallback", self.beets_client_source)
-        self.assertNotIn("transaction_engine", self.beets_client_source)
+        self.assertNotIn("_local_engine_fallback", self.beets_adapter_source)
+        self.assertNotIn("sqlite3.connect", self.beets_adapter_source)
 
     def test_import_fails_closed_when_engine_unreachable(self):
-        client = BeetsClient(base_url="http://127.0.0.1:59999", timeout=0.5)
+        adapter = BeetsAdapter(base_url="http://127.0.0.1:59999", timeout=0.5)
         with self.assertRaises(BeetsUnavailableError):
-            client.plan_import_folder({"source_folder": "/staging/album1"})
+            adapter.run_import(["/staging/album1"])
 
     # ── _album_cleanup_apply_issue: prove absence, not just presence ──────
 
@@ -86,9 +86,9 @@ class TestArch003FinalClosure(unittest.TestCase):
         self.assertEqual(banned_calls, [], f"found prohibited local mutation calls: {banned_calls}")
 
     def test_album_cleanup_apply_issue_routes_to_beets_client(self):
-        self.assertIn("beets_client.plan_album_maintenance", self.app_source)
-        self.assertIn("beets_client.plan_album_artwork", self.app_source)
-        self.assertIn("beets_client.plan_folder_cleanup", self.app_source)
+        self.assertIn("composite_workflows.plan_album_maintenance", self.app_source)
+        self.assertIn("composite_workflows.plan_album_artwork", self.app_source)
+        self.assertIn("composite_workflows.plan_folder_cleanup", self.app_source)
 
     def test_album_cleanup_duplicate_uses_real_item_id_not_zero(self):
         """SEC-002 / ARCH-003 final closure review, finding #6: `to_delete`
@@ -255,7 +255,7 @@ class TestArch003FinalClosure(unittest.TestCase):
                     "inventory": [{
                         "key": "app.py:real_caller:abc123", "file": "app.py", "function": "real_caller",
                         "line": 1, "kind": "subprocess",
-                        "call_text": "beets_client.update_item_metadata(item_id, fields)",
+                        "call_text": "composite_workflows.update_item_metadata(item_id, fields)",
                         "classification": "CONTROLLED_MEDIA_MUTATION",
                         "transaction_family": "album_metadata_repair_v1",
                         "rule": "reviewed-beetsclient-item-metadata-repair",

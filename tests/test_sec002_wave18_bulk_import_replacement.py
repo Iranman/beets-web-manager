@@ -872,8 +872,8 @@ class AstStructuralTests(unittest.TestCase):
         self.assertIsNotNone(node)
         source_lines = self.app_source.splitlines()
         body_text = "\n".join(source_lines[node.lineno - 1: node.end_lineno])
-        self.assertIn("beets_client.get_album", body_text)
-        self.assertIn("beets_client.find_all_items_by_album_id", body_text)
+        self.assertIn("composite_workflows.get_album", body_text)
+        self.assertIn("composite_workflows.find_all_items_by_album_id", body_text)
 
 
     def test_merge_function_calls_engine_for_replace_rows(self):
@@ -963,7 +963,7 @@ class GenericRollbackDispatchTests(unittest.TestCase):
 
 class RealProductionPathTests(unittest.TestCase):
     """Real integration test: the actual app.py _merge_imported_album_into_existing
-    function, with app.beets_client's bulk-replacement methods patched to
+    function, with app.composite_workflows's bulk-replacement methods patched to
     call the REAL transaction_engine functions (real TransactionStore,
     real SQLite DB, real files), and app._db patched to a real local
     sqlite3 connection instead of the remote-engine proxy (which has
@@ -1065,25 +1065,25 @@ class RealProductionPathTests(unittest.TestCase):
             con.close()
             return res
 
-        self._get_album_patch = mock.patch.object(flask_app.beets_client, "get_album", side_effect=fake_get_album)
+        self._get_album_patch = mock.patch.object(flask_app.composite_workflows, "get_album", side_effect=fake_get_album)
         self._get_album_patch.start()
         self.addCleanup(self._get_album_patch.stop)
 
-        self._find_items_patch = mock.patch.object(flask_app.beets_client, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
+        self._find_items_patch = mock.patch.object(flask_app.composite_workflows, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
         self._find_items_patch.start()
         self.addCleanup(self._find_items_patch.stop)
 
-        self._plan_patch = mock.patch.object(flask_app.beets_client, "plan_bulk_import_replacement", side_effect=mock_plan)
+        self._plan_patch = mock.patch.object(flask_app.composite_workflows, "plan_bulk_import_replacement", side_effect=mock_plan)
         self._plan_patch.start()
         self.addCleanup(self._plan_patch.stop)
-        self._apply_patch = mock.patch.object(flask_app.beets_client, "apply_bulk_import_replacement", side_effect=mock_apply)
+        self._apply_patch = mock.patch.object(flask_app.composite_workflows, "apply_bulk_import_replacement", side_effect=mock_apply)
         self._apply_patch.start()
         self.addCleanup(self._apply_patch.stop)
 
-        self._rec_plan_patch = mock.patch.object(flask_app.beets_client, "plan_existing_album_reconcile", side_effect=mock_rec_plan)
+        self._rec_plan_patch = mock.patch.object(flask_app.composite_workflows, "plan_existing_album_reconcile", side_effect=mock_rec_plan)
         self._rec_plan_patch.start()
         self.addCleanup(self._rec_plan_patch.stop)
-        self._rec_apply_patch = mock.patch.object(flask_app.beets_client, "apply_existing_album_reconcile", side_effect=mock_rec_apply)
+        self._rec_apply_patch = mock.patch.object(flask_app.composite_workflows, "apply_existing_album_reconcile", side_effect=mock_rec_apply)
         self._rec_apply_patch.start()
         self.addCleanup(self._rec_apply_patch.stop)
 
@@ -1162,7 +1162,7 @@ class RealProductionPathTests(unittest.TestCase):
         new_p = self._insert_item(new_id, imported_album_id, "new_track.flac", track=1, mb_trackid="tr-new")
 
         log = []
-        with mock.patch.object(self.flask_app.beets_client, "plan_bulk_import_replacement") as plan_mock:
+        with mock.patch.object(self.flask_app.composite_workflows, "plan_bulk_import_replacement") as plan_mock:
             result_album_id = self.flask_app._merge_imported_album_into_existing(
                 imported_album_id, existing_album_id, str(self.music_root), log,
                 mb_albumid="", replace_existing_item_ids=[old_id],

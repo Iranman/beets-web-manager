@@ -356,16 +356,16 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
             return_value={"candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
         ))
         plan_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "plan_artist_folder_reconcile",
+            app_module.composite_workflows, "plan_artist_folder_reconcile",
             return_value={"ok": True, "operation_id": "op-123"},
         ))
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
         tx_status = {"value": "Running"}
         get_tx_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             side_effect=lambda op_id: {"ok": True, "transaction": {"status": tx_status["value"], "operation_id": op_id}},
         ))
 
@@ -441,18 +441,18 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
             return_value={"ok": True, "candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
         ))
         plan_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "plan_artist_folder_reconcile",
+            app_module.composite_workflows, "plan_artist_folder_reconcile",
             return_value={"ok": True, "operation_id": "op-123"},
         ))
         apply_mock = self._patch(mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile",
+            app_module.composite_workflows, "apply_artist_folder_reconcile",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         ))
 
         # Execution 1: Plan -> op-123, Apply's response lost, engine stays
         # Running until the bounded poll deadline -- ends "partial".
         get_tx_patcher = mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             return_value={"ok": True, "transaction": {"status": "Running", "operation_id": "op-123"}},
         )
         get_tx_patcher.start()
@@ -471,7 +471,7 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         # fails (transport uncertainty, not a definitive answer). Must NOT
         # create a new Plan or call Apply again; must NOT drop op-123.
         get_tx_patcher = mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
         )
         get_tx_patcher.start()
@@ -497,7 +497,7 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         # Execution 3: resume finds op-123 again, and this time the status
         # lookup succeeds and reports Completed.
         get_tx_completed = self._patch(mock.patch.object(
-            app_module.beets_client, "get_transaction",
+            app_module.composite_workflows, "get_transaction",
             return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-123"}},
         ))
         self.call_order.clear()

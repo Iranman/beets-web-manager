@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 
 
 class ScanJobAutoCleanTests(unittest.TestCase):
@@ -35,13 +35,13 @@ class ScanJobAutoCleanTests(unittest.TestCase):
 
     def test_scan_job_cleans_stale_and_empty_via_engine(self):
         with mock.patch.object(
-            app_module.beets_client, "get_library_stats",
+            app_module.composite_workflows, "get_library_stats",
             return_value={"tracks": 100, "albums": 10},
         ) as mock_stats, mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             return_value={"missing_count": 2, "removed_from_db": 2},
         ) as mock_sync, mock.patch.object(
-            app_module.beets_client, "clean_empty_albums",
+            app_module.composite_workflows, "clean_empty_albums",
             return_value={"removed_count": 1},
         ) as mock_empty:
             log = self._run_scan()
@@ -58,13 +58,13 @@ class ScanJobAutoCleanTests(unittest.TestCase):
 
     def test_scan_job_no_stale_entries(self):
         with mock.patch.object(
-            app_module.beets_client, "get_library_stats",
+            app_module.composite_workflows, "get_library_stats",
             return_value={"tracks": 50, "albums": 5},
         ), mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             return_value={"missing_count": 0, "removed_from_db": 0},
         ), mock.patch.object(
-            app_module.beets_client, "clean_empty_albums",
+            app_module.composite_workflows, "clean_empty_albums",
             return_value={"removed_count": 0},
         ):
             log = self._run_scan()
@@ -78,7 +78,7 @@ class ScanJobAutoCleanTests(unittest.TestCase):
 
     def test_engine_unavailable_is_logged_and_raises(self):
         with mock.patch.object(
-            app_module.beets_client, "get_library_stats",
+            app_module.composite_workflows, "get_library_stats",
             side_effect=BeetsUnavailableError("offline"),
         ):
             with self.assertRaises(RuntimeError) as ctx:
@@ -87,10 +87,10 @@ class ScanJobAutoCleanTests(unittest.TestCase):
 
     def test_engine_error_during_sync_is_logged_and_raises(self):
         with mock.patch.object(
-            app_module.beets_client, "get_library_stats",
+            app_module.composite_workflows, "get_library_stats",
             return_value={"tracks": 50, "albums": 5},
         ), mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             side_effect=BeetsError("sync failure"),
         ):
             with self.assertRaises(RuntimeError) as ctx:

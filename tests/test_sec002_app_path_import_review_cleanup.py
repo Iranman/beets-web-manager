@@ -84,8 +84,8 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
             ]),
             mock.patch.object(app_module, "_AI_PENDING_FILE", self.pending_file),
             mock.patch.object(app_module, "_record_ai_review_decision", return_value=None),
-            mock.patch.object(app_module.beets_client, "plan_import_review_cleanup", side_effect=mock_plan),
-            mock.patch.object(app_module.beets_client, "apply_import_review_cleanup", side_effect=mock_apply),
+            mock.patch.object(app_module.composite_workflows, "plan_import_review_cleanup", side_effect=mock_plan),
+            mock.patch.object(app_module.composite_workflows, "apply_import_review_cleanup", side_effect=mock_apply),
         ]
         for patch in self.patches:
             patch.start()

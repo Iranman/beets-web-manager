@@ -205,7 +205,7 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
 
     def test_import_downloaded_delegates_identity_verification_to_engine(self):
         body = self.function_source("_playlist_run_import_downloaded")
-        self.assertIn("beets_client.import_playlist_staged", body)
+        self.assertIn("composite_workflows.import_playlist_staged", body)
         self.assertIn("waiting for engine-side staged media verification", body)
         self.assertIn("No downloaded playlist staging files are ready for engine verification", body)
         self.assertNotIn("_playlist_download_match(", body)

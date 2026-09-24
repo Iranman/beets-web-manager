@@ -10671,7 +10671,7 @@ def rollback_album_artwork(
 # ── album_artwork_fetch_v1 ────────────────────────────────────────────────────
 # SEC-002 / ARCH-003 Wave 25 Docker acceptance round: import-time artwork
 # acquisition (fetchart + embedart) was routed through the generic
-# beets_client.run_command()/POST /commands/execute mechanism -- real
+# composite_workflows.run_command()/POST /commands/execute mechanism -- real
 # functionality (see fetch_and_embed_album_art()'s own docstring for why a
 # generic engine command runner is the right transport), but left as an
 # unexplained exception to the controlled-mutation model with no Plan,

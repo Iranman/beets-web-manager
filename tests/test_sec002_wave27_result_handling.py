@@ -87,7 +87,7 @@ class StrictAttachStageResultTests(unittest.TestCase):
 
     def test_exception_from_ipc_call_propagates_to_rollback_failure(self):
         logs = []
-        with mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=RuntimeError("ipc down")):
+        with mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=RuntimeError("ipc down")):
             ok = APP._run_item_metadata_restore(10, {"title": "old"}, logs)
         self.assertFalse(ok)
         self.assertTrue(any("Metadata restore failed" in line for line in logs))
@@ -115,8 +115,8 @@ class AlbumAddMbidsRequiredStageTests(unittest.TestCase):
         })
 
     def test_metadata_failure_stops_before_relocation_and_success_side_effects(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": False, "error": "metadata plan failed"}) as meta, \
-             mock.patch.object(APP.beets_client, "relocate_album") as relocate:
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": False, "error": "metadata plan failed"}) as meta, \
+             mock.patch.object(APP.composite_workflows, "relocate_album") as relocate:
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
@@ -126,8 +126,8 @@ class AlbumAddMbidsRequiredStageTests(unittest.TestCase):
         APP._trigger_plex_refresh.assert_not_called()
 
     def test_relocation_failure_prevents_completed_log_and_plex_refresh(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": True}) as meta, \
-             mock.patch.object(APP.beets_client, "relocate_album", return_value={"ok": False, "error": "relocation apply failed"}) as relocate:
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": True}) as meta, \
+             mock.patch.object(APP.composite_workflows, "relocate_album", return_value={"ok": False, "error": "relocation apply failed"}) as relocate:
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
@@ -166,9 +166,9 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
         return self.client.post("/api/albums/123/match", json={"mb_id": VALID_RELEASE_ID})
 
     def test_identity_update_failure_stops_before_repair_and_relocation(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": False, "error": "metadata apply failed"}) as update, \
-             mock.patch.object(APP.beets_client, "plan_album_mb_track_repair") as plan, \
-             mock.patch.object(APP.beets_client, "relocate_album") as relocate:
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": False, "error": "metadata apply failed"}) as update, \
+             mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair") as plan, \
+             mock.patch.object(APP.composite_workflows, "relocate_album") as relocate:
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
@@ -180,10 +180,10 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
     def test_mb_track_repair_plan_failure_stops_before_apply_and_relocation(self):
         def update_side_effect(*args, **kwargs):
             return {"ok": True}
-        with mock.patch.object(APP.beets_client, "update_album_metadata", side_effect=update_side_effect) as update, \
-             mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": False, "error": "plan failed"}) as plan, \
-             mock.patch.object(APP.beets_client, "apply_album_mb_track_repair") as apply, \
-             mock.patch.object(APP.beets_client, "relocate_album") as relocate:
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", side_effect=update_side_effect) as update, \
+             mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": False, "error": "plan failed"}) as plan, \
+             mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair") as apply, \
+             mock.patch.object(APP.composite_workflows, "relocate_album") as relocate:
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
@@ -194,10 +194,10 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
         APP._invalidate_lib_cache.assert_not_called()
 
     def test_mb_track_repair_apply_failure_stops_before_write_and_relocation(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": True}) as update, \
-             mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": True, "operation_id": "txn_1"}), \
-             mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", return_value={"ok": False, "error": "apply failed"}), \
-             mock.patch.object(APP.beets_client, "relocate_album") as relocate:
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": True}) as update, \
+             mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": True, "operation_id": "txn_1"}), \
+             mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", return_value={"ok": False, "error": "apply failed"}), \
+             mock.patch.object(APP.composite_workflows, "relocate_album") as relocate:
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
@@ -206,10 +206,10 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
         APP._invalidate_lib_cache.assert_not_called()
 
     def test_relocation_failure_is_not_reported_as_success(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": True}) as update, \
-             mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": True, "operation_id": "txn_1"}), \
-             mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", return_value={"ok": True}), \
-             mock.patch.object(APP.beets_client, "relocate_album", return_value={"ok": False, "error": "move failed"}) as relocate:
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": True}) as update, \
+             mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": True, "operation_id": "txn_1"}), \
+             mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", return_value={"ok": True}), \
+             mock.patch.object(APP.composite_workflows, "relocate_album", return_value={"ok": False, "error": "move failed"}) as relocate:
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
@@ -264,14 +264,14 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         # source album (here, exactly one: album 7) instead of raw local
         # SQL -- see docs/TECHNICAL_DEBT.md.
         with mock.patch.object(
-            APP.beets_client, "plan_album_duplicate_merge",
+            APP.composite_workflows, "plan_album_duplicate_merge",
             return_value={"ok": True, "operation_id": "op-retag-1"},
         ) as plan_merge, mock.patch.object(
-            APP.beets_client, "apply_album_duplicate_merge", return_value={"ok": True},
+            APP.composite_workflows, "apply_album_duplicate_merge", return_value={"ok": True},
         ) as apply_merge, mock.patch.object(
-            APP.beets_client, "update_album_metadata", return_value={"ok": True},
+            APP.composite_workflows, "update_album_metadata", return_value={"ok": True},
         ) as update, mock.patch.object(
-            APP.beets_client, "relocate_album", return_value={"ok": True},
+            APP.composite_workflows, "relocate_album", return_value={"ok": True},
         ) as relocate:
             response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
                 "mb_albumid": VALID_RELEASE_ID,
@@ -374,14 +374,14 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
 
     def test_two_distinct_source_albums_produce_two_separate_merge_calls(self):
         with mock.patch.object(
-            APP.beets_client, "plan_album_duplicate_merge",
+            APP.composite_workflows, "plan_album_duplicate_merge",
             return_value={"ok": True, "operation_id": "op-x"},
         ) as plan_merge, mock.patch.object(
-            APP.beets_client, "apply_album_duplicate_merge", return_value={"ok": True},
+            APP.composite_workflows, "apply_album_duplicate_merge", return_value={"ok": True},
         ) as apply_merge, mock.patch.object(
-            APP.beets_client, "update_album_metadata", return_value={"ok": True},
+            APP.composite_workflows, "update_album_metadata", return_value={"ok": True},
         ), mock.patch.object(
-            APP.beets_client, "relocate_album", return_value={"ok": True},
+            APP.composite_workflows, "relocate_album", return_value={"ok": True},
         ):
             response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
                 "mb_albumid": VALID_RELEASE_ID, "write_tags": True, "delete_files": False,
@@ -419,13 +419,13 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
             return {"ok": True, "operation_id": "op-ok"}
 
         with mock.patch.object(
-            APP.beets_client, "plan_album_duplicate_merge", side_effect=fake_plan,
+            APP.composite_workflows, "plan_album_duplicate_merge", side_effect=fake_plan,
         ), mock.patch.object(
-            APP.beets_client, "apply_album_duplicate_merge", return_value={"ok": True},
+            APP.composite_workflows, "apply_album_duplicate_merge", return_value={"ok": True},
         ) as apply_merge, mock.patch.object(
-            APP.beets_client, "update_album_metadata", return_value={"ok": True},
+            APP.composite_workflows, "update_album_metadata", return_value={"ok": True},
         ), mock.patch.object(
-            APP.beets_client, "relocate_album", return_value={"ok": True},
+            APP.composite_workflows, "relocate_album", return_value={"ok": True},
         ):
             response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
                 "mb_albumid": VALID_RELEASE_ID, "write_tags": True, "delete_files": False,
@@ -448,8 +448,8 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         apply_merge.assert_called_once_with("op-ok")
 
     def test_dry_run_reports_both_without_calling_the_engine(self):
-        with mock.patch.object(APP.beets_client, "plan_album_duplicate_merge") as plan_merge, \
-             mock.patch.object(APP.beets_client, "apply_album_duplicate_merge") as apply_merge:
+        with mock.patch.object(APP.composite_workflows, "plan_album_duplicate_merge") as plan_merge, \
+             mock.patch.object(APP.composite_workflows, "apply_album_duplicate_merge") as apply_merge:
             response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
                 "mb_albumid": VALID_RELEASE_ID, "dry_run": True,
                 "actions": self._actions(),
@@ -470,8 +470,8 @@ class LastgenreControlledRepairTests(unittest.TestCase):
         self.assertIn("album_id", result.stderr)
 
     def test_album_query_uses_controlled_genre_repair(self):
-        with mock.patch.object(APP.beets_client, "repair_album_genre", return_value={"ok": True, "output": "genre ok"}) as repair, \
-             mock.patch.object(APP.beets_client, "run_command") as run_command:
+        with mock.patch.object(APP.composite_workflows, "repair_album_genre", return_value={"ok": True, "output": "genre ok"}) as repair, \
+             mock.patch.object(APP.composite_workflows, "run_command") as run_command:
             result = APP._lastgenre_cmd(True, "album_id:123", [], {}, timeout=2)
         self.assertEqual(result.returncode, 0)
         self.assertIn("genre ok", result.stdout)
@@ -479,7 +479,7 @@ class LastgenreControlledRepairTests(unittest.TestCase):
         run_command.assert_not_called()
 
     def test_album_query_failure_is_process_failure(self):
-        with mock.patch.object(APP.beets_client, "repair_album_genre", return_value={"ok": False, "error": "plugin failed"}):
+        with mock.patch.object(APP.composite_workflows, "repair_album_genre", return_value={"ok": False, "error": "plugin failed"}):
             result = APP._lastgenre_cmd(False, "album_id:123", [], {}, timeout=2)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("plugin failed", result.stderr)
@@ -487,8 +487,7 @@ class LastgenreControlledRepairTests(unittest.TestCase):
 
 class BeetsClientRequiredWrapperTests(unittest.TestCase):
     def setUp(self):
-        from backend.beets_client import BeetsClient
-        self.client = BeetsClient(base_url="http://engine", token="x" * 32)
+        self.client = APP.composite_workflows
 
     def test_update_album_metadata_plan_failure_never_applies(self):
         with mock.patch.object(self.client, "plan_album_metadata", return_value={"ok": False, "error": "bad plan", "code": "bad"}), \
@@ -577,9 +576,9 @@ class ArtistAliasFolderReconcileTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_plan_uses_source_and_target_paths_under_music_root(self):
-        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+        with mock.patch.object(APP.composite_workflows, "plan_artist_folder_reconcile",
                                 return_value={"ok": True, "operation_id": "txn_1"}) as plan, \
-             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile",
+             mock.patch.object(APP.composite_workflows, "apply_artist_folder_reconcile",
                                 return_value={"ok": True, "moved_files": 3, "quarantined_files": 0, "removed_dirs": 1}) as apply:
             log = []
             res = APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
@@ -595,34 +594,34 @@ class ArtistAliasFolderReconcileTests(unittest.TestCase):
         apply.assert_called_once_with("txn_1", acceptance_failpoint=None, timeout=APP.BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS)
 
     def test_nonexistent_source_folder_is_skipped_without_calling_engine(self):
-        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile") as plan:
+        with mock.patch.object(APP.composite_workflows, "plan_artist_folder_reconcile") as plan:
             log = []
             res = APP._run_artist_folder_reconcile_for_alias_merge(["Never Existed"], "New Name", VALID_ARTIST_ID, log)
         self.assertTrue(res["ok"])
         plan.assert_not_called()
 
     def test_engine_unavailable_fails_closed_not_silently(self):
-        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+        with mock.patch.object(APP.composite_workflows, "plan_artist_folder_reconcile",
                                 side_effect=APP.BeetsUnavailableError("down")), \
-             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile") as apply:
+             mock.patch.object(APP.composite_workflows, "apply_artist_folder_reconcile") as apply:
             log = []
             with self.assertRaises(RuntimeError):
                 APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
         apply.assert_not_called()
 
     def test_plan_rejection_fails_closed_without_apply(self):
-        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+        with mock.patch.object(APP.composite_workflows, "plan_artist_folder_reconcile",
                                 return_value={"ok": False, "error": "identity conflict"}), \
-             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile") as apply:
+             mock.patch.object(APP.composite_workflows, "apply_artist_folder_reconcile") as apply:
             log = []
             with self.assertRaises(RuntimeError):
                 APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
         apply.assert_not_called()
 
     def test_apply_failure_is_not_reported_as_success(self):
-        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+        with mock.patch.object(APP.composite_workflows, "plan_artist_folder_reconcile",
                                 return_value={"ok": True, "operation_id": "txn_1"}), \
-             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile",
+             mock.patch.object(APP.composite_workflows, "apply_artist_folder_reconcile",
                                 return_value={"ok": False, "error": "move failed"}):
             log = []
             with self.assertRaises(RuntimeError):
@@ -640,7 +639,7 @@ class CompensatingMetadataRollbackTests(unittest.TestCase):
     def test_compensate_rollback_success_logs_and_raises_rolled_back_exception(self):
         log = []
         downstream = RuntimeError("relocate failed")
-        with mock.patch.object(APP.beets_client, "rollback_album_metadata", return_value={"ok": True}):
+        with mock.patch.object(APP.composite_workflows, "rollback_album_metadata", return_value={"ok": True}):
             with self.assertRaises(RuntimeError) as ctx:
                 APP._compensate_committed_metadata_or_raise(123, "meta_op_1", "relocate stage", downstream, log)
         self.assertIn("relocate stage failed and metadata was rolled back", str(ctx.exception))
@@ -649,7 +648,7 @@ class CompensatingMetadataRollbackTests(unittest.TestCase):
     def test_compensate_rollback_failure_raises_recovery_required(self):
         log = []
         downstream = RuntimeError("relocate failed")
-        with mock.patch.object(APP.beets_client, "rollback_album_metadata", return_value={"ok": False, "error": "DB locked"}):
+        with mock.patch.object(APP.composite_workflows, "rollback_album_metadata", return_value={"ok": False, "error": "DB locked"}):
             with self.assertRaises(RuntimeError) as ctx:
                 APP._compensate_committed_metadata_or_raise(123, "meta_op_1", "relocate stage", downstream, log)
         self.assertIn("Recovery Required", str(ctx.exception))

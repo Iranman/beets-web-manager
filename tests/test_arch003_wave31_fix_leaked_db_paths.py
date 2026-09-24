@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 
 
 def _scan_row(item_id, album_id, db_path, resolved_path, safe=True, skip_reason=""):
@@ -54,7 +54,7 @@ class FixLeakedDbPathsTests(unittest.TestCase):
     def test_dry_run_never_calls_engine(self):
         row = _scan_row(1, 10, "Artist/%the{}/track.mp3", "/data/media/music/Artist/track.mp3")
         with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
-             mock.patch.object(app_module.beets_client, "repoint_item_db_path") as mock_repoint:
+             mock.patch.object(app_module.composite_workflows, "repoint_item_db_path") as mock_repoint:
             log = self._run({"dry_run": True})
         mock_repoint.assert_not_called()
         self.assertTrue(any("[dry-run]" in line for line in log))
@@ -70,7 +70,7 @@ class FixLeakedDbPathsTests(unittest.TestCase):
         with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
              mock.patch.object(app_module, "_db_path_value", return_value="Artist/track.mp3") as mock_db_path_value, \
              mock.patch.object(
-                 app_module.beets_client, "repoint_item_db_path",
+                 app_module.composite_workflows, "repoint_item_db_path",
                  return_value={"ok": True, "repointed": True},
              ) as mock_repoint, \
              mock.patch.object(app_module, "_invalidate_lib_cache"):
@@ -83,7 +83,7 @@ class FixLeakedDbPathsTests(unittest.TestCase):
         row = _scan_row(2, 0, "orphan/%the{}/track.mp3", "/data/media/music/orphan/track.mp3")
         with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
              mock.patch.object(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
-             mock.patch.object(app_module.beets_client, "repoint_item_db_path") as mock_repoint:
+             mock.patch.object(app_module.composite_workflows, "repoint_item_db_path") as mock_repoint:
             log = self._run({"dry_run": False, "confirmed": True})
         mock_repoint.assert_not_called()
         self.assertTrue(any("has no album_id" in line for line in log))
@@ -93,7 +93,7 @@ class FixLeakedDbPathsTests(unittest.TestCase):
         with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
              mock.patch.object(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
              mock.patch.object(
-                 app_module.beets_client, "repoint_item_db_path",
+                 app_module.composite_workflows, "repoint_item_db_path",
                  return_value={"ok": False, "error": "boom"},
              ):
             log = self._run({"dry_run": False, "confirmed": True})
@@ -104,7 +104,7 @@ class FixLeakedDbPathsTests(unittest.TestCase):
         with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
              mock.patch.object(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
              mock.patch.object(
-                 app_module.beets_client, "repoint_item_db_path",
+                 app_module.composite_workflows, "repoint_item_db_path",
                  side_effect=BeetsUnavailableError("offline"),
              ):
             log = self._run({"dry_run": False, "confirmed": True})

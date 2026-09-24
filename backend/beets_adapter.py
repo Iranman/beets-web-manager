@@ -92,6 +92,16 @@ class BeetsAdapterBadRequestError(BeetsAdapterError):
         super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
+# Exception aliases for backward compatibility
+BeetsError = BeetsAdapterError
+BeetsAuthError = BeetsAdapterAuthError
+BeetsNotFoundError = BeetsAdapterNotFoundError
+BeetsBadRequestError = BeetsAdapterBadRequestError
+BeetsUnavailableError = BeetsAdapterConnectionError
+BeetsCommandError = BeetsAdapterError
+BeetsClientError = BeetsAdapterError
+
+
 class _ParsedQuery:
     """Parsed shape of one query term against StockBeetsLibrary's legacy-
     shaped `items()`/`albums()` compatibility fallback below. Defined
@@ -201,8 +211,7 @@ class BeetsAdapter:
             return self._api_key
         if self._api_key_file and os.path.isfile(self._api_key_file):
             try:
-                with open(self._api_key_file, "r", encoding="utf-8") as f:
-                    return f.read().strip()
+                return Path(self._api_key_file).read_text(encoding="utf-8").strip()
             except Exception:
                 pass
         return ""
@@ -251,7 +260,13 @@ class BeetsAdapter:
                 content_type = resp.headers.get("Content-Type", "")
                 data = resp.read()
                 if "application/json" in content_type:
-                    return json.loads(data.decode("utf-8"))
+                    try:
+                        return json.loads(data.decode("utf-8"))
+                    except Exception as json_err:
+                        raise BeetsAdapterError(
+                            f"Malformed JSON response from Beets server at {url}: {json_err}",
+                            error_code="MALFORMED_RESPONSE",
+                        ) from json_err
                 return data
         except urllib.error.HTTPError as ex:
             status = ex.code
@@ -1268,6 +1283,7 @@ class StockBeetsLibrary:
 
 # Facade aliases
 RemoteLibrary = StockBeetsLibrary
+BeetsClient = BeetsAdapter
 
 # Global singleton instances
 beets_adapter = BeetsAdapter()

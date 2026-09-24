@@ -73,9 +73,9 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
                     res.append(d)
                 return res
 
-        self._get_album_patch = mock.patch.object(app_module.beets_client, "get_album", side_effect=_mock_get_album)
+        self._get_album_patch = mock.patch.object(app_module.composite_workflows, "get_album", side_effect=_mock_get_album)
         self._get_album_patch.start()
-        self._find_items_patch = mock.patch.object(app_module.beets_client, "find_all_items_by_album_id", side_effect=_mock_find_all_items)
+        self._find_items_patch = mock.patch.object(app_module.composite_workflows, "find_all_items_by_album_id", side_effect=_mock_find_all_items)
         self._find_items_patch.start()
 
     def tearDown(self):
@@ -128,7 +128,7 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
         self._insert_item(10, 1, target_dir / "01 Track.mp3")
         self._insert_item(20, 2, target_dir / "02 Track.mp3")
 
-        with mock.patch.object(app_module.beets_client, "merge_split_album_items") as mock_merge:
+        with mock.patch.object(app_module.composite_workflows, "merge_split_album_items") as mock_merge:
             response, log, result = self._run(1, {"source_album_id": 2, "item_ids": [20], "dry_run": True})
         mock_merge.assert_not_called()
         self.assertTrue(result.get("dry_run"))
@@ -150,7 +150,7 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
         self._insert_item(21, 2, elsewhere / "03 Track.mp3")
 
         with mock.patch.object(
-            app_module.beets_client, "merge_split_album_items",
+            app_module.composite_workflows, "merge_split_album_items",
             return_value={"ok": True, "moved": 1, "source_album_deleted": False},
         ) as mock_merge:
             response, log, result = self._run(1, {"source_album_id": 2, "item_ids": [20, 21], "dry_run": False, "confirmed": True})
@@ -167,7 +167,7 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
         self._insert_item(20, 2, target_dir / "02 Track.mp3")
 
         with mock.patch.object(
-            app_module.beets_client, "merge_split_album_items",
+            app_module.composite_workflows, "merge_split_album_items",
             return_value={"ok": False, "error": "item(s) [20] carry a conflicting release-group id", "code": "album_duplicate_merge_identity_mismatch"},
         ):
             with app_module.app.test_request_context(
@@ -196,7 +196,7 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
 
         before = set(self.tmp_path.iterdir())
         with mock.patch.object(
-            app_module.beets_client, "merge_split_album_items",
+            app_module.composite_workflows, "merge_split_album_items",
             return_value={"ok": True, "moved": 1, "source_album_deleted": True},
         ):
             self._run(1, {"source_album_id": 2, "item_ids": [20], "dry_run": False, "confirmed": True})

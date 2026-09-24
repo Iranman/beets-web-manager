@@ -238,12 +238,12 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self.fake_relocate = fake_relocate
 
         self._patch(mock.patch.object(APP, "_fetch_mb_release_tracklist", side_effect=fake_fetch_tracklist))
-        self._patch(mock.patch.object(APP.beets_client, "plan_confirmed_import", side_effect=fake_plan_confirmed_import))
-        self._patch(mock.patch.object(APP.beets_client, "apply_confirmed_import", side_effect=fake_apply_confirmed_import))
-        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_mb_track))
-        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_mb_track))
-        self._patch(mock.patch.object(APP.beets_client, "update_album_metadata", side_effect=fake_update_meta))
-        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate))
+        self._patch(mock.patch.object(APP.composite_workflows, "plan_confirmed_import", side_effect=fake_plan_confirmed_import))
+        self._patch(mock.patch.object(APP.composite_workflows, "apply_confirmed_import", side_effect=fake_apply_confirmed_import))
+        self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_mb_track))
+        self._patch(mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", side_effect=fake_apply_mb_track))
+        self._patch(mock.patch.object(APP.composite_workflows, "update_album_metadata", side_effect=fake_update_meta))
+        self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate))
 
         self._patch(mock.patch.object(APP, "_preserve_torrent_source_path", return_value=False))
         self._patch(mock.patch.object(APP, "_validate_import_source_audio", return_value=None))
@@ -365,7 +365,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self.assertEqual(result["artwork_status"], "skipped_identity_unverified")
 
     def test_no_album_found_reports_contract_and_skips_artwork(self):
-        with mock.patch.object(APP.beets_client, "apply_confirmed_import", return_value={"ok": True, "album_id": None}), \
+        with mock.patch.object(APP.composite_workflows, "apply_confirmed_import", return_value={"ok": True, "album_id": None}), \
              mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: None), \
              mock.patch("sqlite3.connect") as connect_mock:
             fake_con = mock.MagicMock()
@@ -381,7 +381,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
     # ---- prior-stage failure gating -----------------------------------------
 
     def test_import_failure_raises_before_any_later_stage(self):
-        with mock.patch.object(APP.beets_client, "apply_confirmed_import", return_value={"ok": False, "error": "boom"}), \
+        with mock.patch.object(APP.composite_workflows, "apply_confirmed_import", return_value={"ok": False, "error": "boom"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
@@ -389,35 +389,35 @@ class AiImportFolderSequenceTests(unittest.TestCase):
 
     def test_mbsync_cancellation_prevents_artwork_and_propagates(self):
         cancel_event = threading.Event()
-        with mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": False, "error": "cancelled"}), \
+        with mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": False, "error": "cancelled"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log, cancel_event)
         repair.assert_not_called()
 
     def test_write_timeout_returncode_raises_and_never_reaches_artwork(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": False, "error": "write failed"}), \
+        with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": False, "error": "write failed"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_mbsync_timeout_returncode_raises_and_never_reaches_artwork(self):
-        with mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": False, "error": "mbsync timeout"}), \
+        with mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": False, "error": "mbsync timeout"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_move_timeout_returncode_raises_and_never_reaches_artwork(self):
-        with mock.patch.object(APP.beets_client, "relocate_album", return_value={"ok": False, "error": "move failed"}), \
+        with mock.patch.object(APP.composite_workflows, "relocate_album", return_value={"ok": False, "error": "move failed"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_import_timeout_returncode_raises_before_any_later_stage(self):
-        with mock.patch.object(APP.beets_client, "apply_confirmed_import", return_value={"ok": False, "error": "timeout"}), \
+        with mock.patch.object(APP.composite_workflows, "apply_confirmed_import", return_value={"ok": False, "error": "timeout"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)

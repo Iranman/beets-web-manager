@@ -41,7 +41,7 @@ class SingletonReviewQueryTests(unittest.TestCase):
 
     def test_queries_items_with_no_album_row(self):
         # Under ARCH-007, import_review_queue requests singletons from structured engine method
-        self.assertIn("beets_client.get_unmatched_review_items", self._fn)
+        self.assertIn("composite_workflows.get_unmatched_review_items", self._fn)
         self.assertIn("include_singletons=True", self._fn)
 
     def test_reuses_library_no_mb_type_so_existing_filters_pick_it_up(self):
@@ -50,13 +50,13 @@ class SingletonReviewQueryTests(unittest.TestCase):
 
     def test_uses_text_factory_bytes(self):
         # Under ARCH-007, Web Manager no longer uses direct sqlite queries
-        self.assertIn("beets_client.get_unmatched_review_items", self._fn)
+        self.assertIn("composite_workflows.get_unmatched_review_items", self._fn)
 
     def test_still_respects_music_root_path_guard(self):
-        self.assertIn("beets_client.get_unmatched_review_items", self._fn)
+        self.assertIn("composite_workflows.get_unmatched_review_items", self._fn)
 
     def test_query_scoped_by_the_same_limit_param_as_the_album_query(self):
-        self.assertIn("beets_client.get_unmatched_review_items(limit=limit", self._fn)
+        self.assertIn("composite_workflows.get_unmatched_review_items(limit=limit", self._fn)
 
 
 
@@ -82,8 +82,8 @@ class AttachRecordingEndpointTests(unittest.TestCase):
         apply_album_mb_track_repair, and fails closed (raises, no local
         subprocess call) when the engine transaction does not succeed.
         """
-        self.assertIn("beets_client.plan_album_mb_track_repair(", self._fn)
-        self.assertIn("beets_client.apply_album_mb_track_repair(", self._fn)
+        self.assertIn("composite_workflows.plan_album_mb_track_repair(", self._fn)
+        self.assertIn("composite_workflows.apply_album_mb_track_repair(", self._fn)
         self.assertIn("refusing local fallback mutation", self._fn)
         self.assertNotIn('"modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}"', self._fn)
         self.assertNotIn('["mbsync", query]', self._fn)

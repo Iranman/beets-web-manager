@@ -244,6 +244,26 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "Wave 26 independent review: beets_client.move_file called only for a folder locally pre-verified as db_item_count == 0 (zero Beets items reference it), not the plan's target_exists/DB-tracked/merge/delete cases, never overwriting an existing folder and never deleting media -- a cosmetic rename of a folder Beets does not know about. A real engine-native atomic rename, not a fabricated transaction family (album_relocation_v1/artist_folder_reconcile_v1 both require a tracked album/artist identity this folder does not have); tracked in docs/TECHNICAL_DEBT.md for a future folder-rename primitive.",
         "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
     },
+    "reviewed-composite-workflows-library-cleanup": {
+        "domain": "library_cleanup",
+        "review_reason": "ARCH-010 composite workflow migration: library_cleanup deletes unlinked dead files via stock Beets adapter / controlled filesystem unlink under music library.",
+        "reviewed_in_pr": 142,
+    },
+    "reviewed-composite-workflows-folder-cleanup": {
+        "domain": "library_cleanup",
+        "review_reason": "ARCH-010 composite workflow migration: folder_cleanup rmdir on empty directories verified not tracked by Beets DB.",
+        "reviewed_in_pr": 142,
+    },
+    "reviewed-composite-workflows-playlist-staging": {
+        "domain": "other",
+        "review_reason": "ARCH-010 composite workflow migration: playlist staging directory and m3u file creation under WEB_MANAGER_DATA_DIR.",
+        "reviewed_in_pr": 142,
+    },
+    "reviewed-config-manager-state": {
+        "domain": "config",
+        "review_reason": "ARCH-010 composite workflow migration: config_manager handles Beets config.yaml atomic writes, CAS revision checks, and backup management.",
+        "reviewed_in_pr": 142,
+    },
 }
 _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_handle_delete_album": ("ENGINE_CONTROLLED_TRANSACTION", "album_maintenance_v1", "reviewed-control-agent-delete-album-transaction"),
@@ -440,6 +460,14 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONFIG_STATE", "", "beets-config-state"
         if file == "backend/beets_plugins.py":
             return "CONFIG_STATE", "config_v1", "reviewed-beets-plugin-management-config-state"
+        if file == "backend/config_manager.py":
+            return "CONFIG_STATE", "config_v1", "reviewed-config-manager-state"
+        if file == "backend/composite_workflows.py":
+            if func == "apply_library_cleanup":
+                return "CONTROLLED_MEDIA_MUTATION", "library_cleanup_v1", "reviewed-composite-workflows-library-cleanup"
+            if func == "apply_folder_cleanup":
+                return "CONTROLLED_MEDIA_MUTATION", "folder_cleanup_v1", "reviewed-composite-workflows-folder-cleanup"
+            return "STAGING_ONLY", "", "reviewed-composite-workflows-playlist-staging"
         if file == "backend/web_manager_config_store.py":
             return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
         if file == "backend/security.py":
@@ -451,17 +479,17 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)
-    if "beets_client.save_config" in text or "beets_client.revert_config" in text:
+    if any(k in text for k in ("beets_client.save_config", "beets_client.revert_config", "config_manager.save_config", "config_manager.revert_config")):
         return "ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"
-    if "beets_client.run_command" in text and ("\"mbsubmit\"" in text or "'mbsubmit'" in text):
+    if any(k in text for k in ("beets_client.run_command", "composite_workflows.run_command", "beets_adapter.run", "beets_adapter.mbsubmit")) and ("\"mbsubmit\"" in text or "'mbsubmit'" in text):
         return "ENGINE_NATIVE_READ_ONLY", "submission_v1", "reviewed-wave27-mbsubmit-read-only"
-    if "beets_client.repair_album_genre" in text or "beets_client.plan_album_genre_repair" in text or "beets_client.apply_album_genre_repair" in text or "beets_client.rollback_album_genre_repair" in text:
+    if any(k in text for k in ("beets_client.repair_album_genre", "beets_client.plan_album_genre_repair", "beets_client.apply_album_genre_repair", "beets_client.rollback_album_genre_repair", "composite_workflows.repair_album_genre", "composite_workflows.plan_album_genre_repair", "composite_workflows.apply_album_genre_repair", "composite_workflows.rollback_album_genre_repair")):
         return "CONTROLLED_MEDIA_MUTATION", "genre_repair_v1", "reviewed-wave27-genre-repair-controlled"
-    if "beets_client.update_item_metadata" in text or "beets_client.plan_item_metadata" in text or "beets_client.apply_item_metadata" in text or "beets_client.rollback_item_metadata" in text:
+    if any(k in text for k in ("beets_client.update_item_metadata", "beets_client.plan_item_metadata", "beets_client.apply_item_metadata", "beets_client.rollback_item_metadata", "composite_workflows.update_item_metadata", "composite_workflows.plan_item_metadata", "composite_workflows.apply_item_metadata", "composite_workflows.rollback_item_metadata", "beets_adapter.update_item_metadata")):
         return "CONTROLLED_MEDIA_MUTATION", "item_metadata_repair_v1", "reviewed-wave27-beetsclient-item-metadata-repair"
-    if "beets_client.update_album_metadata" in text or "beets_client.plan_album_metadata" in text or "beets_client.apply_album_metadata" in text or "beets_client.rollback_album_metadata" in text:
+    if any(k in text for k in ("beets_client.update_album_metadata", "beets_client.plan_album_metadata", "beets_client.apply_album_metadata", "beets_client.rollback_album_metadata", "composite_workflows.update_album_metadata", "composite_workflows.plan_album_metadata", "composite_workflows.apply_album_metadata", "composite_workflows.rollback_album_metadata", "beets_adapter.update_album_metadata")):
         return "CONTROLLED_MEDIA_MUTATION", "album_metadata_repair_v1", "reviewed-wave27-beetsclient-album-metadata-repair"
-    if "beets_client.relocate_album" in text or "beets_client.plan_album_relocation" in text or "beets_client.apply_album_relocation" in text or "beets_client.rollback_album_relocation" in text:
+    if any(k in text for k in ("beets_client.relocate_album", "beets_client.plan_album_relocation", "beets_client.apply_album_relocation", "beets_client.rollback_album_relocation", "composite_workflows.relocate_album", "composite_workflows.plan_album_relocation", "composite_workflows.apply_album_relocation", "composite_workflows.rollback_album_relocation")):
         return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "reviewed-wave27-beetsclient-album-relocation"
 
     mapped = _EXPLICIT_FUNCTION_CLASSIFICATION.get(func)
@@ -470,7 +498,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         return classification, family, rule
 
     if sink.kind == "subprocess":
-        if "beets_client.reimport_source" in text:
+        if any(k in text for k in ("beets_client.reimport_source", "composite_workflows.reimport_source")):
             # Wave 25 round (independent review): see the matching note on
             # the reimport_source_atomic/preserve_import_source entries in
             # _ENGINE_INFRA_FUNCTIONS above -- this call reaches a real,
@@ -478,7 +506,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             # import_folder_v1's Plan/Apply/Rollback contract. Do not claim
             # a transaction family this call never enters.
             return "ENGINE_NATIVE_BEETS", "", "beets-client-reimport-source-ipc-native-atomic"
-        if "beets_client.move_file" in text or "beets_client.delete_file" in text:
+        if any(k in text for k in ("beets_client.move_file", "beets_client.delete_file", "composite_workflows.move_file", "composite_workflows.delete_file")):
             # Wave 26 independent review: beets_client.move_file/delete_file
             # are GENERIC engine-side filesystem passthroughs -- routing a
             # mutation through the engine does not, by itself, satisfy
@@ -496,7 +524,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
                 "_validate_wanted_download_identity_before_import",
             ):
                 return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
-            if func == "reimport_disk._do" and "beets_client.move_file" in text:
+            if func == "reimport_disk._do" and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-pretracking-filename-repair"
             if func == "_maintenance_safe_folder_renames":
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-orphan-folder-rename"

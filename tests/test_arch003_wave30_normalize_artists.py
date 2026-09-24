@@ -24,7 +24,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 
 
 class NormalizeArtistsIfNeededTests(unittest.TestCase):
@@ -48,16 +48,16 @@ class NormalizeArtistsIfNeededTests(unittest.TestCase):
             return mock.Mock(job_id="job-test")
 
         with mock.patch.object(
-            app_module.beets_client, "list_distinct_albumartists",
+            app_module.composite_workflows, "list_distinct_albumartists",
             return_value=albumartist_values,
         ), mock.patch.object(
-            app_module.beets_client, "find_all_albums_by_albumartist", side_effect=fake_find,
+            app_module.composite_workflows, "find_all_albums_by_albumartist", side_effect=fake_find,
         ), mock.patch.object(app_module.jobs, "start_python", side_effect=fake_start_python):
             app_module._run_normalize_artists_if_needed()
         return captured.get("log", [])
 
     def test_no_op_when_nothing_needs_normalizing(self):
-        with mock.patch.object(app_module.beets_client, "update_album_metadata") as mock_update:
+        with mock.patch.object(app_module.composite_workflows, "update_album_metadata") as mock_update:
             log = self._run(["Clean Artist"])
         mock_update.assert_not_called()
         self.assertEqual(log, [])
@@ -69,10 +69,10 @@ class NormalizeArtistsIfNeededTests(unittest.TestCase):
         self.assertNotEqual(dirty, clean)
 
         with mock.patch.object(
-            app_module.beets_client, "update_album_metadata",
+            app_module.composite_workflows, "update_album_metadata",
             return_value={"ok": True, "album_fields_changed": 1, "items_changed": 3},
         ) as mock_update, mock.patch.object(
-            app_module.beets_client, "relocate_album",
+            app_module.composite_workflows, "relocate_album",
             return_value={"ok": True, "dest_dir": "/data/media/music/Wu-Tang Clan"},
         ) as mock_relocate:
             log = self._run([dirty], {dirty: [{"id": 1, "albumartist": dirty}]})
@@ -85,9 +85,9 @@ class NormalizeArtistsIfNeededTests(unittest.TestCase):
     def test_engine_rejection_is_logged_not_raised_and_album_not_relocated(self):
         dirty = "Wu‐Tang Clan"
         with mock.patch.object(
-            app_module.beets_client, "update_album_metadata",
+            app_module.composite_workflows, "update_album_metadata",
             return_value={"ok": False, "error": "boom"},
-        ), mock.patch.object(app_module.beets_client, "relocate_album") as mock_relocate:
+        ), mock.patch.object(app_module.composite_workflows, "relocate_album") as mock_relocate:
             log = self._run([dirty], {dirty: [{"id": 1, "albumartist": dirty}]})
         mock_relocate.assert_not_called()
         self.assertTrue(any("Engine rejected normalize" in line for line in log))
@@ -95,9 +95,9 @@ class NormalizeArtistsIfNeededTests(unittest.TestCase):
     def test_engine_unavailable_is_logged_not_raised(self):
         dirty = "Wu‐Tang Clan"
         with mock.patch.object(
-            app_module.beets_client, "update_album_metadata",
+            app_module.composite_workflows, "update_album_metadata",
             side_effect=BeetsUnavailableError("offline"),
-        ), mock.patch.object(app_module.beets_client, "relocate_album") as mock_relocate:
+        ), mock.patch.object(app_module.composite_workflows, "relocate_album") as mock_relocate:
             log = self._run([dirty], {dirty: [{"id": 1, "albumartist": dirty}]})
         mock_relocate.assert_not_called()
         self.assertTrue(any("Engine unavailable" in line for line in log))
@@ -109,7 +109,7 @@ class NormalizeArtistsIfNeededTests(unittest.TestCase):
         _run_normalize_artists_if_needed() at all (there is no `log` at
         that scope to report to; the next periodic call retries)."""
         with mock.patch.object(
-            app_module.beets_client, "list_distinct_albumartists",
+            app_module.composite_workflows, "list_distinct_albumartists",
             side_effect=BeetsUnavailableError("engine offline"),
         ), mock.patch.object(app_module.jobs, "start_python") as mock_start:
             app_module._run_normalize_artists_if_needed()  # must not raise

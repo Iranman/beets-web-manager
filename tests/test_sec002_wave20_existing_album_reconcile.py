@@ -134,9 +134,9 @@ class Wave20FixtureBase(unittest.TestCase):
                 rows = con.execute("SELECT * FROM items WHERE album_id=?", (int(aid),)).fetchall()
                 return [dict(r) for r in rows]
 
-        self._get_album_patch = mock.patch.object(app_module.beets_client, "get_album", side_effect=fake_get_album)
+        self._get_album_patch = mock.patch.object(app_module.composite_workflows, "get_album", side_effect=fake_get_album)
         self._get_album_patch.start()
-        self._find_items_patch = mock.patch.object(app_module.beets_client, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
+        self._find_items_patch = mock.patch.object(app_module.composite_workflows, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
         self._find_items_patch.start()
 
         self._env_patch = mock.patch.dict(os.environ, {
@@ -1035,10 +1035,10 @@ class Wave18InteractionTests(Wave20FixtureBase):
         plan_rec_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_rec_20"})
         apply_rec_mock = mock.MagicMock(return_value={"ok": True})
 
-        with mock.patch.object(app_module.beets_client, "plan_bulk_import_replacement", plan_bulk_mock), \
-             mock.patch.object(app_module.beets_client, "apply_bulk_import_replacement", apply_bulk_mock), \
-             mock.patch.object(app_module.beets_client, "plan_existing_album_reconcile", plan_rec_mock), \
-             mock.patch.object(app_module.beets_client, "apply_existing_album_reconcile", apply_rec_mock):
+        with mock.patch.object(app_module.composite_workflows, "plan_bulk_import_replacement", plan_bulk_mock), \
+             mock.patch.object(app_module.composite_workflows, "apply_bulk_import_replacement", apply_bulk_mock), \
+             mock.patch.object(app_module.composite_workflows, "plan_existing_album_reconcile", plan_rec_mock), \
+             mock.patch.object(app_module.composite_workflows, "apply_existing_album_reconcile", apply_rec_mock):
 
             res = app_module._merge_imported_album_into_existing(
                 2, 1, str(self.staging_root), [], mb_albumid=""
@@ -1059,8 +1059,8 @@ class Wave18InteractionTests(Wave20FixtureBase):
         plan_rec_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_rec_20"})
         apply_rec_mock = mock.MagicMock(return_value={"ok": False, "error": "simulated engine failure"})
 
-        with mock.patch.object(app_module.beets_client, "plan_existing_album_reconcile", plan_rec_mock), \
-             mock.patch.object(app_module.beets_client, "apply_existing_album_reconcile", apply_rec_mock):
+        with mock.patch.object(app_module.composite_workflows, "plan_existing_album_reconcile", plan_rec_mock), \
+             mock.patch.object(app_module.composite_workflows, "apply_existing_album_reconcile", apply_rec_mock):
             res = app_module._merge_imported_album_into_existing(
                 2, 1, str(self.staging_root), [], mb_albumid=""
             )
@@ -1092,8 +1092,8 @@ class RealProductionPathIntegrationTests(Wave20FixtureBase):
             ],
         })
 
-        with mock.patch.object(app_module.beets_client, "plan_existing_album_reconcile", side_effect=_mock_plan), \
-             mock.patch.object(app_module.beets_client, "apply_existing_album_reconcile", side_effect=_mock_apply), \
+        with mock.patch.object(app_module.composite_workflows, "plan_existing_album_reconcile", side_effect=_mock_plan), \
+             mock.patch.object(app_module.composite_workflows, "apply_existing_album_reconcile", side_effect=_mock_apply), \
              mock.patch.object(app_module, "_fetch_mb_release_tracklist", mb_mock), \
              mock.patch.object(app_module, "_guard_existing_track_can_block_downloaded_replacement", return_value=True):
 

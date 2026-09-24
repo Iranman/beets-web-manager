@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import RemoteAlbum
+from backend.beets_adapter import RemoteAlbum
 
 
 class FakeBeetsAlbumMethod:

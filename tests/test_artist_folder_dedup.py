@@ -53,6 +53,7 @@ def _load_namespace(apply_stub=None):
         "Any": Any, "Dict": Dict, "List": List, "Optional": Optional,
         "Path": Path, "re": re, "unicodedata": unicodedata, "defaultdict": defaultdict,
         "_s": lambda value: (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")),
+        "composite_workflows": _FakeBeetsClientForFolderInventory(),
         "beets_client": _FakeBeetsClientForFolderInventory(),
         "_artist_folder_db_counts": lambda: {},
         "_mb_canonical_for_artist_entries": lambda entries, key: {},
