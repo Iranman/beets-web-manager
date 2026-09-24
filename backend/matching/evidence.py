@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from .models import ConfidenceState, ReleaseGroupMatchResult, ReleaseMatch, TrackAlignmentResult
+from .models import ConfidenceState, IdentityProof, ReleaseGroupMatchResult, ReleaseMatch, TrackAlignmentResult
 from .normalize import normalize_artist, normalize_title, similarity
 from .track_alignment import align_tracks_global
 
@@ -247,12 +247,35 @@ def evaluate_release_group_candidate(
     )
     complete_alignment = bool(alignment.total_target_tracks) and alignment.matched_count == alignment.total_target_tracks and not alignment.unmatched_local_count
     coverage = _track_coverage_score(alignment)
+
+    # Identity-vs-completeness split (ARCH-002 Part 3): local coverage (are
+    # all the tracks that exist locally deterministically proven?) and
+    # target coverage (does the whole release exist locally?) are separate
+    # facts. A partial album can have complete local coverage without
+    # complete target coverage -- that's real identity for the tracks
+    # present, not the same thing as a fully confirmed release.
+    local_tracks_total = len(local_tracks)
+    local_tracks_verified = sum(1 for row in alignment.assignments if row.is_deterministic)
+    local_coverage_complete = bool(local_tracks_total) and local_tracks_verified == local_tracks_total and not alignment.unmatched_local_count
+    target_tracks_total = alignment.total_target_tracks
+    target_tracks_matched = alignment.matched_count
+    target_coverage_complete = bool(target_tracks_total) and target_tracks_matched == target_tracks_total
+    release_complete = target_coverage_complete and not alignment.unmatched_local_count
     identity_score = 1.0 if release_group_status == "validated" else 0.55 if candidate_rgid else 0.0
     if hard_track_positive:
         identity_score = max(identity_score, 0.85)
         if release_group_status == "candidate" and candidate_rgid:
             release_group_status = "validated"
             positives.append("track_recording_identity_supports_release_group")
+
+    if conflicts or not candidate_rgid or release_group_status != "validated":
+        identity_proof = IdentityProof.INSUFFICIENT
+    elif release_complete:
+        identity_proof = IdentityProof.CONFIRMED_RELEASE
+    elif local_coverage_complete:
+        identity_proof = IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID
+    else:
+        identity_proof = IdentityProof.RELEASE_GROUP_ID
 
     score_components = {
         "artist_text": artist_score,
@@ -310,4 +333,12 @@ def evaluate_release_group_candidate(
         review_reasons=sorted(set(review_reasons)),
         action_allowed=action_allowed,
         trust_model=trust_model,
+        identity_proof=identity_proof,
+        local_tracks_total=local_tracks_total,
+        local_tracks_verified=local_tracks_verified,
+        local_coverage_complete=local_coverage_complete,
+        target_tracks_total=target_tracks_total,
+        target_tracks_matched=target_tracks_matched,
+        target_coverage_complete=target_coverage_complete,
+        release_complete=release_complete,
     )

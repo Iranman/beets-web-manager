@@ -11,18 +11,31 @@ import unicodedata
 
 try:
     from matching import (
+        ActionScope,
         ConfidenceState,
+        IdentityProof,
+        MatchPolicy,
         evaluate_release_group_candidate,
         normalize_track_title_for_matching,
         similarity as _canonical_similarity,
     )
 except ImportError:
     from backend.matching import (
+        ActionScope,
         ConfidenceState,
+        IdentityProof,
+        MatchPolicy,
         evaluate_release_group_candidate,
         normalize_track_title_for_matching,
         similarity as _canonical_similarity,
     )
+
+#: build_album_matching_decision's historical semantics: identity
+#: established for a partial album (only the local tracks actually
+#: present) is enough to authorize attaching/acting on those tracks --
+#: it has never required the whole release to exist locally. That is
+#: exactly ActionScope.VERIFIED_SUBSET.
+_ALBUM_DECISION_POLICY = MatchPolicy(scope=ActionScope.VERIFIED_SUBSET)
 
 
 SimilarityFn = Callable[[str, str], float]
@@ -1224,17 +1237,6 @@ def build_album_matching_decision(
 
     matched_count = int(alignment.matched_count)
     expected_count = len(track_list)
-    deterministic_track_matches = 0
-    target_recording_ids = {
-        _uuid(track.get("mb_trackid") or track.get("recording_id"))
-        for track in track_list
-    }
-    target_recording_ids.discard("")
-    for item in item_list:
-        item_mbid = _uuid(item.get("mb_trackid") or item.get("recording_id"))
-        if item_mbid and item_mbid in target_recording_ids:
-            deterministic_track_matches += 1
-    deterministic_track_proof = bool(item_list and deterministic_track_matches == len(item_list))
 
     if item_list and track_list:
         if matched_count == 0 and "no_tracks_matched" not in conflicts:
@@ -1253,8 +1255,18 @@ def build_album_matching_decision(
         confidence_score = 0.0
     confidence_score = max(confidence_score, _round_score(float(canonical.score or 0.0)))
 
-    local_rgid_matched = bool(candidate_rg_id and local_rg_id and candidate_rg_id == local_rg_id)
-    identity_verified = bool(candidate_rg_id and not conflicts and (local_rgid_matched or deterministic_track_proof))
+    # ARCH-002 Part 3: identity and action-eligibility now come from the
+    # canonical evaluator's own identity_proof/coverage fields instead of a
+    # second, independent local computation. identity_proof distinguishes
+    # real identity (RG-ID match, or real per-track deterministic proof)
+    # from insufficient evidence; can_auto_accept(VERIFIED_SUBSET) is the
+    # ground truth for whether that identity is backed by enough track-
+    # level evidence to act on the local tracks present -- this function
+    # has never required the whole release to exist locally (see
+    # tests.test_arch002_matching_corpus.TestArch002PartialAlbumIdentity),
+    # so VERIFIED_SUBSET, not FULL_RELEASE, is the correct scope here.
+    identity_verified = bool(candidate_rg_id and not conflicts and canonical.identity_proof != IdentityProof.INSUFFICIENT)
+    canonical_auto_ok = canonical.can_auto_accept(_ALBUM_DECISION_POLICY)
 
     if conflicts:
         safety_result = "Conflict"
@@ -1281,6 +1293,15 @@ def build_album_matching_decision(
         reason_code = "review_required"
         recommended_action = "Review candidate before attaching"
         eligibility_reason = "Candidate has valid Release Group ID but requires review to verify local album equivalence."
+        action_allowed = False
+        review_required = True
+    elif not canonical_auto_ok:
+        safety_result = "Needs review"
+        safety_key = "review"
+        confidence_tier = "medium"
+        reason_code = "rgid_match_without_track_evidence"
+        recommended_action = "Review candidate before attaching"
+        eligibility_reason = "Release Group ID matches, but no track-level evidence confirms it for the tracks present; review before attaching."
         action_allowed = False
         review_required = True
     else:

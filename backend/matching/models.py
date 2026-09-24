@@ -21,6 +21,33 @@ class ConfidenceState(str, Enum):
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
 
+class IdentityProof(str, Enum):
+    """How album/release-group identity was established, independent of
+    whether the release as a whole is complete. Distinct from
+    ConfidenceState: a partial album with every present track
+    deterministically proven is DETERMINISTIC_TRACK_RECORDING_ID even
+    though ConfidenceState may only reach STRONG_MATCH (it is not a
+    complete release)."""
+
+    INSUFFICIENT = "insufficient"
+    RELEASE_GROUP_ID = "release_group_id"
+    DETERMINISTIC_TRACK_RECORDING_ID = "deterministic_track_recording_id"
+    CONFIRMED_RELEASE = "confirmed_release"
+
+
+class ActionScope(str, Enum):
+    """What an operation needs proven before can_auto_accept() authorizes
+    it. Action eligibility is operation-scoped, not one global rule: a
+    metadata update or identity attach touching only the local tracks that
+    are actually present only needs those tracks deterministically proven
+    (VERIFIED_SUBSET); declaring an album complete, or a destructive merge
+    that presumes full track membership, needs the whole release accounted
+    for (FULL_RELEASE)."""
+
+    FULL_RELEASE = "full_release"
+    VERIFIED_SUBSET = "verified_subset"
+
+
 @dataclass
 class TrackAssignment:
     local_index: int
@@ -45,6 +72,20 @@ class TrackAssignment:
     @property
     def target_title(self) -> str:
         return str(self.target_track.get("title") or "")
+
+    @property
+    def is_deterministic(self) -> bool:
+        """True when this assignment is backed by hard per-track identity
+        evidence (an embedded Recording ID matching the target, or a
+        confirmed AcoustID fingerprint) rather than text/position/duration
+        similarity alone."""
+        return (
+            self.status == "matched"
+            and (
+                "embedded_recording_id_matches" in self.positives
+                or "acoustid_recording_confirmed" in self.positives
+            )
+        )
 
     @property
     def target_recording_id(self) -> str:
@@ -212,6 +253,17 @@ class MatchPolicy:
     # must never auto-accept a fresh, unreviewed import (only ever a
     # validated existing-library match) passes {"existing_library"} here.
     allowed_trust_models: Optional[frozenset] = None
+    # What the calling operation needs proven. FULL_RELEASE (default) is
+    # the historical strict behavior: action_allowed/state as computed by
+    # evaluate_release_group_candidate(), which requires the whole release
+    # to be accounted for. VERIFIED_SUBSET is for operations that only act
+    # on the local tracks actually present (a metadata update or identity
+    # attach touching just those files) -- it accepts deterministic
+    # per-track proof for a partial album, without requiring the rest of
+    # the release to exist locally. A caller declaring an album complete,
+    # or doing a destructive merge that presumes full track membership,
+    # must use FULL_RELEASE.
+    scope: ActionScope = ActionScope.FULL_RELEASE
 
     def trust_model_allowed(self, trust_model: str) -> bool:
         return self.allowed_trust_models is None or trust_model in self.allowed_trust_models
@@ -240,30 +292,57 @@ class ReleaseGroupMatchResult:
     review_reasons: List[str] = field(default_factory=list)
     action_allowed: bool = False
     trust_model: str = ""
+    # Identity-vs-completeness split (ARCH-002 Part 3): these describe
+    # release identity, local coverage, and target coverage as three
+    # separate facts rather than conflating them into one state. A partial
+    # album (2 of 18 target tracks) with both local tracks deterministically
+    # proven has local_coverage_complete=True, target_coverage_complete=False
+    # -- real identity, verified only for the tracks actually present.
+    identity_proof: IdentityProof = IdentityProof.INSUFFICIENT
+    local_tracks_total: int = 0
+    local_tracks_verified: int = 0
+    local_coverage_complete: bool = False
+    target_tracks_total: int = 0
+    target_tracks_matched: int = 0
+    target_coverage_complete: bool = False
+    release_complete: bool = False
 
     def can_auto_accept(self, policy: MatchPolicy = DEFAULT_MATCH_POLICY) -> bool:
         """The one method every production caller should use to decide
         whether this match may authorize an unattended mutation.
 
-        `action_allowed` (set once, by `evaluate_release_group_candidate()`,
-        from the real evidence -- hard identity, complete alignment, or an
-        explicitly reviewed+bound fresh import over threshold) is the single
-        ground-truth authorization. This method can only NARROW that
+        Hard conflicts always block, unconditionally -- not
+        policy-configurable, per the standing rule that they cannot be
+        averaged away. Beyond that, what's required depends on
+        `policy.scope`:
+
+        FULL_RELEASE (default): `action_allowed` (set once, by
+        `evaluate_release_group_candidate()`, from real evidence -- hard
+        identity, complete alignment, or an explicitly reviewed+bound fresh
+        import over threshold) is the ground-truth authorization for
+        whole-release operations. This method can only NARROW that
         decision for a caller with stricter needs; it can never grant
-        automation `action_allowed` itself withheld. That asymmetry is
-        deliberate: a caller passing a laxer policy must not be able to
-        widen what the canonical evaluator already decided was not yet safe
-        (e.g. a STRONG_MATCH reached only through a validated embedded
-        Release Group ID with incomplete track alignment -- real identity
-        evidence, but not enough by itself to mutate unattended). Hard
-        conflicts always block, unconditionally -- not policy-configurable,
-        per the standing rule that they cannot be averaged away.
+        automation `action_allowed` itself withheld (e.g. a STRONG_MATCH
+        reached only through a validated embedded Release Group ID with
+        incomplete track alignment -- real identity evidence, but not
+        enough by itself to mutate the whole release unattended).
+
+        VERIFIED_SUBSET: for operations that only act on the local tracks
+        actually present. Deterministic per-track proof for those tracks
+        (local_coverage_complete) plus a validated Release Group is
+        sufficient authorization -- it does not require target_coverage
+        (the rest of the release does not need to exist locally). This is
+        deliberately independent of `action_allowed`/`state`, which encode
+        whole-release completeness and would otherwise force a partial
+        album through the same bar as a complete one.
         """
         if self.conflicts or self.state == ConfidenceState.CONFLICT:
             return False
-        if not self.action_allowed:
-            return False
         if not policy.trust_model_allowed(self.trust_model):
+            return False
+        if policy.scope == ActionScope.VERIFIED_SUBSET:
+            return bool(self.release_group_status == "validated" and self.local_coverage_complete)
+        if not self.action_allowed:
             return False
         if self.state == ConfidenceState.STRONG_MATCH:
             if not policy.allow_strong_match:
@@ -293,4 +372,12 @@ class ReleaseGroupMatchResult:
             "review_reasons": list(self.review_reasons),
             "action_allowed": self.action_allowed,
             "trust_model": self.trust_model,
+            "identity_proof": self.identity_proof.value,
+            "local_tracks_total": self.local_tracks_total,
+            "local_tracks_verified": self.local_tracks_verified,
+            "local_coverage_complete": self.local_coverage_complete,
+            "target_tracks_total": self.target_tracks_total,
+            "target_tracks_matched": self.target_tracks_matched,
+            "target_coverage_complete": self.target_coverage_complete,
+            "release_complete": self.release_complete,
         }

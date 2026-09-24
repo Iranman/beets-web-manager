@@ -7,8 +7,10 @@ run in the web manager and in the flattened beets control-agent image.
 from .evidence import evaluate_release_group_candidate
 from .models import (
     AcoustIDStatus,
+    ActionScope,
     ConfidenceState,
     DEFAULT_MATCH_POLICY,
+    IdentityProof,
     MatchPolicy,
     ReleaseGroupMatchResult,
     ReleaseMatch,
@@ -37,8 +39,10 @@ from .track_alignment import (
 
 __all__ = [
     "AcoustIDStatus",
+    "ActionScope",
     "ConfidenceState",
     "DEFAULT_MATCH_POLICY",
+    "IdentityProof",
     "MatchPolicy",
     "ReleaseGroupMatchResult",
     "ReleaseMatch",

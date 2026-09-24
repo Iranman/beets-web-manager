@@ -3,8 +3,10 @@ import unittest
 
 from backend.matching import (
     AcoustIDStatus,
+    ActionScope,
     ConfidenceState,
     DEFAULT_MATCH_POLICY,
+    IdentityProof,
     MatchPolicy,
     align_tracks_global,
     evaluate_release_group_candidate,
@@ -482,6 +484,157 @@ class TestArch002EvidenceInvariants(unittest.TestCase):
 
         self.assertIn("intro", normalized)
         self.assertLess(elapsed, 0.25)
+
+
+_VERIFIED_SUBSET = MatchPolicy(scope=ActionScope.VERIFIED_SUBSET)
+
+
+def _eighteen_track_release(**overrides):
+    tracks = [_mb(f"Track {i}", i, f"rec-track-{i}") for i in range(1, 19)]
+    return _candidate(tracks=tracks, **overrides)
+
+
+class TestArch002PartialAlbumIdentity(unittest.TestCase):
+    """ARCH-002 Part 3 policy: deterministic per-track proof for a
+    partial album is real identity for the tracks present -- distinct
+    from, and not gated behind, whole-release completeness. See
+    IdentityProof/ActionScope in backend/matching/models.py."""
+
+    def test_two_of_eighteen_deterministic_is_verified_subset_allowed(self):
+        """2 of 18 target tracks, both exact Recording ID matches: local
+        coverage is complete, target/release coverage is not, no conflict,
+        and VERIFIED_SUBSET authorizes action while FULL_RELEASE does not."""
+        local_tracks = [
+            _local("Track Three", 3, recording_id="rec-track-3"),
+            _local("Track Nine", 9, recording_id="rec-track-9"),
+        ]
+        result = evaluate_release_group_candidate(
+            {"artist": "311", "album": "Big Comp"},
+            _eighteen_track_release(artist="Various", title="Big Comp"),
+            local_tracks=local_tracks,
+            trust_model="existing_library",
+        )
+
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.identity_proof, IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID)
+        self.assertEqual(result.local_tracks_total, 2)
+        self.assertEqual(result.local_tracks_verified, 2)
+        self.assertTrue(result.local_coverage_complete)
+        self.assertEqual(result.target_tracks_total, 18)
+        self.assertEqual(result.target_tracks_matched, 2)
+        self.assertFalse(result.target_coverage_complete)
+        self.assertFalse(result.release_complete)
+        self.assertTrue(result.can_auto_accept(_VERIFIED_SUBSET))
+        self.assertFalse(result.can_auto_accept(DEFAULT_MATCH_POLICY))
+
+    def test_rgid_match_alone_does_not_authorize_verified_subset(self):
+        """Matching Release Group ID with zero local tracks supplied (no
+        deterministic evidence at all) must not authorize a subset-scoped
+        action -- string equality alone is not track-level proof."""
+        result = evaluate_release_group_candidate(
+            {"artist": "Various", "album": "Big Comp", "embedded_release_group_id": RG_311_VOYAGER},
+            _candidate(rgid=RG_311_VOYAGER, artist="Various", title="Big Comp"),
+            local_tracks=[],
+            trust_model="existing_library",
+        )
+
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.identity_proof, IdentityProof.RELEASE_GROUP_ID)
+        self.assertFalse(result.local_coverage_complete)
+        self.assertFalse(result.can_auto_accept(_VERIFIED_SUBSET))
+        self.assertFalse(result.can_auto_accept(DEFAULT_MATCH_POLICY))
+
+    def test_partial_album_one_track_recording_id_conflict_denies_action(self):
+        """One of two local tracks carries an embedded Recording ID that
+        conflicts with its aligned target: a hard conflict, blocking
+        action under every scope regardless of the other track's proof."""
+        local_tracks = [
+            _local("Track Three", 3, recording_id="rec-track-3"),
+            _local("Track Nine", 9, recording_id="rec-wrong-recording"),
+        ]
+        result = evaluate_release_group_candidate(
+            {"artist": "311", "album": "Big Comp"},
+            _eighteen_track_release(artist="Various", title="Big Comp"),
+            local_tracks=local_tracks,
+            trust_model="existing_library",
+        )
+
+        self.assertEqual(result.state, ConfidenceState.CONFLICT)
+        self.assertIn("recording_id_conflict", result.conflicts)
+        self.assertFalse(result.can_auto_accept(_VERIFIED_SUBSET))
+        self.assertFalse(result.can_auto_accept(DEFAULT_MATCH_POLICY))
+
+    def test_partial_album_mixed_deterministic_and_text_only_not_verified(self):
+        """One of two local tracks has exact Recording ID proof; the other
+        has only a plain title match with no embedded ID. Local coverage is
+        NOT complete (only 1 of 2 tracks deterministically proven), so this
+        must not reach DETERMINISTIC_TRACK_RECORDING_ID / VERIFIED_SUBSET
+        auto-accept, even though both tracks matched their targets."""
+        local_tracks = [
+            _local("Track Three", 3, recording_id="rec-track-3"),
+            _local("Track Nine", 9, recording_id=""),
+        ]
+        result = evaluate_release_group_candidate(
+            {"artist": "311", "album": "Big Comp"},
+            _eighteen_track_release(artist="Various", title="Big Comp"),
+            local_tracks=local_tracks,
+            trust_model="existing_library",
+        )
+
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.local_tracks_total, 2)
+        self.assertEqual(result.local_tracks_verified, 1)
+        self.assertFalse(result.local_coverage_complete)
+        self.assertNotEqual(result.identity_proof, IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID)
+        self.assertFalse(result.can_auto_accept(_VERIFIED_SUBSET))
+
+    def test_partial_album_duplicate_local_claim_denies_verified_subset(self):
+        """Two local files both carry the SAME Recording ID (both claim
+        the one target track that has it). Only one can win the one-to-one
+        assignment; the other is left unmatched, so local coverage is not
+        complete and VERIFIED_SUBSET must not authorize action."""
+        local_tracks = [
+            _local("Track Three", 3, recording_id="rec-track-3"),
+            _local("Track Three (dup)", 3, recording_id="rec-track-3"),
+        ]
+        result = evaluate_release_group_candidate(
+            {"artist": "311", "album": "Big Comp"},
+            _eighteen_track_release(artist="Various", title="Big Comp"),
+            local_tracks=local_tracks,
+            trust_model="existing_library",
+        )
+
+        self.assertEqual(result.track_alignment.unmatched_local_count, 1)
+        self.assertFalse(result.local_coverage_complete)
+        self.assertFalse(result.can_auto_accept(_VERIFIED_SUBSET))
+
+    def test_partial_album_acoustid_conflict_denies_action(self):
+        """A local track's text/position match points to one target, but
+        its AcoustID fingerprint confidently points to a different
+        recording in the same candidate release: a hard conflict that must
+        block action under every scope."""
+        local_tracks = [
+            # Title/track exactly match target index 2 ("Track 3") by text,
+            # but the fingerprint confirms target index 8 ("Track 9")
+            # instead -- the disagreement the acoustid-conflict path exists
+            # to catch.
+            _local(
+                "Track 3",
+                3,
+                recording_id="",
+                acoustid_hits=[{"recording_id": "rec-track-9", "score": 95}],
+            ),
+        ]
+        result = evaluate_release_group_candidate(
+            {"artist": "311", "album": "Big Comp"},
+            _eighteen_track_release(artist="Various", title="Big Comp"),
+            local_tracks=local_tracks,
+            trust_model="existing_library",
+        )
+
+        self.assertIn("acoustid_conflict", result.conflicts)
+        self.assertFalse(result.can_auto_accept(_VERIFIED_SUBSET))
+        self.assertFalse(result.can_auto_accept(DEFAULT_MATCH_POLICY))
 
 
 if __name__ == "__main__":

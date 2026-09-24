@@ -453,6 +453,38 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
         self.assertTrue(d["action_allowed"])
         self.assertEqual(d["evidence"]["matched_count"], 2)
         self.assertEqual(d["evidence"]["expected_count"], 18)
+        self.assertEqual(d["conflicts"], [])
+
+        # Canonical evaluator backing this decision (ARCH-002 Part 3):
+        # identity is proven by deterministic per-track evidence for the
+        # tracks present, without requiring the rest of the release to
+        # exist locally -- local coverage complete, target/release
+        # coverage explicitly incomplete.
+        canonical = d["evidence"]["canonical_match"]
+        self.assertEqual(canonical["identity_proof"], "deterministic_track_recording_id")
+        self.assertEqual(canonical["local_tracks_total"], 2)
+        self.assertEqual(canonical["local_tracks_verified"], 2)
+        self.assertTrue(canonical["local_coverage_complete"])
+        self.assertEqual(canonical["target_tracks_total"], 18)
+        self.assertEqual(canonical["target_tracks_matched"], 2)
+        self.assertFalse(canonical["target_coverage_complete"])
+        self.assertFalse(canonical["release_complete"])
+
+    def test_rgid_match_with_no_track_evidence_does_not_authorize_action(self):
+        """The weak path the ARCH-002 Part 3 audit found: a local album
+        already carrying the same Release Group ID as the candidate, with
+        zero track-level evidence supplied, must not by itself authorize
+        automatic action -- RG-ID string equality alone is not track proof."""
+        rgid = "511eea39-083a-4741-ae35-5a4d686ca2a6"
+        current = {"mb_releasegroupid": rgid, "album": "Chxtape 5", "artist": "Artist"}
+        candidate = {"mb_releasegroupid": rgid, "album": "Chxtape 5", "artist": "Artist"}
+
+        decision = build_album_matching_decision(current=current, candidate=candidate)
+        d = decision.to_dict()
+
+        self.assertTrue(d["identity_verified"])
+        self.assertFalse(d["action_allowed"])
+        self.assertEqual(d["safety_key"], "review")
 
     def test_generic_details_mapping_is_not_treated_as_selected_release(self):
         """SEC-002 Wave 14 final review: an arbitrary `details` mapping must
