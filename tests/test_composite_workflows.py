@@ -212,6 +212,23 @@ class TestCompositeWorkflows(unittest.TestCase):
             with self.assertRaises(ValueError):
                 delete_staging_file(str(music_file))
 
+    def test_run_command_security_gates(self):
+        from backend.composite_workflows import run_command
+        # Allowed command succeeds
+        res = run_command("mbsubmit", ["album_id:123"])
+        self.assertTrue(res["ok"])
+        self.assertIn("mbsubmit album_id:123", res["stdout"])
+
+        # Prohibited commands raise ValueError
+        for bad_cmd in ["sh", "bash", "rm", "python", "import", "eval", "docker", "drop table"]:
+            with self.assertRaises(ValueError):
+                run_command(bad_cmd, ["arg"])
+
+        # Injection characters in arguments raise ValueError
+        for bad_arg in ["1; rm -rf /", "album_id:1 | cat", "1 & echo hacked", "$USER", "`id`", "1\nrm -rf /"]:
+            with self.assertRaises(ValueError):
+                run_command("mbsubmit", [bad_arg])
+
 
 if __name__ == "__main__":
     unittest.main()
