@@ -3,18 +3,16 @@ name: docker-build
 # Production build/verification only -- every job here is a real,
 # required check.
 #
-# Architecture invariant (stock-Beets migration, Phase 1): this repository
-# builds and publishes exactly one application image,
-# ghcr.io/iranman/beets-web-manager. There is no custom Beets engine image
-# (formerly ghcr.io/iranman/beets-engine, built from Dockerfile.beets) --
-# Beets itself is the unmodified, official lscr.io/linuxserver/beets image.
-# `stock-beets-acceptance` below is the real replacement for what the old
-# beets-engine-verification/beets-engine-latest-compat jobs used to check:
-# it pulls and runs the actual upstream image and exercises the webmanager
-# integration plugin against it over HTTP, never building a derived engine
-# image. See tests/test_architecture_invariants.py for the CI guard that
-# fails if any active workflow tries to build/publish a custom engine image
-# again.
+# Architecture invariant: this repository builds and publishes exactly one
+# application image, ghcr.io/iranman/beets-web-manager. There is no custom
+# Beets engine image -- Beets itself is the unmodified, official
+# lscr.io/linuxserver/beets image, run as its own container and reached
+# only over HTTP via the bundled webmanager integration plugin.
+# `stock-beets-acceptance` below pulls and runs that actual upstream image
+# and exercises the webmanager integration plugin against it over HTTP,
+# never building a derived engine image. See
+# tests/test_architecture_invariants.py for the CI guard that fails if any
+# active workflow tries to build/publish a custom engine image.
 
 on:
   pull_request:
@@ -28,17 +26,22 @@ permissions:
   contents: read
 
 env:
-  # The tested, pinned production Beets version. Update intentionally (a
-  # real repository change, with disposable migration testing) -- never let
-  # this silently track whatever `latest` happens to resolve to today.
-  BEETS_PRODUCTION_VERSION: "2.13.1"
+  # This is a Python *package* version pin for CI-only test fixtures
+  # (backend/transaction_engine.py's native-Beets-formatting tests), NOT
+  # the deployed Beets container version -- production docker-compose.yml
+  # runs the `beets` service on the `:latest` LinuxServer image tag by
+  # design (see stock-beets-acceptance below, which is the real `:latest`
+  # compatibility lane). Kept in sync with requirements-dev.txt's own
+  # `beets==` pin so local `python -m unittest` and CI see the same
+  # fixture behavior.
+  BEETS_TEST_FIXTURE_VERSION: "2.13.1"
 
 jobs:
   compose-verification:
     runs-on: ubuntu-latest
     env:
-      BEETS_API_URL: http://beets.ci.invalid:8338
-      BEETS_API_TOKEN: changeme
+      BEETS_WEB_URL: http://beets.ci.invalid:8337
+      BEETS_OUTBOUND_ALLOWLIST: beets.ci.invalid:8337
       BEETS_WEB_AUTH_TOKEN: changeme
       OPENAI_API_KEY: changeme
       PLEX_TOKEN: changeme
@@ -52,6 +55,7 @@ jobs:
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose -f docker-compose.full.yml config
+      - run: docker compose -f examples/docker-compose.external-beets.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test
@@ -100,14 +104,18 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
-      - run: pip install beets==${{ env.BEETS_PRODUCTION_VERSION }}
+      - run: pip install beets==${{ env.BEETS_TEST_FIXTURE_VERSION }}
+      - name: Record the pulled lscr.io/linuxserver/beets:latest image digest
+        # Section 19 provenance requirement: the compatibility lane below
+        # floats on `:latest`, so record exactly which digest this run
+        # actually tested against.
+        run: |
+          docker pull lscr.io/linuxserver/beets:latest
+          docker inspect --format '{{index .RepoDigests 0}}' lscr.io/linuxserver/beets:latest
       - name: Real Docker acceptance against unmodified lscr.io/linuxserver/beets:latest
         # Never builds or publishes a derived engine image -- pulls and
         # runs the real upstream image as-is, then exercises the
-        # webmanager integration plugin against it over HTTP. This is the
-        # architecture-invariant replacement for the removed
-        # beets-engine-verification/beets-engine-latest-compat jobs, which
-        # used to build a custom beets-engine image from Dockerfile.beets.
+        # webmanager integration plugin against it over HTTP.
         run: python -m unittest tests.test_stock_beets_acceptance -v
 
   production-docker-acceptance:

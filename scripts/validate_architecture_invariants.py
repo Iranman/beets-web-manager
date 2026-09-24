@@ -61,6 +61,63 @@ def check_stock_beets_image():
     return True
 
 
+def check_no_production_legacy_beets_references():
+    """PRODUCTION_LEGACY_BEETS_REFERENCES invariant.
+
+    The retired control-agent client (backend/beets_client.py,
+    BEETS_API_URL, BEETS_API_TOKEN, port 8338, backend/beets_control_agent)
+    must be completely absent from every production module that has
+    already been migrated onto backend/beets_adapter.py. This is checked
+    per-module (not repo-wide) because backend/beets_client.py itself and
+    a large set of composite Plan/Apply/Rollback mutation workflows in
+    app.py have NOT yet been migrated -- that is tracked as open,
+    acknowledged debt in docs/TECHNICAL_DEBT.md (ARCH-010), not something
+    this check should silently pass by skipping app.py. This check proves
+    the migration is real and complete for the modules it claims are
+    finished, without falsely asserting the whole repository is clean.
+    """
+    print("Checking for legacy control-agent references in migrated modules...")
+    forbidden_patterns = ("beets_client", "BEETS_API_URL", "BEETS_API_TOKEN", ":8338", "beets_control_agent")
+    migrated_files = [
+        ROOT / "job_engine.py",
+        ROOT / "routes_setup.py",
+        ROOT / "routes_submissions.py",
+        ROOT / "routes_jobs.py",
+        ROOT / "routes_lidarr.py",
+        ROOT / "backend" / "beets_adapter.py",
+        ROOT / "backend" / "beets_plugins.py",
+        ROOT / "backend" / "security.py",
+    ]
+    migrated_files.extend(sorted((ROOT / "beetsplug" / "webmanager").glob("*.py")))
+
+    ok = True
+    for path in migrated_files:
+        if not path.exists():
+            print(f"FAILED: expected migrated file missing: {path}", file=sys.stderr)
+            ok = False
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for pattern in forbidden_patterns:
+                if pattern in line:
+                    print(
+                        f"FAILED: {path.relative_to(ROOT)}:{line_no} references legacy "
+                        f"control-agent symbol {pattern!r}: {stripped!r}",
+                        file=sys.stderr,
+                    )
+                    ok = False
+    if ok:
+        print(f"  [PASS] Zero legacy control-agent references in {len(migrated_files)} migrated modules.")
+    print(
+        "  [NOTE] app.py and backend/beets_client.py are NOT covered by this check -- "
+        "see docs/TECHNICAL_DEBT.md ARCH-010 for that open, acknowledged migration debt."
+    )
+    return ok
+
+
 def check_plugin_structure():
     """Verify beetsplug.webmanager plugin structure and files."""
     print("Checking beetsplug.webmanager plugin integrity...")
@@ -79,6 +136,7 @@ def main():
         check_no_docker_socket_mounts,
         check_no_direct_sqlite_library_access,
         check_stock_beets_image,
+        check_no_production_legacy_beets_references,
         check_plugin_structure,
     ]
     all_passed = True
