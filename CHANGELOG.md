@@ -6,6 +6,22 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.25 - 2026-09-24
+
+Complete Composite Workflow Migration (ARCH-010) and full retirement of `backend/beets_client.py`.
+
+### Added
+- **`backend/composite_workflows.py`**: Complete implementation of all 20 composite workflow families orchestrating Plan / Apply / Rollback transactions directly backed by stock Beets (`backend/beets_adapter.py` on `:8337`).
+- **`backend/config_manager.py`**: Robust Beets `config.yaml` management with optimistic CAS revision hash checks, strict YAML syntax validation, atomic replace (`fsync`), backup generation, and rollback support.
+
+### Changed
+- **Zero Legacy Engine References**: Migrated all remaining ~386 `beets_client` call sites across `app.py` to `composite_workflows`, `config_manager`, and `beets_adapter`.
+- **Deleted `backend/beets_client.py`**: Retired the legacy HTTP client, port 8338, `BEETS_API_URL`, `BEETS_API_TOKEN`, and legacy control agent scaffolding.
+- **Updated Mutation Inventory**: Reclassified and verified all 402 mutation sinks in `security/arch003_mutation_inventory.json` with 0 unresolved entries.
+
+### Fixed
+- Fixed and verified all 2,675 unit/integration test cases, architecture invariants, and security secret scans.
+
 ## v0.1.24 - 2026-09-24
 
 Closure/hardening pass for the stock-Beets migration (#137-140 left main broken and materially less migrated than represented; see PR #141).
