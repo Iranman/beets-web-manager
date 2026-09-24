@@ -1,9 +1,9 @@
 from typing import Any, Callable, Dict, List
 
 try:
-    from matching import align_tracks_global
+    from matching import align_tracks_global, album_track_score, best_album_track_match
 except ImportError:
-    from backend.matching import align_tracks_global
+    from backend.matching import align_tracks_global, album_track_score, best_album_track_match
 
 
 MatchFn = Callable[[Dict[str, Any], List[Dict[str, Any]]], Dict[str, Any]]
@@ -112,149 +112,14 @@ def _duplicate_recording_groups(
     return groups
 
 
-_TITLE_BRACKET_OPEN = "([{"
-_TITLE_BRACKET_CLOSE = ")]}"
-
-
-def _strip_bracketed_spans(text: str) -> str:
-    """Linear-time, byte-identical replacement for
-    re.sub(r"[\\(\\[\\{].*?[\\)\\]\\}]", "", text).
-
-    Mirrors backend.transaction_engine._strip_bracketed_spans (kept
-    duplicated for the same reason album_track_norm itself is duplicated
-    there -- neither module may import the other). The regex form is
-    quadratic on titles carrying many unmatched opening brackets, since
-    each one restarts a lazy `.*?` scan; this pass is O(len(text)) and
-    produces identical output.
-    """
-    n = len(text)
-    if n == 0:
-        return text
-    next_close = [-1] * (n + 1)
-    for j in range(n - 1, -1, -1):
-        ch = text[j]
-        if ch in _TITLE_BRACKET_CLOSE:
-            next_close[j] = j
-        elif ch == "\n":
-            next_close[j] = -1
-        else:
-            next_close[j] = next_close[j + 1]
-    out: List[str] = []
-    i = 0
-    while i < n:
-        if text[i] in _TITLE_BRACKET_OPEN:
-            close_at = next_close[i + 1]
-            if close_at != -1:
-                i = close_at + 1
-                continue
-        out.append(text[i])
-        i += 1
-    return "".join(out)
-
-
-def album_track_norm(text: Any) -> str:
-    import re
-    t = _s(text).lower()
-    t = _strip_bracketed_spans(t)
-    t = re.sub(r"[^\w\s]", "", t)
-    return " ".join(t.split())
-
-
-def album_track_title_variants(title: str, path: str = "") -> List[str]:
-    import re
-    from pathlib import Path
-    variants = [album_track_norm(title)]
-    if path:
-        stem = Path(_s(path)).stem
-        variants.append(album_track_norm(stem))
-        cleaned_stem = re.sub(r"^\d+[\s\._\-]+", "", stem)
-        variants.append(album_track_norm(cleaned_stem))
-    return [v for v in variants if v]
-
-
-def album_item_position_hints(item: Dict[str, Any]) -> tuple:
-    import re
-    from pathlib import Path
-    disc = int(item.get("disc") or 1)
-    track = int(item.get("track") or 0)
-    if track > 0:
-        return disc, track
-    path = _s(item.get("path") or "")
-    filename = Path(path).name if path else ""
-    m = re.search(r"(\d+)[_\-\s.]+(\d+)", filename)
-    if m:
-        try:
-            return int(m.group(1)), int(m.group(2))
-        except Exception:
-            pass
-    m = re.search(r"(?:track|trk|#)?\s*(\d+)", filename, re.IGNORECASE)
-    if m:
-        try:
-            return disc, int(m.group(1))
-        except Exception:
-            pass
-    return disc, 0
-
-
-def album_track_score(item: Dict[str, Any], mb_trk: Dict[str, Any]) -> float:
-    from difflib import SequenceMatcher
-    mb_norm = mb_trk.get("title_norm") or album_track_norm(mb_trk.get("title", ""))
-    variants = album_track_title_variants(item.get("title", ""), item.get("path", ""))
-    title_score = max(
-        (SequenceMatcher(None, v, mb_norm).ratio() for v in variants if v and mb_norm),
-        default=0.0,
-    )
-    pos_bonus = 0.0
-    item_disc, item_track = album_item_position_hints(item)
-    if item_track == int(mb_trk.get("track") or 0):
-        pos_bonus += 0.04
-        if item_disc == int(mb_trk.get("disc") or 1):
-            pos_bonus += 0.02
-    dur_bonus = 0.0
-    item_ms = int(float(item.get("length") or 0) * 1000)
-    mb_ms = int(mb_trk.get("duration_ms") or 0)
-    if item_ms and mb_ms:
-        diff_s = abs(item_ms - mb_ms) / 1000.0
-        dur_bonus = 0.04 if diff_s <= 4 else (0.02 if diff_s <= 10 else 0.0)
-    return min(1.0, title_score + pos_bonus + dur_bonus)
-
-
-def best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
-    if item_mbid:
-        for idx, trk in enumerate(mb_tracks):
-            if item_mbid and item_mbid == _s(trk.get("mb_trackid", "")).strip().lower():
-                title_score = album_track_score(item, trk)
-                return {
-                    "idx": idx,
-                    "track": trk,
-                    "score": max(0.98, title_score),
-                    "title_score": title_score,
-                    "exact_mbid": True,
-                }
-    best_idx = -1
-    best_score = -1.0
-    best_rank = (-1.0, -1, -1)
-    item_disc, item_track = album_item_position_hints(item)
-    for idx, trk in enumerate(mb_tracks):
-        score = album_track_score(item, trk)
-        exact_pos = int(
-            bool(item_track and item_track == int(trk.get("track") or 0))
-            and bool(item_disc == int(trk.get("disc") or 1))
-        )
-        track_pos = int(bool(item_track and item_track == int(trk.get("track") or 0)))
-        rank = (score, exact_pos, track_pos)
-        if rank > best_rank:
-            best_rank = rank
-            best_score = score
-            best_idx = idx
-    return {
-        "idx": best_idx,
-        "track": mb_tracks[best_idx] if best_idx >= 0 else {},
-        "score": max(best_score, 0.0),
-        "title_score": max(best_score, 0.0),
-        "exact_mbid": False,
-    }
+# album_track_norm/album_track_title_variants/album_item_position_hints and
+# the album_track_score/best_album_track_match pair that used them lived
+# here as an independent SequenceMatcher-only implementation (ARCH-002
+# finding: no AcoustID awareness, different thresholds than the canonical
+# scorer). Every real caller already overrides summarize_mb_track_alignment
+# and greedy_album_track_alignment's match_fn/score_fn with the canonical
+# backend.matching functions imported above, so this file's own copies were
+# dead code -- removed rather than migrated.
 
 
 def summarize_mb_track_alignment(
@@ -361,23 +226,24 @@ def summarize_mb_track_alignment(
     }
 
 
-ScoreFn = Callable[[Dict[str, Any], Dict[str, Any]], float]
-
-
 def greedy_album_track_alignment(
     items: List[Dict[str, Any]],
     mb_tracks: List[Dict[str, Any]],
     *,
-    score_fn: ScoreFn = album_track_score,
+    score_fn: Any = None,
     file_exists_fn: "ExistsFn | None" = None,
     threshold: float = 0.72,
 ) -> Dict[str, Any]:
     """Compatibility wrapper around the ARCH-002 global one-to-one aligner.
 
-    The historical implementation was item-order greedy. ARCH-002 makes the
-    global assignment the single production policy: every local item maps to at
-    most one MusicBrainz track, every MusicBrainz track maps to at most one
-    local item, and a later higher-quality assignment may displace a weaker
+    The historical implementation was item-order greedy and took a caller
+    score function. ARCH-002 makes align_tracks_global's own internal
+    scoring (title/artist/position/duration plus AcoustID-aware conflict
+    detection) the single production policy -- score_fn is accepted only
+    for call-site backward compatibility and is never used; every local
+    item maps to at most one MusicBrainz track, every MusicBrainz track
+    maps to at most one local item, and a later higher-quality assignment
+    may displace a weaker
     local choice when that improves the album-wide evidence.
     """
     exists = file_exists_fn or (lambda _item: True)

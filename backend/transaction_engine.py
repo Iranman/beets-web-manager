@@ -4073,15 +4073,16 @@ def create_album_mb_track_repair_plan(
         # one-to-one alignment wrapper. The historical function name is kept
         # for compatibility, but its implementation delegates to
         # backend.matching.align_tracks_global so duplicate candidates cannot
-        # win the same MusicBrainz track by local greedy order.
+        # win the same MusicBrainz track by local greedy order. There is no
+        # caller-supplied score function anymore -- align_tracks_global's
+        # own AcoustID-aware scoring is the sole policy.
         try:
-            from mb_alignment import greedy_album_track_alignment, album_track_score
+            from mb_alignment import greedy_album_track_alignment
         except ImportError:
-            from backend.mb_alignment import greedy_album_track_alignment, album_track_score
+            from backend.mb_alignment import greedy_album_track_alignment
         alignment = greedy_album_track_alignment(
             items_list,
             mb_tracks,
-            score_fn=album_track_score,
             threshold=0.72,
         )
     except Exception as ex:
@@ -4180,11 +4181,11 @@ def create_album_mb_track_repair_plan(
 
         if current_mbid:
             # A nonblank Recording ID already on this item is existing
-            # identity evidence, not an empty slot. `best_album_track_match`
-            # only reaches this branch when the item's OWN Recording ID did
-            # NOT match anything in the selected tracklist -- i.e. the
-            # match came from title/position/duration fuzzy scoring alone
-            # (backend/mb_alignment.album_track_score), which is not
+            # identity evidence, not an empty slot. This branch is only
+            # reached when the item's OWN Recording ID did NOT match its
+            # aligned target -- i.e. align_tracks_global assigned this slot
+            # on title/artist/position/duration evidence without an
+            # embedded-ID or AcoustID hard positive, which is not
             # sufficient evidence to overwrite an existing identity per
             # project policy ("destructive actions require stronger
             # evidence than suggestions"). Surface for manual review
