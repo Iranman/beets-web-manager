@@ -6,6 +6,20 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.26 - 2026-09-24
+
+Live TrueNAS deployment validation and code-scanning closure pass.
+
+### Fixed
+- **`backend/composite_workflows.py`**: `get_unmatched_review_items()` never actually supported the `limit`/`offset`/`include_singletons` contract its three callers already used, throwing a `TypeError` on every call and breaking the Import Review "Needs MB ID" page entirely; reimplemented to return the `albums`/`singletons` shape callers expect. `get_folder_items()` silently dropped multi-prefix callers; now accepts a single path or a list of path prefixes.
+- CodeQL `py/path-injection` (high): added containment checks to `plan_track_replacement`'s `source_path`, playlist staging paths (sanitized `playlist_key`), `get_artist_folder_inventory`/`resolve_folder_to_albums`/`get_folder_items` (must resolve under `MUSIC_ROOT`), and `inspect_import_source` (must resolve under `MUSIC_ROOT` or an approved staging root) -- previously unvalidated filesystem reads/walks on caller-supplied paths.
+- CodeQL `py/stack-trace-exposure` (medium): `backend/config_manager.py` no longer interpolates raw filesystem exception text into `ConfigError` messages returned to API clients; the real exception is logged server-side and a generic message returned instead.
+- CodeQL `py/polynomial-redos` (high): capped filename length before regex title-guessing on untrusted Soulseek/slskd search result names in `app.py`.
+
+### Verified
+- Deployed to the real TrueNAS installation (not a disposable test path): backups taken, stock-Beets plugin load confirmed genuinely inside the running `beets` container (not just present in the Web Manager's own copy of the source), `docker compose restart` and `up -d --force-recreate` both preserve library state (byte-identical `musiclibrary.blb` hash, unchanged track/album counts).
+- All open GitHub code-scanning alerts (24) individually inspected and dispositioned: real findings fixed in code, remaining false positives dismissed with per-alert justification. Zero open alerts.
+
 ## v0.1.25 - 2026-09-24
 
 Complete Composite Workflow Migration (ARCH-010) and full retirement of `backend/beets_client.py`.
