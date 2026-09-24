@@ -338,7 +338,11 @@ def _summarize_result(result: Any) -> Any:
 
 class TransactionStore:
     def __init__(self, root: Optional[str] = None):
-        base = root or os.environ.get("BEETS_TRANSACTION_DIR") or "/config/transactions"
+        base = (
+            root
+            or os.environ.get("BEETS_TRANSACTION_DIR")
+            or f"{os.environ.get('WEB_MANAGER_DATA_DIR', '/web-manager-data')}/transactions"
+        )
         self.root = Path(base)
         self._lock = threading.RLock()
 

@@ -15,6 +15,7 @@ remain authoritative. This module only adds:
     (in addition to the existing /api/health — these use the unprefixed
     convention most container orchestrators expect by default)
 """
+import copy
 import importlib.util
 import json
 import os
@@ -35,7 +36,6 @@ from flask import jsonify, request, session
 # Imported after app.py has already defined app (circular-but-OK pattern,
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
-from backend.beets_client import BeetsAuthError, BeetsError, BeetsUnavailableError, beets_client  # noqa: E402
 from backend.web_manager_config_store import (  # noqa: E402
     WebManagerConfigStore,
     WebManagerConfigStoreConflictError,
@@ -637,25 +637,6 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "editable": True,
         "restart_required": True,
         "type": "string",
-    },
-    "BEETS_API_URL": {
-        "section": "Beets Core & Engine",
-        "default": "http://beets:8338",
-        "description": "Legacy mutation transport — temporary during migration (http://beets:8338)",
-        "secret": False,
-        "editable": True,
-        "restart_required": True,
-        "type": "string",
-    },
-    "BEETS_API_TOKEN": {
-        "section": "Beets Core & Engine",
-        "default": None,
-        "description": "Shared authentication token for legacy mutation transport (temporary during migration)",
-        "secret": True,
-        "editable": True,
-        "revealable": True,
-        "restart_required": True,
-        "type": "secret",
     },
     "BEETS_VERSION_PROBE_TIMEOUT_SECONDS": {
         "section": "Beets Core & Engine",
@@ -1837,6 +1818,31 @@ def _redact_diagnostic_text(text: str) -> str:
     return redacted
 
 
+def _redact_plugins_report(plugins_report: Dict[str, Any]) -> Dict[str, Any]:
+    """`verify_all_plugins()` surfaces raw plugin-loader exception text (e.g.
+    `summary.errors` and per-plugin `errors`/`note`) that can contain the same
+    secret-bearing substrings `_redact_diagnostic_text()` scrubs elsewhere.
+    This report is embedded verbatim under the top-level `"plugins"` key of
+    `/api/setup/status`, a separate path from `diagnostics["plugin_failures"]`,
+    so it needs its own redaction pass before being returned to the browser."""
+    report = copy.deepcopy(plugins_report or {})
+    summary = report.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("errors"), list):
+        summary["errors"] = [_redact_diagnostic_text(str(line)) for line in summary["errors"]]
+    plugins = report.get("plugins")
+    if isinstance(plugins, list):
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            for field in ("errors", "note"):
+                value = plugin.get(field)
+                if isinstance(value, list):
+                    plugin[field] = [_redact_diagnostic_text(str(line)) for line in value]
+                elif isinstance(value, str):
+                    plugin[field] = _redact_diagnostic_text(value)
+    return report
+
+
 def _remote_beets_diagnostics_failure(
     error: str,
     *,
@@ -1844,14 +1850,12 @@ def _remote_beets_diagnostics_failure(
     diagnostic_error: str = "",
     remote_error: str = "unavailable",
 ) -> Dict[str, Any]:
-    safe_error = _redact_diagnostic_text(error or "Beets control-agent status is unavailable.")
+    safe_error = _redact_diagnostic_text(error or "Stock Beets is unavailable.")
     return {
         "available": False,
-        "path": os.environ.get("BEETS_API_URL", "http://beets:8338"),
+        "path": os.environ.get("BEETS_WEB_URL", "http://beets:8337"),
         "version": "",
         "diagnostic_error": _redact_diagnostic_text(diagnostic_error),
-        "plugins_returncode": None,
-        "plugin_loader_returncode": None,
         "plugin_loader_ok": False,
         "plugin_loader_timed_out": bool(timed_out),
         "plugin_loader_error": safe_error,
@@ -1870,219 +1874,233 @@ def _remote_beets_diagnostics_failure(
         "ffmpeg_path": "",
         "pyacoustid_available": False,
         "capabilities": {},
-        "commands": {},
         "remote_reachable": False,
         "remote_error": remote_error,
         "paths": {},
         "engine_compatibility": {
             "compatible": False,
+            "installed": False,
             "state": remote_error,
-            "engine_release": "",
-            "engine_revision": "",
-            "control_api_version": None,
-            "expected_release": os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.18"),
-            "expected_api_version": 1,
+            "plugin_version": "",
+            "protocol_version": "",
+            "expected_protocol_version": _EXPECTED_PROTOCOL_VERSION,
             "message": diagnostic_error,
         },
     }
 
 
-def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
-    """Return Beets plugin diagnostics from the authoritative remote control
-    agent, never from a local `beet` executable in the web-manager process.
+def _local_path_report(path: Path, *, require_writable: bool = False) -> Dict[str, Any]:
+    """Report a Web Manager-local mounted path's real state.
 
-    The returned shape preserves the public setup-status fields used by the
-    frontend while making the source of truth the authenticated control-agent
-    `/status` response. Any connection, authentication, timeout, or malformed
-    response fails closed: plugin_loader_ok is false and no configured/loaded
-    plugin is trusted.
-    """
+    Replaces the legacy control-agent path-report shape, which described
+    paths as seen by the (now-deleted) remote control agent. Web Manager
+    now owns /config and /downloads directly, so these are real local
+    filesystem checks, not a remote proxy."""
     try:
-        remote_status = beets_client.get_status()
-    except BeetsAuthError:
-        return _remote_beets_diagnostics_failure(
-            "Beets control-agent authentication failed.",
-            diagnostic_error="Beets control-agent authentication failed.",
-            remote_error="authentication_failed",
-        )
-    except BeetsUnavailableError as ex:
-        text = str(ex).lower()
-        timed_out = "timed out" in text or "timeout" in text
-        return _remote_beets_diagnostics_failure(
-            "Beets control-agent status request timed out." if timed_out else "Beets control agent is unavailable.",
-            timed_out=timed_out,
-            diagnostic_error="Beets control agent is unavailable.",
-            remote_error="timeout" if timed_out else "unavailable",
-        )
-    except TimeoutError:
-        return _remote_beets_diagnostics_failure(
-            "Beets control-agent status request timed out.",
-            timed_out=True,
-            diagnostic_error="Beets control-agent status request timed out.",
-            remote_error="timeout",
-        )
-    except BeetsError:
-        return _remote_beets_diagnostics_failure(
-            "Beets control-agent status request failed.",
-            diagnostic_error="Beets control-agent status request failed.",
-            remote_error="request_failed",
-        )
+        exists = path.exists()
+        is_dir = path.is_dir() if exists else False
+        readable = exists and os.access(path, os.R_OK)
+        writable = exists and os.access(path, os.W_OK)
     except Exception:
-        app.logger.error("Remote Beets diagnostics failed: %s", "unexpected_error")
-        return _remote_beets_diagnostics_failure(
-            "Beets control-agent status request failed.",
-            diagnostic_error="Beets control-agent status request failed.",
-            remote_error="request_failed",
-        )
-
-    if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
-        return _remote_beets_diagnostics_failure(
-            "Malformed Beets control-agent status response.",
-            diagnostic_error="Malformed Beets control-agent status response.",
-            remote_error="malformed_response",
-        )
-
-    configured_plugins = remote_status.get("configured_plugins")
-    loaded_plugins = remote_status.get("loaded_plugins")
-    plugin_failures = remote_status.get("plugin_failures")
-    commands = remote_status.get("commands")
-    capabilities = remote_status.get("capabilities")
-    if not isinstance(configured_plugins, list) or not isinstance(loaded_plugins, list):
-        return _remote_beets_diagnostics_failure(
-            "Malformed Beets control-agent status response.",
-            diagnostic_error="Malformed Beets control-agent status response.",
-            remote_error="malformed_response",
-        )
-    if plugin_failures is not None and not isinstance(plugin_failures, list):
-        return _remote_beets_diagnostics_failure(
-            "Malformed Beets control-agent status response.",
-            diagnostic_error="Malformed Beets control-agent status response.",
-            remote_error="malformed_response",
-        )
-    if commands is not None and not isinstance(commands, dict):
-        return _remote_beets_diagnostics_failure(
-            "Malformed Beets control-agent status response.",
-            diagnostic_error="Malformed Beets control-agent status response.",
-            remote_error="malformed_response",
-        )
-    if capabilities is not None and not isinstance(capabilities, dict):
-        return _remote_beets_diagnostics_failure(
-            "Malformed Beets control-agent status response.",
-            diagnostic_error="Malformed Beets control-agent status response.",
-            remote_error="malformed_response",
-        )
-
-    loader_ok = bool(remote_status.get("plugin_loader_ok"))
-    loader_error = str(remote_status.get("plugin_loader_error") or "")
-    if not loader_ok and not loader_error:
-        loader_error = "Beets plugin loader did not complete successfully."
-
-    engine_compat = _check_engine_compatibility(remote_status)
-
+        exists = is_dir = readable = writable = False
+    ok = exists and is_dir and readable and (writable if require_writable else True)
     return {
-        "available": bool(remote_status.get("beet_available", True)),
-        "path": str(remote_status.get("beetsdir") or os.environ.get("BEETS_API_URL", "http://beets:8338")),
-        "version": str(remote_status.get("beets_version") or ""),
-        "diagnostic_error": "",
-        "plugins_returncode": remote_status.get("plugin_loader_returncode"),
-        "plugin_loader_returncode": remote_status.get("plugin_loader_returncode"),
-        "plugin_loader_ok": loader_ok,
-        "plugin_loader_timed_out": bool(remote_status.get("plugin_loader_timed_out")),
-        "plugin_loader_error": _redact_diagnostic_text(loader_error),
-        # BUG-3 (v0.1.12): whether plugin_loader_ok/loaded_plugins above
-        # reflect a fresh engine-side probe or a still-recent cached one
-        # served because the most recent refresh attempt failed/timed out.
-        # A transient timeout no longer overwrites known-good plugin data
-        # with an empty/failed result -- this tells the UI which case it's
-        # looking at instead of hiding the distinction.
-        "diagnostics_fresh": bool(remote_status.get("diagnostics_fresh", True)),
-        "diagnostics_cache_age_seconds": remote_status.get("diagnostics_cache_age_seconds"),
-        "diagnostics_refresh_error": _redact_diagnostic_text(str(remote_status.get("diagnostics_refresh_error") or "")),
-        "configured_plugins": list(dict.fromkeys(str(p) for p in configured_plugins if str(p).strip())),
-        "loaded_plugins": list(dict.fromkeys(str(p) for p in loaded_plugins if str(p).strip())),
-        "installed_plugins": remote_status.get("installed_plugins") if isinstance(remote_status.get("installed_plugins"), dict) else {},
-        "pluginpath": remote_status.get("pluginpath") if isinstance(remote_status.get("pluginpath"), list) else [],
-        "plugin_failures": [_redact_diagnostic_text(str(line)) for line in (plugin_failures or [])][:12],
-        "replaygain_backend": str(remote_status.get("replaygain_backend") or ""),
-        "replaygain_command": str(remote_status.get("replaygain_command") or ""),
-        "discogs_token_configured": bool(remote_status.get("discogs_token_configured")),
-        "listenbrainz_token_configured": bool(remote_status.get("listenbrainz_token_configured")),
-        "fpcalc_available": bool(remote_status.get("fpcalc_available")),
-        "fpcalc_path": str(remote_status.get("fpcalc_path") or ""),
-        "ffmpeg_available": bool(remote_status.get("ffmpeg_available")),
-        "ffmpeg_path": str(remote_status.get("ffmpeg_path") or ""),
-        "pyacoustid_available": bool(remote_status.get("pyacoustid_available")),
-        "capabilities": capabilities or {},
-        "commands": commands or {},
-        "remote_reachable": True,
-        "remote_error": "",
-        "paths": remote_status.get("paths") if isinstance(remote_status.get("paths"), dict) else {},
-        "engine_compatibility": engine_compat,
+        "path": str(path),
+        "exists": exists,
+        "is_dir": is_dir,
+        "readable": readable,
+        "writable": writable,
+        "ok": ok,
     }
 
 
-_MIN_CONTROL_API_VERSION = 1
+def _parse_replaygain_settings(config_text: str) -> Tuple[str, str]:
+    """Best-effort local parse of config.yaml's replaygain: backend/command.
+
+    Web Manager cannot inspect binaries inside the stock Beets container
+    (ffmpeg/bs1770gain/etc.), so this reports what's *configured*, not
+    whether the backend binary is actually present there."""
+    backend = ""
+    command = ""
+    m = re.search(r"^replaygain:\s*$", config_text, re.MULTILINE)
+    if not m:
+        return backend, command
+    block = config_text[m.end():]
+    backend_m = re.search(r"^\s+backend:\s*(\S+)", block, re.MULTILINE)
+    if backend_m:
+        backend = backend_m.group(1).strip().strip("'\"")
+    command_m = re.search(r"^\s+command:\s*(\S+)", block, re.MULTILINE)
+    if command_m:
+        command = command_m.group(1).strip().strip("'\"")
+    return backend, command
 
 
-def _is_version_mismatch(remote_ver: str, expected_ver: str) -> bool:
-    if not remote_ver or not expected_ver:
-        return False
-    r_clean = remote_ver.lstrip("v").strip().lower()
-    e_clean = expected_ver.lstrip("v").strip().lower()
-    ignored = {"stable", "latest", "edge", "test-firstrun", "test-local-firstrun-auth", "local-build"}
-    if r_clean in ignored or e_clean in ignored:
-        return False
-    if r_clean == e_clean:
-        return False
+def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
+    """Return Beets plugin diagnostics from stock Beets (via BeetsAdapter),
+    never from a local `beet` executable or the deleted control agent.
 
-    def parse_semver(v: str) -> Tuple[int, ...]:
-        parts = re.findall(r"\d+", v)
-        return tuple(int(p) for p in parts[:3]) if parts else (0,)
+    The returned shape preserves the public setup-status fields the
+    frontend already consumes, but every value now comes from either the
+    webmanager integration plugin's live handshake or a real local
+    filesystem check of Web Manager's own /config and /downloads mounts.
+    Any connection or handshake failure fails closed: plugin_loader_ok is
+    false and no configured/loaded plugin is trusted.
+    """
+    from backend.beets_adapter import beets_adapter, BeetsAdapterAuthError, BeetsAdapterTimeoutError
 
-    r_parts = parse_semver(r_clean)
-    e_parts = parse_semver(e_clean)
-    if r_parts and e_parts and r_parts < e_parts:
-        return True
-    return False
-
-
-def _check_engine_compatibility(remote_status: Dict[str, Any]) -> Dict[str, Any]:
-    engine_release = str(remote_status.get("engine_release") or "").strip()
-    engine_revision = str(remote_status.get("engine_revision") or "").strip()
-    control_api_ver = remote_status.get("control_api_version")
-
-    expected_release = os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.18").strip() or "0.1.18"
-    min_api_version = _MIN_CONTROL_API_VERSION
-
-    is_compatible = True
-    state = "compatible"
-    message = ""
-
-    if control_api_ver is not None and isinstance(control_api_ver, int):
-        if control_api_ver < min_api_version:
-            is_compatible = False
-            state = "compatibility_mismatch"
-            message = (
-                f"Beets engine control API version ({control_api_ver}) is outdated. "
-                f"Web Manager requires control API version {min_api_version} or higher. "
-                "Please upgrade the Beets engine container."
-            )
-    elif engine_release and _is_version_mismatch(engine_release, expected_release):
-        is_compatible = False
-        state = "compatibility_mismatch"
-        message = (
-            f"Beets engine release ({engine_release}) does not match Web Manager ({expected_release}). "
-            "Please upgrade the Beets engine container to match."
+    try:
+        plugin_status = beets_adapter.get_plugin_status()
+    except BeetsAdapterAuthError:
+        return _remote_beets_diagnostics_failure(
+            "Stock Beets integration plugin authentication failed.",
+            diagnostic_error="Stock Beets integration plugin authentication failed.",
+            remote_error="authentication_failed",
+        )
+    except BeetsAdapterTimeoutError:
+        return _remote_beets_diagnostics_failure(
+            "Stock Beets integration plugin status request timed out.",
+            timed_out=True,
+            diagnostic_error="Stock Beets integration plugin status request timed out.",
+            remote_error="timeout",
+        )
+    except Exception:
+        return _remote_beets_diagnostics_failure(
+            "Stock Beets is unavailable.",
+            diagnostic_error="Stock Beets is unavailable.",
+            remote_error="unavailable",
         )
 
+    if not isinstance(plugin_status, dict) or not plugin_status.get("protocol_version"):
+        return _remote_beets_diagnostics_failure(
+            "Malformed stock Beets integration plugin status response.",
+            diagnostic_error="Malformed stock Beets integration plugin status response.",
+            remote_error="malformed_response",
+        )
+
+    try:
+        stats = beets_adapter.get_stats()
+        beets_version = str(plugin_status.get("beets_version") or "")
+    except Exception:
+        stats = {}
+        beets_version = str(plugin_status.get("beets_version") or "")
+
+    loaded_plugins = list(dict.fromkeys(str(p) for p in (plugin_status.get("loaded_plugins") or []) if str(p).strip()))
+
+    try:
+        from backend.beets_plugins import verify_all_plugins
+        plugins_report = verify_all_plugins(config_path.parent, loaded_plugins=loaded_plugins)
+        configured_plugins = sorted({
+            p["name"] for p in plugins_report.get("plugins", []) if p.get("enabled")
+        })
+        plugin_failures = plugins_report.get("summary", {}).get("errors", [])
+        plugin_loader_ok = bool(plugins_report.get("all_required_healthy", True))
+    except Exception as ex:
+        app.logger.warning("Plugin verification failed in diagnostics: %s", ex)
+        configured_plugins = []
+        plugin_failures = []
+        plugin_loader_ok = True
+
+    loader_error = ""
+    if not plugin_loader_ok and plugin_failures:
+        loader_error = "; ".join(plugin_failures[:3])
+    elif not plugin_loader_ok:
+        loader_error = "One or more required Beets plugins are not healthy."
+
+    config_text = ""
+    try:
+        if config_path.exists():
+            config_text = config_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    replaygain_backend, replaygain_command = _parse_replaygain_settings(config_text)
+
+    capabilities = set(plugin_status.get("capabilities") or [])
+    # mbsubmit capability implies the chroma plugin (and therefore
+    # pyacoustid/fpcalc) is available inside the stock Beets container --
+    # Web Manager has no local binary of its own to check.
+    mbsubmit_available = "mbsubmit" in capabilities
+
+    downloads_root = Path(os.environ.get("DOWNLOADS_PATH", "/downloads"))
+    config_dir = config_path.parent
+
     return {
-        "compatible": is_compatible,
+        "available": True,
+        "path": os.environ.get("BEETS_WEB_URL", "http://beets:8337"),
+        "version": beets_version,
+        "diagnostic_error": "",
+        "plugin_loader_ok": plugin_loader_ok,
+        "plugin_loader_timed_out": False,
+        "plugin_loader_error": _redact_diagnostic_text(loader_error),
+        "diagnostics_fresh": True,
+        "diagnostics_cache_age_seconds": 0,
+        "diagnostics_refresh_error": "",
+        "configured_plugins": configured_plugins,
+        "loaded_plugins": loaded_plugins,
+        "installed_plugins": {},
+        "pluginpath": ["/config/beetsplug"],
+        "plugin_failures": [_redact_diagnostic_text(str(line)) for line in (plugin_failures or [])][:12],
+        "replaygain_backend": replaygain_backend,
+        "replaygain_command": replaygain_command,
+        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
+        "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
+        "fpcalc_available": mbsubmit_available,
+        "fpcalc_path": "",
+        "ffmpeg_available": bool(replaygain_backend == "ffmpeg"),
+        "ffmpeg_path": "",
+        "pyacoustid_available": mbsubmit_available,
+        "capabilities": {
+            "acoustid_lookup": {
+                "fpcalc_available": mbsubmit_available,
+                "chroma_loaded": mbsubmit_available,
+                "pyacoustid_available": mbsubmit_available,
+            },
+        },
+        "remote_reachable": True,
+        "remote_error": "",
+        "paths": {
+            "config": _local_path_report(config_dir, require_writable=True),
+            "downloads": _local_path_report(downloads_root, require_writable=True),
+            "beets_config": _local_path_report(config_path),
+        },
+        "engine_compatibility": _check_integration_plugin_compatibility(plugin_status),
+    }
+
+
+_EXPECTED_PROTOCOL_VERSION = "1.0"
+
+
+def _check_integration_plugin_compatibility(plugin_status: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare the running webmanager integration plugin's handshake against
+    what this Web Manager version expects. Replaces the legacy control-agent
+    "engine_release"/"control_api_version" compatibility concept -- the
+    only thing that can now be incompatible is the integration PLUGIN
+    protocol, never a separate "engine" release."""
+    protocol_version = str(plugin_status.get("protocol_version") or "").strip()
+    plugin_version = str(plugin_status.get("plugin_version") or "").strip()
+
+    installed = bool(protocol_version)
+    compatible = installed and protocol_version == _EXPECTED_PROTOCOL_VERSION
+    message = ""
+    if not installed:
+        state = "not_installed"
+        message = "The webmanager integration plugin is not reachable on stock Beets."
+    elif not compatible:
+        state = "incompatible"
+        message = (
+            f"Integration plugin protocol version ({protocol_version}) does not match "
+            f"the version Web Manager expects ({_EXPECTED_PROTOCOL_VERSION}). "
+            "Restart stock Beets after upgrading Web Manager."
+        )
+    else:
+        state = "compatible"
+
+    return {
+        "compatible": compatible,
+        "installed": installed,
         "state": state,
-        "engine_release": engine_release,
-        "engine_revision": engine_revision,
-        "control_api_version": control_api_ver if isinstance(control_api_ver, int) else None,
-        "expected_release": expected_release,
-        "expected_api_version": min_api_version,
+        "plugin_version": plugin_version,
+        "protocol_version": protocol_version,
+        "expected_protocol_version": _EXPECTED_PROTOCOL_VERSION,
         "message": message,
     }
 
@@ -2678,6 +2696,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             "summary": {"total": 0, "healthy": 0, "errors": []},
         }
 
+    redacted_plugins_report = _redact_plugins_report(plugins_report)
+
     return {
         "ok": True,
         "status": "ready" if ready else "warning",
@@ -2696,7 +2716,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         },
         "fpcalc": {"available": bool(fpcalc_path), "path": fpcalc_path or ""},
         "beets": diagnostics,
-        "plugins": plugins_report,
+        "plugins": redacted_plugins_report,
         "plugins_ready": bool(plugins_report.get("all_required_healthy", False)),
         "auth": auth_status,
         "integrations": integrations,
@@ -3353,16 +3373,12 @@ def setup_first_run():
 def setup_test_beets():
     """Live connectivity test against Stock Beets Web & Integration plugin.
 
-    Phase 2 fail-closed architecture (ARCH note, correction pass): the
-    primary "stock Beets read test" (`ok`/`status` at the top level of this
-    response) tests ONLY stock Beets' native Web API on :8337
-    (`beets_adapter.get_stats()`). It must never silently pass just because
-    the legacy control-agent transport (:8338) happens to still be up --
-    that would hide a real stock-Beets outage behind a transport this
-    migration is actively removing. The WebManager integration plugin
-    handshake (`/webmanager/status`) and the legacy mutation transport are
-    each tested independently and reported in their own sub-objects, never
-    folded into the primary `ok` value.
+    Fail-closed architecture: the primary "stock Beets read test"
+    (`ok`/`status` at the top level of this response) tests ONLY stock
+    Beets' native Web API on :8337 (`beets_adapter.get_stats()`). The
+    WebManager integration plugin handshake (`/webmanager/status`) is
+    tested independently and reported in its own sub-object, never folded
+    into the primary `ok` value.
     """
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
@@ -3407,23 +3423,6 @@ def setup_test_beets():
         app.logger.warning("setup_test_beets: integration plugin handshake failed: %s", ex)
         plugin_result = {"ok": False, "error": "WebManager integration plugin is unreachable or not authenticated."}
 
-    # 3. Legacy mutation transport (temporary during migration) -- reported
-    #    separately, informational only. It NEVER makes the primary stock
-    #    Beets read test above pass, and it never overrides stock_error.
-    legacy_result: Dict[str, Any] = {"available": False}
-    try:
-        remote_status = beets_client.get_status()
-        if isinstance(remote_status, dict) and remote_status.get("status") == "ok":
-            legacy_version = str(remote_status.get("beets_version") or "unknown")
-            legacy_result = {
-                "available": True,
-                "beets_version": legacy_version,
-                "beetsdir": str(remote_status.get("beetsdir") or ""),
-                "message": f"Legacy mutation transport reachable — Beets {legacy_version} (legacy, temporary during migration)",
-            }
-    except Exception:
-        legacy_result = {"available": False}
-
     if stock_ok:
         return jsonify({
             "ok": True,
@@ -3432,7 +3431,6 @@ def setup_test_beets():
             "beets_version": stock_version,
             "message": "Connected to Stock Beets Web API",
             "plugin_status": plugin_result,
-            "legacy_mutation_status": legacy_result,
         })
 
     return jsonify({
@@ -3440,7 +3438,6 @@ def setup_test_beets():
         "status": "failed",
         "error": stock_error or "Could not connect to stock Beets. Check BEETS_WEB_URL and ensure stock Beets is running on :8337.",
         "plugin_status": plugin_result,
-        "legacy_mutation_status": legacy_result,
     }), 200
 
 
@@ -3550,7 +3547,7 @@ def health_ready():
 
     blocking = []
     if not diagnostics.get("remote_reachable"):
-        blocking.append("beets control agent unavailable")
+        blocking.append("stock Beets unavailable")
     if not _remote_path_ok("config", writable=True):
         blocking.append("config path not writable")
     if not _remote_path_ok("downloads", writable=True):
