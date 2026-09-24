@@ -55,8 +55,13 @@ class BeetsPluginManifestTests(unittest.TestCase):
         self.assertIn("disc_subfolder", discpath.template_fields)
 
     def test_chroma_dependencies(self):
+        # pyacoustid/fpcalc run inside the stock Beets container, never
+        # inside Web Manager -- chroma's health must come from stock
+        # Beets' own live loaded_plugins signal, not a local Python
+        # package check against the wrong process (Web Manager has no
+        # pyacoustid dependency of its own; see requirements.txt).
         chroma = BEETS_PLUGIN_MANIFEST["chroma"]
-        self.assertIn("pyacoustid==1.3.1", chroma.python_packages)
+        self.assertNotIn("pyacoustid==1.3.1", chroma.python_packages)
         self.assertIn("fpcalc", chroma.binary_dependencies)
 
     def test_optional_and_integration_plugins(self):

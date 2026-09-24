@@ -126,11 +126,11 @@ def _image_lacks_tag_or_digest(image: str) -> bool:
     return ":" not in last_component
 
 
-def _check_image_digest_semantics(label: str, image: str, has_build: bool, errors: list[str]) -> None:
+def _check_image_digest_semantics(label: str, image: str, has_build: bool, errors: list[str], *, allow_latest: bool = False) -> None:
     if not image:
         errors.append(f"{label} image is missing")
         return
-    if ":latest" in image or image.endswith(":latest"):
+    if (":latest" in image or image.endswith(":latest")) and not allow_latest:
         errors.append(f"{label} image uses latest: {image}")
     if has_build:
         # A locally built image's `image:` tag must stay a plain tag. Attaching
@@ -225,7 +225,15 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], r
 
     if beets:
         beets_image = _image_line(beets)
-        _check_image_digest_semantics(f"{label}: beets", beets_image, _has_build_block(beets), errors)
+        # `:latest` on the stock lscr.io/linuxserver/beets image is an
+        # explicit, intentional project decision (docs/CONFIGURATION.md's
+        # "Beets image version" section) -- the sole authoritative Beets
+        # runtime tracks upstream's rolling release, verified every run by
+        # the stock-beets-acceptance CI job against the exact digest it
+        # pulled. This is not the same risk as an unpinned image on a
+        # service this repository builds/publishes itself.
+        allow_latest = beets_image.strip() == "lscr.io/linuxserver/beets:latest"
+        _check_image_digest_semantics(f"{label}: beets", beets_image, _has_build_block(beets), errors, allow_latest=allow_latest)
 
         beets_active = "\n".join(_active_lines(beets))
         if re.search(r"^\s*privileged:\s*true\b", beets_active, re.M):

@@ -150,7 +150,10 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
         description="AcoustID audio fingerprinting, automated matching, and deduplication.",
-        python_packages=["pyacoustid==1.3.1"],
+        # pyacoustid/fpcalc run inside the stock Beets container, never
+        # inside Web Manager -- this plugin's health comes from stock
+        # Beets' own live loaded_plugins signal (see `loaded` below), not
+        # a local Python-package/binary check against the wrong process.
         binary_dependencies=["fpcalc"],
         commands=["submit"],
     ),

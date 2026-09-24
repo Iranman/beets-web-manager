@@ -1547,7 +1547,7 @@ def attach_album_mbids(aid: int):
         for item_id_str, fields in track_fields.items():
             beets_adapter.modify(fields=fields, item_ids=[int(item_id_str)], write=True, move=False)
 
-        if not apply_res.get("ok"):
+        if not apply_res.get("success"):
             err_msg = apply_res.get("error") or "Metadata apply rejected by engine"
             log.append(f"Metadata apply failed: {err_msg}")
             raise RuntimeError(f"Metadata apply failed: {err_msg}")

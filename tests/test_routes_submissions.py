@@ -137,7 +137,7 @@ class AttachAlbumMbidsTests(unittest.TestCase):
         )
         mock_get_album.return_value = mock_album
         mock_get_item.return_value = mock_item
-        mock_modify.return_value = {"ok": True}
+        mock_modify.return_value = {"success": True}
 
         payload = {
             "mb_albumartistid": "11111111-1111-1111-1111-111111111111",
@@ -187,7 +187,7 @@ class AttachAlbumMbidsTests(unittest.TestCase):
         mock_item = mock.Mock(id=101, mb_trackid="44444444-4444-4444-4444-444444444444")
         mock_get_album.return_value = mock.Mock(id=7, items=lambda: [mock_item])
         mock_get_item.return_value = mock_item
-        mock_modify.return_value = {"ok": False, "error": "album_metadata_album_not_found"}
+        mock_modify.return_value = {"success": False, "error": "album_metadata_album_not_found"}
 
         payload = {
             "mb_albumartistid": "11111111-1111-1111-1111-111111111111",

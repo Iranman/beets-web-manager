@@ -1,32 +1,51 @@
 """Production Docker Acceptance Verification for Beets Web Manager.
 
-Validates the standard, production-ready deployment architecture:
-1. Stock Beets container (lscr.io/linuxserver/beets:2.13.1)
-2. Beets Web Manager container (beets-web-manager:ci built from local Dockerfile)
-3. Shared volumes, all genuinely fresh host directories, no pre-seeded state:
-   - ./beets -> /config (config.yaml and musiclibrary.blb, both created by the
-     real system on first boot -- this script never pre-writes a config.yaml
-     itself, which would be exactly the "magical configuration a real user
-     would never get" this test must not create)
-   - ./music -> /music
+Validates the standard, production stock-Beets deployment architecture
+(docker-compose.yml, unmodified):
+1. Stock Beets container (lscr.io/linuxserver/beets:latest) -- the sole
+   authoritative Beets runtime, owning /config/musiclibrary.blb.
+2. Beets Web Manager container (beets-web-manager:ci built from local
+   Dockerfile) -- no local Beets Python runtime, talks to stock Beets
+   only over HTTP via backend/beets_adapter.py.
+3. Shared volumes, all genuinely fresh host directories, no pre-seeded
+   state:
+   - ./beets -> /config (config.yaml and musiclibrary.blb, both created by
+     stock Beets on first boot; config.yaml's plugins:/pluginpath: entries
+     are provisioned by Web Manager's own startup bootstrap BEFORE stock
+     Beets ever reads the file -- this script never pre-writes
+     config.yaml itself, which would be exactly the "magical configuration
+     a real user would never get" this test must not create)
+   - ./music -> /music (read-only in beets-web-manager)
    - ./downloads -> /downloads
-   - ./web-manager -> /data
+   - ./web-manager -> /web-manager-data
 4. Zero initial tokens required in .env / clean-room startup.
-5. Web Manager can persist .auth_token AND .flask_secret_key to a fresh /data
-   bind mount (a UID mismatch between a freshly-created host directory and
-   the container's identity broke this independently of any PUID/PGID
-   customization).
-6. Embedded Control Agent running strictly on loopback (127.0.0.1:8338) inside Web Manager.
+5. Web Manager can persist .auth_token AND .flask_secret_key to a fresh
+   /web-manager-data bind mount (a UID mismatch between a freshly-created
+   host directory and the container's identity previously broke this,
+   independent of PUID/PGID customization).
+6. Web Manager reaches stock Beets only via BEETS_WEB_URL (http://beets:8337,
+   container-internal) -- port 8338 is never involved, and beets-web-manager
+   never runs a local `beet` command of its own.
 7. First-run browser setup authentication wizard, through explicit completion.
 8. Basic Auth and auto-generated bearer token authentication.
 9. Stock Beets container stays in a stable "running" state with no
    "unknown command" restart-loop errors in its logs (its own default
-   service is `beet web`, which requires the `web` plugin actually enabled).
-10. Shared SQLite database mutation & visibility between Beets Web Manager
-    and stock Beets CLI, proven via matching inode, not just matching path.
-11. Real media import and verification across container boundaries.
-12. Full persistence across `docker compose down && docker compose up -d` and `--force-recreate`.
-13. Clean teardown in `finally` block.
+   service is `beet web`, which requires the `web` plugin actually enabled
+   -- proving Web Manager's startup provisioning genuinely ran before
+   stock Beets' own first boot, per the depends_on/healthcheck ordering
+   in docker-compose.yml).
+10. The webmanager integration plugin loaded inside stock Beets and its
+    protocol version is compatible with this Web Manager build.
+11. Real media import (via the stock Beets CLI, the only place `beet`
+    exists) and cross-container read visibility through Web Manager's own
+    API -- proving BeetsAdapter's reads reflect real, independently-made
+    mutations to the shared library.
+12. A controlled mutation performed THROUGH Web Manager's own API
+    (attach-mbids, backed by backend/beets_adapter.py's modify()) is
+    visible back through a subsequent stock-Beets-side read.
+13. Full persistence across `docker compose down && docker compose up -d`
+    and `--force-recreate`.
+14. Clean teardown in `finally` block.
 
 Usage:
     python scripts/verify_production_docker_acceptance.py
@@ -36,6 +55,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -53,7 +73,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_BASE = ROOT / "docker-compose.yml"
 IMAGE_TAG = "beets-web-manager:ci"
-STOCK_BEETS_IMAGE = "lscr.io/linuxserver/beets:2.13.1"
+STOCK_BEETS_IMAGE = "lscr.io/linuxserver/beets:latest"
 
 FAILURES: list[str] = []
 
@@ -146,19 +166,12 @@ class ProductionAcceptanceStack:
 
         # Deliberately does NOT pre-seed beets/config.yaml. A real user
         # following the documented `docker compose up -d` path never
-        # creates one either -- the stock lscr.io/linuxserver/beets image
-        # populates its own bundled default on first boot (which already
-        # enables the `web` plugin its own default service needs), and
-        # this repo's app.py only ever patches that file narrowly
-        # (_repair_legacy_beets_config), never replaces it. A test-only
-        # config here would be exactly the "magical configuration a real
-        # user would never get" this acceptance test must not create --
-        # and concretely, a minimal test config missing the `web` plugin
-        # is what silently caused the stock container's default `beet
-        # web` service to restart-loop with "unknown command 'web'" in
-        # earlier runs of this script.
+        # creates one either -- Web Manager's own startup bootstrap
+        # (app.py's _bootstrap_beets_plugins) writes a default config.yaml
+        # with the required plugins:/pluginpath: entries before its own
+        # health endpoint comes up, and stock Beets (which depends_on that
+        # healthcheck) only reads config.yaml after that has happened.
 
-        # Write override to target beets-web-manager:ci and uniquely name containers per project
         override_content = f"""
 services:
   beets:
@@ -290,14 +303,12 @@ def build_images() -> None:
     _ok(f"Built {IMAGE_TAG} successfully (VCS_REF={head_sha})")
 
     print(f"==> Step 2: Ensuring stock Beets image {STOCK_BEETS_IMAGE} is present...")
-    inspect_res = run(["docker", "image", "inspect", STOCK_BEETS_IMAGE])
-    if inspect_res.returncode != 0:
-        print(f"Pulling {STOCK_BEETS_IMAGE}...")
-        pull_res = run(["docker", "pull", STOCK_BEETS_IMAGE])
-        if pull_res.returncode != 0:
-            print(f"FATAL: Failed to pull {STOCK_BEETS_IMAGE}:\n{pull_res.stderr}")
-            sys.exit(2)
-    _ok(f"Stock Beets image {STOCK_BEETS_IMAGE} is available")
+    pull_res = run(["docker", "pull", STOCK_BEETS_IMAGE])
+    if pull_res.returncode != 0:
+        print(f"FATAL: Failed to pull {STOCK_BEETS_IMAGE}:\n{pull_res.stderr}")
+        sys.exit(2)
+    digest_res = run(["docker", "inspect", "--format", "{{index .RepoDigests 0}}", STOCK_BEETS_IMAGE])
+    _ok(f"Stock Beets image {STOCK_BEETS_IMAGE} is available (digest: {digest_res.stdout.strip()})")
 
 
 def run_acceptance() -> None:
@@ -318,22 +329,17 @@ def run_acceptance() -> None:
             return
         _ok("Web Manager reported healthy on /health/live and /health/ready")
 
-        # 2. Embedded loopback agent check
-        print("==> Step 5: Verifying embedded Control Agent is private to loopback...")
+        # 2. No port 8338 anywhere in this architecture
+        print("==> Step 5: Verifying port 8338 is not used anywhere...")
         if is_port_open("127.0.0.1", 8338, timeout=0.5):
-            _fail("Port 8338 is open on host network! Embedded control agent must be loopback-only.")
+            _fail("Port 8338 is open on the host network! Nothing in the stock-Beets architecture uses it.")
         else:
-            _ok("Control Agent is not exposed on host port 8338 (internal only)")
-
-        # Verify internal connectivity to embedded agent
-        exec_res = stack.compose(
-            "exec", "-T", "beets-web-manager",
-            "curl", "-s", "http://127.0.0.1:8338/health"
-        )
-        if exec_res.returncode == 0 and "ok" in exec_res.stdout.lower():
-            _ok("Embedded control agent responding on 127.0.0.1:8338 inside Web Manager container")
+            _ok("Port 8338 is not exposed on the host (nothing in this architecture uses it)")
+        wm_logs = stack.logs("beets-web-manager")
+        if ":8338" in wm_logs:
+            _fail("beets-web-manager logs reference port 8338 -- a legacy control-agent code path may still be live")
         else:
-            _ok("Embedded control agent verified via Web Manager health checks")
+            _ok("beets-web-manager logs contain no reference to port 8338")
 
         # 3. First-Run Browser Setup Mode
         print("==> Step 6: Verifying First-Run browser setup flow...")
@@ -373,9 +379,9 @@ def run_acceptance() -> None:
         _ok(f"Verified auto-generated .auth_token in {stack.web_manager_dir} (length={len(auth_token)})")
         bearer_header = {"Authorization": f"Bearer {auth_token}"}
 
-        # A fresh /data bind mount not being writable by the container's
-        # user (a UID mismatch between the host directory and the
-        # container's fixed identity, independent of whether PUID/PGID
+        # A fresh /web-manager-data bind mount not being writable by the
+        # container's user (a UID mismatch between the host directory and
+        # the container's fixed identity, independent of whether PUID/PGID
         # were ever customized) previously made the app fail closed with
         # "no BEETS_WEB_AUTH_TOKEN is configured, and a newly generated
         # token could not be persisted" -- reaching this point at all
@@ -407,45 +413,55 @@ def run_acceptance() -> None:
             return
         _ok("First-run admin credentials established successfully")
 
-        # 3b. Verify Beets Plugin Provisioning & Multi-Runtime Loading
-        print("==> Step 7a: Verifying Beets Plugin Provisioning and Multi-Runtime Loading...")
-        # Provisioning forces and waits for a fresh (not stale-cached) Beets
-        # plugin-load probe after writing config.yaml, which can take up to
-        # the full ~90s beet-version-probe budget under load, most of all
-        # on the very first invocation against a brand new database (real
-        # one-time Beets schema-migration backups are created) -- see
-        # backend/beets_plugins.py's _force_fresh_loaded_plugins and
-        # backend/beets_control_agent.py's _BEET_VERSION_PROBE_TIMEOUT_SECONDS.
-        # The default 15s client timeout is nowhere near enough here.
-        status, _, prov_body = stack.request("POST", "/api/plugins/provision", json_body={}, headers=bearer_header, timeout=110.0)
-        if status != 200 or not isinstance(prov_body, dict):
-            _fail(f"POST /api/plugins/provision failed: {status} {prov_body}")
+        # 3a. Verify stock Beets plugin provisioning happened before stock
+        # Beets' own first boot, and that the webmanager integration
+        # plugin's protocol handshake is compatible with this build.
+        print("==> Step 7a: Verifying stock Beets plugin health and integration-plugin compatibility...")
+        status, _, status_body = stack.request("GET", "/api/setup/status", headers=bearer_header, timeout=30.0)
+        if status != 200 or not isinstance(status_body, dict):
+            _fail(f"GET /api/setup/status failed: {status} {status_body}")
             return
-        _ok(f"Beets plugins provisioned successfully: {prov_body.get('message')}")
+        beets_diag = status_body.get("beets") or {}
+        if not beets_diag.get("available"):
+            _fail(f"Stock Beets not reported available: {beets_diag}")
+            return
+        if not beets_diag.get("plugin_loader_ok"):
+            _fail(f"Stock Beets plugin loader not healthy: {beets_diag}")
+            return
+        compat = beets_diag.get("engine_compatibility") or {}
+        if not compat.get("compatible"):
+            _fail(f"webmanager integration plugin protocol incompatible: {compat}")
+            return
+        _ok(f"Stock Beets available, plugin loader healthy, integration plugin protocol compatible: {compat.get('protocol_version')}")
 
-        # Check bundled discpath.py exists on host mount
+        # Check bundled discpath.py exists on host mount (provisioned by
+        # Web Manager into the shared /config/beetsplug before stock Beets'
+        # own first boot -- see docker-compose.yml's depends_on ordering).
         discpath_host = stack.beets_dir / "beetsplug" / "discpath.py"
         if not discpath_host.exists():
             _fail(f"Bundled plugin discpath.py missing on host mount: {discpath_host}")
             return
         _ok("Bundled discpath.py exists under /config/beetsplug")
 
-        # Verify plugin health report
-        status, _, plugins_body = stack.request("GET", "/api/plugins/status", headers=bearer_header)
-        if status != 200 or not isinstance(plugins_body, dict):
-            _fail(f"GET /api/plugins/status failed: {status} {plugins_body}")
+        webmanager_plugin_host = stack.beets_dir / "beetsplug" / "webmanager"
+        if not webmanager_plugin_host.exists():
+            _fail(f"webmanager integration plugin missing on host mount: {webmanager_plugin_host}")
             return
-        if not plugins_body.get("all_required_healthy"):
-            _fail(f"Expected all_required_healthy=True on fresh install, got: {plugins_body}")
-            return
-        _ok(f"All {plugins_body.get('required_count')} required Beets plugins are healthy (plugins_ready=True)")
+        _ok("webmanager integration plugin exists under /config/beetsplug")
 
-        # Verify plugins load in Web Manager embedded Beets runtime
-        wm_beet = stack.compose("exec", "-T", "beets-web-manager", "beet", "version")
-        if wm_beet.returncode != 0:
-            _fail(f"Web Manager embedded Beets version probe failed: {wm_beet.stderr}")
+        plugins_report = status_body.get("plugins") or {}
+        if not plugins_report.get("all_required_healthy"):
+            _fail(f"Expected all_required_healthy=True on fresh install, got: {plugins_report}")
             return
-        _ok(f"Web Manager embedded Beets runtime loaded plugins: {wm_beet.stdout.strip().splitlines()[0]}")
+        _ok(f"All {plugins_report.get('required_count')} required Beets plugins are healthy (plugins_ready=True)")
+
+        # beets-web-manager has no local Beets runtime of its own -- prove
+        # it, rather than merely asserting it in a comment.
+        no_beet_exec = stack.compose("exec", "-T", "beets-web-manager", "sh", "-c", "command -v beet")
+        if no_beet_exec.returncode == 0 and no_beet_exec.stdout.strip():
+            _fail(f"beets-web-manager unexpectedly has a local `beet` executable: {no_beet_exec.stdout.strip()}")
+            return
+        _ok("Confirmed beets-web-manager has no local `beet` executable (no embedded Beets runtime)")
 
         # Completing setup is a separate, explicit step (mirrors the real
         # browser wizard's final "Finish" action) -- this is exactly the
@@ -483,11 +499,11 @@ def run_acceptance() -> None:
         _ok("Authenticated via auto-generated Bearer token")
 
         # 5. Stock Beets Version and Execution Check
-        print("==> Step 9: Verifying Beets CLI in stock Beets container...")
+        print("==> Step 9: Verifying Beets CLI in the stock Beets container...")
         beet_exec = stack.compose("exec", "-T", "beets", "/lsiopy/bin/beet", "version")
         if beet_exec.returncode != 0:
             beet_exec = stack.compose("exec", "-T", "beets", "beet", "version")
-        if beet_exec.returncode != 0 or "2.13.1" not in beet_exec.stdout:
+        if beet_exec.returncode != 0 or not re.search(r"beets version \d", beet_exec.stdout, re.I):
             _fail(f"Stock beets container version check failed: {beet_exec.returncode}\n{beet_exec.stdout}\n{beet_exec.stderr}")
             return
         _ok(f"Stock Beets container executed beet version successfully: {beet_exec.stdout.strip().splitlines()[0]}")
@@ -511,7 +527,8 @@ def run_acceptance() -> None:
             return
         _ok("Stock Beets container is running stably with no \"unknown command\" restart-loop errors")
 
-        # 6. Seed Synthetic Audio and Perform Import
+        # 6. Seed Synthetic Audio and Perform Import (via the stock Beets
+        # CLI -- the only place a `beet` executable exists in this stack)
         print("==> Step 10: Seeding synthetic audio in downloads directory and importing...")
         album_dir = stack.downloads_dir / "Acceptance Artist" / "Acceptance Album"
         album_dir.mkdir(parents=True, exist_ok=True)
@@ -519,7 +536,6 @@ def run_acceptance() -> None:
         track_file.write_bytes(generate_wav_bytes(freq=440.0, duration=2.0))
         _ok(f"Seeded synthetic WAV file at {track_file}")
 
-        # Run beet import via stock container or Web Manager
         import_exec = stack.compose(
             "exec", "-T", "beets",
             "/lsiopy/bin/beet", "-c", "/config/config.yaml", "-l", "/config/musiclibrary.blb",
@@ -527,7 +543,7 @@ def run_acceptance() -> None:
         )
         if import_exec.returncode != 0:
             import_exec = stack.compose(
-                "exec", "-T", "beets-web-manager",
+                "exec", "-T", "beets",
                 "beet", "-c", "/config/config.yaml", "-l", "/config/musiclibrary.blb",
                 "import", "-q", "-A", "/downloads/Acceptance Artist/Acceptance Album"
             )
@@ -536,51 +552,75 @@ def run_acceptance() -> None:
             return
         _ok(f"Import command executed successfully:\n{import_exec.stdout}")
 
-        # 7. Database and Cross-Container Verification
-        print("==> Step 11: Verifying SQLite library in shared /config volume...")
+        # 7. Cross-container read verification: prove BeetsAdapter's reads
+        # (through Web Manager's own API, not a local sqlite3 connection)
+        # see the item stock Beets just imported.
+        print("==> Step 11: Verifying Web Manager's API sees the imported item via BeetsAdapter...")
         db_path = stack.beets_dir / "musiclibrary.blb"
         if not db_path.exists():
-            _fail(f"musiclibrary.blb not found on host at {db_path}")
+            _fail(f"musiclibrary.blb not found on host at {db_path} (stock Beets should be its sole owner)")
             return
+        _ok(f"Confirmed musiclibrary.blb exists on the shared /config host mount ({db_path})")
 
-        con = sqlite3.connect(str(db_path))
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        items = cur.execute("SELECT id, title, artist, album, path FROM items").fetchall()
-        if not items:
-            _fail("No items found in musiclibrary.blb after import")
+        status, _, albums_body = stack.request("GET", "/api/albums", headers=basic_header)
+        if status != 200 or not isinstance(albums_body, dict) or not albums_body.get("albums"):
+            _fail(f"GET /api/albums did not see the imported album: {status} {albums_body}")
             return
-        item = items[0]
-        _ok(f"Found imported item in SQLite db: id={item['id']} title='{item['title']}' album='{item['album']}'")
-        con.close()
+        album = albums_body["albums"][0]
+        album_id = album.get("id")
+        _ok(f"Web Manager API sees imported album via BeetsAdapter: id={album_id} title={album.get('album')!r}")
 
-        # Prove there is exactly one physical database, not just one path
-        # string that happens to resolve the same way from the host --
-        # both containers must see the identical inode.
-        inode_beets = stack.compose("exec", "-T", "beets", "stat", "-c", "%i", "/config/musiclibrary.blb").stdout.strip()
-        inode_web_manager = stack.compose("exec", "-T", "beets-web-manager", "stat", "-c", "%i", "/config/musiclibrary.blb").stdout.strip()
-        if not inode_beets or not inode_web_manager or inode_beets != inode_web_manager:
-            _fail(f"musiclibrary.blb inode mismatch between containers: beets={inode_beets!r} web-manager={inode_web_manager!r} (a second, separate database may exist)")
-            return
-        _ok(f"Confirmed a single physical /config/musiclibrary.blb (inode {inode_beets}) shared by both containers")
-
-        # Check stock container sees it with `beet ls`
-        ls_exec = stack.compose("exec", "-T", "beets", "/lsiopy/bin/beet", "-l", "/config/musiclibrary.blb", "ls")
-        if ls_exec.returncode != 0:
-            ls_exec = stack.compose("exec", "-T", "beets", "beet", "-l", "/config/musiclibrary.blb", "ls")
-        if ls_exec.returncode != 0 or not ls_exec.stdout.strip():
-            _fail(f"Stock Beets container `beet ls` failed or returned empty: {ls_exec.stderr}")
-            return
-        _ok(f"Stock Beets container `beet ls` returned:\n{ls_exec.stdout.strip()}")
-
-        # Check Web Manager API lists the item/stats
         status, _, stats_body = stack.request("GET", "/api/stats", headers=basic_header)
         if status == 200 and isinstance(stats_body, dict):
             _ok(f"Web Manager /api/stats returned: {stats_body}")
         else:
-            _ok(f"Web Manager /api/stats reached with status={status}")
+            _fail(f"Web Manager /api/stats failed: {status} {stats_body}")
+            return
 
-        # 8. Test Stack Down / Up Persistence
+        # 8. A controlled mutation performed THROUGH Web Manager's own API
+        # (backend/beets_adapter.py's modify(), via the already-migrated
+        # attach-mbids submission workflow), verified by reading it back
+        # through the same read path used above.
+        print("==> Step 11a: Performing a controlled mutation through Web Manager's API...")
+        synthetic_rgid = "11111111-1111-1111-1111-111111111111"
+        synthetic_artistid = "22222222-2222-2222-2222-222222222222"
+        synthetic_albumid = "33333333-3333-3333-3333-333333333333"
+        status, _, attach_body = stack.request(
+            "POST",
+            f"/api/submissions/albums/{album_id}/attach-mbids",
+            json_body={
+                "mb_albumartistid": synthetic_artistid,
+                "mb_releasegroupid": synthetic_rgid,
+                "mb_albumid": synthetic_albumid,
+                "recordings": [],
+            },
+            headers=basic_header,
+        )
+        if status != 200 or not (isinstance(attach_body, dict) and attach_body.get("ok")):
+            _fail(f"POST /api/submissions/albums/{album_id}/attach-mbids failed: {status} {attach_body}")
+            return
+        job_id = attach_body.get("job_id")
+        job_status = None
+        for _ in range(30):
+            status, _, job_body = stack.request("GET", f"/api/jobs/{job_id}", headers=basic_header)
+            if status == 200 and isinstance(job_body, dict):
+                job_status = job_body.get("status")
+                if job_status in ("success", "failed", "cancelled", "cancel_failed"):
+                    break
+            time.sleep(1.0)
+        if job_status != "success":
+            _fail(f"attach-mbids job did not succeed (status={job_status}): {job_body}")
+            return
+        _ok("attach-mbids mutation job completed successfully")
+
+        status, _, albums_body2 = stack.request("GET", "/api/albums", headers=basic_header)
+        updated = next((a for a in (albums_body2.get("albums") or []) if a.get("id") == album_id), None)
+        if not updated or synthetic_albumid not in str(updated.get("mb_albumid") or ""):
+            _fail(f"Mutation not visible on read-back: {updated}")
+            return
+        _ok("Controlled mutation via Web Manager's API is visible on read-back (mb_albumid updated)")
+
+        # 9. Test Stack Down / Up Persistence
         print("==> Step 12: Testing persistence across `docker compose down` and `docker compose up -d`...")
         down_res = stack.compose("down")
         if down_res.returncode != 0:
@@ -613,14 +653,14 @@ def run_acceptance() -> None:
             return
         _ok("Basic Auth credentials persisted across restart")
 
-        # Verify library data persisted
-        ls_after = stack.compose("exec", "-T", "beets", "/lsiopy/bin/beet", "-l", "/config/musiclibrary.blb", "ls")
-        if ls_after.returncode != 0 or not ls_after.stdout.strip():
+        # Verify library data (and the mutation performed above) persisted
+        status, _, albums_after = stack.request("GET", "/api/albums", headers=basic_header)
+        if status != 200 or not (albums_after.get("albums") or []):
             _fail("Library data lost after restart")
             return
-        _ok(f"Library data persisted after restart: {ls_after.stdout.strip()}")
+        _ok(f"Library data persisted after restart ({len(albums_after['albums'])} album(s))")
 
-        # 9. Test --force-recreate Persistence
+        # 10. Test --force-recreate Persistence
         print("==> Step 13: Testing persistence across `docker compose up -d --force-recreate`...")
         stack.up(recreate=True)
         if not stack.wait_healthy(timeout=60):
@@ -644,7 +684,7 @@ def main():
     start_time = time.time()
     print("=" * 70)
     print("PRODUCTION DOCKER ACCEPTANCE TEST")
-    print("Standard architecture: linuxserver/beets:2.13.1 + beets-web-manager:ci")
+    print("Stock-Beets architecture: linuxserver/beets:latest + beets-web-manager:ci")
     print("=" * 70)
 
     try:
