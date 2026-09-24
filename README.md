@@ -8,7 +8,7 @@ This project exists because the Beets web plugin didn't cover enough on its own:
 
 ## Features
 
-- Flask web manager that orchestrates Beets through an authenticated internal control agent.
+- Flask web manager that talks to a standard stock `lscr.io/linuxserver/beets` container over HTTP via its `web` plugin (reads) and a bundled `webmanager` integration plugin (authenticated mutations) — Beets Web Manager has no Beets runtime of its own.
 - React and Next.js static frontend served by the backend.
 - Import review queue with evidence-driven accept, reject, and cleanup actions.
 - Playlist ingestion from files, URLs, pasted tracks, and saved playlist manifests.
@@ -43,7 +43,7 @@ mkdir beets-stack && cd beets-stack
 ```yaml
 services:
   beets:
-    image: lscr.io/linuxserver/beets:2.13.1
+    image: lscr.io/linuxserver/beets:latest
     container_name: beets
     restart: unless-stopped
     environment:
@@ -54,6 +54,11 @@ services:
       - ./beets:/config
       - /path/to/music:/music
       - /path/to/downloads:/downloads
+    expose:
+      - "8337"
+    depends_on:
+      beets-web-manager:
+        condition: service_healthy
 
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:stable
@@ -65,14 +70,22 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
+      - BEETS_WEB_URL=http://beets:8337
+      - BEETS_OUTBOUND_ALLOWLIST=beets:8337
     volumes:
       - ./beets:/config
-      - /path/to/music:/music
+      - /path/to/music:/music:ro
       - /path/to/downloads:/downloads
-      - ./web-manager:/data
-    depends_on:
-      - beets
+      - ./web-manager:/web-manager-data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 ```
+
+See the repository's [`docker-compose.yml`](docker-compose.yml) for the exact, fully-commented production file (including every optional integration variable).
 
 *(Adjust `/path/to/music` and `/path/to/downloads` to match your media storage folders).*
 
@@ -128,7 +141,7 @@ npm run build
 
 Most runtime configuration comes from environment variables and `/config/config.yaml` inside the container. Secrets can be provided through `.env`, Docker Compose environment variables, or configured directly in the web UI.
 
-The standard Compose stack shares `/config`, `/music`, `/downloads`, and `/data` volumes between Beets and Beets Web Manager.
+The standard Compose stack shares `/config`, `/music` (read-only in the Web Manager container — stock Beets owns all writes there), and `/downloads` volumes between Beets and Beets Web Manager. `/web-manager-data` is Web Manager's own durable state and is not shared.
 
 ## Environment Variables
 
@@ -238,20 +251,17 @@ To restrict access to the local machine only, set `WEBCONTROL_PORT=127.0.0.1:833
 
 ## Troubleshooting
 
-**`pull access denied for beets-engine`**
-Docker encountered a local-only engine image tag (`beets-engine:local` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (bundled beets + beets-web-manager using published GHCR images), `examples/docker-compose.external-beets.yml` (for standalone web-manager deployments), or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
-
 **`pull access denied for beets-web-manager`**
 Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
 
 **`failed to read dockerfile`**
 A development Compose file or `build: .` block is being run outside the repository root directory. Production Compose files use published images and do not require a local Dockerfile. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for existing stack snippets.
 
-**`cannot connect to Beets API`**
-In the standard unified deployment (the production `docker-compose.yml` above), Beets Web Manager talks to its own embedded control agent over an internal loopback address and there is nothing to configure. This error normally only applies to the advanced [external Beets](examples/docker-compose.external-beets.yml) deployment — verify `BEETS_API_URL` and `BEETS_API_TOKEN` are set correctly there and that the remote Beets control agent service is healthy and reachable over the network.
+**`cannot connect to Beets`**
+Beets Web Manager talks to the stock `beets` container over HTTP at `BEETS_WEB_URL` (default `http://beets:8337`, the Docker Compose service name and stock Beets' own `web`/`webmanager` plugin port). Confirm the `beets` container is running and healthy, and that `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` in your `.env` point at it.
 
 **The app returns 503 "Authentication is required" and I can't reach the UI at all.**
-This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, read the auto-generated API token from the file it was persisted to (it is never printed to logs): `docker exec <container> cat /data/.auth_token`. The provided Compose files persist that generated token to `/data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `./web-manager` host directory (mounted at `/data`) is writable, or startup will fail closed rather than run with an unrecoverable, unpersisted token.
+This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, read the auto-generated API token from the file it was persisted to (it is never printed to logs): `docker exec <container> cat /web-manager-data/.auth_token`. The provided Compose files persist that generated token to `/web-manager-data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `./web-manager` host directory (mounted at `/web-manager-data`) is writable, or startup will fail closed rather than run with an unrecoverable, unpersisted token.
 
 **"AI authentication failed" / no OpenAI key configured — will my imports still work?**
 Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key, an HTTP 401/403 from the provider, a timeout, or a rate limit never stops MusicBrainz or AcoustID matching — those run unconditionally and are what actually identify releases and recordings.
@@ -260,7 +270,7 @@ Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key,
 Passwords must be at least 16 characters by default (`BEETS_WEB_PASSWORD_MIN_LENGTH`) and must not be obvious placeholders. Long passphrases are supported; uppercase letters, numbers, and symbols are allowed but not mandatory.
 
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
-`GET /api/setup/status` queries the internal Beets control agent for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.
+`GET /api/setup/status` calls the stock Beets `webmanager` integration plugin for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.
 
 ## Demo Mode
 
@@ -281,43 +291,35 @@ Generates a few short, self-synthesized sine-wave WAV files (not copies of any r
 
 Back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin configuration, and web-manager state files under `/config` before upgrades or migrations — **not** your music library, which should be backed up separately with storage/snapshot tooling.
 
-## Manual Beets CLI and Shared Locking
+## Manual Beets CLI
 
-The standard `docker-compose.yml` above runs the **stock, unmodified** `lscr.io/linuxserver/beets` image as the `beets` service — it does not include the `beet-locked` wrapper (that only exists in the custom-built `beets-engine` image used by `docker-compose.full.yml`/`examples/docker-compose.external-beets.yml`). `docker compose exec beets beet-locked ...` will fail with "command not found" on the standard stack.
+The `beets` service is the **stock, unmodified** `lscr.io/linuxserver/beets` image — the sole authoritative Beets runtime and the sole owner of `/config/musiclibrary.blb`. Beets Web Manager never opens that database directly; it reads and writes through the same `beets` container's HTTP API (its `web` plugin for reads, its bundled `webmanager` plugin for authenticated mutations).
 
-Beets Web Manager owns `/config/musiclibrary.blb` through its own embedded engine, and every mutation it performs (imports, cleanup, tag writes, moves) serializes on `/config/.beet_db.lock`. Plain `beet` commands run manually inside the `beets` container do **not** acquire that lock — SQLite's own file-level locking prevents literal database corruption from two processes writing at once, but it does not coordinate with Web Manager's own multi-step operations (for example, a manual `beet import` racing a Web Manager cleanup job that is mid-way through renaming the same files).
-
-Recommended safe usage:
+Read-only CLI inspection inside the `beets` container is always safe, any time:
 
 ```bash
-# Read-only inspection is always safe, any time
 docker compose exec beets beet ls artist:311
 docker compose exec beets beet version
 ```
 
-For mutating operations (`beet import`, `beet move`, `beet write`, etc.), prefer doing them through Beets Web Manager's own UI/API. If you do need to run a manual mutating `beet` command in the `beets` container, do it while Beets Web Manager has no import/cleanup job actively running.
+For mutating operations (`beet import`, `beet move`, `beet write`, etc.), prefer doing them through Beets Web Manager's own UI/API, which serializes them through its own controlled preview/apply/audit workflow. If you do need to run a manual mutating `beet` command in the `beets` container, do it while Beets Web Manager has no import/cleanup job actively running — SQLite's own file-level locking prevents literal database corruption from two processes writing at once, but it does not coordinate with Web Manager's own multi-step operations.
 
-No second Beets database is created — both containers open the exact same `/config/musiclibrary.blb`, and both are pinned to Beets 2.13.1 so there is no schema-version skew between them.
+## Upgrades
 
-## Architecture Migration & Upgrades
-
-Upgrading the Beets **engine version** specifically (not just rebuilding the
-same version) needs the additional backup/verification/rollback steps in
-`docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an
-automatic, one-time, non-reversible database schema migration on first open.
+Upgrading the **Beets image version** specifically (bumping the `beets` service's tag, not just recreating the same version) needs the additional backup/verification/rollback steps in `docs/BEETS_ENGINE_MIGRATION.md` — newer Beets releases can perform an automatic, one-time, non-reversible database schema migration on first open.
 
 ```bash
 # 1. Back up config and library
 ./scripts/backup.sh
 
-# 2. Rebuild both services with clean layers
-docker compose build --no-cache beets beets-web-manager
+# 2. Pull the new images
+docker compose pull
 
 # 3. Re-create and restart the stack
-docker compose up -d --force-recreate beets beets-web-manager
+docker compose up -d
 
-# 4. Verify agent health, web health, and remote Beets diagnostics
-docker compose exec beets /lsiopy/bin/beet version
+# 4. Verify Beets and Web Manager health
+docker compose exec beets beet version
 curl -s http://127.0.0.1:8337/api/health
 curl -s http://127.0.0.1:8337/health/ready
 curl -s http://127.0.0.1:8337/api/setup/status

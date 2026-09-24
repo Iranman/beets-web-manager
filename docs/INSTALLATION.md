@@ -22,7 +22,7 @@ Create a file named `docker-compose.yml` with the following content:
 ```yaml
 services:
   beets:
-    image: lscr.io/linuxserver/beets:2.13.1
+    image: lscr.io/linuxserver/beets:latest
     container_name: beets
     restart: unless-stopped
     environment:
@@ -33,6 +33,11 @@ services:
       - ./beets:/config
       - /path/to/music:/music
       - /path/to/downloads:/downloads
+    expose:
+      - "8337"
+    depends_on:
+      beets-web-manager:
+        condition: service_healthy
 
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:stable
@@ -44,13 +49,19 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
+      - BEETS_WEB_URL=http://beets:8337
+      - BEETS_OUTBOUND_ALLOWLIST=beets:8337
     volumes:
       - ./beets:/config
-      - /path/to/music:/music
+      - /path/to/music:/music:ro
       - /path/to/downloads:/downloads
-      - ./web-manager:/data
-    depends_on:
-      - beets
+      - ./web-manager:/web-manager-data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 ```
 
 > [!TIP]
@@ -76,10 +87,10 @@ Both containers share the same underlying files:
 
 | Host Path | Container Path | Purpose |
 |---|---|---|
-| `./beets` | `/config` | Beets configuration (`config.yaml`), plugins, and SQLite library database (`musiclibrary.blb`) |
-| `/path/to/music` | `/music` | Authoritative music library files |
+| `./beets` | `/config` | Beets configuration (`config.yaml`), plugins, and SQLite library database (`musiclibrary.blb`), owned by the `beets` container. Web Manager also mounts this read/write, only to provision its integration plugin and merge `config.yaml` entries — it never opens `musiclibrary.blb` directly. |
+| `/path/to/music` | `/music` | Authoritative music library files. Mounted read-only into Web Manager; only the `beets` container writes here. |
 | `/path/to/downloads` | `/downloads` | Ingest and download staging directory |
-| `./web-manager` | `/data` | Web manager settings, user accounts, sessions, and transaction audit logs |
+| `./web-manager` | `/web-manager-data` | Web manager settings, user accounts, sessions, and transaction audit logs (Web Manager's own state; not shared with `beets`) |
 
 ---
 
@@ -98,16 +109,17 @@ docker compose exec beets beet ls
 docker compose exec beets beet import /downloads/new-album
 ```
 
-SQLite's own file-level locking on `/config/musiclibrary.blb` prevents literal database corruption from simultaneous writes, but it does not coordinate multi-step operations: Beets Web Manager's own jobs (imports, cleanup, tag writes) additionally serialize on a higher-level lock file (`/config/.beet_db.lock`) that only Web Manager's code acquires — a manual `beet` command run here does not take that lock. Read-only commands (`beet ls`, `beet version`) are always safe; avoid running a manual mutating command (`beet import`, `beet modify`, `beet rm`) at the same time as an active Web Manager job.
+Read-only commands (`beet ls`, `beet version`) are always safe, any time. Prefer doing mutating operations (`beet import`, `beet modify`, `beet rm`) through Beets Web Manager's own UI/API, which serializes them through its own controlled preview/apply/audit workflow; if you do run a manual mutating `beet` command in the container, avoid doing so while a Web Manager job is actively running — SQLite's own file-level locking on `/config/musiclibrary.blb` prevents literal database corruption from simultaneous writes, but it does not coordinate with Web Manager's own multi-step operations.
 
 ---
 
 ## Advanced: External / Standalone Beets Deployment
 
-If you run Beets on a separate host (e.g. TrueNAS, Unraid, or another server) and want Beets Web Manager to connect over the network:
+If you run Beets on a separate host (e.g. TrueNAS, Unraid, or another server) and want Beets Web Manager to connect over the network instead of starting its own `beets` service:
 
 1. Use [examples/docker-compose.external-beets.yml](../examples/docker-compose.external-beets.yml).
-2. Configure `BEETS_API_URL` (e.g. `http://192.168.1.50:8338`) and `BEETS_API_TOKEN`.
+2. Configure `BEETS_WEB_URL` (e.g. `http://192.168.1.50:8337`) and `BEETS_OUTBOUND_ALLOWLIST`.
+3. The remote Beets instance must already have its `web`/`webmanager` plugins enabled and provisioned — Web Manager cannot provision a plugin into a filesystem it does not mount.
 
 ---
 

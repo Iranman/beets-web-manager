@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration is split between environment variables for the web-manager and control-agent boundary, and `/config/config.yaml` for Beets itself.
+Configuration is split between environment variables for Beets Web Manager (including how it reaches stock Beets), and `/config/config.yaml` for Beets itself.
 
 ## Configuration ownership and precedence
 
@@ -53,8 +53,7 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 |---|---|---:|---|
 | `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.18`, or `edge`. |
 | `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`. |
-| `BEETS_API_TOKEN` | both | optional | Shared secret for internal Beets control agent. Auto-generated and managed internally in standard unified deployments. |
-| `BEETS_API_URL` | web | optional | Control agent endpoint URL. In standard unified deployment, defaults to internal loopback `http://127.0.0.1:8338`. For external deployments, set to external URL (e.g. `http://192.168.1.50:8338`). |
+| `BEETS_WEB_URL` | web | optional | Stock Beets container's `web`/`webmanager` plugin URL. Defaults to `http://beets:8337` (the standard Compose service name/port). For an externally-managed Beets instance, set to its URL (e.g. `http://192.168.1.50:8337`). |
 | `BEETS_WEB_AUTH_TOKEN` | web | optional | Owner API/script bearer token. The app auto-generates a secure token if none is set. |
 | `BEETS_WEB_PASSWORD` | web | optional | Administrator browser login password. Prefer setting this via the first-run browser setup wizard. |
 | `BEETS_WEB_USERNAME` | web | optional | Browser login username, default `admin`. |
@@ -78,19 +77,20 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 
 ## Beets config
 
-The authoritative Beets config is `/config/config.yaml` in the `beets` engine container. The web manager does not own a second Beets config, and -- since the two-service architecture cutover (2026-07-28) -- has no local mount of this file at all; its own `/config` volume is a separate, unrelated directory for its own app state.
+The authoritative Beets config is `/config/config.yaml`, owned by the stock `beets` container. Web Manager also mounts `/config` (read/write) — not to run Beets itself, but to provision the bundled `webmanager` integration plugin's files into `/config/beetsplug` and to safely merge required `plugins:`/`pluginpath:` entries into `config.yaml` at startup (additive only: it backs up the file first and never removes an operator's existing settings).
 
-The Settings page's config editor (`GET/POST /api/config`, `POST /api/config/revert`) therefore does not touch a local filesystem path. It proxies through `beets_client` to dedicated control-agent endpoints (`GET/POST /config`, `POST /config/revert` on the agent, BEETSDIR-relative, never a client-supplied path) that read/write the engine's own `config.yaml`. Secret-line redaction (API keys, tokens, passwords) still happens in the web manager, at the boundary before content reaches the browser -- the agent returns raw content across the trusted internal network only. An earlier version of these routes read/wrote a local `/config/config.yaml` path directly, which never existed in the real deployed topology and made the config editor unconditionally return 500; that behavior was fixed in v0.1.12.
+> [!NOTE]
+> The Settings page's config text editor (`GET/POST /api/config`) still calls the retired `backend/beets_client.py` control-agent client and is currently non-functional — see `docs/TECHNICAL_DEBT.md` (ARCH-010). Edit `/config/config.yaml` directly on the host, or via `docker compose exec beets sh`, until that route is migrated onto `backend/beets_adapter.py`.
 
-The engine image includes the bundled `discpath` plugin under `/opt/beets-web-manager-agent/beetsplug`; user plugins can be mounted under `/config/beetsplug`. Configure `pluginpath` so `/config/beetsplug` is searched before the bundled path.
+Beets Web Manager provisions the bundled `discpath` plugin (and the `webmanager` plugin itself) into `/config/beetsplug`; further user plugins can be dropped into the same directory. `pluginpath` must include `/config/beetsplug` for any of them to load — the provisioning step ensures this automatically.
 
-`/api/health` is a web-manager liveness check. `/health/ready` and `/api/setup/status` query the remote control agent for Beets readiness and fail closed when the engine is unreachable or rejects authentication. The control agent's own `/status` (deep plugin/version diagnostics) is single-flight cached for `BEETS_VERSION_CACHE_TTL_SECONDS` (default 30s) and, on a transient probe failure, keeps serving the last known-good plugin list (marked `diagnostics_fresh: false`) rather than reporting a false `0 plugins loaded`. Its own `/health` liveness check is a hardcoded, dependency-free response, served by a threaded HTTP server so a slow `/status` probe elsewhere can never block it.
+`/api/health` is a Web-Manager liveness check. `/health/ready` and `/api/setup/status` call `BeetsAdapter.get_plugin_status()`/`get_stats()` (the `webmanager` plugin's live HTTP handshake) and fail closed when stock Beets is unreachable or rejects authentication.
 
 ### Item pagination is not real upstream pagination (known limitation)
 
 `BeetsAdapter.get_items_page()` (used by `GET /api/library/items` and similar paged reads) does not have a real bounded query to page against: stock `beetsplug.web`'s `GET /item/` always returns the entire library, with no `offset`/`limit` support. Web Manager therefore fetches the full item list and slices it in Python. This is deliberately not disguised as real pagination -- the response shape (`items`/`offset`/`limit`/`returned`/`total`) is honest about `total` being the whole library, not an upstream-reported page count.
 
-To avoid re-fetching the whole library on every single page request within one browsing session or workflow, `BeetsAdapter` caches the full item list for a short, bounded TTL (`_ITEMS_PAGE_CACHE_TTL_SECONDS`, 5 seconds). This is a latency/load mitigation only -- it does not make the underlying operation real pagination, and the short TTL is intentional so a concurrent import/modify becomes visible again within a few seconds. Building a custom SQL/pagination endpoint against `musiclibrary.blb` to fix this properly is explicitly out of scope: Beets Web Manager does not become a second owner of the Beets database (see the stock-Beets architecture invariant in `docs/BEETS_ENGINE_MIGRATION.md`). If upstream Beets ever adds real `beetsplug.web` pagination, `get_items_page()` should be updated to use it directly instead of this workaround.
+To avoid re-fetching the whole library on every single page request within one browsing session or workflow, `BeetsAdapter` caches the full item list for a short, bounded TTL (`_ITEMS_PAGE_CACHE_TTL_SECONDS`, 5 seconds). This is a latency/load mitigation only -- it does not make the underlying operation real pagination, and the short TTL is intentional so a concurrent import/modify becomes visible again within a few seconds. Building a custom SQL/pagination endpoint against `musiclibrary.blb` to fix this properly is explicitly out of scope: Beets Web Manager does not become a second owner of the Beets database (see `docs/ARCHITECTURE.md`'s non-negotiable rules). If upstream Beets ever adds real `beetsplug.web` pagination, `get_items_page()` should be updated to use it directly instead of this workaround.
 
 ## Authentication and sessions
 
@@ -109,16 +109,14 @@ MusicBrainz autotagging is built into Beets itself -- there is no `musicbrainz` 
 - `submit`: Beets/Chroma command for AcoustID submission readiness. Requires Chroma loaded and the command registered.
 - `mbsubmit`: MusicBrainz submission command readiness. It is independent of `submit`.
 
-## Beets engine version
+## Beets image version
 
-`Dockerfile.beets` selects its upstream LinuxServer Beets base image via the `BEETS_BASE_IMAGE` build argument (`docker-compose.dev.yml`/`docker-compose.full.yml` read it from the `BEETS_BASE_IMAGE` environment variable, default `lscr.io/linuxserver/beets:2.13.1`):
+`docker-compose.yml`'s `beets` service image tag selects the stock Beets version:
 
-- **An exact version** (e.g. `lscr.io/linuxserver/beets:2.13.1`): the tested, reproducible production default. Update it only through an intentional repository change validated per `docs/BEETS_ENGINE_MIGRATION.md`.
-- **A digest pin** (e.g. `lscr.io/linuxserver/beets:2.13.1@sha256:...`): preferred for production once a version has been validated -- fully reproducible, immune to a registry retagging the same version tag.
-- **`latest`**: resolves to whatever LinuxServer currently publishes. This is also the version the `stock-beets-acceptance` CI job in `.github/workflows/docker-build.yml` runs the real Docker acceptance test against; never use it as a production default, since it can silently change the running Beets version on a routine rebuild.
+- **`latest`** (the production default): resolves to whatever LinuxServer currently publishes. This is also the version the `stock-beets-acceptance` CI job in `.github/workflows/docker-build.yml` runs the real Docker acceptance test against.
+- **An exact version** (e.g. `lscr.io/linuxserver/beets:2.13.1`): fully reproducible; use this if you need a pinned version instead of floating with `latest`.
+- **A digest pin** (e.g. `lscr.io/linuxserver/beets:2.13.1@sha256:...`): fully reproducible and immune to a registry retagging the same version tag.
 
-The Beets engine version is independent of the Beets Web Manager image version -- upgrading one does not require upgrading the other.
+The Beets image version is independent of the Beets Web Manager image version -- upgrading one does not require upgrading the other.
 
-**Stock-Beets migration (Phase 1):** Beets Web Manager builds and publishes exactly one image, `ghcr.io/iranman/beets-web-manager`. There is no custom Beets engine image in active CI -- the sole Beets runtime this repository verifies against is the unmodified, official `lscr.io/linuxserver/beets` image, exercised over HTTP by the webmanager integration plugin (`beetsplug/webmanager/`) in the `stock-beets-acceptance` job. `Dockerfile.beets` and `docker/beets/apply_patches.py` remain in source only as migration scaffolding for deployments that have not yet cut over; they are not built, tested, or published by any active workflow. See `docs/BEETS_ENGINE_MIGRATION.md` for details and the retention policy for that legacy path.
-
-Beets 2.4.0 was previously pinned because of a narrow plugin-resolution defect (`beetbox/beets#6033`), fixed upstream in Beets 2.5.0 (`beetbox/beets#6039`). `docker/beets/apply_patches.py` applies the local backport patch only when the installed Beets version is exactly 2.4.0, skips it (and instead verifies the upstream fix directly) on Beets >= 2.5.0, and fails the build for any other, unsupported version -- it is never applied outside 2.4.0. This patch path is legacy migration scaffolding (see above) and is no longer built or tested by CI. Upgrading the Beets engine version on a deployment with an existing library requires the backup/migration/rollback procedure in `docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an automatic, one-time, non-reversible database schema migration on first open.
+Beets Web Manager builds and publishes exactly one image, `ghcr.io/iranman/beets-web-manager`. There is no custom Beets image anywhere in this repository or its CI -- the sole Beets runtime this repository verifies against is the unmodified, official `lscr.io/linuxserver/beets` image, exercised over HTTP by the `webmanager` integration plugin (`beetsplug/webmanager/`) in the `stock-beets-acceptance` job. Upgrading the Beets image version on a deployment with an existing library requires the backup/upgrade/rollback procedure in `docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an automatic, one-time, non-reversible database schema migration on first open.

@@ -10,7 +10,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Evidence: Most operator workflows (import review, library, cleanup, deduplication, playlists, Plex, configuration, transactions, import) still live in `app.py` rather than a thin route calling an owned service.
 - Current risk: Changes to one workflow can accidentally alter unrelated behavior; it is hard to tell whether a given call site uses a well-owned service method or a legacy shape.
 - Desired state: Routes remain thin. Application services own workflows. Domain modules own matching and safety decisions. Provider adapters own external calls. Repository/client methods own Beets-engine access.
-- Safe migration approach: Extract one tested service at a time. Prefer replacing legacy call shapes with explicit `BeetsClient` methods while preserving route signatures and responses.
+- Safe migration approach: Extract one tested service at a time. Prefer replacing legacy call shapes with explicit `BeetsAdapter` methods while preserving route signatures and responses.
 - Priority: P0. Status: Open.
 
 ## ARCH-002 Duplicated Matching And Confidence Rules
@@ -67,6 +67,15 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: Shared matching and import contracts carry both fields with explicit names and semantics: release-group ID for canonical album identity, optional release ID for edition-level evidence, recording IDs for track identity. No workflow substitutes a release ID where release-group identity is required.
 - Safe migration approach: Do not rename fields globally. Add contract tests and typed result shapes around current entry points first, then update one workflow at a time to require/propagate `mb_releasegroupid` for album identity while retaining `mb_albumid` as representative release evidence. Keep API compatibility by accepting existing fields during transition.
 - Required tests: Unit tests for release-vs-release-group normalization; contract tests for MusicBrainz release/release-group candidates; import review tests for selected-match propagation; playlist placement tests for representative release evidence; repair/replacement tests that keep release-group folder identity stable; cleanup tests that do not merge distinct release groups; a regression test proving a release ID is never written where a release-group ID is required.
+- Priority: P0. Status: Open.
+
+## ARCH-010 Composite Mutation Workflows Still Call The Retired `backend/beets_client.py`
+
+- Affected area: `app.py`'s composite Plan/Apply/Rollback mutation workflows -- merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, album artwork fetch/embed, genre repair, mbsync-all, and move-all.
+- Evidence: These workflows still call `backend.beets_client.BeetsClient` (`plan_*`/`apply_*`/`rollback_*` methods, defaulting to `http://beets:8338`), the HTTP client for the embedded control-agent server that was deleted in the stock-Beets migration. `backend/beets_client.py` itself is retained only because these ~280 call sites across ~112 methods still import it; every one of these calls now fails closed against a server that no longer exists. `job_engine.py`, `routes_setup.py`, and `routes_submissions.py` have already been fully migrated onto `backend/beets_adapter.py` (the stock-Beets `webmanager` integration-plugin client) and no longer reference `beets_client`.
+- Current risk: Every listed workflow is currently non-functional in production (fails with a stock-Beets-unavailable error), not merely un-migrated -- this is the single largest remaining gap in the stock-Beets migration.
+- Desired state: Zero production references to `backend.beets_client`/`BEETS_API_URL`/`BEETS_API_TOKEN`/port 8338 anywhere in `app.py`; every composite workflow re-implemented against `backend/beets_adapter.py`'s narrow stock-Beets operations (`modify`, `move`, `remove`, `mbsync`, `fetch_art`, `embed_art`, `lastgenre`), with `backend/transaction_engine.py`'s Plan/Apply/Rollback/Verify bookkeeping retained as pure Web-Manager-local orchestration around those calls. `backend/beets_client.py` is deleted once its caller count reaches zero.
+- Safe migration approach: Migrate one composite workflow's entire `beets_client` surface at a time (never a single method in isolation -- partial migration breaks the mocked-consistency assumption each workflow's existing unit tests rely on), verifying against `backend/beets_adapter.py`'s real stock-Beets acceptance suite before moving to the next workflow.
 - Priority: P0. Status: Open.
 
 ## ARCH-019 Job/Transaction-Status Test Can Be Intermittently Flaky Under CI Load
