@@ -6,6 +6,31 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.24 - 2026-09-24
+
+Closure/hardening pass for the stock-Beets migration (#137-140 left main broken and materially less migrated than represented; see PR #141).
+
+### Fixed
+
+- **`/health/ready` and setup status were permanently unhealthy on a fresh install.** `chroma`'s required-plugin health check tested for a local `pyacoustid` Python package inside Web Manager, but AcoustID fingerprinting runs entirely inside the stock Beets container -- Web Manager has no `pyacoustid` dependency of its own.
+- **Existing-install upgrades never actually enabled `web`/`webmanager`.** Both were missing or misclassified in the plugin manifest, so an existing user's config.yaml never got the plugin entries needed for stock Beets' own default service to even start, and `replaygain` could get enabled without the `backend:` setting it needs to avoid a hard load failure. Migrating a plugin name into `plugins:` without its minimum required settings block is now handled for `web`, `webmanager`, and `replaygain`, without ever touching a block a user already has.
+- **A real upstream Beets 2.14.1 defect crashed every album/item read with `include_paths: yes`** (`beets.util.displayable_path(None)` raising instead of returning `""` for an album with no artwork yet -- i.e. every album immediately after import). Worked around defensively inside the `webmanager` integration plugin at load time; does not modify the Beets image itself.
+- A real, previously-unredacted secret-leak path in `/api/setup/status`'s top-level `plugins` field.
+- A silent no-op in `attach_album_mbids()`: it checked the stock-Beets integration plugin's modify response for an `"ok"` key that response never carries (the real key is `"success"`), so every real mutation through that endpoint was treated as a failure.
+- The fresh-install plugin-provisioning ordering race: `beets` now waits on Web Manager's own healthcheck (inverted from the previous direction), since Web Manager provisions the webmanager plugin's files and config.yaml entries before its own HTTP port binds.
+- Removed the forbidden generic `POST /api/plugins/run` beet-command endpoint.
+
+### Changed
+
+- `docker-compose.yml`/`docker-compose.dev.yml`/`docker-compose.full.yml` now use `lscr.io/linuxserver/beets:latest`, mount `/music` read-only into Web Manager, and unify Web Manager's durable-state mount on `/web-manager-data`.
+- `job_engine.py`, `routes_setup.py`, and `routes_submissions.py` are now fully migrated onto `backend/beets_adapter.py`, with zero remaining references to the retired `backend/beets_client.py` control-agent client.
+- Added a `PRODUCTION_LEGACY_BEETS_REFERENCES` CI invariant proving that migration claim from source.
+- Rewrote `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`, `docs/INSTALLATION.md`, `docs/EXAMPLES.md`, `docs/DEVELOPMENT.md`, `docs/BEETS_ENGINE_MIGRATION.md`, and `README.md` to describe the current stock-Beets architecture instead of the deleted control-agent one.
+
+### Known remaining debt (not fixed in this release)
+
+`app.py`'s composite Plan/Apply/Rollback mutation workflows (merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, artwork, genre repair, mbsync-all, move-all, and the `/api/config` editor) still call the retired `backend/beets_client.py` and are currently non-functional against the real stock-Beets stack. Tracked as `docs/TECHNICAL_DEBT.md` ARCH-010.
+
 ## v0.1.23 - 2026-09-22
 
 Ships work that had been written and passing locally but never committed/deployed -- discovered while performing live acceptance testing of v0.1.22's secret-reveal feature (see #136).
