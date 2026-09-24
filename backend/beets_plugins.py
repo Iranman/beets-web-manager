@@ -414,6 +414,9 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
     target_beetsplug_dir = cfg_dir / "beetsplug"
     target_beetsplug_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure .webmanager_api_key file is always provisioned in config directory
+    provision_api_key_file(cfg_dir)
+
     # Locate source beetsplug directory
     source_dir = SOURCE_BEETSPLUG_DIR
     if not source_dir.exists():

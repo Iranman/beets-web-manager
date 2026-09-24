@@ -33,24 +33,38 @@ def get_expected_api_key() -> str:
     if env_key:
         return env_key if _is_valid_key_format(env_key) else ""
 
-    file_path = _KEY_FILE_PATH or os.environ.get(
-        "BEETS_WEBMANAGER_API_KEY_FILE", "/config/.webmanager_api_key"
-    )
-    if not file_path or not os.path.isfile(file_path):
+    if _KEY_FILE_PATH:
+        if not os.path.isfile(_KEY_FILE_PATH) or os.path.islink(_KEY_FILE_PATH):
+            return ""
+        try:
+            with open(_KEY_FILE_PATH, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+            if _is_valid_key_format(key):
+                return key
+        except Exception:
+            pass
         return ""
 
-    # Symlink safety check: reject symlinked key file
-    if os.path.islink(file_path):
-        return ""
+    candidates = []
+    if os.environ.get("BEETS_WEBMANAGER_API_KEY_FILE"):
+        candidates.append(os.environ["BEETS_WEBMANAGER_API_KEY_FILE"])
+    if os.environ.get("BEETS_CONFIG"):
+        candidates.append(os.path.join(os.path.dirname(os.environ["BEETS_CONFIG"]), ".webmanager_api_key"))
+    if os.environ.get("BEETSDIR"):
+        candidates.append(os.path.join(os.environ["BEETSDIR"], ".webmanager_api_key"))
+    candidates.append("/config/.webmanager_api_key")
 
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            key = f.read().strip()
-        if _is_valid_key_format(key):
-            return key
-        return ""
-    except Exception:
-        return ""
+    for file_path in candidates:
+        if not file_path or not os.path.isfile(file_path) or os.path.islink(file_path):
+            continue
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+            if _is_valid_key_format(key):
+                return key
+        except Exception:
+            pass
+    return ""
 
 
 def verify_token(token: str) -> bool:

@@ -6,6 +6,7 @@ Communicates over HTTP with the stock LinuxServer Beets container:
 """
 
 import os
+from pathlib import Path
 import json
 import logging
 import re
@@ -209,11 +210,29 @@ class BeetsAdapter:
         """Resolve current API key from memory, env, or file."""
         if self._api_key:
             return self._api_key
-        if self._api_key_file and os.path.isfile(self._api_key_file):
+        env_key = os.environ.get("BEETS_WEBMANAGER_API_KEY", "").strip()
+        if env_key:
+            return env_key
+
+        candidate_files = []
+        if self._api_key_file:
+            candidate_files.append(Path(self._api_key_file))
+        if os.environ.get("BEETS_WEBMANAGER_API_KEY_FILE"):
+            candidate_files.append(Path(os.environ["BEETS_WEBMANAGER_API_KEY_FILE"]))
+        if os.environ.get("BEETS_CONFIG"):
+            candidate_files.append(Path(os.environ["BEETS_CONFIG"]).parent / ".webmanager_api_key")
+        if os.environ.get("BEETSDIR"):
+            candidate_files.append(Path(os.environ["BEETSDIR"]) / ".webmanager_api_key")
+        candidate_files.append(Path("/config/.webmanager_api_key"))
+
+        for p in candidate_files:
             try:
-                return Path(self._api_key_file).read_text(encoding="utf-8").strip()
-            except Exception:
-                pass
+                if p.is_file() and not p.is_symlink():
+                    content = p.read_text(encoding="utf-8").strip()
+                    if content:
+                        return content
+            except Exception as ex:
+                log.debug("Could not read API key from %s: %s", p, ex)
         return ""
 
     def _build_url(self, path: str) -> str:
@@ -252,6 +271,8 @@ class BeetsAdapter:
             token = self.api_key
             if token and "Authorization" not in req_headers:
                 req_headers["Authorization"] = f"Bearer {token}"
+            elif not token and "Authorization" not in req_headers:
+                log.warning("No WebManager API key available when requesting %s", path)
 
         req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
 
