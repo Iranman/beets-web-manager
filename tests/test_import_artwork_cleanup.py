@@ -49,7 +49,7 @@ class ArtworkHelperDefinitionTests(unittest.TestCase):
     def test_db_lookup_for_canonical_path(self):
         helper = _artwork_helper_source(self._src)
         self.assertIn(
-            "beets_client.find_all_items_by_album_id",
+            "composite_workflows.find_all_items_by_album_id",
             helper,
         )
 

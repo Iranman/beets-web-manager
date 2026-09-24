@@ -16,7 +16,7 @@ import sqlite3
 import unittest
 from unittest import mock
 
-from backend.beets_client import (
+from backend.composite_workflows import (
     BeetsClient,
     BeetsError,
     BeetsUnavailableError,
@@ -63,7 +63,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_review_queue_fails_closed_503_on_beets_unavailable(self):
         """Review queue must return HTTP 503 with ENGINE_UNAVAILABLE when engine is down."""
-        with mock.patch("app.beets_client.get_unmatched_review_items") as mock_unmatched:
+        with mock.patch("app.composite_workflows.get_unmatched_review_items") as mock_unmatched:
             mock_unmatched.side_effect = BeetsUnavailableError("Engine connection refused: [WinError 10061]")
 
             response = self.client.get("/api/import/review-queue")
@@ -84,7 +84,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_config_get_fails_closed_503_on_beets_unavailable(self):
         """GET /api/config must return HTTP 503 when engine is down."""
-        with mock.patch("app.beets_client.get_config") as mock_get_config:
+        with mock.patch("app.composite_workflows.get_config") as mock_get_config:
             mock_get_config.side_effect = BeetsUnavailableError("Connection timeout")
 
             response = self.client.get("/api/config")
@@ -104,7 +104,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
              mock.patch("app._resolve_import_review_source_path", return_value=(Path("/data/staging/replacement.flac"), None)), \
              mock.patch("pathlib.Path.exists", return_value=True), \
              mock.patch("app._acoustid_fingerprint_match", return_value=("rec-123", {"rec-123"}, {"rec-123"})), \
-             mock.patch("app.beets_client.plan_track_replacement") as mock_plan:
+             mock.patch("app.composite_workflows.plan_track_replacement") as mock_plan:
             mock_plan.side_effect = BeetsUnavailableError("Connection refused")
 
             response = self.client.post(
@@ -122,7 +122,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_item_replacement_apply_fails_closed_503_on_beets_unavailable(self):
         """POST /api/items/<iid>/replacement/apply must return HTTP 503 on engine down."""
-        with mock.patch("app.beets_client.apply_track_replacement") as mock_apply:
+        with mock.patch("app.composite_workflows.apply_track_replacement") as mock_apply:
             mock_apply.side_effect = BeetsUnavailableError("Connection refused")
 
             response = self.client.post(
@@ -174,7 +174,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_album_cleanup_db_index_no_sqlite_fallback(self):
         """_album_cleanup_db_index must handle client failure without local SQLite access."""
-        with mock.patch("app.beets_client.get_album_cleanup_index") as mock_idx:
+        with mock.patch("app.composite_workflows.get_album_cleanup_index") as mock_idx:
             mock_idx.side_effect = BeetsUnavailableError("Engine offline")
 
             res = _album_cleanup_db_index(Path("/data/music"))
@@ -185,7 +185,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_album_cleanup_item_id_for_path_no_sqlite_fallback(self):
         """_album_cleanup_item_id_for_path must handle client failure returning 0 without SQLite."""
-        with mock.patch("app.beets_client.find_item_by_path") as mock_find:
+        with mock.patch("app.composite_workflows.find_item_by_path") as mock_find:
             mock_find.side_effect = BeetsUnavailableError("Engine offline")
 
             item_id = _album_cleanup_item_id_for_path(Path("/data/music/track.mp3"))
@@ -196,7 +196,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_stamp_artist_folder_album_mbid_counts_no_sqlite_fallback(self):
         """_stamp_artist_folder_album_mbid_counts returns error string on failure without SQLite."""
-        with mock.patch("app.beets_client.get_artist_folder_album_mbids") as mock_mbids:
+        with mock.patch("app.composite_workflows.get_artist_folder_album_mbids") as mock_mbids:
             mock_mbids.side_effect = BeetsUnavailableError("Engine offline")
 
             id_sets, totals, err = _stamp_artist_folder_album_mbid_counts(
@@ -218,9 +218,9 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_music_format_find_verified_replacement_no_sqlite_fallback(self):
         """_music_format_find_verified_replacement must not query SQLite on engine failure."""
-        with mock.patch("app.beets_client.find_all_items_by_mbid") as mock_mbid, \
-             mock.patch("app.beets_client.find_all_items_by_album_id") as mock_aid, \
-             mock.patch("app.beets_client.get_items_page") as mock_page:
+        with mock.patch("app.composite_workflows.find_all_items_by_mbid") as mock_mbid, \
+             mock.patch("app.composite_workflows.find_all_items_by_album_id") as mock_aid, \
+             mock.patch("app.composite_workflows.get_items_page") as mock_page:
             mock_mbid.side_effect = BeetsUnavailableError("Engine offline")
             mock_aid.side_effect = BeetsUnavailableError("Engine offline")
             mock_page.side_effect = BeetsUnavailableError("Engine offline")

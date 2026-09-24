@@ -25,7 +25,7 @@ from backend.transaction_engine import (
     _read_file_audio_tags,
     _write_file_audio_tags,
 )
-from backend.beets_client import BeetsClient
+from backend.beets_adapter import BeetsAdapter
 import app as app_module
 
 ITEMS_SCHEMA = """
@@ -1122,7 +1122,7 @@ class ReleaseOnlyStampingTests(Wave19FixtureBase):
                 music_allowed_roots=[str(self.music_root)], write_tags=write_tags,
             )
 
-        with mock.patch.object(app_module, "beets_client") as mock_client:
+        with mock.patch.object(app_module, "composite_workflows") as mock_client:
             mock_client.plan_album_mb_track_repair.side_effect = _mock_plan
             mock_client.apply_album_mb_track_repair.side_effect = _mock_apply
             summary = app_module._repair_album_mbid_sticking_once(
@@ -1143,9 +1143,6 @@ class RealProductionPathIntegrationTests(Wave19FixtureBase):
         self._create_album_and_items(album_id=1)
 
         app_module.app.config["TESTING"] = True
-        with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}):
-            client = BeetsClient(base_url="http://mock-beets:8338")
-
         mock_plan_res = create_album_mb_track_repair_plan(
             self.store,
             {"album_id": 1},
@@ -1166,7 +1163,7 @@ class RealProductionPathIntegrationTests(Wave19FixtureBase):
                 music_allowed_roots=[str(self.music_root)],
             )
 
-        with mock.patch.object(app_module, "beets_client") as mock_client, \
+        with mock.patch.object(app_module, "composite_workflows") as mock_client, \
              mock.patch.object(app_module.lib, "get_album", return_value=mock.Mock(albumartist="Test Artist", album="Test Album Title")), \
              mock.patch.object(app_module, "_invalidate_lib_cache"), \
              mock.patch.object(app_module, "_trigger_plex_refresh"):

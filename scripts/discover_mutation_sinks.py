@@ -347,30 +347,23 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
             elif chain in (
                 "subprocess.run", "subprocess.Popen", "subprocess.call",
                 "subprocess.check_call", "subprocess.check_output",
-                "beets_client.run_command", "beets_client.reimport_source",
-                "beets_client.reimport_disk", "beets_client.modify", "beets_client.retag",
-                "beets_client.write_tags", "beets_client.save_config", "beets_client.revert_config",
-                "beets_client.plan_album_relocation", "beets_client.apply_album_relocation",
-                "beets_client.rollback_album_relocation", "beets_client.relocate_album",
-                "beets_client.plan_album_metadata", "beets_client.apply_album_metadata",
-                "beets_client.rollback_album_metadata", "beets_client.update_album_metadata",
-                "beets_client.plan_item_metadata", "beets_client.apply_item_metadata",
-                "beets_client.rollback_item_metadata", "beets_client.update_item_metadata",
-                "beets_client.plan_album_genre_repair", "beets_client.apply_album_genre_repair",
-                "beets_client.rollback_album_genre_repair", "beets_client.repair_album_genre",
-                # Wave 26 correction: beets_client.move_file/delete_file are
-                # GENERIC engine-side filesystem mutation passthroughs
-                # (POST /files/move, /files/delete) -- exactly as
-                # architecturally significant as the other beets_client.*
-                # mutation calls already listed here, and exactly the kind
-                # of call a caller can misuse to claim "moved into the
-                # engine, therefore controlled" without actually composing
-                # a real Plan/Apply/Verify family. They were missing from
-                # this tuple entirely, which meant every call site using
-                # them was invisible to this scanner -- not classified as
-                # resolved, not flagged as a blocker, simply never
-                # discovered as a sink at all.
-                "beets_client.move_file", "beets_client.delete_file",
+                "beets_client.run_command",
+                "composite_workflows.run_command", "composite_workflows.reimport_source",
+                "composite_workflows.reimport_disk", "composite_workflows.modify", "composite_workflows.retag",
+                "composite_workflows.write_tags", "config_manager.save_config", "config_manager.revert_config",
+                "composite_workflows.plan_album_relocation", "composite_workflows.apply_album_relocation",
+                "composite_workflows.rollback_album_relocation", "composite_workflows.relocate_album",
+                "composite_workflows.plan_album_metadata", "composite_workflows.apply_album_metadata",
+                "composite_workflows.rollback_album_metadata", "composite_workflows.update_album_metadata",
+                "composite_workflows.plan_item_metadata", "composite_workflows.apply_item_metadata",
+                "composite_workflows.rollback_item_metadata", "composite_workflows.update_item_metadata",
+                "composite_workflows.plan_album_genre_repair", "composite_workflows.apply_album_genre_repair",
+                "composite_workflows.rollback_album_genre_repair", "composite_workflows.repair_album_genre",
+                "composite_workflows.move_file", "composite_workflows.delete_file",
+                "beets_adapter.modify", "beets_adapter.move", "beets_adapter.remove",
+                "beets_adapter.run_import", "beets_adapter.fetch_art", "beets_adapter.embed_art",
+                "beets_adapter.lastgenre", "beets_adapter.mbsync", "beets_adapter.mbsubmit",
+                "beets_adapter.run", "beets_adapter.update_album_metadata", "beets_adapter.update_item_metadata",
             ):
                 kind = "subprocess"
 

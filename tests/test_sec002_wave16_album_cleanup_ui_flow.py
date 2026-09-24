@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest import mock
 from unittest.mock import patch
 
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 from backend.transaction_engine import (
     TransactionStore,
     create_album_cleanup_plan,
@@ -51,7 +51,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         os.environ["BEETS_WEB_AUTH_DISABLED"] = "1"
         self.client = flask_app.app.test_client()
 
-    @patch("app.beets_client.plan_album_cleanup")
+    @patch("app.composite_workflows.plan_album_cleanup")
     def test_plan_album_cleanup_delegates_to_beets_client(self, mock_plan):
         # Real create_album_cleanup_plan() success shape.
         mock_plan.return_value = {
@@ -70,7 +70,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         self.assertEqual(data["operation_id"], "txn_1700000000_abcdef012345")
         mock_plan.assert_called_once_with(42)
 
-    @patch("app.beets_client.plan_album_cleanup")
+    @patch("app.composite_workflows.plan_album_cleanup")
     def test_plan_album_cleanup_engine_unreachable(self, mock_plan):
         mock_plan.side_effect = BeetsUnavailableError("Control agent down")
 
@@ -87,7 +87,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertIn("album_id", data["error"])
 
-    @patch("app.beets_client.apply_album_cleanup")
+    @patch("app.composite_workflows.apply_album_cleanup")
     def test_apply_album_cleanup_delegates_to_beets_client(self, mock_apply):
         # Real execute_album_cleanup_apply() success shape.
         mock_apply.return_value = {
@@ -110,7 +110,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("operation_id", resp.get_json()["error"])
 
-    @patch("app.beets_client.apply_album_cleanup")
+    @patch("app.composite_workflows.apply_album_cleanup")
     def test_apply_album_cleanup_stale_plan_before_mutation_is_truthful(self, mock_apply):
         """A revalidate_preconditions()-style failure (mutated=False) must
         be classified stale_plan and shown as "nothing was changed"."""
@@ -128,7 +128,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         self.assertIn("Nothing was changed", data["error"])
         self.assertFalse(data["mutated"])
 
-    @patch("app.beets_client.apply_album_cleanup")
+    @patch("app.composite_workflows.apply_album_cleanup")
     def test_apply_album_cleanup_partial_mutation_never_reported_as_stale(self, mock_apply):
         """Regression test for the core Wave 16 truthfulness bug: a
         mid-Apply failure (e.g. the DB-membership-drift check, which fires
@@ -153,7 +153,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         self.assertNotIn("Nothing was changed", data["error"])
         self.assertTrue(data["mutated"])
 
-    @patch("app.beets_client.apply_album_cleanup")
+    @patch("app.composite_workflows.apply_album_cleanup")
     def test_apply_album_cleanup_non_staleness_failure_not_mislabeled(self, mock_apply):
         """A failure that is neither stale nor partially mutated (e.g. a
         missing/misconfigured database) must not be relabeled as either
@@ -180,7 +180,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         resp = self.client.post("/api/albums/cleanup/rollback", json={"operation_id": "txn_x"})
         self.assertIn(resp.status_code, (404, 405))
 
-    @patch("app.beets_client.list_transactions")
+    @patch("app.composite_workflows.list_transactions")
     def test_transactions_list_does_not_fall_back_to_engine(self, mock_list_tx):
         """/api/transactions must stay local-only -- nothing in the
         frontend uses an engine-wide transaction browse, and exposing it
@@ -189,7 +189,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         mock_list_tx.assert_not_called()
 
-    @patch("app.beets_client.get_transaction")
+    @patch("app.composite_workflows.get_transaction")
     def test_transaction_detail_does_not_fall_back_to_engine(self, mock_get_tx):
         """/api/transactions/<id> must stay local-only for the same
         reason -- confirm the unknown-locally case 404s cleanly instead of
@@ -201,7 +201,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
 
 class Wave16RealEngineIntegrationTests(unittest.TestCase):
     """Integration tests routing real requests through the actual Flask
-    routes with app.beets_client's methods patched to call the REAL
+    routes with app.composite_workflows's methods patched to call the REAL
     transaction_engine.py functions (a real TransactionStore, real SQLite
     DB, real filesystem) -- not fabricated response shapes -- matching the
     established pattern in tests/test_sec002_app_path_import_review_cleanup.py.
@@ -291,8 +291,8 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         return plan_res["operation_id"]
 
     def test_end_to_end_plan_apply_through_real_routes(self):
-        with patch.object(flask_app.beets_client, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
-             patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
+        with patch.object(flask_app.composite_workflows, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
+             patch.object(flask_app.composite_workflows, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
             plan_resp = self.client.post("/api/albums/10/cleanup/plan")
             self.assertEqual(plan_resp.status_code, 200)
             plan_data = plan_resp.get_json()
@@ -331,8 +331,8 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         con.commit()
         con.close()
 
-        with patch.object(flask_app.beets_client, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
-             patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
+        with patch.object(flask_app.composite_workflows, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
+             patch.object(flask_app.composite_workflows, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
             plan_resp = self.client.post("/api/albums/10/cleanup/plan")
             op_id = plan_resp.get_json()["operation_id"]
 
@@ -355,10 +355,10 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         the Import Review-specific rollback executor. Album Cleanup is
         irreversible by design -- this must fail closed with a clear
         message, never silently "succeed" having restored nothing."""
-        with patch.object(flask_app.beets_client, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
-             patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup), \
-             patch.object(flask_app.beets_client, "rollback_import_review_cleanup", side_effect=self.mock_rollback), \
-             patch.object(flask_app.beets_client, "get_transaction", side_effect=self.mock_get_transaction):
+        with patch.object(flask_app.composite_workflows, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
+             patch.object(flask_app.composite_workflows, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup), \
+             patch.object(flask_app.composite_workflows, "rollback_import_review_cleanup", side_effect=self.mock_rollback), \
+             patch.object(flask_app.composite_workflows, "get_transaction", side_effect=self.mock_get_transaction):
             plan_resp = self.client.post("/api/albums/10/cleanup/plan")
             op_id = plan_resp.get_json()["operation_id"]
             apply_resp = self.client.post("/api/albums/cleanup/apply", json={"operation_id": op_id})
@@ -373,14 +373,14 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
     def test_generic_rollback_route_still_works_for_import_review_transaction(self):
         """Confirm the transaction-family fix doesn't collateral-damage the
         legitimate, still-supported Import Review cleanup rollback path."""
-        with patch.object(flask_app.beets_client, "plan_import_review_cleanup",
+        with patch.object(flask_app.composite_workflows, "plan_import_review_cleanup",
                            side_effect=lambda payload, **kw: execute_import_review_cleanup_plan(
                                self.tx_store, payload, [str(self.downloads_root)])), \
-             patch.object(flask_app.beets_client, "apply_import_review_cleanup",
+             patch.object(flask_app.composite_workflows, "apply_import_review_cleanup",
                            side_effect=lambda op_id, **kw: execute_import_review_cleanup_apply(
                                self.tx_store, op_id, quarantine_root=str(self.tmp_path / "quarantine"))), \
-             patch.object(flask_app.beets_client, "rollback_import_review_cleanup", side_effect=self.mock_rollback), \
-             patch.object(flask_app.beets_client, "get_transaction", side_effect=self.mock_get_transaction):
+             patch.object(flask_app.composite_workflows, "rollback_import_review_cleanup", side_effect=self.mock_rollback), \
+             patch.object(flask_app.composite_workflows, "get_transaction", side_effect=self.mock_get_transaction):
             op_id = self._create_real_import_review_transaction(action="quarantine_rejected")
             apply_res = execute_import_review_cleanup_apply(
                 self.tx_store, op_id, quarantine_root=str(self.tmp_path / "quarantine"),
@@ -410,10 +410,10 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         to the Album Cleanup Apply route -- execute_album_cleanup_apply's
         own mutation_family check (Wave 15) must still be enforced when
         reached through the new Wave 16 route."""
-        with patch.object(flask_app.beets_client, "plan_import_review_cleanup",
+        with patch.object(flask_app.composite_workflows, "plan_import_review_cleanup",
                            side_effect=lambda payload, **kw: execute_import_review_cleanup_plan(
                                self.tx_store, payload, [str(self.downloads_root)])), \
-             patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
+             patch.object(flask_app.composite_workflows, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
             op_id = self._create_real_import_review_transaction()
 
             resp = self.client.post("/api/albums/cleanup/apply", json={"operation_id": op_id})
@@ -425,14 +425,14 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
             self.assertTrue(self.review_file.exists())
 
     def test_apply_rejects_malformed_transaction_id(self):
-        with patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
+        with patch.object(flask_app.composite_workflows, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
             resp = self.client.post("/api/albums/cleanup/apply", json={"operation_id": "../../etc/passwd"})
             self.assertEqual(resp.status_code, 400)
             self.assertFalse(resp.get_json()["ok"])
 
     def test_repeated_apply_is_idempotent_through_the_route(self):
-        with patch.object(flask_app.beets_client, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
-             patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
+        with patch.object(flask_app.composite_workflows, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
+             patch.object(flask_app.composite_workflows, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup):
             plan_resp = self.client.post("/api/albums/10/cleanup/plan")
             op_id = plan_resp.get_json()["operation_id"]
 
@@ -446,7 +446,7 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
     def test_plan_route_performs_no_mutation(self):
         """Verify pressing "Delete Album" (Plan) alone never touches disk
         or DB -- only Apply does."""
-        with patch.object(flask_app.beets_client, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup):
+        with patch.object(flask_app.composite_workflows, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup):
             resp = self.client.post("/api/albums/10/cleanup/plan")
             self.assertTrue(resp.get_json()["ok"])
         self.assertTrue(self.track.exists())

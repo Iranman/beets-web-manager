@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ['BEETS_WEB_AUTH_DISABLED'] = '1'
 import app as app_module
-from backend.beets_client import BeetsUnavailableError, BeetsError
+from backend.beets_adapter import BeetsUnavailableError, BeetsError
 
 
 class JobsPageEndpointsTestCase(unittest.TestCase):
@@ -125,7 +125,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
                 "missing_files": 0,
             },
         }
-        with patch.object(app_module.beets_client, 'get_library_health', return_value=sample_report):
+        with patch.object(app_module.composite_workflows, 'get_library_health', return_value=sample_report):
             res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 200)
             data = res.get_json()
@@ -134,7 +134,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('item_row_count'), 8)
 
     def test_library_health_engine_offline_handling(self):
-        with patch.object(app_module.beets_client, 'get_library_health', side_effect=BeetsUnavailableError("Control agent down")):
+        with patch.object(app_module.composite_workflows, 'get_library_health', side_effect=BeetsUnavailableError("Control agent down")):
             res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 503)
             data = res.get_json()
@@ -143,7 +143,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('error'), 'Beets engine is unavailable.')
 
     def test_library_health_engine_application_error_not_engine_offline(self):
-        with patch.object(app_module.beets_client, 'get_library_health', side_effect=BeetsError("Internal query error")):
+        with patch.object(app_module.composite_workflows, 'get_library_health', side_effect=BeetsError("Internal query error")):
             res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 500)
             data = res.get_json()
@@ -152,8 +152,8 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('error'), 'Could not load library health.')
 
     def test_library_health_engine_auth_error_handling(self):
-        from backend.beets_client import BeetsAuthError
-        with patch.object(app_module.beets_client, 'get_library_health', side_effect=BeetsAuthError("Token invalid")):
+        from backend.beets_adapter import BeetsAuthError
+        with patch.object(app_module.composite_workflows, 'get_library_health', side_effect=BeetsAuthError("Token invalid")):
             res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 503)
             data = res.get_json()
@@ -162,7 +162,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('error'), 'Beets engine authentication failed.')
 
     def test_art_repair_engine_auth_error_handling(self):
-        from backend.beets_client import BeetsAuthError
+        from backend.beets_adapter import BeetsAuthError
         with patch('app._art_repair_build_report', side_effect=BeetsAuthError("Token invalid")):
             res = self.client.get('/api/library/art-repair', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 503)
@@ -174,13 +174,13 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
     def test_beets_client_http_500_raises_beets_error_not_unavailable(self):
         import urllib.error
         from io import BytesIO
-        from backend.beets_client import BeetsClient
-        client = BeetsClient(base_url="http://localhost:8338", token="test")
+        from backend.beets_adapter import BeetsAdapter
+        client = BeetsAdapter(base_url="http://localhost:8337")
         body_bytes = b'{"ok": false, "error": "Internal database query error", "error_code": "DB_QUERY_FAILED"}'
-        err = urllib.error.HTTPError("http://localhost:8338/library/health", 500, "Server Error", {}, BytesIO(body_bytes))
+        err = urllib.error.HTTPError("http://localhost:8337/stats", 500, "Server Error", {}, BytesIO(body_bytes))
         with patch('urllib.request.urlopen', side_effect=err):
             with self.assertRaises(BeetsError) as ctx:
-                client.get_library_health()
+                client.get_stats()
             self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
             self.assertEqual(ctx.exception.status_code, 500)
             self.assertEqual(ctx.exception.error_code, 'DB_QUERY_FAILED')
@@ -188,13 +188,13 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
     def test_beets_client_http_401_raises_beets_auth_error(self):
         import urllib.error
         from io import BytesIO
-        from backend.beets_client import BeetsClient, BeetsAuthError
-        client = BeetsClient(base_url="http://localhost:8338", token="test")
+        from backend.beets_adapter import BeetsAdapter, BeetsAuthError
+        client = BeetsAdapter(base_url="http://localhost:8337")
         body_bytes = b'{"ok": false, "error": "Unauthorized token", "error_code": "ENGINE_AUTH_FAILED"}'
-        err = urllib.error.HTTPError("http://localhost:8338/library/health", 401, "Unauthorized", {}, BytesIO(body_bytes))
+        err = urllib.error.HTTPError("http://localhost:8337/webmanager/status", 401, "Unauthorized", {}, BytesIO(body_bytes))
         with patch('urllib.request.urlopen', side_effect=err):
             with self.assertRaises(BeetsAuthError) as ctx:
-                client.get_library_health()
+                client.get_plugin_status()
             self.assertEqual(ctx.exception.status_code, 401)
             self.assertEqual(ctx.exception.error_code, 'ENGINE_AUTH_FAILED')
 
@@ -204,7 +204,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             error_code="INVALID_QUERY_PARAMETER",
             status_code=400,
         )
-        with patch.object(app_module.beets_client, 'get_library_health', side_effect=exc):
+        with patch.object(app_module.composite_workflows, 'get_library_health', side_effect=exc):
             res = self.client.get('/api/clean/library-health?duplicate_limit=invalid_value', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 400)
             data = res.get_json()
@@ -221,7 +221,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             error_code="UNPROCESSABLE_ENTITY",
             status_code=422,
         )
-        with patch.object(app_module.beets_client, 'get_library_health', side_effect=exc):
+        with patch.object(app_module.composite_workflows, 'get_library_health', side_effect=exc):
             res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 422)
             data = res.get_json()
@@ -282,7 +282,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
         }
         app_module._set_rgid_resolution(resolved_rgid, "keep_separate", "manually verified distinct releases")
         try:
-            with patch.object(app_module.beets_client, 'get_library_health', return_value=sample_report):
+            with patch.object(app_module.composite_workflows, 'get_library_health', return_value=sample_report):
                 res = self.client.get(
                     '/api/clean/library-health?duplicate_limit=2',
                     headers={'X-Beets-CSRF': '1'},

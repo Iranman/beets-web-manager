@@ -139,7 +139,7 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
         ), mock.patch.object(
             app_module, "_pending_review_matches", return_value=True,
         ), mock.patch.object(
-            app_module.beets_client, "plan_import_review_cleanup",
+            app_module.composite_workflows, "plan_import_review_cleanup",
             side_effect=app_module.BeetsError(leak, error_code="cleanup_failed", status_code=500),
         ):
             response = app_module.cleanup_import_review_files()
@@ -175,7 +175,7 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
 
     def test_get_config_read_failure_is_sanitized(self):
         with app_module.app.test_request_context("/api/config"), \
-             mock.patch.object(app_module.beets_client, "get_config",
+             mock.patch.object(app_module.composite_workflows, "get_config",
                                 side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml", error_code="config_read_failed", status_code=500)):
             response = app_module.get_config()
         status = response[1]
@@ -188,7 +188,7 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
             "/api/config", method="POST",
             data=json.dumps({"content": "beets:\n  library: /config/musiclibrary.blb\n", "expected_revision": "rev1"}),
             content_type="application/json",
-        ), mock.patch.object(app_module.beets_client, "save_config",
+        ), mock.patch.object(app_module.composite_workflows, "save_config",
                               side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml", error_code="config_write_failed", status_code=500)):
             response = app_module.save_config()
         status = response[1]
@@ -198,7 +198,7 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
 
     def test_revert_config_failure_is_sanitized(self):
         with app_module.app.test_request_context("/api/config/revert", method="POST", data=json.dumps({"expected_revision": "rev1"}), content_type="application/json"), \
-             mock.patch.object(app_module.beets_client, "revert_config",
+             mock.patch.object(app_module.composite_workflows, "revert_config",
                                 side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml.bak", error_code="config_revert_failed", status_code=500)):
             response = app_module.revert_config()
         status = response[1]
@@ -256,7 +256,7 @@ class PlaylistDeleteExceptionSanitizationTests(unittest.TestCase):
              mock.patch.object(app_module, "_playlist_ensure_state_dirs"), \
              mock.patch.object(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
              mock.patch.object(app_module, "_playlist_key", return_value="pl_test_playlist"), \
-             mock.patch.object(app_module.beets_client, "delete_playlist_m3u", side_effect=OSError("LEAK_MARKER /data/playlists")):
+             mock.patch.object(app_module.composite_workflows, "delete_playlist_m3u", side_effect=OSError("LEAK_MARKER /data/playlists")):
             response = app_module.playlist_delete("Test Playlist")
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
         status_code = response.status_code if hasattr(response, "status_code") else response[1]
@@ -271,7 +271,7 @@ class PlaylistDeleteExceptionSanitizationTests(unittest.TestCase):
         ), mock.patch.object(app_module, "_playlist_ensure_state_dirs"), \
            mock.patch.object(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
            mock.patch.object(app_module, "_playlist_key", return_value="pl_test_playlist"), \
-           mock.patch.object(app_module.beets_client, "delete_playlist_m3u", return_value={"ok": True, "deleted": True}), \
+           mock.patch.object(app_module.composite_workflows, "delete_playlist_m3u", return_value={"ok": True, "deleted": True}), \
            mock.patch.object(app_module, "_plex_settings", return_value={"token": "secret"}), \
            mock.patch.object(app_module, "_plex_delete_playlist_by_title", side_effect=OSError("LEAK_MARKER plex.internal.example")):
             response = app_module.playlist_delete("Test Playlist")

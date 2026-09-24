@@ -56,7 +56,7 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
             mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}),
             mock.patch.object(app_module, "MUSIC_ROOT", self.music),
             mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
-            mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
+            mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
             patch.start()
@@ -211,7 +211,7 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.assertFalse(data["ok"])
 
     def test_stamp_mbid_dry_run_accepts_music_root(self):
-        with mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+        with mock.patch.object(app_module.composite_workflows, "get_artist_folder_album_mbids", return_value=[]):
             resp = self._post(
                 "/api/clean/artist-folders/stamp-mbid",
                 {"root": str(self.music), "dry_run": True},
@@ -285,7 +285,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(app_module, "MUSIC_ROOT", self.music),
             mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
-            mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
+            mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
             patch.start()
@@ -336,8 +336,8 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         plan_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_1"})
         apply_mock = mock.MagicMock(return_value={"ok": True, "moved_files": 1})
         with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp, \
-             mock.patch.object(app_module.beets_client, "plan_artist_folder_reconcile", plan_mock), \
-             mock.patch.object(app_module.beets_client, "apply_artist_folder_reconcile", apply_mock):
+             mock.patch.object(app_module.composite_workflows, "plan_artist_folder_reconcile", plan_mock), \
+             mock.patch.object(app_module.composite_workflows, "apply_artist_folder_reconcile", apply_mock):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=False,
             )
@@ -366,7 +366,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         b.mkdir()
         log = []
         with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True), \
-             mock.patch.object(app_module.beets_client, "plan_artist_folder_reconcile", side_effect=ConnectionError("engine unreachable")):
+             mock.patch.object(app_module.composite_workflows, "plan_artist_folder_reconcile", side_effect=ConnectionError("engine unreachable")):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=False,
             )
@@ -406,9 +406,9 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         ), mock.patch.object(
             app_module, "_artist_folder_fingerprint_confirms", return_value=True,
         ) as fp, mock.patch.object(
-            app_module.beets_client, "plan_artist_folder_reconcile", plan_mock,
+            app_module.composite_workflows, "plan_artist_folder_reconcile", plan_mock,
         ), mock.patch.object(
-            app_module.beets_client, "apply_artist_folder_reconcile", apply_mock,
+            app_module.composite_workflows, "apply_artist_folder_reconcile", apply_mock,
         ):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=True,
@@ -491,7 +491,7 @@ class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(app_module, "MUSIC_ROOT", self.music),
             mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
-            mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
+            mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
             patch.start()

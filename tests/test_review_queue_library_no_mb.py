@@ -112,7 +112,7 @@ class LibraryNoMbQueryTextFactoryTests(unittest.TestCase):
 class LibraryNoMbQuerySourceFixTests(unittest.TestCase):
     def test_query_now_uses_text_factory_bytes(self):
         # Under ARCH-007, import_review_queue uses structured BeetsClient calls
-        self.assertIn("beets_client.get_unmatched_review_items", APP_SOURCE)
+        self.assertIn("composite_workflows.get_unmatched_review_items", APP_SOURCE)
 
 
 if __name__ == "__main__":

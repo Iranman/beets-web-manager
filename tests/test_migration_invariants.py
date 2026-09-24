@@ -53,8 +53,8 @@ class MigrationInvariantsTests(unittest.TestCase):
         self.assertEqual(OP_PROT, PROTOCOL_VERSION)
 
     def test_phase2_reads_use_stock_beets_adapter(self):
-        """Verify that lib in backend.beets_client uses StockBeetsLibrary with BeetsAdapter."""
-        from backend.beets_client import lib
+        """Verify that lib in backend.composite_workflows uses StockBeetsLibrary with BeetsAdapter."""
+        from backend.composite_workflows import lib
         from backend.beets_adapter import StockBeetsLibrary, BeetsAdapter
 
         self.assertIsInstance(lib, StockBeetsLibrary)

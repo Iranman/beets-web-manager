@@ -21,3 +21,4 @@ mutagen==1.48.1
 
 # Tag I/O
 mediafile==0.17.0
+PyYAML==6.0.2

@@ -15,13 +15,13 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
     def setUp(self):
         self.repo_root = Path(__file__).parent.parent
         self.app_path = self.repo_root / "app.py"
-        self.beets_client_path = self.repo_root / "backend" / "beets_client.py"
+        self.beets_adapter_path = self.repo_root / "backend" / "beets_adapter.py"
 
         self.app_source = self.app_path.read_text(encoding="utf-8")
-        self.beets_client_source = self.beets_client_path.read_text(encoding="utf-8")
+        self.beets_adapter_source = self.beets_adapter_path.read_text(encoding="utf-8")
 
-    def test_beets_client_has_no_transaction_engine_imports(self):
-        tree = ast.parse(self.beets_client_source)
+    def test_beets_adapter_has_no_transaction_engine_imports(self):
+        tree = ast.parse(self.beets_adapter_source)
         imported_modules = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -33,33 +33,19 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertNotIn("backend.transaction_engine", imported_modules)
         self.assertNotIn("transaction_engine", imported_modules)
 
-    def test_beets_client_is_pure_http_proxy(self):
-        # All API endpoints in beets_client should call self._request
-        self.assertIn("def _request(", self.beets_client_source)
-        self.assertIn("BeetsUnavailableError", self.beets_client_source)
-        self.assertIn("BeetsAuthError", self.beets_client_source)
+    def test_beets_adapter_is_pure_http_proxy(self):
+        # All API endpoints in beets_adapter should call self._request
+        self.assertIn("def _request(", self.beets_adapter_source)
+        self.assertIn("BeetsUnavailableError", self.beets_adapter_source)
+        self.assertIn("BeetsAuthError", self.beets_adapter_source)
 
-    def test_beets_client_class_has_no_local_filesystem_mutation_calls(self):
-        """SEC-002 / ARCH-003 Wave 24 final review (CRITICAL): a submitted
-        revision of replace_album_art()/delete_album_art() decoded image
-        bytes and wrote a staging file directly to this container's own
-        local disk (`stg_base.mkdir()`, `temp_art.write_bytes()`), then
-        probed local `Path.exists()`/`Path.is_file()` for candidate art
-        files -- both silently reintroducing exactly the local-mutation
-        fallback test_beets_client_is_pure_http_proxy's substring checks
-        above were never actually strong enough to catch (it only checks
-        that `_request`/error classes exist *somewhere* in the file, not
-        that every method actually routes through them). This walks the
-        real `BeetsClient` class body and proves no filesystem mutation
-        call shape appears anywhere in it -- every method must be pure
-        computation plus HTTP, matching the two-service architecture
-        where only the engine container touches the media filesystem."""
-        tree = ast.parse(self.beets_client_source)
+    def test_beets_adapter_class_has_no_local_filesystem_mutation_calls(self):
+        tree = ast.parse(self.beets_adapter_source)
         client_class = next(
-            (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "BeetsClient"),
+            (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name in ("BeetsAdapter", "BeetsClient")),
             None,
         )
-        self.assertIsNotNone(client_class, "BeetsClient class not found in beets_client.py")
+        self.assertIsNotNone(client_class, "BeetsAdapter class not found in beets_adapter.py")
 
         banned_calls = {
             "mkdir", "makedirs", "unlink", "remove", "rename", "replace",
@@ -78,8 +64,8 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertEqual(found, [], f"found prohibited local-filesystem-mutation call node(s) in BeetsClient: {found}")
 
     def test_app_delegates_folder_cleanup_to_beets_client(self):
-        self.assertIn("beets_client.plan_folder_cleanup(", self.app_source)
-        self.assertIn("beets_client.apply_folder_cleanup(", self.app_source)
+        self.assertIn("composite_workflows.plan_folder_cleanup(", self.app_source)
+        self.assertIn("composite_workflows.apply_folder_cleanup(", self.app_source)
 
     def test_folder_placeholder_apply_has_no_direct_mutation_calls(self):
         src = self._function_source("apply_folder_placeholder_action_api")
@@ -97,20 +83,20 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
                 if name in banned_calls:
                     found.append(f"call:{name}@{node.lineno}")
         self.assertEqual(found, [], f"found prohibited local-mutation call node(s) in folder placeholder apply: {found}")
-        self.assertIn("beets_client.plan_folder_cleanup(", src)
-        self.assertIn("beets_client.apply_folder_cleanup(", src)
+        self.assertIn("composite_workflows.plan_folder_cleanup(", src)
+        self.assertIn("composite_workflows.apply_folder_cleanup(", src)
 
     def test_app_delegates_playlist_media_cleanup_to_beets_client(self):
-        self.assertIn("beets_client.plan_playlist_media_cleanup(", self.app_source)
-        self.assertIn("beets_client.apply_playlist_media_cleanup(", self.app_source)
+        self.assertIn("composite_workflows.plan_playlist_media_cleanup(", self.app_source)
+        self.assertIn("composite_workflows.apply_playlist_media_cleanup(", self.app_source)
 
     def test_app_delegates_album_maintenance_to_beets_client(self):
-        self.assertIn("beets_client.plan_album_maintenance(", self.app_source)
-        self.assertIn("beets_client.apply_album_maintenance(", self.app_source)
+        self.assertIn("composite_workflows.plan_album_maintenance(", self.app_source)
+        self.assertIn("composite_workflows.apply_album_maintenance(", self.app_source)
 
     def test_app_delegates_album_artwork_to_beets_client(self):
-        self.assertIn("beets_client.plan_album_artwork(", self.app_source)
-        self.assertIn("beets_client.apply_album_artwork(", self.app_source)
+        self.assertIn("composite_workflows.plan_album_artwork(", self.app_source)
+        self.assertIn("composite_workflows.apply_album_artwork(", self.app_source)
 
     def test_app_delegates_import_folder_to_beets_client(self):
         # Wave 25 Round 3: import_folder_with_id() now routes fresh reviewed
@@ -121,10 +107,10 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         # plan_import_folder/apply_import_folder methods still exist on
         # BeetsClient and the import_folder_v1 family is still tested, but
         # neither is invoked by production app.py code any more.
-        self.assertIn("beets_client.plan_confirmed_import(", self.app_source)
-        self.assertIn("beets_client.apply_confirmed_import(", self.app_source)
-        self.assertNotIn("beets_client.plan_import_folder(", self.app_source)
-        self.assertNotIn("beets_client.apply_import_folder(", self.app_source)
+        self.assertIn("composite_workflows.plan_confirmed_import(", self.app_source)
+        self.assertIn("composite_workflows.apply_confirmed_import(", self.app_source)
+        self.assertNotIn("composite_workflows.plan_import_folder(", self.app_source)
+        self.assertNotIn("composite_workflows.apply_import_folder(", self.app_source)
 
     def test_transaction_rollback_api_supports_all_families(self):
         self.assertIn('mutation_family == "folder_cleanup_v1"', self.app_source)
@@ -134,7 +120,7 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn('mutation_family == "import_folder_v1"', self.app_source)
 
     # SEC-002 / ARCH-003 Wave 22 final review, findings #39/#40: an
-    # `assertIn("beets_client.plan_xxx(", app_source)` proves only that
+    # `assertIn("composite_workflows.plan_xxx(", app_source)` proves only that
     # the engine call exists *somewhere* in the file -- it says nothing
     # about whether the legacy local mutation it was supposed to replace
     # is actually gone, which is exactly how a real local subprocess

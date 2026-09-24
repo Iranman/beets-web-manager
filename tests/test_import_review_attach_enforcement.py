@@ -237,10 +237,10 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
-        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
-        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
-        self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))
-        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate_album))
+        self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
+        self._patch(mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
+        self._patch(mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=fake_update_item_metadata))
+        self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 
@@ -588,10 +588,10 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
-        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
-        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
-        self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))
-        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate_album))
+        self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
+        self._patch(mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
+        self._patch(mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=fake_update_item_metadata))
+        self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 

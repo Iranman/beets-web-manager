@@ -214,7 +214,7 @@ class FolderCleanupEngineErrorResponseTests(unittest.TestCase):
 
     def test_plan_rejection_returns_structured_json_not_valueerror(self):
         with mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
+            app_module.composite_workflows, "plan_folder_cleanup",
             return_value={"ok": False, "error": "not empty", "code": "folder_cleanup_not_empty"},
         ):
             response = self._post_apply({
@@ -228,10 +228,10 @@ class FolderCleanupEngineErrorResponseTests(unittest.TestCase):
 
     def test_apply_rejection_returns_structured_json_not_valueerror(self):
         with mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
+            app_module.composite_workflows, "plan_folder_cleanup",
             return_value={"ok": True, "operation_id": "op-1"},
         ), mock.patch.object(
-            app_module.beets_client, "apply_folder_cleanup",
+            app_module.composite_workflows, "apply_folder_cleanup",
             return_value={"ok": False, "error": "stale", "code": "folder_cleanup_toctou_mismatch", "mutated": False},
         ):
             response = self._post_apply({
@@ -245,10 +245,10 @@ class FolderCleanupEngineErrorResponseTests(unittest.TestCase):
 
     def test_engine_unavailable_during_apply_returns_503_not_valueerror(self):
         with mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
+            app_module.composite_workflows, "plan_folder_cleanup",
             return_value={"ok": True, "operation_id": "op-1"},
         ), mock.patch.object(
-            app_module.beets_client, "apply_folder_cleanup",
+            app_module.composite_workflows, "apply_folder_cleanup",
             side_effect=app_module.BeetsUnavailableError("offline"),
         ):
             response = self._post_apply({
@@ -262,10 +262,10 @@ class FolderCleanupEngineErrorResponseTests(unittest.TestCase):
 
     def test_success_path_still_returns_plan_apply_result(self):
         with mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
+            app_module.composite_workflows, "plan_folder_cleanup",
             return_value={"ok": True, "operation_id": "op-1"},
         ), mock.patch.object(
-            app_module.beets_client, "apply_folder_cleanup",
+            app_module.composite_workflows, "apply_folder_cleanup",
             return_value={"ok": True, "mutated": True, "removed_dirs": ["/data/media/music/Artist/Album"]},
         ):
             response = self._post_apply({

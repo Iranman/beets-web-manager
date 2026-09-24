@@ -30,13 +30,13 @@ if str(ROOT) not in sys.path:
 class TestWave25ReviewStructuralFixes(unittest.TestCase):
     def setUp(self):
         self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.client_source = (ROOT / "backend" / "beets_client.py").read_text(encoding="utf-8")
+        self.client_source = (ROOT / "backend" / "composite_workflows.py").read_text(encoding="utf-8")
         self.generator_source = (ROOT / "scripts" / "generate_arch003_mutation_inventory.py").read_text(encoding="utf-8")
 
     # ── Bug: repair_album_artwork() does not exist on BeetsClient ──────────
 
     def test_nonexistent_repair_album_artwork_call_is_gone(self):
-        self.assertNotIn("beets_client.repair_album_artwork(", self.app_source)
+        self.assertNotIn("composite_workflows.repair_album_artwork(", self.app_source)
 
     def test_beets_client_has_real_artwork_fetch_embed_method(self):
         self.assertIn("def fetch_and_embed_album_art(", self.client_source)
@@ -49,13 +49,13 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         self.assertIn("def plan_album_artwork_fetch(", self.client_source)
         self.assertIn("def apply_album_artwork_fetch(", self.client_source)
         idx = self.client_source.index("def fetch_and_embed_album_art(")
-        end_idx = self.client_source.index("\n    def ", idx + 1)
+        end_idx = self.client_source.index("\ndef ", idx + 1)
         body = self.client_source[idx:end_idx]
-        self.assertIn("self.plan_album_artwork_fetch(", body)
-        self.assertIn("self.apply_album_artwork_fetch(", body)
+        self.assertIn("plan_album_artwork_fetch(", body)
+        self.assertIn("apply_album_artwork_fetch(", body)
 
     def test_app_calls_the_real_artwork_method(self):
-        self.assertIn("beets_client.fetch_and_embed_album_art(", self.app_source)
+        self.assertIn("composite_workflows.fetch_and_embed_album_art(", self.app_source)
 
     # ── Bug: item_id passed where album_id was required ────────────────────
 
@@ -74,12 +74,12 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         the item's own id."""
         idx = self.app_source.index("_item_repaired_album_ids: set = set()")
         window = self.app_source[idx: idx + 2200]
-        self.assertIn("beets_client.get_item(iid)", window)
+        self.assertIn("composite_workflows.get_item(iid)", window)
         self.assertIn("_real_aid = int(_item_data.get(\"album_id\") or 0)", window)
         self.assertIn("if _real_aid <= 0:", window)
-        self.assertIn('beets_client.plan_album_mb_track_repair({"album_id": _real_aid', window)
-        self.assertIn("beets_client.update_album_metadata(_real_aid,", window)
-        self.assertIn("beets_client.relocate_album(_real_aid,", window)
+        self.assertIn('composite_workflows.plan_album_mb_track_repair({"album_id": _real_aid', window)
+        self.assertIn("composite_workflows.update_album_metadata(_real_aid,", window)
+        self.assertIn("composite_workflows.relocate_album(_real_aid,", window)
 
 
     # ── Bug: plan_album_mb_track_repair() called without album_id ──────────
@@ -145,7 +145,7 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         "delete"} -- a key/action pair create_folder_cleanup_plan() never
         recognizes (it reads "source"/"source_folder", and "delete" is not
         an implemented action), which unconditionally rejected the Plan."""
-        self.assertNotIn('beets_client.plan_folder_cleanup({"path":', self.app_source)
+        self.assertNotIn('composite_workflows.plan_folder_cleanup({"path":', self.app_source)
 
     def test_staged_item_and_orphan_cleanup_use_playlist_media_cleanup(self):
         """Both real DB-row-deletion call sites (_delete_album_items_under_folder's
@@ -154,8 +154,8 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         the family that actually reads item_ids and deletes both the file
         (quarantined) and the DB row (with any now-empty album) as one
         transaction -- not the no-op folder_cleanup_v1 shape."""
-        self.assertIn('beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})', self.app_source)
-        self.assertIn('beets_client.plan_playlist_media_cleanup({"item_ids": orphan_ids})', self.app_source)
+        self.assertIn('composite_workflows.plan_playlist_media_cleanup({"item_ids": delete_ids})', self.app_source)
+        self.assertIn('composite_workflows.plan_playlist_media_cleanup({"item_ids": orphan_ids})', self.app_source)
 
     # ── Dead code: _delete_row_file (raw delete_file on library media, ─────
     # ── never actually called) ──────────────────────────────────────────────
@@ -176,9 +176,9 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         idx = self.app_source.index("def _cleanup_failed_import_copy")
         end_idx = self.app_source.index("def _rollback_failed_library_source_import")
         body = self.app_source[idx:end_idx]
-        self.assertNotIn("beets_client.delete_file(", body)
-        self.assertIn("beets_client.plan_album_cleanup(", body)
-        self.assertIn("beets_client.apply_album_cleanup(", body)
+        self.assertNotIn("composite_workflows.delete_file(", body)
+        self.assertIn("composite_workflows.plan_album_cleanup(", body)
+        self.assertIn("composite_workflows.apply_album_cleanup(", body)
 
     # ── Inventory classification truthfulness (reimport_source) ────────────
 
@@ -242,62 +242,33 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
 
 
 class TestFetchAndEmbedAlbumArt(unittest.TestCase):
-    """Real functional unit tests for BeetsClient.fetch_and_embed_album_art.
-
-    Wave 25 Docker acceptance round: this is now a thin wrapper over the
-    real album_artwork_fetch_v1 Plan/Apply transaction family (see
-    tests/test_album_artwork_fetch_v1.py for the transaction_engine.py
-    logic itself), not a bare run_command()/POST /commands/execute
-    composition -- fetchart/embedart genuinely mutate authoritative
-    library state and needed a real controlled-mutation boundary, not just
-    a restored call. These tests prove the client-level wrapper composes
-    Plan -> Apply correctly and propagates failure/Recovery-Required
-    status truthfully; still replaces the nonexistent repair_album_artwork()."""
+    """Real functional unit tests for composite_workflows.fetch_and_embed_album_art."""
 
     def setUp(self):
-        from backend.beets_client import BeetsClient
-        self.client = BeetsClient(base_url="http://engine.invalid:8338", token="test-token")
+        import backend.composite_workflows as cw
+        self.client = cw
 
     def test_success_plans_then_applies(self):
-        calls = []
-
-        def fake_request(method, path, payload=None, timeout=None):
-            calls.append(path)
-            if path == "/albums/artwork/fetch/plan":
-                self.assertEqual(payload, {"album_id": 42})
-                return {"ok": True, "operation_id": "txn_1_aaaaaaaaaaaaaaaa"}
-            if path == "/albums/artwork/fetch/apply":
-                self.assertEqual(payload, {"operation_id": "txn_1_aaaaaaaaaaaaaaaa"})
-                return {"ok": True, "status": "Completed", "artpath": "/music/a/cover.jpg"}
-            raise AssertionError(f"unexpected path {path}")
-
-        with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request):
+        with unittest.mock.patch.object(self.client, "plan_album_artwork_fetch", return_value={"ok": True, "operation_id": "txn_1_aaaaaaaaaaaaaaaa"}) as plan, \
+             unittest.mock.patch.object(self.client, "apply_album_artwork_fetch", return_value={"ok": True, "status": "Completed", "artpath": "/music/a/cover.jpg"}) as apply:
             res = self.client.fetch_and_embed_album_art(42)
 
         self.assertTrue(res.get("ok"), res)
         self.assertEqual(res.get("artpath"), "/music/a/cover.jpg")
-        self.assertEqual(calls, ["/albums/artwork/fetch/plan", "/albums/artwork/fetch/apply"])
+        plan.assert_called_once_with({"album_id": 42}, store=None)
+        apply.assert_called_once_with("txn_1_aaaaaaaaaaaaaaaa", adapter=None, store=None)
 
     def test_plan_rejection_short_circuits_before_apply(self):
-        calls = []
-
-        def fake_request(method, path, payload=None, timeout=None):
-            calls.append(path)
-            return {"ok": False, "error": "Album 42 not found"}
-
-        with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request):
+        with unittest.mock.patch.object(self.client, "plan_album_artwork_fetch", return_value={"ok": False, "error": "Album 42 not found"}) as plan, \
+             unittest.mock.patch.object(self.client, "apply_album_artwork_fetch") as apply:
             res = self.client.fetch_and_embed_album_art(42)
 
         self.assertFalse(res.get("ok"))
-        self.assertEqual(calls, ["/albums/artwork/fetch/plan"], "apply must not run if plan was rejected")
+        apply.assert_not_called()
 
     def test_apply_recovery_required_status_is_surfaced_not_swallowed(self):
-        def fake_request(method, path, payload=None, timeout=None):
-            if path == "/albums/artwork/fetch/plan":
-                return {"ok": True, "operation_id": "txn_1_bbbbbbbbbbbbbbbb"}
-            return {"ok": False, "error": "embedart did not confirm", "status": "Recovery Required"}
-
-        with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request):
+        with unittest.mock.patch.object(self.client, "plan_album_artwork_fetch", return_value={"ok": True, "operation_id": "txn_1_bbbbbbbbbbbbbbbb"}), \
+             unittest.mock.patch.object(self.client, "apply_album_artwork_fetch", return_value={"ok": False, "error": "embedart did not confirm", "status": "Recovery Required"}):
             res = self.client.fetch_and_embed_album_art(42)
 
         self.assertFalse(res.get("ok"))

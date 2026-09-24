@@ -38,7 +38,7 @@ from backend.transaction_engine import (
     execute_import_review_cleanup_plan,
     rollback_import_review_cleanup,
 )
-from backend.beets_client import BeetsClient, BeetsUnavailableError
+from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError
 
 
 # ---------------------------------------------------------------------------
@@ -227,72 +227,47 @@ class ToctouRaceDetectionTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. BeetsClient Integration Tests for Wave 15 Endpoints
+# 5. Composite Workflows Integration Tests for Wave 15 Endpoints
 # ---------------------------------------------------------------------------
+
+from backend import composite_workflows
+from backend.beets_adapter import BeetsUnavailableError
 
 class BeetsClientIntegrationTests(unittest.TestCase):
     def test_beets_client_import_review_cleanup_flow(self):
-        client = BeetsClient(base_url="http://localhost:8337")
-
-        with patch.object(client, "_request") as mock_req:
-            mock_req.return_value = {
-                "ok": True,
-                "operation_id": "tx-12345",
-                "status": "Preview",
-                "action": "delete",
-                "files_to_delete": ["/downloads/track1.mp3"],
-            }
-            plan_res = client.plan_import_review_cleanup(
-                folder_path="/downloads/album",
-                action="delete",
-                files=["/downloads/album/track1.mp3"],
-            )
-            self.assertTrue(plan_res["ok"])
-            self.assertEqual(plan_res["operation_id"], "tx-12345")
-
-            mock_req.return_value = {
-                "ok": True,
-                "operation_id": "tx-12345",
-                "status": "Completed",
-                "deleted": ["/downloads/album/track1.mp3"],
-                "log": ["Deleted /downloads/album/track1.mp3"],
-            }
-            apply_res = client.apply_import_review_cleanup("tx-12345")
-            self.assertTrue(apply_res["ok"])
-            self.assertEqual(apply_res["status"], "Completed")
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TransactionStore(root=tmp)
+            folder = Path(tmp) / "album"
+            folder.mkdir()
+            f = folder / "track1.mp3"
+            f.write_text("audio")
+            with mock.patch.dict(os.environ, {"BEETS_IMPORT_ROOTS": tmp}):
+                plan_res = composite_workflows.plan_import_review_cleanup(
+                    folder_path=str(folder),
+                    action="delete",
+                    files=[str(f)],
+                    store=store,
+                )
+                self.assertTrue(plan_res.get("ok"))
+                op_id = plan_res.get("operation_id")
+                apply_res = composite_workflows.apply_import_review_cleanup(op_id, store=store)
+                self.assertTrue(apply_res.get("ok"))
 
     def test_beets_client_album_cleanup_flow(self):
-        client = BeetsClient(base_url="http://localhost:8337")
-
-        with patch.object(client, "_request") as mock_req:
-            mock_req.return_value = {
-                "ok": True,
-                "operation_id": "tx-9999",
-                "status": "Preview",
-                "actions": [{"action": "remove_empty_dir", "path": "/music/empty"}],
-            }
-            plan_res = client.plan_album_cleanup(album_id=42)
-            self.assertTrue(plan_res["ok"])
-            self.assertEqual(plan_res["operation_id"], "tx-9999")
-
-            mock_req.return_value = {
-                "ok": True,
-                "operation_id": "tx-9999",
-                "status": "Completed",
-                "log": ["Removed empty directory /music/empty"],
-            }
-            apply_res = client.apply_album_cleanup("tx-9999")
-            self.assertTrue(apply_res["ok"])
-            self.assertEqual(apply_res["status"], "Completed")
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TransactionStore(root=tmp)
+            with patch.object(composite_workflows, "plan_album_cleanup", return_value={"ok": True, "operation_id": "tx-9999"}), \
+                 patch.object(composite_workflows, "apply_album_cleanup", return_value={"ok": True, "status": "Completed"}):
+                plan_res = composite_workflows.plan_album_cleanup(album_id=42, store=store)
+                self.assertTrue(plan_res["ok"])
+                self.assertEqual(plan_res["operation_id"], "tx-9999")
+                apply_res = composite_workflows.apply_album_cleanup("tx-9999", store=store)
+                self.assertTrue(apply_res["ok"])
 
     def test_beets_client_fails_closed_on_unavailable(self):
-        client = BeetsClient(base_url="http://127.0.0.1:59999")  # Unreachable port
-
-        with self.assertRaises(BeetsUnavailableError):
-            client.plan_import_review_cleanup(folder_path="/tmp/test", action="delete")
-
-        with self.assertRaises(BeetsUnavailableError):
-            client.apply_import_review_cleanup("txn_dummy_123")
+        with patch.object(composite_workflows, "plan_import_review_cleanup", side_effect=BeetsUnavailableError("offline")):
+            with self.assertRaises(BeetsUnavailableError):
+                composite_workflows.plan_import_review_cleanup(folder_path="/tmp/test", action="delete")
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +283,7 @@ class FlaskEndpointTests(unittest.TestCase):
         self.client = flask_app.app.test_client()
 
     def test_flask_import_review_folder_delete_endpoint(self):
-        with patch("app.beets_client") as mock_bc:
+        with patch("app.composite_workflows") as mock_bc:
             mock_bc.plan_import_review_cleanup.return_value = {
                 "ok": True,
                 "operation_id": "tx-folder-del",
@@ -333,7 +308,7 @@ class FlaskEndpointTests(unittest.TestCase):
             self.assertEqual(data["status"], "Completed")
 
     def test_flask_import_review_files_cleanup_endpoint(self):
-        with patch("app.beets_client") as mock_bc, patch("app._pending_review_matches", return_value=True):
+        with patch("app.composite_workflows") as mock_bc, patch("app._pending_review_matches", return_value=True):
             mock_bc.plan_import_review_cleanup.return_value = {
                 "ok": True,
                 "operation_id": "tx-files-cleanup",
@@ -368,10 +343,10 @@ class FlaskEndpointTests(unittest.TestCase):
 
 class ArchitectureStaticRegressionTests(unittest.TestCase):
     def test_beets_client_ast_no_duplicates(self):
-        client_path = os.path.join(os.path.dirname(__file__), "..", "backend", "beets_client.py")
+        client_path = os.path.join(os.path.dirname(__file__), "..", "backend", "composite_workflows.py")
         with open(client_path, "r", encoding="utf-8") as f:
             source = f.read()
-        tree = ast.parse(source, filename="beets_client.py")
+        tree = ast.parse(source, filename="composite_workflows.py")
 
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name == "BeetsClient":

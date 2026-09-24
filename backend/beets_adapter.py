@@ -6,6 +6,7 @@ Communicates over HTTP with the stock LinuxServer Beets container:
 """
 
 import os
+from pathlib import Path
 import json
 import logging
 import re
@@ -90,6 +91,16 @@ class BeetsAdapterBadRequestError(BeetsAdapterError):
 
     def __init__(self, message: str, status_code: int = 400, response_data: Optional[Any] = None, error_code: str = "BEETS_BAD_REQUEST"):
         super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
+
+
+# Exception aliases for backward compatibility
+BeetsError = BeetsAdapterError
+BeetsAuthError = BeetsAdapterAuthError
+BeetsNotFoundError = BeetsAdapterNotFoundError
+BeetsBadRequestError = BeetsAdapterBadRequestError
+BeetsUnavailableError = BeetsAdapterConnectionError
+BeetsCommandError = BeetsAdapterError
+BeetsClientError = BeetsAdapterError
 
 
 class _ParsedQuery:
@@ -199,12 +210,29 @@ class BeetsAdapter:
         """Resolve current API key from memory, env, or file."""
         if self._api_key:
             return self._api_key
-        if self._api_key_file and os.path.isfile(self._api_key_file):
+        env_key = os.environ.get("BEETS_WEBMANAGER_API_KEY", "").strip()
+        if env_key:
+            return env_key
+
+        candidate_files = []
+        if self._api_key_file:
+            candidate_files.append(Path(self._api_key_file))
+        if os.environ.get("BEETS_WEBMANAGER_API_KEY_FILE"):
+            candidate_files.append(Path(os.environ["BEETS_WEBMANAGER_API_KEY_FILE"]))
+        if os.environ.get("BEETS_CONFIG"):
+            candidate_files.append(Path(os.environ["BEETS_CONFIG"]).parent / ".webmanager_api_key")
+        if os.environ.get("BEETSDIR"):
+            candidate_files.append(Path(os.environ["BEETSDIR"]) / ".webmanager_api_key")
+        candidate_files.append(Path("/config/.webmanager_api_key"))
+
+        for p in candidate_files:
             try:
-                with open(self._api_key_file, "r", encoding="utf-8") as f:
-                    return f.read().strip()
-            except Exception:
-                pass
+                if p.is_file() and not p.is_symlink():
+                    content = p.read_text(encoding="utf-8").strip()
+                    if content:
+                        return content
+            except Exception as ex:
+                log.debug("Could not read API key from %s: %s", p, ex)
         return ""
 
     def _build_url(self, path: str) -> str:
@@ -243,6 +271,8 @@ class BeetsAdapter:
             token = self.api_key
             if token and "Authorization" not in req_headers:
                 req_headers["Authorization"] = f"Bearer {token}"
+            elif not token and "Authorization" not in req_headers:
+                log.warning("No WebManager API key available when requesting %s", path)
 
         req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
 
@@ -251,7 +281,13 @@ class BeetsAdapter:
                 content_type = resp.headers.get("Content-Type", "")
                 data = resp.read()
                 if "application/json" in content_type:
-                    return json.loads(data.decode("utf-8"))
+                    try:
+                        return json.loads(data.decode("utf-8"))
+                    except Exception as json_err:
+                        raise BeetsAdapterError(
+                            f"Malformed JSON response from Beets server at {url}: {json_err}",
+                            error_code="MALFORMED_RESPONSE",
+                        ) from json_err
                 return data
         except urllib.error.HTTPError as ex:
             status = ex.code
@@ -1268,6 +1304,7 @@ class StockBeetsLibrary:
 
 # Facade aliases
 RemoteLibrary = StockBeetsLibrary
+BeetsClient = BeetsAdapter
 
 # Global singleton instances
 beets_adapter = BeetsAdapter()

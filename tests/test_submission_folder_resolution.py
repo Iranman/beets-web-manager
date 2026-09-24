@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
 
 import app as app_module
-from backend.beets_client import RemoteAlbum
+from backend.beets_adapter import RemoteAlbum
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTES_SOURCE = ROOT / "routes_submissions.py"

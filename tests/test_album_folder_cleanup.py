@@ -219,6 +219,7 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         # DB-tracked-item-membership logic, so a fixed positive id is enough
         # to let the (already content/path-verified above this call)
         # candidate through.
+        "composite_workflows": _FakeEngineClient(),
         "beets_client": _FakeEngineClient(),
         "BeetsUnavailableError": _FakeBeetsUnavailableError,
         "BeetsError": _FakeBeetsError,

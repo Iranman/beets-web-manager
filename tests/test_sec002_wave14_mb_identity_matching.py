@@ -358,7 +358,7 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
             # rather than relying on the web manager reading local disk
             # directly (the vulnerability being closed).
             with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
-                 patch("app.beets_client.inspect_import_source", return_value={
+                 patch("app.composite_workflows.inspect_import_source", return_value={
                      "ok": True,
                      "audio_files": [{"relative_path": "track01.mp3", "properties": {}}],
                  }):
@@ -402,7 +402,7 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
             empty_dir.mkdir(parents=True)
 
             with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
-                 patch("app.beets_client.inspect_import_source", side_effect=RuntimeError("Beets Control Agent is unavailable")):
+                 patch("app.composite_workflows.inspect_import_source", side_effect=RuntimeError("Beets Control Agent is unavailable")):
                 res = _folder_release_preflight(str(empty_dir), "11111111-1111-1111-1111-111111111111")
 
         self.assertFalse(res["ok"])
@@ -618,7 +618,7 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
             # fixed local-scan gate (#6093/#6095) routes this through the
             # engine-side inspect_import_source() fallback instead.
             with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
-                 patch("app.beets_client.inspect_import_source", return_value={
+                 patch("app.composite_workflows.inspect_import_source", return_value={
                      "ok": True,
                      "audio_files": [{"relative_path": "01 Track One.mp3", "properties": {}}],
                  }):
@@ -699,8 +699,8 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
             "mb_releasegroupid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         }
 
-        with patch.object(app_module.beets_client, "get_album", return_value=album_row), \
-             patch.object(app_module.beets_client, "find_all_items_by_album_id", return_value=[]), \
+        with patch.object(app_module.composite_workflows, "get_album", return_value=album_row), \
+             patch.object(app_module.composite_workflows, "find_all_items_by_album_id", return_value=[]), \
              patch.object(app_module, "_fetch_mb_release_tracklist", return_value={
                  "ok": True,
                  "tracks": [{"title": "Track One", "track": 1}],

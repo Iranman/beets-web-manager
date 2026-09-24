@@ -24,7 +24,7 @@ from unittest import mock
 from unittest.mock import patch
 
 import app as flask_app
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 from backend.transaction_engine import (
     TransactionStore,
     create_track_replacement_plan,
@@ -810,7 +810,7 @@ class AstStructuralTests(unittest.TestCase):
 
 
 class RealEndToEndRouteTests(unittest.TestCase):
-    """Real integration tests: actual Flask routes with app.beets_client's
+    """Real integration tests: actual Flask routes with app.composite_workflows's
     track-replacement methods patched to call the REAL transaction_engine
     functions (real TransactionStore, real SQLite DB, real files) --
     matching the established pattern from Wave 16's
@@ -947,7 +947,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
         self.addCleanup(self._lib_patch.stop)
 
     def test_plan_route_performs_no_mutation(self):
-        with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan), \
+        with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan), \
              patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
         self.assertEqual(resp.status_code, 200)
@@ -956,7 +956,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
         self.assertTrue(self.cand.exists())
 
     def test_plan_refuses_when_fingerprint_unverified(self):
-        with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan), \
+        with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan), \
              patch.object(flask_app, "_acoustid_fingerprint_match", return_value=("", [], [])), \
              patch.object(flask_app, "_acoustid_fingerprint_ids", return_value=[]):
             resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
@@ -979,7 +979,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
         outside.mkdir()
         probe = outside / "not_a_staging_file.flac"
         probe.write_bytes(b"whatever")
-        with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan) as plan_mock, \
+        with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan) as plan_mock, \
              patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(probe)})
         self.assertEqual(resp.status_code, 400)
@@ -987,10 +987,10 @@ class RealEndToEndRouteTests(unittest.TestCase):
         plan_mock.assert_not_called()
 
     def test_end_to_end_plan_apply_rollback_through_real_routes(self):
-        with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan), \
-             patch.object(flask_app.beets_client, "apply_track_replacement", side_effect=self.mock_apply), \
-             patch.object(flask_app.beets_client, "rollback_track_replacement", side_effect=self.mock_rollback), \
-             patch.object(flask_app.beets_client, "get_transaction", side_effect=self.mock_get_transaction), \
+        with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan), \
+             patch.object(flask_app.composite_workflows, "apply_track_replacement", side_effect=self.mock_apply), \
+             patch.object(flask_app.composite_workflows, "rollback_track_replacement", side_effect=self.mock_rollback), \
+             patch.object(flask_app.composite_workflows, "get_transaction", side_effect=self.mock_get_transaction), \
              patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             plan_resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
             self.assertEqual(plan_resp.status_code, 200)
@@ -1014,11 +1014,11 @@ class RealEndToEndRouteTests(unittest.TestCase):
         call the matching executor -- not assume Import Review cleanup for
         every unknown-locally id, which was the Wave 16 anti-pattern this
         review is re-confirming stays fixed for a third mutation family."""
-        with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan), \
-             patch.object(flask_app.beets_client, "apply_track_replacement", side_effect=self.mock_apply), \
-             patch.object(flask_app.beets_client, "rollback_track_replacement", side_effect=self.mock_rollback) as mock_rb, \
-             patch.object(flask_app.beets_client, "rollback_import_review_cleanup") as mock_ir_rb, \
-             patch.object(flask_app.beets_client, "get_transaction", side_effect=self.mock_get_transaction), \
+        with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan), \
+             patch.object(flask_app.composite_workflows, "apply_track_replacement", side_effect=self.mock_apply), \
+             patch.object(flask_app.composite_workflows, "rollback_track_replacement", side_effect=self.mock_rollback) as mock_rb, \
+             patch.object(flask_app.composite_workflows, "rollback_import_review_cleanup") as mock_ir_rb, \
+             patch.object(flask_app.composite_workflows, "get_transaction", side_effect=self.mock_get_transaction), \
              patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             plan_resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
             op_id = plan_resp.get_json()["operation_id"]

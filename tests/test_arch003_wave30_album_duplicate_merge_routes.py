@@ -78,11 +78,11 @@ class _MergeTestBase(unittest.TestCase):
                     albums.append(alb_dict)
                 return {"ok": True, "rgid": rgid, "albums": albums, "album_count": len(albums)}
 
-        self._get_album_patch = mock.patch.object(app_module.beets_client, "get_album", side_effect=fake_get_album)
+        self._get_album_patch = mock.patch.object(app_module.composite_workflows, "get_album", side_effect=fake_get_album)
         self._get_album_patch.start()
-        self._find_items_patch = mock.patch.object(app_module.beets_client, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
+        self._find_items_patch = mock.patch.object(app_module.composite_workflows, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
         self._find_items_patch.start()
-        self._get_rgid_patch = mock.patch.object(app_module.beets_client, "get_rgid_group_detail", side_effect=fake_get_rgid_group_detail)
+        self._get_rgid_patch = mock.patch.object(app_module.composite_workflows, "get_rgid_group_detail", side_effect=fake_get_rgid_group_detail)
         self._get_rgid_patch.start()
 
         self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
@@ -146,7 +146,7 @@ class CleanMergeDuplicateAlbumTests(_MergeTestBase):
         self._insert_item(12, 102, disc=1, track=2)
 
         with mock.patch.object(
-            app_module.beets_client, "merge_duplicate_albums",
+            app_module.composite_workflows, "merge_duplicate_albums",
             return_value={"ok": True, "moved": 1, "inherit_fields": {"year": 2001, "label": "Cool Label"}},
         ) as mock_merge:
             response, log = self._run_job_body(
@@ -166,7 +166,7 @@ class CleanMergeDuplicateAlbumTests(_MergeTestBase):
         self._insert_item(12, 102, disc=1, track=2)
 
         with mock.patch.object(
-            app_module.beets_client, "merge_duplicate_albums",
+            app_module.composite_workflows, "merge_duplicate_albums",
             return_value={"ok": False, "error": "engine down"},
         ), app_module.app.test_request_context(
             "/api/clean/merge-duplicate-album", method="POST",
@@ -189,7 +189,7 @@ class CleanRgidGroupMergeTests(_MergeTestBase):
         self._insert_item(22, 202, disc=1, track=2)
 
         with mock.patch.object(
-            app_module.beets_client, "merge_duplicate_albums",
+            app_module.composite_workflows, "merge_duplicate_albums",
             return_value={"ok": True, "moved": 1, "inherit_fields": {"year": 1995}},
         ) as mock_merge, mock.patch.object(app_module, "_clear_rgid_resolution") as mock_clear:
             response, log = self._run_job_body(
@@ -207,7 +207,7 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
         self._insert_album(301, artist="Artist", album="Album", mbid="", rgid="")
 
         with mock.patch.object(
-            app_module.beets_client, "update_album_metadata",
+            app_module.composite_workflows, "update_album_metadata",
             return_value={"ok": True, "album_fields_changed": 2},
         ) as mock_update, mock.patch.object(
             app_module, "_repair_album_mbid_sticking_once",
@@ -223,7 +223,7 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
     def test_relink_engine_rejection_raises_not_swallowed(self):
         self._insert_album(301, artist="Artist", album="Album", mbid="", rgid="")
         with mock.patch.object(
-            app_module.beets_client, "update_album_metadata",
+            app_module.composite_workflows, "update_album_metadata",
             return_value={"ok": False, "error": "engine down"},
         ):
             with app_module.app.test_request_context(

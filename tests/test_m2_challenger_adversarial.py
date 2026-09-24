@@ -17,7 +17,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import BeetsUnavailableError, BeetsError
+from backend.beets_adapter import BeetsUnavailableError, BeetsError
 
 
 class M2AdversarialBase(unittest.TestCase):
@@ -73,8 +73,8 @@ class TestEngineOfflineFailClosed(M2AdversarialBase):
 
     def test_mbsync_all_engine_offline_on_orphan_lookup_and_mbsync(self):
         """When engine is offline, mbsync must fail closed, log error, and not call subprocess."""
-        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", side_effect=BeetsUnavailableError("Engine connection refused")), \
-             mock.patch.object(app_module.beets_client, "mbsync", side_effect=BeetsUnavailableError("Engine connection refused")):
+        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", side_effect=BeetsUnavailableError("Engine connection refused")), \
+             mock.patch.object(app_module.composite_workflows, "mbsync", side_effect=BeetsUnavailableError("Engine connection refused")):
 
             job = self._run_job_sync(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
@@ -87,9 +87,9 @@ class TestEngineOfflineFailClosed(M2AdversarialBase):
 
     def test_move_all_engine_offline_on_path_scan_and_move(self):
         """When engine is offline, move_all must fail closed, log error, and not call subprocess."""
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", side_effect=BeetsUnavailableError("Engine unreachable")), \
-             mock.patch.object(app_module.beets_client, "move_library", side_effect=BeetsUnavailableError("Engine unreachable")), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan:
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", side_effect=BeetsUnavailableError("Engine unreachable")), \
+             mock.patch.object(app_module.composite_workflows, "move_library", side_effect=BeetsUnavailableError("Engine unreachable")), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup") as mock_plan:
 
             job = self._run_job_sync(app_module.library_move_all, "/api/library/move-all")
 
@@ -113,9 +113,9 @@ class TestRemoteJobFailureDiagnostics(M2AdversarialBase):
             {"status": "failed", "returncode": 2, "stdout": [], "stderr": ["fatal database lock error", "aborting"]},
         ]
 
-        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", side_effect=responses):
+        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=responses):
 
             job = self._run_job_sync(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
@@ -132,9 +132,9 @@ class TestRemoteJobFailureDiagnostics(M2AdversarialBase):
             {"status": "failed", "returncode": 1, "stdout": [], "stderr": ["tag update error for track 42"]},
         ]
 
-        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", side_effect=responses):
+        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=responses):
 
             job = self._run_job_sync(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
@@ -151,10 +151,10 @@ class TestRemoteJobFailureDiagnostics(M2AdversarialBase):
             {"status": "failed", "returncode": 1, "stdout": [], "stderr": ["rescan disk error: file corrupt"]},
         ]
 
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
-             mock.patch.object(app_module.beets_client, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", side_effect=responses), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan:
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=responses), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup") as mock_plan:
 
             job = self._run_job_sync(app_module.library_move_all, "/api/library/move-all")
 
@@ -181,10 +181,10 @@ class TestUserCancellation(M2AdversarialBase):
             time.sleep(0.05)
             return {"status": "running", "stdout": ["processing..."], "stderr": []}
 
-        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", side_effect=fake_get_job), \
-             mock.patch.object(app_module.beets_client, "cancel_job", side_effect=fake_cancel_job):
+        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=fake_get_job), \
+             mock.patch.object(app_module.composite_workflows, "cancel_job", side_effect=fake_cancel_job):
 
             with app_module.app.test_request_context("/api/library/mbsync-all", method="POST"):
                 resp = app_module.library_mbsync_all()
@@ -199,7 +199,7 @@ class TestUserCancellation(M2AdversarialBase):
             while job.finished_at is None and time.time() < deadline:
                 time.sleep(0.05)
 
-            self.assertTrue(cancel_called.is_set(), "beets_client.cancel_job was not called with remote_job_id")
+            self.assertTrue(cancel_called.is_set(), "composite_workflows.cancel_job was not called with remote_job_id")
             self.assertTrue(any("[cancelled]" in line for line in job.log))
             self.assertEqual(self._beet_subprocess_calls, [])
 
@@ -217,11 +217,11 @@ class TestUserCancellation(M2AdversarialBase):
             time.sleep(0.05)
             return {"status": "running", "stdout": ["updating..."], "stderr": []}
 
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
-             mock.patch.object(app_module.beets_client, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", side_effect=fake_get_job), \
-             mock.patch.object(app_module.beets_client, "cancel_job", side_effect=fake_cancel_job), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan:
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=fake_get_job), \
+             mock.patch.object(app_module.composite_workflows, "cancel_job", side_effect=fake_cancel_job), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup") as mock_plan:
 
             with app_module.app.test_request_context("/api/library/move-all", method="POST"):
                 resp = app_module.library_move_all()
@@ -235,7 +235,7 @@ class TestUserCancellation(M2AdversarialBase):
             while job.finished_at is None and time.time() < deadline:
                 time.sleep(0.05)
 
-            self.assertTrue(cancel_called.is_set(), "beets_client.cancel_job was not called")
+            self.assertTrue(cancel_called.is_set(), "composite_workflows.cancel_job was not called")
             self.assertTrue(any("[cancelled]" in line for line in job.log))
             mock_plan.assert_not_called()
             self.assertEqual(self._beet_subprocess_calls, [])
@@ -251,10 +251,10 @@ class TestTimeoutHandlingAndCleanup(M2AdversarialBase):
             {"status": "timeout", "returncode": 124, "stdout": [], "stderr": ["Command timed out"]},
         ]
 
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
-             mock.patch.object(app_module.beets_client, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", side_effect=responses), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan:
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=responses), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup") as mock_plan:
 
             job = self._run_job_sync(app_module.library_move_all, "/api/library/move-all")
 
@@ -286,11 +286,11 @@ class TestTimeoutHandlingAndCleanup(M2AdversarialBase):
                 return start_time + 6000.0
             return start_time
 
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
-             mock.patch.object(app_module.beets_client, "move_library", side_effect=fake_move), \
-             mock.patch.object(app_module.beets_client, "get_job", return_value={"status": "running"}), \
-             mock.patch.object(app_module.beets_client, "cancel_job", side_effect=fake_cancel), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan, \
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", side_effect=fake_move), \
+             mock.patch.object(app_module.composite_workflows, "get_job", return_value={"status": "running"}), \
+             mock.patch.object(app_module.composite_workflows, "cancel_job", side_effect=fake_cancel), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup") as mock_plan, \
              mock.patch.object(app_module.time, "time", side_effect=fake_time):
 
             job = self._run_job_sync(app_module.library_move_all, "/api/library/move-all")
@@ -316,11 +316,11 @@ class TestTimeoutHandlingAndCleanup(M2AdversarialBase):
             applied.append(op_id)
             return {"ok": True}
 
-        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["ArtistA/AlbumA/track1.mp3", "ArtistA/AlbumA/track2.mp3"]), \
-             mock.patch.object(app_module.beets_client, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.beets_client, "get_job", return_value={"status": "success", "returncode": 0, "stdout": ["moved 2 tracks"]}), \
-             mock.patch.object(app_module.beets_client, "plan_folder_cleanup", side_effect=fake_plan) as mock_plan, \
-             mock.patch.object(app_module.beets_client, "apply_folder_cleanup", side_effect=fake_apply) as mock_apply:
+        with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["ArtistA/AlbumA/track1.mp3", "ArtistA/AlbumA/track2.mp3"]), \
+             mock.patch.object(app_module.composite_workflows, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \
+             mock.patch.object(app_module.composite_workflows, "get_job", return_value={"status": "success", "returncode": 0, "stdout": ["moved 2 tracks"]}), \
+             mock.patch.object(app_module.composite_workflows, "plan_folder_cleanup", side_effect=fake_plan) as mock_plan, \
+             mock.patch.object(app_module.composite_workflows, "apply_folder_cleanup", side_effect=fake_apply) as mock_apply:
 
             job = self._run_job_sync(app_module.library_move_all, "/api/library/move-all")
 

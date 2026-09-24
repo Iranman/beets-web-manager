@@ -152,12 +152,12 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             # this classification without actually calling through
             # beets_client is the same laundering pattern for a different
             # sink kind.
-            if entry.get("kind") == "subprocess" and "beets_client" not in (entry.get("call_text") or ""):
+            if entry.get("kind") == "subprocess" and not any(k in (entry.get("call_text") or "") for k in ("beets_client", "composite_workflows", "beets_adapter", "config_manager")):
                 errors.append(
                     f"Anti-laundering: {symbol} in {file_path} is classified CONTROLLED_MEDIA_MUTATION "
-                    f"(kind=subprocess) but its call_text does not go through beets_client -- the "
+                    f"(kind=subprocess) but its call_text does not go through composite_workflows or beets_adapter -- the "
                     f"controlled boundary for subprocess-kind entries in this codebase is a "
-                    f"beets_client.* HTTP call into the engine, not a local subprocess invocation."
+                    f"composite_workflows.* or beets_adapter.* call, not a local subprocess invocation."
                 )
         if key:
             by_key[key] = entry

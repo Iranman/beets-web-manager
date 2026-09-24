@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from backend import transaction_engine
-from backend.beets_client import BeetsUnavailableError
+from backend.beets_adapter import BeetsUnavailableError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -343,9 +343,9 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
             src = self._function_source(func)
             for needle in banned:
                 self.assertNotIn(needle, src, msg=f"{func} still contains {needle}")
-        self.assertIn("beets_client.plan_library_cleanup", self._function_source("dedup_cleanup"))
-        self.assertIn("beets_client.apply_library_cleanup", self._function_source("dedup_cleanup"))
-        self.assertIn("beets_client.plan_folder_cleanup", self._function_source("_album_cleanup_remove_empty_tree"))
+        self.assertIn("composite_workflows.plan_library_cleanup", self._function_source("dedup_cleanup"))
+        self.assertIn("composite_workflows.apply_library_cleanup", self._function_source("dedup_cleanup"))
+        self.assertIn("composite_workflows.plan_folder_cleanup", self._function_source("_album_cleanup_remove_empty_tree"))
 
     def test_dedup_cleanup_engine_unavailable_fails_closed(self):
         import app as app_module
@@ -353,7 +353,7 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             candidate = Path(td) / "song.mp3"
             candidate.write_bytes(b"audio")
-            with mock.patch.object(app_module.beets_client, "plan_library_cleanup", side_effect=BeetsUnavailableError("offline")):
+            with mock.patch.object(app_module.composite_workflows, "plan_library_cleanup", side_effect=BeetsUnavailableError("offline")):
                 with app_module.app.test_request_context(
                     "/api/dedup/cleanup",
                     method="POST",

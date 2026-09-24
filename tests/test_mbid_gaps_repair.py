@@ -34,7 +34,7 @@ class MbidGapsRepairFixesTheBugTests(unittest.TestCase):
 
     def test_scans_albums_with_blank_album_mb_albumid(self):
         # Under ARCH-007, uses structured BeetsClient endpoint
-        self.assertIn('beets_client.get_mbid_sticking_candidates(mode="blank"', self._fn)
+        self.assertIn('composite_workflows.get_mbid_sticking_candidates(mode="blank"', self._fn)
 
 
     def test_attempts_resolution_via_release_group_or_search(self):
@@ -54,11 +54,11 @@ class MbidGapsRepairFixesTheBugTests(unittest.TestCase):
         self.assertIn("_album_source_folder(aid)", self._fn)
 
     def test_writes_resolved_release_id_to_album_db_row(self):
-        self.assertIn('beets_client.update_album_metadata(aid, {"mb_albumid": mbid})', self._fn)
+        self.assertIn('composite_workflows.update_album_metadata(aid, {"mb_albumid": mbid})', self._fn)
 
     def test_writes_release_group_id_when_it_was_blank(self):
         self.assertIn("_fetch_mb_release_candidate(resolved_mbid)", self._fn)
-        self.assertIn("beets_client.update_album_metadata(aid, meta_opts)", self._fn)
+        self.assertIn("composite_workflows.update_album_metadata(aid, meta_opts)", self._fn)
 
     def test_unresolved_albums_get_a_reason_not_silent_failure(self):
         self.assertIn('"No MusicBrainz match found"', self._fn)
@@ -123,7 +123,7 @@ class MbidGapsRepairIdempotencyTests(unittest.TestCase):
 
     def test_resolution_query_excludes_albums_that_already_have_a_release_id(self):
         # Under ARCH-007, server-owned get_mbid_sticking_candidates(mode="blank") returns albums missing mb_albumid
-        self.assertIn('beets_client.get_mbid_sticking_candidates(mode="blank"', self._fn)
+        self.assertIn('composite_workflows.get_mbid_sticking_candidates(mode="blank"', self._fn)
 
 
     def test_release_id_stamping_uses_idempotent_helper(self):
@@ -147,7 +147,7 @@ class MbidGapsRepairDebugLoggingTests(unittest.TestCase):
     def test_logs_where_writes_landed(self):
         self.assertIn("wrote {changed} row(s) via IPC: items.mb_albumid", self._fn)
         self.assertIn("Repaired {len(track_updates)} recording ID(s) via IPC:", self._fn)
-        self.assertIn("beets_client.apply_album_mb_track_repair(", self._fn)
+        self.assertIn("composite_workflows.apply_album_mb_track_repair(", self._fn)
 
     def test_logs_skip_reason(self):
         self.assertIn("SKIPPED — {reason}. Needs manual review.", self._fn)

@@ -66,31 +66,33 @@ def check_no_production_legacy_beets_references():
 
     The retired control-agent client (backend/beets_client.py,
     BEETS_API_URL, BEETS_API_TOKEN, port 8338, backend/beets_control_agent)
-    must be completely absent from every production module that has
-    already been migrated onto backend/beets_adapter.py. This is checked
-    per-module (not repo-wide) because backend/beets_client.py itself and
-    a large set of composite Plan/Apply/Rollback mutation workflows in
-    app.py have NOT yet been migrated -- that is tracked as open,
-    acknowledged debt in docs/TECHNICAL_DEBT.md (ARCH-010), not something
-    this check should silently pass by skipping app.py. This check proves
-    the migration is real and complete for the modules it claims are
-    finished, without falsely asserting the whole repository is clean.
+    must be completely absent from every production module.
+    ARCH-010 completes this migration across all workflows, including app.py,
+    backend/composite_workflows.py, and backend/config_manager.py.
     """
-    print("Checking for legacy control-agent references in migrated modules...")
+    print("Checking for legacy control-agent references in production modules...")
     forbidden_patterns = ("beets_client", "BEETS_API_URL", "BEETS_API_TOKEN", ":8338", "beets_control_agent")
     migrated_files = [
+        ROOT / "app.py",
         ROOT / "job_engine.py",
         ROOT / "routes_setup.py",
         ROOT / "routes_submissions.py",
         ROOT / "routes_jobs.py",
         ROOT / "routes_lidarr.py",
         ROOT / "backend" / "beets_adapter.py",
+        ROOT / "backend" / "composite_workflows.py",
+        ROOT / "backend" / "config_manager.py",
         ROOT / "backend" / "beets_plugins.py",
         ROOT / "backend" / "security.py",
     ]
     migrated_files.extend(sorted((ROOT / "beetsplug" / "webmanager").glob("*.py")))
 
     ok = True
+    client_file = ROOT / "backend" / "beets_client.py"
+    if client_file.exists():
+        print(f"FAILED: backend/beets_client.py still exists!", file=sys.stderr)
+        ok = False
+
     for path in migrated_files:
         if not path.exists():
             print(f"FAILED: expected migrated file missing: {path}", file=sys.stderr)
@@ -110,11 +112,7 @@ def check_no_production_legacy_beets_references():
                     )
                     ok = False
     if ok:
-        print(f"  [PASS] Zero legacy control-agent references in {len(migrated_files)} migrated modules.")
-    print(
-        "  [NOTE] app.py and backend/beets_client.py are NOT covered by this check -- "
-        "see docs/TECHNICAL_DEBT.md ARCH-010 for that open, acknowledged migration debt."
-    )
+        print(f"  [PASS] Zero legacy control-agent references in all {len(migrated_files)} production modules.")
     return ok
 
 

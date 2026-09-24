@@ -66,7 +66,7 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
                  mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
                  mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
-                 mock.patch.object(app_module.beets_client, "inspect_import_source") as mock_inspect:
+                 mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.return_value = {"ok": True, "audio_files": []}
                 app_module._folder_release_preflight(
                     str(outside), "11111111-1111-1111-1111-111111111111"
@@ -89,7 +89,7 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
                  mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
                  mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
-                 mock.patch.object(app_module.beets_client, "inspect_import_source") as mock_inspect:
+                 mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.return_value = {"ok": True, "audio_files": []}
                 app_module._folder_release_preflight(
                     str(sibling), "11111111-1111-1111-1111-111111111111"
@@ -111,7 +111,7 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
                  mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
                  mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
-                 mock.patch.object(app_module.beets_client, "inspect_import_source") as mock_inspect:
+                 mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.return_value = {"ok": True, "audio_files": []}
                 app_module._folder_release_preflight(
                     str(link), "11111111-1111-1111-1111-111111111111"
@@ -137,7 +137,7 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
                  mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
                  mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
-                 mock.patch.object(app_module.beets_client, "inspect_import_source") as mock_inspect:
+                 mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 res = app_module._folder_release_preflight(
                     str(album_dir), "11111111-1111-1111-1111-111111111111"
                 )
@@ -154,7 +154,7 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
                  mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
                  mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
-                 mock.patch.object(app_module.beets_client, "inspect_import_source") as mock_inspect:
+                 mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.side_effect = RuntimeError("Beets Control Agent is unavailable")
                 res = app_module._folder_release_preflight(
                     str(missing), "11111111-1111-1111-1111-111111111111"

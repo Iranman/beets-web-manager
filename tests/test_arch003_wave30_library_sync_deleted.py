@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import BeetsError, BeetsUnavailableError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 
 
 class LibrarySyncDeletedTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
 
     def test_dry_run_never_calls_engine(self):
         with mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             return_value={"scanned_items": 10, "missing_count": 2, "missing_albums_count": 1},
         ) as mock_sync:
             log = self._run(dry_run=True)
@@ -48,7 +48,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
 
     def test_all_items_missing_removes_whole_album_via_engine(self):
         with mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             return_value={"scanned_items": 10, "missing_count": 1, "removed_from_db": 1, "missing_albums_count": 1},
         ) as mock_sync:
             log = self._run(dry_run=False)
@@ -57,7 +57,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
 
     def test_partial_missing_keeps_album_removes_only_missing_items(self):
         with mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             return_value={"scanned_items": 10, "missing_count": 1, "removed_from_db": 1, "missing_albums_count": 0},
         ) as mock_sync:
             log = self._run(dry_run=False)
@@ -66,7 +66,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
 
     def test_orphan_item_with_no_album_is_skipped_not_crashed(self):
         with mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             return_value={"scanned_items": 10, "missing_count": 0, "removed_from_db": 0, "missing_albums_count": 0},
         ) as mock_sync:
             log = self._run(dry_run=False)
@@ -75,7 +75,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
 
     def test_engine_rejection_is_logged_not_raised(self):
         with mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             side_effect=BeetsError("boom"),
         ):
             with self.assertRaises(RuntimeError):
@@ -83,7 +83,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
 
     def test_engine_unavailable_is_logged_not_raised(self):
         with mock.patch.object(
-            app_module.beets_client, "sync_deleted_files",
+            app_module.composite_workflows, "sync_deleted_files",
             side_effect=BeetsUnavailableError("offline"),
         ):
             with self.assertRaises(RuntimeError):
