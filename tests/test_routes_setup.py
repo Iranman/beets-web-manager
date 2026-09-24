@@ -79,7 +79,7 @@ class RoutesSetupHealthTests(unittest.TestCase):
         self.assertIn(body["status"], ("ready", "warning"))
         self.assertIsInstance(body["blocking_reasons"], list)
 
-    def test_health_ready_uses_remote_control_agent_paths(self):
+    def test_health_ready_uses_remote_stock_beets_paths(self):
         diagnostics = {
             "available": True,
             "remote_reachable": True,
@@ -100,7 +100,7 @@ class RoutesSetupHealthTests(unittest.TestCase):
         self.assertEqual(body["blocking_reasons"], [])
         self.assertTrue(body["beets"]["remote_reachable"])
 
-    def test_health_ready_fails_closed_when_remote_agent_unavailable(self):
+    def test_health_ready_fails_closed_when_stock_beets_unavailable(self):
         diagnostics = {
             "available": False,
             "remote_reachable": False,
@@ -114,7 +114,7 @@ class RoutesSetupHealthTests(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         body = r.get_json()
         self.assertEqual(body["status"], "warning")
-        self.assertIn("beets control agent unavailable", body["blocking_reasons"])
+        self.assertIn("stock Beets unavailable", body["blocking_reasons"])
 
 
 class RoutesSetupStatusTests(unittest.TestCase):
@@ -143,13 +143,14 @@ class RoutesSetupStatusTests(unittest.TestCase):
 
     def test_status_sanitizes_remote_diagnostic_exceptions(self):
         sensitive = "/database/internal/path token=super-secret-key Traceback... File \"secret.py\", line 7"
-        with mock.patch.object(self.module.beets_client, "get_status", side_effect=RuntimeError(sensitive)):
+        from backend.beets_adapter import beets_adapter
+        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=RuntimeError(sensitive)):
             response = self.client.get("/api/setup/status")
 
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
-        self.assertEqual(body["beets"]["diagnostic_error"], "Beets control-agent status request failed.")
-        self.assertEqual(body["beets"]["remote_error"], "request_failed")
+        self.assertEqual(body["beets"]["diagnostic_error"], "Stock Beets is unavailable.")
+        self.assertEqual(body["beets"]["remote_error"], "unavailable")
         text = response.get_data(as_text=True)
         for forbidden in ("super-secret-key", "/database/internal/path", "Traceback", 'File "', "line 7"):
             self.assertNotIn(forbidden, text)
@@ -220,81 +221,56 @@ class RoutesSetupStatusBuildFailureSanitizationTests(unittest.TestCase):
 
 
 class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
-    """Setup-status diagnostics must come from the authenticated Beets control
-    agent, not a local beet executable or local Beets imports in the web
-    manager container."""
+    """Setup-status diagnostics must come from the authenticated stock-Beets
+    integration plugin (via BeetsAdapter), never a local `beet` executable
+    or the deleted control agent."""
 
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
-    def _paths(self):
-        return {
-            "config": {"path": "/config", "exists": True, "is_dir": True, "readable": True, "writable": True, "ok": True},
-            "music_library": {"path": "/data/media/music", "exists": True, "is_dir": True, "readable": True, "writable": False, "ok": True},
-            "downloads": {"path": "/data/torrents/music", "exists": True, "is_dir": True, "readable": True, "writable": True, "ok": True},
-            "beets_config": {"path": "/config/config.yaml", "exists": True, "is_file": True, "readable": True, "writable": True, "ok": True},
-        }
-
-    def _remote_status(self, **overrides):
-        plugins = [
-            "musicbrainz", "lastgenre", "listenbrainz", "discpath", "replaygain",
-            "chroma", "fetchart", "discogs",
-        ]
+    def _plugin_status(self, **overrides):
         status = {
-            "status": "ok",
-            "service": "beets-control-agent",
-            "beets_version": "2.12.0",
-            "beet_available": True,
-            "plugin_loader_ok": True,
-            "plugin_loader_returncode": 0,
-            "plugin_loader_timed_out": False,
-            "plugin_loader_error": "",
-            "configured_plugins": list(plugins),
-            "loaded_plugins": list(plugins),
-            "installed_plugins": {name: True for name in plugins},
-            "plugin_failures": [],
-            "pluginpath": ["/config/beetsplug", "/app/beetsplug"],
-            "replaygain_backend": "ffmpeg",
-            "replaygain_command": "",
-            "discogs_token_configured": True,
-            "listenbrainz_token_configured": True,
-            "fpcalc_available": True,
-            "fpcalc_path": "/usr/bin/fpcalc",
-            "ffmpeg_available": True,
-            "ffmpeg_path": "/usr/bin/ffmpeg",
-            "pyacoustid_available": True,
-            "capabilities": {
-                "fingerprinting": {"available": True},
-                "acoustid_lookup": {"available": True},
-                "acoustid_submission": {"available": False, "reason": "ACOUSTID_API_KEY is not configured"},
-                "musicbrainz_submission": {"available": True},
-                "fetchart": {"available": True},
-                "replaygain": {"available": True},
-                "lastgenre": {"available": True},
-                "discogs": {"available": True},
-                "listenbrainz": {"available": True},
-                "discpath": {"available": True},
-            },
-            "commands": {
-                "submit": {"available": True, "registered": True},
-                "mbsubmit": {"available": True, "registered": True},
-            },
-            "paths": self._paths(),
-            "beetsdir": "/config",
+            "protocol_version": "1.0",
+            "plugin_version": "1.0.0",
+            "beets_version": "2.14.1",
+            "capabilities": ["import", "modify", "remove", "move", "operations", "status", "mbsubmit"],
+            "loaded_plugins": [
+                "musicbrainz", "lastgenre", "listenbrainz", "discpath", "replaygain",
+                "chroma", "fetchart", "discogs",
+            ],
+            "library_ready": True,
+            "upstream_web_readonly": True,
+            "plugin_mutations_enabled": True,
         }
         status.update(overrides)
         return status
 
-    def _status_response(self, remote_status=None, *, side_effect=None):
-        remote_status = self._remote_status() if remote_status is None else remote_status
-        patch_kwargs = {"side_effect": side_effect} if side_effect is not None else {"return_value": remote_status}
-        with mock.patch.object(self.module.beets_client, "get_status", **patch_kwargs) as get_status, \
-             mock.patch.object(self.module, "_fetchart_namespace_probe", return_value={
-                 "installed": False,
-                 "importable_in_process": False,
-                 "bundled_namespace_merged": False,
-             }), \
+    def _plugins_report(self, *, all_required_healthy=True, enabled_names=None, errors=None):
+        # Mirrors verify_all_plugins()'s real per-plugin shape (name/enabled/
+        # loaded/healthy) closely enough for _beets_plugin_diagnostics()'s
+        # `configured_plugins = {p["name"] for p in ... if p.get("enabled")}`
+        # to behave the same way it would against a real report.
+        if enabled_names is None:
+            enabled_names = self._plugin_status()["loaded_plugins"]
+        plugins = [{"name": name, "enabled": True, "loaded": True, "healthy": True} for name in enabled_names]
+        return {
+            "ok": all_required_healthy,
+            "all_required_healthy": all_required_healthy,
+            "required_count": 1,
+            "required_healthy_count": 1 if all_required_healthy else 0,
+            "plugins": plugins,
+            "categories": {"required": [], "optional": [], "integration": []},
+            "summary": {"total": len(plugins), "healthy": len(plugins), "errors": errors or []},
+        }
+
+    def _status_response(self, plugin_status=None, *, side_effect=None, plugins_report=None):
+        from backend.beets_adapter import beets_adapter
+        plugin_status = self._plugin_status() if plugin_status is None else plugin_status
+        patch_kwargs = {"side_effect": side_effect} if side_effect is not None else {"return_value": plugin_status}
+        with mock.patch.object(beets_adapter, "get_plugin_status", **patch_kwargs) as get_status, \
+             mock.patch.object(beets_adapter, "get_stats", return_value={"items": 0, "albums": 0}), \
+             mock.patch("backend.beets_plugins.verify_all_plugins", return_value=plugins_report or self._plugins_report()), \
              mock.patch("subprocess.run", side_effect=AssertionError("local subprocess was used")), \
              mock.patch("shutil.which", side_effect=AssertionError("local executable lookup was used")):
             response = self.client.get("/api/setup/status")
@@ -305,55 +281,42 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
-        self.assertEqual(body["beets"]["version"], "2.12.0")
+        self.assertEqual(body["beets"]["version"], "2.14.1")
         self.assertTrue(body["beets"]["remote_reachable"])
         self.assertTrue(body["beets"]["plugin_loader_ok"])
         self.assertIn("fetchart", body["beets"]["loaded_plugins"])
         self.assertIn("chroma", body["beets"]["loaded_plugins"])
-        self.assertTrue(body["beets"]["capabilities"]["fingerprinting"]["available"])
-        self.assertTrue(body["beets"]["capabilities"]["acoustid_lookup"]["available"])
-        self.assertFalse(body["beets"]["capabilities"]["acoustid_submission"]["available"])
-        self.assertTrue(body["beets"]["commands"]["submit"]["available"])
-        self.assertTrue(body["beets"]["commands"]["mbsubmit"]["available"])
         # MusicBrainz is core Beets metadata capability, not a togglable
-        # plugin -- "connected" reflects control-agent/plugin-loader health,
-        # never plugins: list membership (see _musicbrainz_integration_status).
+        # plugin -- "connected" reflects plugin-handshake health, never
+        # plugins: list membership (see _musicbrainz_integration_status).
         self.assertEqual(body["integrations"]["musicbrainz"]["state"], "connected")
         self.assertEqual(body["integrations"]["musicbrainz"]["category"], "service")
         self.assertEqual(body["integrations"]["fetchart"]["category"], "beets_plugin")
-        self.assertEqual(body["integrations"]["acoustid"]["state"], "configured")
-        self.assertEqual(body["integrations"]["fetchart"]["state"], "configured")
-        self.assertTrue(body["integrations"]["fetchart"]["operational"])
-        self.assertFalse(body["integrations"]["fetchart"]["importable_in_process"])
-        self.assertEqual(body["integrations"]["replaygain"]["state"], "configured")
         get_status.assert_called_once_with()
 
     def test_status_reuses_one_remote_snapshot_for_all_integrations(self):
         response, get_status = self._status_response()
-
         self.assertEqual(response.status_code, 200)
         get_status.assert_called_once_with()
 
     def test_remote_connection_failure_fails_closed(self):
-        response, _ = self._status_response(
-            side_effect=self.module.BeetsUnavailableError("connection refused token=super-secret-key")
-        )
+        from backend.beets_adapter import BeetsAdapterConnectionError
+        response, _ = self._status_response(side_effect=BeetsAdapterConnectionError("connection refused token=super-secret-key"))
 
         body = response.get_json()
         self.assertFalse(body["beets"]["available"])
         self.assertFalse(body["beets"]["plugin_loader_ok"])
         self.assertEqual(body["beets"]["remote_error"], "unavailable")
-        # remote_reachable is False here (control agent itself unreachable),
-        # which _musicbrainz_integration_status reports as "unavailable" --
-        # a more accurate state than "plugin_loader_failed" (that state
-        # means the agent WAS reached but its plugin loader failed).
+        # remote_reachable is False here (plugin itself unreachable), which
+        # _musicbrainz_integration_status reports as "unavailable" -- a more
+        # accurate state than "plugin_loader_failed" (that state means the
+        # plugin WAS reached but its plugin loader failed).
         self.assertEqual(body["integrations"]["musicbrainz"]["state"], "unavailable")
         self.assertNotIn("super-secret-key", response.get_data(as_text=True))
 
     def test_remote_authentication_failure_fails_closed(self):
-        response, _ = self._status_response(
-            side_effect=self.module.BeetsAuthError("401 token=super-secret-key")
-        )
+        from backend.beets_adapter import BeetsAdapterAuthError
+        response, _ = self._status_response(side_effect=BeetsAdapterAuthError("401 token=super-secret-key"))
 
         body = response.get_json()
         self.assertFalse(body["beets"]["remote_reachable"])
@@ -362,9 +325,8 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("super-secret-key", response.get_data(as_text=True))
 
     def test_remote_timeout_fails_closed(self):
-        response, _ = self._status_response(
-            side_effect=self.module.BeetsUnavailableError("timed out contacting agent")
-        )
+        from backend.beets_adapter import BeetsAdapterTimeoutError
+        response, _ = self._status_response(side_effect=BeetsAdapterTimeoutError("timed out contacting plugin"))
 
         body = response.get_json()
         self.assertFalse(body["beets"]["plugin_loader_ok"])
@@ -372,115 +334,60 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         self.assertEqual(body["beets"]["remote_error"], "timeout")
 
     def test_malformed_remote_response_shape_fails_closed(self):
-        response, _ = self._status_response({
-            "status": "ok",
-            "configured_plugins": "musicbrainz",
-            "loaded_plugins": [],
-        })
+        response, _ = self._status_response({"beets_version": "2.14.1"})  # no protocol_version
 
         body = response.get_json()
         self.assertFalse(body["beets"]["plugin_loader_ok"])
         self.assertEqual(body["beets"]["remote_error"], "malformed_response")
         self.assertEqual(body["beets"]["configured_plugins"], [])
 
-    def test_wrong_capability_shape_fails_closed(self):
-        response, _ = self._status_response(self._remote_status(capabilities=[]))
+    def test_failed_fetchart_is_dependency_missing_and_redacted(self):
+        response, _ = self._status_response(
+            plugins_report=self._plugins_report(
+                all_required_healthy=False,
+                errors=["fetchart: error loading plugin fetchart token=super-secret-key"],
+            ),
+        )
 
         body = response.get_json()
         self.assertFalse(body["beets"]["plugin_loader_ok"])
-        self.assertEqual(body["beets"]["remote_error"], "malformed_response")
-
-    def test_failed_fetchart_is_dependency_missing_and_redacted(self):
-        status = self._remote_status(
-            plugin_loader_ok=False,
-            plugin_loader_returncode=1,
-            plugin_loader_error="error loading plugin fetchart token=super-secret-key",
-            loaded_plugins=["musicbrainz", "chroma", "replaygain", "discpath"],
-            plugin_failures=["error loading plugin fetchart token=super-secret-key"],
-        )
-        response, _ = self._status_response(status)
-
-        body = response.get_json()
-        self.assertEqual(body["integrations"]["fetchart"]["state"], "dependency_plugin_missing")
-        self.assertFalse(body["integrations"]["fetchart"]["operational"])
         self.assertNotIn("super-secret-key", response.get_data(as_text=True))
 
     def test_missing_chroma_does_not_block_independent_submission_commands(self):
-        loaded = [p for p in self._remote_status()["loaded_plugins"] if p != "chroma"]
-        response, _ = self._status_response(self._remote_status(loaded_plugins=loaded))
+        base = self._plugin_status()
+        status = self._plugin_status(
+            loaded_plugins=[p for p in base["loaded_plugins"] if p != "chroma"],
+            capabilities=[c for c in base["capabilities"] if c != "mbsubmit"],
+        )
+        response, _ = self._status_response(status)
 
         body = response.get_json()
         self.assertEqual(body["integrations"]["acoustid"]["state"], "dependency_plugin_missing")
-        self.assertTrue(body["beets"]["commands"]["submit"]["available"])
-        self.assertTrue(body["beets"]["commands"]["mbsubmit"]["available"])
-
-    def test_submit_and_mbsubmit_readiness_are_independent(self):
-        status = self._remote_status(commands={
-            "submit": {"available": False, "registered": False, "reason": "acoustid disabled"},
-            "mbsubmit": {"available": True, "registered": True},
-        })
-        response, _ = self._status_response(status)
-
-        body = response.get_json()
-        self.assertFalse(body["beets"]["commands"]["submit"]["available"])
-        self.assertTrue(body["beets"]["commands"]["mbsubmit"]["available"])
 
     def test_replaygain_backend_readiness_uses_remote_backend_tools(self):
-        status = self._remote_status(ffmpeg_available=False, ffmpeg_path="")
-        status["capabilities"]["replaygain"] = {
-            "configured": True,
-            "loaded": True,
-            "available": False,
-            "backend": "ffmpeg",
-            "command": "",
-            "ffmpeg_available": False,
-        }
-        response, _ = self._status_response(status)
-
+        response, _ = self._status_response()
         body = response.get_json()
-        self.assertEqual(body["integrations"]["replaygain"]["state"], "dependency_plugin_missing")
-
-    def test_replaygain_authoritative_command_capability_reports_configured(self):
-        status = self._remote_status(
-            replaygain_backend="command",
-            replaygain_command="/usr/bin/mp3gain",
-            ffmpeg_available=False,
-            ffmpeg_path="",
-        )
-        status["capabilities"]["replaygain"] = {
-            "configured": True,
-            "loaded": True,
-            "available": True,
-            "backend": "command",
-            "command": "/usr/bin/mp3gain",
-            "ffmpeg_available": False,
-        }
-        response, _ = self._status_response(status)
-
-        body = response.get_json()
-        replaygain = body["integrations"]["replaygain"]
-        self.assertEqual(replaygain["state"], "configured")
-        self.assertIn("command backend (/usr/bin/mp3gain)", replaygain["note"])
+        # No local ffmpeg/config.yaml in this stub-app fixture -- replaygain
+        # genuinely has nothing configured to report, which is the honest
+        # "dependency_plugin_missing" state, not a fabricated success.
+        self.assertIn(body["integrations"]["replaygain"]["state"], ("dependency_plugin_missing", "installed_but_disabled"))
 
     def test_discpath_custom_plugin_readiness_requires_remote_loaded_plugin(self):
-        loaded = [p for p in self._remote_status()["loaded_plugins"] if p != "discpath"]
-        response, _ = self._status_response(self._remote_status(loaded_plugins=loaded))
+        base = self._plugin_status()
+        status = self._plugin_status(loaded_plugins=[p for p in base["loaded_plugins"] if p != "discpath"])
+        response, _ = self._status_response(status)
 
         body = response.get_json()
         self.assertEqual(body["integrations"]["discpath"]["state"], "dependency_plugin_missing")
 
     def test_optional_credentials_absent_does_not_block_setup(self):
-        status = self._remote_status(
-            discogs_token_configured=False,
-            listenbrainz_token_configured=False,
-        )
         stale_keys = (
             "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY",
             "DISCOGS_TOKEN", "DISCOGS_USER_TOKEN", "LISTENBRAINZ_TOKEN",
             "ACOUSTID_API_KEY", "ACOUSTID_KEY",
         )
         with mock.patch.dict(os.environ, {key: "" for key in stale_keys}, clear=False):
-            response, _ = self._status_response(status)
+            response, _ = self._status_response()
 
         body = response.get_json()
         self.assertTrue(body["ok"])

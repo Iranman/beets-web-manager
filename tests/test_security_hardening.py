@@ -97,7 +97,6 @@ class SecurityHardeningTests(unittest.TestCase):
         for route in (
             '@app.get("/api/config")',
             '@app.post("/api/config")',
-            '@app.post("/api/plugins/run")',
             '@app.post("/api/library/music-format/replace")',
             '@app.post("/api/import/review-folder/delete")',
             '@app.delete("/api/playlists/<path:name>")',

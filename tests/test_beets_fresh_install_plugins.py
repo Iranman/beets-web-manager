@@ -20,12 +20,13 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertIn("pylast==7.1.0", REQ)
         self.assertNotIn("beets==2.2.0", REQ)
         self.assertNotIn("python3-discogs-client==", REQ)
-        # The unified single-compose architecture bundles a full beets==
-        # runtime (with its chroma plugin) directly inside Web Manager, so
-        # pyacoustid -- the package providing the `acoustid` module chroma
-        # imports -- is now a real, required runtime dependency here too,
-        # not something only the separate Beets engine needs.
-        self.assertIn("pyacoustid==", REQ)
+        # Stock-Beets architecture: chroma/AcoustID fingerprinting runs
+        # entirely inside the stock lscr.io/linuxserver/beets container via
+        # the real beetsplug.chroma plugin (see beets_adapter.mbsubmit()).
+        # Web Manager has no local Beets runtime of its own, so it must not
+        # depend on pyacoustid (or beets itself) to perform production work.
+        self.assertNotIn("pyacoustid", REQ)
+        self.assertNotRegex(REQ, r"(?im)^beets==")
 
     def test_default_plugin_list_is_importable_model(self):
         first_line = CONFIG.splitlines()[0]
@@ -53,21 +54,23 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY:?", combined)
         self.assertNotIn("AI_API_KEY:?", combined)
 
-    def test_compose_passes_expect_existing_library_override_to_beets(self):
-        # Dockerfile.beets bakes BEETS_EXPECT_EXISTING_LIBRARY=1 as the image
-        # default (fail closed on a missing/empty database). A genuine first
-        # run needs to override that to 0 via .env, but that override only
-        # reaches the container if docker-compose.full.yml's `beets` service
-        # actually forwards the variable -- verified missing this passthrough
-        # makes .env's BEETS_EXPECT_EXISTING_LIBRARY=0 silently have no
-        # effect, permanently refusing to start a brand new deployment.
-        beets_start = FULL_COMPOSE.index("\n  beets:")
-        beets_end = FULL_COMPOSE.index("\n  bgutil-provider:", beets_start)
-        beets_block = FULL_COMPOSE[beets_start:beets_end]
-        self.assertIn(
-            "BEETS_EXPECT_EXISTING_LIBRARY=${BEETS_EXPECT_EXISTING_LIBRARY:-1}",
-            beets_block,
-        )
+    def test_compose_beets_service_is_stock_image_with_no_custom_build(self):
+        # Dockerfile.beets (the legacy custom Beets engine image) was
+        # deleted outright as part of the stock-Beets migration -- the sole
+        # authoritative Beets runtime is the published
+        # lscr.io/linuxserver/beets image, started with no `build:`
+        # directive anywhere. There is no "existing vs. fresh library"
+        # startup-behavior override to forward, because Web Manager never
+        # builds or owns a Beets image in the first place.
+        self.assertFalse((ROOT / "Dockerfile.beets").exists())
+        for compose_text in (COMPOSE, FULL_COMPOSE):
+            beets_start = compose_text.index("\n  beets:")
+            beets_end = compose_text.index("\n\n", beets_start)
+            beets_block = compose_text[beets_start:beets_end]
+            self.assertIn("lscr.io/linuxserver/beets:", beets_block)
+            self.assertNotIn("build:", beets_block)
+            self.assertNotIn("Dockerfile.beets", beets_block)
+            self.assertNotIn("BEETS_EXPECT_EXISTING_LIBRARY", beets_block)
     def test_compose_host_port_does_not_change_container_listener(self):
         combined = "\n".join(
             (ROOT / name).read_text(encoding="utf-8")
