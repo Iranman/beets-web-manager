@@ -54,17 +54,15 @@ class PluginJobConfigCommandAllowlistTests(unittest.TestCase):
             self.assertNotIn("\\", cmd)
             self.assertNotIn("..", cmd)
 
-    def test_api_plugins_run_rejects_commands_outside_the_allowlist(self):
-        with app_module.app.test_request_context(
-            "/api/plugins/run", method="POST",
-            data=json.dumps({"args": ["../../etc/passwd"]}),
-            content_type="application/json",
-        ):
-            response = app_module.api_plugins_run()
-        payload = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
-        status = response.status_code if hasattr(response, "status_code") else response[1]
-        self.assertEqual(status, 400)
-        self.assertFalse(payload["ok"])
+    def test_generic_plugin_run_endpoint_does_not_exist(self):
+        # POST /api/plugins/run (arbitrary beet-command execution) was
+        # removed outright: Web Manager must not expose any generic
+        # remote-command transport, per the stock-Beets architecture
+        # invariant. /api/plugins/installed remains (status-only, no
+        # execution capability).
+        self.assertFalse(hasattr(app_module, "api_plugins_run"))
+        rules = [str(rule) for rule in app_module.app.url_map.iter_rules()]
+        self.assertNotIn("/api/plugins/run", rules)
 
 
 class JobBeetsConfigSecretPermissionTests(unittest.TestCase):

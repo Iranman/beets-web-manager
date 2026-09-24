@@ -1,20 +1,18 @@
 # ==============================================================================
-# [LEGACY / ADVANCED TESTING ONLY] Custom Beets Engine Stack
+# [ADVANCED] Hardened stock-Beets stack, with the yt-dlp PO-token provider
 # ==============================================================================
-# DO NOT USE FOR NORMAL INSTALLATIONS.
-# Standard production deployments use the primary `docker-compose.yml`, which
-# runs the stock LinuxServer Beets image alongside Beets Web Manager with zero
-# build requirements.
+# Same two-service stock-Beets architecture as the primary `docker-compose.yml`
+# (no build, no custom Beets image, no control agent, no port 8338) --
+# this variant additionally applies container security hardening
+# (read_only rootfs, cap_drop: ALL, no-new-privileges) to beets-web-manager
+# and starts the bgutil-ytdlp-pot-provider service some yt-dlp downloads need.
 #
-# This file builds the legacy custom Beets engine from Dockerfile.beets and is
-# retained solely for legacy migration testing and compatibility verification.
-#
-# Usage (Testing only):
-#   docker compose -f docker-compose.full.yml up -d --build
+# Usage:
+#   docker compose -f docker-compose.full.yml up -d
 
 services:
   beets:
-    image: lscr.io/linuxserver/beets:2.13.1
+    image: lscr.io/linuxserver/beets:latest
     container_name: beets
     restart: unless-stopped
     environment:
@@ -27,6 +25,13 @@ services:
       - ${DOWNLOAD_PATH:-./data/downloads}:/downloads
     expose:
       - "8337"
+    # See the primary docker-compose.yml for why this depends on
+    # beets-web-manager's healthcheck rather than the other way around:
+    # Web Manager provisions the webmanager plugin into config.yaml at its
+    # own startup, before stock Beets ever reads that file.
+    depends_on:
+      beets-web-manager:
+        condition: service_healthy
 
   # Included by default so yt-dlp YouTube downloads work out of the box
   # (YouTube's PO token requirement). This service starts unconditionally
@@ -56,6 +61,7 @@ services:
 
       BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
       BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
+      WEB_MANAGER_DATA_DIR: /web-manager-data
       BEETS_TRANSACTION_DIR: /web-manager-data/transactions
       BEETS_WEB_USERNAME: ${BEETS_WEB_USERNAME:-}
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
@@ -95,6 +101,9 @@ services:
       PGID: ${PGID:-1000}
 
     volumes:
+      - ${BEETS_CONFIG_PATH:-./config}:/config
+      - ${MUSIC_LIBRARY_PATH:-./data/music}:/music:ro
+      - ${DOWNLOAD_PATH:-./data/downloads}:/downloads
       - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
 
     security_opt:
@@ -108,10 +117,6 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=512m
       - /run:rw,nosuid,nodev,size=64m
-
-    depends_on:
-      beets:
-        condition: service_healthy
 
     healthcheck:
       test:

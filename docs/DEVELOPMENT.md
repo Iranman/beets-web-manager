@@ -4,11 +4,12 @@ Developer setup, project layout, validation commands, and the engineering constr
 
 ## Project Layout
 
-- `app.py`: primary Flask application — routes, import workflows, matching adjudication, job tracking, and proxying to the remote Beets control agent.
+- `app.py`: primary Flask application — routes, import workflows, matching adjudication, and job tracking. Talks to stock Beets only through `backend/beets_adapter.py`.
 - `routes_jobs.py`, `routes_lidarr.py`, `routes_setup.py`, `routes_submissions.py`: split route modules for jobs, Lidarr/wanted endpoints, setup/auth/config, and MusicBrainz/AcoustID submissions.
-- `job_engine.py`: in-memory `Job`/`PythonJob`/`JobStore`, structured state, cooperative cancellation, remote control-agent task integration.
+- `job_engine.py`: in-memory `PythonJob`/`JobStore`, structured state, cooperative cancellation.
 - `helpers_mb.py`: MusicBrainz and AcoustID helpers. No `app.py` dependency — the strongest current provider boundary.
-- `backend/`: `beets_client.py` (remote Beets API client), `beets_control_agent.py` (runs inside the `beets` container), `transaction_engine.py` (controlled mutation boundary), `matching/` (canonical matching evidence engine), plus `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`.
+- `backend/`: `beets_adapter.py` (the sole HTTP client to stock Beets' `web`/`webmanager` plugins), `beets_plugins.py` (`webmanager` plugin provisioning/health), `transaction_engine.py` (controlled mutation boundary, pure Web-Manager-local orchestration), `matching/` (canonical matching evidence engine), plus `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`. `beets_client.py` (the retired control-agent HTTP client) is not yet deleted — see `docs/TECHNICAL_DEBT.md` (ARCH-010).
+- `beetsplug/webmanager/`: the integration plugin itself, provisioned into stock Beets' `/config/beetsplug`.
 - `frontend/src/`: React/Next/TypeScript frontend; `api/client.ts` centralizes API calls and CSRF headers, `api/types.ts` centralizes response shapes, `views/` and `features/` hold pages and workflow panels.
 - `tests/`: Python backend tests (`unittest`/`pytest`-compatible). `frontend/` has its own Vitest suite.
 - `scripts/`: CI-invoked security/inventory generators and verifiers, plus deployment helpers. See each script's own docstring; anything not referenced by `.github/workflows/` or a test is not part of the supported toolchain.

@@ -65,15 +65,8 @@ else
   cp .env.example .env
   FRESH_ENV=1
   TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
-  API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
   set_env_value "BEETS_WEB_AUTH_TOKEN" "${TOKEN}"
-  set_env_value "BEETS_API_TOKEN" "${API_TOKEN}"
-  if [ ! -f "beets/musiclibrary.blb" ]; then
-    set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "0"
-  else
-    set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "1"
-  fi
-  echo "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN in .env."
+  echo "    Generated random BEETS_WEB_AUTH_TOKEN in .env."
 fi
 
 # Interactive Web Access prompt -- only on a genuinely fresh .env

@@ -172,7 +172,7 @@ class GenericDetectorSelfTest(unittest.TestCase):
 
     def test_detects_synthetic_rfc1918_address(self):
         self._assert_detects(
-            "BEETS_API_URL=http://192.168.50.25:8338",
+            "BEETS_WEB_URL=http://192.168.50.25:8337",
             "hardcoded RFC1918 host address",
         )
 
@@ -181,7 +181,7 @@ class GenericDetectorSelfTest(unittest.TestCase):
         literal must pass cleanly."""
         clean_examples = [
             "      - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music",
-            "BEETS_API_URL=${BEETS_API_URL:?set BEETS_API_URL in .env}",
+            "BEETS_WEB_URL=${BEETS_WEB_URL:?set BEETS_WEB_URL in .env}",
             "TZ: ${TZ:-UTC}",
         ]
         for sample in clean_examples:

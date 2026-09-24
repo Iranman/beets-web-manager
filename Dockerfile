@@ -50,10 +50,10 @@ COPY tests/ ./tests/
 COPY config.yaml.example .env.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 
-RUN mkdir -p /web-manager-data /data /config /music /downloads \
-    && chown -R beets:beets /app /web-manager-data /data /config /music /downloads
+RUN mkdir -p /web-manager-data /config /music /downloads \
+    && chown -R beets:beets /app /web-manager-data /config /music /downloads
 
-VOLUME ["/data", "/web-manager-data"]
+VOLUME ["/web-manager-data"]
 
 ENV WEBCONTROL_PORT=8337 \
     BEETSDIR=/config \

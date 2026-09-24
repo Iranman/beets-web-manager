@@ -438,14 +438,11 @@ from backend.beets_adapter import (
 
 
 def _read_file_media_tags(path: Any) -> Dict[str, Any]:
-    """Read media tags from an audio file via BeetsClient API, unit test mocks, or mutagen fallback."""
+    """Read media tags directly from an audio file (mutagen; beets.mediafile
+    if genuinely present, e.g. under unit tests) -- never a remote call.
+    Web Manager reads staged/unimported files' tags locally; only stock
+    Beets ever owns library tag state."""
     p_str = str(path)
-    try:
-        tags = beets_client.read_tags(p_str)
-        if tags and isinstance(tags, dict) and any(tags.values()):
-            return tags
-    except Exception:
-        pass
     sys_mods = sys.modules if "sys" in globals() else __import__("sys").modules
     if "beets.mediafile" in sys_mods and hasattr(sys_mods["beets.mediafile"], "MediaFile"):
         try:
@@ -2021,7 +2018,6 @@ def _call_job_fn(fn, log, cancel=None, update_state=None):
 def _install_transaction_job_hooks() -> None:
     if getattr(jobs, "_transaction_hooks_installed", False):
         return
-    original_start = jobs.start
     original_start_python = jobs.start_python
 
     def start_python_with_transaction(fn, label="", metadata=None):
@@ -2049,17 +2045,7 @@ def _install_transaction_job_hooks() -> None:
             transactions.attach_job(tx_id, job.job_id)
         return job
 
-    def start_with_transaction(command, label=""):
-        tx = _transaction_create_for_job(label or "beet command", {"type": "beet-command"}, command=list(command or []))
-        job = original_start(command, label=label)
-        if tx:
-            metadata_payload = {"type": "beet-command", "transaction_id": tx["id"]}
-            setattr(job, "metadata", metadata_payload)
-            transactions.attach_job(tx["id"], job.job_id)
-        return job
-
     jobs.start_python = start_python_with_transaction
-    jobs.start = start_with_transaction
     jobs._transaction_hooks_installed = True
 
 
@@ -2605,11 +2591,26 @@ _repair_legacy_beets_config()
 
 
 def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
+    """Provision the bundled webmanager plugin files AND write/merge
+    config.yaml's plugins:/pluginpath: before this process binds its HTTP
+    port (this function runs at module-import time -- see the Dockerfile's
+    CMD -- strictly before Flask/Waitress starts listening).
+
+    This ordering is load-bearing for fresh installs: docker-compose.yml
+    makes the `beets` service depend on beets-web-manager's healthcheck, so
+    stock Beets only starts reading config.yaml on its own first boot AFTER
+    this has already written the webmanager plugin into it -- no third
+    "wait for it" service or Docker socket required. Only local
+    file/config work happens here; verifying the plugin actually loaded
+    inside stock Beets is a live HTTP call and happens later (System page /
+    setup status), once stock Beets is actually up.
+    """
     try:
-        from backend.beets_plugins import provision_bundled_plugins
+        from backend.beets_plugins import provision_bundled_plugins, update_config_yaml_plugins
         cfg_dir = config_dir if config_dir else Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")).parent
         if cfg_dir.exists():
             provision_bundled_plugins(cfg_dir)
+            update_config_yaml_plugins(cfg_dir / "config.yaml")
     except Exception as ex:
         try:
             app.logger.warning("Auto plugin provisioning on startup skipped/failed: %s", ex)
@@ -52777,27 +52778,6 @@ def react_spa_fallback(spa_path):
     if spa_path.startswith("api/") or spa_path.startswith("assets/") or spa_path.startswith("_next/"):
         abort(404)
     return react_index_response()
-
-
-@app.post("/api/plugins/run")
-def api_plugins_run():
-    """Run a whitelisted beet plugin command as a background job.
-    Body: { "args": ["ytimport"], "label": "optional display name" }
-    """
-    data    = request.get_json(silent=True) or {}
-    args    = data.get("args") or []
-    label   = data.get("label") or ("beet " + " ".join(str(a) for a in args[:4]))
-    if not args:
-        return jsonify({"ok": False, "error": "No args"})
-    cmd = str(args[0])
-    if cmd not in _PLUGIN_CMDS:
-        return jsonify({"ok": False, "error": f"Command not allowed: {args[0]!r}"}), 400
-    installed = _plugin_installed_map()
-    if not installed.get(cmd):
-        return jsonify({"ok": False, "error": f"Plugin is not installed: {cmd}"}), 400
-    sub_args = [str(a) for a in args[1:]]
-    job  = jobs.start(cmd, args=sub_args, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.get("/api/plugins/install-log")

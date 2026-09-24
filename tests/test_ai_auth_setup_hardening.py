@@ -299,7 +299,7 @@ class AuthTokenAutoGenerationTests(unittest.TestCase):
         # _bootstrap_auth_token_if_missing() and _bootstrap_browser_password_if_missing()
         # were split into two independent bootstraps (each checks its own
         # credential type, not "any credential") -- verified correct via a
-        # real Docker acceptance run (scripts/verify_first_run_docker_acceptance.py:
+        # real Docker acceptance run (scripts/verify_production_docker_acceptance.py:
         # token Bearer auth works independently of browser password, and vice
         # versa). The end_marker below scopes to just this function's body;
         # _bootstrap_browser_password_if_missing is the next def after it.

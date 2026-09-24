@@ -9,7 +9,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ### 1. `pull access denied for beets` or `beets-web-manager`
 * **Cause**: Incorrect image tag or registry name.
 * **Fix**:
-  1. For standard deployments: Use the production `docker-compose.yml` with official images `lscr.io/linuxserver/beets:2.13.1` and `ghcr.io/iranman/beets-web-manager:stable`.
+  1. For standard deployments: Use the production `docker-compose.yml` with official images `lscr.io/linuxserver/beets:latest` and `ghcr.io/iranman/beets-web-manager:stable`.
   2. For development builds from source: Run `docker compose -f docker-compose.dev.yml up -d --build`.
 
 ---

@@ -21,16 +21,14 @@ jobs:
         # album_metadata_repair_v1 families ask the REAL installed Beets
         # for path/tag decisions (Wave 24 final review section 7/8/28) --
         # deliberately not a hand-rolled duplicate formatter. That code
-        # only runs where `beets` is genuinely importable, matching the
-        # beets-engine container (Dockerfile.beets, built FROM
-        # lscr.io/linuxserver/beets:2.13.1) it actually executes in.
+        # only runs where `beets` is genuinely importable.
         # requirements.txt intentionally omits the full `beets` package to
         # keep the Web Manager image itself dependency-light (only
         # `mediafile`, its tag-I/O component, is a real dependency there);
-        # this step is CI-test-only, pinned to the exact version the
-        # engine container bundles, so this suite exercises the real
-        # native-Beets code path instead of only ever hitting its
-        # explicit, fail-closed "unavailable" branch.
+        # this step is CI-test-only, pinned to the same version
+        # requirements-dev.txt uses for local test fixtures, so this suite
+        # exercises the real native-Beets code path instead of only ever
+        # hitting its explicit, fail-closed "unavailable" branch.
         run: pip install beets==2.13.1
       - name: Set a fake CI-only web auth token
         # Prevents _bootstrap_auth_token_if_missing() from generating and
@@ -44,5 +42,5 @@ jobs:
         # exception for a value that has to fail the app's own placeholder
         # check.
         run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
-      - run: python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/verify_security_config.py
+      - run: python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py scripts/security_secret_scan.py scripts/validate_compose_security.py
       - run: python -m unittest discover -s tests -p "test_*.py"

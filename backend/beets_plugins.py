@@ -1,11 +1,21 @@
 """Authoritative Beets Plugin Manifest & Management Engine for Beets Web Manager.
 
+Stock lscr.io/linuxserver/beets:latest is the sole, authoritative Beets
+runtime -- Web Manager never runs Beets itself, never loads Beets plugins
+locally, and never owns plugin-loading decisions. This module's job is
+narrowly: maintain the plugin manifest, provision bundled plugin files into
+the shared /config/beetsplug mount, safely update config.yaml, and inspect
+stock Beets' actual loaded-plugin state over BeetsAdapter (never a local
+`import beets` runtime check).
+
 Provides:
 1. One authoritative manifest (`BEETS_PLUGIN_MANIFEST`) classifying every plugin
    used by Beets Web Manager as REQUIRED, OPTIONAL, or INTEGRATION, and as
    builtin, bundled, or third-party.
-2. Safe runtime discovery and verification across Beets environments (both
-   stock Beets container and Web Manager embedded Beets runtime).
+2. Plugin discovery and verification against the real, running stock Beets
+   process, via BeetsAdapter.get_plugin_status() -- falling back to
+   in-process `beets.plugins.find_plugins()` only for local/unit-test
+   environments where no stock Beets process is reachable at all.
 3. Bundled plugin provisioning to the shared `/config/beetsplug` mount.
 4. Safe, atomic YAML configuration updates with timestamped backups and
    preservation of existing user settings and custom plugins.
@@ -140,7 +150,10 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
         description="AcoustID audio fingerprinting, automated matching, and deduplication.",
-        python_packages=["pyacoustid==1.3.1"],
+        # pyacoustid/fpcalc run inside the stock Beets container, never
+        # inside Web Manager -- this plugin's health comes from stock
+        # Beets' own live loaded_plugins signal (see `loaded` below), not
+        # a local Python-package/binary check against the wrong process.
         binary_dependencies=["fpcalc"],
         commands=["submit"],
     ),
@@ -298,10 +311,29 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "web": PluginDefinition(
         name="web",
         display_name="Beets Built-in Web Server",
-        category=PluginCategory.OPTIONAL,
+        # REQUIRED, not optional: this is the read transport BeetsAdapter
+        # depends on for every non-mutation read, and stock Beets' own
+        # default supervised service is `beet web` -- without this
+        # plugin enabled, the container crash-loops with "unknown
+        # command 'web'".
+        category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Beets simple built-in web server.",
+        description="Beets simple built-in web server -- the read transport BeetsAdapter depends on.",
         commands=["web"],
+    ),
+    "webmanager": PluginDefinition(
+        name="webmanager",
+        display_name="Web Manager Integration Plugin",
+        # REQUIRED: the sole authenticated mutation transport BeetsAdapter
+        # depends on. Provisioned as a bundled directory (not a single
+        # bundled_file) by provision_bundled_plugins(); its health/loaded
+        # state must come from stock Beets' own live handshake
+        # (`loaded_plugins`), never a local check, since this plugin
+        # only ever runs inside the stock Beets container.
+        category=PluginCategory.REQUIRED,
+        plugin_type=PluginType.BUNDLED,
+        description="Beets Web Manager's own integration plugin -- the sole authenticated mutation transport.",
+        commands=[],
     ),
     "hook": PluginDefinition(
         name="hook",
@@ -661,6 +693,43 @@ def update_config_yaml_plugins(
             else:
                 text = pluginpath_block + text
 
+    # 3. When `web`/`webmanager`/`replaygain` are newly added (an
+    # existing user migrating onto this architecture, not a fresh
+    # install that already gets these blocks from config.yaml.example),
+    # also add their required settings blocks -- adding just the plugin
+    # NAME without these is worse than not adding it at all: stock
+    # Beets' own `beet web` default service crash-loops ("unknown
+    # command 'web'") without a loadable `web` plugin, and `replaygain`
+    # raises a hard, plugin-load-aborting FatalReplayGainError without
+    # an explicit `backend:` (its own default `command` backend needs a
+    # binary name that is never set otherwise). Never touches an
+    # EXISTING block -- only adds one when it is completely absent, so a
+    # user's own customization is never overwritten.
+    for newly_added, block_name, block_lines in (
+        ("web", "web", [
+            "web:",
+            "    host: 0.0.0.0",
+            "    port: 8337",
+            "    readonly: yes",
+            "    include_paths: yes",
+        ]),
+        ("webmanager", "webmanager", [
+            "webmanager:",
+            "    api_key_file: /config/.webmanager_api_key",
+        ]),
+        ("replaygain", "replaygain", [
+            "replaygain:",
+            "    auto: no",
+            "    backend: ffmpeg",
+        ]),
+    ):
+        if newly_added not in missing_plugins:
+            continue
+        if re.search(rf"(?m)^{block_name}:[ \t]*$", text):
+            continue  # user already has this block -- never overwrite it
+        changed = True
+        text = text.rstrip("\n") + "\n\n" + "\n".join(block_lines) + "\n"
+
     if not changed:
         return False, "All required plugins and pluginpath already configured"
 
@@ -874,21 +943,12 @@ def verify_all_plugins(
             from backend.beets_adapter import beets_adapter
             plugin_res = beets_adapter.get_plugin_status()
             if isinstance(plugin_res, dict) and plugin_res.get("protocol_version"):
-                loaded = {"web", "webmanager"}
+                raw_loaded = plugin_res.get("loaded_plugins") or []
+                loaded = set(raw_loaded) | {"web", "webmanager"}
         except Exception:
             pass
 
-    if not loaded and remote_status is None and loaded_plugins is None:
-        try:
-            from backend.beets_client import beets_client
-            remote_res = beets_client.get_status()
-            if isinstance(remote_res, dict):
-                raw_loaded = remote_res.get("loaded_plugins") or remote_res.get("plugins") or []
-                loaded = set(raw_loaded)
-        except Exception:
-            pass
-
-    # If beets_client didn't return plugins (e.g. running in test or local), check in-process Beets
+    # If BeetsAdapter didn't return plugins (e.g. running in test or local), check in-process Beets
     if not loaded:
         try:
             import beets.plugins as bp
@@ -935,34 +995,15 @@ def verify_all_plugins(
     }
 
 
-# ── [MIGRATION STATUS: DELETE WHEN LEGACY CALLERS REACH ZERO] ───────────────
-# Legacy embedded-control-agent probe. Retained strictly as migration scaffolding
-# until all callers switch to BeetsAdapter in Phase 2-4 and beets_control_agent is removed.
-def _force_fresh_loaded_plugins(max_wait_seconds: float = 95.0) -> Optional[Set[str]]:
-    """Force and wait for a genuinely fresh `beet version` probe when
-    running alongside the embedded Beets Control Agent in this same
-    process, bypassing its normal cached/asynchronous diagnostics.
-    """
-    try:
-        from backend import beets_control_agent as _bca
-    except Exception:
-        return None
-    if getattr(_bca, "_embedded_server", None) is None:
-        return None
-    try:
-        snapshot = _bca._cached_beet_version_snapshot(force=True, max_wait_seconds=max_wait_seconds)
-        return set(snapshot.get("loaded_plugins") or [])
-    except Exception:
-        return None
-
-
 def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, Any]:
     """Execute complete plugin provisioning workflow:
 
     1. Copy bundled plugins to `/config/beetsplug`.
     2. Safely update `config.yaml` with missing required plugins.
-    3. Re-run verification, forcing a fresh (not stale-cached) plugin load
-       probe whenever the config was actually changed above.
+    3. Re-run verification against stock Beets (BeetsAdapter.get_plugin_status()
+       is a live HTTP call, not cached, so no forced-refresh step is needed
+       after writing config -- unlike the deleted embedded control agent's
+       own 30s status cache).
     4. Return full diagnostic response.
     """
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
@@ -975,11 +1016,8 @@ def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, A
     config_path = cfg_dir / "config.yaml"
     changed, msg = update_config_yaml_plugins(config_path)
 
-    # 3. Verify all plugins -- force a fresh probe if the config was just
-    # modified, so verification reflects the config just written rather
-    # than a snapshot cached from before the change.
-    loaded_plugins = _force_fresh_loaded_plugins() if changed else None
-    verification = verify_all_plugins(cfg_dir, loaded_plugins=loaded_plugins)
+    # 3. Verify all plugins against the live stock Beets process.
+    verification = verify_all_plugins(cfg_dir)
     verification["provisioned_files"] = provisioned_files
     verification["config_updated"] = changed
     verification["message"] = msg

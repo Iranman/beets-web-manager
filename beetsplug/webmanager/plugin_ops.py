@@ -33,6 +33,7 @@ _CAPABILITY_CLASS_NAMES = {
     "fetchart": "FetchArtPlugin",
     "embedart": "EmbedCoverArtPlugin",
     "lastgenre": "LastGenrePlugin",
+    "mbsubmit": "AcoustidPlugin",
 }
 
 
@@ -296,3 +297,35 @@ def run_lastgenre(lib, album_ids: List[int], force: bool = False) -> Dict[str, A
             updated += 1
 
     return {"processed_albums": len(albums), "updated_albums": updated}
+
+
+def run_mbsubmit(lib, item_ids: List[int], api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Submit AcoustID fingerprints for explicit items using the real
+    chroma plugin's submit_items() (the same function `beet submit` uses).
+    Never reimplements fingerprinting or the AcoustID submission format."""
+    plugin = _require_plugin("mbsubmit")
+
+    try:
+        from beetsplug.chroma import submit_items
+    except ImportError as ex:
+        raise PluginIncompatibleError(
+            f"Could not locate chroma's submit_items() helper for this Beets version: {ex}"
+        ) from ex
+
+    userkey = api_key
+    if not userkey:
+        try:
+            from beets import config as beets_config
+            userkey = beets_config["acoustid"]["apikey"].as_str()
+        except Exception:
+            userkey = None
+    if not userkey:
+        raise PluginCapabilityError("No AcoustID user API key configured")
+
+    items = [it for it in (lib.get_item(int(iid)) for iid in item_ids) if it is not None]
+    try:
+        submit_items(plugin._log, userkey, items)
+    except Exception as ex:
+        raise PluginIncompatibleError(f"mbsubmit plugin call failed: {type(ex).__name__}") from ex
+
+    return {"submitted_items": len(items)}

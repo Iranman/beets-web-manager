@@ -1,6 +1,20 @@
 # Standalone Docker Compose configuration for Beets Web Manager.
-# Connects to an existing Beets control agent endpoint via BEETS_API_URL and BEETS_API_TOKEN.
-# Uses the published GHCR container image -- no local source or Dockerfile required.
+# Connects to an existing, separately-managed stock lscr.io/linuxserver/beets
+# instance (e.g. one already running on another host/stack, such as a NAS)
+# over HTTP via BEETS_WEB_URL -- no BEETS_API_URL/BEETS_API_TOKEN, no
+# control agent, no second Beets container started by this file.
+#
+# The remote Beets instance must already have the `web` and `webmanager`
+# plugins enabled in its own config.yaml (see config.yaml.example) and the
+# `webmanager` plugin's files provisioned into its own /config/beetsplug --
+# this file's beets-web-manager service cannot write to a filesystem it
+# does not mount, so it cannot provision that plugin automatically the way
+# the standard two-service docker-compose.yml does. Provision it once,
+# manually, by copying beetsplug/webmanager/ into the remote instance's
+# /config/beetsplug and restarting it.
+#
+# Uses the published GHCR container image -- no local source or Dockerfile
+# required.
 #
 # Usage:
 #   docker compose -f examples/docker-compose.external-beets.yml up -d
@@ -18,17 +32,19 @@ services:
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      BEETS_API_URL: ${BEETS_API_URL:?set BEETS_API_URL in .env}
-      BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
+      # Point this at the remote stock Beets instance's own web/webmanager
+      # plugin port, e.g. http://192.168.1.50:8337.
+      BEETS_WEB_URL: ${BEETS_WEB_URL:?set BEETS_WEB_URL in .env}
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:?set BEETS_OUTBOUND_ALLOWLIST in .env to match the host:port in BEETS_WEB_URL}
 
       BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
       BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
+      WEB_MANAGER_DATA_DIR: /web-manager-data
       BEETS_TRANSACTION_DIR: /web-manager-data/transactions
       BEETS_WEB_USERNAME: ${BEETS_WEB_USERNAME:-}
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-}
 
       BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS: ${BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS:-120}
       BEETS_LONG_OPERATION_POLL_SECONDS: ${BEETS_LONG_OPERATION_POLL_SECONDS:-5}

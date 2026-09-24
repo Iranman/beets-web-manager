@@ -92,6 +92,77 @@ class BeetsAdapterBadRequestError(BeetsAdapterError):
         super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
+class _ParsedQuery:
+    """Parsed shape of one query term against StockBeetsLibrary's legacy-
+    shaped `items()`/`albums()` compatibility fallback below. Defined
+    locally in this module (not imported from the retired control-agent
+    HTTP client) so this module has zero import dependency on that
+    retired module -- both raise BeetsAdapterError, never that other
+    module's own exception hierarchy."""
+
+    def __init__(self, target: str, field: Optional[str], value: str, operator: str = "equals"):
+        self.target = target  # "items" or "albums"
+        self.field = field    # field name e.g. "album_id", "mb_albumid", or None for bare text
+        self.value = value
+        self.operator = operator  # "equals", "contains", "singleton"
+
+    def __repr__(self):
+        return f"<_ParsedQuery target={self.target!r} field={self.field!r} value={self.value!r} op={self.operator!r}>"
+
+
+def _parse_query_term(term: str, target: str) -> "_ParsedQuery":
+    """Parse and validate a query term for target ('items' or 'albums'). Raises BeetsAdapterError on invalid syntax/field."""
+    if not isinstance(term, str):
+        raise BeetsAdapterError(f"Query term must be a string, got {type(term).__name__}")
+    q_str = term.strip()
+    if not q_str:
+        raise BeetsAdapterError("Query term cannot be empty or whitespace")
+
+    if ":" in q_str:
+        field, val = q_str.split(":", 1)
+        field = field.strip()
+        val = val.strip()
+        if not field:
+            raise BeetsAdapterError(f"Query field prefix cannot be empty in '{term}'")
+
+        if target == "items":
+            allowed_fields = {"album_id", "album", "artist", "title", "path", "mb_trackid", "mbid", "singleton"}
+            if field not in allowed_fields:
+                raise BeetsAdapterError(f"Unsupported query field '{field}' in '{term}'")
+            if not val and field != "singleton":
+                raise BeetsAdapterError(f"Query field '{field}' requires a non-empty value in '{term}'")
+            if field == "album_id":
+                if not val.isdigit():
+                    raise BeetsAdapterError(f"album_id must be an integer: {val!r}")
+                return _ParsedQuery(target="items", field="album_id", value=val, operator="equals")
+            elif field == "singleton":
+                if val.lower() not in {"true", "false"}:
+                    raise BeetsAdapterError(f"singleton value must be 'true' or 'false': {val!r}")
+                return _ParsedQuery(target="items", field="singleton", value=val.lower(), operator="singleton")
+            elif field in {"mb_trackid", "mbid"}:
+                return _ParsedQuery(target="items", field="mb_trackid", value=val, operator="equals")
+            elif field == "path":
+                return _ParsedQuery(target="items", field="path", value=val, operator="equals")
+            elif field in {"album", "artist", "title"}:
+                return _ParsedQuery(target="items", field=field, value=val, operator="contains")
+
+        elif target == "albums":
+            allowed_fields = {"mb_albumid", "mb_releasegroupid", "album", "artist", "albumartist"}
+            if field not in allowed_fields:
+                raise BeetsAdapterError(f"Unsupported query field '{field}' in '{term}'")
+            if not val:
+                raise BeetsAdapterError(f"Query field '{field}' requires a non-empty value in '{term}'")
+            if field == "mb_albumid":
+                return _ParsedQuery(target="albums", field="mb_albumid", value=val, operator="equals")
+            elif field == "mb_releasegroupid":
+                return _ParsedQuery(target="albums", field="mb_releasegroupid", value=val, operator="equals")
+            elif field in {"album", "artist", "albumartist"}:
+                return _ParsedQuery(target="albums", field=field, value=val, operator="contains")
+
+    # Bare-word query
+    return _ParsedQuery(target=target, field=None, value=q_str, operator="contains")
+
+
 class BeetsAdapter:
     """Client for Stock Beets Web & WebManager Plugin APIs."""
 
@@ -605,6 +676,23 @@ class BeetsAdapter:
             headers["Idempotency-Key"] = idempotency_key
         return self._request("POST", "/webmanager/lastgenre", json_data=payload, headers=headers)
 
+    def mbsubmit(
+        self,
+        item_ids: List[int],
+        api_key: Optional[str] = None,
+        is_async: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Submit AcoustID fingerprints for explicit items via the real
+        Beets chroma plugin, through the stock-Beets integration plugin."""
+        payload = {"item_ids": item_ids, "api_key": api_key, "async": is_async}
+        headers = {}
+        if is_async:
+            headers["Prefer"] = "respond-async"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return self._request("POST", "/webmanager/mbsubmit", json_data=payload, headers=headers)
+
     # -------------------------------------------------------------------------
     # Caller Compatibility Helpers
     # -------------------------------------------------------------------------
@@ -1069,8 +1157,7 @@ class StockBeetsLibrary:
             items_data = self.adapter.get_items(query_str)
             return [RemoteItem(r) for r in items_data]
 
-        # Legacy BeetsClient adapter fallback for legacy unit tests
-        from backend.beets_client import parse_query_term, BeetsError
+        # Legacy BeetsClient-shaped adapter fallback for legacy unit tests
         if query is None or query == [] or query == () or query == "":
             items_data = self.adapter.list_all_items()
             return [RemoteItem(r) for r in items_data]
@@ -1080,7 +1167,7 @@ class StockBeetsLibrary:
                 items_data = self.adapter.list_all_items()
                 return [RemoteItem(r) for r in items_data]
 
-            parsed_list = [parse_query_term(term, "items") for term in query]
+            parsed_list = [_parse_query_term(term, "items") for term in query]
 
             first_results = self.items(query[0])
             if not first_results or len(query) == 1:
@@ -1103,7 +1190,7 @@ class StockBeetsLibrary:
             return final_items
 
         if isinstance(query, str):
-            pq = parse_query_term(query, "items")
+            pq = _parse_query_term(query, "items")
             if pq.field == "album_id":
                 items_data = self.adapter.find_all_items_by_album_id(int(pq.value))
             elif pq.field == "mb_trackid":
@@ -1119,7 +1206,7 @@ class StockBeetsLibrary:
 
             return [RemoteItem(r) for r in items_data]
 
-        raise BeetsError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
+        raise BeetsAdapterError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
 
     def albums(self, query: Any = None) -> List[RemoteAlbum]:
         if hasattr(self.adapter, "get_albums"):
@@ -1127,8 +1214,7 @@ class StockBeetsLibrary:
             albums_data = self.adapter.get_albums(query_str)
             return [RemoteAlbum(r, adapter=self.adapter) for r in albums_data]
 
-        # Legacy BeetsClient adapter fallback for legacy unit tests
-        from backend.beets_client import parse_query_term, BeetsError
+        # Legacy BeetsClient-shaped adapter fallback for legacy unit tests
         if query is None or query == [] or query == ():
             albums_data = self.adapter.list_all_albums()
             return [RemoteAlbum(r) for r in albums_data]
@@ -1142,7 +1228,7 @@ class StockBeetsLibrary:
                 albums_data = self.adapter.list_all_albums()
                 return [RemoteAlbum(r) for r in albums_data]
 
-            parsed_list = [parse_query_term(term, "albums") for term in query]
+            parsed_list = [_parse_query_term(term, "albums") for term in query]
 
             first_results = self.albums(query[0])
             if not first_results or len(query) == 1:
@@ -1165,7 +1251,7 @@ class StockBeetsLibrary:
             return final_albums
 
         if isinstance(query, str):
-            pq = parse_query_term(query, "albums")
+            pq = _parse_query_term(query, "albums")
             if pq.field == "mb_albumid":
                 albums_data = self.adapter.find_all_albums_by_mb_albumid(pq.value)
             elif pq.field == "mb_releasegroupid":
@@ -1177,7 +1263,7 @@ class StockBeetsLibrary:
 
             return [RemoteAlbum(r) for r in albums_data]
 
-        raise BeetsError(f"Unsupported RemoteLibrary albums() query shape: {query!r}")
+        raise BeetsAdapterError(f"Unsupported RemoteLibrary albums() query shape: {query!r}")
 
 
 # Facade aliases

@@ -32,18 +32,17 @@ from backend.beets_plugins import (
     update_config_yaml_plugins,
     verify_all_plugins,
     verify_plugin,
-    _force_fresh_loaded_plugins,
 )
 from tests.test_routes_setup import _load_routes_setup_against_stub_app
 
 
 class BeetsPluginManifestTests(unittest.TestCase):
     def test_manifest_contains_all_required_plugins(self):
-        self.assertEqual(len(REQUIRED_PLUGIN_NAMES), 13)
+        self.assertEqual(len(REQUIRED_PLUGIN_NAMES), 15)
         for req in (
             "musicbrainz", "chroma", "fetchart", "embedart", "scrub",
             "zero", "ftintitle", "fromfilename", "mbsync", "mbsubmit",
-            "replaygain", "lastgenre", "discpath"
+            "replaygain", "lastgenre", "discpath", "web", "webmanager",
         ):
             self.assertIn(req, REQUIRED_PLUGIN_NAMES)
             pdef = BEETS_PLUGIN_MANIFEST[req]
@@ -56,13 +55,21 @@ class BeetsPluginManifestTests(unittest.TestCase):
         self.assertIn("disc_subfolder", discpath.template_fields)
 
     def test_chroma_dependencies(self):
+        # pyacoustid/fpcalc run inside the stock Beets container, never
+        # inside Web Manager -- chroma's health must come from stock
+        # Beets' own live loaded_plugins signal, not a local Python
+        # package check against the wrong process (Web Manager has no
+        # pyacoustid dependency of its own; see requirements.txt).
         chroma = BEETS_PLUGIN_MANIFEST["chroma"]
-        self.assertIn("pyacoustid==1.3.1", chroma.python_packages)
+        self.assertNotIn("pyacoustid==1.3.1", chroma.python_packages)
         self.assertIn("fpcalc", chroma.binary_dependencies)
 
     def test_optional_and_integration_plugins(self):
-        for opt in ("convert", "duplicates", "missing", "smartplaylist", "unimported", "lyrics", "parentwork", "edit", "web", "hook"):
+        # web/webmanager are REQUIRED (BeetsAdapter's sole read/mutation
+        # transport), not optional -- see test_manifest_contains_all_required_plugins.
+        for opt in ("convert", "duplicates", "missing", "smartplaylist", "unimported", "lyrics", "parentwork", "edit", "hook"):
             self.assertIn(opt, OPTIONAL_PLUGIN_NAMES)
+        self.assertNotIn("web", OPTIONAL_PLUGIN_NAMES)
 
         for integ in ("listenbrainz", "deezer", "discogs", "spotify", "plexsync", "bpsync"):
             self.assertIn(integ, INTEGRATION_PLUGIN_NAMES)
@@ -240,7 +247,7 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertIn("required", report["categories"])
         self.assertIn("optional", report["categories"])
         self.assertIn("integration", report["categories"])
-        self.assertEqual(report["required_count"], 13)
+        self.assertEqual(report["required_count"], 15)
 
     def test_unconfigured_integration_does_not_block_health(self):
         pdef = BEETS_PLUGIN_MANIFEST["discogs"]
@@ -256,57 +263,6 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertTrue(result.get("config_updated"))
         self.assertIn("discpath.py", result.get("provisioned_files", []))
         self.assertIn("summary", result)
-
-    def test_provision_forces_fresh_probe_not_stale_cache_when_embedded(self):
-        """Regression for the real CI failure this required-plugins fix was
-        for: verify_all_plugins()'s own fallback (remote beets_client.get_status()
-        or an in-process find_plugins() call) can return a snapshot taken
-        BEFORE update_config_yaml_plugins() just added the missing required
-        plugins to config.yaml in this same provisioning call, reporting
-        them unhealthy purely from cache staleness. When running embedded,
-        provision_and_verify() must force and wait for a fresh probe
-        (bypassing get_loaded_beet_plugins()'s hot-path convenience
-        wrapper, which never passes force=True and would itself return the
-        same stale, still-TTL-fresh cache) instead of trusting a stale
-        snapshot that predates the config change."""
-        import backend.beets_control_agent as bca
-
-        fresh_snapshot = {
-            "loaded_plugins": ["fetchart", "embedart", "scrub", "zero", "ftintitle",
-                               "fromfilename", "mbsync", "mbsubmit", "chroma",
-                               "replaygain", "lastgenre", "discpath"],
-        }
-        with mock.patch.object(bca, "_embedded_server", object()), \
-             mock.patch.object(bca, "_cached_beet_version_snapshot", return_value=fresh_snapshot) as mock_snap:
-            result = provision_and_verify(self.config_dir)
-
-        mock_snap.assert_called_once_with(force=True, max_wait_seconds=mock.ANY)
-        # These six are exactly the plugins the real CI failure reported
-        # unhealthy purely from stale-cache staleness (present in the fresh
-        # snapshot above, but would show loaded=False if provision_and_verify
-        # fell through to verify_all_plugins()'s stale-fallback chain
-        # instead of consulting this forced-fresh snapshot). Not asserting
-        # blanket all_required_healthy here: chroma/replaygain's health also
-        # depends on real fpcalc/ffmpeg binaries on PATH, which this unit
-        # test environment does not provide and is not what this regression
-        # is about.
-        healthy_by_name = {p["name"]: p["healthy"] for p in result.get("plugins", [])}
-        for name in ("zero", "ftintitle", "fromfilename", "mbsync", "mbsubmit", "discpath"):
-            self.assertTrue(healthy_by_name.get(name), f"{name} should be healthy from the forced-fresh snapshot")
-
-    def test_force_fresh_loaded_plugins_returns_none_when_not_embedded(self):
-        """A remote/external-engine deployment has no local `beet` binary
-        or embedded control agent in this process -- must fall back to the
-        normal remote/in-process discovery chain, never fabricate an empty
-        "zero plugins loaded" result."""
-        import backend.beets_control_agent as bca
-
-        with mock.patch.object(bca, "_embedded_server", None), \
-             mock.patch.object(bca, "_cached_beet_version_snapshot") as mock_snap:
-            result = _force_fresh_loaded_plugins()
-        self.assertIsNone(result)
-        mock_snap.assert_not_called()
-
 
 class BeetsPluginApiRoutesTests(unittest.TestCase):
     def setUp(self):

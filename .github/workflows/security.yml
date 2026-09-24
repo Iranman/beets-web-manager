@@ -25,6 +25,9 @@ jobs:
         # added to the audit trail -- see docs/TECHNICAL_DEBT.md ARCH-013).
         run: python3 scripts/generate_endpoint_inventory.py --check
 
+      - name: Stock-Beets architecture invariants
+        run: python3 scripts/validate_architecture_invariants.py
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
@@ -33,8 +36,8 @@ jobs:
         # backend/transaction_engine.py's real-Beets integration
         # (Wave 24 final review section 7/8/28), which only runs where
         # `beets` is genuinely importable -- CI-test-only, not part of the
-        # Web Manager image's own requirements.txt, pinned to the exact
-        # version the beets-engine container bundles (Dockerfile.beets).
+        # Web Manager image's own requirements.txt. Pinned to the same
+        # version requirements-dev.txt uses for local test fixtures.
         run: pip install beets==2.13.1
 
       - name: Set a fake CI-only web auth token

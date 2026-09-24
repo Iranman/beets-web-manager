@@ -48,18 +48,8 @@ if (Test-Path ".env") {
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $token = -join ($bytes | ForEach-Object { $_.ToString("x2") })
-    $apiBytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($apiBytes)
-    $apiToken = -join ($apiBytes | ForEach-Object { $_.ToString("x2") })
     Set-EnvValue -Key "BEETS_WEB_AUTH_TOKEN" -Value $token
-    Set-EnvValue -Key "BEETS_API_TOKEN" -Value $apiToken
-
-    if (-not (Test-Path "beets\musiclibrary.blb")) {
-        Set-EnvValue -Key "BEETS_EXPECT_EXISTING_LIBRARY" -Value "0"
-    } else {
-        Set-EnvValue -Key "BEETS_EXPECT_EXISTING_LIBRARY" -Value "1"
-    }
-    Write-Host "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN in .env."
+    Write-Host "    Generated random BEETS_WEB_AUTH_TOKEN in .env."
 }
 
 # Interactive Web Access prompt

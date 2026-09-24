@@ -226,7 +226,7 @@ def get_upstream_web_readonly() -> bool:
 
 
 _CORE_CAPABILITIES = ["import", "modify", "remove", "move", "operations", "status"]
-_PLUGIN_GATED_CAPABILITIES = ["mbsync", "fetchart", "embedart", "lastgenre"]
+_PLUGIN_GATED_CAPABILITIES = ["mbsync", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
 def get_capabilities() -> List[str]:
@@ -250,6 +250,22 @@ def get_capabilities() -> List[str]:
     return caps
 
 
+def get_loaded_plugin_names() -> List[str]:
+    """Every Beets plugin genuinely loaded in this process right now.
+
+    Distinct from get_capabilities(): capabilities is a curated subset (the
+    handful of plugins the webmanager endpoints can drive), this is the
+    full list -- used by Web Manager's plugin manifest/health reporting so
+    it never has to guess or fall back to a local `import beets` runtime
+    check of its own.
+    """
+    try:
+        from beets.plugins import find_plugins
+        return sorted({p.name for p in find_plugins() if getattr(p, "name", "")})
+    except Exception:
+        return []
+
+
 @webmanager_bp.route("/status", methods=["GET"])
 def get_status():
     """Healthcheck and capability status handshake endpoint."""
@@ -260,6 +276,7 @@ def get_status():
             "plugin_version": PLUGIN_VERSION,
             "beets_version": getattr(beets, "__version__", "unknown"),
             "capabilities": get_capabilities(),
+            "loaded_plugins": get_loaded_plugin_names(),
             "library_ready": lib_ready,
             "upstream_web_readonly": get_upstream_web_readonly(),
             "plugin_mutations_enabled": True,
@@ -897,3 +914,19 @@ def run_lastgenre_route():
         return lambda: plugin_ops.run_lastgenre(lib, album_ids, force=force)
 
     return _run_plugin_gated_operation("lastgenre", "lastgenre", _build)
+
+
+@webmanager_bp.route("/mbsubmit", methods=["POST"])
+def run_mbsubmit_route():
+    """Submit AcoustID fingerprints for explicit items using the real Beets
+    chroma plugin's submit_items()."""
+    lib = g.lib
+
+    def _build(data):
+        item_ids = _parse_id_list(data, "item_ids")
+        if not item_ids:
+            raise ValueError("Must specify item_ids")
+        api_key = data.get("api_key") or None
+        return lambda: plugin_ops.run_mbsubmit(lib, item_ids, api_key=api_key)
+
+    return _run_plugin_gated_operation("mbsubmit", "mbsubmit", _build)

@@ -139,10 +139,15 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
             self.db_spy.assert_not_called()
 
     def test_routes_submissions_find_beets_album_raises_on_beets_unavailable(self):
-        """_find_beets_album_for_folder must re-raise BeetsUnavailableError, not swallow."""
+        """_find_beets_album_for_folder must re-raise BeetsUnavailableError, not swallow.
+
+        This now reads via the StockBeetsLibrary facade (`lib.albums()`,
+        backed by BeetsAdapter) rather than a remote control-agent
+        folder-resolution call, so the fail-closed behavior is exercised by
+        making the facade itself raise."""
         folder = Path("/data/media/music/Artist/Album")
-        with mock.patch.object(routes_submissions.beets_client, "resolve_folder_to_albums") as mock_res:
-            mock_res.side_effect = BeetsUnavailableError("Engine dead")
+        with mock.patch.object(routes_submissions.lib, "albums") as mock_albums:
+            mock_albums.side_effect = BeetsUnavailableError("Engine dead")
 
             with self.assertRaises(BeetsUnavailableError):
                 routes_submissions._find_beets_album_for_folder(folder)
@@ -151,10 +156,15 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
             self.db_spy.assert_not_called()
 
     def test_routes_submissions_find_beets_items_raises_on_beets_unavailable(self):
-        """_find_beets_items_for_folder must re-raise BeetsUnavailableError, not swallow."""
+        """_find_beets_items_for_folder must re-raise BeetsUnavailableError, not swallow.
+
+        This now reads via the StockBeetsLibrary facade (`lib.items()`,
+        backed by BeetsAdapter) rather than a remote control-agent
+        folder-resolution call, so the fail-closed behavior is exercised by
+        making the facade itself raise."""
         folder = Path("/data/media/music/Artist/Album")
-        with mock.patch.object(routes_submissions.beets_client, "resolve_folder_to_albums") as mock_res:
-            mock_res.side_effect = BeetsUnavailableError("Engine dead")
+        with mock.patch.object(routes_submissions.lib, "items") as mock_items:
+            mock_items.side_effect = BeetsUnavailableError("Engine dead")
 
             with self.assertRaises(BeetsUnavailableError):
                 routes_submissions._find_beets_items_for_folder(folder)

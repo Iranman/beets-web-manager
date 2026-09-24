@@ -1,16 +1,16 @@
 """Regression coverage for the fresh-install experience and token generation.
 
 setup.sh and setup.ps1 are optional convenience wrappers around the standard
-`beets`/`music`/`downloads`/`web-manager` unified-compose topology -- the
-normal install path is just `docker compose up -d` with no script at all.
+`beets`/`music`/`downloads`/`web-manager` two-container stock-Beets compose
+topology -- the normal install path is just `docker compose up -d` with no
+script at all.
 
 setup.sh and setup.ps1:
 1. Create the standard persistent data directories (`beets`, `music`, `downloads`, `web-manager`).
 2. Initialize default `beets/config.yaml` from `config.yaml.example` if not present.
-3. Generate cryptographically strong non-placeholder tokens for `BEETS_API_TOKEN` and `BEETS_WEB_AUTH_TOKEN`.
-4. Set `BEETS_EXPECT_EXISTING_LIBRARY=0` on fresh install when no database exists, and `1` when `beets/musiclibrary.blb` exists.
-5. Leave browser password unconfigured in `.env` so the browser first-run wizard is triggered without requiring a complex 32-char CLI password prompt.
-6. Support idempotent re-runs preserving existing configuration.
+3. Generate a cryptographically strong non-placeholder `BEETS_WEB_AUTH_TOKEN`.
+4. Leave browser password unconfigured in `.env` so the browser first-run wizard is triggered without requiring a complex 32-char CLI password prompt.
+5. Support idempotent re-runs preserving existing configuration.
 
 These tests execute the real setup.sh (bash) and setup.ps1 (pwsh) scripts end-to-end
 in an isolated temporary directory with a stub `docker` on PATH.
@@ -117,7 +117,7 @@ class SetupShTokenGenerationTests(unittest.TestCase):
             result = self._run_setup_sh(workdir)
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
-            # Persistent directories created (standard unified topology)
+            # Persistent directories created (standard two-container topology)
             self.assertTrue((workdir / "beets").is_dir())
             self.assertTrue((workdir / "music").is_dir())
             self.assertTrue((workdir / "downloads").is_dir())
@@ -126,35 +126,13 @@ class SetupShTokenGenerationTests(unittest.TestCase):
 
             env_path = workdir / ".env"
             self.assertTrue(env_path.exists())
-            api_token = _read_env_value(env_path, "BEETS_API_TOKEN")
             web_token = _read_env_value(env_path, "BEETS_WEB_AUTH_TOKEN")
-            expect_lib = _read_env_value(env_path, "BEETS_EXPECT_EXISTING_LIBRARY")
             web_pass = _read_env_value(env_path, "BEETS_WEB_PASSWORD")
-
-            self.assertNotIn(api_token.lower(), _PLACEHOLDER_TOKENS)
-            self.assertGreaterEqual(len(api_token), _MIN_TOKEN_LENGTH)
-            self.assertNotEqual(api_token, "changeme")
 
             self.assertNotIn(web_token.lower(), _PLACEHOLDER_TOKENS)
             self.assertGreaterEqual(len(web_token), _MIN_TOKEN_LENGTH)
-
-            self.assertNotEqual(api_token, web_token)
-            self.assertEqual(expect_lib, "0")
+            self.assertNotEqual(web_token, "changeme")
             self.assertEqual(web_pass, "")
-
-    def test_fresh_install_with_existing_database_sets_expect_existing_library_1(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp)
-            beets_dir = workdir / "beets"
-            beets_dir.mkdir(parents=True)
-            (beets_dir / "musiclibrary.blb").write_bytes(b"existing-db")
-
-            result = self._run_setup_sh(workdir)
-            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
-
-            env_path = workdir / ".env"
-            expect_lib = _read_env_value(env_path, "BEETS_EXPECT_EXISTING_LIBRARY")
-            self.assertEqual(expect_lib, "1")
 
     def test_rerun_is_idempotent_and_preserves_existing_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,16 +140,13 @@ class SetupShTokenGenerationTests(unittest.TestCase):
             first = self._run_setup_sh(workdir)
             self.assertEqual(first.returncode, 0, msg=first.stdout + first.stderr)
             env_path = workdir / ".env"
-            api_token_first = _read_env_value(env_path, "BEETS_API_TOKEN")
             web_token_first = _read_env_value(env_path, "BEETS_WEB_AUTH_TOKEN")
 
             second = self._run_setup_sh(workdir)
             self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
             self.assertIn(".env already exists", second.stdout)
 
-            api_token_second = _read_env_value(env_path, "BEETS_API_TOKEN")
             web_token_second = _read_env_value(env_path, "BEETS_WEB_AUTH_TOKEN")
-            self.assertEqual(api_token_first, api_token_second)
             self.assertEqual(web_token_first, web_token_second)
 
 
@@ -231,7 +206,7 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
             result = self._run_setup_ps1(workdir)
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
-            # Persistent directories created (standard unified topology)
+            # Persistent directories created (standard two-container topology)
             self.assertTrue((workdir / "beets").is_dir())
             self.assertTrue((workdir / "music").is_dir())
             self.assertTrue((workdir / "downloads").is_dir())
@@ -240,35 +215,13 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
 
             env_path = workdir / ".env"
             self.assertTrue(env_path.exists())
-            api_token = _read_env_value(env_path, "BEETS_API_TOKEN")
             web_token = _read_env_value(env_path, "BEETS_WEB_AUTH_TOKEN")
-            expect_lib = _read_env_value(env_path, "BEETS_EXPECT_EXISTING_LIBRARY")
             web_pass = _read_env_value(env_path, "BEETS_WEB_PASSWORD")
-
-            self.assertNotIn(api_token.lower(), _PLACEHOLDER_TOKENS)
-            self.assertGreaterEqual(len(api_token), _MIN_TOKEN_LENGTH)
-            self.assertNotEqual(api_token, "changeme")
 
             self.assertNotIn(web_token.lower(), _PLACEHOLDER_TOKENS)
             self.assertGreaterEqual(len(web_token), _MIN_TOKEN_LENGTH)
-
-            self.assertNotEqual(api_token, web_token)
-            self.assertEqual(expect_lib, "0")
+            self.assertNotEqual(web_token, "changeme")
             self.assertEqual(web_pass, "")
-
-    def test_fresh_install_with_existing_database_sets_expect_existing_library_1(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp)
-            beets_dir = workdir / "beets"
-            beets_dir.mkdir(parents=True)
-            (beets_dir / "musiclibrary.blb").write_bytes(b"existing-db")
-
-            result = self._run_setup_ps1(workdir)
-            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
-
-            env_path = workdir / ".env"
-            expect_lib = _read_env_value(env_path, "BEETS_EXPECT_EXISTING_LIBRARY")
-            self.assertEqual(expect_lib, "1")
 
 
 if __name__ == "__main__":

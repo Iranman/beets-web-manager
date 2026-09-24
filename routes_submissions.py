@@ -36,6 +36,7 @@ from app import (  # noqa: E402
     _mb_artist_search_one,
     _path_is_under,
     _read_beets_plugin_list,
+    _read_file_media_tags,
     _s,
     _ytdlp_js_runtime_options,
     _ytdlp_ready,
@@ -44,7 +45,11 @@ from app import (  # noqa: E402
     jobs,
     lib,
 )
-from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError, BeetsAuthError
+from backend.beets_adapter import (
+    BeetsAdapterError as BeetsError,
+    BeetsAdapterConnectionError as BeetsUnavailableError,
+    BeetsAdapterAuthError as BeetsAuthError,
+)
 from backend.security import OutboundPolicyError, validate_outbound_url
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -67,39 +72,28 @@ def _append_clean_output(log, stdout: str = "", stderr: str = "") -> str:
     return output
 
 
-def _start_acoustid_submit_job(query: str, label: str):
-    """Execute AcoustID "submit" job via control agent IPC."""
+def _start_acoustid_submit_job(item_ids: List[int], label: str):
+    """Execute AcoustID "submit" for explicit items via the real chroma
+    plugin, through the stock-Beets integration plugin (BeetsAdapter)."""
     def _do(log, cancel_event=None):
         if cancel_event is not None and cancel_event.is_set():
             log.append("[job cancelled before submission]")
-            return {"cancelled": True, "query": query}
+            return {"cancelled": True, "item_ids": item_ids}
+
+        from backend.beets_adapter import beets_adapter
 
         api_key = _acoustid_key()
         if not api_key:
             log.append("ACOUSTID_API_KEY/ACOUSTID_KEY is not set in the environment; using Beets config if present.")
         try:
-            result = beets_client.acoustid_submit(
-                query=query,
-                api_key=api_key or None,
-                timeout=300.0,
-            )
-        except BeetsUnavailableError as exc:
-            log.append(f"Beets engine is offline: {exc}")
-            raise RuntimeError(f"Beets engine is offline: {exc}") from exc
-        except BeetsError as exc:
-            log.append(f"AcoustID submission rejected by engine: {exc}")
-            raise RuntimeError(f"AcoustID submission rejected by engine: {exc}") from exc
+            result = beets_adapter.mbsubmit(item_ids, api_key=api_key or None)
         except Exception as exc:
             log.append(f"AcoustID submission failed: {exc}")
             raise RuntimeError(f"AcoustID submission failed: {exc}") from exc
 
-        stdout = result.get("stdout") or ""
-        stderr = result.get("stderr") or ""
-        output = _append_clean_output(log, stdout, stderr)
-        rc = result.get("returncode", 0)
-        if rc != 0 or not result.get("ok", True):
-            raise RuntimeError(f"beet submit failed with exit code {rc}")
-        return {"output": output, "query": query}
+        submitted = result.get("submitted_items", 0)
+        log.append(f"Submitted {submitted} fingerprint(s) to AcoustID.")
+        return {"output": f"Submitted {submitted} fingerprint(s).", "item_ids": item_ids}
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -125,7 +119,8 @@ def album_acoustid_submit(aid: int):
         return jsonify({"ok": False, "error": f"{len(missing)} track(s) are missing MusicBrainz recording MBIDs before AcoustID submission.", "missing_item_ids": missing}), 400
     title = " - ".join(part for part in (_s(album.albumartist), _s(album.album)) if part)
     label = f"AcoustID submit: {title or f'album {aid}'}"
-    return _start_acoustid_submit_job(f"album_id:{aid}", label)
+    item_ids = [int(getattr(item, "id", 0) or 0) for item in album.items() if getattr(item, "id", None)]
+    return _start_acoustid_submit_job(item_ids, label)
 
 
 @app.post("/api/items/<int:iid>/acoustid-submit")
@@ -145,15 +140,18 @@ def item_acoustid_submit(iid: int):
         return jsonify({"ok": False, "error": "The AcoustID API key is not configured."}), 400
     if getattr(item, "album_id", None):
         album = lib.get_album(int(getattr(item, "album_id", 0) or 0))
-        missing = [int(getattr(row, "id", 0) or 0) for row in (album.items() if album else []) if not _MB_UUID_RE.match(_s(getattr(row, "mb_trackid", "") or "").strip())]
+        album_items = list(album.items()) if album else []
+        missing = [int(getattr(row, "id", 0) or 0) for row in album_items if not _MB_UUID_RE.match(_s(getattr(row, "mb_trackid", "") or "").strip())]
         if missing:
             return jsonify({"ok": False, "error": f"{len(missing)} track(s) in this album are missing MusicBrainz recording MBIDs before AcoustID submission.", "missing_item_ids": missing}), 400
-    elif not _MB_UUID_RE.match(_s(getattr(item, "mb_trackid", "") or "").strip()):
-        return jsonify({"ok": False, "error": f"Item {iid} has no MusicBrainz recording MBID, so its fingerprint cannot be submitted yet."}), 400
-    query = f"album_id:{item.album_id}" if getattr(item, "album_id", None) else f"id:{iid}"
+        item_ids = [int(getattr(row, "id", 0) or 0) for row in album_items if getattr(row, "id", None)]
+    else:
+        if not _MB_UUID_RE.match(_s(getattr(item, "mb_trackid", "") or "").strip()):
+            return jsonify({"ok": False, "error": f"Item {iid} has no MusicBrainz recording MBID, so its fingerprint cannot be submitted yet."}), 400
+        item_ids = [iid]
     title = " - ".join(part for part in (_s(item.artist), _s(item.title)) if part)
     label = f"AcoustID submit: {title or f'item {iid}'}"
-    return _start_acoustid_submit_job(query, label)
+    return _start_acoustid_submit_job(item_ids, label)
 
 
 # -- Submission workspace helpers -------------------------------------------------
@@ -235,23 +233,24 @@ def _config_has_acoustid_key(config_path: str = "/config/config.yaml") -> bool:
 
 
 def _submission_readiness() -> Dict[str, Any]:
-    """Report AcoustID/MusicBrainz submission capability strictly from the remote
-    Beets control agent's own /status response.
+    """Report AcoustID/MusicBrainz submission capability strictly from the
+    stock Beets integration plugin's own /webmanager/status handshake.
 
-    Fails closed: any connection failure, authentication failure, or malformed
-    response is reported as every capability being unavailable rather than
-    falling back to local `find_spec()`/`shutil.which()`/local Beets config
-    checks -- the web manager has no local Beets installation to inspect, so a
-    local fallback could only ever be a guess, not a fact.
+    Fails closed: any connection failure or malformed response is reported
+    as every capability being unavailable rather than falling back to local
+    `find_spec()`/`shutil.which()`/local Beets config checks -- Web Manager
+    has no local Beets installation to inspect, so a local fallback could
+    only ever be a guess, not a fact.
     """
-    remote_status = None
-    remote_error = ""
+    from backend.beets_adapter import beets_adapter
+
     try:
-        remote_status = beets_client.get_status()
+        plugin_status = beets_adapter.get_plugin_status()
     except Exception as exc:
         app.logger.warning("Submission readiness status check failed: %s", type(exc).__name__)
-        remote_error = "Beets control agent status is unavailable"
-    if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
+        plugin_status = None
+
+    if not isinstance(plugin_status, dict) or not plugin_status.get("protocol_version"):
         return {
             "plugins": {"mbsubmit": False, "musicbrainz": False, "chroma": False, "mbsync": False},
             "fpcalc_available": False,
@@ -260,23 +259,26 @@ def _submission_readiness() -> Dict[str, Any]:
             "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
             "beet_available": False,
             "remote_reachable": False,
-            "reason": remote_error or "Beets control agent status is unavailable or malformed",
+            "reason": "Stock Beets integration plugin is unreachable or not authenticated",
         }
 
-    remote_plugins = remote_status.get("plugins")
-    if not isinstance(remote_plugins, dict):
-        remote_plugins = {}
-
+    capabilities = set(plugin_status.get("capabilities") or [])
+    # chroma is the Beets plugin that provides both mbsubmit (AcoustID
+    # submission) and fingerprinting; mbsubmit capability implies chroma is
+    # loaded and pyacoustid/fpcalc are available inside the stock Beets
+    # container (Web Manager has no local binary to check -- it never runs
+    # fingerprinting itself).
+    mbsubmit_available = "mbsubmit" in capabilities
     return {
         "plugins": {
-            "mbsubmit": bool(remote_plugins.get("mbsubmit", False)),
-            "musicbrainz": bool(remote_plugins.get("musicbrainz", False)),
-            "chroma": bool(remote_plugins.get("chroma", False)),
-            "mbsync": bool(remote_plugins.get("mbsync", False)),
+            "mbsubmit": mbsubmit_available,
+            "musicbrainz": True,  # MusicBrainz is core Beets, not a plugin
+            "chroma": mbsubmit_available,
+            "mbsync": "mbsync" in capabilities,
         },
-        "fpcalc_available": bool(remote_status.get("fpcalc_available", False)),
-        "fpcalc_path": remote_status.get("fpcalc_path") or "",
-        "pyacoustid_available": bool(remote_status.get("pyacoustid_available", False)),
+        "fpcalc_available": mbsubmit_available,
+        "fpcalc_path": "",
+        "pyacoustid_available": mbsubmit_available,
         "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
         "beet_available": True,
         "remote_reachable": True,
@@ -418,35 +420,12 @@ def _abs_resolved(path_str: str) -> Path:
 
 
 def _find_beets_album_for_folder(folder: Path):
+    """Find the stock-Beets album whose item directory matches this folder.
+
+    Reads via the StockBeetsLibrary facade (BeetsAdapter) only -- there is
+    no remote control-agent folder-resolution call to fall back to.
+    """
     target = str(folder)
-    try:
-        from backend.beets_client import beets_client, BeetsUnavailableError, BeetsError
-        has_client = True
-    except Exception:
-        has_client = False
-
-    if has_client and hasattr(lib, "get_album"):
-        try:
-            res = beets_client.resolve_folder_to_albums(target)
-            album_ids = res.get("album_ids", []) if isinstance(res, dict) else []
-        except (BeetsUnavailableError, BeetsError):
-            raise
-        except Exception:
-            album_ids = []
-
-        for aid in album_ids:
-            album = lib.get_album(aid)
-            if album is None:
-                continue
-            try:
-                album_dir = str(Path(_get_album_item_dir(album)).resolve(strict=False))
-            except Exception:
-                continue
-            if album_dir == target:
-                return album
-        return None
-
-    # Fallback for mock test harnesses that only supply a fake lib without client binding
     for album in lib.albums():
         try:
             album_dir = str(Path(_get_album_item_dir(album)).resolve(strict=False))
@@ -458,38 +437,12 @@ def _find_beets_album_for_folder(folder: Path):
 
 
 def _find_beets_items_for_folder(folder: Path) -> List[Any]:
+    """Find stock-Beets items whose file lives directly in this folder.
+
+    Reads via the StockBeetsLibrary facade (BeetsAdapter) only -- there is
+    no remote control-agent folder-resolution call to fall back to.
+    """
     target = str(folder)
-    try:
-        from backend.beets_client import beets_client, BeetsUnavailableError, BeetsError
-        has_client = True
-    except Exception:
-        has_client = False
-
-    if has_client and hasattr(lib, "get_item"):
-        try:
-            res = beets_client.resolve_folder_to_albums(target)
-            item_ids = res.get("item_ids", []) if isinstance(res, dict) else []
-        except (BeetsUnavailableError, BeetsError):
-            raise
-        except Exception:
-            item_ids = []
-
-        matches = []
-        for iid in item_ids:
-            item = lib.get_item(iid)
-            if item is None:
-                continue
-            try:
-                item_path = _item_abs_path(item)
-                if not item_path:
-                    continue
-                if str(Path(item_path).parent.resolve(strict=False)) == target:
-                    matches.append(item)
-            except Exception:
-                continue
-        return matches
-
-    # Fallback for mock test harnesses that only supply a fake lib without client binding
     matches = []
     for item in lib.items():
         try:
@@ -511,8 +464,7 @@ def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
     mb_trackid = ""
     if exists:
         try:
-            from backend.beets_client import beets_client
-            tags = beets_client.read_tags(str(file_path))
+            tags = _read_file_media_tags(str(file_path))
             title = _s(tags.get("title", "") or "").strip()
             artist = _s(tags.get("artist", "") or "").strip()
             album = _s(tags.get("album", "") or "").strip()
@@ -1575,41 +1527,27 @@ def attach_album_mbids(aid: int):
             for row in clean_recordings
         }
 
-        log.append(f"Planning atomic MusicBrainz ID attachment for album {aid} ({len(clean_recordings)} track(s)).")
+        log.append(f"Attaching MusicBrainz IDs for album {aid} ({len(clean_recordings)} track(s)).")
         if update_state:
-            update_state(stage="planning", completed=0, total=len(clean_recordings) + 2)
-
-        plan = beets_client.plan_album_metadata(
-            album_id=aid,
-            album_fields=album_fields,
-            track_fields=track_fields,
-        )
-
-        if not plan.get("ok"):
-            err_msg = plan.get("error") or "Metadata plan rejected by engine"
-            log.append(f"Metadata plan failed: {err_msg}")
-            raise RuntimeError(f"Metadata plan failed: {err_msg}")
-
-        plan_token = plan.get("token") or plan.get("operation_id")
-        if not plan_token:
-            log.append("No changes detected in metadata plan.")
-            return {"output": "No changes needed", "album_id": aid, "recording_mbids_attached": 0, "files_moved": 0, "verified": True}
-
+            update_state(stage="applying", completed=0, total=len(clean_recordings) + 2)
         if cancel_event is not None and cancel_event.is_set():
             log.append("[cancel requested before apply]")
             return {"cancelled": True}
 
-        # Step 2: Apply plan with tag writing under exclusive engine lock
-        if update_state:
-            update_state(stage="applying", completed=1, total=len(clean_recordings) + 2)
-        log.append("Applying metadata updates and writing tags via engine...")
+        from backend.beets_adapter import beets_adapter
 
-        apply_res = beets_client.apply_album_metadata(
-            plan_token=plan_token,
-            force_write_tags=True,
-        )
+        # Step 1/2: Apply album-level MB IDs, then each track's mb_trackid
+        # individually (modify() applies one fields dict to all targets in
+        # a call, and each track here needs a different mb_trackid) via
+        # the real stock-Beets integration plugin -- no local Plan/Apply
+        # ceremony needed since Beets itself now owns the write atomically
+        # per call.
+        log.append("Writing tags via stock Beets integration plugin...")
+        apply_res = beets_adapter.modify(fields=album_fields, album_ids=[aid], write=True, move=False)
+        for item_id_str, fields in track_fields.items():
+            beets_adapter.modify(fields=fields, item_ids=[int(item_id_str)], write=True, move=False)
 
-        if not apply_res.get("ok"):
+        if not apply_res.get("success"):
             err_msg = apply_res.get("error") or "Metadata apply rejected by engine"
             log.append(f"Metadata apply failed: {err_msg}")
             raise RuntimeError(f"Metadata apply failed: {err_msg}")

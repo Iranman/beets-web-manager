@@ -198,25 +198,6 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 401)
             self.assertEqual(ctx.exception.error_code, 'ENGINE_AUTH_FAILED')
 
-    def test_control_agent_bounded_query_limits(self):
-        from backend.beets_control_agent import _parse_bounded_int_param
-        # Valid
-        val, err = _parse_bounded_int_param({"duplicate_limit": ["50"]}, "duplicate_limit")
-        self.assertIsNone(err)
-        self.assertEqual(val, 50)
-        # Malformed
-        val, err = _parse_bounded_int_param({"duplicate_limit": ["garbage"]}, "duplicate_limit")
-        self.assertIsNotNone(err)
-        self.assertIn("must be an integer", err)
-        # Out of bounds (negative)
-        val, err = _parse_bounded_int_param({"duplicate_limit": ["-5"]}, "duplicate_limit")
-        self.assertIsNotNone(err)
-        self.assertIn("must be between 0 and 1000", err)
-        # Out of bounds (too large)
-        val, err = _parse_bounded_int_param({"duplicate_limit": ["999999"]}, "duplicate_limit")
-        self.assertIsNotNone(err)
-        self.assertIn("must be between 0 and 1000", err)
-
     def test_library_health_sanitizes_raw_exception_text_and_prevents_information_disclosure(self):
         exc = BeetsError(
             "Beets API request error: HTTP 400: SECRET_INTERNAL_DIAGNOSTIC",
