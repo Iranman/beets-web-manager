@@ -38,11 +38,11 @@ from tests.test_routes_setup import _load_routes_setup_against_stub_app
 
 class BeetsPluginManifestTests(unittest.TestCase):
     def test_manifest_contains_all_required_plugins(self):
-        self.assertEqual(len(REQUIRED_PLUGIN_NAMES), 13)
+        self.assertEqual(len(REQUIRED_PLUGIN_NAMES), 15)
         for req in (
             "musicbrainz", "chroma", "fetchart", "embedart", "scrub",
             "zero", "ftintitle", "fromfilename", "mbsync", "mbsubmit",
-            "replaygain", "lastgenre", "discpath"
+            "replaygain", "lastgenre", "discpath", "web", "webmanager",
         ):
             self.assertIn(req, REQUIRED_PLUGIN_NAMES)
             pdef = BEETS_PLUGIN_MANIFEST[req]
@@ -65,8 +65,11 @@ class BeetsPluginManifestTests(unittest.TestCase):
         self.assertIn("fpcalc", chroma.binary_dependencies)
 
     def test_optional_and_integration_plugins(self):
-        for opt in ("convert", "duplicates", "missing", "smartplaylist", "unimported", "lyrics", "parentwork", "edit", "web", "hook"):
+        # web/webmanager are REQUIRED (BeetsAdapter's sole read/mutation
+        # transport), not optional -- see test_manifest_contains_all_required_plugins.
+        for opt in ("convert", "duplicates", "missing", "smartplaylist", "unimported", "lyrics", "parentwork", "edit", "hook"):
             self.assertIn(opt, OPTIONAL_PLUGIN_NAMES)
+        self.assertNotIn("web", OPTIONAL_PLUGIN_NAMES)
 
         for integ in ("listenbrainz", "deezer", "discogs", "spotify", "plexsync", "bpsync"):
             self.assertIn(integ, INTEGRATION_PLUGIN_NAMES)
@@ -244,7 +247,7 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertIn("required", report["categories"])
         self.assertIn("optional", report["categories"])
         self.assertIn("integration", report["categories"])
-        self.assertEqual(report["required_count"], 13)
+        self.assertEqual(report["required_count"], 15)
 
     def test_unconfigured_integration_does_not_block_health(self):
         pdef = BEETS_PLUGIN_MANIFEST["discogs"]

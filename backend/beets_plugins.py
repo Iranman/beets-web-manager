@@ -311,10 +311,29 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "web": PluginDefinition(
         name="web",
         display_name="Beets Built-in Web Server",
-        category=PluginCategory.OPTIONAL,
+        # REQUIRED, not optional: this is the read transport BeetsAdapter
+        # depends on for every non-mutation read, and stock Beets' own
+        # default supervised service is `beet web` -- without this
+        # plugin enabled, the container crash-loops with "unknown
+        # command 'web'".
+        category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Beets simple built-in web server.",
+        description="Beets simple built-in web server -- the read transport BeetsAdapter depends on.",
         commands=["web"],
+    ),
+    "webmanager": PluginDefinition(
+        name="webmanager",
+        display_name="Web Manager Integration Plugin",
+        # REQUIRED: the sole authenticated mutation transport BeetsAdapter
+        # depends on. Provisioned as a bundled directory (not a single
+        # bundled_file) by provision_bundled_plugins(); its health/loaded
+        # state must come from stock Beets' own live handshake
+        # (`loaded_plugins`), never a local check, since this plugin
+        # only ever runs inside the stock Beets container.
+        category=PluginCategory.REQUIRED,
+        plugin_type=PluginType.BUNDLED,
+        description="Beets Web Manager's own integration plugin -- the sole authenticated mutation transport.",
+        commands=[],
     ),
     "hook": PluginDefinition(
         name="hook",
@@ -673,6 +692,43 @@ def update_config_yaml_plugins(
                 text = re.sub(r"(?m)^plugins:.*$\n?", lambda m: m.group(0) + pluginpath_block, text, count=1)
             else:
                 text = pluginpath_block + text
+
+    # 3. When `web`/`webmanager`/`replaygain` are newly added (an
+    # existing user migrating onto this architecture, not a fresh
+    # install that already gets these blocks from config.yaml.example),
+    # also add their required settings blocks -- adding just the plugin
+    # NAME without these is worse than not adding it at all: stock
+    # Beets' own `beet web` default service crash-loops ("unknown
+    # command 'web'") without a loadable `web` plugin, and `replaygain`
+    # raises a hard, plugin-load-aborting FatalReplayGainError without
+    # an explicit `backend:` (its own default `command` backend needs a
+    # binary name that is never set otherwise). Never touches an
+    # EXISTING block -- only adds one when it is completely absent, so a
+    # user's own customization is never overwritten.
+    for newly_added, block_name, block_lines in (
+        ("web", "web", [
+            "web:",
+            "    host: 0.0.0.0",
+            "    port: 8337",
+            "    readonly: yes",
+            "    include_paths: yes",
+        ]),
+        ("webmanager", "webmanager", [
+            "webmanager:",
+            "    api_key_file: /config/.webmanager_api_key",
+        ]),
+        ("replaygain", "replaygain", [
+            "replaygain:",
+            "    auto: no",
+            "    backend: ffmpeg",
+        ]),
+    ):
+        if newly_added not in missing_plugins:
+            continue
+        if re.search(rf"(?m)^{block_name}:[ \t]*$", text):
+            continue  # user already has this block -- never overwrite it
+        changed = True
+        text = text.rstrip("\n") + "\n\n" + "\n".join(block_lines) + "\n"
 
     if not changed:
         return False, "All required plugins and pluginpath already configured"
