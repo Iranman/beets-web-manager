@@ -154,7 +154,8 @@ def save_config(
                 tmp_path.unlink()
             except Exception:
                 pass
-        raise ConfigError(f"Failed to write configuration file: {exc}") from exc
+        log.error("Failed to write configuration file %s: %s", cfg, exc)
+        raise ConfigError("Failed to write configuration file.") from exc
 
     new_rev = compute_revision(content)
     return {
@@ -183,7 +184,8 @@ def revert_config(
     try:
         backup_content = bak.read_text(encoding="utf-8")
     except Exception as exc:
-        raise ConfigError(f"Failed to read backup configuration: {exc}") from exc
+        log.error("Failed to read backup configuration %s: %s", bak, exc)
+        raise ConfigError("Failed to read backup configuration.") from exc
 
     valid, err_msg = validate_config_yaml(backup_content)
     if not valid:
@@ -203,7 +205,8 @@ def revert_config(
                 tmp_path.unlink()
             except Exception:
                 pass
-        raise ConfigError(f"Failed to revert configuration: {exc}") from exc
+        log.error("Failed to revert configuration %s: %s", cfg, exc)
+        raise ConfigError("Failed to revert configuration.") from exc
 
     new_rev = compute_revision(backup_content)
     return {

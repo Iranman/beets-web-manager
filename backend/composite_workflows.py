@@ -102,6 +102,17 @@ def _get_staging_roots() -> List[Path]:
     return paths
 
 
+def _is_within_music_root(path: Union[str, Path]) -> bool:
+    """True if path resolves inside MUSIC_ROOT -- the only tree these
+    artist/album folder-inventory helpers are meant to walk or list."""
+    music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
+    try:
+        p = Path(path).resolve()
+    except Exception:
+        return False
+    return p == music_root or music_root in p.parents
+
+
 def _is_safe_staging_path(path: Union[str, Path]) -> bool:
     p = Path(path).resolve()
     music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
@@ -682,6 +693,8 @@ def plan_track_replacement(
         return {"ok": False, "error": f"Item {item_id} not found in library"}
     if not source_path or not os.path.exists(source_path):
         return {"ok": False, "error": f"Candidate source audio file not found: {source_path}"}
+    if not _is_safe_staging_path(source_path):
+        return {"ok": False, "error": "Replacement source must be within a staging/download root"}
 
     target_path = _decode_path(item.get("path"))
     changes = [{
@@ -1702,11 +1715,13 @@ def _get_playlist_dir() -> Path:
     return base
 
 
+def _sanitize_playlist_key(playlist_key: str) -> str:
+    safe_key = "".join(c for c in _decode_path(playlist_key) if c.isalnum() or c in ("-", "_")).strip()
+    return safe_key or "playlist"
+
+
 def _get_playlist_m3u_path(playlist_key: str, display_name: str = "") -> Path:
-    safe_key = "".join(c for c in playlist_key if c.isalnum() or c in ("-", "_")).strip()
-    if not safe_key:
-        safe_key = "playlist"
-    return _get_playlist_dir() / f"{safe_key}.m3u"
+    return _get_playlist_dir() / f"{_sanitize_playlist_key(playlist_key)}.m3u"
 
 
 def read_playlist_m3u(playlist_key: str, fallback_name: str = "") -> Dict[str, Any]:
@@ -1746,7 +1761,7 @@ def list_playlist_m3u() -> Dict[str, Any]:
 
 
 def ensure_playlist_staging(playlist_key: str, playlist_id: str = "", name: str = "") -> Dict[str, Any]:
-    stg_dir = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "playlist_staging" / playlist_key
+    stg_dir = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "playlist_staging" / _sanitize_playlist_key(playlist_key)
     stg_dir.mkdir(parents=True, exist_ok=True)
     return {"ok": True, "path": str(stg_dir)}
 
@@ -1758,14 +1773,16 @@ def delete_playlist_staged_track(playlist_key: str, track_id: str, requested_pat
 
 
 def inspect_playlist_staged_track(playlist_key: str, track_id: str, requested_path: str = "") -> Dict[str, Any]:
-    p = Path(requested_path)
+    if not requested_path or not _is_safe_staging_path(requested_path):
+        return {"ok": False, "exists": False}
+    p = Path(requested_path).resolve()
     if not p.exists():
         return {"ok": False, "exists": False}
     return {"ok": True, "exists": True, "path": str(p), "size": p.stat().st_size}
 
 
 def list_playlist_staged_files(playlist_key: str, playlist_id: str = "") -> Dict[str, Any]:
-    stg_dir = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "playlist_staging" / playlist_key
+    stg_dir = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "playlist_staging" / _sanitize_playlist_key(playlist_key)
     if not stg_dir.exists():
         return {"ok": True, "files": []}
     files = [str(f) for f in stg_dir.rglob("*") if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS]
@@ -1781,7 +1798,9 @@ def get_playlist_quality_candidates(playlist_key: str, track_id: str, adapter: O
 
 
 def validate_playlist_staged_track(playlist_key: str, track_id: str, requested_path: str) -> Dict[str, Any]:
-    p = Path(requested_path)
+    if not requested_path or not _is_safe_staging_path(requested_path):
+        return {"ok": True, "valid": False, "path": requested_path}
+    p = Path(requested_path).resolve()
     valid = p.exists() and p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
     return {"ok": True, "valid": valid, "path": requested_path}
 
@@ -1841,6 +1860,8 @@ def resolve_folder_to_albums(
     adapter: Optional[BeetsAdapter] = None,
 ) -> List[int]:
     """Find all distinct album IDs associated with files under folder_path."""
+    if not _is_within_music_root(folder_path):
+        return []
     ad = adapter or beets_adapter
     p_norm = _decode_path(folder_path).rstrip("/\\")
     items = ad.get_items()
@@ -1855,20 +1876,32 @@ def resolve_folder_to_albums(
 
 
 def get_folder_items(
-    folder_path: str,
+    folder_path: Union[str, List[str]],
     adapter: Optional[BeetsAdapter] = None,
 ) -> List[Dict[str, Any]]:
+    """Return items whose path starts with folder_path, or with any of its
+    entries when a list of prefixes is given (e.g. several album folders'
+    worth of candidate paths in one lookup)."""
+    prefixes = folder_path if isinstance(folder_path, list) else [folder_path]
+    norm_prefixes = [_decode_path(p).rstrip("/\\") for p in prefixes]
+    norm_prefixes = [p for p in norm_prefixes if p and _is_within_music_root(p)]
+    if not norm_prefixes:
+        return []
     ad = adapter or beets_adapter
-    p_norm = _decode_path(folder_path).rstrip("/\\")
     items = ad.get_items()
-    return [it for it in items if _decode_path(it.get("path")).startswith(p_norm)]
+    return [
+        it for it in items
+        if any(_decode_path(it.get("path")).startswith(p) for p in norm_prefixes)
+    ]
 
 
 def get_artist_folder_inventory(
     root: str,
     adapter: Optional[BeetsAdapter] = None,
 ) -> List[Dict[str, Any]]:
-    p = Path(root)
+    if not _is_within_music_root(root):
+        return []
+    p = Path(root).resolve()
     if not p.exists() or not p.is_dir():
         return []
     results = []
@@ -1920,10 +1953,61 @@ def get_rgid_group_detail(rgid: str, adapter: Optional[BeetsAdapter] = None) -> 
     return {"ok": True, "mb_releasegroupid": rgid, "albums": albums, "count": len(albums)}
 
 
-def get_unmatched_review_items(adapter: Optional[BeetsAdapter] = None) -> List[Dict[str, Any]]:
+def get_unmatched_review_items(
+    adapter: Optional[BeetsAdapter] = None,
+    limit: int = 500,
+    offset: int = 0,
+    include_singletons: bool = True,
+) -> Dict[str, Any]:
+    """Return albums, and optionally singleton items, missing a MusicBrainz
+    identity, for the Import Review "Needs MB ID" queue.
+
+    Albums come from the `albums` table (missing mb_albumid), annotated
+    with their first item's id/path and a track count -- beetsplug.web
+    doesn't expose either directly, so this derives them from a single
+    pass over all items rather than one lookup per album.
+
+    Singletons are already-imported items with no album row (album_id is
+    NULL) missing mb_trackid. They can never appear in the albums-table
+    query above, so without this they stay invisible to Import Review even
+    though Library's disk-folder grouping already flags them.
+    """
     ad = adapter or beets_adapter
-    items = ad.get_items()
-    return [it for it in items if not it.get("mb_albumid")]
+    all_items = ad.get_items()
+
+    by_album: Dict[int, List[Dict[str, Any]]] = {}
+    singleton_candidates: List[Dict[str, Any]] = []
+    for it in all_items:
+        album_id = it.get("album_id")
+        if album_id:
+            by_album.setdefault(int(album_id), []).append(it)
+        elif not it.get("mb_trackid"):
+            singleton_candidates.append(it)
+
+    unmatched_albums: List[Dict[str, Any]] = []
+    for a in ad.get_albums():
+        if a.get("mb_albumid"):
+            continue
+        aid = int(a["id"])
+        album_items = sorted(
+            by_album.get(aid, []),
+            key=lambda it: (int(it.get("track") or 0), int(it.get("id") or 0)),
+        )
+        first_item = album_items[0] if album_items else {}
+        row = dict(a)
+        row["first_item_id"] = first_item.get("id", 0)
+        row["first_item_path"] = first_item.get("path", "")
+        row["tracks"] = len(album_items)
+        unmatched_albums.append(row)
+    unmatched_albums.sort(key=lambda r: float(r.get("added") or 0))
+
+    singleton_candidates.sort(key=lambda it: float(it.get("added") or 0))
+
+    end = offset + limit if limit else None
+    return {
+        "albums": unmatched_albums[offset:end],
+        "singletons": singleton_candidates[offset:end] if include_singletons else [],
+    }
 
 
 def inspect_import_source(
@@ -1931,7 +2015,13 @@ def inspect_import_source(
     operation: str = "import",
     timeout: float = 60.0,
 ) -> Dict[str, Any]:
-    p = Path(source_path)
+    # source_path reaches here from several callers (reimport scans, album
+    # cleanup, manual discovery) with inconsistent upstream validation --
+    # enforce containment here, at the actual filesystem-walking sink,
+    # rather than trusting every present and future caller to do it first.
+    if not _is_within_music_root(source_path) and not _is_safe_staging_path(source_path):
+        return {"ok": False, "exists": False, "error": f"Path is outside approved roots: {source_path}"}
+    p = Path(source_path).resolve()
     if not p.exists():
         return {"ok": False, "exists": False, "error": f"Path not found: {source_path}"}
     audio_files = []

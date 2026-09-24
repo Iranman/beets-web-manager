@@ -5737,7 +5737,10 @@ def _album_item_position_hints(item: Dict[str, Any]) -> tuple:
 
 
 def _slskd_title_guess_from_name(name: str) -> str:
-    stem = _strip_track_filename_id_suffix(Path(_s(name).replace("\\", "/")).stem)
+    # Cap input length before any regex work below: `name` can come from
+    # untrusted Soulseek/slskd search results (no filesystem length limit
+    # applies yet), and filenames are never legitimately this long.
+    stem = _strip_track_filename_id_suffix(Path(_s(name)[:400].replace("\\", "/")).stem)
     scene_matches = [
         m for m in re.finditer(r"(?:^|[\s._-])(\d{1,3})\s*[-_.]\s*(?=\D)", stem)
         if m.start(1) > 0 and len(m.group(1)) >= 2
