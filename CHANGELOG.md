@@ -6,6 +6,27 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.27 - 2026-09-26
+
+Canonical album identity: identity verification split from release completeness (ARCH-002 Part 3).
+
+### Changed
+- **`backend/matching/models.py`**: new `IdentityProof` (INSUFFICIENT / RELEASE_GROUP_ID / DETERMINISTIC_TRACK_RECORDING_ID / CONFIRMED_RELEASE) and `ActionScope` (FULL_RELEASE / VERIFIED_SUBSET) enums. `ReleaseGroupMatchResult` now reports identity proof plus local and target track coverage as separate facts, and `MatchPolicy.scope` selects what an operation needs proven. The default `FULL_RELEASE` scope behaves exactly as before.
+- **`backend/matching_contract.py`**: `build_album_matching_decision` no longer computes its own `identity_verified`/`action_allowed`. It now uses the canonical `identity_proof` and `can_auto_accept(scope=VERIFIED_SUBSET)`.
+- Removed the dead duplicate track scorer from `backend/mb_alignment.py`. Both alignment helpers now resolve to the canonical `backend.matching` functions.
+
+### Fixed
+- A local album whose `mb_releasegroupid` matched the candidate's could authorize automatic action with no track-level evidence at all. A bare Release Group ID match no longer authorizes action.
+- A partial album (for example 2 of 18 tracks) where every local track is proven by an exact Recording ID still authorizes action on those tracks. It no longer depends on whole-release completeness.
+
+### Tests
+- `tests/test_arch002_matching_corpus.py::TestArch002PartialAlbumIdentity` covers these cases:
+  - a 2-of-18 deterministic subset is allowed under VERIFIED_SUBSET and denied under FULL_RELEASE
+  - a bare Release Group ID match is denied
+  - a Recording ID conflict is denied
+  - a mix of deterministic and text-only tracks is denied
+  - a duplicate local claim is denied
+  - an AcoustID conflict is denied
 ## v0.1.26 - 2026-09-24
 
 Live TrueNAS deployment validation and code-scanning closure pass.
