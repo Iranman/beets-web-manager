@@ -18,6 +18,17 @@ from .models import (
     TrackAssignment,
     UnmatchedLocalTrack,
 )
+from .recording import (
+    HARD_CONFLICTS as RECORDING_HARD_CONFLICTS,
+    AcoustIDRecordingEvidence,
+    RecordingIdentityProof,
+    RecordingMatchResult,
+    acoustid_evidence_from_claims,
+    acoustid_evidence_from_hits,
+    best_recording_candidates,
+    evaluate_recording_candidate,
+    verify_audio_against_request,
+)
 from .normalize import (
     normalize_artist,
     normalize_title,
@@ -38,8 +49,17 @@ from .track_alignment import (
 )
 
 __all__ = [
+    "AcoustIDRecordingEvidence",
     "AcoustIDStatus",
     "ActionScope",
+    "RECORDING_HARD_CONFLICTS",
+    "RecordingIdentityProof",
+    "RecordingMatchResult",
+    "acoustid_evidence_from_claims",
+    "acoustid_evidence_from_hits",
+    "best_recording_candidates",
+    "evaluate_recording_candidate",
+    "verify_audio_against_request",
     "ConfidenceState",
     "DEFAULT_MATCH_POLICY",
     "IdentityProof",

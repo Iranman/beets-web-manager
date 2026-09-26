@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 try:
     from matching import align_tracks_global
@@ -36,8 +36,14 @@ def _mb_norm(track: Dict[str, Any]) -> str:
     return _s(track.get("title_norm") or _mb_title(track).casefold())
 
 
-def align_tracks(local_files: List[str], mb_tracks: List[Dict[str, Any]], similarity_fn: SimilarityFn) -> List[Dict[str, Any]]:
+def align_tracks(local_files: List[str], mb_tracks: List[Dict[str, Any]],
+                 similarity_fn: Optional[SimilarityFn] = None) -> List[Dict[str, Any]]:
     """Align local files to MusicBrainz tracks by global one-to-one evidence.
+
+    ARCH-002: alignment is canonical (align_tracks_global with
+    trust_model="fresh_reviewed_import"). ``similarity_fn`` is accepted for
+    call-site compatibility only and is intentionally unused -- there is no
+    second title scorer.
 
     This intentionally avoids positional matching so a missing first track does
     not shift every subsequent local file onto the wrong MusicBrainz row. The

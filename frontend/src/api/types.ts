@@ -126,6 +126,15 @@ export interface RecordingMatchDecision {
   release_group_match?: RecordingMatchField;
   confidence_score?: number;
   safety_result?: string;
+  /** Canonical backend decision (backend/matching/recording.py). The UI
+   * displays these; it never recomputes eligibility from scores. */
+  confidence_state?: 'confirmed' | 'strong_match' | 'review_recommended' | 'conflict' | 'insufficient_evidence' | string;
+  identity_proof?: 'insufficient' | 'textual_support' | 'embedded_recording_id' | 'acoustid_recording_id' | 'multi_source_deterministic' | string;
+  hard_conflicts?: string[];
+  review_reasons?: string[];
+  warnings?: string[];
+  eligibility_reason?: string;
+  action_eligibility?: { attach_without_review?: boolean; destructive_use?: boolean };
 }
 
 export interface ReviewRecordingCandidate {
@@ -201,6 +210,8 @@ export interface ReviewPreflight {
   error?: string;
   examples?: string[];
   reason?: string;
+  /** Canonical album decision (build_album_matching_decision). */
+  matching_decision?: { action_allowed?: boolean; explanation?: string; reason_code?: string } | null;
 }
 
 export interface ReviewEvidence {

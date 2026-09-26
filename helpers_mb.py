@@ -1,5 +1,5 @@
 """MusicBrainz / AcoustID API helpers — no app.py dependencies."""
-import json, os, re, shutil, subprocess, threading, time
+import json, logging, os, re, shutil, subprocess, threading, time
 import urllib.error, urllib.parse, urllib.request
 from backend.security import install_secure_urllib
 install_secure_urllib()
@@ -630,6 +630,31 @@ def _clean_for_mb(title: str, artist: str):
     return title, artist
 
 
+_ACOUSTID_SERVICE_ERRORS_LOGGED: set = set()
+ACOUSTID_LAST_SERVICE_ERROR: Dict[str, Any] = {}
+
+
+def _note_acoustid_service_error(http_status: int, body: Any) -> None:
+    """Record and log (once per error code per process) an AcoustID service
+    error. Never logs the API key or fingerprint."""
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    message = str(error.get("message") or "") if isinstance(error, dict) else ""
+    ACOUSTID_LAST_SERVICE_ERROR.update({
+        "http_status": int(http_status or 0), "code": code, "message": message[:200], "at": time.time(),
+    })
+    key = (http_status, code)
+    if key in _ACOUSTID_SERVICE_ERRORS_LOGGED:
+        return
+    _ACOUSTID_SERVICE_ERRORS_LOGGED.add(key)
+    hint = " -- check ACOUSTID_API_KEY" if code == 4 else ""
+    logging.getLogger("helpers_mb").warning(
+        "AcoustID lookup rejected by service (http=%s code=%s message=%s)%s; "
+        "fingerprint evidence is unavailable until this is fixed.",
+        http_status, code, message[:200], hint,
+    )
+
+
 def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
     """Run fpcalc + AcoustID lookup. Returns list of MB recording candidate dicts."""
     fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
@@ -670,11 +695,22 @@ def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
             with _ur.urlopen(req, timeout=15) as r2:
                 data = json.loads(r2.read())
             break
+        except urllib.error.HTTPError as http_err:
+            # A rejected request (invalid API key, bad fingerprint) is a
+            # service error, not "no match". It still returns [] to callers,
+            # but must never be silent.
+            try:
+                data = json.loads(http_err.read() or b"{}")
+            except Exception:
+                data = {}
+            _note_acoustid_service_error(http_err.code, data)
+            return []
         except Exception:
             if attempt >= 1:
                 return []
             time.sleep(1.0)
     if data.get("status") != "ok":
+        _note_acoustid_service_error(0, data)
         return []
     out = []
     seen_mbids: set = set()

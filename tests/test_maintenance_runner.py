@@ -76,7 +76,7 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("_maintenance_full_duplicate_scan", self.app_source)
         self.assertIn("_maintenance_full_duplicate_scan(", self.runner_source)
         self.assertIn("_maintenance_same_file_hash", self.app_source)
-        self.assertIn('match_type == "identical file size" and _maintenance_same_file_hash', self.app_source)
+        self.assertIn("same_file=_maintenance_same_file_hash", self.app_source)
         self.assertIn("dedup_scan()", self.app_source)
         self.assertIn("dedup_cleanup()", self.app_source)
         self.assertIn('json={"path": str(MUSIC_ROOT)}', self.app_source)

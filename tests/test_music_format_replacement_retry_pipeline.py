@@ -60,7 +60,7 @@ class ReplacementRetryPipelineTests(unittest.TestCase):
     def test_uncertain_album_context_needs_review_before_download(self):
         replace_source = function_source("_music_format_replace_rows")
         payload_source = function_source("_music_format_replacement_payload")
-        self.assertIn('album_context = _s(resolved.get("mb_releasegroupid") or resolved.get("mb_albumid") or "").strip()', replace_source)
+        self.assertIn('album_context = _s(resolved.get("mb_releasegroupid") or "").strip()', replace_source)
         self.assertIn('stage="album_context_resolution"', replace_source)
         self.assertIn('Could not confidently identify album context', replace_source)
         self.assertNotIn('row.get("album") or row.get("title")', payload_source)
@@ -68,7 +68,9 @@ class ReplacementRetryPipelineTests(unittest.TestCase):
     def test_acoustid_resolved_orphan_track_uses_recording_identity(self):
         resolver_source = function_source("_music_format_resolve_replacement_identity")
         self.assertIn('_acoustid_lookup_cached(str(path))', resolver_source)
-        self.assertIn('resolved["acoustid_mb_trackid"]', resolver_source)
+        self.assertIn('recording_review.apply_replacement_identity(', resolver_source)
+        service = (Path(__file__).resolve().parents[1] / "backend" / "recording_review.py").read_text(encoding="utf-8")
+        self.assertIn('resolved["acoustid_mb_trackid"]', service)
         self.assertIn('AcoustID match found', resolver_source)
 
     def test_unresolved_orphan_needs_review_not_retry_loop(self):

@@ -401,7 +401,7 @@ from backend.matching_contract import (
     build_recording_matching_decision,
     compute_decision_version,
 )
-from backend.matching import AcoustIDStatus, evaluate_release_group_candidate
+from backend.matching import AcoustIDStatus, evaluate_release_group_candidate, verify_audio_against_request
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -433,7 +433,10 @@ from backend.beets_adapter import (
     BeetsAdapterConnectionError, BeetsAdapterTimeoutError, StockBeetsLibrary,
 )
 import backend.composite_workflows as composite_workflows
+import backend.recording_review as recording_review
+import backend.duplicate_identity as _duplicate_identity
 import backend.config_manager as config_manager
+from backend.config_manager import ConfigConflictError, ConfigError, ConfigValidationError
 
 
 def _read_file_media_tags(path: Any) -> Dict[str, Any]:
@@ -4096,29 +4099,15 @@ def _reconstruct_track_recording_candidates(item, iid: int):
     if not mb_text_cands and _mb_a:
         mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
 
-    seen_ids: set = set()
-    mb_candidates: List[Dict[str, Any]] = []
-    for c in acoustid_cands + mb_text_cands:
-        mid = c.get("mb_trackid", "")
-        if mid and mid not in seen_ids:
-            seen_ids.add(mid)
-            is_acoustid = c in acoustid_cands
-            c["source"] = c.get("source") or ("acoustid" if is_acoustid else "mb")
-            c["fingerprint_attempted"] = bool(item_path)
-            c["fingerprint_matched"] = bool(is_acoustid)
-            c["fingerprint_status"] = c.get("fingerprint_status") or (
-                "matched" if is_acoustid else ("no_result" if item_path else "not_attempted")
-            )
-            c["mapped_recording_id"] = mid if is_acoustid else ""
-            c["_match_score"] = _score_track_ai_candidate(current, _mb_t, _mb_a, filename, c)
-            mb_candidates.append(c)
-    mb_candidates.sort(key=lambda c: c.get("_match_score", {}).get("total", 0), reverse=True)
-    mb_candidates = mb_candidates[:8]
-    for c in mb_candidates:
-        _enrich_track_ai_candidate(current, c, item_id=iid)
-    mb_candidates.sort(key=lambda c: c.get("_match_score", {}).get("total", 0), reverse=True)
-    for idx, c in enumerate(mb_candidates):
-        c["candidate_index"] = idx
+    mb_candidates = recording_review.merge_recording_candidates(
+        acoustid_cands, mb_text_cands, item_path=item_path,
+        score_fn=lambda c: _score_track_ai_candidate(current, _mb_t, _mb_a, filename, c),
+    )
+    recording_review.enrich_and_index(
+        mb_candidates,
+        lambda c, hits: _enrich_track_ai_candidate(current, c, item_id=iid, acoustid_hits=hits),
+        recording_review.acoustid_hits_for(item_path, acoustid_cands),
+    )
     return current, mb_candidates, item_path, filename
 
 
@@ -4717,7 +4706,8 @@ def _track_ai_match_status(score: float, strong: float = 0.82, fuzzy: float = 0.
 
 
 def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any], details: Optional[Dict[str, Any]] = None,
-                               *, ai_state: Optional[AiState] = None, item_id: Optional[int] = None) -> Dict[str, Any]:
+                               *, ai_state: Optional[AiState] = None, item_id: Optional[int] = None,
+                               acoustid_hits: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     details = details or {}
     mb_trackid = _s(candidate.get("mb_trackid") or details.get("recording_id") or "").strip().lower()
     if mb_trackid and not details:
@@ -4734,6 +4724,7 @@ def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any
         linked_releases=linked_releases,
         ai_state=ai_state,
         similarity_fn=_track_ai_similarity,
+        acoustid_hits=acoustid_hits,
     )
     candidate.update(matching_result.to_review_recording_candidate())
     if item_id is not None:
@@ -4948,42 +4939,19 @@ def ai_suggest(iid):
     # ── 3. Discogs (supplemental genre / label info) ──────────────────────────
     discogs_cands = _discogs_track_search(_mb_t, _mb_a, limit=3)
 
-    # Merge AcoustID + MB, deduplicate by mb_trackid
-    seen_ids: set = set()
-    mb_candidates: List[Dict[str, Any]] = []
-    for c in acoustid_cands + mb_text_cands:
-        mid = c.get("mb_trackid", "")
-        if mid and mid not in seen_ids:
-            seen_ids.add(mid)
-            is_acoustid = c in acoustid_cands
-            c["source"] = c.get("source") or ("acoustid" if is_acoustid else "mb")
-            # Explicit fingerprint provenance: true only for candidates that
-            # actually came back from a successful AcoustID lookup, not
-            # inferred later from source string or score alone.
-            c["fingerprint_attempted"] = bool(item_path)
-            c["fingerprint_matched"] = bool(is_acoustid)
-            c["fingerprint_status"] = c.get("fingerprint_status") or (
-                "matched" if is_acoustid else ("no_result" if item_path else "not_attempted")
-            )
-            c["mapped_recording_id"] = mid if is_acoustid else ""
-            c["_match_score"] = _score_track_ai_candidate(
-                current,
-                _mb_t,
-                _mb_a,
-                filename,
-                c,
-            )
-            mb_candidates.append(c)
-    mb_candidates.sort(key=lambda c: c.get("_match_score", {}).get("total", 0), reverse=True)
-    mb_candidates = mb_candidates[:8]
-    for c in mb_candidates:
-        try:
-            _enrich_track_ai_candidate(current, c, item_id=iid)
-        except Exception as exc:
-            c["enrichment_error"] = _s(exc)
-    mb_candidates.sort(key=lambda c: c.get("_match_score", {}).get("total", 0), reverse=True)
-    for idx, c in enumerate(mb_candidates):
-        c["candidate_index"] = idx
+    # Merge AcoustID + MB, deduplicate by mb_trackid (candidate generation
+    # only -- the canonical evaluator decides, with the full hit set).
+    acoustid_hits = recording_review.acoustid_hits_for(item_path, acoustid_cands)
+    mb_candidates = recording_review.merge_recording_candidates(
+        acoustid_cands, mb_text_cands, item_path=item_path,
+        score_fn=lambda c: _score_track_ai_candidate(current, _mb_t, _mb_a, filename, c),
+    )
+    recording_review.enrich_and_index(
+        mb_candidates,
+        lambda c, hits: _enrich_track_ai_candidate(current, c, item_id=iid, acoustid_hits=hits),
+        acoustid_hits,
+        swallow_errors=True,
+    )
 
     mb_section = ""
     if mb_candidates:
@@ -5179,7 +5147,10 @@ def ai_suggest(iid):
                             if ai_contributed else {}
                         ),
                     )
-                    _enrich_track_ai_candidate(current, selected_candidate, details, ai_state=ai_state_for_selected)
+                    _enrich_track_ai_candidate(
+                        current, selected_candidate, details,
+                        ai_state=ai_state_for_selected, acoustid_hits=acoustid_hits,
+                    )
                     # Fields MB fills authoritatively (override AI guesses)
                     _mb_authoritative = {"artist", "mb_albumid", "mb_artistid",
                                          "track", "tracktotal", "disc", "disctotal",
@@ -11768,9 +11739,10 @@ def album_remove(aid):
     if not album_obj:
         return jsonify({"ok": False, "error": f"Album {aid} not found in library"}), 404
 
-    items = _album_items_list(album_obj)
-    item_ids = [getattr(it, "id", None) or it.get("id") for it in items if (hasattr(it, "id") or (isinstance(it, dict) and "id" in it))]
-    item_ids = [int(i) for i in item_ids if i is not None and str(i).isdigit()]
+    item_ids = [
+        int(i) for i in (getattr(it, "id", None) for it in lib.items(f"album_id:{aid}"))
+        if i is not None and str(i).isdigit()
+    ]
 
     def _do(log, cancel_event=None):
         log.append(f"Removing album '{_s(album_obj.album)}' (id={aid}) via engine controlled transaction…")
@@ -11807,12 +11779,12 @@ def album_remove(aid):
 
         _invalidate_lib_cache()
 
-    job_id = jobs.create(
-        f"Remove Album: {_s(album_obj.album or f'id={aid}')}",
+    job = jobs.start_python(
         _do,
-        meta={"album_id": aid, "type": "album_remove", "delete_files": delete_files}
+        label=f"Remove Album: {_s(album_obj.album or f'id={aid}')}",
+        metadata={"album_id": aid, "type": "album_remove", "delete_files": delete_files},
     )
-    return jsonify({"ok": True, "job_id": job_id})
+    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/rename")
@@ -17500,9 +17472,9 @@ def _build_folder_evidence(folder_path: str) -> Dict[str, Any]:
                 track_titles.append(_stem)
                 track_lines.append(f"  {_stem}")
             # Collect tag-derived metadata for artist/album/year guessing
-            _ta = (getattr(mf, "albumartist", "") or mf.artist or "").strip()
-            _tb = (mf.album or "").strip()
-            _ty = str(mf.year or "").strip()
+            _ta = str(tags.get("albumartist") or tags.get("artist") or "").strip()
+            _tb = str(tags.get("album") or "").strip()
+            _ty = str(tags.get("year") or "").strip()[:4]
             if _ta:
                 tag_artists.append(_ta)
             if _tb:
@@ -18080,58 +18052,24 @@ def _audio_identity_decision(file_path: str, *, expected_artist: str = "",
         "mb_release_group_id_candidate": _s(top.get("mb_releasegroupid") or ""),
     })
 
-    expected_mbid = _s(expected_mb_trackid).strip().lower()
-    expected_title = _s(expected_title).strip()
-    expected_artist = _s(expected_artist).strip()
-    confirmed: Optional[Dict[str, Any]] = None
-    confirmed_by = ""
-    for cand in candidates[:5]:
-        cand_mbid = _s(cand.get("mb_trackid") or "").strip().lower()
-        cand_title = _s(cand.get("title") or "").strip()
-        cand_artist = _s(cand.get("artist") or "").strip()
-        mbid_ok = bool(expected_mbid and cand_mbid and cand_mbid == expected_mbid)
-        title_ok = bool(expected_title and cand_title and _playlist_title_score(expected_title, cand_title) >= 0.78)
-        artist_ok = bool(
-            not expected_artist
-            or not cand_artist
-            or _playlist_artist_name_score(expected_artist, cand_artist) >= 0.72
-        )
-        if mbid_ok or (title_ok and artist_ok):
-            confirmed = cand
-            confirmed_by = "MusicBrainz recording ID" if mbid_ok else "AcoustID title/artist evidence"
-            break
-
-    if confirmed:
-        result.update({
-            "acoustid_status": "confirmed",
-            "acoustid_match_score": _audio_identity_score(confirmed),
-            "acoustid_id": _s(confirmed.get("acoustid_id") or ""),
-            "mb_recording_id_candidate": _s(confirmed.get("mb_trackid") or ""),
-            "mb_release_group_id_candidate": _s(confirmed.get("mb_releasegroupid") or ""),
-            "metadata_agreement": "match",
-            "ai_assessment": "Fingerprint evidence agrees with the requested recording context.",
-            "final_confidence": "high" if _audio_identity_score(confirmed) >= 0.80 else "medium",
-            "decision_reason": f"Verified by {confirmed_by} from AcoustID fingerprint evidence.",
-            "final_action": "accept",
-            "identity_status": "verified",
-            "conflicts": [],
-        })
-        return result
-
-    title_score = float(text_match.get("title_score") or 0)
-    artist_score = float(text_match.get("artist_score") or 0)
-    result.update({
-        "acoustid_status": "mismatch",
-        "metadata_agreement": "conflict",
-        "ai_assessment": "Fingerprint evidence conflicts with the requested metadata; do not trust filename or tags alone.",
-        "final_confidence": "high" if result["acoustid_match_score"] >= 0.80 else "medium",
-        "decision_reason": "AcoustID identified a different recording than the requested track.",
-        "conflicts": ["acoustid_metadata_conflict"],
-        "final_action": "reject" if result["acoustid_match_score"] >= 0.70 else "review",
-        "identity_status": "conflict" if result["acoustid_match_score"] >= 0.70 else "review_required",
-    })
-    if text_match.get("ok") or title_score >= 0.90 or artist_score >= 0.90:
-        result["conflicts"].append("text_metadata_disagrees_with_fingerprint")
+    # ARCH-002: the accept/review/reject verdict is canonical
+    # (backend.matching.verify_audio_against_request): canonical AcoustID
+    # score floor and ambiguity window, and an expected Recording ID that the
+    # fingerprint contradicts is never accepted on title/artist text.
+    verdict = verify_audio_against_request(
+        candidates,
+        expected_title=_s(expected_title).strip(),
+        expected_artist=_s(expected_artist).strip(),
+        expected_recording_id=_s(expected_mb_trackid).strip().lower(),
+        similarity_fn=_canonical_similarity,
+    )
+    chosen = next(
+        (c for c in candidates if _s(c.get("mb_trackid") or "").strip().lower() == verdict.get("recording_id")),
+        top,
+    )
+    result.update(recording_review.audio_identity_fields(
+        verdict, chosen, text_match, acoustid_score=_audio_identity_score(chosen),
+    ))
     return result
 
 
@@ -20272,6 +20210,21 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
         blockers.append("confidence below 60% auto-import threshold")
     if selected_match.get("preflight_status") and selected_match.get("preflight_status") != "passed":
         blockers.append("track preflight is not passed")
+    # ARCH-002: the canonical album decision is authoritative. The confidence
+    # threshold above may only narrow it -- a candidate the canonical
+    # evaluator refused (matching_decision.action_allowed=False, surfaced by
+    # _import_review_build_revalidated_match as is_importable=False) must never
+    # be auto-enqueued because a separate confidence number cleared 60%.
+    canonical_decision = (
+        selected_match.get("matching_decision") if isinstance(selected_match.get("matching_decision"), dict) else {}
+    )
+    if (
+        selected_match.get("matching_decision_blocks_import")
+        or (canonical_decision and not canonical_decision.get("action_allowed", False))
+    ):
+        blockers.append("canonical matching decision requires review")
+    elif selected_match.get("is_importable") is False:
+        blockers.append("revalidated match is not importable")
     if not selected_files:
         blockers.append("no verified local tracks selected for import")
 
@@ -23471,7 +23424,6 @@ def reimport_disk():
                 expected_deterministic_identity=expected_identity,
                 beets_options={
                     "mb_albumid": mb_albumid,
-                    "config_override": temp_cfg_content,
                     "duplicate_action": "keep" if existing_album_id else "remove",
                 },
                 timeout=import_timeout + 15.0,
@@ -27742,7 +27694,7 @@ def album_fix_genre(aid):
         if not genre:
             log.append("  AI could not determine genre")
             return
-        _apply_genre_to_album(aid, genre, log, env, cancel_event)
+        _apply_genre_to_album(aid, genre, log, cancel_event=cancel_event)
         _invalidate_lib_cache()
 
     label = f"Fix genre: {album.albumartist or '?'} — {album.album or '?'}"
@@ -28811,7 +28763,7 @@ def _resolve_album_title_duplicate_candidate(
     Used by dedup_scan to match files where the source folder represents the album name.
     Returns (candidate_item, match_type_str). Returns (None, "") on no match or query failure.
     """
-    log = logger_instance or logger
+    log = logger_instance or app.logger
     if not track_title or not folder_raw:
         return None, ""
 
@@ -29118,7 +29070,7 @@ def dedup_scan():
                     #    the source folder is "WILLOW (2019)" or "1999 - Californication"
                     if not lib_item and title:
                         cand_item, cand_match_type = _resolve_album_title_duplicate_candidate(
-                            lib, src.parent.name, title, logger_instance=logger
+                            lib, src.parent.name, title, logger_instance=app.logger
                         )
                         if cand_item:
                             lib_item = cand_item
@@ -29190,6 +29142,20 @@ def dedup_scan():
                     if fingerprint_verified and match_type not in reason_map:
                         reason += f" Confirmed by AcoustID audio fingerprint (recording {fingerprint_mbid})."
 
+                    # ARCH-009: a shared Recording ID (or fingerprint) proves the
+                    # same *recording*, not the same album. The same recording
+                    # on a studio album and a compilation is two legitimate
+                    # library entries, never a duplicate file to delete.
+                    known_source = path_to_item.get(source_key)
+                    source_item = known_source[0] if known_source else None
+                    release_relation = _duplicate_identity.release_relation(source_item, lib_item)
+                    if release_relation in ("different_release", "different_position"):
+                        confidence = "medium"
+                        reason += (
+                            " Both files are library tracks in different release slots -- same recording, "
+                            "not a duplicate file; review before removing either."
+                        )
+
                     dup = {
                         "source_path":          str(src),
                         "source_filename":      src.name,
@@ -29201,6 +29167,10 @@ def dedup_scan():
                         "lib_artist":           lib_item.artist or "",
                         "lib_album":            lib_item.album  or "",
                         "lib_id":               lib_item.id,
+                        "lib_album_id":         _duplicate_identity.item_album_id(lib_item),
+                        "source_item_id":       getattr(source_item, "id", None) if source_item is not None else None,
+                        "source_album_id":      _duplicate_identity.item_album_id(source_item),
+                        "release_relation":     release_relation,
                         "match_type":           match_type,
                         "confidence":           confidence,
                         "reason":               reason,
@@ -30155,19 +30125,27 @@ def _library_duplicate_merge_safety(rows: List[Any],
 
     if not sorted_rows or not source_ids:
         blockers.append("not enough album rows to merge")
-    if any(not mbid for mbid in mbids):
+    # ARCH-009: Release Group ID is canonical album identity for a merge.
+    # Every row sharing one non-blank RGID is the same album (different
+    # release IDs are just editions). When any row lacks an RGID, release ID
+    # may stand in only if every row carries the same concrete release --
+    # one release belongs to exactly one release group. A row with an
+    # unknown RGID never inherits another row's RGID.
+    all_rgids_known = bool(rgids) and all(rgids)
+    if len(nonblank_rgids) > 1:
+        blockers.append(
+            f"different MusicBrainz release-group IDs — these may be separate albums "
+            f"({', '.join(sorted(nonblank_rgids)[:3])})"
+        )
+    elif all_rgids_known:
+        pass  # one release group: canonical album identity established
+    elif any(not mbid for mbid in mbids):
         blockers.append("missing MusicBrainz release ID")
-    if len(nonblank_mbids) > 1:
-        # Different release IDs might be fine if they share the same release-group ID
-        if len(nonblank_rgids) > 1:
-            blockers.append(
-                f"different MusicBrainz release-group IDs — these may be separate albums "
-                f"({', '.join(sorted(nonblank_rgids)[:3])})"
-            )
-        elif len(nonblank_rgids) == 1:
-            pass  # same RGID, different release IDs = different editions, probably safe
-        else:
-            blockers.append("different MusicBrainz release IDs")
+    elif len(nonblank_mbids) > 1:
+        blockers.append(
+            "different MusicBrainz release IDs without a release-group ID on every row"
+            if nonblank_rgids else "different MusicBrainz release IDs"
+        )
 
     positions: Dict[Tuple[int, int], int] = {}
     unknown_position_albums: set[int] = set()
@@ -36065,65 +36043,16 @@ def _maintenance_duplicate_report(log: List[str], progress: Optional[Any] = None
     return result
 
 
-
 def _maintenance_same_file_hash(left: Path, right: Path) -> bool:
-    try:
-        if left.stat().st_size != right.stat().st_size:
-            return False
-        h_left = hashlib.sha256()
-        h_right = hashlib.sha256()
-        with left.open("rb") as left_fh, right.open("rb") as right_fh:
-            while True:
-                left_chunk = left_fh.read(1024 * 1024)
-                right_chunk = right_fh.read(1024 * 1024)
-                if left_chunk != right_chunk:
-                    return False
-                if not left_chunk:
-                    break
-                h_left.update(left_chunk)
-                h_right.update(right_chunk)
-        return h_left.digest() == h_right.digest()
-    except Exception:
-        return False
+    return _duplicate_identity.same_file_hash(left, right)
 
 
 def _maintenance_duplicate_cleanup_paths(scan_result: Dict[str, Any]) -> List[str]:
-    selected: List[str] = []
-    seen: set = set()
-    music_root = MUSIC_ROOT.resolve(strict=False)
-    for dup in scan_result.get("duplicates") or []:
-        if not isinstance(dup, dict):
-            continue
-        if _s(dup.get("confidence")).lower() != "high":
-            continue
-        match_type = _s(dup.get("match_type"))
-        raw_source = _s(dup.get("source_path")).strip()
-        raw_lib = _s(dup.get("lib_path")).strip()
-        if not raw_source or not raw_lib:
-            continue
-        try:
-            source = Path(raw_source).resolve(strict=False)
-            library_copy = Path(raw_lib).resolve(strict=False)
-        except Exception:
-            continue
-        if source == library_copy:
-            continue
-        if not _path_under(source, music_root):
-            continue
-        if not source.exists() or not source.is_file():
-            continue
-        if not library_copy.exists() or not library_copy.is_file():
-            continue
-        strong_identity = bool(dup.get("fingerprint_verified") or match_type in {"MB Track ID", "AcoustID fingerprint"})
-        exact_hash = match_type == "identical file size" and _maintenance_same_file_hash(source, library_copy)
-        if not (strong_identity or exact_hash):
-            continue
-        key = str(source).casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        selected.append(str(source))
-    return selected
+    # Rules live in backend/duplicate_identity.py (ARCH-009): deterministic
+    # identity or identical bytes, same album, one copy per pair.
+    return _duplicate_identity.select_unattended_cleanup_paths(
+        scan_result, MUSIC_ROOT, _path_under, same_file=_maintenance_same_file_hash,
+    )
 
 
 def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any] = None,
@@ -44351,6 +44280,9 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         playlist_id=pid,
         log=log,
     )
+    prior_rating_key = ""
+    if isinstance(manifest, dict):
+        prior_rating_key = _s((manifest.get("last_plex") or {}).get("rating_key") or "").strip()
 
     plex = {
         "created": False,
@@ -51637,49 +51569,21 @@ def _music_format_resolve_replacement_identity(row: Dict[str, Any], log: list) -
     path = Path(path_text) if path_text else Path("")
     if path_text and not path.is_absolute():
         path = MUSIC_ROOT / path_text
-    acoustid_candidates: List[Dict[str, Any]] = []
+    acoustid_hits: Optional[List[Dict[str, Any]]] = None
     if path_text and path.is_file():
         try:
-            acoustid_candidates = _acoustid_lookup_cached(str(path))
+            acoustid_hits = _acoustid_lookup_cached(str(path))
         except Exception as ex:
             log.append(f"  AcoustID lookup failed: {ex}")
-        if acoustid_candidates:
-            top = acoustid_candidates[0]
+        if acoustid_hits:
             log.append("  AcoustID match found")
-            if _audio_identity_score(top) >= 0.70:
-                resolved["mb_trackid"] = _s(top.get("mb_trackid") or resolved.get("mb_trackid") or "").strip().lower()
-                resolved["acoustid_mb_trackid"] = resolved.get("mb_trackid", "")
-                resolved["identity_mb_trackid"] = resolved.get("mb_trackid", "")
-                resolved["title"] = _s(top.get("title") or resolved.get("title") or "")
-                resolved["artist"] = _s(top.get("artist") or resolved.get("artist") or "")
-                if top.get("album") and not _s(resolved.get("album") or "").strip():
-                    resolved["album"] = _s(top.get("album") or "")
-                if top.get("year") and not _s(resolved.get("year") or "").strip():
-                    resolved["year"] = _s(top.get("year") or "")
-                if top.get("mb_releasegroupid"):
-                    resolved["mb_releasegroupid"] = _s(top.get("mb_releasegroupid") or "").strip().lower()
-
-    if not _s(resolved.get("mb_trackid") or "").strip() and title:
-        log.append("  Searching for metadata")
-        mb_candidates = _mb_recording_search(title, artist, limit=5)
-        if mb_candidates:
-            best = mb_candidates[0]
-            title_score = _playlist_title_score(title, _s(best.get("title") or ""))
-            artist_score = _playlist_artist_name_score(artist, _s(best.get("artist") or "")) if artist else 1.0
-            if int(best.get("score") or 0) >= 90 and title_score >= 0.85 and artist_score >= 0.70:
-                resolved["mb_trackid"] = _s(best.get("mb_trackid") or "").strip().lower()
-                resolved["resolved_mb_trackid"] = resolved["mb_trackid"]
-                resolved["title"] = _s(best.get("title") or resolved.get("title") or "")
-                resolved["artist"] = _s(best.get("artist") or resolved.get("artist") or "")
-                if best.get("album") and not _s(resolved.get("album") or "").strip():
-                    resolved["album"] = _s(best.get("album") or "")
-                if best.get("mb_albumid") and not _s(resolved.get("mb_albumid") or "").strip():
-                    resolved["mb_albumid"] = _s(best.get("mb_albumid") or "").strip().lower()
-                if best.get("year") and not _s(resolved.get("year") or "").strip():
-                    resolved["year"] = _s(best.get("year") or "")
-                log.append("  MusicBrainz recording resolved")
-            else:
-                resolved["review_reason"] = "multiple or weak MusicBrainz recording candidates remain plausible"
+    # Canonical recording identity: backend/recording_review.py.
+    recording_review.apply_replacement_identity(
+        resolved, title=title, artist=artist, filename=path.name if path_text else "",
+        acoustid_hits=acoustid_hits,
+        search_text=lambda t, a: _mb_recording_search(t, a, limit=5),
+        similarity_fn=_track_ai_similarity, log=log,
+    )
 
     mb_trackid = _s(resolved.get("mb_trackid") or "").strip().lower()
     if mb_trackid:
@@ -52124,7 +52028,10 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
             ])
             continue
 
-        album_context = _s(resolved.get("mb_releasegroupid") or resolved.get("mb_albumid") or "").strip()
+        # ARCH-009: the replacement's target album is identified by its
+        # Release Group; a bare Release ID (edition evidence) is never
+        # substituted when the release group could not be resolved.
+        album_context = _s(resolved.get("mb_releasegroupid") or "").strip()
         if not album_context:
             failed += 1
             reason = "Could not confidently identify album context"

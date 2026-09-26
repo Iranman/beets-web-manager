@@ -6,6 +6,35 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+Canonical single-recording evaluator, release-aware duplicate identity, and latent NameError fixes (ARCH-002 / ARCH-009).
+
+### Added
+- **`backend/matching/recording.py`** adds the canonical single-recording evaluator, `evaluate_recording_candidate`. It combines embedded Recording ID, AcoustID, title, artist, duration, filename, position and version-qualifier evidence, and reports a `RecordingIdentityProof` (insufficient / textual_support / embedded_recording_id / acoustid_recording_id / multi_source_deterministic). The same module adds `verify_audio_against_request` for checking downloaded audio against a request. AcoustID semantics match album alignment: a score floor of 80 and a 3-point ambiguity window.
+- **`backend/recording_review.py`** is a new service module. It handles recording-candidate generation (candidates only) and canonical replacement-identity resolution.
+- **`backend/duplicate_identity.py`** is a new service module for duplicate-file identity (release slot) and for selecting paths that unattended cleanup may delete.
+- **`scripts/audit_arch002_callers.py` + `docs/arch002_caller_audit.json`** add a CI-enforced classification of every production final-decision pattern hit.
+
+### Changed
+- `build_recording_matching_decision` takes its attach eligibility, safety key, confidence state, conflicts and review reasons only from the canonical evaluator, so there is no second decision tree. It also takes the real AcoustID hit set. **Policy change:** a MusicBrainz text-search candidate with no embedded Recording ID and no AcoustID proof is now "Needs review" (it can still be attached with confirmation). Previously it could be one-click "Safe to attach".
+- Import Review now shows identity proof, confidence state, hard conflicts, review reasons and backend attach eligibility for recording candidates. The AI-suggestion match builder honors the backend's canonical veto.
+- The format-replacement workflow now establishes identity canonically. An AcoustID hit can no longer silently replace the embedded Recording ID, and a text-search result alone goes to review. The target album requires a Release Group.
+- Playlist/download audio verification uses the canonical verdict. A fingerprint that names a different recording is never accepted because of title text.
+
+### Fixed
+- An MB text candidate that AcoustID contradicted was labelled "no result" and could be marked safe. It is now a hard conflict.
+- The unattended Import Review auto-enqueue ignored the canonical album veto (`matching_decision.action_allowed=False`).
+- Scheduled duplicate cleanup counted a shared Recording ID as duplicate-file identity, and for a mutual pair it selected **both** copies. On the live library, all 7 duplicated recordings would have lost every copy. Unattended deletion now requires the same release slot and keeps one copy.
+- Duplicate-album merge let a row with an unknown release group inherit another row's release group (ARCH-009).
+- Latent `NameError`s were fixed in:
+  - `dedup_scan`'s album+title step, which aborted scans
+  - `POST /api/albums/<id>/remove` (plus a nonexistent `jobs.create`)
+  - `reimport_disk` (`temp_cfg_content`)
+  - the AI genre fallback (`env`)
+  - Plex playlist re-verification (`prior_rating_key`)
+  - folder tag-evidence guessing (`mf`)
+  - `/api/config` error handlers (`ConfigError`)
+- AcoustID service rejections (for example an invalid API key) are now logged and recorded instead of looking like "no match".
+- Removed the dead confirmed-import title scorer, which was passed but never used.
 ## v0.1.27 - 2026-09-26
 
 Canonical album identity: identity verification split from release completeness (ARCH-002 Part 3).
