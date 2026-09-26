@@ -909,6 +909,10 @@ function recordingCandidateRowLabel({
   if (isFirstBackendCandidate) return 'First backend candidate';
   return 'Backend alternate candidate';
 }
+function humanizeCode(value?: string | null): string {
+  return (value || '').replace(/_/g, ' ');
+}
+
 function DetailRow({
   label,
   value,
@@ -1087,12 +1091,28 @@ function RecordingIdEvidencePanel({
               <DetailRow label="Release year/date" value={displayCandidate.release_year || displayCandidate.year || displayCandidate.release_date || displayCandidate.selected_release?.year || displayCandidate.selected_release?.date} />
               <DetailRow label="Backend status" value={displayCandidate.safety_result || displayCandidate.safety_key} />
               <DetailRow label="Recommended action" value={displayCandidate.recommended_action} />
+              <DetailRow label="Identity proof" value={humanizeCode(displayCandidate.decision?.identity_proof)} />
+              <DetailRow label="Confidence state" value={humanizeCode(displayCandidate.decision?.confidence_state)} />
+              <DetailRow
+                label="Attach without review"
+                value={displayCandidate.decision?.action_eligibility?.attach_without_review ? 'Allowed by backend' : 'Requires confirmation'}
+              />
+              <DetailRow label="Eligibility" value={displayCandidate.decision?.eligibility_reason} />
             </div>
           ) : (
             <div className="mt-2 text-zinc-700">Use Find Match or Enter MusicBrainz ID to load backend recording evidence.</div>
           )}
           {displayCandidate?.reason ? <div className="mt-2 text-zinc-700">{displayCandidate.reason}</div> : null}
+          {displayCandidate?.decision?.hard_conflicts?.length ? (
+            <div className="mt-2 font-medium text-rose-800">Hard conflicts: {displayCandidate.decision.hard_conflicts.map(humanizeCode).join(', ')}</div>
+          ) : null}
           {displayCandidate?.conflicts?.length ? <div className="mt-2 font-medium text-amber-800">Backend conflicts: {displayCandidate.conflicts.join(', ')}</div> : null}
+          {displayCandidate?.decision?.review_reasons?.length ? (
+            <div className="mt-2 text-amber-800">Review reasons: {displayCandidate.decision.review_reasons.map(humanizeCode).join(', ')}</div>
+          ) : null}
+          {displayCandidate?.decision?.warnings?.length ? (
+            <div className="mt-2 text-zinc-700">Warnings: {displayCandidate.decision.warnings.map(humanizeCode).join(', ')}</div>
+          ) : null}
           {decision?.year_match?.status === 'conflict' ? (
             <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-900">
               <div className="font-semibold">Year conflict</div>
@@ -1701,7 +1721,10 @@ function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
   const candidateIdentityError = (suggestion.candidate_identity_error || '').trim();
   const isReleaseGroupUsable = isMusicBrainzUuid(releaseGroupId);
   const hasRepresentativeRelease = isMusicBrainzUuid(representativeReleaseId);
-  const isImportable = identityValidated && isReleaseGroupUsable && hasRepresentativeRelease && importableTrackCount > 0 && status === 'passed';
+  // Backend authority: the canonical album decision can veto importability;
+  // the UI never re-derives eligibility past it.
+  const canonicalVeto = preflight?.matching_decision?.action_allowed === false;
+  const isImportable = identityValidated && isReleaseGroupUsable && hasRepresentativeRelease && importableTrackCount > 0 && status === 'passed' && !canonicalVeto;
   const confidenceScore = normalizedScoreValue(suggestion.confidence_score ?? undefined);
   let confidenceLevel = confidenceScore !== null ? confidenceLevelForScore(confidenceScore) : confidenceLevelFromAi(suggestion.confidence);
   if (!identityValidated || !isReleaseGroupUsable) {
@@ -1710,6 +1733,7 @@ function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
     confidenceLevel = 'not_importable';
   }
   const reason = candidateIdentityError
+    || (canonicalVeto ? (preflight?.matching_decision?.explanation || 'Backend matching decision requires review before import.') : '')
     || suggestion.preflight_note
     || (isPartialImport
       ? `Partial import ready: ${importableTrackCount} verified track${importableTrackCount === 1 ? '' : 's'} will import.${extraCount > 0 ? ` ${extraCount} unmatched file${extraCount === 1 ? '' : 's'} will stay in review.` : ''}${missingTrackCount > 0 ? ` ${missingTrackCount} album track${missingTrackCount === 1 ? '' : 's'} can be acquired later.` : ''}`
