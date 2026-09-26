@@ -23,7 +23,7 @@ import time
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 import unicodedata
 
@@ -10902,23 +10902,6 @@ def _confirmed_import_embedded_tag_conflict(
     return None
 
 
-def _confirmed_import_title_similarity(file_path: str, mb_title_norm: str) -> float:
-    """Self-contained title similarity for track_align.align_tracks's
-    similarity_fn -- deliberately not a new matcher, just enough
-    normalization to compare a local filename stem against an already-
-    normalized MusicBrainz track title."""
-    stem = Path(str(file_path)).stem
-    norm_stem = re.sub(r"[^a-z0-9]+", " ", stem.casefold()).strip()
-    norm_target = re.sub(r"[^a-z0-9]+", " ", str(mb_title_norm or "").casefold()).strip()
-    if not norm_stem or not norm_target:
-        return 0.0
-    from difflib import SequenceMatcher
-    score = SequenceMatcher(None, norm_stem, norm_target).ratio()
-    if set(norm_stem.split()) & set(norm_target.split()):
-        score = max(score, 0.70)
-    return score
-
-
 def _confirmed_import_acoustid_conflicts(
     comparison: List[Dict[str, Any]], mb_tracks: List[Dict[str, Any]], acoustid_lookup_fn: Optional[Any],
     *, min_conflict_score: int = 85,
@@ -11062,7 +11045,7 @@ def create_confirmed_import_plan(
     except ImportError:
         from backend.track_align import align_tracks, resolve_unmatched_via_acoustid
 
-    comparison = align_tracks(local_files, mb_tracks, _confirmed_import_title_similarity)
+    comparison = align_tracks(local_files, mb_tracks)
     if acoustid_lookup_fn is not None:
         try:
             resolve_unmatched_via_acoustid(comparison, acoustid_lookup_fn, fpcalc_available=True)

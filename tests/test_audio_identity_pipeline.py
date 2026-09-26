@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _app_ast_cache import get_app_ast  # noqa: E402
+from backend.matching import similarity as canonical_similarity, verify_audio_against_request  # noqa: E402
+import backend.recording_review as recording_review  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -47,6 +49,9 @@ class SharedAudioIdentityDecisionTests(unittest.TestCase):
             "_playlist_title_score": score,
             "_playlist_artist_name_score": score,
             "_acoustid_lookup_cached": lookup or (lambda path: []),
+            "verify_audio_against_request": verify_audio_against_request,
+            "_canonical_similarity": canonical_similarity,
+            "recording_review": recording_review,
         }
         load_symbols([
             "_audio_identity_score",

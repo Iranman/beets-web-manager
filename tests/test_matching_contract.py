@@ -976,7 +976,11 @@ class MatchingContractScoreSanitizationTests(unittest.TestCase):
 class MatchingContractCompatibilityRegressionTests(unittest.TestCase):
     """Section 10 & 12: realistic behavior/value regression coverage, not just key presence."""
 
-    def test_safe_musicbrainz_candidate(self):
+    def test_text_only_musicbrainz_candidate_requires_confirmation(self):
+        """ARCH-002 canonical recording policy: a MusicBrainz text-search
+        candidate with strong title/artist agreement but no embedded
+        Recording ID or AcoustID proof is STRONG_MATCH / TEXTUAL_SUPPORT --
+        usable after confirmation, never a one-click attach."""
         compat = build_recording_matching_decision(
             current=_local(), candidate=_candidate(), selected_release=_release()
         ).to_review_recording_candidate()
@@ -985,11 +989,24 @@ class MatchingContractCompatibilityRegressionTests(unittest.TestCase):
         self.assertEqual(compat["mb_releasegroupid"], RGID)
         self.assertEqual(compat["source"], "mb")
         self.assertEqual(compat["match_method"], "mb")
+        self.assertEqual(compat["safety_key"], "review")
+        self.assertEqual(compat["safety_result"], "Needs review")
+        self.assertTrue(compat["requires_confirmation"])
+        self.assertEqual(compat["conflicts"], [])
+        self.assertFalse(compat["action_eligibility"]["attach_without_review"])
+        self.assertEqual(compat["decision"]["identity_proof"], "textual_support")
+        self.assertEqual(compat["decision"]["confidence_state"], "strong_match")
+        self.assertIn("no_deterministic_recording_proof", compat["decision"]["review_reasons"])
+
+    def test_musicbrainz_candidate_with_matching_embedded_id_is_safe(self):
+        compat = build_recording_matching_decision(
+            current=_local(mb_trackid=RECORDING_ID), candidate=_candidate(), selected_release=_release()
+        ).to_review_recording_candidate()
         self.assertEqual(compat["safety_key"], "safe")
         self.assertEqual(compat["safety_result"], "Safe to attach")
         self.assertFalse(compat["requires_confirmation"])
-        self.assertEqual(compat["conflicts"], [])
         self.assertEqual(compat["recommended_action"], "Attach Recording ID")
+        self.assertEqual(compat["decision"]["identity_proof"], "embedded_recording_id")
 
     def test_safe_verified_acoustid_candidate(self):
         compat = build_recording_matching_decision(

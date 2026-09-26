@@ -43,7 +43,7 @@ class DedupJobsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         app_source = (root / "app.py").read_text(encoding="utf-8")
         dedup_source = app_source[app_source.index('@app.post("/api/dedup/scan")'):app_source.index('@app.post("/api/dedup/cleanup")')]
-        cleanup_source = app_source[app_source.index('def _maintenance_duplicate_cleanup_paths'):app_source.index('def _maintenance_full_duplicate_scan')]
+        cleanup_source = (root / "backend" / "duplicate_identity.py").read_text(encoding="utf-8")
 
         self.assertIn("size = src.stat().st_size", dedup_source)
         self.assertIn("except FileNotFoundError:", dedup_source)
