@@ -585,13 +585,32 @@ def run_acceptance() -> None:
         synthetic_rgid = "11111111-1111-1111-1111-111111111111"
         synthetic_artistid = "22222222-2222-2222-2222-222222222222"
         synthetic_albumid = "33333333-3333-3333-3333-333333333333"
-        status, _, attach_body = stack.request(
+        # ARCH-009 contract, exercised in the real production container: a
+        # Release ID whose Release Group cannot be verified against
+        # MusicBrainz is refused before anything is written.
+        status, _, refused_body = stack.request(
             "POST",
             f"/api/submissions/albums/{album_id}/attach-mbids",
             json_body={
                 "mb_albumartistid": synthetic_artistid,
                 "mb_releasegroupid": synthetic_rgid,
                 "mb_albumid": synthetic_albumid,
+                "recordings": [],
+            },
+            headers=basic_header,
+        )
+        if status != 409 or not isinstance(refused_body, dict) or refused_body.get("code") not in (
+                "release_group_unverified", "release_not_in_release_group"):
+            _fail(f"attach-mbids accepted an unverifiable Release ID/Release Group pairing: {status} {refused_body}")
+            return
+        _ok(f"attach-mbids refused an unverifiable edition pairing ({refused_body.get('code')})")
+        # The controlled mutation itself carries canonical album identity only.
+        status, _, attach_body = stack.request(
+            "POST",
+            f"/api/submissions/albums/{album_id}/attach-mbids",
+            json_body={
+                "mb_albumartistid": synthetic_artistid,
+                "mb_releasegroupid": synthetic_rgid,
                 "recordings": [],
             },
             headers=basic_header,
@@ -615,10 +634,10 @@ def run_acceptance() -> None:
 
         status, _, albums_body2 = stack.request("GET", "/api/albums", headers=basic_header)
         updated = next((a for a in (albums_body2.get("albums") or []) if a.get("id") == album_id), None)
-        if not updated or synthetic_albumid not in str(updated.get("mb_albumid") or ""):
+        if not updated or str(updated.get("mb_releasegroupid") or "").lower() != synthetic_rgid:
             _fail(f"Mutation not visible on read-back: {updated}")
             return
-        _ok("Controlled mutation via Web Manager's API is visible on read-back (mb_albumid updated)")
+        _ok("Controlled mutation via Web Manager's API is visible on read-back (mb_releasegroupid updated)")
 
         # 9. Test Stack Down / Up Persistence
         print("==> Step 12: Testing persistence across `docker compose down` and `docker compose up -d`...")

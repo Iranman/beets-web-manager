@@ -52284,6 +52284,7 @@ def album_dict(album) -> Dict[str, Any]:
         "year":        getattr(album, "year", 0) if not isinstance(album, dict) else album.get("year", 0),
         "genre":       _s(getattr(album, "genre", "") if not isinstance(album, dict) else album.get("genre", "")),
         "mb_albumid":  _s(getattr(album, "mb_albumid", "") if not isinstance(album, dict) else album.get("mb_albumid", "")),
+        "mb_releasegroupid": _s(getattr(album, "mb_releasegroupid", "") if not isinstance(album, dict) else album.get("mb_releasegroupid", "")),
         "path":        _get_album_item_dir(album),
     }
 

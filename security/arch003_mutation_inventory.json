@@ -2563,7 +2563,7 @@
       "key": "app.py:render_index:16681d2a2064",
       "file": "app.py",
       "function": "render_index",
-      "line": 52602,
+      "line": 52603,
       "kind": "filesystem",
       "call_text": "template.replace(\"__EDITABLE_FIELDS__\", ef_js)",
       "classification": "READ_ONLY_FALSE_POSITIVE",
