@@ -13,18 +13,6 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Safe migration approach: Extract one tested service at a time. Prefer replacing legacy call shapes with explicit `BeetsAdapter` methods while preserving route signatures and responses.
 - Priority: P0. Status: Open.
 
-## ARCH-002 Duplicated Matching And Confidence Rules
-
-- Affected area: Import review, AI album/recording suggestion, playlist processing, missing-track replacement, duplicate handling, MusicBrainz submission preparation.
-- Canonical authority (`backend/matching/`): `evidence.evaluate_release_group_candidate` (album / release group, with `IdentityProof` and `ActionScope`), `recording.evaluate_recording_candidate` (single recording: embedded Recording ID, AcoustID, title/artist/duration/filename/position evidence, `RecordingIdentityProof`, `can_auto_attach()` / `identity_established()`), `recording.verify_audio_against_request` (downloaded-audio verification), and `track_alignment.align_tracks_global` (global track alignment).
-- Migrated to canonical authority: `build_album_matching_decision`, `build_recording_matching_decision` (no second decision tree), Import Review / AI-suggest recording candidates (now given the full AcoustID hit set), format-replacement identity (`backend/recording_review.resolve_recording_identity`), playlist/download audio verification (`_audio_identity_decision`), Import Review auto-enqueue (`evaluate_import_eligibility` honors the canonical veto), playlist placement, folder preflight, and confirmed-import alignment (`track_align.align_tracks` -> `align_tracks_global`).
-- Caller audit: `scripts/audit_arch002_callers.py` maps every production final-decision pattern hit to its function and checks it against `docs/arch002_caller_audit.json` (CI-enforced by `tests/test_arch002_caller_audit.py`: every hit-bearing unit must be classified and the NEEDS_MIGRATION set may only shrink). Current totals: 130 units / 450 hits — CANONICAL_FINAL_DECISION 32, COMPATIBILITY_WRAPPER 24, CANDIDATE_GENERATION_ONLY 24, DISPLAY_ONLY 38, SAFE_SPECIALIZED_EVIDENCE 8, TEST_ONLY 1, NEEDS_MIGRATION 3.
-- Remaining NEEDS_MIGRATION (one workflow): existing-row reconciliation after an import into an existing album — `app._merge_imported_album_into_existing` via `backend.import_guard.existing_track_matches_target` / `existing_track_can_block_downloaded_replacement`. When neither a Recording ID nor a fingerprint decides, a text title score (0.90, or 0.72 with a matching Recording ID) chooses whether the existing row is retired or the new import is discarded. Migration needs a canonical non-destructive outcome for the text-only case (keep both and route to review), validated against live data first.
-- Documented candidate-generation / specialized exceptions: provider search ranking (MusicBrainz, Discogs, Soulseek, AI ordering); playlist-entry text resolution (`_playlist_suggestions_for_track`, `_playlist_canonicalize_track`) rewrites only a playlist manifest's requested artist/title text, never library data; veto-only AcoustID checks in the engine (`_mb_track_repair_acoustid_check`, `_confirmed_import_acoustid_conflicts`).
-- Desired state: every production final identity/safety decision flows through `backend/matching/`; NEEDS_MIGRATION = 0.
-- Priority: P0.
-- Status: Open (1 workflow / 3 units remaining).
-
 ## ARCH-004 Job Persistence And Idempotency Are Uneven
 
 - Affected area: `job_engine.py`, import review jobs, playlist download/sync jobs, AI batch import, acquisition, replacement, maintenance runner.
@@ -51,15 +39,6 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: Each provider has a small adapter with typed inputs/outputs, explicit transient/permanent failure classification, bounded retries, and redaction.
 - Safe migration approach: Extract adapters only when changing a workflow for a real bug. Preserve API responses and add contract tests.
 - Priority: P2. Status: Open.
-
-## ARCH-009 Release ID And Release-Group Identity Are Inconsistently Modeled
-
-- Affected area: import review, folder import, repair, cleanup/dedup, album merge, playlist placement, replacement.
-- Rule (`docs/adr/0002-release-group-id-is-canonical-album-identity.md`): Release Group ID is canonical album identity; Release ID is edition evidence (tracklist, date, country, media) only.
-- Verified correct: canonical folder identity (`_DEFAULT_ALBUM_PATH_TEMPLATE` stamps `$mb_releasegroupid`); canonical album evaluation and `build_album_matching_decision`; playlist placement (skips releases without an RGID); import-with-ID release/RG consistency check; post-import lookups that locate the concrete release just imported (release-level use).
-- Fixed: duplicate-album merge identity (`_library_duplicate_merge_safety`) no longer lets a row with an unknown RGID inherit another row's RGID or requires a Release ID when every row shares one RGID (`tests/test_arch009_merge_identity.py`); format-replacement target album requires a Release Group (no Release-ID fallback); unattended duplicate deletion requires the same release slot, not just the same Recording ID (`backend/duplicate_identity.py`, `tests/test_duplicate_resolver_identity.py`).
-- Remaining: the reconciliation path listed under ARCH-002 (`_merge_imported_album_into_existing`) matches an imported row to an existing album row by disc/track within an album already chosen upstream. It is not a Release-ID-for-RGID substitution, but it has not been re-audited end to end under ARCH-009, and API/client payload shapes still accept either field during the transition. No confirmed misuse remains open.
-- Priority: P0. Status: Open (audit of the reconciliation path and payload-shape tightening outstanding).
 
 ## ARCH-010 Composite Mutation Workflows Still Call The Retired `backend/beets_client.py`
 
