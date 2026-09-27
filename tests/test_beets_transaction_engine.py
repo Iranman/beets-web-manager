@@ -637,6 +637,24 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             self.assertIsNotNone(arow)
 
     @mock.patch("backend.transaction_engine._read_file_audio_tags")
+    def test_album_mb_track_repair_direct_tracks_without_release_group_is_refused(self, mock_read):
+        """ARCH-009: caller-supplied tracks never inherit the album's RGID."""
+        mock_read.return_value = {"ok": True, "tags": {"title": "Song 1", "artist": "Artist B"}}
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, year, mb_albumid, mb_releasegroupid) VALUES (202, 'Album MB', 'Artist B', 2000, '55555555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666')")
+            f1 = self.music_dir / "mb_track_norg.mp3"
+            f1.write_bytes(b"audio track 1")
+            conn.execute("INSERT INTO items (id, path, album_id, title, artist, album, mb_trackid, mb_albumid, disc, track) VALUES (602, ?, 202, 'Song 1', 'Artist B', 'Album MB', '', '55555555-5555-5555-5555-555555555555', 1, 1)", (str(f1).encode("utf-8"),))
+        plan = transaction_engine.create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 202, "mb_tracks": [{"track": 1, "disc": 1, "title": "Song 1",
+                                             "mb_trackid": "77777777-7777-7777-7777-777777777777"}]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "repair_release_group_unverified")
+    @mock.patch("backend.transaction_engine._read_file_audio_tags")
     def test_album_mb_track_repair_direct_tracks(self, mock_read):
         mock_read.return_value = {"ok": True, "tags": {"title": "Song 1", "artist": "Artist B"}}
         # Create album and items
@@ -655,6 +673,7 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             {
                 "album_id": 201,
                 "mb_tracks": mb_tracks,
+                "release_group": "66666666-6666-6666-6666-666666666666",
             },
             music_allowed_roots=[str(self.music_dir)],
             db_path=str(self.db_path),

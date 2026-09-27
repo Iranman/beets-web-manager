@@ -3901,7 +3901,9 @@ def create_album_mb_track_repair_plan(
         return {"ok": False, "error": "Album does not have a MusicBrainz release ID"}
 
     if payload.get("mb_tracks") or payload.get("track_matches"):
-        mb = {"ok": True, "tracks": payload.get("mb_tracks") or payload.get("track_matches"), "release_group": payload.get("release_group", album_rg)}
+        # ARCH-009: caller-supplied tracks must state their release group; it is
+        # never defaulted from (inherited by) the album being repaired.
+        mb = {"ok": True, "tracks": payload.get("mb_tracks") or payload.get("track_matches"), "release_group": payload.get("release_group") or ""}
     elif fetch_tracklist_fn is not None:
         mb = fetch_tracklist_fn(target_mb_albumid)
     else:
@@ -3937,6 +3939,14 @@ def create_album_mb_track_repair_plan(
     establish_release_group_id = ""
 
     candidate_rg = str(mb.get("release_group") or "").strip().lower()
+    if not candidate_rg:
+        # Fail closed: without the release's authoritative Release Group the
+        # edition cannot be proven to belong to this album (ARCH-009).
+        return {
+            "ok": False,
+            "error": "Could not verify the requested release's MusicBrainz Release Group; refusing repair.",
+            "code": "repair_release_group_unverified",
+        }
     # Release Group ID remains the canonical album-family identity; Release
     # ID is edition/tracklist evidence. Refuse whenever the selected
     # release's Release Group would conflict with (or silently establish,

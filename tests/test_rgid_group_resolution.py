@@ -80,8 +80,9 @@ class RgidResolutionSafetyTests(unittest.TestCase):
     def test_assign_release_refuses_mismatched_release_group(self):
         assign_fn = self._section[self._section.index("def clean_rgid_group_assign_release"):
                                    self._section.index("def clean_rgid_group_relink")]
-        self.assertIn("cand_rgid != rgid", assign_fn)
-        self.assertIn("refusing to assign a mismatched release", assign_fn)
+        # ARCH-009: verified against the release's authoritative RG, fail closed.
+        self.assertIn("_verify_album_identity(rgid, mb_albumid", assign_fn)
+        self.assertIn("Refusing to assign this release", assign_fn)
 
 
 class RgidResolutionReuseTests(unittest.TestCase):

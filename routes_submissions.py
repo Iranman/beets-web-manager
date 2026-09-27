@@ -22,6 +22,7 @@ from flask import jsonify, request
 
 from app import (  # noqa: E402
     AUDIO_EXT,
+    _mb_release_group_for_release,
     DISCOGS_TOKEN,
     DOWNLOADS_ROOT,
     MUSIC_ROOT,
@@ -51,6 +52,7 @@ from backend.beets_adapter import (
     BeetsAdapterAuthError as BeetsAuthError,
 )
 from backend.security import OutboundPolicyError, validate_outbound_url
+from backend.identity_contract import verify_album_identity
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
 _REFERENCE_URL_TIMEOUT = 20
@@ -58,8 +60,17 @@ _REFERENCE_MAX_BYTES = 2_000_000
 
 
 def _acoustid_key() -> str:
+    """AcoustID *user* key for fingerprint submission.
+
+    AcoustID has two credential types: an application key (``client``) for
+    lookups -- ACOUSTID_API_KEY, used by helpers_mb -- and a per-account user
+    key (``user``) for submissions. ACOUSTID_USER_KEY is the explicit source;
+    the legacy ACOUSTID_API_KEY/ACOUSTID_KEY fallback keeps installs that
+    configured a single variable working exactly as before.
+    """
     return (
-        os.environ.get("ACOUSTID_API_KEY", "").strip()
+        os.environ.get("ACOUSTID_USER_KEY", "").strip()
+        or os.environ.get("ACOUSTID_API_KEY", "").strip()
         or os.environ.get("ACOUSTID_KEY", "").strip()
     )
 
@@ -84,7 +95,7 @@ def _start_acoustid_submit_job(item_ids: List[int], label: str):
 
         api_key = _acoustid_key()
         if not api_key:
-            log.append("ACOUSTID_API_KEY/ACOUSTID_KEY is not set in the environment; using Beets config if present.")
+            log.append("ACOUSTID_USER_KEY is not set in the environment; using Beets config if present.")
         try:
             result = beets_adapter.mbsubmit(item_ids, api_key=api_key or None)
         except Exception as exc:
@@ -1498,6 +1509,11 @@ def attach_album_mbids(aid: int):
         return jsonify({"ok": False, "error": "Release-group MBID must be a valid MusicBrainz UUID."}), 400
     if mb_albumid and not _MB_UUID_RE.match(mb_albumid):
         return jsonify({"ok": False, "error": "Release MBID must be a valid MusicBrainz UUID."}), 400
+    # ARCH-009: the edition must belong to the stated Release Group.
+    identity = verify_album_identity(mb_releasegroupid, mb_albumid,
+                                     resolve_release_group=_mb_release_group_for_release)
+    if not identity.ok:
+        return jsonify({"ok": False, "error": identity.error, "code": identity.code}), 409
     album_item_ids = {int(getattr(item, "id", 0) or 0) for item in album.items()}
     clean_recordings = []
     for row in recordings if isinstance(recordings, list) else []:
