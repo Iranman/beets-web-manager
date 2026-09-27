@@ -163,5 +163,37 @@ class ScanSourceContractTests(unittest.TestCase):
         )
 
 
+class DuplicateGroupSafetyTests(unittest.TestCase):
+    """Never regress the v0.1.28 fix: unattended cleanup keeps at least one
+    copy of every duplicate group, whatever its size or scan order."""
+
+    def test_no_group_can_lose_every_copy(self):
+        import itertools
+        import random
+        from backend.duplicate_identity import select_unattended_cleanup_paths
+        rng = random.Random(7)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for size in range(2, 7):
+                paths = []
+                for n in range(size):
+                    p = root / f"g{size}" / f"copy{n}.flac"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_bytes(b"x")
+                    paths.append(p)
+                ids = rng.sample(range(100, 999), size)
+                dups = [
+                    {"source_path": str(paths[a]), "lib_path": str(paths[b]), "source_item_id": ids[a],
+                     "lib_id": ids[b], "release_relation": "same_release_position",
+                     "match_type": "MB Track ID", "confidence": "high", "fingerprint_verified": False}
+                    for a, b in itertools.permutations(range(size), 2)
+                ]
+                rng.shuffle(dups)
+                selected = select_unattended_cleanup_paths({"duplicates": dups}, root, lambda p, r: True)
+                self.assertEqual(len(selected), size - 1, size)
+                kept = {str(paths[i].resolve()) for i in range(size)} - set(selected)
+                self.assertEqual(kept, {str(paths[ids.index(min(ids))].resolve())})
+
+
 if __name__ == "__main__":
     unittest.main()

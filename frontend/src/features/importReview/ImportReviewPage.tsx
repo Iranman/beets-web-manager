@@ -44,6 +44,7 @@ import {
   suggestItem,
   validateManualMusicBrainzId,
 } from '../../api/client';
+import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import type {
   AiSuggestResponse,
   AiSuggestion,
@@ -4303,8 +4304,11 @@ export function ImportReviewPage({
         delete targetPreviewKeysRef.current[item.id];
         setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
       } else if (suggestion?.mb_valid && suggestion.mb_albumid) {
-        const rgid = suggestion.mb_releasegroupid || suggestion.mb_albumid || '';
-        setMbids((current) => ({ ...current, [item.id]: rgid }));
+        // Generic MusicBrainz ID input (release group preferred, else a release).
+        // Apply sends it as the representative release and derives the Release
+        // Group separately -- it is never copied into a Release Group field.
+        const mbidInput = suggestion.mb_releasegroupid || suggestion.mb_albumid || '';
+        setMbids((current) => ({ ...current, [item.id]: mbidInput }));
         setSelectedMatches((current) => ({ ...current, [item.id]: buildAiSelectedMatch(suggestion) }));
         delete targetPreviewKeysRef.current[item.id];
         setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
@@ -4854,6 +4858,7 @@ export function ImportReviewPage({
 
   return (
     <section className="flex flex-col gap-5">
+      <ReconciliationReviewPanel />
       {/* Counts + action bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">

@@ -21,6 +21,7 @@ verification) as correct.
 This suite is a from-scratch rewrite proving the corrected invariants.
 """
 import ast
+import json
 import os
 import shutil
 import sqlite3
@@ -893,10 +894,14 @@ class AstStructuralTests(unittest.TestCase):
         self.assertIsNotNone(node)
         replace_if = None
         for n in ast.walk(node):
-            if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == "replace_rows":
+            if not isinstance(n, ast.If):
+                continue
+            test = n.test
+            if (isinstance(test, ast.Name) and test.id == "replace_rows") or (
+                    isinstance(test, ast.Attribute) and test.attr == "replace_rows"):
                 replace_if = n
                 break
-        self.assertIsNotNone(replace_if, "could not locate `if replace_rows:` block")
+        self.assertIsNotNone(replace_if, "could not locate `if plan.replace_rows:` block")
         for child in ast.walk(replace_if):
             if isinstance(child, ast.Call):
                 func_name = ""
@@ -1110,41 +1115,98 @@ class RealProductionPathTests(unittest.TestCase):
         con.close()
         return p
 
-    def test_merge_function_actually_retires_old_row_end_to_end(self):
-        """Real production path: no mb_albumid resolvable (so the general
-        'existing row at this disc/track doesn't match any known target'
-        branch fires, not the replace_existing_item_ids-forced one -- see
-        the module docstring on why the forced branch intentionally does
-        NOT route through bulk_import_replacement_v1, since that specific
-        old item's retirement is Wave 17's track_replacement_v1's job,
-        running as a separate, later call in the real pipeline)."""
-        existing_album_id = 500
-        imported_album_id = 501
-        self._insert_album(existing_album_id, "Existing Album")
-        self._insert_album(imported_album_id, "Existing Album")
+    RG = "11111111-1111-1111-1111-111111111111"
+    TARGET_REC = "22222222-2222-2222-2222-222222222222"
+    OTHER_REC = "33333333-3333-3333-3333-333333333333"
 
-        old_id = 5001
+    def _tracklist(self):
+        return mock.patch.object(self.flask_app, "_fetch_mb_release_tracklist", return_value={
+            "ok": True, "release_group": self.RG,
+            "tracks": [{"disc": 1, "track": 1, "title": "Track 1", "mb_trackid": self.TARGET_REC,
+                        "duration_ms": 180000}],
+        })
+
+    def test_merge_function_actually_retires_old_row_end_to_end(self):
+        """Real production path, canonical evidence: the existing file is
+        fingerprinted as a DIFFERENT recording than the slot expects and the
+        imported file is fingerprinted as the expected one -> the existing
+        row is retired through the real engine bulk-replacement call."""
+        existing_album_id, imported_album_id = 500, 501
+        self._insert_album(existing_album_id, "Existing Album", rgid=self.RG)
+        self._insert_album(imported_album_id, "Existing Album", rgid=self.RG)
+        old_id, new_id = 5001, 5002
         old_p = self._insert_item(old_id, existing_album_id, "old_track.mp3", track=1, mb_trackid="tr-old")
-        new_id = 5002
-        new_p = self._insert_item(new_id, imported_album_id, "new_track.flac", track=1, mb_trackid="tr-new")
+        new_p = self._insert_item(new_id, imported_album_id, "new_track.flac", track=1, mb_trackid=self.TARGET_REC)
+
+        def hits(path):
+            return ([{"mb_trackid": self.OTHER_REC, "score": 96}] if str(path).endswith("old_track.mp3")
+                    else [{"mb_trackid": self.TARGET_REC, "score": 96}])
 
         log = []
-        result_album_id = self.flask_app._merge_imported_album_into_existing(
-            imported_album_id, existing_album_id, str(self.music_root), log,
-            mb_albumid="", replace_existing_item_ids=None,
-        )
+        with self._tracklist(), mock.patch.object(self.flask_app, "_acoustid_lookup_cached", side_effect=hits):
+            result_album_id = self.flask_app._merge_imported_album_into_existing(
+                imported_album_id, existing_album_id, str(self.music_root), log,
+                mb_albumid="44444444-4444-4444-4444-444444444444", replace_existing_item_ids=None,
+            )
 
-        # The pre-Wave-18-final-review-fix version of this diff silently
-        # returned None here and mutated nothing at all.
         self.assertEqual(result_album_id, existing_album_id)
         self.assertFalse(old_p.exists(), "old file must have been quarantined by the real engine call")
         con = sqlite3.connect(self.db_path)
-        cur = con.execute("SELECT COUNT(*) FROM items WHERE id=?", (old_id,))
-        self.assertEqual(cur.fetchone()[0], 0)
-        cur = con.execute("SELECT album_id FROM items WHERE id=?", (new_id,))
-        self.assertEqual(cur.fetchone()[0], existing_album_id, "new item must be merged into the existing album")
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM items WHERE id=?", (old_id,)).fetchone()[0], 0)
+        self.assertEqual(con.execute("SELECT album_id FROM items WHERE id=?", (new_id,)).fetchone()[0], existing_album_id)
         con.close()
         self.assertTrue(any("Delegated removal" in line for line in log), log)
+
+    def test_text_only_slot_keeps_both_files_and_rows_for_review(self):
+        """ARCH-002: without deterministic evidence neither file is discarded
+        -- previously the existing file was retired here on no evidence."""
+        existing_album_id, imported_album_id = 510, 511
+        self._insert_album(existing_album_id, "Existing Album", rgid=self.RG)
+        self._insert_album(imported_album_id, "Existing Album", rgid=self.RG)
+        old_p = self._insert_item(5101, existing_album_id, "old_track.mp3", track=1, mb_trackid="")
+        new_p = self._insert_item(5102, imported_album_id, "new_track.flac", track=1, mb_trackid=self.TARGET_REC)
+        review_path = self.tmp_path / "reviews.json"
+        log = []
+        with self._tracklist(), \
+                mock.patch.object(self.flask_app, "_acoustid_lookup_cached", return_value=[]), \
+                mock.patch.object(self.flask_app._import_reconciliation, "review_store_path", return_value=review_path), \
+                mock.patch.object(self.flask_app.composite_workflows, "plan_bulk_import_replacement") as plan_mock:
+            self.flask_app._merge_imported_album_into_existing(
+                imported_album_id, existing_album_id, str(self.music_root), log,
+                mb_albumid="44444444-4444-4444-4444-444444444444",
+            )
+        plan_mock.assert_not_called()
+        self.assertTrue(old_p.exists())
+        self.assertTrue(new_p.exists())
+        con = sqlite3.connect(self.db_path)
+        self.assertEqual(con.execute("SELECT album_id FROM items WHERE id=5101").fetchone()[0], existing_album_id)
+        self.assertEqual(con.execute("SELECT album_id FROM items WHERE id=5102").fetchone()[0], imported_album_id)
+        con.close()
+        reviews = json.loads(review_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["outcome"], "keep_both_review")
+        self.assertEqual(reviews[0]["existing_item_id"], 5101)
+        self.assertEqual(reviews[0]["imported_item_id"], 5102)
+        self.assertEqual(reviews[0]["release_group_id"], self.RG)
+
+    def test_unknown_release_group_never_merges(self):
+        """ARCH-009: without proven Release Group identity nothing moves and
+        nothing is retired; the RGID is never inherited from the other row."""
+        self._insert_album(520, "Existing Album", rgid="")
+        self._insert_album(521, "Existing Album", rgid=self.RG)
+        old_p = self._insert_item(5201, 520, "old_track.mp3", track=1, mb_trackid="tr-old")
+        self._insert_item(5202, 521, "new_track.flac", track=1, mb_trackid=self.TARGET_REC)
+        review_path = self.tmp_path / "reviews.json"
+        with mock.patch.object(self.flask_app._import_reconciliation, "review_store_path", return_value=review_path), \
+                mock.patch.object(self.flask_app.composite_workflows, "plan_existing_album_reconcile") as rec_mock:
+            res = self.flask_app._merge_imported_album_into_existing(521, 520, str(self.music_root), [], mb_albumid="")
+        self.assertEqual(res, 521)
+        rec_mock.assert_not_called()
+        self.assertTrue(old_p.exists())
+        con = sqlite3.connect(self.db_path)
+        self.assertEqual(con.execute("SELECT mb_releasegroupid FROM albums WHERE id=520").fetchone()[0], "")
+        con.close()
+        self.assertEqual(json.loads(review_path.read_text(encoding="utf-8"))[0]["kind"], "album_identity_unproven")
 
     def test_merge_function_forced_replace_leaves_old_row_for_wave17(self):
         """replace_existing_item_ids must NOT trigger a second,
@@ -1153,8 +1215,8 @@ class RealProductionPathTests(unittest.TestCase):
         for -- the old row must be left exactly as-is by this function."""
         existing_album_id = 600
         imported_album_id = 601
-        self._insert_album(existing_album_id, "Existing Album")
-        self._insert_album(imported_album_id, "Existing Album")
+        self._insert_album(existing_album_id, "Existing Album", rgid=self.RG)
+        self._insert_album(imported_album_id, "Existing Album", rgid=self.RG)
 
         old_id = 6001
         old_p = self._insert_item(old_id, existing_album_id, "old_track.mp3", track=1, mb_trackid="tr-old")

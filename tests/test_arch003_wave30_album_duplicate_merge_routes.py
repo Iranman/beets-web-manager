@@ -212,7 +212,7 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
         ) as mock_update, mock.patch.object(
             app_module, "_repair_album_mbid_sticking_once",
             return_value={"changed": True},
-        ):
+        ), mock.patch.object(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
             response, log = self._run_job_body(
                 app_module.clean_rgid_group_relink,
                 {"album_id": 301, "mb_albumid": SAME_MBID, "mb_releasegroupid": SAME_RGID},
@@ -235,7 +235,8 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
                     with self.assertRaises(RuntimeError):
                         fn([], cancel_event=None)
                     return mock.Mock(job_id="job-test")
-                with mock.patch.object(app_module.jobs, "start_python", side_effect=fake_start_python):
+                with mock.patch.object(app_module.jobs, "start_python", side_effect=fake_start_python), \
+                        mock.patch.object(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
                     app_module.clean_rgid_group_relink()
 
 

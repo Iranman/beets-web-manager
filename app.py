@@ -403,7 +403,6 @@ from backend.matching_contract import (
 )
 from backend.matching import AcoustIDStatus, evaluate_release_group_candidate, verify_audio_against_request
 from backend.import_guard import (
-    existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
     missing_wanted_tracks_block_retag as _guard_missing_wanted_tracks_block_retag,
     release_track_matches_missing_target as _guard_release_track_matches_missing_target,
@@ -435,6 +434,8 @@ from backend.beets_adapter import (
 import backend.composite_workflows as composite_workflows
 import backend.recording_review as recording_review
 import backend.duplicate_identity as _duplicate_identity
+import backend.import_reconciliation as _import_reconciliation
+from backend.identity_contract import verify_album_identity as _verify_album_identity
 import backend.config_manager as config_manager
 from backend.config_manager import ConfigConflictError, ConfigError, ConfigValidationError
 
@@ -4008,6 +4009,11 @@ def album_mbsubmit(aid: int):
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+def _mb_release_group_for_release(release_id: str) -> str:
+    """Authoritative Release Group of a Release, from MusicBrainz ("" if unknown)."""
+    return _s((_fetch_mb_release_candidate(release_id) or {}).get("mb_releasegroupid") or "").strip().lower()
+
+
 @app.post("/api/albums/<int:aid>/add-mbids")
 def album_add_mbids(aid: int):
     """Attach real MusicBrainz IDs to an album and move it to the MBID-stamped path."""
@@ -4019,14 +4025,20 @@ def album_add_mbids(aid: int):
         return jsonify({"ok": False, "error": "mb_albumartistid and mb_releasegroupid are required"}), 400
     if not _MB_UUID_RE.match(mb_albumartistid) or not _MB_UUID_RE.match(mb_releasegroupid):
         return jsonify({"ok": False, "error": "Invalid MusicBrainz UUID format"}), 400
+    # ARCH-009: an optional Release ID is edition evidence and must belong to
+    # the supplied Release Group (verified against MusicBrainz, fail closed).
+    identity = _verify_album_identity(mb_releasegroupid, mb_albumid,
+                                      resolve_release_group=_mb_release_group_for_release)
+    if not identity.ok:
+        return jsonify({"ok": False, "error": identity.error, "code": identity.code}), 409
 
     def _do(log, cancel_event=None):
         fields = {
             "mb_albumartistid": mb_albumartistid,
-            "mb_releasegroupid": mb_releasegroupid,
+            "mb_releasegroupid": identity.release_group_id,
         }
-        if mb_albumid and _MB_UUID_RE.match(mb_albumid):
-            fields["mb_albumid"] = mb_albumid
+        if identity.release_id:
+            fields["mb_albumid"] = identity.release_id
         meta_result = composite_workflows.update_album_metadata(aid, fields)
         _require_attach_stage_success(meta_result, "album MBID metadata update")
         # update_album_metadata() commits through its own rollback-capable
@@ -6708,96 +6720,38 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                                         source_folder: str, log: list,
                                         mb_albumid: str = "",
                                         replace_existing_item_ids: Optional[Iterable[int]] = None) -> int:
-    """Move newly imported missing items onto an existing album row."""
+    """Move newly imported items onto an existing album row.
+
+    ARCH-002/009: album identity (Release Group) and every contested
+    disc/track slot are decided by backend/import_reconciliation.py from
+    canonical evidence. Text similarity never discards either file: an
+    unproven slot keeps both files and both rows and is recorded for review.
+    This function only gathers inputs and applies the planned engine
+    transactions.
+    """
     if not imported_album_id or not existing_album_id or imported_album_id == existing_album_id:
         return imported_album_id
-    forced_replace_ids = {int(v) for v in (replace_existing_item_ids or []) if int(v or 0)}
     try:
-        mb_tracks: List[Dict[str, Any]] = []
-        target_by_key: Dict[tuple, Dict[str, Any]] = {}
+        target_by_slot: Dict[tuple, Dict[str, Any]] = {}
+        target_rgid = ""
         if mb_albumid:
             mb = _fetch_mb_release_tracklist(mb_albumid, log)
             if mb.get("ok"):
-                mb_tracks = mb.get("tracks") or []
-                target_by_key = {
+                target_rgid = _s(mb.get("release_group") or "")
+                target_by_slot = {
                     (int(t.get("disc") or 1), int(t.get("track") or 0)): t
-                    for t in mb_tracks
+                    for t in (mb.get("tracks") or [])
                     if int(t.get("track") or 0)
                 }
-
-        def _row_item(row: sqlite3.Row) -> Dict[str, Any]:
-            return {
-                "title": _s(row["title"]) if "title" in row.keys() else "",
-                "path": _s(row["path"]) if "path" in row.keys() else "",
-                "disc": int(row["disc"] or 1),
-                "track": int(row["track"] or 0),
-                "mb_trackid": _s(row["mb_trackid"]) if "mb_trackid" in row.keys() else "",
-                "length": float(row["length"] or 0) if "length" in row.keys() else 0.0,
-            }
-
-        def _row_file_exists(row: sqlite3.Row) -> bool:
-            raw_path = _s(row["path"]) if "path" in row.keys() else ""
-            if not raw_path:
-                return False
-            fpath = Path(raw_path)
-            if not fpath.is_absolute():
-                fpath = MUSIC_ROOT / raw_path
-            try:
-                return fpath.exists() and fpath.is_file()
-            except Exception:
-                return False
-
-        def _row_matches_target(row: sqlite3.Row, target: Dict[str, Any]) -> bool:
-            if not target:
-                return False
-            item = _row_item(row)
-            fp = _album_track_fingerprint_check(item, [target])
-            fingerprint_status = _s(fp.get("status", ""))
-            target_id = _s(target.get("mb_trackid", "")).strip().lower()
-            item_id = _s(item.get("mb_trackid", "")).strip().lower()
-            title_only_score = _album_track_score({**item, "path": ""}, target)
-            return _guard_existing_track_can_block_downloaded_replacement(
-                file_exists=_row_file_exists(row),
-                fingerprint_status=fingerprint_status,
-                exact_mbid=bool(item_id and target_id and item_id == target_id),
-                title_score=title_only_score,
-                repair_threshold=_MB_TRACK_REPAIR_MATCH_THRESHOLD,
-            )
-
-        # SEC-002 Wave 18 final review: this entire data-gathering and
-        # matching block (existing/existing_rows/imported_rows/move_ids/
-        # dup_rows/replace_rows) had been deleted by the Wave 18 diff while
-        # leaving the code below that consumes those names untouched and
-        # nested INSIDE _row_matches_target's body as unreachable dead code
-        # after its own return statement -- meaning this whole function
-        # silently did nothing at all (fell out of the try block with no
-        # return, implicitly returning None) on every call, worse than the
-        # NameError the review brief anticipated. Restored verbatim from
-        # the pre-Wave-18 implementation, with only the replace_rows branch
-        # below changed to delegate to the engine instead of deleting rows
-        # and unlinking files directly from the Web Manager.
-        #
-        # Wave 25 round (independent review): the pre-Wave-18 helper that
-        # used to be called here, _delete_row_file(), directly deleted a
-        # Beets-DB-tracked media file via a generic engine call with no
-        # corresponding DB row update in the same transaction -- exactly
-        # the "generic delete_file is not a transaction" pattern this
-        # review's threat model flags. It is DEAD CODE: every actual path
-        # below (replace_rows -> bulk_import_replacement_v1, dup_rows/
-        # move_ids -> existing_album_reconcile_v1) already delegates both
-        # the file and the DB row to a real controlled transaction family.
-        # Removed rather than left as a live-looking trap for a future
-        # caller to reach for.
-
         try:
             existing = composite_workflows.get_album(int(existing_album_id))
+            imported = composite_workflows.get_album(int(imported_album_id)) or {}
         except BeetsUnavailableError as ex:
-            log.append(f"  [merge] Engine unavailable fetching album {existing_album_id}: {ex}")
+            log.append(f"  [merge] Engine unavailable fetching albums: {ex}")
             raise
         if not existing:
             log.append(f"  [merge] Existing album_id {existing_album_id} not found; keeping imported album_id {imported_album_id}")
             return imported_album_id
-
         try:
             existing_items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
             imported_items = composite_workflows.find_all_items_by_album_id(int(imported_album_id))
@@ -6805,114 +6759,38 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
             log.append(f"  [merge] Engine unavailable fetching items: {ex}")
             raise
 
-        existing_rows = sorted(
-            existing_items,
-            key=lambda r: (int(r.get("disc") or 1), int(r.get("track") or 0), int(r.get("id") or 0)),
-        )
-        existing_by_key: Dict[tuple, List[Dict[str, Any]]] = {}
-        for row in existing_rows:
-            key = (int(row.get("disc") or 1), int(row.get("track") or 0))
-            if key[1]:
-                existing_by_key.setdefault(key, []).append(row)
-        imported_rows = sorted(
-            imported_items,
-            key=lambda r: (int(r.get("disc") or 1), int(r.get("track") or 0), int(r.get("id") or 0)),
-        )
-        move_ids: List[int] = []
-        dup_rows: List[Dict[str, Any]] = []
-        replace_rows: List[Dict[str, Any]] = []
-        # SEC-002 Wave 18: explicit old_item_id -> new_item_id
-        # correspondence, captured directly from the same matching loop
-        # that decides an existing row is being superseded -- not
-        # reconstructed later from "whatever else is now in the album",
-        # which cannot distinguish a genuine replacement from an
-        # unrelated pre-existing row.
-        mapping_pairs: List[Dict[str, int]] = []
-        for row in imported_rows:
-            key = (int(row["disc"] or 1), int(row["track"] or 0))
-            if key[1] and key in existing_by_key:
-                target = target_by_key.get(key, {})
-                existing_rows_for_key = existing_by_key.get(key, [])
-                forced_replace_rows = [
-                    ex for ex in existing_rows_for_key
-                    if int(ex["id"] or 0) in forced_replace_ids
-                ]
-                if forced_replace_rows:
-                    # SEC-002 Wave 18 final review: do NOT also route
-                    # forced_replace_rows through bulk_import_replacement_v1.
-                    # replace_existing_item_ids' only real production
-                    # caller is the automatic music-format retry
-                    # pipeline (_music_format_replace_rows), which
-                    # retires this exact old item through its own,
-                    # separate, already-verified engine transaction --
-                    # _music_format_remove_original_after_replacement,
-                    # SEC-002 Wave 17's track_replacement_v1 -- called
-                    # independently after this import completes (see
-                    # start_music_format_replacement_retry). At the
-                    # point this function runs, that retirement has
-                    # NOT happened yet (the old row is still present,
-                    # which is exactly why forced_replace_rows finds
-                    # it), so also planning a bulk_import_replacement_v1
-                    # retirement for the same old item here would be a
-                    # second, redundant, and potentially conflicting
-                    # retirement attempt racing the real one. This
-                    # branch's only job is bookkeeping: stop the
-                    # duplicate-matching heuristic below from
-                    # reconsidering this old row, and let `row` (the
-                    # newly imported track) take its place via
-                    # move_ids. This matches the pre-Wave-18 behavior
-                    # exactly -- untouched by this wave.
-                    existing_by_key[key] = [
-                        ex for ex in existing_rows_for_key
-                        if int(ex["id"] or 0) not in forced_replace_ids
-                    ]
-                else:
-                    existing_matches = [
-                        ex for ex in existing_rows_for_key
-                        if _row_matches_target(ex, target)
-                    ]
-                    if existing_matches:
-                        dup_rows.append(row)
-                        continue
-                    replace_rows.extend(existing_rows_for_key)
-                    for ex in existing_rows_for_key:
-                        # Weaker, real (not AI-only) evidence: `row`
-                        # was imported specifically to fill this
-                        # disc/track position against the resolved MB
-                        # release tracklist, and none of the existing
-                        # rows already occupying that position passed
-                        # _row_matches_target against it. The engine
-                        # still independently requires the imported
-                        # row to carry its own Recording ID for this
-                        # identity_source (see recording_id_required).
-                        mapping_pairs.append({
-                            "old_item_id": int(ex["id"]),
-                            "new_item_id": int(row["id"]),
-                            "identity_source": "mb_tracklist_position_match",
-                        })
-                    existing_by_key[key] = []
-            move_ids.append(int(row["id"]))
-            if key[1]:
-                existing_by_key.setdefault(key, []).append(row)
+        def _hits(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+            path = _album_item_abs_path(_s(row.get("path") or ""))
+            return _acoustid_lookup_cached(path) if path and Path(path).is_file() else None
 
-        # SEC-002 Wave 20 final review: track whether each delegated
-        # engine operation actually succeeded so the function's return
-        # value is truthful. Previously this returned existing_album_id
-        # (implying reconciliation succeeded) whenever dup_rows/move_ids/
-        # replace_rows were non-empty, regardless of whether the engine
-        # Plan/Apply calls actually succeeded -- a caller relying on the
-        # returned album id as a success signal would be misled by a
-        # logged-and-swallowed engine failure.
+        plan = _import_reconciliation.plan_reconciliation(
+            existing_items, imported_items, target_by_slot,
+            _import_reconciliation.album_identity(existing, imported, target_rgid),
+            forced_replace_ids=replace_existing_item_ids or (),
+            hits_fn=_hits,
+            exists_fn=lambda row: bool(_album_item_abs_path(_s(row.get("path") or ""))
+                                       and Path(_album_item_abs_path(_s(row.get("path") or ""))).is_file()),
+            similarity_fn=_track_ai_similarity,
+        )
+        log.append(f"  [merge] Reconciliation plan: {plan.counts()} (album identity: {plan.album.reason})")
+        reviews = _import_reconciliation.record_reviews(
+            plan, existing_album_id=existing_album_id, imported_album_id=imported_album_id,
+            release_id=mb_albumid, source_folder=source_folder,
+        )
+        if reviews:
+            log.append(f"  [merge] {len(reviews)} item(s) kept on both sides and queued for reconciliation review.")
+        if not plan.album.same_album:
+            return imported_album_id
+
         replace_ok = True
         reconcile_ok = True
-
-        if replace_rows:
-            replace_ids = sorted({int(r["id"]) for r in replace_rows})
+        if plan.replace_rows:
+            replace_ids = sorted({int(r["id"]) for r in plan.replace_rows})
             try:
                 plan_res = composite_workflows.plan_bulk_import_replacement({
                     "existing_album_id": existing_album_id,
                     "old_item_ids": replace_ids,
-                    "mappings": mapping_pairs,
+                    "mappings": plan.mapping_pairs,
                     "source_folder": source_folder,
                     "mb_albumid": mb_albumid,
                     "reason": "Bulk import album merge replacement",
@@ -6921,17 +6799,10 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                     op_id = plan_res.get("operation_id")
                     apply_res = composite_workflows.apply_bulk_import_replacement(op_id)
                     if apply_res.get("ok"):
-                        log.append(
-                            f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
-                            f"to engine bulk replacement tx {op_id}."
-                        )
+                        log.append(f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
+                                   f"to engine bulk replacement tx {op_id}.")
                     else:
-                        # Fail closed: do NOT fall back to a local
-                        # DELETE/unlink of the old rows. If the engine
-                        # refused (e.g. a mapping could not be
-                        # identity-verified), those old rows remain in
-                        # place -- both versions coexist rather than
-                        # silently losing the only verified copy.
+                        # Fail closed: both versions coexist rather than losing a copy.
                         replace_ok = False
                         log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
                 else:
@@ -6941,24 +6812,20 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 replace_ok = False
                 log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
 
-        if dup_rows or move_ids:
-            dup_item_ids = [int(r["id"]) for r in dup_rows]
-            dup_details = []
-            for r in dup_rows:
-                key = (int(r["disc"] or 1), int(r["track"] or 0))
-                survivor_ids = [int(ex["id"]) for ex in existing_by_key.get(key, []) if int(ex["id"] or 0)]
-                dup_details.append({
-                    "dup_item_id": int(r["id"]),
-                    "survivor_item_ids": survivor_ids,
-                })
-
+        if plan.duplicate_rows or plan.move_ids:
+            dup_item_ids = [int(r["id"]) for r in plan.duplicate_rows]
+            dup_details = [
+                {"dup_item_id": int(r["id"]),
+                 "survivor_item_ids": plan.survivors_by_slot.get(_import_reconciliation.slot_key(r), [])}
+                for r in plan.duplicate_rows
+            ]
             try:
                 plan_res = composite_workflows.plan_existing_album_reconcile({
                     "imported_album_id": imported_album_id,
                     "existing_album_id": existing_album_id,
                     "dup_item_ids": dup_item_ids,
                     "dup_details": dup_details,
-                    "move_item_ids": move_ids,
+                    "move_item_ids": plan.move_ids,
                     "source_folder": source_folder,
                     "reason": "Existing album reconciliation",
                 })
@@ -6966,10 +6833,8 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                     op_id = plan_res.get("operation_id")
                     apply_res = composite_workflows.apply_existing_album_reconcile(op_id)
                     if apply_res.get("ok"):
-                        log.append(
-                            f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
-                            f"and {len(move_ids)} move(s) to engine reconcile tx {op_id}."
-                        )
+                        log.append(f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
+                                   f"and {len(plan.move_ids)} move(s) to engine reconcile tx {op_id}.")
                     else:
                         reconcile_ok = False
                         log.append(f"  [merge] WARN existing album reconcile apply failed: {apply_res.get('error')}")
@@ -6980,13 +6845,10 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 reconcile_ok = False
                 log.append(f"  [merge] WARN exception delegating existing album reconcile to engine: {ex}")
 
-        # SEC-002 Wave 20 final review: only report existing_album_id
-        # (i.e. "reconciliation happened") when what was attempted
-        # actually succeeded. A failed delegation leaves the imported
-        # album's rows exactly where they were, so the truthful return
-        # value in that case is imported_album_id, not a claim of
-        # success upstream code would otherwise trust.
-        attempted = bool(move_ids or dup_rows or replace_rows)
+        # Report existing_album_id only when what was attempted succeeded.
+        # Rows held for review stay untouched in the imported album row; the
+        # caller then validates the existing album and never the held rows.
+        attempted = bool(plan.move_ids or plan.duplicate_rows or plan.replace_rows)
         succeeded = replace_ok and reconcile_ok
         return existing_album_id if (attempted and succeeded) else imported_album_id
     except Exception as ex:
@@ -11958,6 +11820,17 @@ def album_deduplicate(aid):
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"}), 404
+    override_rgid = ""
+    if mb_override:
+        # ARCH-009: an override release is persisted as this album's edition
+        # only if it belongs to the album's Release Group (fail closed).
+        identity = _verify_album_identity(
+            _s(getattr(album, "mb_releasegroupid", "") or ""), mb_override.lower(),
+            resolve_release_group=_mb_release_group_for_release, require_release_group=False,
+        )
+        if not identity.ok:
+            return jsonify({"ok": False, "error": identity.error, "code": identity.code}), 409
+        mb_override, override_rgid = identity.release_id, identity.release_group_id
 
     label = f"Dedup: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"
 
@@ -11981,7 +11854,10 @@ def album_deduplicate(aid):
         # `beet mbsync` (Step 6) can read it from the DB.
         if mb_albumid and _MB_UUID_RE.match(mb_albumid):
             try:
-                composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+                identity_fields = {"mb_albumid": mb_albumid}
+                if override_rgid:
+                    identity_fields["mb_releasegroupid"] = override_rgid
+                composite_workflows.update_album_metadata(aid, identity_fields)
                 log.append(f"  Stored mb_albumid in DB")
             except Exception as ex:
                 log.append(f"  WARN storing mb_albumid: {ex}")
@@ -20522,6 +20398,33 @@ def import_review_auto_enqueue_ready_job():
 
     job = jobs.start_python(_do, label="Auto-import ready review items")
     return jsonify({"ok": True, "job_id": job.job_id, "limit": max(1, min(limit, 25))})
+
+@app.get("/api/import-reconciliation/reviews")
+def import_reconciliation_reviews():
+    """Reconciliation decisions held for review (both files kept)."""
+    status = _s(request.args.get("status") or "open").strip().lower()
+    records = _import_reconciliation.load_reviews()
+    if status != "all":
+        records = [r for r in records if _s(r.get("status")) == status]
+    return jsonify({"ok": True, "reviews": records[-500:], "count": len(records)})
+
+
+@app.post("/api/import-reconciliation/reviews/<review_id>/resolve")
+def import_reconciliation_resolve(review_id: str):
+    """Apply a reviewer's choice through the engine's controlled transactions."""
+    payload = request.get_json(silent=True) or {}
+    review_id = _s(review_id).strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", review_id):
+        return jsonify({"ok": False, "error": "invalid review id"}), 400
+    try:
+        result = _import_reconciliation.resolve_review(review_id, payload.get("choice"), composite_workflows)
+    except (BeetsUnavailableError, BeetsError):
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
+    if result.get("ok"):
+        _invalidate_lib_cache()
+        return jsonify(result)
+    status = {"not_found": 404, "already_resolved": 409, "album_identity_unproven": 409}.get(result.get("code"), 400)
+    return jsonify(result), status
 
 @app.post("/api/import-review/auto-enqueue")
 def import_review_auto_enqueue():
@@ -30760,14 +30663,11 @@ def clean_rgid_group_assign_release():
     rgid = _s(alb.get("mb_releasegroupid") or "").strip().lower()
 
     def _do(log, cancel_event=None):
-        if rgid:
-            cand = _fetch_mb_release_candidate(mb_albumid) or {}
-            cand_rgid = _s(cand.get("mb_releasegroupid") or "").strip().lower()
-            if cand_rgid and cand_rgid != rgid:
-                raise RuntimeError(
-                    f"Release {mb_albumid} belongs to release-group {cand_rgid}, not {rgid} "
-                    "— refusing to assign a mismatched release."
-                )
+        # ARCH-009: fail closed -- an unverifiable release is never assigned.
+        identity = _verify_album_identity(rgid, mb_albumid, resolve_release_group=_mb_release_group_for_release,
+                                          require_release_group=False)
+        if not identity.ok:
+            raise RuntimeError(f"{identity.error} Refusing to assign this release.")
         result = _repair_album_mbid_sticking_once(
             album_id, mb_albumid, log, repair_tracks=True, write_tags=True, cancel_event=cancel_event,
         )
@@ -30815,9 +30715,13 @@ def clean_rgid_group_relink():
                 target_rgid = _s(candidates[0].get("mb_releasegroupid") or "").strip().lower()
         if not target_mbid or not _MB_UUID_RE.match(target_mbid):
             raise RuntimeError("Could not resolve a valid MusicBrainz release for relink")
-        if not target_rgid:
-            cand = _fetch_mb_release_candidate(target_mbid) or {}
-            target_rgid = _s(cand.get("mb_releasegroupid") or "").strip().lower()
+        # ARCH-009: the Release Group written is always the release's
+        # authoritative one; a supplied RGID that disagrees is refused.
+        identity = _verify_album_identity(target_rgid, target_mbid,
+                                          resolve_release_group=_mb_release_group_for_release)
+        if not identity.ok:
+            raise RuntimeError(identity.error)
+        target_rgid = identity.release_group_id
 
         relink_updates: Dict[str, Any] = {"mb_albumid": target_mbid}
         if target_rgid:
@@ -32393,6 +32297,17 @@ def apply_album_duplicate_resolver(aid):
     write_tags = payload.get("write_tags", True) is not False
     if not isinstance(actions, list) or not actions:
         return jsonify({"ok": False, "error": "actions required"}), 400
+    if mbid:
+        # ARCH-009: an override release is stamped onto the album only if it
+        # belongs to the album's Release Group (verified, fail closed).
+        album = lib.get_album(aid)
+        identity = _verify_album_identity(
+            _s(getattr(album, "mb_releasegroupid", "") or "") if album else "", mbid.lower(),
+            resolve_release_group=_mb_release_group_for_release, require_release_group=False,
+        )
+        if not identity.ok:
+            return jsonify({"ok": False, "error": identity.error, "code": identity.code}), 409
+        mbid = identity.release_id
 
     def _do(log, cancel_event=None):
         plan = _album_duplicate_resolver_plan(aid, mbid, log)
@@ -52369,6 +52284,7 @@ def album_dict(album) -> Dict[str, Any]:
         "year":        getattr(album, "year", 0) if not isinstance(album, dict) else album.get("year", 0),
         "genre":       _s(getattr(album, "genre", "") if not isinstance(album, dict) else album.get("genre", "")),
         "mb_albumid":  _s(getattr(album, "mb_albumid", "") if not isinstance(album, dict) else album.get("mb_albumid", "")),
+        "mb_releasegroupid": _s(getattr(album, "mb_releasegroupid", "") if not isinstance(album, dict) else album.get("mb_releasegroupid", "")),
         "path":        _get_album_item_dir(album),
     }
 

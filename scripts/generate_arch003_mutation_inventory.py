@@ -335,6 +335,10 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     # Wave 28 Final Pass: Explicit non-media application state, cache, staging,
     # and template read-only classifications with sink-specific evidence.
     "_artist_alias_write_rejected_map": ("APP_STATE", "app_state_v1", "web-manager-rejected-artist-alias-map-state"),
+    # ARCH-002 final closure: atomic write of the import-reconciliation review queue 
+    # (web-manager-data/import_reconciliation_reviews.json). Non-media app state;
+    # media changes from a resolved review go through engine transactions only.
+    "_write_reviews": ("APP_STATE", "app_state_v1", "import-reconciliation-review-queue-state"),
     "_mb_release_tracklist_write_disk": ("CACHE_STATE", "cache_v1", "mb-release-tracklist-disk-cache"),
     "_plex_client_identifier": ("APP_STATE", "app_state_v1", "plex-client-identifier-state"),
     "_record_scan": ("APP_STATE", "app_state_v1", "library-scan-timestamp-state"),

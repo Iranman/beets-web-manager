@@ -137,9 +137,10 @@ Frontend direction:
 
 - `backend/beets_client.py` and the composite mutation workflows in `app.py` that still call it instead of `backend/beets_adapter.py` (ARCH-010) — the largest and highest-priority open item.
 - `app.py` route/domain/mutation/job coupling (ARCH-001).
-- Duplicated matching and confidence rules across import review, playlist, replacement, cleanup, and submission flows: a canonical matching evidence engine exists (`backend/matching/`), but not every production entry point uses it yet (ARCH-002).
 - Job idempotency and checkpoint consistency across all long-running workflows (ARCH-004).
 - Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers (ARCH-006).
+
+Matching and identity: every production final identity/safety decision goes through `backend/matching/` (enforced by `scripts/audit_arch002_callers.py`). Album identity is the Release Group everywhere (`docs/arch009_identity_fields.md`).
 
 See `docs/TECHNICAL_DEBT.md` for the full current list, including affected areas, risk, and desired state for each.
 - Large frontend modules that mix rendering, polling, local state machines, and decision presentation.

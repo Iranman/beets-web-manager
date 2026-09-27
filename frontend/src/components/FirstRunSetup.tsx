@@ -668,20 +668,21 @@ export default function FirstRunSetup() {
               <div>
                 <h2 className="text-xl font-bold text-white">AcoustID (Optional)</h2>
                 <p className="mt-1 text-sm text-zinc-400">
-                  AcoustID audio fingerprinting lookup integration.
+                  AcoustID audio fingerprinting lookups. Use an <em>application</em> key from acoustid.org/new-application;
+                  your account's user key is only for submissions and is set separately (ACOUSTID_USER_KEY).
                 </p>
               </div>
 
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                    AcoustID API Key
+                    AcoustID Application API Key
                   </label>
                   <input
                     type="text"
                     value={acoustidKey}
                     onChange={(e) => setAcoustidKey(e.target.value)}
-                    placeholder="Optional API Key"
+                    placeholder="Optional application key"
                     className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>

@@ -102,6 +102,7 @@ class AlbumAddMbidsRequiredStageTests(unittest.TestCase):
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
             mock.patch.object(APP, "_invalidate_lib_cache"),
             mock.patch.object(APP, "_trigger_plex_refresh"),
+            mock.patch.object(APP, "_mb_release_group_for_release", return_value=VALID_RGID),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -241,6 +242,8 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         self.client = APP.app.test_client()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
+            mock.patch.object(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            mock.patch.object(APP.lib, "get_album", return_value=None),
             mock.patch.object(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
             mock.patch.object(APP, "_album_duplicate_resolver_plan", return_value={
                 "ok": True,
@@ -343,6 +346,8 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         self.client = APP.app.test_client()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
+            mock.patch.object(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            mock.patch.object(APP.lib, "get_album", return_value=None),
             mock.patch.object(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
             mock.patch.object(APP, "_album_duplicate_resolver_plan", return_value={
                 "ok": True,

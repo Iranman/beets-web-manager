@@ -384,7 +384,7 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         stale_keys = (
             "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY",
             "DISCOGS_TOKEN", "DISCOGS_USER_TOKEN", "LISTENBRAINZ_TOKEN",
-            "ACOUSTID_API_KEY", "ACOUSTID_KEY",
+            "ACOUSTID_API_KEY", "ACOUSTID_USER_KEY", "ACOUSTID_KEY",
         )
         with mock.patch.dict(os.environ, {key: "" for key in stale_keys}, clear=False):
             response, _ = self._status_response()
@@ -929,6 +929,7 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
             ("BEETS_CONFIG_PATH", "Storage & Paths", False),
             ("PLAYLIST_DIR", "Storage & Paths", False),
             ("ACOUSTID_API_KEY", "Music Services & Metadata", True),
+            ("ACOUSTID_USER_KEY", "Music Services & Metadata", True),
             ("DISCOGS_TOKEN", "Music Services & Metadata", True),
             ("LISTENBRAINZ_TOKEN", "Music Services & Metadata", True),
             ("SPOTIFY_CLIENT_ID", "Music Services & Metadata", False),

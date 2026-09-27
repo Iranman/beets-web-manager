@@ -6,6 +6,43 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+Final matching and identity closure: canonical import reconciliation, release-group identity contracts, and AcoustID key roles. **ARCH-002 and ARCH-009 are closed.**
+
+### Added
+- **`backend/import_reconciliation.py`**: a canonical reconciliation service for imports into an existing album. It first proves album identity by Release Group, then decides every contested disc/track slot with the canonical recording evaluator. There are four outcomes:
+  - KEEP_EXISTING: both files are the same recording
+  - KEEP_IMPORTED: the existing file is fingerprinted as the wrong recording
+  - CONFLICT
+  - KEEP_BOTH_REVIEW
+  Text evidence never discards either file. Undecided slots keep both files and both library rows, and are recorded to `web-manager-data/import_reconciliation_reviews.json`.
+- **Reconciliation review queue**: `GET /api/import-reconciliation/reviews` and `POST /api/import-reconciliation/reviews/<id>/resolve` (`keep_existing` / `keep_imported` / `keep_both`, applied only through engine transactions). A new "Reconciliation review" panel on the Import Review page shows each side's canonical evidence.
+- **`backend/identity_contract.py`**: every release ID supplied to a mutation is resolved to its authoritative MusicBrainz Release Group. A mismatch is refused, an unverifiable release fails closed, and a Release ID is never copied into a Release Group field. Field classification is in `docs/arch009_identity_fields.md`.
+- **`ACOUSTID_USER_KEY`**: the AcoustID user key used for fingerprint submissions. `ACOUSTID_API_KEY` is now documented as the *application* key for lookups. One variable had been serving both, so a user key made every lookup fail with "invalid API key". Legacy single-variable installs keep working.
+
+### Changed
+- `_merge_imported_album_into_existing` only orchestrates now. Previously:
+  - a text title score (0.90, or 0.72 with a matching Recording ID) decided which file was discarded;
+  - with no MusicBrainz tracklist the existing file was always retired;
+  - album identity was never checked.
+- Removed `import_guard.existing_track_matches_target` / `existing_track_can_block_downloaded_replacement`, the text-threshold destructive guards.
+- ARCH-009 contract enforcement was added to these routes:
+  - `add-mbids`
+  - submissions `attach-mbids`
+  - `rgid-group/relink`
+  - `rgid-group/assign-representative-release` (previously failed open)
+  - album `deduplicate` override
+  - `duplicate-resolver/apply` override
+  - the engine MB track repair, which no longer lets caller-supplied tracks inherit the album's release group and refuses when the release's release group is unknown
+- The ARCH-002 caller audit now enforces NEEDS_MIGRATION = 0.
+
+### Tests
+- New and updated test files:
+  - `tests/test_import_reconciliation.py` (28)
+  - `tests/test_arch009_identity_contract.py`
+  - `tests/test_acoustid_key_roles.py`
+  - a duplicate-group safety property test covering groups of 2–6 copies: at least one copy is always kept
+  - the wave18/wave20 real-path reconciliation tests, updated to the canonical rules
+  - `frontend/tests/ReconciliationReviewPanel.test.tsx`
 ## v0.1.28 - 2026-09-26
 
 Canonical single-recording evaluator, release-aware duplicate identity, and latent NameError fixes (ARCH-002 / ARCH-009).

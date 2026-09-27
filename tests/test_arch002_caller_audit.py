@@ -14,11 +14,10 @@ _spec = importlib.util.spec_from_file_location("audit_arch002_callers", ROOT / "
 audit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(audit)
 
-KNOWN_NEEDS_MIGRATION = {
-    "app.py::_merge_imported_album_into_existing",
-    "backend/import_guard.py::existing_track_can_block_downloaded_replacement",
-    "backend/import_guard.py::existing_track_matches_target",
-}
+#: ARCH-002 is closed: no production final decision may bypass canonical
+#: matching. A new independent decision site fails this suite until it is
+#: migrated -- it can never be admitted by adding it here.
+KNOWN_NEEDS_MIGRATION: set = set()
 
 
 class CallerAuditTests(unittest.TestCase):
@@ -28,7 +27,7 @@ class CallerAuditTests(unittest.TestCase):
             code = audit.main([])
         self.assertEqual(code, 0, err.getvalue())
 
-    def test_needs_migration_set_only_shrinks(self):
+    def test_needs_migration_is_zero(self):
         units = json.loads(audit.CLASSIFICATION.read_text(encoding="utf-8"))["units"]
         hits = audit.hit_map()
         needs = {u for u in hits if units.get(u, [""])[0] == "NEEDS_MIGRATION"}
@@ -45,3 +44,20 @@ class CallerAuditTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReconciliationAuthorityTests(unittest.TestCase):
+    def test_merge_delegates_to_reconciliation_service(self):
+        src = (ROOT / "app.py").read_text(encoding="utf-8")
+        start = src.index("def _merge_imported_album_into_existing(")
+        body = src[start:src.index("\ndef ", start + 10)]
+        self.assertIn("_import_reconciliation.plan_reconciliation(", body)
+        self.assertIn("_import_reconciliation.album_identity(", body)
+        for legacy in ("title_score", "repair_threshold", "duplicate_threshold", "_album_track_score",
+                       "_guard_existing_track"):
+            self.assertNotIn(legacy, body)
+
+    def test_text_threshold_guards_are_gone(self):
+        guard = (ROOT / "backend" / "import_guard.py").read_text(encoding="utf-8")
+        self.assertNotIn("def existing_track_matches_target", guard)
+        self.assertNotIn("def existing_track_can_block_downloaded_replacement", guard)

@@ -120,12 +120,14 @@ class AttachAlbumMbidsTests(unittest.TestCase):
             resp = routes_submissions.attach_album_mbids(aid)
         return resp, captured
 
+    @mock.patch.object(routes_submissions, "_mb_release_group_for_release",
+                       return_value="22222222-2222-2222-2222-222222222222")
     @mock.patch.object(routes_submissions, "_invalidate_lib_cache")
     @mock.patch.object(routes_submissions.lib, "get_album")
     @mock.patch.object(routes_submissions.lib, "get_item")
     @mock.patch("backend.beets_adapter.beets_adapter.modify")
     def test_attach_album_mbids_success_writes_via_beets_adapter_modify(
-        self, mock_modify, mock_get_item, mock_get_album, mock_inval
+        self, mock_modify, mock_get_item, mock_get_album, mock_inval, mock_rg
     ):
         mock_item = mock.Mock(id=101, mb_trackid="44444444-4444-4444-4444-444444444444")
         mock_album = mock.Mock(

@@ -48,7 +48,7 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         combined = COMPOSE + "\n" + FULL_COMPOSE
         for var in (
             "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY", "AI_BASE_URL", "AI_MODEL",
-            "ACOUSTID_API_KEY", "ACOUSTID_KEY", "DISCOGS_TOKEN", "DISCOGS_USER_TOKEN", "LISTENBRAINZ_TOKEN",
+            "ACOUSTID_API_KEY", "ACOUSTID_USER_KEY", "ACOUSTID_KEY", "DISCOGS_TOKEN", "DISCOGS_USER_TOKEN", "LISTENBRAINZ_TOKEN",
         ):
             self.assertIn(var, combined)
         self.assertNotIn("OPENAI_API_KEY:?", combined)

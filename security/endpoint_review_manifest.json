@@ -4472,6 +4472,44 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
       ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "import_reconciliation_reviews",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "list import reconciliation decisions held for review",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_import_reconciliation.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_reconciliation_resolve",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "apply a reviewer's reconciliation choice via engine reconcile/bulk-replacement transactions",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_import_reconciliation.py"
+      ]
     }
   ]
 }

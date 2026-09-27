@@ -109,6 +109,8 @@ import type {
   SubmissionMusicBrainzValidationResponse,
   SubmissionAttachMbidsPayload,
   TransactionSettingsResponse,
+  ReconciliationChoice,
+  ReconciliationReviewsResponse,
 } from './types';
 import type { LibraryTrack } from '../types/api';
 
@@ -1627,4 +1629,15 @@ export function applyTrackReplacement(
 // transaction's real mutation_family before picking an executor.
 export function rollbackTrackReplacement(operationId: string): Promise<TrackReplacementApplyResponse> {
   return apiJson<TrackReplacementApplyResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
+}
+
+export function getReconciliationReviews(): Promise<ReconciliationReviewsResponse> {
+  return apiJson<ReconciliationReviewsResponse>('/api/import-reconciliation/reviews');
+}
+
+export function resolveReconciliationReview(reviewId: string, choice: ReconciliationChoice): Promise<ApiOkResponse> {
+  return apiJson<ApiOkResponse>(
+    `/api/import-reconciliation/reviews/${encodeURIComponent(reviewId)}/resolve`,
+    jsonRequest('POST', { choice }),
+  );
 }

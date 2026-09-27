@@ -154,6 +154,7 @@ LIDARR_API_KEY=
 
 # Music metadata providers
 ACOUSTID_API_KEY=
+ACOUSTID_USER_KEY=
 ACOUSTID_KEY=
 DISCOGS_TOKEN=
 DISCOGS_USER_TOKEN=
@@ -734,7 +735,17 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     "ACOUSTID_API_KEY": {
         "section": "Music Services & Metadata",
         "default": None,
-        "description": "AcoustID user API key for audio fingerprinting submissions",
+        "description": "AcoustID application API key (acoustid.org/new-application) used for fingerprint lookups",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
+    },
+    "ACOUSTID_USER_KEY": {
+        "section": "Music Services & Metadata",
+        "default": None,
+        "description": "AcoustID user API key (your account page) used only for fingerprint submissions",
         "secret": True,
         "editable": True,
         "revealable": True,
