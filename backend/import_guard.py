@@ -6,65 +6,10 @@ import re
 
 from typing import Callable, Dict, Iterable, List, Optional
 
-try:
-    from matching import AcoustIDStatus
-except ImportError:
-    from backend.matching import AcoustIDStatus
-
-
-def existing_track_matches_target(
-    *,
-    fingerprint_status: str = "",
-    exact_mbid: bool = False,
-    title_score: float = 0.0,
-    repair_threshold: float = 0.72,
-    duplicate_threshold: float = 0.90,
-) -> bool:
-    """Return true only when an existing row really satisfies an MB track.
-
-    This intentionally uses title-only score from the caller. Folder/file-path
-    variants can include the album title and must not make a wrong existing row
-    look like a duplicate of a newly downloaded correct track.
-
-    ARCH-002: `fingerprint_status` is expected to be a canonical
-    `AcoustIDStatus` value (its callers pass `_album_track_fingerprint_check()`'s
-    `status` field, which now returns canonical values directly -- see that
-    function's docstring). `AcoustIDStatus` is a `str` subclass, so passing
-    either the enum member or its `.value` string works identically here.
-    Only `CONFLICT` is a hard block; `NO_RESULT`/`UNAVAILABLE`/`AMBIGUOUS` (or
-    an empty/unrecognized status) all fall through to the text-score
-    fallback below, same as before -- "no result" and "unavailable" have
-    never been treated as a conflict by this function, and still are not.
-    """
-    status = (fingerprint_status or "").strip().lower()
-    if status == AcoustIDStatus.CONFLICT:
-        return False
-    if status == AcoustIDStatus.CONFIRMED:
-        return True
-    if exact_mbid:
-        return float(title_score or 0.0) >= float(repair_threshold)
-    return float(title_score or 0.0) >= float(duplicate_threshold)
-
-
-def existing_track_can_block_downloaded_replacement(
-    *,
-    file_exists: bool,
-    fingerprint_status: str = "",
-    exact_mbid: bool = False,
-    title_score: float = 0.0,
-    repair_threshold: float = 0.72,
-    duplicate_threshold: float = 0.90,
-) -> bool:
-    """Return true when an existing row should make a new downloaded row a duplicate."""
-    if not file_exists:
-        return False
-    return existing_track_matches_target(
-        fingerprint_status=fingerprint_status,
-        exact_mbid=exact_mbid,
-        title_score=title_score,
-        repair_threshold=repair_threshold,
-        duplicate_threshold=duplicate_threshold,
-    )
+# ARCH-002: existing_track_matches_target / existing_track_can_block_downloaded_replacement
+# were removed. They let a text title score decide whether an existing library
+# file or a new import was discarded. That decision now belongs to the canonical
+# reconciliation service, backend/import_reconciliation.py.
 
 
 def missing_wanted_tracks_block_retag(missing_tracks: Iterable[object]) -> bool:

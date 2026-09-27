@@ -1095,7 +1095,11 @@ class RealProductionPathIntegrationTests(Wave20FixtureBase):
         with mock.patch.object(app_module.composite_workflows, "plan_existing_album_reconcile", side_effect=_mock_plan), \
              mock.patch.object(app_module.composite_workflows, "apply_existing_album_reconcile", side_effect=_mock_apply), \
              mock.patch.object(app_module, "_fetch_mb_release_tracklist", mb_mock), \
-             mock.patch.object(app_module, "_guard_existing_track_can_block_downloaded_replacement", return_value=True):
+             mock.patch.object(app_module, "_acoustid_lookup_cached",
+                               return_value=[{"mb_trackid": REC_1, "score": 95}]):
+            # ARCH-002: the imported copy is discarded only because canonical
+            # evidence proves BOTH files are the expected recording (embedded
+            # Recording ID + confirmed AcoustID), never from a text score.
 
             log = []
             res_aid = app_module._merge_imported_album_into_existing(
