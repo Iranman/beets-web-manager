@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.29 - 2026-09-27
+
 Final matching and identity closure: canonical import reconciliation, release-group identity contracts, and AcoustID key roles. **ARCH-002 and ARCH-009 are closed.**
 
 ### Added
