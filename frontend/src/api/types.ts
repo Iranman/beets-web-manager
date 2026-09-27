@@ -3009,6 +3009,43 @@ export interface FolderPlaceholderApplySafeRenamesResult {
   summary: string;
 }
 
+/** One side of a contested reconciliation slot (canonical backend evidence). */
+export interface ReconciliationSide {
+  item_id: number;
+  path: string;
+  recording_id: string;
+  release_id: string;
+  release_group_id: string;
+  identity_proof: string;
+  confidence_state: string;
+  acoustid: { status?: string; recording_id?: string; score?: number };
+  hard_conflicts: string[];
+  review_reasons: string[];
+}
 
+/** Import reconciliation decision held for review: both files were kept. */
+export interface ReconciliationReview {
+  review_id: string;
+  kind: 'contested_slot' | 'album_identity_unproven' | string;
+  status: 'open' | 'resolved' | string;
+  outcome?: 'keep_both_review' | 'conflict' | string;
+  existing_album_id: number;
+  imported_album_id: number;
+  release_group_id: string;
+  release_id: string;
+  disc?: number;
+  track?: number;
+  target_recording_id?: string;
+  existing?: ReconciliationSide;
+  imported?: ReconciliationSide;
+  reasons: string[];
+  recommended_action: string;
+}
 
+export interface ReconciliationReviewsResponse {
+  ok: boolean;
+  reviews: ReconciliationReview[];
+  count: number;
+}
 
+export type ReconciliationChoice = 'keep_existing' | 'keep_imported' | 'keep_both';
