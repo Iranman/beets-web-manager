@@ -1,11 +1,15 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class AcquisitionActionFlagTests(unittest.TestCase):
     def test_acquire_recommends_download_or_review_only(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("def _acq_can_import_disk", source)
         self.assertIn("def _acq_can_download", source)
@@ -20,7 +24,7 @@ class AcquisitionActionFlagTests(unittest.TestCase):
 
     def test_acquire_download_all_ignores_import_disk_rows(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         ui_source = (
             root / "frontend" / "src" / "features" / "acquisition" / "AcquisitionPanel.tsx"
         ).read_text(encoding="utf-8")
@@ -52,7 +56,7 @@ class AcquisitionActionFlagTests(unittest.TestCase):
 
     def test_source_fallback_applies_to_wanted_album_downloads(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         ui_source = (
             root / "frontend" / "src" / "features" / "acquisition" / "AcquisitionPanel.tsx"
         ).read_text(encoding="utf-8")

@@ -18,10 +18,14 @@ already-existing but previously-unused /api/items/<iid>/ai-suggest.
 """
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 IMPORT_REVIEW_SOURCE = (ROOT / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")

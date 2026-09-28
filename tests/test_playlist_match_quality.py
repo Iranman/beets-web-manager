@@ -4,12 +4,16 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class PlaylistMatchQualityTests(unittest.TestCase):
     def _helpers(self, items):
         root = Path(__file__).resolve().parents[1]
-        source = (root / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         start = source.index("def _norm(s):")
         end = source.index("def _playlist_item_payload")
         namespace = {
@@ -80,7 +84,7 @@ class PlaylistMatchQualityTests(unittest.TestCase):
 
     def _download_helpers(self):
         root = Path(__file__).resolve().parents[1]
-        source = (root / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         namespace = {
             "Any": Any,
             "Dict": Dict,

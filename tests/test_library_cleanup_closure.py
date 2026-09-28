@@ -10,10 +10,14 @@ from unittest import mock
 
 from backend import transaction_engine
 from backend.beets_adapter import BeetsUnavailableError
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (REPO_ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 
 
 class LibraryCleanupTransactionTests(unittest.TestCase):

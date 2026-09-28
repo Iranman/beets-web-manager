@@ -1,12 +1,16 @@
 import re
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class YtdlpCookieMessageTests(unittest.TestCase):
     def test_bot_check_failures_use_rejected_cookie_message(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("def _ytdlp_cookie_rejected_help", source)
         self.assertIn("def _ytdlp_cookie_rejection_seen", source)
@@ -24,7 +28,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_acquire_batch_uses_source_fallback_not_youtube_fallback(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("batch_source_fallback_enabled = bool(try_source_fallback)", source)
         self.assertIn('"try_source_fallback": try_source_fallback', source)
@@ -33,7 +37,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_rejected_cookie_state_does_not_disable_anonymous_youtube(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("_YTDLP_COOKIE_REJECTED_FILE", source)
         self.assertIn("def _mark_ytdlp_cookie_rejected", source)
@@ -45,7 +49,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_cookie_file_is_optional_and_browser_cookies_are_opt_in(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("YTDLP_ALLOW_BROWSER_COOKIES", source)
         self.assertIn("YTDLP_COOKIES_FROM_BROWSER", source)
@@ -63,7 +67,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_ytdlp_netrc_is_scoped_without_exposing_credentials(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("YTDLP_NETRC_FILE", source)
         self.assertIn("def _configured_ytdlp_netrc_file", source)
@@ -80,7 +84,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_cookie_file_rejection_can_fall_back_to_browser_auth_when_enabled(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("def _configured_ytdlp_cookie_auths", source)
         self.assertIn("def _usable_ytdlp_cookie_auths", source)
@@ -90,7 +94,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_ytdlp_status_is_cookie_independent_for_youtube(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("def _ytdlp_auth_smoke_check", source)
         self.assertIn("def _usable_ytdlp_cookie_auths_with_smoke", source)
@@ -102,7 +106,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_ytdlp_bootstrap_probes_without_runtime_installers(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn('os.environ.get("YTDLP_PIP_PACKAGE", "yt-dlp[default,curl-cffi]")', source)
         self.assertIn('os.environ.get("YTDLP_BGUTIL_PIP_PACKAGE", "bgutil-ytdlp-pot-provider==1.3.1")', source)
@@ -124,7 +128,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_spotiflac_cli_does_not_install_at_runtime(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("_SPOTIFLAC_AUTO_INSTALL = False", source)
         self.assertIn("runtime CLI installation is disabled", source)
@@ -134,7 +138,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         self.assertNotIn("_pip_install(_SPOTIFLAC_PIP_PACKAGE", source)
     def test_youtube_uses_flac_po_provider_and_anonymous_test_endpoint(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn('YTDLP_PO_PROVIDER_URL = os.environ.get(', source)
         self.assertIn('"youtubepot-bgutilhttp": {"base_url": [YTDLP_PO_PROVIDER_URL]}', source)
@@ -147,14 +151,14 @@ class YtdlpCookieMessageTests(unittest.TestCase):
 
     def test_parent_child_wait_includes_actionable_failure_detail(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()
 
         self.assertIn("def _child_failure_detail", source)
         self.assertIn('f"{prefix} job failed: {detail}"', source)
 
     def test_download_sources_are_exposed_across_backend_frontend_and_compose(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         type_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
         helper_source = (root / "frontend" / "src" / "lib" / "downloadMethods.ts").read_text(encoding="utf-8")
         playlist_source = (root / "frontend" / "src" / "views" / "Playlists.tsx").read_text(encoding="utf-8")

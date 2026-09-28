@@ -312,7 +312,7 @@ def extracted_modules():
     return out
 
 
-def plan(module_path, requested_names, requested_domains, pull=True, line_range=None):
+def plan(module_path, requested_names, requested_domains, pull=True, line_range=None, exclude_domains=(), exclude_regex=None):
     src = APP.read_text(encoding="utf-8")
     tree, lines, units = build_units(src)
     owner = {}
@@ -336,6 +336,13 @@ def plan(module_path, requested_names, requested_domains, pull=True, line_range=
             if lo <= u.node.lineno <= hi and not u.is_import:
                 selected.add(u.idx)
     excluded = set()
+    for u in units:
+        fn_domain = domain_of.get(u.node.name) if isinstance(u.node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+        text = lines[u.node.lineno - 1]
+        if (fn_domain and fn_domain in exclude_domains) or (exclude_regex and re.search(exclude_regex, text)):
+            if not (u.defines & set(requested_names)):
+                selected.discard(u.idx)
+                excluded.add(u.idx)
     for n in requested_names:
         if n.startswith("-"):
             for u in units:
@@ -511,11 +518,15 @@ def main(argv):
     ap.add_argument("--lower", default="", help="comma list of modules safe to from-import (lower layers)")
     ap.add_argument("--nopull", action="store_true")
     ap.add_argument("--range", default="")
+    ap.add_argument("--exclude-domains", default="")
+    ap.add_argument("--exclude-regex", default="")
     args = ap.parse_args(argv)
     names = [n for n in args.names.split(",") if n]
     domains = [d for d in args.domains.split(",") if d]
     rng = tuple(int(x) for x in args.range.split(":")) if args.range else None
-    p = plan(args.module, names, domains, pull=not args.nopull, line_range=rng)
+    p = plan(args.module, names, domains, pull=not args.nopull, line_range=rng,
+             exclude_domains=[d for d in args.exclude_domains.split(",") if d],
+             exclude_regex=args.exclude_regex or None)
     size = sum(p["units"][i].end - p["units"][i].start + 1 for i in p["selected"])
     print(f"selected units: {len(p['selected'])}  lines: {size}  names: {len(p['moved_names'])}")
     if p["cross"]:
@@ -528,8 +539,17 @@ def main(argv):
         if args.action == "apply":
             return 2
     if args.action == "apply":
-        lower = [m for m in args.lower.split(",") if m]
+        # Extraction order is a topological order: an earlier module can never
+        # reference a later one (it would have been blocked on app.py), so every
+        # already-extracted module is a lower layer and plain imports are safe.
+        lower = set(m for m in args.lower.split(",") if m) | set(p["ext_owner"].values())
         n_units, n_names = apply(args.module, p, args.doc, lower)
+        inv = json.loads(INVENTORY.read_text(encoding="utf-8"))
+        mods = inv.setdefault("extracted_modules", [])
+        rel = args.module.replace("\\", "/")
+        if rel not in mods:
+            mods.append(rel)
+        INVENTORY.write_text(json.dumps(inv, indent=1) + "\n", encoding="utf-8", newline="\n")
         print(f"moved {n_units} units ({n_names} names) -> {args.module}")
     return 0
 

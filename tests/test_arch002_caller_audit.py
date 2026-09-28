@@ -8,6 +8,10 @@ import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("audit_arch002_callers", ROOT / "scripts" / "audit_arch002_callers.py")
@@ -48,7 +52,7 @@ if __name__ == "__main__":
 
 class ReconciliationAuthorityTests(unittest.TestCase):
     def test_merge_delegates_to_reconciliation_service(self):
-        src = (ROOT / "app.py").read_text(encoding="utf-8")
+        src = app_family_source()
         start = src.index("def _merge_imported_album_into_existing(")
         body = src[start:src.index("\ndef ", start + 10)]
         self.assertIn("_import_reconciliation.plan_reconciliation(", body)

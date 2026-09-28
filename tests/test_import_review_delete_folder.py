@@ -1,12 +1,16 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 
 class ImportReviewDeleteFolderTests(unittest.TestCase):
     def test_needs_mbid_delete_folder_stays_guarded(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         album_folder_source = app_source[
             app_source.index("def _album_folder_for_album_id"):
             app_source.index("def _source_audio_missing_track_scan")

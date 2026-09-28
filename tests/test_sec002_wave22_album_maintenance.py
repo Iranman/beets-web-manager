@@ -17,6 +17,10 @@ from backend.transaction_engine import (
     execute_album_artwork_apply,
     rollback_album_artwork,
 )
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class Wave22AlbumMaintenanceTests(unittest.TestCase):
@@ -263,7 +267,7 @@ class Wave22AlbumMaintenanceTests(unittest.TestCase):
         """AST check of app.py to verify no direct file unlinks or SQL deletes remain in target helpers."""
         app_path = Path(__file__).parent.parent / "app.py"
         self.assertTrue(app_path.exists())
-        tree = ast.parse(app_path.read_text(encoding="utf-8"))
+        tree = ast.parse(app_family_source())
 
         target_func_names = {
             "_remove_album_track_items",

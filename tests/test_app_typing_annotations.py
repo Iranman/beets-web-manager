@@ -1,6 +1,10 @@
 import ast
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 TYPING_NAMES = {
@@ -32,7 +36,7 @@ def _annotation_names(annotation):
 class AppTypingAnnotationTests(unittest.TestCase):
     def test_typing_aliases_used_in_annotations_are_imported(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
-        tree = ast.parse(app_path.read_text(encoding="utf-8"))
+        tree = ast.parse(app_family_source())
 
         imported = set()
         used = set()

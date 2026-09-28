@@ -1,12 +1,16 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 
 class LibraryHealthJobsTests(unittest.TestCase):
     def test_library_health_scan_is_jobstore_backed(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         route_source = app_source[
             app_source.index('@app.post("/api/clean/library-health/scan")'):
             app_source.index("def _clean_remove_orphaned_items")

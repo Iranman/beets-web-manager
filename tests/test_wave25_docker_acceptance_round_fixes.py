@@ -49,6 +49,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -57,7 +61,7 @@ if str(ROOT) not in sys.path:
 
 class TestImportSourcePathDoesNotRequireLocalExistence(unittest.TestCase):
     def setUp(self):
-        self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.app_source = app_family_source()
 
     def test_import_folder_with_id_does_not_require_local_existence(self):
         idx = self.app_source.index("def import_folder_with_id()")
@@ -160,7 +164,7 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
     raising NameError on every real fresh-import call."""
 
     def setUp(self):
-        self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.app_source = app_family_source()
 
     def test_input_looks_like_release_group_is_assigned_before_use(self):
         idx = self.app_source.index("def import_folder_with_id()")
@@ -223,7 +227,7 @@ class TestConfirmedImportV1ResultSkipsRedundantRawSqlRevalidation(unittest.TestC
     engine's config) let native import succeed for the first time."""
 
     def setUp(self):
-        self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.app_source = app_family_source()
 
     def test_confirmed_import_v1_result_is_trusted_without_calling_album_match_summary(self):
         idx = self.app_source.index("def import_folder_with_id()")

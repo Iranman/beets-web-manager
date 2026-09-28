@@ -36,9 +36,13 @@ destructive-adjacent library operation.
 import ast
 from pathlib import Path
 import unittest
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent
-APP_SOURCE = (REPO_ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 _APP_TREE = ast.parse(APP_SOURCE)
 
 

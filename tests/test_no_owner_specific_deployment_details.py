@@ -17,6 +17,10 @@ neither is in scope here.
 import re
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,7 +128,7 @@ class NoOwnerSpecificDeploymentDetailsTests(unittest.TestCase):
             self.fail(f"next.config.mjs:{line_no} hardcodes a {label} as the dev proxy default: {line.strip()!r}")
 
     def test_app_py_does_not_default_plex_url_to_a_lan_address(self):
-        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         for line_no, line, label in _scan_lines_for_patterns(
             app_source, {"hardcoded RFC1918 host address": _GENERIC_HOST_PATH_PATTERNS["hardcoded RFC1918 host address"]}
         ):

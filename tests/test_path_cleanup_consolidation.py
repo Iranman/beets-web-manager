@@ -1,5 +1,9 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +20,7 @@ class PathCleanupConsolidationTests(unittest.TestCase):
         cls.leaked_panel_source = (
             ROOT / "frontend" / "src" / "features" / "leakedPaths" / "LeakedPathsPanel.tsx"
         ).read_text(encoding="utf-8")
-        cls.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        cls.app_source = app_family_source()
         cls.types_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 
     def test_files_tab_no_longer_duplicates_path_cleanup_actions(self):

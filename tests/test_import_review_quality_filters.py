@@ -1,5 +1,9 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 
@@ -10,7 +14,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn("export type QueueFilter =", review_source)
         self.assertIn("| 'ready'", review_source)
@@ -158,7 +162,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn('@app.post("/api/import/reconcile-job")', app_source)
         self.assertIn('def import_reconcile_job():', app_source)
@@ -183,7 +187,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_review_queue_uses_lightweight_status_loaders(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn("def _load_pending_reviews(*, prune_resolved: bool = True) -> list:", app_source)
         self.assertIn("pending_reviews = _load_pending_reviews(prune_resolved=False)", app_source)
@@ -193,7 +197,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("_import_skipped_items(skipped_limit, deep_scan=skipped_deep_scan, max_log_lines=skipped_max_log_lines)", app_source)
     def test_backend_import_target_preview_is_read_only_and_release_group_based(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn('@app.post("/api/folders/import-target-preview")', app_source)
         self.assertIn("def _build_import_target_preview(payload: Dict[str, Any])", app_source)
@@ -225,7 +229,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn("function selectedCleanupSourceFiles", review_source)
         self.assertIn("const CLEANUP_TRACK_STATUSES = new Set<TrackRow['status']>([", review_source)
@@ -329,7 +333,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_auto_enqueue_failed_is_failed_not_ready(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         body = app_source[app_source.index('def _review_queue_status_matches'):app_source.index('def _review_row_has_evidence')]
         self.assertIn('"auto_enqueue_failed"', body)
         self.assertIn('"format_policy_rejected"', body)

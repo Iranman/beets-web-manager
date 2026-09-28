@@ -60,17 +60,43 @@ from typing import (
 import unicodedata
 import uuid
 
-_APP_PY_PATH = Path(__file__).resolve().parents[1] / "app.py"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_APP_PY_PATH = _REPO_ROOT / "app.py"
 _cached_tree: Optional[ast.Module] = None
 _cached_source: Optional[str] = None
 _parse_count = 0
 
 
+def app_family_paths() -> list:
+    """app.py plus every module extracted from it (ARCH-001), in a stable order.
+
+    Helpers that tests extract from source keep working after a function
+    moves out of app.py into an owned module: the family is parsed as one
+    combined module. The list is maintained by scripts/arch001_extract.py in
+    docs/arch001_app_ownership.json ("extracted_modules").
+    """
+    inventory = _REPO_ROOT / "docs" / "arch001_app_ownership.json"
+    try:
+        modules = json.loads(inventory.read_text(encoding="utf-8")).get("extracted_modules") or []
+    except Exception:
+        modules = []
+    # The foundation layer came from the top of app.py, so it precedes it;
+    # domain modules follow in extraction order.
+    before = [_REPO_ROOT / m for m in modules if m == "backend/app_runtime.py"]
+    after = [_REPO_ROOT / m for m in modules if m != "backend/app_runtime.py"]
+    return [p for p in before + [_APP_PY_PATH] + after if p.exists()]
+
+
+def app_family_source() -> str:
+    """Concatenated source of app.py and its extracted modules."""
+    return "\n\n".join(p.read_text(encoding="utf-8") for p in app_family_paths())
+
+
 def get_app_ast() -> ast.Module:
-    """Return the parsed AST of app.py, parsing only on first call."""
+    """Return the parsed AST of the app.py module family, parsing only once."""
     global _cached_tree, _cached_source, _parse_count
     if _cached_tree is None:
-        _cached_source = _APP_PY_PATH.read_text(encoding="utf-8")
+        _cached_source = app_family_source()
         _cached_tree = ast.parse(_cached_source)
         _parse_count += 1
     return _cached_tree

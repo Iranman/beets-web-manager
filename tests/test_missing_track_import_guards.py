@@ -1,6 +1,10 @@
 import re
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
@@ -9,7 +13,7 @@ APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 class MissingTrackImportGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = APP_SOURCE.read_text(encoding="utf-8")
+        cls.source = app_family_source()
 
     def test_pre_rename_uses_existing_template_token_cleaner(self):
         self.assertNotIn("_TMPL_RE", self.source)

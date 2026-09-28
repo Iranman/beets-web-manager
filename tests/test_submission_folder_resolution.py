@@ -8,6 +8,10 @@ from urllib.parse import urlparse
 
 import app as app_module
 from backend.beets_adapter import RemoteAlbum
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTES_SOURCE = ROOT / "routes_submissions.py"
@@ -319,7 +323,7 @@ class DiskArtBothRootsTests(unittest.TestCase):
     music root it originally hardcoded."""
 
     def test_disk_art_serve_checks_both_allowed_roots(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         self.assertIn("any(_path_is_under(p, root) for root in _BROWSE_ALLOWED_ROOTS)", source)
 
 

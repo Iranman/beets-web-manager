@@ -44,90 +44,132 @@ if __name__ == "__main__":
 else:
     sys.modules.setdefault("app", sys.modules[__name__])
 
-# Convenience aliases used throughout (matches inline import pattern in functions)
-_ur = urllib.request
-_up = urllib.parse
-
-# Single source of truth for where Web Manager's own durable state lives.
-# Set (not just read) as early as possible, before any other module in this
-# process reads WEB_MANAGER_DATA_DIR: routes_setup.py and
-# backend/web_manager_config_store.py each independently default to
-# "/web-manager-data" when the env var is unset, so unless the unified
-# single-compose layout's actual mount ("/data") is exported here first,
-# every one of app.py's own /web-manager-data-prefixed constants below,
-# plus every other module's fallback, silently disagrees with each other
-# and with WEB_MANAGER_DATA_DIR -- state written under one path (the real
-# bind mount, /data) can never be found again at the other (the container's
-# un-mounted, non-persistent built-in /web-manager-data directory).
-os.environ.setdefault(
-    "WEB_MANAGER_DATA_DIR",
-    "/data" if os.path.exists("/data") else "/web-manager-data",
+from backend.app_runtime import (  # ARCH-001 extracted
+    ALBUM_FOLDER_CLEANUP_LAST_FILE,
+    ARTIST_IMAGE_CACHE_DIR,
+    ART_REPAIR_LAST_FILE,
+    AUDIO_EXT,
+    CONFIG_FILE,
+    DEFAULT_TORRENT_SOURCE_ROOTS,
+    DOWNLOADS_ROOT,
+    EDITABLE_FIELDS,
+    HOST,
+    LIB_PATH,
+    LIDARR_KEY,
+    LIDARR_URL,
+    LOG_FILE,
+    MAINTENANCE_RUNNER_LAST_FILE,
+    METADATA_CACHE_ROOT,
+    MUSIC_ROOT,
+    PLAYLIST_AUTO_SYNC_ENABLED,
+    PLAYLIST_AUTO_SYNC_INTERVAL,
+    PLAYLIST_DIR,
+    PLAYLIST_DOWNLOAD_BATCH_SIZE,
+    PLAYLIST_DOWNLOAD_METHODS,
+    PLAYLIST_DOWNLOAD_ROOT,
+    PLAYLIST_EXPORTS_DIR,
+    PLAYLIST_INDEX_PATH,
+    PLAYLIST_JOB_STATE_DIR,
+    PLAYLIST_MANIFESTS_DIR,
+    PLAYLIST_MEMBERSHIP_DIR,
+    PLAYLIST_MIN_DOWNLOAD_SECONDS,
+    PLAYLIST_PATH_ROOT_ALIASES,
+    PLAYLIST_PIPELINE_STATES,
+    PLAYLIST_STATE_ROOT,
+    PLEX_API_TIMEOUT,
+    PLEX_INDEX_CACHE_TTL,
+    PLEX_INDEX_PAGE_SIZE,
+    PLEX_INDEX_TIMEOUT,
+    PLEX_PLAYLIST_CHUNK_SIZE,
+    PLEX_SCAN_TIMEOUT,
+    PLEX_SYNC_MAX_FALLBACK_SEARCHES,
+    PLEX_SYNC_MAX_UNMATCHED_REPLACE,
+    PLEX_SYNC_MIN_MATCH_RATIO,
+    PLEX_TOKEN,
+    PLEX_URL,
+    PORT,
+    QBIT_CATEGORY,
+    QBIT_FILTER,
+    QBIT_PASSWORD,
+    QBIT_PATH_ALIASES,
+    QBIT_REPAIR_ALLOWED_ROOTS,
+    QBIT_URL,
+    QBIT_USERNAME,
+    RELEASE_ART_CACHE_DIR,
+    RGID_RESOLUTION_STATE_FILE,
+    ROOT_FOLDER_REPAIR_LAST_FILE,
+    SLSKD_URL,
+    TORRENT_SOURCE_MOVE_ALLOWED,
+    TORRENT_SOURCE_ROOTS,
+    UNMATCHED_DRAFT_ROOT,
+    WEB_MANAGER_DATA_DIR,
+    YTDLP_ALLOW_BROWSER_COOKIES,
+    YTDLP_COOKIES_FROM_BROWSER,
+    YTDLP_COOKIES_FROM_BROWSER_FALLBACK,
+    YTDLP_COOKIE_FALLBACKS,
+    YTDLP_COOKIE_FILE,
+    YTDLP_NETRC_FILE,
+    YTDLP_PO_PROVIDER_URL,
+    YTDLP_REQUIRE_YOUTUBE_AUTH,
+    _AI_BATCH_MEDIUM_RATIO,
+    _AI_BATCH_MIN_CONF,
+    _AI_CONF_ORDER,
+    _AI_MISSING_MIN_CONF,
+    _AI_REPAIR_MIN_CONF,
+    _AI_USE_CASE_THRESHOLDS,
+    _ALBUMTYPE_SINGLE_PATH_TEMPLATE,
+    _ANSI_RE,
+    _ARTIST_FOLDER_PATH_TEMPLATE,
+    _BOOT_ENV_BLOCKED_NAMES,
+    _BOOT_ENV_NAME_RE,
+    _DEFAULT_ALBUM_PATH_TEMPLATE,
+    _DISC_CACHE_TTL,
+    _LITERAL_PLACEHOLDER_RE,
+    _MALFORMED_RELEASE_GROUP_STAMP_RE,
+    _MB_RELEASE_TRACKLIST_CACHE,
+    _MB_RELEASE_TRACKLIST_CACHE_DIR,
+    _MB_RELEASE_TRACKLIST_CACHE_LOCK,
+    _MB_RELEASE_TRACKLIST_CACHE_TTL,
+    _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL,
+    _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD,
+    _MB_TRACK_REPAIR_MATCH_THRESHOLD,
+    _MB_UUID_RE,
+    _MISSING_TRACK_FILE_MATCH_SCORE,
+    _MISSING_TRACK_TITLE_FUZZY_SCORE,
+    _SINGLE_TRACK_PATH_TEMPLATE,
+    _SQLITE_WAL_CONFIGURED,
+    _SQLITE_WAL_LOCK,
+    _UNRESOLVED_TEMPLATE_TOKEN_RE,
+    _YEAR_SFXRE,
+    _YTDLP_AUTH_SMOKE_TTL,
+    _YTDLP_BGUTIL_PIP_PACKAGE,
+    _YTDLP_COOKIE_REJECTED_FILE,
+    _YTDLP_JS_RUNTIME_PROBE_TIMEOUT,
+    _YTDLP_PIP_FALLBACK_PACKAGE,
+    _YTDLP_PIP_PACKAGE,
+    _YTDLP_RUNTIME_BIN_DIR,
+    _config_file_first_line,
+    _db,
+    _decode_boot_env_value,
+    _env_flag,
+    _env_float,
+    _env_int,
+    _extract_mb_uuid,
+    _is_valid_mb_uuid,
+    _load_persisted_setup_env_at_boot,
+    _plugin_install_log,
+    _read_beets_plugin_list,
+    _s,
+    _sqlite_is_locked_error,
+    _sqlite_timeout_seconds,
+    _sqlite_write_retry,
+    _up,
+    _ur,
+    _ytdlp_auth_smoke_cache,
+    _ytdlp_auth_smoke_lock,
+    _ytdlp_ready,
 )
 
-def _s(v: Any) -> str:
-    return str(v or "") if v is not None else ""
-
-
-_BOOT_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
-_BOOT_ENV_BLOCKED_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
-
-
-def _decode_boot_env_value(raw: str) -> str:
-    value = (raw or "").strip()
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        inner = value[1:-1]
-        return (
-            inner.replace(r"\n", "\n")
-            .replace(r"\r", "\r")
-            .replace(r"\"", '"')
-            .replace(r"\\", "\\")
-        )
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1]
-    return value
-
-
-def _load_persisted_setup_env_at_boot() -> None:
-    """Load setup-managed persisted environment before clients read os.environ."""
-    env_file = Path(os.environ.get("SETUP_ENV_FILE", os.path.join(os.environ["WEB_MANAGER_DATA_DIR"], ".env")))
-    try:
-        text = env_file.read_text(encoding="utf-8")
-    except Exception:
-        return
-    for raw_line in text.splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        candidate = stripped[7:].strip() if stripped.startswith("export ") else stripped
-        if "=" not in candidate:
-            continue
-        key, raw_value = candidate.split("=", 1)
-        key = key.strip()
-        if key in _BOOT_ENV_BLOCKED_NAMES or not _BOOT_ENV_NAME_RE.match(key):
-            continue
-        if os.environ.get(key, "").strip():
-            continue
-        value = _decode_boot_env_value(raw_value)
-        if "\n" in value or "\r" in value or len(value) > 4096:
-            continue
-        os.environ[key] = value
-
-
-_load_persisted_setup_env_at_boot()
-
-os.environ.setdefault("BEETSDIR", "/config")
-
-# ── yt-dlp: probe preinstalled tools; runtime package/binary installs are disabled
-_ytdlp_ready = threading.Event()
-_YTDLP_PIP_PACKAGE = os.environ.get("YTDLP_PIP_PACKAGE", "yt-dlp[default,curl-cffi]").strip() or "yt-dlp[default,curl-cffi]"
-_YTDLP_PIP_FALLBACK_PACKAGE = os.environ.get("YTDLP_PIP_FALLBACK_PACKAGE", "yt-dlp[default]").strip() or "yt-dlp[default]"
-_YTDLP_BGUTIL_PIP_PACKAGE = os.environ.get("YTDLP_BGUTIL_PIP_PACKAGE", "bgutil-ytdlp-pot-provider==1.3.1").strip()
-_YTDLP_RUNTIME_BIN_DIR = Path(os.environ.get("YTDLP_RUNTIME_BIN_DIR", "/config/yt-dlp/bin"))
-_YTDLP_AUTH_SMOKE_TTL = int(os.environ.get("YTDLP_AUTH_SMOKE_TTL", "300") or "300")
-_YTDLP_JS_RUNTIME_PROBE_TIMEOUT = float(os.environ.get("YTDLP_JS_RUNTIME_PROBE_TIMEOUT", "15") or "15")
-_ytdlp_auth_smoke_lock = threading.Lock()
-_ytdlp_auth_smoke_cache: Dict[str, Dict[str, Any]] = {}
-_plugin_install_log: List[str] = []   # visible via /api/plugins/install-log
 
 def _pip_install(*packages, timeout=300) -> bool:
     """Runtime package installation is intentionally disabled."""
@@ -514,178 +556,12 @@ def _slskd_api_key_from_file() -> str:
         return ""
 
 
-def _config_file_first_line(env_name: str, default_path: str) -> str:
-    key_path = Path(os.environ.get(env_name, default_path))
-    try:
-        value = key_path.read_text(encoding="utf-8", errors="ignore").strip()
-        return value.splitlines()[0].strip() if value else ""
-    except Exception:
-        return ""
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-def _env_int(name: str, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
-    try:
-        value = int(os.environ.get(name, str(default)) or default)
-    except Exception:
-        value = default
-    if minimum is not None:
-        value = max(minimum, value)
-    if maximum is not None:
-        value = min(maximum, value)
-    return value
-
-def _env_float(name: str, default: float, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
-    try:
-        value = float(os.environ.get(name, str(default)) or default)
-    except Exception:
-        value = default
-    if minimum is not None:
-        value = max(minimum, value)
-    if maximum is not None:
-        value = min(maximum, value)
-    return value
-
-LIB_PATH  = os.environ.get("BEETS_LIBRARY", "")
-LOG_FILE  = os.environ.get("BEETS_LOG", "/config/beet.log")
-HOST      = "0.0.0.0"
-PORT      = int(os.environ.get("WEBCONTROL_PORT", "8337"))
-PLEX_URL      = os.environ.get("PLEX_URL",   "").rstrip("/")
-PLEX_TOKEN    = os.environ.get("PLEX_TOKEN", "")
-PLEX_API_TIMEOUT = _env_int("PLEX_API_TIMEOUT", 20, minimum=5)
-PLEX_SCAN_TIMEOUT = _env_int("PLEX_SCAN_TIMEOUT", 90, minimum=0)
-PLEX_INDEX_TIMEOUT = _env_int("PLEX_INDEX_TIMEOUT", 90, minimum=20)
-PLEX_INDEX_PAGE_SIZE = _env_int("PLEX_INDEX_PAGE_SIZE", 500, minimum=100, maximum=2000)
-PLEX_INDEX_CACHE_TTL = _env_int("PLEX_INDEX_CACHE_TTL", 600, minimum=0)
-PLEX_SYNC_MAX_FALLBACK_SEARCHES = _env_int("PLEX_SYNC_MAX_FALLBACK_SEARCHES", 10, minimum=0)
-PLEX_SYNC_MIN_MATCH_RATIO = _env_float("PLEX_SYNC_MIN_MATCH_RATIO", 0.85, minimum=0.0, maximum=1.0)
-PLEX_SYNC_MAX_UNMATCHED_REPLACE = _env_int("PLEX_SYNC_MAX_UNMATCHED_REPLACE", 25, minimum=0)
-PLEX_PLAYLIST_CHUNK_SIZE = _env_int("PLEX_PLAYLIST_CHUNK_SIZE", 200, minimum=25, maximum=500)
-LIDARR_URL    = (
-    os.environ.get("LIDARR_URL", "").strip()
-    or _config_file_first_line("LIDARR_URL_FILE", "/config/lidarr_url")
-    or "http://lidarr:8686"
-).rstrip("/")
-LIDARR_KEY    = (
-    os.environ.get("LIDARR_API_KEY", "").strip()
-    or _config_file_first_line("LIDARR_API_KEY_FILE", "/config/lidarr_api_key")
-)
 DISCOGS_TOKEN = (
     os.environ.get("DISCOGS_TOKEN", "").strip()
     or os.environ.get("DISCOGS_USER_TOKEN", "").strip()
     or _beets_config_discogs_token()
 )
-WEB_MANAGER_DATA_DIR = Path(os.environ["WEB_MANAGER_DATA_DIR"])
-PLAYLIST_STATE_ROOT = WEB_MANAGER_DATA_DIR / "playlists"
-PLAYLIST_MANIFESTS_DIR = PLAYLIST_STATE_ROOT / "manifests"
-PLAYLIST_JOB_STATE_DIR = Path(os.environ.get("PLAYLIST_JOB_STATE_DIR", "")) or (PLAYLIST_STATE_ROOT / "jobs")
-PLAYLIST_EXPORTS_DIR = PLAYLIST_STATE_ROOT / "exports"
-PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
-PLAYLIST_INDEX_PATH = PLAYLIST_STATE_ROOT / "index.json"
-PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "/music/playlists" if os.path.exists("/music") else "/data/media/music/playlists"))
-PLAYLIST_PATH_ROOT_ALIASES = [
-    value.strip().replace("\\", "/").rstrip("/")
-    for value in (
-        os.environ.get("PLAYLIST_PATH_ROOT_ALIASES")
-        or os.environ.get("PLEX_MUSIC_ROOT")
-        or "/data/music,/music"
-    ).split(",")
-    if value.strip()
-]
-PLAYLIST_AUTO_SYNC_ENABLED = os.environ.get("PLAYLIST_AUTO_SYNC", "1").strip().lower() not in {"0", "false", "no", "off"}
-PLAYLIST_AUTO_SYNC_INTERVAL = max(60, int(os.environ.get("PLAYLIST_AUTO_SYNC_INTERVAL", "300") or "300"))
-PLAYLIST_MIN_DOWNLOAD_SECONDS = max(0, int(os.environ.get("PLAYLIST_MIN_DOWNLOAD_SECONDS", "45") or "45"))
-PLAYLIST_DOWNLOAD_BATCH_SIZE = _env_int("PLAYLIST_DOWNLOAD_BATCH_SIZE", 0, minimum=0)
-PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,spotiflac,ytdlp,soundcloud")
-PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
-    "PLAYLIST_DOWNLOAD_ROOT",
-    "/downloads/music/Playlist Downloads" if os.path.exists("/downloads") else "/data/torrents/music/Playlist Downloads",
-))
-PLAYLIST_PIPELINE_STATES = {
-    "pending", "available", "searching", "downloaded", "waiting_import",
-    "importing", "imported", "plex_synced", "failed", "missing",
-    "review_required", "removed", "excluded",
-}
-SLSKD_URL     = os.environ.get("SLSKD_URL",     "http://slskd:5030")
 SLSKD_API_KEY = os.environ.get("SLSKD_API_KEY", "").strip() or _slskd_api_key_from_file()
-DOWNLOADS_ROOT = Path("/data/torrents/music")
-DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
-TORRENT_SOURCE_ROOTS = tuple(
-    Path(value.strip())
-    for value in os.environ.get("TORRENT_SOURCE_ROOTS", DEFAULT_TORRENT_SOURCE_ROOTS).split(",")
-    if value.strip()
-)
-TORRENT_SOURCE_MOVE_ALLOWED = _env_flag("ALLOW_TORRENT_SOURCE_MOVE", False)
-QBIT_URL = (
-    os.environ.get("QBITTORRENT_URL", "").strip()
-    or os.environ.get("QBIT_URL", "").strip()
-    or os.environ.get("QB_URL", "").strip()
-    or _config_file_first_line("QBITTORRENT_URL_FILE", "/config/qbittorrent_url")
-).rstrip("/")
-QBIT_USERNAME = (
-    os.environ.get("QBITTORRENT_USERNAME", "").strip()
-    or os.environ.get("QBIT_USER", "").strip()
-    or os.environ.get("QB_USER", "").strip()
-    or _config_file_first_line("QBITTORRENT_USERNAME_FILE", "/config/qbittorrent_username")
-)
-QBIT_PASSWORD = (
-    os.environ.get("QBITTORRENT_PASSWORD", "").strip()
-    or os.environ.get("QBIT_PASS", "").strip()
-    or os.environ.get("QB_PASS", "").strip()
-    or _config_file_first_line("QBITTORRENT_PASSWORD_FILE", "/config/qbittorrent_password")
-)
-QBIT_CATEGORY = (
-    os.environ.get("QBITTORRENT_CATEGORY", "").strip()
-    or os.environ.get("QBIT_CATEGORY", "").strip()
-    or "music"
-)
-QBIT_FILTER = (
-    os.environ.get("QBITTORRENT_FILTER", "").strip()
-    or os.environ.get("QBIT_FILTER", "").strip()
-    or "errored"
-)
-QBIT_PATH_ALIASES = os.environ.get(
-    "QBIT_PATH_ALIASES",
-    "/downloads=/data/torrents,/download=/data/torrents,/data/downloads=/data/torrents",
-)
-QBIT_REPAIR_ALLOWED_ROOTS = tuple(
-    Path(value.strip())
-    for value in os.environ.get(
-        "QBIT_REPAIR_ALLOWED_ROOTS",
-        ",".join([str(DOWNLOADS_ROOT), str(DOWNLOADS_ROOT.parent), "/data/downloads"]),
-    ).split(",")
-    if value.strip()
-)
-YTDLP_COOKIE_FILE = os.environ.get("YTDLP_COOKIE_FILE", "").strip()
-YTDLP_NETRC_FILE = os.environ.get("YTDLP_NETRC_FILE", "/config/.netrc").strip()
-YTDLP_REQUIRE_YOUTUBE_AUTH = os.environ.get(
-    "YTDLP_REQUIRE_YOUTUBE_AUTH", "0"
-).strip().lower() in {"1", "true", "yes", "on"}
-YTDLP_PO_PROVIDER_URL = os.environ.get(
-    "YTDLP_PO_PROVIDER_URL", "http://bgutil-provider:4416"
-).strip().rstrip("/")
-YTDLP_ALLOW_BROWSER_COOKIES = os.environ.get(
-    "YTDLP_ALLOW_BROWSER_COOKIES", "0"
-).strip().lower() in {"1", "true", "yes", "on"}
-YTDLP_COOKIES_FROM_BROWSER = (
-    os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "")
-    or os.environ.get("YTDLP_COOKIES_BROWSER", "")
-).strip()
-YTDLP_COOKIES_FROM_BROWSER_FALLBACK = os.environ.get(
-    "YTDLP_COOKIES_FROM_BROWSER_FALLBACK",
-    "",
-).strip()
-YTDLP_COOKIE_FALLBACKS = (
-    Path("/config/yt-dlp/cookies.txt"),
-    Path("/config/ytdlp_cookies.txt"),
-    Path("/config/cookies.txt"),
-)
-_YTDLP_COOKIE_REJECTED_FILE = Path("/config/yt-dlp/cookies.rejected.json")
 
 def _ytdlp_cookie_help() -> str:
     return (
@@ -1367,102 +1243,6 @@ def _ytdlp_youtube_status(js_runtime: Optional[Dict[str, Any]] = None) -> Dict[s
         "ready": bool(install.get("version") and js_runtime.get("available")),
     }
 
-# ── Derived constants ──────────────────────────────────────────────────────────
-MUSIC_ROOT   = Path("/data/media/music")    # canonical library root on disk
-CONFIG_FILE  = "/config/config.yaml"        # main beets config
-# Unmatched-draft review metadata (submission text + JSON, no audio) is
-# web-manager orchestration state, not authoritative media -- it must not
-# live under MUSIC_ROOT, which the web manager neither owns nor (per the
-# shipped Compose topology) has mounted at all. /web-manager-data is the
-# one path volume every shipped Compose file actually gives this container
-# (SEC-002 Wave 8 architecture review).
-UNMATCHED_DRAFT_ROOT = Path(os.environ["UNMATCHED_DRAFT_DIR"]) if os.environ.get("UNMATCHED_DRAFT_DIR", "").strip() else (WEB_MANAGER_DATA_DIR / "unmatched_drafts")
-METADATA_CACHE_ROOT = Path(os.environ.get("METADATA_CACHE_DIR", "/config/.cache/metadata"))
-ARTIST_IMAGE_CACHE_DIR = METADATA_CACHE_ROOT / "artist-images"
-RELEASE_ART_CACHE_DIR = METADATA_CACHE_ROOT / "release-art"
-ART_REPAIR_LAST_FILE = METADATA_CACHE_ROOT / "art-repair-last.json"
-MAINTENANCE_RUNNER_LAST_FILE = METADATA_CACHE_ROOT / "maintenance-runner-last.json"
-ALBUM_FOLDER_CLEANUP_LAST_FILE = METADATA_CACHE_ROOT / "album-folder-cleanup-last.json"
-ROOT_FOLDER_REPAIR_LAST_FILE = METADATA_CACHE_ROOT / "root-folder-repair-last.json"
-RGID_RESOLUTION_STATE_FILE = METADATA_CACHE_ROOT / "rgid-resolution-state.json"
-AUDIO_EXT    = frozenset({                  # all audio extensions the app handles
-    '.flac', '.mp3', '.m4a', '.ogg', '.opus', '.wav',
-    '.aiff', '.aif', '.ape', '.wv', '.mpc', '.dsf', '.dff', '.webm',
-})
-_ANSI_RE    = re.compile(r'\x1b\[[0-9;]*m')   # strip terminal colour codes
-_MB_UUID_RE = re.compile(                      # MusicBrainz UUID validator
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
-
-
-def _is_valid_mb_uuid(value: Any) -> bool:
-    return bool(_MB_UUID_RE.match(_s(value).strip()))
-_YEAR_SFXRE = re.compile(r'\s*[\(\[]\d{4}[\)\]]\s*$')  # trailing year in album name
-_DISC_CACHE_TTL = 1800   # seconds before Discogs discography cache expires
-_MB_RELEASE_TRACKLIST_CACHE_TTL = 300
-_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL = _env_int("MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800, minimum=0)
-_MB_RELEASE_TRACKLIST_CACHE_DIR = METADATA_CACHE_ROOT / "mb-release-tracklists"
-_MB_RELEASE_TRACKLIST_CACHE: Dict[str, Any] = {}
-_MB_RELEASE_TRACKLIST_CACHE_LOCK = threading.Lock()
-_MB_TRACK_PREFLIGHT_MATCH_THRESHOLD = 0.82
-_MB_TRACK_REPAIR_MATCH_THRESHOLD = 0.72
-_UNRESOLVED_TEMPLATE_TOKEN_RE = re.compile(
-    r'%\w+\{[^}]+\}'
-    r'|\$(?:disc_subfolder|albumartist|album|artist|title|track|disc|year|'
-    r'mb_[A-Za-z0-9_]+)'
-    r'|\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12},\}'
-    # Literal text placeholders that should have been replaced with a real UUID:
-    r'|\{(?:Album\s+MbId|Track\s+ArtistMbId)\}',
-    re.IGNORECASE,
-)
-# Matches {Album MbId} / {Album Mbid} / {Track ArtistMbId} — literal text placeholders in
-# folder/file names where a real UUID was never substituted.
-_LITERAL_PLACEHOLDER_RE = re.compile(
-    r'\{(?:Album\s+MbId|Track\s+ArtistMbId)\}',
-    re.IGNORECASE,
-)
-_MALFORMED_RELEASE_GROUP_STAMP_RE = re.compile(
-    r'\{([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}),\}',
-    re.IGNORECASE,
-)
-# AI confidence thresholds for automated import decisions (use these instead of magic strings)
-# Downloads batch import: "high" auto-imports; "medium" auto-imports only when preflight is strong
-_AI_BATCH_MIN_CONF        = "high"   # minimum confidence for unconditional auto-import
-_AI_BATCH_MEDIUM_RATIO    = 0.80     # preflight match ratio needed to auto-import at medium confidence
-# Library repair (light-confirm / missing-track): lower bar once a release is already validated
-_AI_REPAIR_MIN_CONF       = "medium" # minimum confidence for auto-repair of existing library albums
-_AI_MISSING_MIN_CONF      = "medium" # minimum confidence for missing-track gap-fill repair
-_AI_CONF_ORDER            = {"low": 0, "medium": 1, "high": 2}
-_AI_USE_CASE_THRESHOLDS   = {
-    "fresh_import": {
-        "auto_confidence": _AI_BATCH_MIN_CONF,
-        "review_confidence": "medium",
-        "medium_preflight_ratio": _AI_BATCH_MEDIUM_RATIO,
-        "requires_mb_release": True,
-    },
-    "light_confirm": {
-        "auto_confidence": _AI_REPAIR_MIN_CONF,
-        "preflight_ratio": 0.60,
-        "requires_mb_release": True,
-    },
-    "missing_track": {
-        "auto_confidence": _AI_MISSING_MIN_CONF,
-        "preflight_ratio": 0.60,
-        "requires_mb_release": True,
-    },
-}
-
-
-def _extract_mb_uuid(value: str) -> str:
-    """Return the first MusicBrainz UUID from a raw UUID or MB URL."""
-    match = re.search(
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        _s(value),
-        re.I,
-    )
-    return match.group(0).lower() if match else ""
-_MISSING_TRACK_FILE_MATCH_SCORE = 0.86
-_MISSING_TRACK_TITLE_FUZZY_SCORE = 0.88
-
 
 def _ai_conf_at_least(confidence: str, required: str) -> bool:
     """Return whether an AI confidence label satisfies a named threshold."""
@@ -1548,8 +1328,6 @@ def _ai_auto_import_allowed(use_case: str, confidence: str,
     return False
 
 
-
-
 def _beet_import_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale beet import timeout with a known audio-file count while
     keeping a hard cap. Shared formula for _beet_import_timeout() (local
@@ -1572,81 +1350,9 @@ def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 12
     return _beet_import_timeout_for_count(count, minimum, maximum)
 
 
-def _read_beets_plugin_list(config_path: str = "/config/config.yaml") -> List[str]:
-    """Read the configured plugin names without requiring PyYAML."""
-    plugins: List[str] = []
-    in_plugins = False
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            for raw in f:
-                stripped = raw.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if in_plugins and raw[:1].isspace():
-                    if stripped.startswith("-"):
-                        plugins.extend(p for p in stripped[1:].strip().split() if p)
-                    continue
-                in_plugins = False
-                if stripped.startswith("plugins:"):
-                    plugins.extend(p for p in stripped.split(":", 1)[1].strip().split() if p)
-                    in_plugins = True
-    except Exception:
-        pass
-    return plugins
-
-
-_ARTIST_FOLDER_PATH_TEMPLATE = "$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}"
-_DEFAULT_ALBUM_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$albumartist - $album - %right{00$track,2} - $title"
-_ALBUMTYPE_SINGLE_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/%if{$year,%left{$year,4} - }$album [Single]/%right{00$track,2} - $title"
-_SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$artist - $album - %right{00$track,2} - $title ($disc)%if{$mb_artistid,{$mb_artistid$}}"
-
-
 def _write_playlist_import_beets_config(temp_path: str) -> str:
     """Use the project single-track path format for playlist download imports."""
     return "/config/config.yaml"
-
-
-def _sqlite_timeout_seconds() -> float:
-    try:
-        return max(1.0, float(os.environ.get("BEETS_SQLITE_TIMEOUT", "30") or "30"))
-    except Exception:
-        return 30.0
-
-
-_SQLITE_WAL_CONFIGURED: set = set()
-_SQLITE_WAL_LOCK = threading.Lock()
-
-
-def _sqlite_is_locked_error(exc: BaseException) -> bool:
-    return isinstance(exc, sqlite3.OperationalError) and (
-        "database is locked" in str(exc).lower()
-        or "database is busy" in str(exc).lower()
-    )
-
-
-def _sqlite_write_retry(label: str, fn, *, log=None, attempts: int = 5):
-    for attempt in range(1, max(1, attempts) + 1):
-        try:
-            return fn()
-        except sqlite3.OperationalError as exc:
-            if not _sqlite_is_locked_error(exc) or attempt >= attempts:
-                raise
-            message = f"database locked while {label}; retrying {attempt + 1}/{attempts}"
-            if isinstance(log, list) and message not in log[-5:]:
-                log.append(message)
-            time.sleep(min(2.0, 0.2 * (2 ** (attempt - 1))))
-
-
-@contextmanager
-def _db(path=None, *, text_factory=None, row_factory=None):
-    """Context manager: yield a RemoteSQLiteConnection to the Beets control agent."""
-    con = get_db_connection(path)
-    if row_factory is not None:
-        con.row_factory = row_factory
-    try:
-        yield con
-    finally:
-        con.close()
 
 
 def _stamp_album_release_id(album_id: int, mb_albumid: str,
@@ -1728,24 +1434,6 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
     summary["changed"] = bool(album_changed)
     return summary
 
-
-EDITABLE_FIELDS = [
-    ("title",       "Title"),
-    ("artist",      "Artist"),
-    ("album",       "Album"),
-    ("albumartist", "Album Artist"),
-    ("year",        "Year"),
-    ("genre",       "Genre"),
-    ("track",       "Track #"),
-    ("tracktotal",  "Total Tracks"),
-    ("disc",        "Disc #"),
-    ("disctotal",   "Total Discs"),
-    ("label",       "Label"),
-    ("comments",    "Comments"),
-    ("mb_trackid",  "MB Track ID"),
-    ("mb_albumid",  "MB Album ID"),
-    ("mb_artistid", "MB Artist ID"),
-]
 
 app   = Flask(__name__)
 jobs  = JobStore()
@@ -3505,7 +3193,6 @@ def _item_metadata_transaction_payload(iid: int, fields: Dict[str, Any]) -> Tupl
         "reason": "Restore metadata values captured before the edit.",
     }
     return item, current, proposed, {"change": change, "rollback_op": rollback_op, "diff_rows": diff_rows}
-
 
 
 def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
@@ -8079,7 +7766,6 @@ def _playlist_filter_preview_downloads(paths: Iterable[str], log) -> List[str]:
     return valid
 
 
-
 def _ytdlp_find_first_url(source: str, queries: List[str], log: list) -> str:
     if not _ytdlp_ready.wait(timeout=30):
         raise RuntimeError("yt-dlp not ready — still installing")
@@ -8589,7 +8275,6 @@ def _mb_release_track_count(mb_releaseid: str, log: list = None) -> int:
 def _mb_release_has_tracks(mb_releaseid: str) -> bool:
     """Return True when a UUID resolves as a MusicBrainz release with media."""
     return _mb_release_track_count(mb_releaseid) > 0
-
 
 
 def _folder_import_track_count(source_folder: str, existing_album_id: int = 0) -> int:
@@ -12243,7 +11928,6 @@ def unmatched_tracks():
     return jsonify({"tracks": tracks[:limit], "total": len(tracks)})
 
 
-
 @app.post("/api/albums/<int:aid>/match")
 def match_album(aid):
     """Set mb_albumid, sync full metadata from MusicBrainz, write tags, then move files
@@ -12911,7 +12595,6 @@ def delete_import_review_folder():
     except Exception as ex:
         app.logger.warning("delete_import_review_folder failed for %r: %s", src_path, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not delete source folder.", "log": log}), 500
-
 
 
 def _import_review_cleanup_destination(path: Path) -> Path:
@@ -13668,7 +13351,6 @@ def fetch_missing_art():
         metadata={"type": "fetch-missing-art"},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
-
 
 
 @app.post("/api/rebuild-album-art")
@@ -16529,7 +16211,6 @@ def import_skipped():
     return jsonify({"ok": True, "skipped": skipped, "total": len(skipped)})
 
 
-
 def _review_blocked_metadata(status: Any,
                              reason: Any = "",
                              suggestion: Optional[Dict[str, Any]] = None,
@@ -16577,7 +16258,6 @@ def _review_blocked_metadata(status: Any,
     else:
         next_action = "Resolve this review item before importing."
     return {"reason": block_reason, "next_action": next_action}
-
 
 
 REVIEW_ORIGIN_TYPES = {
@@ -20704,7 +20384,6 @@ def import_reconcile_job():
         "pending_review_exists": False,
         "source_exists": source_exists,
     })
-
 
 
 def _import_review_revalidation_confidence_score(
@@ -27784,7 +27463,6 @@ def _artist_alias_key(value: str) -> str:
     return " ".join(_normalize_name(_s(value)).casefold().split())
 
 
-
 def _artist_alias_values(row: sqlite3.Row) -> List[str]:
     values: List[str] = []
     for col in ("albumartist", "albumartist_credit"):
@@ -31342,7 +31020,6 @@ def _best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]
         return _fallback_best(item, mb_tracks)
 
 
-
 def _album_track_fingerprint_check(item: Dict[str, Any],
                                    mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Fingerprint-check one library item against a candidate MB tracklist.
@@ -33352,8 +33029,6 @@ def _artist_folder_db_counts() -> Dict[str, Dict[str, int]]:
         return beets_adapter.get_artist_counts()
     except Exception:
         return {}
-
-
 
 
 def _scan_artist_folder_groups(root: str, *, use_musicbrainz: bool = False,
@@ -46073,7 +45748,6 @@ def _playlist_validate_downloaded_files(paths: Iterable[str], artist: str, title
     return valid
 
 
-
 def _validate_wanted_download_identity_before_import(import_dir: str,
                                                      wanted_tracks: List[Dict[str, Any]],
                                                      log: list,
@@ -48614,9 +48288,6 @@ def _playlist_move_singleton_candidate(candidate: Dict[str, Any],
         }
     except Exception as ex:
         return {"id": item_id, "moved": False, "reason": f"Engine move IPC failed: {ex}"}
-
-
-
 
 
 def _playlist_candidate_text_pairs(candidate: Dict[str, Any]) -> List[Tuple[str, str]]:
@@ -51375,7 +51046,6 @@ def _music_format_hydrate_status_row(row: Dict[str, Any], library_rows: List[Dic
     return dict(row)
 
 
-
 _MUSIC_FORMAT_REPLACEMENT_MAX_ATTEMPTS = int(os.environ.get("MUSIC_FORMAT_REPLACEMENT_MAX_ATTEMPTS", "3") or "3")
 _MUSIC_FORMAT_REPLACEMENT_BACKOFF_SECONDS = int(os.environ.get("MUSIC_FORMAT_REPLACEMENT_BACKOFF_SECONDS", "900") or "900")
 
@@ -52333,7 +52003,6 @@ def _plugin_status_payload() -> Dict[str, Any]:
         "enabled": enabled,
         "status": status,
     }
-
 
 
 # -- Transaction / Library Changes Endpoints ---------------------------------

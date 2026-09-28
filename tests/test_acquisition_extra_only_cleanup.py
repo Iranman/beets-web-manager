@@ -1,5 +1,9 @@
 from pathlib import Path
 import unittest
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
@@ -8,7 +12,7 @@ APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 class AcquisitionExtraOnlyCleanupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = APP_SOURCE.read_text(encoding="utf-8")
+        cls.source = app_family_source()
 
     def test_extra_only_complete_albums_are_not_download_candidates(self):
         self.assertIn("def _acq_is_extra_only_complete", self.source)

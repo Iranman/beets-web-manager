@@ -2,11 +2,15 @@
 folders sitting directly under MUSIC_ROOT instead of inside an artist folder)."""
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 def _app_source() -> str:
     root = Path(__file__).resolve().parents[1]
-    return (root / "app.py").read_text(encoding="utf-8")
+    return app_family_source()
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:

@@ -5,6 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _app_ast_cache import get_app_ast  # noqa: E402
@@ -12,7 +16,7 @@ from backend.matching import similarity as canonical_similarity, verify_audio_ag
 import backend.recording_review as recording_review  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 HELPERS_SOURCE = (ROOT / "helpers_mb.py").read_text(encoding="utf-8")
 
 
