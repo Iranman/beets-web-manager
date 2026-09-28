@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.34 - 2026-09-28
+
 ### Fixed
 - The tracked-library duplicate scan is single-pass:
   - It loads the library once and builds every index (Recording ID, size, path, album, fuzzy title) once.
