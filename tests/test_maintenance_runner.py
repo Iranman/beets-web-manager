@@ -83,7 +83,7 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("same_file=_maintenance_same_file_hash", self.app_source)
         self.assertIn("start_dedup_scan(", self.app_source)
         self.assertIn("run_dedup_cleanup(", self.app_source)
-        self.assertIn('start_dedup_scan({"path": str(MUSIC_ROOT)})', self.app_source)
+        self.assertIn('start_dedup_scan({"path": str(MUSIC_ROOT), "tracked_only": True})', self.app_source)
         self.assertIn('"file_duplicate_scan_started": True', self.app_source)
 
         self.assertIn("_maintenance_release_group_merge", self.app_source)

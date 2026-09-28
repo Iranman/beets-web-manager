@@ -166,6 +166,11 @@ class ScheduledDuplicateStepTests(unittest.TestCase):
         self.assertTrue(any("Unattended deletion is disabled" in line for line in log))
         self.assertTrue(any(line.startswith("[duplicates] PROPOSED delete") for line in log))
 
+    def test_scheduled_step_only_checks_beets_tracked_files(self):
+        self._run(authorized=False)
+        payload = app_module.start_dedup_scan.call_args.args[0]
+        self.assertIs(payload.get("tracked_only"), True)
+
     def test_only_the_explicit_authorization_lets_the_step_delete(self):
         _result, cleanup, _log, drop, _keep = self._run(authorized=True)
         cleanup.assert_called_once()
@@ -195,6 +200,43 @@ class AuthorizationRouteTests(unittest.TestCase):
         resp = self.client.post(url, json={"enabled": False})
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(auth.unattended_delete_enabled(Path(self.tmp.name)))
+
+
+
+class TrackedOnlyScanTests(unittest.TestCase):
+    """tracked_only enumerates Beets-tracked files, never every file on disk."""
+
+    def test_untracked_files_are_not_scanned(self):
+        import time
+        from types import SimpleNamespace
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "Tracked").mkdir()
+        (root / "Stray").mkdir()
+        tracked = root / "Tracked" / "01 - A.flac"
+        tracked.write_bytes(b"a")
+        (root / "Stray" / "01 - B.flac").write_bytes(b"b")
+        (root / "Stray" / "02 - C.flac").write_bytes(b"c")
+        item = SimpleNamespace(id=1, album_id=1, path="Tracked/01 - A.flac", mb_trackid="", title="A", artist="X",
+                               albumartist="X", album="Al", disc=1, track=1, length=10.0, mb_albumid="")
+        fake_lib = SimpleNamespace(items=lambda *_a, **_k: [item], get_item=lambda _i: item)
+        for patcher in (patch_app_family(app_module, "MUSIC_ROOT", root),
+                        patch_app_family(app_module, "lib", fake_lib),
+                        patch_app_family(app_module, "_resolve_dedup_scan_path", return_value=(root, None)),
+                        patch_app_family(app_module, "_acoustid_fingerprint_ids", return_value=[]),
+                        patch_app_family(app_module, "_acoustid_fingerprint_match", return_value=("", [], []))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        body, status = dedup_service.start_dedup_scan({"path": str(root), "tracked_only": True})
+        self.assertEqual(status, 200, body)
+        job = app_module.jobs.get(body["job_id"])
+        for _ in range(200):
+            if job.status in ("success", "failed"):
+                break
+            time.sleep(0.05)
+        self.assertEqual(job.status, "success", job.log[-5:] if job.log else None)
+        self.assertIn("Found 1 audio file to check", "\n".join(job.log))
 
 
 if __name__ == "__main__":
