@@ -1052,7 +1052,7 @@
     "_folder_cleanup_path",
     "_library_file_candidates_for_qbit",
     "_library_file_candidates_for_qbit_metadata",
-    "_maintenance_duplicate_cleanup_paths",
+    "_maintenance_duplicate_plan",
     "_maintenance_safe_folder_renames",
     "_qbit_allowed_repair_path",
     "_scan_no_audio_folder_candidates",
@@ -25893,7 +25893,7 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_maintenance_duplicate_cleanup_paths"
+    "_maintenance_duplicate_plan"
    ],
    "caller_count": 1,
    "dependencies": []
@@ -27024,10 +27024,10 @@
    "module": "backend/dedup_service.py",
    "lines": [
     283,
-    788
+    791
    ],
-   "size": 506,
-   "body_lines": 504,
+   "size": 509,
+   "body_lines": 507,
    "route": null,
    "mutation_capable": true,
    "domain": "DEDUP",
@@ -27060,8 +27060,8 @@
    "name": "run_dedup_cleanup",
    "module": "backend/dedup_service.py",
    "lines": [
-    793,
-    916
+    796,
+    919
    ],
    "size": 124,
    "body_lines": 123,
@@ -27083,8 +27083,8 @@
    "name": "_library_duplicate_merge_safety",
    "module": "backend/dedup_service.py",
    "lines": [
-    921,
-    1032
+    924,
+    1035
    ],
    "size": 112,
    "body_lines": 110,
@@ -27107,8 +27107,8 @@
    "name": "_resolver_rel_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    1035,
-    1040
+    1038,
+    1043
    ],
    "size": 6,
    "body_lines": 5,
@@ -27129,8 +27129,8 @@
    "name": "_resolver_parent",
    "module": "backend/dedup_service.py",
    "lines": [
-    1043,
-    1047
+    1046,
+    1050
    ],
    "size": 5,
    "body_lines": 4,
@@ -27151,8 +27151,8 @@
    "name": "_resolver_sql_like",
    "module": "backend/dedup_service.py",
    "lines": [
-    1050,
-    1056
+    1053,
+    1059
    ],
    "size": 7,
    "body_lines": 6,
@@ -27169,8 +27169,8 @@
    "name": "_resolver_compact_track",
    "module": "backend/dedup_service.py",
    "lines": [
-    1059,
-    1065
+    1062,
+    1068
    ],
    "size": 7,
    "body_lines": 6,
@@ -27192,8 +27192,8 @@
    "name": "_resolver_compact_item",
    "module": "backend/dedup_service.py",
    "lines": [
-    1068,
-    1089
+    1071,
+    1092
    ],
    "size": 22,
    "body_lines": 18,
@@ -27214,8 +27214,8 @@
    "name": "_resolver_title_base",
    "module": "backend/dedup_service.py",
    "lines": [
-    1092,
-    1094
+    1095,
+    1097
    ],
    "size": 3,
    "body_lines": 2,
@@ -27237,8 +27237,8 @@
    "name": "_resolver_title_score",
    "module": "backend/dedup_service.py",
    "lines": [
-    1097,
-    1116
+    1100,
+    1119
    ],
    "size": 20,
    "body_lines": 19,
@@ -27260,8 +27260,8 @@
    "name": "_resolver_retag_candidates",
    "module": "backend/dedup_service.py",
    "lines": [
-    1119,
-    1131
+    1122,
+    1134
    ],
    "size": 13,
    "body_lines": 11,
@@ -27283,8 +27283,8 @@
    "name": "_album_duplicate_resolver_plan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1134,
-    1304
+    1137,
+    1307
    ],
    "size": 171,
    "body_lines": 169,
@@ -27312,8 +27312,8 @@
    "name": "_filename_cleanup_duplicate_quarantine_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    1307,
-    1312
+    1310,
+    1315
    ],
    "size": 6,
    "body_lines": 5,
@@ -27333,8 +27333,8 @@
    "name": "_maintenance_duplicate_report",
    "module": "backend/dedup_service.py",
    "lines": [
-    1315,
-    1348
+    1318,
+    1351
    ],
    "size": 34,
    "body_lines": 27,
@@ -27352,34 +27352,55 @@
    ]
   },
   {
-   "name": "_maintenance_duplicate_cleanup_paths",
+   "name": "_maintenance_duplicate_plan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1351,
-    1356
+    1354,
+    1360
    ],
-   "size": 6,
+   "size": 7,
    "body_lines": 3,
    "route": null,
-   "mutation_capable": false,
+   "mutation_capable": true,
    "domain": "DEDUP",
    "desired_owner": "backend/dedup_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_maintenance_duplicate_cleanup_paths",
     "_maintenance_full_duplicate_scan"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": [
     "_maintenance_same_file_hash",
     "_path_under"
    ]
   },
   {
+   "name": "_maintenance_duplicate_cleanup_paths",
+   "module": "backend/dedup_service.py",
+   "lines": [
+    1363,
+    1364
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_maintenance_duplicate_plan"
+   ]
+  },
+  {
    "name": "_file_size",
    "module": "backend/dedup_service.py",
    "lines": [
-    1359,
-    1363
+    1367,
+    1371
    ],
    "size": 5,
    "body_lines": 4,
@@ -27399,11 +27420,11 @@
    "name": "_maintenance_duplicate_proposal",
    "module": "backend/dedup_service.py",
    "lines": [
-    1366,
+    1374,
     1408
    ],
-   "size": 43,
-   "body_lines": 40,
+   "size": 35,
+   "body_lines": 31,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27423,10 +27444,10 @@
    "module": "backend/dedup_service.py",
    "lines": [
     1411,
-    1419
+    1420
    ],
-   "size": 9,
-   "body_lines": 8,
+   "size": 10,
+   "body_lines": 9,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27442,11 +27463,11 @@
    "name": "_maintenance_full_duplicate_scan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1422,
-    1523
+    1423,
+    1525
    ],
-   "size": 102,
-   "body_lines": 100,
+   "size": 103,
+   "body_lines": 101,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27459,7 +27480,7 @@
    "caller_count": 2,
    "dependencies": [
     "_json_from_flask_response",
-    "_maintenance_duplicate_cleanup_paths",
+    "_maintenance_duplicate_plan",
     "_maintenance_duplicate_proposal",
     "_maintenance_duplicate_proposal_line",
     "_maintenance_extract_child_job_id",
@@ -27474,8 +27495,8 @@
    "name": "_album_cleanup_count_duplicate_files",
    "module": "backend/dedup_service.py",
    "lines": [
-    1526,
-    1527
+    1528,
+    1529
    ],
    "size": 2,
    "body_lines": 1,

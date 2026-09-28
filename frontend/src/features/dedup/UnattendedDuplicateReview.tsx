@@ -22,7 +22,7 @@ function CopyCell({ copy, role }: { copy: DuplicateProposalCopy; role: 'delete' 
       </div>
       <div className="break-all font-mono text-xs text-zinc-200">{copy.path}</div>
       <div className="text-xs text-zinc-400">
-        {formatSize(copy.size)} · item {copy.item_id ?? '—'} · album {copy.album_id ?? '—'} · disc {copy.disc ?? '—'} track {copy.track ?? '—'}
+        {copy.format ? `${copy.format} · ` : ''}{formatSize(copy.size)} · item {copy.item_id ?? '—'} · album {copy.album_id ?? '—'} · disc {copy.disc ?? '—'} track {copy.track ?? '—'}
       </div>
       <div className="break-all font-mono text-xs text-zinc-500">embedded Recording ID: {copy.recording_id || '—'}</div>
     </div>
@@ -35,6 +35,9 @@ function ProposalRow({ row }: { row: DuplicateProposalRow }) {
     <div className="grid gap-3 rounded border border-zinc-800 p-3 md:grid-cols-2">
       <CopyCell copy={row.delete} role="delete" />
       <CopyCell copy={row.keep} role="keep" />
+      {row.keep_reason ? (
+        <div className="text-xs text-emerald-200 md:col-span-2">Kept because: {row.keep_reason}</div>
+      ) : null}
       <div className="text-xs text-zinc-400 md:col-span-2">
         <Chip size="small" label={row.release_relation || 'unknown slot'} sx={{ mr: 1 }} />
         <Chip
