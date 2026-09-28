@@ -9,6 +9,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class InlineJob:
@@ -160,20 +164,19 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self.call_order = []
         self.client = app_module.app.test_client()
         self.patchers = []
-        self._patch(mock.patch.object(app_module, "MAINTENANCE_RUNNER_LAST_FILE", self.checkpoint))
-        self._patch(mock.patch.object(app_module, "MUSIC_ROOT", self.music_root))
-        self._patch(mock.patch.object(app_module, "_security_auth_disabled", return_value=True))
-        self._patch(mock.patch.object(app_module, "jobs", self.store))
-        self._patch(mock.patch.object(app_module, "_scan_folder_name_placeholders", side_effect=self._scan_placeholders))
-        self._patch(mock.patch.object(app_module, "_maintenance_release_group_merge", side_effect=self._release_group_merge))
-        self._patch(mock.patch.object(app_module, "_maintenance_full_duplicate_scan", side_effect=self._duplicates))
-        self._patch(mock.patch.object(app_module, "_maintenance_final_verification", side_effect=self._final_verification))
-        self._patch(mock.patch.object(app_module, "fetch_missing_art", side_effect=self._child_route("artwork", {"saved": 0})))
-        self._patch(mock.patch.object(app_module, "library_fix_genres", side_effect=self._child_route("genres", {"changed_count": 0})))
-        self._patch(mock.patch.object(
-            app_module,
-            "playlist_sync_status",
-            return_value=SimpleNamespace(get_json=lambda silent=True: {"enabled": False, "running": False}),
+        self._patch(patch_app_family(app_module, "MAINTENANCE_RUNNER_LAST_FILE", self.checkpoint))
+        self._patch(patch_app_family(app_module, "MUSIC_ROOT", self.music_root))
+        self._patch(patch_app_family(app_module, "_security_auth_disabled", return_value=True))
+        self._patch(patch_app_family(app_module, "jobs", self.store))
+        self._patch(patch_app_family(app_module, "_scan_folder_name_placeholders", side_effect=self._scan_placeholders))
+        self._patch(patch_app_family(app_module, "_maintenance_release_group_merge", side_effect=self._release_group_merge))
+        self._patch(patch_app_family(app_module, "_maintenance_full_duplicate_scan", side_effect=self._duplicates))
+        self._patch(patch_app_family(app_module, "_maintenance_final_verification", side_effect=self._final_verification))
+        self._patch(patch_app_family(app_module, "start_fetch_missing_art", side_effect=self._child_route("artwork", {"saved": 0})))
+        self._patch(patch_app_family(app_module, "start_library_fix_genres", side_effect=self._child_route("genres", {"changed_count": 0})))
+        self._patch(patch_app_family(app_module,
+            "playlist_sync_status_payload",
+            return_value={"enabled": False, "running": False},
         ))
 
     def tearDown(self):
@@ -185,10 +188,10 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         return patcher.start()
 
     def _child_route(self, name, result):
-        def route():
+        def service(_payload=None):
             job = app_module.jobs.start_python(lambda log, cancel_event=None: result, label=f"fake {name}", metadata={"type": name})
-            return app_module.jsonify({"ok": True, "job_id": job.job_id})
-        return route
+            return {"ok": True, "job_id": job.job_id}, 200
+        return service
 
     def _scan_placeholders(self, *args, **kwargs):
         self.call_order.append("folder_scan")
@@ -221,11 +224,11 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
 
     def test_resume_from_artist_folder_merge_checkpoint_does_not_reference_undefined_root_str(self):
         _checkpoint_with_first_four_complete(self.checkpoint)
-        library_health = self._patch(mock.patch.object(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
-        missing_files = self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
-        root_repair = self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
-        artist_alias = self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
-        self._patch(mock.patch.object(app_module, "_stamp_artist_folder_scan", side_effect=self._artist_scan_success))
+        library_health = self._patch(patch_app_family(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
+        missing_files = self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
+        root_repair = self._patch(patch_app_family(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
+        artist_alias = self._patch(patch_app_family(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan", side_effect=self._artist_scan_success))
 
         parent, data = self._post_clean_all()
 
@@ -252,11 +255,11 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self.assertEqual(len(stamp_jobs), 0)
 
     def test_fresh_clean_all_still_runs_all_phases(self):
-        self._patch(mock.patch.object(app_module, "_library_health_payload", return_value=_task_results()["library_health"]))
-        self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", return_value=_task_results()["missing_files"]))
-        self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", return_value=_task_results()["root_folder_repair"]))
-        self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", return_value=[]))
-        self._patch(mock.patch.object(app_module, "_stamp_artist_folder_scan", side_effect=self._artist_scan_success))
+        self._patch(patch_app_family(app_module, "_library_health_payload", return_value=_task_results()["library_health"]))
+        self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", return_value=_task_results()["missing_files"]))
+        self._patch(patch_app_family(app_module, "_maintenance_root_folder_repair", return_value=_task_results()["root_folder_repair"]))
+        self._patch(patch_app_family(app_module, "_artist_id_alias_groups", return_value=[]))
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan", side_effect=self._artist_scan_success))
 
         parent, data = self._post_clean_all(force_fresh=True)
 
@@ -269,10 +272,10 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
 
     def test_artist_folder_merge_failure_preserves_checkpoint_and_resume_retries_only_that_phase(self):
         _checkpoint_with_first_four_complete(self.checkpoint)
-        self._patch(mock.patch.object(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
-        self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
-        self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
-        self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
+        self._patch(patch_app_family(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
+        self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
+        self._patch(patch_app_family(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
+        self._patch(patch_app_family(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
         artist_scan_attempts = []
 
         def fail_once_then_succeed(*_args, **_kwargs):
@@ -282,8 +285,7 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
                 raise RuntimeError("artist folder merge boom")
             return {"candidates": [], "skipped": []}
 
-        scan = self._patch(mock.patch.object(
-            app_module,
+        scan = self._patch(patch_app_family(app_module,
             "_stamp_artist_folder_scan",
             side_effect=fail_once_then_succeed,
         ))
@@ -345,14 +347,13 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         call for work a prior, interrupted run already started.
         """
         _checkpoint_with_first_four_complete(self.checkpoint)
-        self._patch(mock.patch.object(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
-        self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
-        self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
-        self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
-        self._patch(mock.patch.object(
-            app_module, "_stamp_artist_folder_scan",
+        self._patch(patch_app_family(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
+        self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
+        self._patch(patch_app_family(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
+        self._patch(patch_app_family(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan",
             return_value={"candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
         ))
         plan_mock = self._patch(mock.patch.object(
@@ -430,14 +431,13 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
            second Apply call across all three executions.
         """
         _checkpoint_with_first_four_complete(self.checkpoint)
-        self._patch(mock.patch.object(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
-        self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
-        self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
-        self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
-        self._patch(mock.patch.object(
-            app_module, "_stamp_artist_folder_scan",
+        self._patch(patch_app_family(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
+        self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
+        self._patch(patch_app_family(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
+        self._patch(patch_app_family(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan",
             return_value={"ok": True, "candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
         ))
         plan_mock = self._patch(mock.patch.object(

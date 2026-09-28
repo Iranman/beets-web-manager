@@ -1,9 +1,13 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source, app_unit_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 CONFIG_SOURCE = (ROOT / "frontend" / "src" / "views" / "Config.tsx").read_text(encoding="utf-8")
 SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "views" / "System.tsx").read_text(encoding="utf-8")
@@ -38,10 +42,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertNotIn('_validate_import_source_audio(str(round_dl_dir), state["log"], reject_downloads=True)', APP_SOURCE)
 
     def test_partial_import_subset_validates_selected_files_before_staging(self):
-        route = APP_SOURCE[
-            APP_SOURCE.index('@app.post("/api/folders/import-with-id")'):
-            APP_SOURCE.index('def _match_tracks_from_mb')
-        ]
+        route = app_unit_source("start_folder_import_with_id")
         validate_pos = route.index('active_selected_source_files = _filter_import_review_selected_audio_files(')
         stage_pos = route.index('import_folder_path = _stage_selected_audio_files(')
         self.assertLess(validate_pos, stage_pos)
@@ -50,10 +51,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertIn('Selected partial-import files passed pre-stage audio validation.', route)
 
     def test_partial_import_subset_deferred_inspection_keeps_source_for_review(self):
-        helper = APP_SOURCE[
-            APP_SOURCE.index('def _filter_import_review_selected_audio_files'):
-            APP_SOURCE.index('def _validate_import_source_audio')
-        ]
+        helper = app_unit_source("_filter_import_review_selected_audio_files")
         self.assertIn('def _audio_validation_inspection_failed(', APP_SOURCE)
         self.assertIn('_audio_validation_inspection_failed(row)', helper)
         self.assertIn('Inspection deferred; source kept in review', helper)
@@ -78,7 +76,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertIn('Current files were kept and marked Needs replacement', APP_SOURCE)
         self.assertIn('No replacement found: keeping current file and marking Needs replacement', APP_SOURCE)
         self.assertIn('Queued retry: no compliant source available', APP_SOURCE)
-        scan_source = APP_SOURCE[APP_SOURCE.index('def _music_format_scan_library('):APP_SOURCE.index('@app.post("/api/library/music-format/scan")')]
+        scan_source = app_unit_source("_music_format_scan_library")
         self.assertNotIn('unlink(', scan_source)
         self.assertNotIn('remove(', scan_source)
         self.assertNotIn('rmtree(', scan_source)

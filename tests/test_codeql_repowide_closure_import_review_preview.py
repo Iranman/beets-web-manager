@@ -24,6 +24,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class ImportTargetPreviewSourcePathContainmentTests(unittest.TestCase):
@@ -55,13 +59,10 @@ class ImportTargetPreviewSourcePathContainmentTests(unittest.TestCase):
         }
 
     def _run(self, source_path_value):
-        with mock.patch.object(
-            app_module, "_resolve_import_review_source_path",
+        with patch_app_family(app_module, "_resolve_import_review_source_path",
             return_value=(self.trusted_source, None),
-        ), mock.patch.object(
-            app_module, "_target_preview_source_files", return_value=[],
-        ), mock.patch.object(
-            app_module, "_target_preview_artist_folder", return_value="Some Artist",
+        ), patch_app_family(app_module, "_target_preview_source_files", return_value=[],
+        ), patch_app_family(app_module, "_target_preview_artist_folder", return_value="Some Artist",
         ):
             return app_module._build_import_target_preview(self._payload(source_path_value))
 

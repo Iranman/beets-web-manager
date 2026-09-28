@@ -25,6 +25,14 @@ from backend.transaction_engine import (
     _read_file_audio_tags,
 )
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -119,7 +127,7 @@ class Wave20FixtureBase(unittest.TestCase):
             finally:
                 con.close()
 
-        self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
+        self._db_patch = patch_app_family(app_module, "_db", side_effect=_mock_db_cm)
         self._db_patch.start()
 
         def fake_get_album(aid):
@@ -1094,8 +1102,8 @@ class RealProductionPathIntegrationTests(Wave20FixtureBase):
 
         with mock.patch.object(app_module.composite_workflows, "plan_existing_album_reconcile", side_effect=_mock_plan), \
              mock.patch.object(app_module.composite_workflows, "apply_existing_album_reconcile", side_effect=_mock_apply), \
-             mock.patch.object(app_module, "_fetch_mb_release_tracklist", mb_mock), \
-             mock.patch.object(app_module, "_acoustid_lookup_cached",
+             patch_app_family(app_module, "_fetch_mb_release_tracklist", mb_mock), \
+             patch_app_family(app_module, "_acoustid_lookup_cached",
                                return_value=[{"mb_trackid": REC_1, "score": 95}]):
             # ARCH-002: the imported copy is discarded only because canonical
             # evidence proves BOTH files are the expected recording (embedded
@@ -1120,8 +1128,7 @@ class RealProductionPathIntegrationTests(Wave20FixtureBase):
 
 class WebManagerMutationProhibitionTests(unittest.TestCase):
     def test_merge_imported_album_into_existing_contains_no_direct_mutations(self):
-        app_path = Path(app_module.__file__)
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()  # ARCH-001: app.py module family
         tree = ast.parse(source)
 
         merge_fn_def = None

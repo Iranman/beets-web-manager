@@ -19,6 +19,10 @@ from pathlib import Path
 from unittest import mock
 
 from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from verify_arch003_mutation_inventory import verify_mutation_inventory  # noqa: E402
@@ -31,7 +35,7 @@ class TestArch003FinalClosure(unittest.TestCase):
         self.app_path = self.repo_root / "app.py"
         self.beets_adapter_path = self.repo_root / "backend" / "beets_adapter.py"
 
-        self.app_source = self.app_path.read_text(encoding="utf-8")
+        self.app_source = app_family_source()
         self.beets_adapter_source = self.beets_adapter_path.read_text(encoding="utf-8")
 
     def _function_source(self, name: str) -> str:

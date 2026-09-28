@@ -1,16 +1,20 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 ROUTES_SOURCE = (ROOT / "routes_lidarr.py").read_text(encoding="utf-8")
 GITIGNORE_SOURCE = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
 
 class LidarrRoutesStaticTests(unittest.TestCase):
     def test_route_module_is_loaded_and_tracked(self):
-        self.assertIn("import routes_lidarr", APP_SOURCE)
+        self.assertIn('"routes_lidarr"', APP_SOURCE)  # listed in app.ROUTE_MODULES (ARCH-001)
         self.assertTrue((ROOT / "routes_lidarr.py").exists())
 
     def test_expected_frontend_routes_exist(self):

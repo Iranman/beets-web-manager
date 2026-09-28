@@ -26,11 +26,15 @@ from unittest import mock
 
 import app as app_module
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class LibraryNormalizeArtistsTests(unittest.TestCase):
     def setUp(self):
-        self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
+        self._invalidate_patch = patch_app_family(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
 
     def tearDown(self):
@@ -64,7 +68,7 @@ class LibraryNormalizeArtistsTests(unittest.TestCase):
 
     def test_no_op_when_nothing_needs_normalizing(self):
         with mock.patch.object(app_module.composite_workflows, "update_album_metadata") as mock_update, \
-             mock.patch.object(app_module, "subprocess") as mock_subprocess:
+             patch_app_family(app_module, "subprocess") as mock_subprocess:
             log = self._run(["Clean Artist"])
         mock_update.assert_not_called()
         mock_subprocess.run.assert_not_called()
@@ -81,8 +85,7 @@ class LibraryNormalizeArtistsTests(unittest.TestCase):
         ) as mock_update, mock.patch.object(
             app_module.composite_workflows, "relocate_album",
             return_value={"ok": True, "dest_dir": "/data/media/music/Wu-Tang Clan"},
-        ) as mock_relocate, mock.patch.object(
-            app_module, "subprocess",
+        ) as mock_relocate, patch_app_family(app_module, "subprocess",
         ) as mock_subprocess:
             log = self._run([dirty], {dirty: [{"id": 1, "albumartist": dirty}]})
 

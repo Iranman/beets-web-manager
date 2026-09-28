@@ -8,17 +8,27 @@ not the source-text assertions.
 """
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import source_between  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import source_between  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 INTAKE_PANEL_SOURCE = (ROOT / "frontend" / "src" / "features" / "intake" / "IntakePanel.tsx").read_text(encoding="utf-8")
 API_TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
-    start = src.index(start_marker)
-    end = src.index(end_marker, start)
-    return src[start:end]
+    return source_between(src, start_marker, end_marker)
 
 
 class StartAiBatchJobRaceTests(unittest.TestCase):
@@ -560,8 +570,7 @@ class BehavioralTestCase(unittest.TestCase):
         # accept it -- patch it in explicitly rather than relying on
         # production's trusted-root list happening to already cover an
         # arbitrary test scratch directory.
-        self._downloads_roots_patcher = mock.patch.object(
-            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(_BEHAVIORAL_TMP_ROOT)]
+        self._downloads_roots_patcher = patch_app_family(APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(_BEHAVIORAL_TMP_ROOT)]
         )
         self._downloads_roots_patcher.start()
         self.addCleanup(self._downloads_roots_patcher.stop)
@@ -705,7 +714,7 @@ class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
                 results.append(resp.get_json())
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
             threads = [threading.Thread(target=call_recover) for _ in range(6)]
             for t in threads:
                 t.start()
@@ -800,7 +809,7 @@ class StartupReservationCollisionDuringUnpromotedWindowTests(BehavioralTestCase)
                 )
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=blocking_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocking_run_ai_batch_import):
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=blocking_run_ai_batch_import):
             first_thread = threading.Thread(target=call_first)
             first_thread.start()
             self.assertTrue(entered_start_python.wait(timeout=5), "first call never reached jobs.start_python()")
@@ -873,7 +882,7 @@ class StartupFailureReleasesReservationTests(BehavioralTestCase):
             run_calls.append(batch_job_id)
             return {"status": "completed_with_warnings"}
 
-        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
+        with patch_app_family(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -941,7 +950,7 @@ class PostStartPreHeartbeatDuplicateWorkerRegressionTests(BehavioralTestCase):
             first_holder["response"] = resp.get_json()
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocking_run_ai_batch_import):
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=blocking_run_ai_batch_import):
             first_thread = threading.Thread(target=call_first)
             first_thread.start()
             first_thread.join(timeout=10)
@@ -1002,7 +1011,7 @@ class WorkerCompletionCleanupTests(BehavioralTestCase):
         def fast_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
             return {"status": "completed_with_warnings"}
 
-        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=fast_run):
+        with patch_app_family(APP, "_run_ai_batch_import", side_effect=fast_run):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -1042,7 +1051,7 @@ class WorkerExceptionCleanupTests(BehavioralTestCase):
         def raising_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
             raise RuntimeError("simulated worker failure")
 
-        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=raising_run):
+        with patch_app_family(APP, "_run_ai_batch_import", side_effect=raising_run):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -1126,8 +1135,8 @@ class AssociationPersistenceFailureAbortsWorkerTests(_PostSpawnStartupFailureBeh
         def raising_persist(batch_job_id, job_id):
             raise RuntimeError("simulated association-write failure")
 
-        with mock.patch.object(APP, "_ai_batch_persist_job_association", side_effect=raising_persist), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run):
+        with patch_app_family(APP, "_ai_batch_persist_job_association", side_effect=raising_persist), \
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=fake_run):
             self._assert_post_spawn_failure_is_handled_safely(run_calls)
 
 
@@ -1146,8 +1155,8 @@ class PromotionFailureAbortsWorkerTests(_PostSpawnStartupFailureBehaviorMixin, B
             run_calls.append(batch_job_id)
             return {"status": "completed_with_warnings"}
 
-        with mock.patch.object(APP, "_ai_batch_promote_worker", side_effect=promote_side_effect), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run):
+        with patch_app_family(APP, "_ai_batch_promote_worker", side_effect=promote_side_effect), \
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=fake_run):
             self._assert_post_spawn_failure_is_handled_safely(run_calls)
 
     def test_promote_worker_returning_false_aborts_worker(self):
@@ -1180,8 +1189,8 @@ class PostPromotionResponseConstructionFailureTests(_PostSpawnStartupFailureBeha
         def raising_public_state(state):
             raise RuntimeError("simulated response-construction failure")
 
-        with mock.patch.object(APP, "_ai_batch_public_state", side_effect=raising_public_state), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run):
+        with patch_app_family(APP, "_ai_batch_public_state", side_effect=raising_public_state), \
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=fake_run):
             self._assert_post_spawn_failure_is_handled_safely(run_calls)
 
 
@@ -1205,8 +1214,8 @@ class ResponseBuiltBeforeHandoffTests(BehavioralTestCase):
             order.append("worker_ran")
             return {"status": "completed_with_warnings"}
 
-        with mock.patch.object(APP, "_ai_batch_public_state", side_effect=recording_public_state), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=recording_run):
+        with patch_app_family(APP, "_ai_batch_public_state", side_effect=recording_public_state), \
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=recording_run):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -1248,7 +1257,7 @@ class PauseOwnershipTests(BehavioralTestCase):
             return {"status": "completed_with_warnings"}
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocked_run):
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=blocked_run):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -1321,7 +1330,7 @@ class StopOwnershipTests(BehavioralTestCase):
             return {"status": "canceled"}
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocked_run):
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=blocked_run):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -1415,7 +1424,7 @@ class RecoverRouteUnpromotedReservationTests(BehavioralTestCase):
                 )
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=blocking_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocking_run):
+             patch_app_family(APP, "_run_ai_batch_import", side_effect=blocking_run):
             first_thread = threading.Thread(target=call_first)
             first_thread.start()
             self.assertTrue(entered_start_python.wait(timeout=5), "first call never reached jobs.start_python()")
@@ -1610,7 +1619,7 @@ class LegitimateFastCompletionReportsUnconfirmedTests(BehavioralTestCase):
         def fast_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
             return {"status": "completed_with_warnings"}
 
-        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=fast_run):
+        with patch_app_family(APP, "_run_ai_batch_import", side_effect=fast_run):
             with APP.app.test_request_context():
                 resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
             payload = json.loads(resp.get_data(as_text=True))
@@ -1670,7 +1679,7 @@ class _LosingCallerPostSpawnFailureBehaviorMixin:
                     json={"batch_job_id": self.batch_job_id, "retry_failed": True},
                 )
 
-        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=lambda *a, **k: (run_calls.append(1), {"status": "completed_with_warnings"})[1]), \
+        with patch_app_family(APP, "_run_ai_batch_import", side_effect=lambda *a, **k: (run_calls.append(1), {"status": "completed_with_warnings"})[1]), \
              winner_patches(wrap_with_delay):
             first_thread = threading.Thread(target=call_first)
             first_thread.start()
@@ -1720,7 +1729,7 @@ class LosingCallerAssociationFailureTests(_LosingCallerPostSpawnFailureBehaviorM
         def winner_patches(wrap):
             def raising_persist(batch_job_id, job_id):
                 raise RuntimeError("simulated association-write failure")
-            return mock.patch.object(APP, "_ai_batch_persist_job_association", side_effect=wrap(raising_persist))
+            return patch_app_family(APP, "_ai_batch_persist_job_association", side_effect=wrap(raising_persist))
 
         self._assert_losing_caller_sees_truthful_failure(winner_patches, run_calls)
 
@@ -1736,7 +1745,7 @@ class LosingCallerPromotionFailureTests(_LosingCallerPostSpawnFailureBehaviorMix
         run_calls = []
 
         def winner_patches(wrap):
-            return mock.patch.object(APP, "_ai_batch_promote_worker", side_effect=wrap(lambda batch_job_id, job_id: False))
+            return patch_app_family(APP, "_ai_batch_promote_worker", side_effect=wrap(lambda batch_job_id, job_id: False))
 
         self._assert_losing_caller_sees_truthful_failure(winner_patches, run_calls)
 
@@ -1748,7 +1757,7 @@ class LosingCallerPromotionFailureTests(_LosingCallerPostSpawnFailureBehaviorMix
         def winner_patches(wrap):
             def raising_promote(batch_job_id, job_id):
                 raise RuntimeError("simulated promotion failure")
-            return mock.patch.object(APP, "_ai_batch_promote_worker", side_effect=wrap(raising_promote))
+            return patch_app_family(APP, "_ai_batch_promote_worker", side_effect=wrap(raising_promote))
 
         self._assert_losing_caller_sees_truthful_failure(winner_patches, run_calls)
 
@@ -1823,11 +1832,9 @@ class RetryReconciliationRegressionTests(BehavioralTestCase):
 
     def setUp(self):
         super().setUp()
-        self._suggestions_patcher = mock.patch.object(
-            APP, "_ai_batch_run_suggestions", return_value="done",
+        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_suggestions", return_value="done",
         )
-        self._decisions_patcher = mock.patch.object(
-            APP, "_ai_batch_process_decisions", return_value={},
+        self._decisions_patcher = patch_app_family(APP, "_ai_batch_process_decisions", return_value={},
         )
         self._suggestions_patcher.start()
         self._decisions_patcher.start()
@@ -1915,8 +1922,8 @@ class ContradictoryTerminalStateHealingTests(BehavioralTestCase):
 class RetryExhaustionStateTransitionTests(BehavioralTestCase):
     def setUp(self):
         super().setUp()
-        self._suggestions_patcher = mock.patch.object(APP, "_ai_batch_run_suggestions", return_value="done")
-        self._decisions_patcher = mock.patch.object(APP, "_ai_batch_process_decisions", return_value={})
+        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_suggestions", return_value="done")
+        self._decisions_patcher = patch_app_family(APP, "_ai_batch_process_decisions", return_value={})
         self._suggestions_patcher.start()
         self._decisions_patcher.start()
         self.addCleanup(self._suggestions_patcher.stop)
@@ -2018,7 +2025,7 @@ class AiBatchStateConflictHttpMappingTests(BehavioralTestCase):
             concurrent_state["status"] = "running"
             APP._get_ai_batch_store().save_batch_state(concurrent_state, expected_revision=1)
 
-        with mock.patch.object(APP, "_ai_batch_recalculate_batch_state", side_effect=_recalculate_then_race):
+        with patch_app_family(APP, "_ai_batch_recalculate_batch_state", side_effect=_recalculate_then_race):
             with APP.app.test_client() as client:
                 resp = client.post("/api/ai-batch-pause", json={"batch_job_id": self.batch_job_id})
 

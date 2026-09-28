@@ -38,6 +38,10 @@ from backend.transaction_engine import (
     rollback_import_review_cleanup,
 )
 import app as flask_app
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class Wave16RouteDelegationTests(unittest.TestCase):
@@ -556,8 +560,7 @@ class Wave16AstStructuralTests(unittest.TestCase):
 
     def setUp(self):
         app_path = flask_app.__file__
-        with open(app_path, "r", encoding="utf-8") as f:
-            self.source = f.read()
+        self.source = app_family_source()  # ARCH-001: app.py module family
         self.tree = ast.parse(self.source, filename=app_path)
 
     def test_no_direct_mutation_calls_in_album_cleanup_routes(self):

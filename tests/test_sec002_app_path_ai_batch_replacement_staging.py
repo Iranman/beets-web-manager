@@ -39,6 +39,10 @@ import unittest.mock as mock
 from pathlib import Path
 
 import app as APP
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class UnmatchedDraftPathSafetyTests(unittest.TestCase):
@@ -52,14 +56,14 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
         self.music_root.mkdir(parents=True)
         self.outside.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
-        self._draft_root_patcher = mock.patch.object(APP, "UNMATCHED_DRAFT_ROOT", self.draft_root)
+        self._draft_root_patcher = patch_app_family(APP, "UNMATCHED_DRAFT_ROOT", self.draft_root)
         self._draft_root_patcher.start()
         self.addCleanup(self._draft_root_patcher.stop)
         # MUSIC_ROOT is deliberately ALSO patched to an isolated, empty temp
         # directory (never used as UNMATCHED_DRAFT_ROOT) so that
         # test_music_root_is_never_touched below is a genuine architecture
         # assertion, not just "the test happens not to look there."
-        self._music_root_patcher = mock.patch.object(APP, "MUSIC_ROOT", self.music_root)
+        self._music_root_patcher = patch_app_family(APP, "MUSIC_ROOT", self.music_root)
         self._music_root_patcher.start()
         self.addCleanup(self._music_root_patcher.stop)
         self.env_patcher = mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}, clear=False)
@@ -213,8 +217,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         self.outside.mkdir(parents=True)
         (self.outside / "sentinel.flac").write_bytes(b"SHOULD_NOT_BE_SCANNED")
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
-        self._downloads_roots_patcher = mock.patch.object(
-            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(self.allowed_root)]
+        self._downloads_roots_patcher = patch_app_family(APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(self.allowed_root)]
         )
         self._downloads_roots_patcher.start()
         self.addCleanup(self._downloads_roots_patcher.stop)
@@ -226,7 +229,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         self.addCleanup(self._app_context.pop)
 
     def test_outside_root_scan_path_rejected_before_any_walk(self):
-        with mock.patch.object(APP, "_ai_batch_find_audio_dirs") as mock_walk:
+        with patch_app_family(APP, "_ai_batch_find_audio_dirs") as mock_walk:
             result = APP._start_ai_batch_job(str(self.outside))
         mock_walk.assert_not_called()
         self.assertIsInstance(result, tuple)
@@ -236,7 +239,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
 
     def test_traversal_scan_path_rejected(self):
         traversal = str(self.allowed_root / ".." / ".." / "etc")
-        with mock.patch.object(APP, "_ai_batch_find_audio_dirs") as mock_walk:
+        with patch_app_family(APP, "_ai_batch_find_audio_dirs") as mock_walk:
             result = APP._start_ai_batch_job(traversal)
         mock_walk.assert_not_called()
         body, status = result
@@ -248,7 +251,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
             link.symlink_to(self.outside, target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest("platform/user cannot create symlinks")
-        with mock.patch.object(APP, "_ai_batch_find_audio_dirs") as mock_walk:
+        with patch_app_family(APP, "_ai_batch_find_audio_dirs") as mock_walk:
             result = APP._start_ai_batch_job(str(link))
         mock_walk.assert_not_called()
         body, status = result
@@ -265,8 +268,8 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         # ordinary "valid" path.
         valid_subdir = self.allowed_root / "torrent_album"
         valid_subdir.mkdir()
-        with mock.patch.object(APP, "_ai_batch_reserve_worker", return_value=False) as mock_reserve, \
-             mock.patch.object(APP, "_ai_batch_reconnect_response", return_value=("reconnect", 200)) as mock_reconnect:
+        with patch_app_family(APP, "_ai_batch_reserve_worker", return_value=False) as mock_reserve, \
+             patch_app_family(APP, "_ai_batch_reconnect_response", return_value=("reconnect", 200)) as mock_reconnect:
             result = APP._start_ai_batch_job(str(valid_subdir))
         mock_reserve.assert_called_once()
         mock_reconnect.assert_called_once()
@@ -277,14 +280,14 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         corrupted/tampered/stale state, or state written before this fix
         existed) must be rejected at recovery time, not trusted because it
         was already queued."""
-        with mock.patch.object(APP, "_ai_batch_reserve_worker") as mock_reserve:
+        with patch_app_family(APP, "_ai_batch_reserve_worker") as mock_reserve:
             result = APP._start_ai_batch_job(str(self.outside), recover_batch_job_id="stale-batch-id")
         mock_reserve.assert_not_called()
         body, status = result
         self.assertEqual(status, 400)
 
     def test_nul_byte_scan_path_rejected(self):
-        with mock.patch.object(APP, "_ai_batch_find_audio_dirs") as mock_walk:
+        with patch_app_family(APP, "_ai_batch_find_audio_dirs") as mock_walk:
             result = APP._start_ai_batch_job(str(self.allowed_root) + "\x00evil")
         mock_walk.assert_not_called()
         body, status = result
@@ -303,7 +306,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         self.music_root.mkdir(parents=True)
         self.outside.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
-        self._music_root_patcher = mock.patch.object(APP, "MUSIC_ROOT", self.music_root)
+        self._music_root_patcher = patch_app_family(APP, "MUSIC_ROOT", self.music_root)
         self._music_root_patcher.start()
         self.addCleanup(self._music_root_patcher.stop)
         self.env_patcher = mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}, clear=False)
@@ -371,7 +374,7 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
                     "ok": True, "canonical_path": "/data/torrents/music/real_album",
                     "audio_count": 3, "audio_files": [], "source_signature": "abc",
                 }), \
-             mock.patch.object(APP, "_library_album_ids_for_folder", return_value=[]):
+             patch_app_family(APP, "_library_album_ids_for_folder", return_value=[]):
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": "/data/torrents/music/real_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
             })

@@ -1,5 +1,9 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class TransactionIntegrationSourceTests(unittest.TestCase):
     def test_backend_exposes_transaction_api_and_job_hook(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         self.assertIn("transactions = TransactionStore()", source)
         self.assertIn("def _install_transaction_job_hooks()", source)
         self.assertIn("metadata_payload[\"transaction_id\"] = tx_id", source)
@@ -18,7 +22,7 @@ class TransactionIntegrationSourceTests(unittest.TestCase):
         self.assertIn('@app.get("/api/transactions/<transaction_id>/export")', source)
 
     def test_item_modify_creates_preview_diff_and_requires_approval(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         start = source.index('@app.post("/api/items/<int:iid>/modify")')
         end = source.index('@app.post("/api/items/<int:iid>/retag")', start)
         route = source[start:end]
@@ -31,7 +35,7 @@ class TransactionIntegrationSourceTests(unittest.TestCase):
         self.assertNotIn('jobs.start_python(', route)
 
     def test_transaction_apply_executes_approved_metadata_update(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         start = source.index('def _start_metadata_apply_transaction')
         end = source.index('@app.post("/api/items/<int:iid>/modify")', start)
         helper = source[start:end]
@@ -41,7 +45,7 @@ class TransactionIntegrationSourceTests(unittest.TestCase):
         self.assertIn('status="Completed"', helper)
 
     def test_transaction_rollback_executes_metadata_restore_operations(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        source = app_family_source()
         start = source.index('@app.post("/api/transactions/<transaction_id>/rollback")')
         end = source.index('@app.get("/api/transactions/<transaction_id>/export")', start)
         route = source[start:end]

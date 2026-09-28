@@ -257,10 +257,6 @@
       "DISPLAY_ONLY",
       "Docstring/route wrapper."
     ],
-    "app.py::api_download_album": [
-      "DISPLAY_ONLY",
-      "Review label."
-    ],
     "app.py::batch_ai_suggest": [
       "CANDIDATE_GENERATION_ONLY",
       "Reuses prior suggestions as candidates."
@@ -269,17 +265,9 @@
       "CANDIDATE_GENERATION_ONLY",
       "AI-proposed duplicates; fingerprint mismatch rejects; deletion needs explicit paths or the maintenance deterministic same-album rule."
     ],
-    "app.py::dedup_scan": [
-      "CANDIDATE_GENERATION_ONLY",
-      "Provisional duplicate candidates with fingerprint veto; FIXED this pass: release_relation recorded, cross-release matches downgraded."
-    ],
     "app.py::evaluate_import_eligibility": [
       "COMPATIBILITY_WRAPPER",
       "FIXED this pass (was NEEDS_MIGRATION): unattended auto-enqueue now honors the canonical matching_decision veto; the 60% confidence floor only narrows."
-    ],
-    "app.py::import_folder_with_id": [
-      "COMPATIBILITY_WRAPPER",
-      "Human-supplied release; library-source preflight canonical; fresh path goes to the engine confirmed-import plan (see transaction_engine entries)."
     ],
     "app.py::import_review_queue": [
       "DISPLAY_ONLY",
@@ -301,17 +289,33 @@
       "DISPLAY_ONLY",
       "Transaction metadata for a user edit."
     ],
-    "app.py::playlist_download": [
+    "app.py::start_album_download": [
       "DISPLAY_ONLY",
-      "Status message text."
+      "Review label. (ARCH-001: body moved from the route into this request-free service.)"
     ],
-    "app.py::reimport_disk": [
+    "app.py::start_dedup_scan": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Provisional duplicate candidates with fingerprint veto; FIXED this pass: release_relation recorded, cross-release matches downgraded. (ARCH-001: body moved from the route into this request-free service.)"
+    ],
+    "app.py::start_folder_import_with_id": [
       "COMPATIBILITY_WRAPPER",
-      "Mutation requires canonical preflight.ok (or explicit manual override) and the engine deterministic-identity gate."
+      "Human-supplied release; library-source preflight canonical; fresh path goes to the engine confirmed-import plan (see transaction_engine entries). (ARCH-001: body moved from the route into this request-free service.)"
+    ],
+    "app.py::start_playlist_download": [
+      "DISPLAY_ONLY",
+      "Status message text. (ARCH-001: body moved from the route into this request-free service.)"
+    ],
+    "app.py::start_reimport_disk": [
+      "COMPATIBILITY_WRAPPER",
+      "Mutation requires canonical preflight.ok (or explicit manual override) and the engine deterministic-identity gate. (ARCH-001: body moved from the route into this request-free service.)"
     ],
     "backend/album_match.py::build_album_match_plan": [
       "COMPATIBILITY_WRAPPER",
       "Caller supplies the canonical match function."
+    ],
+    "backend/app_runtime.py::<module>": [
+      "DISPLAY_ONLY",
+      "AI threshold constants moved verbatim from app.py (ARCH-001); each consumer is classified separately."
     ],
     "backend/duplicate_identity.py::select_unattended_cleanup_paths": [
       "SAFE_SPECIALIZED_EVIDENCE",

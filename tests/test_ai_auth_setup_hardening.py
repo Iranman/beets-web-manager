@@ -27,10 +27,18 @@ import re
 import textwrap
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import source_between  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import source_between  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 SETUP_SOURCE = (ROOT / "routes_setup.py").read_text(encoding="utf-8")
 SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "views" / "System.tsx").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
@@ -39,9 +47,7 @@ README_SOURCE = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
-    start = src.index(start_marker)
-    end = src.index(end_marker, start)
-    return src[start:end]
+    return source_between(src, start_marker, end_marker)
 
 
 class ClassifyOpenAiErrorBehaviorTests(unittest.TestCase):
@@ -60,7 +66,7 @@ class ClassifyOpenAiErrorBehaviorTests(unittest.TestCase):
         class _StubApp:
             logger = logging.getLogger("test_classify_openai_error")
 
-        namespace = {"urllib": _urllib, "app": _StubApp()}
+        namespace = {"urllib": _urllib, "app": _StubApp(), "_app_logger": _StubApp().logger}
         namespace["urllib"].error = _urllib_error
         exec(compile(fn_src, "<classify_openai_error>", "exec"), namespace)
         cls._classify = staticmethod(namespace["_classify_openai_error"])

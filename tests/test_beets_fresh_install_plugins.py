@@ -4,11 +4,15 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 REQ = (ROOT / "requirements.txt").read_text(encoding="utf-8")
 CONFIG = (ROOT / "config.yaml.example").read_text(encoding="utf-8")
-APP = (ROOT / "app.py").read_text(encoding="utf-8")
+APP = app_family_source()
 SETUP = (ROOT / "routes_setup.py").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 FULL_COMPOSE = (ROOT / "docker-compose.full.yml").read_text(encoding="utf-8")

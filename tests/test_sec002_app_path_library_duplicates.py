@@ -6,6 +6,10 @@ from typing import Any, Dict
 from unittest import mock
 
 import app
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class TestSec002AppPathLibraryDuplicates(unittest.TestCase):
@@ -24,8 +28,7 @@ class TestSec002AppPathLibraryDuplicates(unittest.TestCase):
         # trusted-root authorization on non-production platforms for no
         # production benefit -- tempfile.gettempdir() is /tmp on Linux
         # anyway, already covered).
-        self._downloads_roots_patcher = mock.patch.object(
-            app, "_DOWNLOADS_ROOTS", app._DOWNLOADS_ROOTS + [str(self.tmp_path)]
+        self._downloads_roots_patcher = patch_app_family(app, "_DOWNLOADS_ROOTS", app._DOWNLOADS_ROOTS + [str(self.tmp_path)]
         )
         self._downloads_roots_patcher.start()
         self.addCleanup(self._downloads_roots_patcher.stop)

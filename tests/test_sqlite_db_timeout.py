@@ -1,9 +1,13 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 
 
 class SqliteDbTimeoutTests(unittest.TestCase):
@@ -13,7 +17,11 @@ class SqliteDbTimeoutTests(unittest.TestCase):
         source = APP_SOURCE[start:end]
 
         self.assertIn("BEETS_SQLITE_TIMEOUT", source)
-        self.assertIn("get_db_connection(path)", source)
+        # ARCH-001: _db() referenced a control-agent helper removed with the
+        # custom engine (it could only raise NameError). It now fails closed
+        # explicitly; the Web Manager never opens the Beets database.
+        self.assertIn("direct Beets database access is not available in the Web Manager", source)
+        self.assertNotIn("get_db_connection", source)
         self.assertNotIn("sqlite3.connect", source)
         self.assertIn("def _sqlite_write_retry", source)
         self.assertIn("database locked while", source)

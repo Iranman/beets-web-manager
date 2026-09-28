@@ -1,9 +1,13 @@
 """Regression coverage for Import Review auto-import enqueue behavior."""
 from pathlib import Path
 import unittest
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source, app_unit_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = (ROOT / "app.py").read_text(encoding="utf-8")
+APP = app_family_source()
 REVIEW_PAGE = (ROOT / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx").read_text(encoding="utf-8")
 CLIENT = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
@@ -86,10 +90,10 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('"existing_job": True', body)
         self.assertIn('"selected_source_files": eligibility["selected_file_paths"]', body)
         self.assertIn('"auto_import_idempotency_key": key', body)
-        self.assertIn('with app.test_request_context("/api/folders/import-with-id"', body)
+        self.assertIn('start_folder_import_with_id(import_payload)', body)
 
     def test_auto_import_reuses_verified_track_mapping_before_broad_rematch(self):
-        body = section(APP, '@app.post("/api/folders/import-with-id")', 'def _match_tracks_from_mb')
+        body = app_unit_source("start_folder_import_with_id")
         self.assertIn('def _apply_verified_review_track_mapping(album_db_id: int) -> int:', body)
         self.assertIn('auto_import and selected_subset_import and importable_rows', body)
         self.assertIn('Applied verified Import Review track mapping', body)
@@ -99,7 +103,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('log.append("[3/4] Writing tags to audio files', body)
         self.assertIn('log.append("[4/4] Renaming files to match library path template', body)
     def test_import_job_metadata_contains_immutable_selection_and_skips_plex_by_default(self):
-        body = section(APP, '@app.post("/api/folders/import-with-id")', 'def _match_tracks_from_mb')
+        body = app_unit_source("start_folder_import_with_id")
         self.assertIn('"selected_source_files": [str(p) for p in selected_source_files]', body)
         self.assertIn('"import_review_auto_idempotency_key": auto_import_idempotency_key', body)
         self.assertIn('trigger_plex_refresh_after = bool(payload.get("trigger_plex"))', body)
@@ -129,7 +133,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         body = section(APP, 'def _reconcile_pending_review_enqueue_item', 'def _import_review_auto_key')
         self.assertIn('if _import_job_resolved_as_already_in_library(job):', body)
         self.assertIn('return None, True', body)
-        import_body = section(APP, '@app.post("/api/folders/import-with-id")', 'def _match_tracks_from_mb')
+        import_body = app_unit_source("start_folder_import_with_id")
         self.assertIn('_remove_pending_review_for_path(folder_path, log)', import_body)
         self.assertIn('return {"status": "already_in_library"}', import_body)
 
@@ -146,7 +150,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('skip_import_lock: bool = False', APP)
         self.assertIn('payload["skip_import_lock"] = True', APP)
         self.assertIn('skip_import_lock=True', APP)
-        body = section(APP, '@app.post("/api/albums/reimport-disk")', '_LIBRARY_IMPORT_ALL_LAST_FILE')
+        body = app_unit_source("start_reimport_disk")
         self.assertIn('skip_import_lock = bool(payload.get("skip_import_lock"))', body)
         self.assertIn('[reimport] Running inside parent import slot', body)
         self.assertIn('"skip_import_lock": skip_import_lock', body)

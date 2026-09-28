@@ -1,9 +1,13 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 ROUTES_SOURCE = (ROOT / "routes_submissions.py").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 APP_TSX_SOURCE = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
@@ -15,7 +19,7 @@ SUBMISSIONS_SOURCE = (ROOT / "frontend" / "src" / "views" / "Submissions.tsx").r
 
 class MetadataSubmissionsStaticTests(unittest.TestCase):
     def test_submission_route_module_is_loaded(self):
-        self.assertIn("import routes_submissions", APP_SOURCE)
+        self.assertIn('"routes_submissions"', APP_SOURCE)  # listed in app.ROUTE_MODULES (ARCH-001)
 
     def test_acoustid_submit_routes_use_beet_submit_jobs(self):
         self.assertIn('@app.post("/api/albums/<int:aid>/acoustid-submit")', ROUTES_SOURCE)

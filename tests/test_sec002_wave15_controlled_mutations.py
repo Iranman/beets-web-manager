@@ -39,6 +39,10 @@ from backend.transaction_engine import (
     rollback_import_review_cleanup,
 )
 from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +287,7 @@ class FlaskEndpointTests(unittest.TestCase):
         self.client = flask_app.app.test_client()
 
     def test_flask_import_review_folder_delete_endpoint(self):
-        with patch("app.composite_workflows") as mock_bc:
+        with patch_app_family("app", "composite_workflows") as mock_bc:
             mock_bc.plan_import_review_cleanup.return_value = {
                 "ok": True,
                 "operation_id": "tx-folder-del",
@@ -308,7 +312,7 @@ class FlaskEndpointTests(unittest.TestCase):
             self.assertEqual(data["status"], "Completed")
 
     def test_flask_import_review_files_cleanup_endpoint(self):
-        with patch("app.composite_workflows") as mock_bc, patch("app._pending_review_matches", return_value=True):
+        with patch_app_family("app", "composite_workflows") as mock_bc, patch_app_family("app", "_pending_review_matches", return_value=True):
             mock_bc.plan_import_review_cleanup.return_value = {
                 "ok": True,
                 "operation_id": "tx-files-cleanup",

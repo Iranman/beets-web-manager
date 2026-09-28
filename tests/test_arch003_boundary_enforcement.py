@@ -9,6 +9,10 @@ Verifies:
 import ast
 from pathlib import Path
 import unittest
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class TestArch003BoundaryEnforcement(unittest.TestCase):
@@ -17,7 +21,7 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.app_path = self.repo_root / "app.py"
         self.beets_adapter_path = self.repo_root / "backend" / "beets_adapter.py"
 
-        self.app_source = self.app_path.read_text(encoding="utf-8")
+        self.app_source = app_family_source()
         self.beets_adapter_source = self.beets_adapter_path.read_text(encoding="utf-8")
 
     def test_beets_adapter_has_no_transaction_engine_imports(self):
@@ -154,7 +158,7 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         for marker in self._NO_DIRECT_MUTATION_MARKERS:
             self.assertNotIn(marker, src, f"found prohibited local-mutation marker {marker!r} in _move_artwork_to_target")
 
-        src = self._function_source("import_folder_with_id")
+        src = self._function_source("start_folder_import_with_id")
         self.assertNotIn('base_import + ["import"', src)
         self.assertNotIn("subprocess.run(\n                base_import", src)
 

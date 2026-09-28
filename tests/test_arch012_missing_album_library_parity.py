@@ -13,6 +13,10 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import app  # noqa: E402
@@ -73,7 +77,7 @@ class Arch012MissingAlbumLibraryParityTests(unittest.TestCase):
         ]
         mock_lib.items.return_value = items
 
-        with patch.object(app, "lib", mock_lib), \
+        with patch_app_family(app, "lib", mock_lib), \
              patch("pathlib.Path.exists", return_value=False), \
              patch("pathlib.Path.iterdir", return_value=[]):
             
@@ -109,7 +113,7 @@ class Arch012MissingAlbumLibraryParityTests(unittest.TestCase):
         ]
         mock_lib.items.return_value = items
 
-        with patch.object(app, "lib", mock_lib), \
+        with patch_app_family(app, "lib", mock_lib), \
              patch("pathlib.Path.exists", return_value=False), \
              patch("pathlib.Path.iterdir", return_value=[]):
             
@@ -138,7 +142,7 @@ class Arch012MissingAlbumLibraryParityTests(unittest.TestCase):
         ]
         mock_lib.items.return_value = items
 
-        with patch.object(app, "lib", mock_lib), \
+        with patch_app_family(app, "lib", mock_lib), \
              patch("pathlib.Path.exists", return_value=False), \
              patch("pathlib.Path.iterdir", return_value=[]):
             
@@ -165,7 +169,7 @@ class Arch012MissingAlbumLibraryParityTests(unittest.TestCase):
         ]
         mock_lib.items.return_value = items
 
-        with patch.object(app, "lib", mock_lib), \
+        with patch_app_family(app, "lib", mock_lib), \
              patch("pathlib.Path.exists", return_value=False), \
              patch("pathlib.Path.iterdir", return_value=[]):
             
@@ -198,7 +202,7 @@ class Arch012MissingAlbumLibraryParityTests(unittest.TestCase):
         ]
         mock_lib.items.return_value = items
 
-        with patch.object(app, "lib", mock_lib), \
+        with patch_app_family(app, "lib", mock_lib), \
              patch("pathlib.Path.exists", return_value=False), \
              patch("pathlib.Path.iterdir", return_value=[]):
             

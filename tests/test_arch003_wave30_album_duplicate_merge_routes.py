@@ -16,6 +16,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 SAME_MBID = "10101010-1010-1010-1010-101010101010"
 SAME_RGID = "20202020-2020-2020-2020-202020202020"
@@ -85,9 +89,9 @@ class _MergeTestBase(unittest.TestCase):
         self._get_rgid_patch = mock.patch.object(app_module.composite_workflows, "get_rgid_group_detail", side_effect=fake_get_rgid_group_detail)
         self._get_rgid_patch.start()
 
-        self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
+        self._db_patch = patch_app_family(app_module, "_db", side_effect=_mock_db_cm)
         self._db_patch.start()
-        self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
+        self._invalidate_patch = patch_app_family(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
 
     def tearDown(self):
@@ -191,7 +195,7 @@ class CleanRgidGroupMergeTests(_MergeTestBase):
         with mock.patch.object(
             app_module.composite_workflows, "merge_duplicate_albums",
             return_value={"ok": True, "moved": 1, "inherit_fields": {"year": 1995}},
-        ) as mock_merge, mock.patch.object(app_module, "_clear_rgid_resolution") as mock_clear:
+        ) as mock_merge, patch_app_family(app_module, "_clear_rgid_resolution") as mock_clear:
             response, log = self._run_job_body(
                 app_module.clean_rgid_group_merge,
                 {"mb_releasegroupid": SAME_RGID, "target_album_id": 201, "source_album_id": 202},
@@ -209,10 +213,9 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
         with mock.patch.object(
             app_module.composite_workflows, "update_album_metadata",
             return_value={"ok": True, "album_fields_changed": 2},
-        ) as mock_update, mock.patch.object(
-            app_module, "_repair_album_mbid_sticking_once",
+        ) as mock_update, patch_app_family(app_module, "_repair_album_mbid_sticking_once",
             return_value={"changed": True},
-        ), mock.patch.object(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
+        ), patch_app_family(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
             response, log = self._run_job_body(
                 app_module.clean_rgid_group_relink,
                 {"album_id": 301, "mb_albumid": SAME_MBID, "mb_releasegroupid": SAME_RGID},
@@ -236,7 +239,7 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
                         fn([], cancel_event=None)
                     return mock.Mock(job_id="job-test")
                 with mock.patch.object(app_module.jobs, "start_python", side_effect=fake_start_python), \
-                        mock.patch.object(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
+                        patch_app_family(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
                     app_module.clean_rgid_group_relink()
 
 

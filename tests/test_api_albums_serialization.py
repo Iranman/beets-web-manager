@@ -10,6 +10,10 @@ from unittest import mock
 
 import app as app_module
 from backend.beets_adapter import RemoteAlbum
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class FakeBeetsAlbumMethod:
@@ -176,7 +180,7 @@ class ApiAlbumsRouteTests(unittest.TestCase):
         self.client = self.app.test_client()
 
     def test_get_api_albums_unauthenticated_returns_401(self):
-        with mock.patch("app._security_auth_disabled", return_value=False):
+        with patch_app_family("app", "_security_auth_disabled", return_value=False):
             res = self.client.get("/api/albums")
             self.assertEqual(res.status_code, 401)
 
@@ -203,7 +207,7 @@ class ApiAlbumsRouteTests(unittest.TestCase):
         ]
 
         with mock.patch("app.lib.albums", return_value=mock_data), \
-             mock.patch("app._security_auth_disabled", return_value=True):
+             patch_app_family("app", "_security_auth_disabled", return_value=True):
             res = self.client.get("/api/albums?limit=10")
             self.assertEqual(res.status_code, 200)
             data = res.get_json()
@@ -223,7 +227,7 @@ class ApiAlbumsRouteTests(unittest.TestCase):
         ]
 
         with mock.patch("app.lib.albums", return_value=mock_data), \
-             mock.patch("app._security_auth_disabled", return_value=True):
+             patch_app_family("app", "_security_auth_disabled", return_value=True):
             res = self.client.get("/api/albums?limit=3")
             self.assertEqual(res.status_code, 200)
             data = res.get_json()

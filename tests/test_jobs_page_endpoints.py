@@ -5,6 +5,10 @@ and return clean error payloads when unauthenticated or when Beets control agent
 import os
 import unittest
 from unittest.mock import patch
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 os.environ['BEETS_WEB_AUTH_DISABLED'] = '1'
 import app as app_module
@@ -80,7 +84,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
         self.assertIn('job_id', data)
 
     def test_art_repair_report_engine_offline_handling(self):
-        with patch('app._art_repair_build_report', side_effect=BeetsUnavailableError("Control agent down")):
+        with patch_app_family("app", "_art_repair_build_report", side_effect=BeetsUnavailableError("Control agent down")):
             res = self.client.get('/api/library/art-repair', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 503)
             data = res.get_json()
@@ -89,7 +93,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('error'), 'Beets engine is unavailable.')
 
     def test_art_repair_report_application_error_not_engine_offline(self):
-        with patch('app._art_repair_build_report', side_effect=BeetsError("Processing calculation error")):
+        with patch_app_family("app", "_art_repair_build_report", side_effect=BeetsError("Processing calculation error")):
             res = self.client.get('/api/library/art-repair', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 500)
             data = res.get_json()
@@ -163,7 +167,7 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
 
     def test_art_repair_engine_auth_error_handling(self):
         from backend.beets_adapter import BeetsAuthError
-        with patch('app._art_repair_build_report', side_effect=BeetsAuthError("Token invalid")):
+        with patch_app_family("app", "_art_repair_build_report", side_effect=BeetsAuthError("Token invalid")):
             res = self.client.get('/api/library/art-repair', headers={'X-Beets-CSRF': '1'})
             self.assertEqual(res.status_code, 503)
             data = res.get_json()

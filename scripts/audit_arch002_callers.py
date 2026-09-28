@@ -40,20 +40,29 @@ def production_files():
     tracked = subprocess.check_output(
         ["git", "ls-files", "backend/*.py", "beetsplug/*.py"], cwd=ROOT, text=True
     ).split()
-    return [f for f in TOP_LEVEL + tracked if (ROOT / f).exists() and not f.startswith("tests/")]
+    # ARCH-001: every top-level route module is production code too.
+    routes = sorted(p.name for p in ROOT.glob("routes_*.py"))
+    files = list(dict.fromkeys(TOP_LEVEL + routes + tracked))
+    return [f for f in files if (ROOT / f).exists() and not f.startswith("tests/")]
 
 
 def hit_map():
     units = Counter()
     for rel in production_files():
         src = (ROOT / rel).read_text(encoding="utf-8")
+        tree = ast.parse(src)
         spans = [
             (n.lineno, n.end_lineno, n.name)
-            for n in ast.walk(ast.parse(src))
+            for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
+        # An import line naming a threshold/score helper decides nothing.
+        import_lines = {
+            ln for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+            for ln in range(n.lineno, n.end_lineno + 1)
+        }
         for lineno, line in enumerate(src.splitlines(), 1):
-            if not PATTERN.search(line):
+            if lineno in import_lines or not PATTERN.search(line):
                 continue
             containing = [s for s in spans if s[0] <= lineno <= s[1]]
             name = min(containing, key=lambda s: s[0])[2] if containing else "<module>"
@@ -61,9 +70,34 @@ def hit_map():
     return units
 
 
+def app_family_modules():
+    """Modules extracted from app.py by ARCH-001 (docs/arch001_app_ownership.json)."""
+    try:
+        data = json.loads((ROOT / "docs" / "arch001_app_ownership.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return set(data.get("extracted_modules") or [])
+
+
+def load_classification(hits):
+    """Classifications, with ARCH-001 moves inheriting their app.py entry.
+
+    A function moved verbatim from app.py into an owned module keeps the
+    classification it had as `app.py::<name>`; module-level units and any
+    function without an app.py entry must be classified explicitly.
+    """
+    classified = dict(json.loads(CLASSIFICATION.read_text(encoding="utf-8"))["units"])
+    family = app_family_modules()
+    for unit in hits:
+        rel, _, name = unit.partition("::")
+        if unit not in classified and rel in family and name != "<module>" and f"app.py::{name}" in classified:
+            classified[unit] = classified[f"app.py::{name}"]
+    return classified
+
+
 def main(argv):
-    classified = json.loads(CLASSIFICATION.read_text(encoding="utf-8"))["units"]
     hits = hit_map()
+    classified = load_classification(hits)
     unclassified = sorted(u for u in hits if u not in classified)
     bad_class = sorted(u for u, (cls, _) in classified.items() if cls not in CLASSES)
     unit_counts = Counter()

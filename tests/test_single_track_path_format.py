@@ -1,5 +1,9 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 
@@ -22,7 +26,7 @@ class SingleTrackPathFormatTests(unittest.TestCase):
         if not config_path.exists():
             config_path = root / "config.yaml.example"
         config_source = config_path.read_text(encoding="utf-8")
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn(f'singleton: "{SINGLE_TRACK_TEMPLATE}"', config_source)
         self.assertIn(f'default: "{DEFAULT_TEMPLATE}"', config_source)
@@ -37,7 +41,7 @@ class SingleTrackPathFormatTests(unittest.TestCase):
 
     def test_template_token_cleanup_catches_leaked_filename_template(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
 
         self.assertIn("albumartist|album|artist|title|track|disc|year", app_source)
         self.assertIn("_album_template_token_cleanup_candidates", app_source)

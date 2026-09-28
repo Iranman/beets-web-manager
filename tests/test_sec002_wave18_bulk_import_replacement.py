@@ -41,6 +41,14 @@ from backend.transaction_engine import (
     create_existing_album_reconcile_plan,
     execute_existing_album_reconcile_apply,
 )
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -851,8 +859,7 @@ class AstStructuralTests(unittest.TestCase):
     }
 
     def setUp(self):
-        with open("app.py", "r", encoding="utf-8") as f:
-            self.app_source = f.read()
+        self.app_source = app_family_source()
         self.app_tree = ast.parse(self.app_source, filename="app.py")
         with open("backend/transaction_engine.py", "r", encoding="utf-8") as f:
             self.engine_source = f.read()
@@ -956,10 +963,7 @@ class GenericRollbackDispatchTests(unittest.TestCase):
     'unknown family -> try X' fallback."""
 
     def test_app_dispatches_bulk_family_explicitly(self):
-        import app as flask_app
-        source = flask_app.__file__
-        with open(source, "r", encoding="utf-8") as f:
-            text = f.read()
+        text = app_family_source()  # ARCH-001: app.py module family
         idx = text.index("def api_transaction_rollback")
         snippet = text[idx: idx + 4000]
         self.assertIn('mutation_family == "bulk_import_replacement_v1"', snippet)
@@ -1014,11 +1018,11 @@ class RealProductionPathTests(unittest.TestCase):
             finally:
                 con.close()
 
-        self._db_patch = mock.patch.object(flask_app, "_db", _local_db)
+        self._db_patch = patch_app_family(flask_app, "_db", _local_db)
         self._db_patch.start()
         self.addCleanup(self._db_patch.stop)
 
-        self._music_root_patch = mock.patch.object(flask_app, "MUSIC_ROOT", self.music_root)
+        self._music_root_patch = patch_app_family(flask_app, "MUSIC_ROOT", self.music_root)
         self._music_root_patch.start()
         self.addCleanup(self._music_root_patch.stop)
 
@@ -1120,7 +1124,7 @@ class RealProductionPathTests(unittest.TestCase):
     OTHER_REC = "33333333-3333-3333-3333-333333333333"
 
     def _tracklist(self):
-        return mock.patch.object(self.flask_app, "_fetch_mb_release_tracklist", return_value={
+        return patch_app_family(self.flask_app, "_fetch_mb_release_tracklist", return_value={
             "ok": True, "release_group": self.RG,
             "tracks": [{"disc": 1, "track": 1, "title": "Track 1", "mb_trackid": self.TARGET_REC,
                         "duration_ms": 180000}],
@@ -1143,7 +1147,7 @@ class RealProductionPathTests(unittest.TestCase):
                     else [{"mb_trackid": self.TARGET_REC, "score": 96}])
 
         log = []
-        with self._tracklist(), mock.patch.object(self.flask_app, "_acoustid_lookup_cached", side_effect=hits):
+        with self._tracklist(), patch_app_family(self.flask_app, "_acoustid_lookup_cached", side_effect=hits):
             result_album_id = self.flask_app._merge_imported_album_into_existing(
                 imported_album_id, existing_album_id, str(self.music_root), log,
                 mb_albumid="44444444-4444-4444-4444-444444444444", replace_existing_item_ids=None,
@@ -1168,7 +1172,7 @@ class RealProductionPathTests(unittest.TestCase):
         review_path = self.tmp_path / "reviews.json"
         log = []
         with self._tracklist(), \
-                mock.patch.object(self.flask_app, "_acoustid_lookup_cached", return_value=[]), \
+                patch_app_family(self.flask_app, "_acoustid_lookup_cached", return_value=[]), \
                 mock.patch.object(self.flask_app._import_reconciliation, "review_store_path", return_value=review_path), \
                 mock.patch.object(self.flask_app.composite_workflows, "plan_bulk_import_replacement") as plan_mock:
             self.flask_app._merge_imported_album_into_existing(

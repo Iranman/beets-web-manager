@@ -10,6 +10,10 @@ from unittest import mock
 import app as app_module
 from backend.identity_contract import album_identity_from_payload, verify_album_identity
 from backend.import_reconciliation import album_identity
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 RG = "11111111-1111-1111-1111-111111111111"
@@ -70,7 +74,7 @@ class AddMbidsRouteTests(unittest.TestCase):
     def test_mismatched_release_is_refused_before_any_write(self):
         client = app_module.app.test_client()
         headers = {}
-        with mock.patch.object(app_module, "_mb_release_group_for_release", return_value=RG2), \
+        with patch_app_family(app_module, "_mb_release_group_for_release", return_value=RG2), \
                 mock.patch.object(app_module.composite_workflows, "update_album_metadata") as update, \
                 mock.patch.object(app_module.app, "before_request_funcs", {}):
             resp = client.post("/api/albums/5/add-mbids", headers=headers, json={

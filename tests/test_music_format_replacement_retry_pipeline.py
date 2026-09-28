@@ -3,10 +3,14 @@ import unittest
 from pathlib import Path
 
 from backend.audio_preferences import mark_needs_replacement
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 
 
 def function_source(name: str) -> str:
@@ -124,7 +128,7 @@ class ReplacementRetryPipelineTests(unittest.TestCase):
 
     def test_imported_wanted_downloads_are_fingerprint_gated_before_import(self):
         helper_source = function_source("_validate_wanted_download_identity_before_import")
-        download_source = function_source("api_download_album")
+        download_source = function_source("start_album_download")
         self.assertIn("_playlist_download_match", helper_source)
         self.assertIn("Downloaded audio did not fingerprint-verify", helper_source)
         self.assertIn("_validate_wanted_download_identity_before_import(", download_source)
@@ -134,7 +138,7 @@ class ReplacementRetryPipelineTests(unittest.TestCase):
         )
 
     def test_replace_existing_import_skips_repair_only_shortcut(self):
-        reimport_source = function_source("reimport_disk")
+        reimport_source = function_source("start_reimport_disk")
         self.assertIn('replace_existing = bool(payload.get("replace_existing") or replace_existing_item_ids)', reimport_source)
         self.assertIn("Replacement mode: importing verified staged file", reimport_source)
         self.assertIn(

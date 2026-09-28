@@ -18,6 +18,10 @@ import types
 import unittest
 from pathlib import Path
 from unittest import mock
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class LegacySetupCompleteMigrationTests(unittest.TestCase):
@@ -44,12 +48,12 @@ class LegacySetupCompleteMigrationTests(unittest.TestCase):
         self.setup_state_file = root / ".browser_setup_state"
 
         self.patches = [
-            mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", root),
+            patch_app_family(app_module, "WEB_MANAGER_DATA_DIR", root),
             mock.patch.object(routes_setup, "_SETUP_COMPLETE_MARKER", self.marker),
-            mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
-            mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
-            mock.patch.object(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
-            mock.patch.object(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
+            patch_app_family(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
+            patch_app_family(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
+            patch_app_family(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
+            patch_app_family(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
         ]
         self.env_patch = mock.patch.dict(
             __import__("os").environ,

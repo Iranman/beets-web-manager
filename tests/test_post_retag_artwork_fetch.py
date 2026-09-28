@@ -22,6 +22,10 @@ import unittest
 import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,7 +89,7 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
 
     def test_skips_fetchart_when_identity_not_verified(self):
         self.album.mb_albumid = OTHER_ALBUMID  # persisted ID differs from what was just imported
-        with mock.patch.object(APP, "_repair_album_art") as repair:
+        with patch_app_family(APP, "_repair_album_art") as repair:
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         repair.assert_not_called()
         self.assertFalse(result["identity_verified"])
@@ -94,14 +98,14 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
 
     def test_skips_fetchart_when_album_missing(self):
         with mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: None), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         repair.assert_not_called()
         self.assertFalse(result["identity_verified"])
         self.assertEqual(result["artwork_status"], "skipped_identity_unverified")
 
     def test_runs_fetchart_scoped_to_album_id_when_identity_verified(self):
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "saved", "saved_path": "/x/cover.jpg"}) as repair:
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "saved", "saved_path": "/x/cover.jpg"}) as repair:
             result = APP._fetch_artwork_after_retag(42, MB_ALBUMID, self.log)
         repair.assert_called_once()
         called_aid = repair.call_args[0][0]
@@ -113,13 +117,13 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
     # ---- status classification ---------------------------------------------
 
     def test_already_present_is_not_retryable(self):
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "skipped", "source": "local"}):
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "skipped", "source": "local"}):
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         self.assertEqual(result["artwork_status"], "already_present")
         self.assertFalse(result["artwork_retryable"])
 
     def test_fetchart_failure_is_truthful_and_retryable(self):
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "failed", "error": "No art found by fetchart or Discogs fallback"}):
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "failed", "error": "No art found by fetchart or Discogs fallback"}):
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         self.assertTrue(result["identity_verified"])
         self.assertEqual(result["artwork_status"], "failed")
@@ -127,13 +131,13 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
         self.assertTrue(any("Artwork: failed" in line for line in self.log))
 
     def test_unresolved_status_is_treated_as_failed_and_retryable(self):
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "unresolved", "error": "Album folder no longer exists on disk"}):
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "unresolved", "error": "Album folder no longer exists on disk"}):
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         self.assertEqual(result["artwork_status"], "failed")
         self.assertTrue(result["artwork_retryable"])
 
     def test_unexpected_exception_from_repair_is_caught_and_reported_as_failed(self):
-        with mock.patch.object(APP, "_repair_album_art", side_effect=RuntimeError("boom")):
+        with patch_app_family(APP, "_repair_album_art", side_effect=RuntimeError("boom")):
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         self.assertEqual(result["artwork_status"], "failed")
         self.assertTrue(result["artwork_retryable"])
@@ -147,7 +151,7 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
             cancel_event.set()
             return {"status": "failed", "error": "cancelled"}
 
-        with mock.patch.object(APP, "_repair_album_art", side_effect=fake_repair):
+        with patch_app_family(APP, "_repair_album_art", side_effect=fake_repair):
             with self.assertRaises(RuntimeError):
                 APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log, cancel_event=cancel_event)
 
@@ -155,7 +159,7 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
 
     def test_error_text_is_redacted_before_logging(self):
         secret_error = "api_key: sk-should-not-appear"
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "failed", "error": secret_error}):
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "failed", "error": secret_error}):
             APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         combined = "\n".join(self.log)
         self.assertNotIn("sk-should-not-appear", combined)
@@ -166,7 +170,7 @@ class FetchArtworkAfterRetagTests(unittest.TestCase):
                 raise RuntimeError("token=sk-must-not-leak")
 
         with mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: _Boom()), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             result = APP._fetch_artwork_after_retag(1, MB_ALBUMID, self.log)
         repair.assert_not_called()
         self.assertFalse(result["identity_verified"])

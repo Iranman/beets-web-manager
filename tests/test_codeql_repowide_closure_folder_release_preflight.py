@@ -35,6 +35,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
@@ -63,9 +67,9 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             outside.mkdir(parents=True)
             (outside / "secret_track.mp3").write_bytes(b"x")
 
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
-                 mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
-                 mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root), \
+                 patch_app_family(app_module, "DOWNLOADS_ROOT", downloads_root), \
+                 patch_app_family(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
                  mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.return_value = {"ok": True, "audio_files": []}
                 app_module._folder_release_preflight(
@@ -86,9 +90,9 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             sibling.mkdir(parents=True)
             (sibling / "track.mp3").write_bytes(b"x")
 
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
-                 mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
-                 mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root), \
+                 patch_app_family(app_module, "DOWNLOADS_ROOT", downloads_root), \
+                 patch_app_family(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
                  mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.return_value = {"ok": True, "audio_files": []}
                 app_module._folder_release_preflight(
@@ -108,9 +112,9 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             link = music_root / "Escaped Album"
             link.symlink_to(outside, target_is_directory=True)
 
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
-                 mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
-                 mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root), \
+                 patch_app_family(app_module, "DOWNLOADS_ROOT", downloads_root), \
+                 patch_app_family(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
                  mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.return_value = {"ok": True, "audio_files": []}
                 app_module._folder_release_preflight(
@@ -134,9 +138,9 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             album_dir.mkdir(parents=True)
             (album_dir / "01 Track One.mp3").write_bytes(b"x")
 
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
-                 mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
-                 mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root), \
+                 patch_app_family(app_module, "DOWNLOADS_ROOT", downloads_root), \
+                 patch_app_family(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
                  mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 res = app_module._folder_release_preflight(
                     str(album_dir), "11111111-1111-1111-1111-111111111111"
@@ -151,9 +155,9 @@ class FolderReleasePreflightLocalScanContainmentTests(unittest.TestCase):
             downloads_root = Path(tmp) / "downloads"
             missing = Path(tmp) / "outside" / "does-not-exist"
 
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root), \
-                 mock.patch.object(app_module, "DOWNLOADS_ROOT", downloads_root), \
-                 mock.patch.object(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root), \
+                 patch_app_family(app_module, "DOWNLOADS_ROOT", downloads_root), \
+                 patch_app_family(app_module, "_fetch_mb_release_tracklist", return_value=self._mb_mock()), \
                  mock.patch.object(app_module.composite_workflows, "inspect_import_source") as mock_inspect:
                 mock_inspect.side_effect = RuntimeError("Beets Control Agent is unavailable")
                 res = app_module._folder_release_preflight(

@@ -154,13 +154,26 @@ _CARRY_FORWARD_FIELDS = [
 _NEEDS_REVIEW = "NEEDS_REVIEW"
 
 
+# ARCH-001 moved the public-endpoint allowlists out of app.py into the auth
+# and setup services; the allowlists are read from wherever they now live.
+PUBLIC_ENDPOINT_SOURCES = ["app.py", "backend/auth_service.py", "backend/setup_service.py"]
+
+
+def _route_files() -> List[str]:
+    """ROUTE_FILES plus every top-level routes_*.py (ARCH-001 route modules)."""
+    extra = sorted(p.name for p in ROOT.glob("routes_*.py"))
+    return [f for f in dict.fromkeys(ROUTE_FILES + extra) if (ROOT / f).exists()]
+
+
 def build_inventory() -> Dict[str, Any]:
-    app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+    app_source = "\n\n".join(
+        (ROOT / rel).read_text(encoding="utf-8") for rel in PUBLIC_ENDPOINT_SOURCES if (ROOT / rel).exists()
+    )
     public_endpoints, first_run_public = _extract_public_endpoint_sets(app_source)
     reviewed = _load_review_manifest()
 
     all_routes: List[Dict[str, Any]] = []
-    for filename in ROUTE_FILES:
+    for filename in _route_files():
         all_routes.extend(_extract_routes(filename))
     all_routes.sort(key=lambda r: (r["source_file"], r["line"], r["method"]))
 

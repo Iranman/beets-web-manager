@@ -2,11 +2,19 @@
 import re
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_unit_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_unit_source  # noqa: E402
 
 
 def _app_source() -> str:
     root = Path(__file__).resolve().parents[1]
-    return (root / "app.py").read_text(encoding="utf-8")
+    return app_family_source()
 
 
 def _reconcile_fn_source(src: str) -> str:
@@ -24,10 +32,7 @@ def _set_track_status_source(src: str) -> str:
 
 
 def _download_missing_source(src: str) -> str:
-    return src[
-        src.index("def _playlist_download_missing_tracks("):
-        src.index("@app.post(\"/api/playlist/download\")")
-    ]
+    return app_unit_source("_playlist_download_missing_tracks")
 
 
 def _staged_entries_source(src: str) -> str:
@@ -51,10 +56,7 @@ def _state_summary_source(src: str) -> str:
 
 
 def _playlist_download_route_source(src: str) -> str:
-    start = src.index("@app.post(\"/api/playlist/download\")")
-    # ends at the next route or top-level def/class after the function
-    end = src.index("@app.get(\"/api/playlist/", start)
-    return src[start:end]
+    return app_unit_source("start_playlist_download")
 
 
 class ReconcileFunctionDefinitionTests(unittest.TestCase):

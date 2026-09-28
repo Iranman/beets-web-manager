@@ -86,6 +86,12 @@ def check_no_production_legacy_beets_references():
         ROOT / "backend" / "security.py",
     ]
     migrated_files.extend(sorted((ROOT / "beetsplug" / "webmanager").glob("*.py")))
+    # ARCH-001: every route module and every service carved out of app.py.
+    migrated_files.extend(sorted(ROOT.glob("routes_*.py")))
+    migrated_files.extend(sorted((ROOT / "backend").glob("*_service.py")))
+    migrated_files.extend(ROOT / "backend" / name for name in (
+        "app_runtime.py", "serializers.py", "pending_review_store.py", "library_cache.py"))
+    migrated_files = list(dict.fromkeys(migrated_files))
 
     ok = True
     client_file = ROOT / "backend" / "beets_client.py"

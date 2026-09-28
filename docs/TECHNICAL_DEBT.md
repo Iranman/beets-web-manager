@@ -4,14 +4,14 @@ Current, unresolved architecture and security debt only. Statuses: Open, Accepte
 
 Each entry: affected area, evidence, current risk, desired state, safe migration approach, priority, status.
 
-## ARCH-001 Monolithic Route/Domain/Mutation Coupling
+## ARCH-001 Route Handlers Still Orchestrate Workflows
 
-- Affected area: Backend `app.py` and route modules.
-- Evidence: Most operator workflows (import review, library, cleanup, deduplication, playlists, Plex, configuration, transactions, import) still live in `app.py` rather than a thin route calling an owned service.
-- Current risk: Changes to one workflow can accidentally alter unrelated behavior; it is hard to tell whether a given call site uses a well-owned service method or a legacy shape.
-- Desired state: Routes remain thin. Application services own workflows. Domain modules own matching and safety decisions. Provider adapters own external calls. Repository/client methods own Beets-engine access.
-- Safe migration approach: Extract one tested service at a time. Prefer replacing legacy call shapes with explicit `BeetsAdapter` methods while preserving route signatures and responses.
-- Priority: P0. Status: Open.
+- Affected area: route modules `routes_library.py`, `routes_cleanup.py`, `routes_import.py`, `routes_maintenance.py`, `routes_playlist.py`, `routes_acquisition.py`.
+- Evidence: v0.1.31 decomposed `app.py` (52,665 -> ~570 lines of application glue) into layered owned services with CI guards (see `docs/arch001_service_decomposition.md`; inventory `docs/arch001_app_ownership.json`). What remains: 26 route handlers over 100 lines still orchestrate inline (largest: `start_maintenance_runner` 494, `dedup_ai_review` 430, `item_attach_recording` 396, `ai_suggest` 338, `import_review_queue` 279, `apply_album_duplicate_resolver` 256), and 155 helpers live in a lower-layer module than their domain (`EXTRACTED_SHARED`).
+- Current risk: Workflow logic inside a handler is only reachable through HTTP and is harder to reuse or test directly; shared helpers sit in a neighbor domain's module.
+- Desired state: Every handler parses input, calls one service, and shapes the response. Owners: library/artwork -> `library_service`/`artwork_service`; cleanup/dedup -> `cleanup_service`/`dedup_service`; import/review/AI -> `import_service`/`import_review_service`/`ai_service`; maintenance/transactions -> `maintenance_service`/`transaction_service`; playlist -> `playlist_service`; acquisition -> `acquisition_service`.
+- Safe migration approach: Move one handler body at a time into its service as a request-free function returning `(json_body, status)` (the pattern used for the in-process route calls in v0.1.31); keep the route shape via `serializers.json_route_result`; `tests/test_arch001_architecture.py` keeps layering intact.
+- Priority: P2. Status: Open.
 
 ## ARCH-004 Job Persistence And Idempotency Are Uneven
 
@@ -34,7 +34,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 ## ARCH-006 Provider Boundaries Are Inconsistent
 
 - Affected area: MusicBrainz, AcoustID, OpenAI, Discogs, SLSKD, yt-dlp, Plex, Lidarr.
-- Evidence: `helpers_mb.py` and `backend/slskd.py` are extracted boundaries; `app.py` still contains direct OpenAI, Discogs, yt-dlp, Plex, and download orchestration logic.
+- Evidence: `helpers_mb.py` and `backend/slskd.py` are adapter boundaries; since ARCH-001 (v0.1.31) the provider logic lives in owned services (`musicbrainz_service`, `acoustid_service`, `plex_service`, `slskd_service`, `ytdlp_service`, `ai_service`), but those services still mix provider calls with workflow orchestration and do not share one retry/failure contract.
 - Current risk: Retry, rate-limit, secret redaction, and failure representation differ by provider.
 - Desired state: Each provider has a small adapter with typed inputs/outputs, explicit transient/permanent failure classification, bounded retries, and redaction.
 - Safe migration approach: Extract adapters only when changing a workflow for a real bug. Preserve API responses and add contract tests.

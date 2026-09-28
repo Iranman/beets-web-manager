@@ -19,7 +19,9 @@ These are standing product/architecture invariants, not aspirations. Each is bac
 
 - `beets` (Stock Beets Container): Standard upstream LinuxServer Beets container (`lscr.io/linuxserver/beets:latest`). Owns `/config/config.yaml`, the authoritative `/config/musiclibrary.blb` database, and all `/music` writes. Runs the built-in `web` plugin (read-only HTTP API) and the bundled `webmanager` integration plugin (the only mutation surface Web Manager is allowed to call), both on its own internal `:8337`.
 - `beets-web-manager` (Web Manager Container): Production web application built from `Dockerfile`. Has no local Beets Python runtime (`requirements.txt` does not install `beets`) and performs zero local Beets database or media-file mutation. Serves the browser UI and its own API on port 8337, executes background jobs, and talks to stock Beets exclusively through `backend/beets_adapter.py`.
-- `app.py`: primary Flask application serving the web interface, operator routes, import workflows, matching adjudication, and job tracking.
+- `app.py`: application glue only (~570 lines since ARCH-001, v0.1.31) — creates the Flask app, request hooks (auth/CSRF/rate limits), security headers, error handlers, static/SPA serving and health, and loads the route modules. Every moved name still resolves as `app.<name>`. See `docs/arch001_service_decomposition.md`.
+- `routes_library.py`, `routes_cleanup.py`, `routes_import.py`, `routes_playlist.py`, `routes_acquisition.py`, `routes_maintenance.py`, `routes_system.py`: route families moved out of `app.py`; HTTP handlers over the owned services.
+- `backend/*_service.py` (+ `app_runtime.py`, `serializers.py`, `pending_review_store.py`, `library_cache.py`): owned services, strictly layered (a service imports only lower layers; nothing under `backend/` imports `app.py`). Layer order and ownership: `docs/arch001_service_decomposition.md`, `docs/arch001_app_ownership.json`.
 - `routes_jobs.py`: split route module for `/api/jobs/*` job listing, lookup, and cancellation.
 - `routes_lidarr.py`: split route module for Lidarr/wanted endpoints.
 - `routes_setup.py`: split route module for setup, authentication, and configuration checks; sources all Beets/plugin diagnostics from `backend/beets_adapter.py` and `backend/beets_plugins.py`.
@@ -85,12 +87,12 @@ Intended direction:
 
 Existing entry points include:
 
-- Import review AI and candidate flow in `app.py` around item/album/folder AI suggestion, target preview, auto-enqueue, revalidation, and attach/match routes.
+- Import review AI and candidate flow in `backend/import_review_service.py`, `backend/ai_service.py`, `backend/ai_evidence_service.py` and `routes_import.py` (item/album/folder AI suggestion, target preview, auto-enqueue, revalidation, attach/match).
 - MusicBrainz and AcoustID helpers in `helpers_mb.py`.
 - Track alignment in `backend/track_align.py` and `backend/mb_alignment.py`.
 - Import safety decisions in `backend/import_guard.py`.
-- Playlist matching in `app.py` around `_match_playlist_tracks`, reference matching, and quality-place flows.
-- Missing-track replacement and Music Format Preferences matching in `app.py`.
+- Playlist matching in `backend/playlist_service.py` around `_match_playlist_tracks`, reference matching, and quality-place flows.
+- Missing-track replacement and Music Format Preferences matching in `backend/replacement_service.py` and `backend/acquisition_service.py`.
 - Submission preparation and MusicBrainz validation in `routes_submissions.py`.
 
 Intended direction:
@@ -136,7 +138,7 @@ Frontend direction:
 ## Areas Still Being Migrated
 
 - `backend/beets_client.py` and the composite mutation workflows in `app.py` that still call it instead of `backend/beets_adapter.py` (ARCH-010) — the largest and highest-priority open item.
-- `app.py` route/domain/mutation/job coupling (ARCH-001).
+- Thick route handlers that still orchestrate workflows inline instead of calling their service (ARCH-001, narrowed after `app.py` was decomposed in v0.1.31).
 - Job idempotency and checkpoint consistency across all long-running workflows (ARCH-004).
 - Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers (ARCH-006).
 

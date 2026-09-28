@@ -33,6 +33,16 @@ from discover_mutation_sinks import MutationSink, discover_all  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 INVENTORY_PATH = REPO_ROOT / "security" / "arch003_mutation_inventory.json"
+ARCH001_INVENTORY_PATH = REPO_ROOT / "docs" / "arch001_app_ownership.json"
+
+
+def _app_family_modules() -> frozenset:
+    """Modules extracted from app.py (ARCH-001); classified like app.py."""
+    try:
+        data = json.loads(ARCH001_INVENTORY_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    return frozenset(data.get("extracted_modules") or [])
 LIBRARY_CLEANUP_CLOSURE_PR = 99
 WAVE26_AI_IMPORT_PR = 101
 
@@ -454,8 +464,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         return "NON_MEDIA_FILESYSTEM", "", "mb-helper-non-media"
 
     # 8. backend/ support modules -- content-based per module, not a
-    # blanket "any backend/ file gets X" rule.
-    if file.startswith("backend/"):
+    # blanket "any backend/ file gets X" rule. Modules carved out of app.py
+    # by ARCH-001 keep app.py's rules (section 9): moving a function into an
+    # owned service must not change how its sinks are classified.
+    if file.startswith("backend/") and file not in _app_family_modules():
         if file == "backend/audio_preferences.py":
             return "CONFIG_STATE", "", "audio-preferences-config"
         if file == "backend/slskd.py":
@@ -525,10 +537,11 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             if func in (
                 "_delete_staged_import_folder",
                 "import_folder_with_id._do",
+                "start_folder_import_with_id._do",  # ARCH-001: request-free service behind the route
                 "_validate_wanted_download_identity_before_import",
             ):
                 return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
-            if func == "reimport_disk._do" and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
+            if func in ("reimport_disk._do", "start_reimport_disk._do") and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-pretracking-filename-repair"
             if func == "_maintenance_safe_folder_renames":
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-orphan-folder-rename"

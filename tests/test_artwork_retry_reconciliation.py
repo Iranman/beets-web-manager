@@ -22,6 +22,14 @@ import unittest.mock as mock
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_family import rebind_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import rebind_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,11 +93,11 @@ def _bind_app_globals_to_this_test_module(app_module, tmp_root: Path) -> str:
         except Exception:
             pass
     lib_path = str(tmp_root / "config" / "musiclibrary.blb")
-    app_module.LIB_PATH = lib_path
-    app_module.lib = Library(lib_path)
+    rebind_app_family(app_module, "LIB_PATH", lib_path)
+    rebind_app_family(app_module, "lib", Library(lib_path))
     state_dir = tmp_root / "ai_batch_jobs"
     state_dir.mkdir(parents=True, exist_ok=True)
-    app_module._AI_BATCH_STATE_DIR = state_dir
+    rebind_app_family(app_module, "_AI_BATCH_STATE_DIR", state_dir)
     return lib_path
 
 
@@ -171,7 +179,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
         return self.client.post("/api/ai-batch/reconcile-artwork", json=body)
 
     def test_reconciles_to_fetched_when_art_now_present(self):
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": True, "local_art_path": "/x/cover.jpg"}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": True, "local_art_path": "/x/cover.jpg"}):
             resp = self._post()
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
@@ -181,7 +189,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
         self.assertFalse(folder["artwork_retryable"])
 
     def test_reconciles_to_failed_when_art_still_missing(self):
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": False}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": False}):
             resp = self._post()
         body = resp.get_json()
         folder = next(f for f in body["state"]["folders"] if f["folder_id"] == "f1")
@@ -190,7 +198,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
 
     def test_reconciles_to_cancelled_when_job_was_cancelled_and_no_art(self):
         job_id = self._register_job(album_id=1, status="failed", terminal_outcome="cancelled")
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": False}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": False}):
             resp = self._post(artwork_job_id=job_id)
         body = resp.get_json()
         folder = next(f for f in body["state"]["folders"] if f["folder_id"] == "f1")
@@ -199,7 +207,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
 
     def test_reconciles_to_timed_out_when_job_timed_out_and_no_art(self):
         job_id = self._register_job(album_id=1, status="failed", terminal_outcome="timed_out")
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": False}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": False}):
             resp = self._post(artwork_job_id=job_id)
         body = resp.get_json()
         folder = next(f for f in body["state"]["folders"] if f["folder_id"] == "f1")
@@ -210,7 +218,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
         # The job reports cancelled/failed, but real on-disk art verification
         # says otherwise -- the actual persisted state must always win.
         job_id = self._register_job(album_id=1, status="failed", terminal_outcome="cancelled")
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": True}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": True}):
             resp = self._post(artwork_job_id=job_id)
         body = resp.get_json()
         folder = next(f for f in body["state"]["folders"] if f["folder_id"] == "f1")
@@ -221,7 +229,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
         # A client-supplied "status"/"artwork_present" field must be
         # completely ignored -- only the real _album_art_status() re-read
         # decides the outcome.
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": False}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": False}):
             resp = self._post(status="fetched", artwork_present=True, artwork_status="fetched")
         body = resp.get_json()
         folder = next(f for f in body["state"]["folders"] if f["folder_id"] == "f1")
@@ -231,7 +239,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
     def test_missing_album_id_reports_skipped_no_album(self):
         self.state["folder_states"]["f1"]["album_id"] = None
         APP._ai_batch_write_state(self.state)
-        with mock.patch.object(APP, "_album_art_status") as status_check:
+        with patch_app_family(APP, "_album_art_status") as status_check:
             resp = self._post()
         status_check.assert_not_called()
         body = resp.get_json()
@@ -299,14 +307,14 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
 
     def test_still_running_artwork_job_is_not_yet_reconcilable(self):
         job_id = self._register_job(album_id=1, status="running", terminal_outcome="")
-        with mock.patch.object(APP, "_album_art_status") as status_check:
+        with patch_app_family(APP, "_album_art_status") as status_check:
             resp = self._post(artwork_job_id=job_id)
         status_check.assert_not_called()
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.get_json().get("code"), "artwork_job_not_terminal")
 
     def test_reconciled_state_persists_across_reload(self):
-        with mock.patch.object(APP, "_album_art_status", return_value={"has_local_art": True}):
+        with patch_app_family(APP, "_album_art_status", return_value={"has_local_art": True}):
             self._post()
         reloaded = APP._ai_batch_find_state(self.batch_job_id)
         folder = reloaded["folder_states"]["f1"]
@@ -317,7 +325,7 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
 
     def test_response_never_leaks_injected_secret_values(self):
         secret = "sk-should-not-appear"
-        with mock.patch.object(APP, "_album_art_status", side_effect=RuntimeError(f"api_key={secret}")):
+        with patch_app_family(APP, "_album_art_status", side_effect=RuntimeError(f"api_key={secret}")):
             resp = self._post()
         rendered = json.dumps(resp.get_json())
         self.assertNotIn(secret, rendered)

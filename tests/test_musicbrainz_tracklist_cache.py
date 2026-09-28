@@ -1,12 +1,16 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class MusicBrainzTracklistCacheTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
-        cls.app_source = (root / "app.py").read_text(encoding="utf-8")
+        cls.app_source = app_family_source()
         start = cls.app_source.index("def _mb_release_tracklist_cache_path(")
         end = cls.app_source.index("def _album_track_score(")
         cls.tracklist_source = cls.app_source[start:end]

@@ -6,6 +6,32 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+`app.py` decomposed into owned services (ARCH-001). No API, route, or behavior changes are intended.
+
+### Changed
+- `app.py` went from 52,665 lines to about 570 lines of application glue: app creation, request hooks, security headers, error handlers, static and SPA serving, and route-module loading.
+- The code moved verbatim into layered services under `backend/` (for example `library_service`, `playlist_service`, `import_service`, `dedup_service` and `ai_service`) and into route modules (`routes_library`, `routes_cleanup`, `routes_import`, `routes_playlist`, `routes_acquisition`, `routes_maintenance`, `routes_system`).
+- `app.<name>` still resolves every moved name.
+- The layer order, the global-state audit and the remaining debt are documented in `docs/arch001_service_decomposition.md`.
+- Some routes were called in-process through a fake request context. They now call request-free services, for example `start_dedup_scan`, `start_album_download` and `start_folder_import_with_id`.
+- Globals that functions rebound (the library cache, the last scan job) now live on shared state objects.
+
+### Fixed
+- The playlist JSON-state safety check looked up its allowed roots through `globals()`. That lookup would have silently found none once the code left `app.py`, so it now uses explicit references.
+- Two `_extract_mb_uuid` definitions existed, and the later strict one silently shadowed the URL-capable parser. Pasted MusicBrainz URLs now resolve again.
+- The dead `_db()` helper pointed at a removed control-agent function, so calling it could only raise a `NameError`. It now fails closed explicitly.
+
+### Verified
+- The Flask URL map is identical to v0.1.30: 259 rules, with the same endpoints and methods.
+- The endpoint security inventory is unchanged (250 entries).
+- The ARCH-003 mutation inventory is unchanged: 403 sinks with the same classifications.
+- ARCH-002 `NEEDS_MIGRATION` is still 0.
+- New CI guards in `tests/test_arch001_architecture.py` and `scripts/audit_arch001_ownership.py` check that:
+  - nothing under `backend/` imports `app.py`;
+  - a service only imports lower layers;
+  - `app.py` has no SQLite, subprocess, Docker, `beet` command or matching policy;
+  - the duplicate-deletion rule still requires fingerprint or byte proof.
+
 ## v0.1.30 - 2026-09-28
 
 Duplicate cleanup requires audio proof (found with live AcoustID).

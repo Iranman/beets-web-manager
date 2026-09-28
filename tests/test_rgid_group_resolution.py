@@ -6,11 +6,15 @@ rather than executing it.
 """
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 def _app_source() -> str:
     root = Path(__file__).resolve().parents[1]
-    return (root / "app.py").read_text(encoding="utf-8")
+    return app_family_source()
 
 
 def _section_source(src: str) -> str:
@@ -208,8 +212,11 @@ class MbReleaseGroupCandidatesHelperTests(unittest.TestCase):
         self.assertIn("release-group/{rg_mbid}", src)
 
     def test_imported_into_app(self):
+        # ARCH-001: the callers moved into owned services; they import the
+        # shared helper directly (app.<name> still resolves it).
+        import re
         src = _app_source()
-        self.assertIn("_mb_release_group_candidates,", src)
+        self.assertRegex(src, re.compile(r"from helpers_mb import [^\n]*\b_mb_release_group_candidates\b"))
 
 
 if __name__ == "__main__":

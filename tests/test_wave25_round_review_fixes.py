@@ -21,6 +21,10 @@ import sys
 import unittest
 import unittest.mock
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -29,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 class TestWave25ReviewStructuralFixes(unittest.TestCase):
     def setUp(self):
-        self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.app_source = app_family_source()
         self.client_source = (ROOT / "backend" / "composite_workflows.py").read_text(encoding="utf-8")
         self.generator_source = (ROOT / "scripts" / "generate_arch003_mutation_inventory.py").read_text(encoding="utf-8")
 

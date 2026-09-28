@@ -1,11 +1,15 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 class LibraryLazyTracksTests(unittest.TestCase):
     def test_library_summary_defers_tracks_but_album_tracks_include_disk_only_rows(self):
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "app.py").read_text(encoding="utf-8")
+        app_source = app_family_source()
         types_source = (root / "frontend" / "src" / "types" / "api.ts").read_text(encoding="utf-8")
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         library_page = (root / "frontend" / "src" / "views" / "Library.tsx").read_text(encoding="utf-8")
@@ -17,7 +21,7 @@ class LibraryLazyTracksTests(unittest.TestCase):
         self.assertIn("def _library_album_is_disk_only", app_source)
         self.assertIn("include_disk_only", app_source)
         self.assertIn("def _library_stats_for_artists", app_source)
-        self.assertIn('include_tracks = request.args.get("include_tracks", "0") == "1"', app_source)
+        self.assertIn('include_tracks=request.args.get("include_tracks", "0") == "1"', app_source)
         self.assertIn('@app.get("/api/albums/<int:aid>/tracks")', app_source)
         self.assertIn('"ok": False,', app_source)
         self.assertIn('"missing": False,', app_source)

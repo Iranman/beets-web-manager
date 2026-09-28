@@ -15,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 AUDIO_NAMES_WITH_LITERAL_PERCENT = [
@@ -74,16 +78,16 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
                 "BEETS_WEB_AUTH_DISABLED": "1",
                 "IMPORT_REVIEW_QUARANTINE_DIR": str(self.quarantine),
             }),
-            mock.patch.object(app_module, "MUSIC_ROOT", self.music),
-            mock.patch.object(app_module, "DOWNLOADS_ROOT", self.downloads),
-            mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
-            mock.patch.object(app_module, "_DOWNLOADS_ROOTS", [
+            patch_app_family(app_module, "MUSIC_ROOT", self.music),
+            patch_app_family(app_module, "DOWNLOADS_ROOT", self.downloads),
+            patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            patch_app_family(app_module, "_DOWNLOADS_ROOTS", [
                 str(self.downloads),
                 str(self.other_downloads),
                 str(self.tmp_downloads),
             ]),
-            mock.patch.object(app_module, "_AI_PENDING_FILE", self.pending_file),
-            mock.patch.object(app_module, "_record_ai_review_decision", return_value=None),
+            patch_app_family(app_module, "_AI_PENDING_FILE", self.pending_file),
+            patch_app_family(app_module, "_record_ai_review_decision", return_value=None),
             mock.patch.object(app_module.composite_workflows, "plan_import_review_cleanup", side_effect=mock_plan),
             mock.patch.object(app_module.composite_workflows, "apply_import_review_cleanup", side_effect=mock_apply),
         ]

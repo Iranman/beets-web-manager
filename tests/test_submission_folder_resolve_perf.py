@@ -10,6 +10,10 @@ lazily when tags didn't already cover album/artist/year.
 """
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import source_between  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import source_between  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,9 +21,7 @@ ROUTES_SOURCE = (ROOT / "routes_submissions.py").read_text(encoding="utf-8")
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
-    start = src.index(start_marker)
-    end = src.index(end_marker, start)
-    return src[start:end]
+    return source_between(src, start_marker, end_marker)
 
 
 class FolderAudioListingHelperTests(unittest.TestCase):

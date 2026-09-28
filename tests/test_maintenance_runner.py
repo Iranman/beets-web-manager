@@ -1,5 +1,9 @@
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class MaintenanceRunnerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        cls.app_source = app_family_source()
         cls.jobs_source = (ROOT / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
         cls.client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         cls.shell_source = (
@@ -77,9 +81,9 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("_maintenance_full_duplicate_scan(", self.runner_source)
         self.assertIn("_maintenance_same_file_hash", self.app_source)
         self.assertIn("same_file=_maintenance_same_file_hash", self.app_source)
-        self.assertIn("dedup_scan()", self.app_source)
-        self.assertIn("dedup_cleanup()", self.app_source)
-        self.assertIn('json={"path": str(MUSIC_ROOT)}', self.app_source)
+        self.assertIn("start_dedup_scan(", self.app_source)
+        self.assertIn("run_dedup_cleanup(", self.app_source)
+        self.assertIn('start_dedup_scan({"path": str(MUSIC_ROOT)})', self.app_source)
         self.assertIn('"file_duplicate_scan_started": True', self.app_source)
 
         self.assertIn("_maintenance_release_group_merge", self.app_source)
@@ -88,8 +92,8 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("verbose_files=False", self.app_source)
         self.assertIn('"release_group_merge"', self.app_source)
 
-        self.assertIn('json={"force": False, "use_ai": False}', self.runner_source)
-        self.assertIn("fetch_missing_art()", self.runner_source)
+        self.assertIn('start_library_fix_genres({"force": False, "use_ai": False})', self.runner_source)
+        self.assertIn("start_fetch_missing_art(", self.runner_source)
 
         self.assertIn("_scan_folder_name_placeholders", self.runner_source)
         self.assertIn("Placeholder-only renames disabled", self.runner_source)

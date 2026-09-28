@@ -11,10 +11,18 @@ import tempfile
 import unittest
 import unittest.mock as mock
 from pathlib import Path
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+APP_SOURCE = app_family_source()
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 IMPORT_REVIEW_SOURCE = (
@@ -301,9 +309,9 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         )
 
     def test_release_url_resolves_release_group_and_importable_match_without_ai_keys(self):
-        with mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist()), \
-             mock.patch.object(self.app_module, "_candidate_track_comparison_payload", return_value=_comparison()), \
-             mock.patch.object(self.app_module, "_run_ai_release_preflight", return_value={"ok": True}):
+        with patch_app_family(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist()), \
+             patch_app_family(self.app_module, "_candidate_track_comparison_payload", return_value=_comparison()), \
+             patch_app_family(self.app_module, "_run_ai_release_preflight", return_value={"ok": True}):
             response = self._post(f"https://musicbrainz.org/release/{RELEASE_ID}?foo=bar#frag")
 
         self.assertEqual(response.status_code, 200)
@@ -317,10 +325,10 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
 
     def test_release_group_url_selects_representative_release_before_validation(self):
         candidates = [{"mb_albumid": ALT_RELEASE_ID, "mb_releasegroupid": RGID, "title": "Edition"}]
-        with mock.patch.object(self.app_module, "_mb_release_group_candidates", return_value=candidates), \
-             mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist(ALT_RELEASE_ID)), \
-             mock.patch.object(self.app_module, "_candidate_track_comparison_payload", return_value=_comparison(ALT_RELEASE_ID)), \
-             mock.patch.object(self.app_module, "_run_ai_release_preflight", return_value={"ok": True}):
+        with patch_app_family(self.app_module, "_mb_release_group_candidates", return_value=candidates), \
+             patch_app_family(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist(ALT_RELEASE_ID)), \
+             patch_app_family(self.app_module, "_candidate_track_comparison_payload", return_value=_comparison(ALT_RELEASE_ID)), \
+             patch_app_family(self.app_module, "_run_ai_release_preflight", return_value={"ok": True}):
             response = self._post(f"https://musicbrainz.org/release-group/{RGID}/")
 
         self.assertEqual(response.status_code, 200)
@@ -339,7 +347,7 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
             "linked_releases": [{"mb_albumid": RELEASE_ID, "mb_releasegroupid": RGID}],
         }
         fake_item = type("Item", (), {"title": "Song", "artist": "Manual Artist", "album": "", "albumartist": "", "year": "", "length": 180})()
-        with mock.patch.object(self.app_module, "_fetch_mb_recording_details", return_value=details), \
+        with patch_app_family(self.app_module, "_fetch_mb_recording_details", return_value=details), \
              mock.patch.object(self.app_module.lib, "get_item", return_value=fake_item):
             response = self._post(f"https://musicbrainz.org/recording/{RECORDING_ID}", target_kind="item")
 
@@ -361,7 +369,7 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
 
     def test_unexpected_manual_release_lookup_exception_is_sanitized(self):
-        with mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
+        with patch_app_family(self.app_module, "_fetch_mb_release_tracklist", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
             response = self._post(f"https://musicbrainz.org/release/{RELEASE_ID}")
 
         self.assertEqual(response.status_code, 500)
@@ -369,8 +377,8 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertNoSensitiveExceptionDetails(response)
 
     def test_manual_track_comparison_failure_does_not_leak_nested_error(self):
-        with mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist()), \
-             mock.patch.object(self.app_module, "_candidate_track_comparison_payload", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
+        with patch_app_family(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist()), \
+             patch_app_family(self.app_module, "_candidate_track_comparison_payload", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
             response = self._post(f"https://musicbrainz.org/release/{RELEASE_ID}")
 
         self.assertEqual(response.status_code, 400)
@@ -381,9 +389,9 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp).resolve() / "manual-album"
             folder.mkdir()
-            with mock.patch.object(self.app_module, "DOWNLOADS_ROOT", Path(tmp).resolve()), \
-                 mock.patch.object(self.app_module, "_DOWNLOADS_ROOTS", [Path(tmp).resolve()]), \
-                 mock.patch.object(self.app_module, "_candidate_track_local_candidates", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
+            with patch_app_family(self.app_module, "DOWNLOADS_ROOT", Path(tmp).resolve()), \
+                 patch_app_family(self.app_module, "_DOWNLOADS_ROOTS", [Path(tmp).resolve()]), \
+                 patch_app_family(self.app_module, "_candidate_track_local_candidates", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
                 response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks", query_string={"folder": str(folder)})
 
         self.assertEqual(response.status_code, 400)
@@ -394,10 +402,10 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp).resolve() / "manual-album"
             folder.mkdir()
-            with mock.patch.object(self.app_module, "DOWNLOADS_ROOT", Path(tmp).resolve()), \
-                 mock.patch.object(self.app_module, "_DOWNLOADS_ROOTS", [Path(tmp).resolve()]), \
-                 mock.patch.object(self.app_module, "_candidate_track_local_candidates", return_value=[]), \
-                 mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
+            with patch_app_family(self.app_module, "DOWNLOADS_ROOT", Path(tmp).resolve()), \
+                 patch_app_family(self.app_module, "_DOWNLOADS_ROOTS", [Path(tmp).resolve()]), \
+                 patch_app_family(self.app_module, "_candidate_track_local_candidates", return_value=[]), \
+                 patch_app_family(self.app_module, "_fetch_mb_release_tracklist", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
                 response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks", query_string={"folder": str(folder)})
 
         self.assertEqual(response.status_code, 400)
