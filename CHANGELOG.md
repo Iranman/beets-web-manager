@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.32 - 2026-09-28
+
 Library root fixed; unattended duplicate deletion needs explicit authorization.
 
 ### Fixed
