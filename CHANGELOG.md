@@ -6,6 +6,9 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+- The scheduled duplicate step checks only Beets-tracked library files instead of every audio file under the library mount. The live `/music` holds about 106k audio files but Beets tracks 3,144, and unattended deletion can only ever select tracked pairs. The same rules and proof apply, and the step finishes in minutes instead of days. The manual Duplicate Files scan still walks the whole folder.
+
 ## v0.1.32 - 2026-09-28
 
 Library root fixed; unattended duplicate deletion needs explicit authorization.

@@ -258,6 +258,9 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """Start a background dedup scan; returns job_id immediately."""
     payload   = payload_in
     path_raw  = payload.get("path", "/data/torrents/music")
+    # tracked_only: check only files Beets tracks (the scheduled cleanup can
+    # only ever act on tracked pairs, so untracked files are out of scope).
+    tracked_only = payload.get("tracked_only") is True
     scan_path, path_error = _resolve_dedup_scan_path(path_raw)
     if path_error:
         return {"ok": False, "error": path_error}, 400
@@ -333,13 +336,25 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 current_task="Listing source audio files",
                 current_result="Scanning source path",
             ))
-        state["log"].append(f"Scanning downloads folder: {scan_path}")
+        if tracked_only:
+            state["log"].append(f"Checking Beets-tracked library files under: {scan_path}")
+        else:
+            state["log"].append(f"Scanning downloads folder: {scan_path}")
         state["log"].append(f"Comparing against library items in beets database …")
         try:
-            source_files = sorted(
-                p for p in scan_path.rglob("*")
-                if p.is_file() and p.suffix.lower() in AUDIO_EXTS
-            )
+            if tracked_only:
+                scan_root = scan_path.resolve(strict=False)
+                tracked = {Path(_item_library_path(it)) for it in lib.items([])}
+                source_files = sorted(
+                    p for p in tracked
+                    if p.resolve(strict=False).is_relative_to(scan_root)
+                    and p.suffix.lower() in AUDIO_EXTS and p.is_file()
+                )
+            else:
+                source_files = sorted(
+                    p for p in scan_path.rglob("*")
+                    if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+                )
         except Exception as exc:
             state["log"].append(f"ERROR listing files: {exc}")
             state["status"] = "done"
@@ -1335,7 +1350,9 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
         return result
 
     log.append(f"[duplicates] Starting full duplicate scan under {MUSIC_ROOT}")
-    child_id = _maintenance_extract_child_job_id(start_dedup_scan({"path": str(MUSIC_ROOT)}))
+    # Only Beets-tracked pairs can ever be selected for unattended deletion,
+    # so the scheduled step checks tracked library files, not every file on disk.
+    child_id = _maintenance_extract_child_job_id(start_dedup_scan({"path": str(MUSIC_ROOT), "tracked_only": True}))
     scan_result = _wait_for_child_job(
         child_id,
         log,

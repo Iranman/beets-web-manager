@@ -27020,10 +27020,10 @@
    "module": "backend/dedup_service.py",
    "lines": [
     257,
-    686
+    701
    ],
-   "size": 430,
-   "body_lines": 428,
+   "size": 445,
+   "body_lines": 443,
    "route": null,
    "mutation_capable": true,
    "domain": "DEDUP",
@@ -27053,8 +27053,8 @@
    "name": "run_dedup_cleanup",
    "module": "backend/dedup_service.py",
    "lines": [
-    691,
-    814
+    706,
+    829
    ],
    "size": 124,
    "body_lines": 123,
@@ -27076,8 +27076,8 @@
    "name": "_library_duplicate_merge_safety",
    "module": "backend/dedup_service.py",
    "lines": [
-    819,
-    930
+    834,
+    945
    ],
    "size": 112,
    "body_lines": 110,
@@ -27100,8 +27100,8 @@
    "name": "_resolver_rel_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    933,
-    938
+    948,
+    953
    ],
    "size": 6,
    "body_lines": 5,
@@ -27122,8 +27122,8 @@
    "name": "_resolver_parent",
    "module": "backend/dedup_service.py",
    "lines": [
-    941,
-    945
+    956,
+    960
    ],
    "size": 5,
    "body_lines": 4,
@@ -27144,8 +27144,8 @@
    "name": "_resolver_sql_like",
    "module": "backend/dedup_service.py",
    "lines": [
-    948,
-    954
+    963,
+    969
    ],
    "size": 7,
    "body_lines": 6,
@@ -27162,8 +27162,8 @@
    "name": "_resolver_compact_track",
    "module": "backend/dedup_service.py",
    "lines": [
-    957,
-    963
+    972,
+    978
    ],
    "size": 7,
    "body_lines": 6,
@@ -27185,8 +27185,8 @@
    "name": "_resolver_compact_item",
    "module": "backend/dedup_service.py",
    "lines": [
-    966,
-    987
+    981,
+    1002
    ],
    "size": 22,
    "body_lines": 18,
@@ -27207,8 +27207,8 @@
    "name": "_resolver_title_base",
    "module": "backend/dedup_service.py",
    "lines": [
-    990,
-    992
+    1005,
+    1007
    ],
    "size": 3,
    "body_lines": 2,
@@ -27230,8 +27230,8 @@
    "name": "_resolver_title_score",
    "module": "backend/dedup_service.py",
    "lines": [
-    995,
-    1014
+    1010,
+    1029
    ],
    "size": 20,
    "body_lines": 19,
@@ -27253,8 +27253,8 @@
    "name": "_resolver_retag_candidates",
    "module": "backend/dedup_service.py",
    "lines": [
-    1017,
-    1029
+    1032,
+    1044
    ],
    "size": 13,
    "body_lines": 11,
@@ -27276,8 +27276,8 @@
    "name": "_album_duplicate_resolver_plan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1032,
-    1202
+    1047,
+    1217
    ],
    "size": 171,
    "body_lines": 169,
@@ -27305,8 +27305,8 @@
    "name": "_filename_cleanup_duplicate_quarantine_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    1205,
-    1210
+    1220,
+    1225
    ],
    "size": 6,
    "body_lines": 5,
@@ -27326,8 +27326,8 @@
    "name": "_maintenance_duplicate_report",
    "module": "backend/dedup_service.py",
    "lines": [
-    1213,
-    1246
+    1228,
+    1261
    ],
    "size": 34,
    "body_lines": 27,
@@ -27348,8 +27348,8 @@
    "name": "_maintenance_duplicate_cleanup_paths",
    "module": "backend/dedup_service.py",
    "lines": [
-    1249,
-    1254
+    1264,
+    1269
    ],
    "size": 6,
    "body_lines": 3,
@@ -27371,8 +27371,8 @@
    "name": "_file_size",
    "module": "backend/dedup_service.py",
    "lines": [
-    1257,
-    1261
+    1272,
+    1276
    ],
    "size": 5,
    "body_lines": 4,
@@ -27392,8 +27392,8 @@
    "name": "_maintenance_duplicate_proposal",
    "module": "backend/dedup_service.py",
    "lines": [
-    1264,
-    1306
+    1279,
+    1321
    ],
    "size": 43,
    "body_lines": 40,
@@ -27415,8 +27415,8 @@
    "name": "_maintenance_duplicate_proposal_line",
    "module": "backend/dedup_service.py",
    "lines": [
-    1309,
-    1317
+    1324,
+    1332
    ],
    "size": 9,
    "body_lines": 8,
@@ -27435,11 +27435,11 @@
    "name": "_maintenance_full_duplicate_scan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1320,
-    1419
+    1335,
+    1436
    ],
-   "size": 100,
-   "body_lines": 98,
+   "size": 102,
+   "body_lines": 100,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27467,8 +27467,8 @@
    "name": "_album_cleanup_count_duplicate_files",
    "module": "backend/dedup_service.py",
    "lines": [
-    1422,
-    1423
+    1439,
+    1440
    ],
    "size": 2,
    "body_lines": 1,
