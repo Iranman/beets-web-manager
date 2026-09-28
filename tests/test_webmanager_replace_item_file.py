@@ -136,6 +136,30 @@ class ReplaceItemFileTests(unittest.TestCase):
         with open(data["quarantine_path"], "rb") as f:
             self.assertEqual(f.read(), self.old_bytes)
 
+    def test_works_on_a_request_thread_without_the_music_dir_context(self):
+        """Live failure on v0.1.37: Beets expands relative DB paths through a
+        ContextVar set only in the thread that opened the Library. Werkzeug
+        request threads start with it empty, so item.path loaded relative
+        and the engine refused a file that existed."""
+        import threading
+        from beets import context as beets_context
+
+        results = {}
+
+        def on_server_thread():
+            beets_context.set_music_dir(b"")  # a fresh thread's state
+            results["res"] = self._replace()
+
+        worker = threading.Thread(target=on_server_thread)
+        worker.start()
+        worker.join()
+        res = results["res"]
+        self.assertEqual(res.status_code, 200, res.get_json())
+        item = self.lib.get_item(self.target.id)
+        self.assertTrue(os.path.isabs(res.get_json()["new_target_path"]))
+        self.assertEqual(item.format, "FLAC")
+        self.assertTrue(os.path.isfile(os.fsdecode(item.path)))
+
     def test_retry_with_same_key_replays_instead_of_failing(self):
         self.replay_key = f"op-{uuid.uuid4()}"
         first = self._replace(key=self.replay_key)
