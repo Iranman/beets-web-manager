@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.30 - 2026-09-28
+
 Duplicate cleanup requires audio proof (found with live AcoustID).
 
 ### Fixed
