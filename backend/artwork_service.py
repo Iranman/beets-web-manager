@@ -525,7 +525,7 @@ def _album_art_repair_entry(album, status: Optional[Dict[str, Any]] = None,
     if not issue:
         if path_summary.get("outside_library_count"):
             issue = "unresolved"
-            reason = reason or "Track files are outside /data/media/music; move the album into the library before art repair"
+            reason = reason or f"Track files are outside {MUSIC_ROOT}; move the album into the library before art repair"
         elif not aldir:
             issue = "unresolved"
             reason = reason or "Album folder could not be resolved"

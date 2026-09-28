@@ -12,7 +12,8 @@ import { JobStatusCard } from '../../components/JobStatusCard';
 import { LogViewer } from '../../components/LogViewer';
 import { useJobPoll } from '../../lib/hooks';
 
-const DEFAULT_ROOT = '/data/media/music';
+// Empty = the server's configured library root (MUSIC_ROOT).
+const DEFAULT_ROOT = '';
 
 function jobsUrl(jobId: string | null) {
   return jobId ? `/jobs?q=${encodeURIComponent(jobId)}` : '/jobs';
@@ -129,7 +130,7 @@ export function ArtistFoldersPanel() {
     setSelected(new Set());
     setDryRunLog([]);
     try {
-      const r = await scanArtistFolders(root.trim() || DEFAULT_ROOT);
+      const r = await scanArtistFolders(root.trim() || undefined);
       if (!r.job_id) throw new Error('Artist-folder scan did not return a job id');
       setScanJobId(r.job_id);
       window.dispatchEvent(new Event('beets:jobs-changed'));
@@ -154,7 +155,7 @@ export function ArtistFoldersPanel() {
     try {
       const r = await mergeArtistFolders(
         Array.from(selected),
-        root.trim() || DEFAULT_ROOT,
+        root.trim() || undefined,
         dryRun,
       );
       if (dryRun && r.log) {
@@ -174,7 +175,7 @@ export function ArtistFoldersPanel() {
     setStampLog([]);
     setStampMsg('');
     try {
-      const r = await stampMbidFolders({ root: root.trim() || DEFAULT_ROOT, dryRun });
+      const r = await stampMbidFolders({ root: root.trim() || undefined, dryRun });
       if (r.log) setStampLog(r.log);
       if (dryRun) {
         const candidates = r.candidates ?? r.renamed ?? 0;

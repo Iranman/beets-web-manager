@@ -37,6 +37,7 @@ def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lo
     if with_fingerprint_check:
         names.add("_album_track_fingerprint_check")
     extra_ns = {
+        "MUSIC_ROOT": Path("/music"),
         "AcoustIDStatus": AcoustIDStatus,
         "_s": lambda value: (
             value.decode("utf-8", errors="replace")

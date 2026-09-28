@@ -486,6 +486,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "STAGING_ONLY", "", "reviewed-composite-workflows-playlist-staging"
         if file == "backend/web_manager_config_store.py":
             return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
+        if file == "backend/dedup_authorization.py":
+            # Atomic write of web-manager-data/duplicate_cleanup_authorization.json
+            # (the operator's unattended-deletion switch); never library media.
+            return "APP_STATE", "", "dedup-authorization-state-file"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
         if file == "backend/ai_batch_state_store.py":

@@ -254,7 +254,8 @@ PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
 PLAYLIST_INDEX_PATH = PLAYLIST_STATE_ROOT / "index.json"
 
 
-PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "/music/playlists" if os.path.exists("/music") else "/data/media/music/playlists"))
+_MUSIC_ROOT_SETTING = Path(os.environ.get("MUSIC_ROOT", "").strip() or "/music")
+PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "").strip() or str(_MUSIC_ROOT_SETTING / "playlists"))
 
 
 PLAYLIST_PATH_ROOT_ALIASES = [
@@ -413,7 +414,10 @@ _YTDLP_COOKIE_REJECTED_FILE = Path("/config/yt-dlp/cookies.rejected.json")
 
 
 # ── Derived constants ──────────────────────────────────────────────────────────
-MUSIC_ROOT   = Path("/data/media/music")    # canonical library root on disk
+# The Beets library as mounted in this container -- the single setting for
+# where library files live (stock stack: /music, read-only). Configuration
+# only: it never authorizes deleting anything (see backend/dedup_authorization).
+MUSIC_ROOT   = _MUSIC_ROOT_SETTING
 
 
 CONFIG_FILE  = "/config/config.yaml"        # main beets config

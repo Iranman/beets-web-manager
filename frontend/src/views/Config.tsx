@@ -34,7 +34,7 @@ const INTEGRATIONS: Array<{
 }> = [
   { key: 'library_path',   label: 'Beets library',   description: '/config/musiclibrary.blb' },
   { key: 'beet_bin',       label: 'beet binary',      description: 'fpcalc / beet in PATH' },
-  { key: 'music_root',     label: 'Music root',       description: '/data/media/music' },
+  { key: 'music_root',     label: 'Music root',       description: 'Library mount (MUSIC_ROOT, default /music)' },
   { key: 'openai_key',     label: 'OpenAI',           description: 'AI matching + batch import' },
   { key: 'discogs_token',  label: 'Discogs',          description: 'Artist images + discography' },
   { key: 'lidarr_key',     label: 'Lidarr',           description: 'Wanted albums + monitoring' },

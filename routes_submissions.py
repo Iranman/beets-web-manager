@@ -300,7 +300,7 @@ def _submission_readiness() -> Dict[str, Any]:
 def _item_abs_path(item) -> str:
     raw = _s(getattr(item, "path", "") or "")
     if raw and not Path(raw).is_absolute():
-        return str(Path("/data/media/music") / raw)
+        return str(MUSIC_ROOT / raw)
     return raw
 
 

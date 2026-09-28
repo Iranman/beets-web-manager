@@ -6,6 +6,25 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+Library root fixed; unattended duplicate deletion needs explicit authorization.
+
+### Fixed
+- The Web Manager hard-coded its library root as `/data/media/music`, but every shipped compose file mounts the library at `/music`, so on live installs file-level features found no files. That included the scheduled duplicate scan, fingerprint checks and local artwork/path checks. `MUSIC_ROOT` is now the one configurable setting (default `/music`), and backend and frontend no longer hard-code a library path.
+
+### Added
+- Unattended duplicate deletion is a separate authorization, off by default and independent of `MUSIC_ROOT`. While it is off, the scheduled duplicate step scans, verifies with AcoustID and records a review proposal, but deletes nothing.
+- Each proposal row shows:
+  - both paths;
+  - sizes;
+  - embedded Recording IDs;
+  - AcoustID fingerprint evidence;
+  - the release/track slot;
+  - which copy is kept.
+- The proposal appears in the Duplicate Files panel and the job log.
+- Enabling requires an exact confirmation phrase.
+- New endpoints: `GET/POST /api/dedup/unattended-cleanup` and `POST /api/dedup/maintenance-run`.
+- New regression tests prove that changing `MUSIC_ROOT` cannot enable destructive cleanup.
+
 ## v0.1.31 - 2026-09-28
 
 `app.py` decomposed into owned services (ARCH-001). No API, route, or behavior changes are intended.

@@ -978,6 +978,7 @@ def _album_track_path_prefixes(path: str) -> List[str]:
     if not raw_path:
         return []
     for marker in (
+        str(MUSIC_ROOT).rstrip("/") + "/",
         "/data/media/music/",
         "/data/torrents/music/",
         "/data/downloads/music/",

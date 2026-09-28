@@ -507,7 +507,7 @@
     "_ai_batch_recompute_counts",
     "_ai_batch_reconcile_state"
    ],
-   "caller_count": 568,
+   "caller_count": 570,
    "dependencies": []
   },
   {
@@ -629,8 +629,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    468,
-    469
+    472,
+    473
    ],
    "size": 2,
    "body_lines": 1,
@@ -653,8 +653,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    562,
-    569
+    566,
+    573
    ],
    "size": 8,
    "body_lines": 6,
@@ -683,8 +683,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    578,
-    598
+    582,
+    602
    ],
    "size": 21,
    "body_lines": 19,
@@ -703,8 +703,8 @@
    "name": "_sqlite_timeout_seconds",
    "module": "backend/app_runtime.py",
    "lines": [
-    613,
-    617
+    617,
+    621
    ],
    "size": 5,
    "body_lines": 4,
@@ -721,8 +721,8 @@
    "name": "_sqlite_is_locked_error",
    "module": "backend/app_runtime.py",
    "lines": [
-    626,
-    630
+    630,
+    634
    ],
    "size": 5,
    "body_lines": 4,
@@ -741,8 +741,8 @@
    "name": "_sqlite_write_retry",
    "module": "backend/app_runtime.py",
    "lines": [
-    633,
-    643
+    637,
+    647
    ],
    "size": 11,
    "body_lines": 10,
@@ -761,8 +761,8 @@
    "name": "_is_musl_linux",
    "module": "backend/app_runtime.py",
    "lines": [
-    667,
-    679
+    671,
+    683
    ],
    "size": 13,
    "body_lines": 12,
@@ -779,8 +779,8 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    694,
-    697
+    698,
+    701
    ],
    "size": 4,
    "body_lines": 3,
@@ -799,8 +799,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    714,
-    718
+    718,
+    722
    ],
    "size": 5,
    "body_lines": 4,
@@ -835,8 +835,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    721,
-    731
+    725,
+    735
    ],
    "size": 11,
    "body_lines": 10,
@@ -858,8 +858,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    734,
-    739
+    738,
+    743
    ],
    "size": 6,
    "body_lines": 5,
@@ -902,8 +902,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    742,
-    753
+    746,
+    757
    ],
    "size": 12,
    "body_lines": 10,
@@ -930,8 +930,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    756,
-    773
+    760,
+    777
    ],
    "size": 18,
    "body_lines": 11,
@@ -953,8 +953,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    776,
-    783
+    780,
+    787
    ],
    "size": 8,
    "body_lines": 7,
@@ -977,8 +977,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    786,
-    800
+    790,
+    804
    ],
    "size": 15,
    "body_lines": 14,
@@ -1006,8 +1006,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    830,
-    833
+    834,
+    837
    ],
    "size": 4,
    "body_lines": 3,
@@ -1031,8 +1031,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    836,
-    846
+    840,
+    850
    ],
    "size": 11,
    "body_lines": 10,
@@ -1067,8 +1067,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    849,
-    863
+    853,
+    867
    ],
    "size": 15,
    "body_lines": 14,
@@ -1093,8 +1093,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    866,
-    870
+    870,
+    874
    ],
    "size": 5,
    "body_lines": 4,
@@ -1115,8 +1115,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    873,
-    892
+    877,
+    896
    ],
    "size": 20,
    "body_lines": 11,
@@ -1137,8 +1137,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    895,
-    904
+    899,
+    908
    ],
    "size": 10,
    "body_lines": 7,
@@ -1161,8 +1161,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    907,
-    916
+    911,
+    920
    ],
    "size": 10,
    "body_lines": 7,
@@ -1183,8 +1183,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    919,
-    929
+    923,
+    933
    ],
    "size": 11,
    "body_lines": 7,
@@ -1205,8 +1205,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    934,
-    935
+    938,
+    939
    ],
    "size": 2,
    "body_lines": 1,
@@ -1249,8 +1249,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    940,
-    948
+    944,
+    952
    ],
    "size": 9,
    "body_lines": 2,
@@ -1267,8 +1267,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    974,
-    976
+    978,
+    980
    ],
    "size": 3,
    "body_lines": 2,
@@ -1285,8 +1285,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    979,
-    982
+    983,
+    986
    ],
    "size": 4,
    "body_lines": 3,
@@ -2290,10 +2290,11 @@
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
     "_transaction_create_for_job",
+    "dedup_unattended_cleanup_set",
     "item_attach_recording",
     "modify_item"
    ],
-   "caller_count": 3,
+   "caller_count": 4,
    "dependencies": []
   },
   {
@@ -2841,9 +2842,10 @@
    "callers": [
     "_maintenance_full_duplicate_scan",
     "_maintenance_release_group_merge",
+    "dedup_maintenance_run",
     "start_maintenance_runner"
    ],
-   "caller_count": 3,
+   "caller_count": 4,
    "dependencies": []
   },
   {
@@ -7107,10 +7109,10 @@
    "module": "backend/matching_service.py",
    "lines": [
     975,
-    1038
+    1039
    ],
-   "size": 64,
-   "body_lines": 62,
+   "size": 65,
+   "body_lines": 63,
    "route": null,
    "mutation_capable": true,
    "domain": "MATCHING",
@@ -7130,8 +7132,8 @@
    "name": "_album_track_title_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1041,
-    1101
+    1042,
+    1102
    ],
    "size": 61,
    "body_lines": 60,
@@ -7158,8 +7160,8 @@
    "name": "_mb_release_tracklist_cache_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1104,
-    1121
+    1105,
+    1122
    ],
    "size": 18,
    "body_lines": 4,
@@ -7182,8 +7184,8 @@
    "name": "_mb_release_tracklist_read_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1124,
-    1138
+    1125,
+    1139
    ],
    "size": 15,
    "body_lines": 14,
@@ -7204,8 +7206,8 @@
    "name": "_mb_release_tracklist_write_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1141,
-    1156
+    1142,
+    1157
    ],
    "size": 16,
    "body_lines": 15,
@@ -7226,8 +7228,8 @@
    "name": "_fetch_mb_release_tracklist",
    "module": "backend/matching_service.py",
    "lines": [
-    1159,
-    1249
+    1160,
+    1250
    ],
    "size": 91,
    "body_lines": 90,
@@ -7273,8 +7275,8 @@
    "name": "_album_track_score",
    "module": "backend/matching_service.py",
    "lines": [
-    1252,
-    1257
+    1253,
+    1258
    ],
    "size": 6,
    "body_lines": 5,
@@ -7293,8 +7295,8 @@
    "name": "_best_album_track_match",
    "module": "backend/matching_service.py",
    "lines": [
-    1260,
-    1265
+    1261,
+    1266
    ],
    "size": 6,
    "body_lines": 5,
@@ -7323,8 +7325,8 @@
    "name": "_ai_review_album_track_candidates",
    "module": "backend/matching_service.py",
    "lines": [
-    1268,
-    1367
+    1269,
+    1368
    ],
    "size": 100,
    "body_lines": 96,
@@ -7347,8 +7349,8 @@
    "name": "_scan_album_track_integrity",
    "module": "backend/matching_service.py",
    "lines": [
-    1370,
-    1564
+    1371,
+    1565
    ],
    "size": 195,
    "body_lines": 190,
@@ -7375,8 +7377,8 @@
    "name": "_album_mb_match_plan",
    "module": "backend/matching_service.py",
    "lines": [
-    1567,
-    1642
+    1568,
+    1643
    ],
    "size": 76,
    "body_lines": 74,
@@ -7402,8 +7404,8 @@
    "name": "_album_mb_completeness",
    "module": "backend/matching_service.py",
    "lines": [
-    1645,
-    1750
+    1646,
+    1751
    ],
    "size": 106,
    "body_lines": 104,
@@ -7434,8 +7436,8 @@
    "name": "_remove_album_track_items",
    "module": "backend/matching_service.py",
    "lines": [
-    1753,
-    1813
+    1754,
+    1814
    ],
    "size": 61,
    "body_lines": 56,
@@ -7460,8 +7462,8 @@
    "name": "_artist_folder_name_without_mbid",
    "module": "backend/matching_service.py",
    "lines": [
-    1822,
-    1823
+    1823,
+    1824
    ],
    "size": 2,
    "body_lines": 1,
@@ -7490,8 +7492,8 @@
    "name": "_stamp_folder_for_item_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1826,
-    1853
+    1827,
+    1854
    ],
    "size": 28,
    "body_lines": 22,
@@ -7512,8 +7514,8 @@
    "name": "_stamp_artist_folder_album_mbid_counts",
    "module": "backend/matching_service.py",
    "lines": [
-    1856,
-    1897
+    1857,
+    1898
    ],
    "size": 42,
    "body_lines": 37,
@@ -7536,8 +7538,8 @@
    "name": "_playlist_artist_credit_info",
    "module": "backend/matching_service.py",
    "lines": [
-    1903,
-    1929
+    1904,
+    1930
    ],
    "size": 27,
    "body_lines": 26,
@@ -15957,6 +15959,7 @@
    "dependencies": [
     "_clean_playlist_name",
     "_download_method_label",
+    "_file_size",
     "_playlist_download_methods",
     "_playlist_ensure_staging_dirs",
     "_playlist_identity_status_fields",
@@ -23294,10 +23297,10 @@
    "module": "backend/import_service.py",
    "lines": [
     482,
-    1761
+    1760
    ],
-   "size": 1280,
-   "body_lines": 1256,
+   "size": 1279,
+   "body_lines": 1255,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT",
@@ -23350,8 +23353,8 @@
    "name": "_validate_wanted_album_items_with_acoustid",
    "module": "backend/import_service.py",
    "lines": [
-    1764,
-    1890
+    1763,
+    1889
    ],
    "size": 127,
    "body_lines": 123,
@@ -23377,8 +23380,8 @@
    "name": "_beet_import_timeout",
    "module": "backend/import_service.py",
    "lines": [
-    1893,
-    1904
+    1892,
+    1903
    ],
    "size": 12,
    "body_lines": 10,
@@ -23399,8 +23402,8 @@
    "name": "_audio_validation_inspection_failed",
    "module": "backend/import_service.py",
    "lines": [
-    1907,
-    1925
+    1906,
+    1924
    ],
    "size": 19,
    "body_lines": 18,
@@ -23421,8 +23424,8 @@
    "name": "_filter_import_review_selected_audio_files",
    "module": "backend/import_service.py",
    "lines": [
-    1928,
-    1978
+    1927,
+    1977
    ],
    "size": 51,
    "body_lines": 49,
@@ -23446,8 +23449,8 @@
    "name": "_resolve_import_review_db_music_path",
    "module": "backend/import_service.py",
    "lines": [
-    1981,
-    2000
+    1980,
+    1999
    ],
    "size": 20,
    "body_lines": 14,
@@ -23470,8 +23473,8 @@
    "name": "_import_skipped_items",
    "module": "backend/import_service.py",
    "lines": [
-    2003,
-    2051
+    2002,
+    2050
    ],
    "size": 49,
    "body_lines": 47,
@@ -23491,8 +23494,8 @@
    "name": "_target_preview_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    2054,
-    2112
+    2053,
+    2111
    ],
    "size": 59,
    "body_lines": 58,
@@ -23517,8 +23520,8 @@
    "name": "_import_review_selected_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    2141,
-    2177
+    2140,
+    2176
    ],
    "size": 37,
    "body_lines": 31,
@@ -23542,8 +23545,8 @@
    "name": "_import_target_preview_cache_key",
    "module": "backend/import_service.py",
    "lines": [
-    2180,
-    2227
+    2179,
+    2226
    ],
    "size": 48,
    "body_lines": 47,
@@ -23565,8 +23568,8 @@
    "name": "_cached_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    2230,
-    2249
+    2229,
+    2248
    ],
    "size": 20,
    "body_lines": 19,
@@ -23589,8 +23592,8 @@
    "name": "_build_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    2252,
-    2539
+    2251,
+    2538
    ],
    "size": 288,
    "body_lines": 281,
@@ -23620,8 +23623,8 @@
    "name": "_import_review_confidence_score",
    "module": "backend/import_service.py",
    "lines": [
-    2542,
-    2558
+    2541,
+    2557
    ],
    "size": 17,
    "body_lines": 16,
@@ -23641,8 +23644,8 @@
    "name": "_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2561,
-    2569
+    2560,
+    2568
    ],
    "size": 9,
    "body_lines": 8,
@@ -23663,8 +23666,8 @@
    "name": "_write_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2572,
-    2577
+    2571,
+    2576
    ],
    "size": 6,
    "body_lines": 5,
@@ -23683,8 +23686,8 @@
    "name": "_import_review_auto_update",
    "module": "backend/import_service.py",
    "lines": [
-    2580,
-    2589
+    2579,
+    2588
    ],
    "size": 10,
    "body_lines": 9,
@@ -23709,8 +23712,8 @@
    "name": "_import_review_auto_key",
    "module": "backend/import_service.py",
    "lines": [
-    2592,
-    2603
+    2591,
+    2602
    ],
    "size": 12,
    "body_lines": 10,
@@ -23731,8 +23734,8 @@
    "name": "evaluate_import_eligibility",
    "module": "backend/import_service.py",
    "lines": [
-    2606,
-    2722
+    2605,
+    2721
    ],
    "size": 117,
    "body_lines": 115,
@@ -23762,8 +23765,8 @@
    "name": "start_folder_import_with_id",
    "module": "backend/import_service.py",
    "lines": [
-    2727,
-    4084
+    2726,
+    4083
    ],
    "size": 1358,
    "body_lines": 1347,
@@ -23824,8 +23827,8 @@
    "name": "_coerce_library_import_all_album",
    "module": "backend/import_service.py",
    "lines": [
-    4093,
-    4120
+    4092,
+    4119
    ],
    "size": 28,
    "body_lines": 27,
@@ -23849,8 +23852,8 @@
    "name": "_library_import_all_retry_payload",
    "module": "backend/import_service.py",
    "lines": [
-    4123,
-    4131
+    4122,
+    4130
    ],
    "size": 9,
    "body_lines": 8,
@@ -23872,8 +23875,8 @@
    "name": "_library_import_all_record",
    "module": "backend/import_service.py",
    "lines": [
-    4134,
-    4145
+    4133,
+    4144
    ],
    "size": 12,
    "body_lines": 10,
@@ -23896,8 +23899,8 @@
    "name": "_library_import_all_read_last",
    "module": "backend/import_service.py",
    "lines": [
-    4148,
-    4156
+    4147,
+    4155
    ],
    "size": 9,
    "body_lines": 8,
@@ -23917,8 +23920,8 @@
    "name": "_library_import_all_write_last",
    "module": "backend/import_service.py",
    "lines": [
-    4159,
-    4167
+    4158,
+    4166
    ],
    "size": 9,
    "body_lines": 8,
@@ -23937,8 +23940,8 @@
    "name": "_resolve_import_source_path",
    "module": "backend/import_service.py",
    "lines": [
-    4175,
-    4209
+    4174,
+    4208
    ],
    "size": 35,
    "body_lines": 16,
@@ -25653,10 +25656,11 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_maintenance_save_last_report",
+    "_unattended_cleanup_status",
     "maintenance_runner_report",
     "start_maintenance_runner"
    ],
-   "caller_count": 3,
+   "caller_count": 4,
    "dependencies": []
   },
   {
@@ -26780,8 +26784,8 @@
    "name": "_dedup_norm_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    40,
-    44
+    43,
+    47
    ],
    "size": 5,
    "body_lines": 4,
@@ -26800,8 +26804,8 @@
    "name": "_dedup_resolve_source_scan",
    "module": "backend/dedup_service.py",
    "lines": [
-    47,
-    71
+    50,
+    74
    ],
    "size": 25,
    "body_lines": 23,
@@ -26822,8 +26826,8 @@
    "name": "_dedup_cancel_requested",
    "module": "backend/dedup_service.py",
    "lines": [
-    74,
-    78
+    77,
+    81
    ],
    "size": 5,
    "body_lines": 4,
@@ -26842,8 +26846,8 @@
    "name": "_dedup_raise_if_cancelled",
    "module": "backend/dedup_service.py",
    "lines": [
-    81,
-    86
+    84,
+    89
    ],
    "size": 6,
    "body_lines": 5,
@@ -26865,8 +26869,8 @@
    "name": "_dedup_structured_state",
    "module": "backend/dedup_service.py",
    "lines": [
-    89,
-    108
+    92,
+    111
    ],
    "size": 20,
    "body_lines": 19,
@@ -26886,8 +26890,8 @@
    "name": "_dedup_final_summary",
    "module": "backend/dedup_service.py",
    "lines": [
-    111,
-    126
+    114,
+    129
    ],
    "size": 16,
    "body_lines": 13,
@@ -26909,8 +26913,8 @@
    "name": "_dedup_state_status",
    "module": "backend/dedup_service.py",
    "lines": [
-    129,
-    134
+    132,
+    137
    ],
    "size": 6,
    "body_lines": 5,
@@ -26929,8 +26933,8 @@
    "name": "_dedup_state_response",
    "module": "backend/dedup_service.py",
    "lines": [
-    137,
-    161
+    140,
+    164
    ],
    "size": 25,
    "body_lines": 24,
@@ -26951,8 +26955,8 @@
    "name": "_dedup_job_result",
    "module": "backend/dedup_service.py",
    "lines": [
-    164,
-    176
+    167,
+    179
    ],
    "size": 13,
    "body_lines": 12,
@@ -26972,8 +26976,8 @@
    "name": "_resolve_album_title_duplicate_candidate",
    "module": "backend/dedup_service.py",
    "lines": [
-    179,
-    218
+    182,
+    221
    ],
    "size": 40,
    "body_lines": 28,
@@ -26992,8 +26996,8 @@
    "name": "_resolve_dedup_scan_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    221,
-    249
+    224,
+    252
    ],
    "size": 29,
    "body_lines": 16,
@@ -27015,11 +27019,11 @@
    "name": "start_dedup_scan",
    "module": "backend/dedup_service.py",
    "lines": [
-    254,
-    669
+    257,
+    686
    ],
-   "size": 416,
-   "body_lines": 414,
+   "size": 430,
+   "body_lines": 428,
    "route": null,
    "mutation_capable": true,
    "domain": "DEDUP",
@@ -27049,8 +27053,8 @@
    "name": "run_dedup_cleanup",
    "module": "backend/dedup_service.py",
    "lines": [
-    674,
-    797
+    691,
+    814
    ],
    "size": 124,
    "body_lines": 123,
@@ -27072,8 +27076,8 @@
    "name": "_library_duplicate_merge_safety",
    "module": "backend/dedup_service.py",
    "lines": [
-    802,
-    913
+    819,
+    930
    ],
    "size": 112,
    "body_lines": 110,
@@ -27096,8 +27100,8 @@
    "name": "_resolver_rel_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    916,
-    921
+    933,
+    938
    ],
    "size": 6,
    "body_lines": 5,
@@ -27118,8 +27122,8 @@
    "name": "_resolver_parent",
    "module": "backend/dedup_service.py",
    "lines": [
-    924,
-    928
+    941,
+    945
    ],
    "size": 5,
    "body_lines": 4,
@@ -27140,8 +27144,8 @@
    "name": "_resolver_sql_like",
    "module": "backend/dedup_service.py",
    "lines": [
-    931,
-    937
+    948,
+    954
    ],
    "size": 7,
    "body_lines": 6,
@@ -27158,8 +27162,8 @@
    "name": "_resolver_compact_track",
    "module": "backend/dedup_service.py",
    "lines": [
-    940,
-    946
+    957,
+    963
    ],
    "size": 7,
    "body_lines": 6,
@@ -27181,8 +27185,8 @@
    "name": "_resolver_compact_item",
    "module": "backend/dedup_service.py",
    "lines": [
-    949,
-    970
+    966,
+    987
    ],
    "size": 22,
    "body_lines": 18,
@@ -27203,8 +27207,8 @@
    "name": "_resolver_title_base",
    "module": "backend/dedup_service.py",
    "lines": [
-    973,
-    975
+    990,
+    992
    ],
    "size": 3,
    "body_lines": 2,
@@ -27226,8 +27230,8 @@
    "name": "_resolver_title_score",
    "module": "backend/dedup_service.py",
    "lines": [
-    978,
-    997
+    995,
+    1014
    ],
    "size": 20,
    "body_lines": 19,
@@ -27249,8 +27253,8 @@
    "name": "_resolver_retag_candidates",
    "module": "backend/dedup_service.py",
    "lines": [
-    1000,
-    1012
+    1017,
+    1029
    ],
    "size": 13,
    "body_lines": 11,
@@ -27272,8 +27276,8 @@
    "name": "_album_duplicate_resolver_plan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1015,
-    1185
+    1032,
+    1202
    ],
    "size": 171,
    "body_lines": 169,
@@ -27301,8 +27305,8 @@
    "name": "_filename_cleanup_duplicate_quarantine_path",
    "module": "backend/dedup_service.py",
    "lines": [
-    1188,
-    1193
+    1205,
+    1210
    ],
    "size": 6,
    "body_lines": 5,
@@ -27322,8 +27326,8 @@
    "name": "_maintenance_duplicate_report",
    "module": "backend/dedup_service.py",
    "lines": [
-    1196,
-    1229
+    1213,
+    1246
    ],
    "size": 34,
    "body_lines": 27,
@@ -27344,8 +27348,8 @@
    "name": "_maintenance_duplicate_cleanup_paths",
    "module": "backend/dedup_service.py",
    "lines": [
-    1232,
-    1237
+    1249,
+    1254
    ],
    "size": 6,
    "body_lines": 3,
@@ -27364,26 +27368,93 @@
    ]
   },
   {
-   "name": "_maintenance_full_duplicate_scan",
+   "name": "_file_size",
    "module": "backend/dedup_service.py",
    "lines": [
-    1240,
-    1325
+    1257,
+    1261
    ],
-   "size": 86,
-   "body_lines": 84,
+   "size": 5,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_maintenance_duplicate_proposal",
+    "_playlist_download_missing_tracks"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_maintenance_duplicate_proposal",
+   "module": "backend/dedup_service.py",
+   "lines": [
+    1264,
+    1306
+   ],
+   "size": 43,
+   "body_lines": 40,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
    "desired_owner": "backend/dedup_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_maintenance_full_duplicate_scan"
    ],
    "caller_count": 1,
    "dependencies": [
+    "_file_size",
+    "_s"
+   ]
+  },
+  {
+   "name": "_maintenance_duplicate_proposal_line",
+   "module": "backend/dedup_service.py",
+   "lines": [
+    1309,
+    1317
+   ],
+   "size": 9,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_maintenance_full_duplicate_scan"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_maintenance_full_duplicate_scan",
+   "module": "backend/dedup_service.py",
+   "lines": [
+    1320,
+    1419
+   ],
+   "size": 100,
+   "body_lines": 98,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "dedup_maintenance_run",
+    "start_maintenance_runner"
+   ],
+   "caller_count": 2,
+   "dependencies": [
     "_json_from_flask_response",
     "_maintenance_duplicate_cleanup_paths",
+    "_maintenance_duplicate_proposal",
+    "_maintenance_duplicate_proposal_line",
     "_maintenance_extract_child_job_id",
     "_maintenance_save_last_report",
     "_running_job_of_type",
@@ -27396,8 +27467,8 @@
    "name": "_album_cleanup_count_duplicate_files",
    "module": "backend/dedup_service.py",
    "lines": [
-    1328,
-    1329
+    1422,
+    1423
    ],
    "size": 2,
    "body_lines": 1,
@@ -30257,8 +30328,8 @@
    "name": "dedup_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    33,
-    36
+    40,
+    43
    ],
    "size": 4,
    "body_lines": 2,
@@ -30281,8 +30352,8 @@
    "name": "dedup_scan_status",
    "module": "routes_cleanup.py",
    "lines": [
-    40,
-    61
+    47,
+    68
    ],
    "size": 22,
    "body_lines": 20,
@@ -30304,8 +30375,8 @@
    "name": "dedup_ai_review",
    "module": "routes_cleanup.py",
    "lines": [
-    65,
-    494
+    72,
+    501
    ],
    "size": 430,
    "body_lines": 425,
@@ -30336,8 +30407,8 @@
    "name": "dedup_cleanup",
    "module": "routes_cleanup.py",
    "lines": [
-    498,
-    500
+    505,
+    507
    ],
    "size": 3,
    "body_lines": 2,
@@ -30360,8 +30431,8 @@
    "name": "clean_no_audio_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    504,
-    518
+    511,
+    525
    ],
    "size": 15,
    "body_lines": 14,
@@ -30384,8 +30455,8 @@
    "name": "clean_no_audio_folders_delete",
    "module": "routes_cleanup.py",
    "lines": [
-    522,
-    542
+    529,
+    549
    ],
    "size": 21,
    "body_lines": 20,
@@ -30408,8 +30479,8 @@
    "name": "clean_library_health",
    "module": "routes_cleanup.py",
    "lines": [
-    546,
-    608
+    553,
+    615
    ],
    "size": 63,
    "body_lines": 52,
@@ -30431,8 +30502,8 @@
    "name": "clean_library_health_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    612,
-    661
+    619,
+    668
    ],
    "size": 50,
    "body_lines": 49,
@@ -30454,8 +30525,8 @@
    "name": "clean_merge_duplicate_album",
    "module": "routes_cleanup.py",
    "lines": [
-    665,
-    773
+    672,
+    780
    ],
    "size": 109,
    "body_lines": 101,
@@ -30480,8 +30551,8 @@
    "name": "clean_rgid_group_detail",
    "module": "routes_cleanup.py",
    "lines": [
-    777,
-    825
+    784,
+    832
    ],
    "size": 49,
    "body_lines": 47,
@@ -30507,8 +30578,8 @@
    "name": "clean_rgid_group_merge",
    "module": "routes_cleanup.py",
    "lines": [
-    829,
-    893
+    836,
+    900
    ],
    "size": 65,
    "body_lines": 63,
@@ -30534,8 +30605,8 @@
    "name": "clean_rgid_group_keep_separate",
    "module": "routes_cleanup.py",
    "lines": [
-    897,
-    909
+    904,
+    916
    ],
    "size": 13,
    "body_lines": 11,
@@ -30559,8 +30630,8 @@
    "name": "clean_rgid_group_undo_resolution",
    "module": "routes_cleanup.py",
    "lines": [
-    913,
-    920
+    920,
+    927
    ],
    "size": 8,
    "body_lines": 6,
@@ -30583,8 +30654,8 @@
    "name": "clean_rgid_group_assign_release",
    "module": "routes_cleanup.py",
    "lines": [
-    924,
-    954
+    931,
+    961
    ],
    "size": 31,
    "body_lines": 29,
@@ -30609,8 +30680,8 @@
    "name": "clean_rgid_group_relink",
    "module": "routes_cleanup.py",
    "lines": [
-    958,
-    1018
+    965,
+    1025
    ],
    "size": 61,
    "body_lines": 59,
@@ -30635,8 +30706,8 @@
    "name": "clean_rgid_group_send_to_repair",
    "module": "routes_cleanup.py",
    "lines": [
-    1022,
-    1073
+    1029,
+    1080
    ],
    "size": 52,
    "body_lines": 50,
@@ -30663,8 +30734,8 @@
    "name": "clean_remove_orphaned_items",
    "module": "routes_cleanup.py",
    "lines": [
-    1077,
-    1090
+    1084,
+    1097
    ],
    "size": 14,
    "body_lines": 13,
@@ -30686,8 +30757,8 @@
    "name": "clean_remove_empty_albums",
    "module": "routes_cleanup.py",
    "lines": [
-    1094,
-    1107
+    1101,
+    1114
    ],
    "size": 14,
    "body_lines": 13,
@@ -30709,8 +30780,8 @@
    "name": "clean_album_tracks_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1111,
-    1176
+    1118,
+    1183
    ],
    "size": 66,
    "body_lines": 65,
@@ -30732,8 +30803,8 @@
    "name": "clean_album_tracks_remove",
    "module": "routes_cleanup.py",
    "lines": [
-    1180,
-    1215
+    1187,
+    1222
    ],
    "size": 36,
    "body_lines": 35,
@@ -30755,8 +30826,8 @@
    "name": "clean_album_tracks_remove_batch",
    "module": "routes_cleanup.py",
    "lines": [
-    1219,
-    1294
+    1226,
+    1301
    ],
    "size": 76,
    "body_lines": 75,
@@ -30778,8 +30849,8 @@
    "name": "review_folder_placeholder_api",
    "module": "routes_cleanup.py",
    "lines": [
-    1298,
-    1308
+    1305,
+    1315
    ],
    "size": 11,
    "body_lines": 10,
@@ -30802,8 +30873,8 @@
    "name": "preview_folder_placeholder_merge_api",
    "module": "routes_cleanup.py",
    "lines": [
-    1312,
-    1320
+    1319,
+    1327
    ],
    "size": 9,
    "body_lines": 8,
@@ -30826,8 +30897,8 @@
    "name": "apply_folder_placeholder_action_api",
    "module": "routes_cleanup.py",
    "lines": [
-    1324,
-    1506
+    1331,
+    1513
    ],
    "size": 183,
    "body_lines": 182,
@@ -30852,8 +30923,8 @@
    "name": "apply_safe_folder_placeholder_renames_job",
    "module": "routes_cleanup.py",
    "lines": [
-    1510,
-    1632
+    1517,
+    1639
    ],
    "size": 123,
    "body_lines": 121,
@@ -30879,8 +30950,8 @@
    "name": "clean_album_folders_report",
    "module": "routes_cleanup.py",
    "lines": [
-    1636,
-    1648
+    1643,
+    1655
    ],
    "size": 13,
    "body_lines": 12,
@@ -30900,8 +30971,8 @@
    "name": "clean_album_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1652,
-    1690
+    1659,
+    1697
    ],
    "size": 39,
    "body_lines": 38,
@@ -30925,8 +30996,8 @@
    "name": "clean_album_folders_apply_safe",
    "module": "routes_cleanup.py",
    "lines": [
-    1694,
-    1724
+    1701,
+    1731
    ],
    "size": 31,
    "body_lines": 30,
@@ -30950,8 +31021,8 @@
    "name": "clean_root_folders_report",
    "module": "routes_cleanup.py",
    "lines": [
-    1728,
-    1740
+    1735,
+    1747
    ],
    "size": 13,
    "body_lines": 12,
@@ -30971,8 +31042,8 @@
    "name": "clean_root_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1744,
-    1779
+    1751,
+    1786
    ],
    "size": 36,
    "body_lines": 35,
@@ -30996,8 +31067,8 @@
    "name": "clean_root_folders_apply_safe",
    "module": "routes_cleanup.py",
    "lines": [
-    1783,
-    1812
+    1790,
+    1819
    ],
    "size": 30,
    "body_lines": 29,
@@ -31021,8 +31092,8 @@
    "name": "clean_album_folders_apply_issue",
    "module": "routes_cleanup.py",
    "lines": [
-    1816,
-    1890
+    1823,
+    1897
    ],
    "size": 75,
    "body_lines": 74,
@@ -31049,8 +31120,8 @@
    "name": "clean_artist_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1894,
-    1930
+    1901,
+    1937
    ],
    "size": 37,
    "body_lines": 36,
@@ -31073,8 +31144,8 @@
    "name": "clean_artist_folders_merge",
    "module": "routes_cleanup.py",
    "lines": [
-    1934,
-    1955
+    1941,
+    1962
    ],
    "size": 22,
    "body_lines": 21,
@@ -31097,8 +31168,8 @@
    "name": "clean_artist_folders_stamp_mbid",
    "module": "routes_cleanup.py",
    "lines": [
-    1959,
-    2072
+    1966,
+    2079
    ],
    "size": 114,
    "body_lines": 105,
@@ -31120,6 +31191,101 @@
     "_invalidate_lib_cache",
     "_s",
     "_stamp_artist_folder_scan"
+   ]
+  },
+  {
+   "name": "_unattended_cleanup_status",
+   "module": "routes_cleanup.py",
+   "lines": [
+    2085,
+    2094
+   ],
+   "size": 10,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CLEANUP",
+   "desired_owner": "backend/cleanup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "dedup_unattended_cleanup_set",
+    "dedup_unattended_cleanup_status"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_maintenance_load_last_report"
+   ]
+  },
+  {
+   "name": "dedup_unattended_cleanup_status",
+   "module": "routes_cleanup.py",
+   "lines": [
+    2098,
+    2100
+   ],
+   "size": 3,
+   "body_lines": 1,
+   "route": {
+    "method": "GET",
+    "path": "/api/dedup/unattended-cleanup"
+   },
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_unattended_cleanup_status"
+   ]
+  },
+  {
+   "name": "dedup_unattended_cleanup_set",
+   "module": "routes_cleanup.py",
+   "lines": [
+    2104,
+    2120
+   ],
+   "size": 17,
+   "body_lines": 14,
+   "route": {
+    "method": "POST",
+    "path": "/api/dedup/unattended-cleanup"
+   },
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_s",
+    "_transaction_user_label",
+    "_unattended_cleanup_status"
+   ]
+  },
+  {
+   "name": "dedup_maintenance_run",
+   "module": "routes_cleanup.py",
+   "lines": [
+    2124,
+    2135
+   ],
+   "size": 12,
+   "body_lines": 8,
+   "route": {
+    "method": "POST",
+    "path": "/api/dedup/maintenance-run"
+   },
+   "mutation_capable": true,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_maintenance_full_duplicate_scan",
+    "_running_job_of_type"
    ]
   },
   {

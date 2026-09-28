@@ -3061,7 +3061,7 @@ export default function Playlists() {
               Saved Playlists
             </h2>
             <div className="mt-1 text-xs text-zinc-500">
-              M3U files, manifests, and resumable checkpoints from <code className="text-zinc-400">/data/media/music/playlists</code>
+              M3U files, manifests, and resumable checkpoints from <code className="text-zinc-400">&lt;music root&gt;/playlists</code>
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">

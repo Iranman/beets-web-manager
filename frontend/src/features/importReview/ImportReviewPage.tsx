@@ -314,7 +314,7 @@ function reviewInteractionIsExpanded(): boolean {
 }
 
 function isMusicLibraryPath(path?: string): boolean {
-  return Boolean(path?.replace(/\\/g, '/').startsWith('/data/media/music/'));
+  return /^\/(?:music|data\/media\/music)\//.test(path?.replace(/\\/g, '/') ?? '');
 }
 
 function countFor(counts: ReviewCounts, filter: ReviewItemType): number {

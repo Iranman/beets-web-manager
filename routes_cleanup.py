@@ -26,6 +26,13 @@ from backend.playlist_service import _PLAYLIST_DUPLICATE_JOB_MESSAGE
 from backend.serializers import json_route_result
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 
+import backend.dedup_authorization as _dedup_authorization
+from backend.app_runtime import WEB_MANAGER_DATA_DIR
+from backend.auth_service import _transaction_user_label
+from backend.dedup_service import _maintenance_full_duplicate_scan
+from backend.job_service import _running_job_of_type
+from backend.maintenance_service import _maintenance_load_last_report
+
 # ── ARCH-001 extracted code ──
 
 
@@ -356,7 +363,7 @@ def dedup_ai_review():
                     if not lib_item_obj: continue
                     lib_path = _s(getattr(lib_item_obj, "path", "") or "")
                     if lib_path and not lib_path.startswith("/"):
-                        lib_path = "/data/media/music/" + lib_path
+                        lib_path = str(MUSIC_ROOT / lib_path)
                     if not Path(lib_path).exists(): continue
 
                     fm  = file_meta[fidx]
@@ -2069,4 +2076,60 @@ def clean_artist_folders_stamp_mbid():
         label=f"Stamp MB IDs on artist folders: {root_path.name or root_str}",
         metadata={"type": "stamp-mbid-folders", "path": root_str},
     )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
+# ── Unattended duplicate deletion: authorization and review ──────────────────
+
+
+def _unattended_cleanup_status() -> Dict[str, Any]:
+    report = _maintenance_load_last_report()
+    duplicates = report.get("duplicates") if isinstance(report.get("duplicates"), dict) else {}
+    return {
+        "ok": True,
+        "authorization": _dedup_authorization.load_authorization(WEB_MANAGER_DATA_DIR),
+        "music_root": str(MUSIC_ROOT),
+        "last_run_summary": duplicates.get("final_summary") or {},
+        "proposal": duplicates.get("proposal") or [],
+    }
+
+
+@app.get("/api/dedup/unattended-cleanup")
+def dedup_unattended_cleanup_status():
+    """Authorization state plus the last scheduled run's review proposal."""
+    return jsonify(_unattended_cleanup_status())
+
+
+@app.post("/api/dedup/unattended-cleanup")
+def dedup_unattended_cleanup_set():
+    """Turn unattended duplicate deletion on or off. Enabling requires the
+    exact confirmation phrase; disabling never does."""
+    payload = request.get_json(silent=True) or {}
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"ok": False, "error": "enabled must be true or false"}), 400
+    if enabled and payload.get("confirm") != _dedup_authorization.ENABLE_CONFIRMATION:
+        return jsonify({
+            "ok": False,
+            "error": f'Enabling unattended deletion requires confirm="{_dedup_authorization.ENABLE_CONFIRMATION}".',
+        }), 400
+    _dedup_authorization.set_unattended_delete(
+        WEB_MANAGER_DATA_DIR, enabled, actor=_transaction_user_label(), reason=_s(payload.get("reason")),
+    )
+    _app_logger.warning("Unattended duplicate deletion %s", "ENABLED" if enabled else "disabled")
+    return jsonify(_unattended_cleanup_status())
+
+
+@app.post("/api/dedup/maintenance-run")
+def dedup_maintenance_run():
+    """Run the scheduled duplicate step on its own (scan, AcoustID
+    verification, proposal). It deletes only when unattended deletion is
+    authorized; otherwise it records the proposal for review."""
+    if _running_job_of_type({"dedup-scan", "dedup-ai-review", "dedup-cleanup", "maintenance-duplicates"}):
+        return jsonify({"ok": False, "error": "A duplicate scan or cleanup is already running"}), 409
+
+    def _do(log, cancel_event=None):
+        return _maintenance_full_duplicate_scan(log, cancel_event)
+
+    job = jobs.start_python(_do, label="Duplicate maintenance run", metadata={"type": "maintenance-duplicates"})
     return jsonify({"ok": True, "job_id": job.job_id})
