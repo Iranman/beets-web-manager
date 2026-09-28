@@ -26,6 +26,10 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_family import rebind_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import rebind_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,11 +93,11 @@ def _bind_app_globals_to_this_test_module(app_module, tmp_root: Path) -> str:
         except Exception:
             pass
     lib_path = str(tmp_root / "config" / "musiclibrary.blb")
-    app_module.LIB_PATH = lib_path
-    app_module.lib = Library(lib_path)
+    rebind_app_family(app_module, "LIB_PATH", lib_path)
+    rebind_app_family(app_module, "lib", Library(lib_path))
     state_dir = tmp_root / "ai_batch_jobs"
     state_dir.mkdir(parents=True, exist_ok=True)
-    app_module._AI_BATCH_STATE_DIR = state_dir
+    rebind_app_family(app_module, "_AI_BATCH_STATE_DIR", state_dir)
     return lib_path
 
 

@@ -1,9 +1,9 @@
 import unittest
 from pathlib import Path
 try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
-    from _app_ast_cache import app_family_source  # noqa: E402
+    from _app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 except ImportError:  # pragma: no cover
-    from tests._app_ast_cache import app_family_source  # noqa: E402
+    from tests._app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 
 
 
@@ -11,7 +11,7 @@ class DedupJobsTests(unittest.TestCase):
     def test_dedup_scans_are_jobstore_backed(self):
         root = Path(__file__).resolve().parents[1]
         app_source = app_family_source()
-        dedup_source = app_source[app_source.index('@app.post("/api/dedup/scan")'):app_source.index('@app.post("/api/dedup/cleanup")')]
+        dedup_source = "".join(app_unit_source(n) for n in ("start_dedup_scan", "dedup_ai_review", "dedup_scan_status"))
         panel_source = (root / "frontend" / "src" / "features" / "dedup" / "DedupPanel.tsx").read_text(encoding="utf-8")
         clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
         hooks_source = (root / "frontend" / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
@@ -34,7 +34,7 @@ class DedupJobsTests(unittest.TestCase):
     def test_dedup_scan_uses_musicbrainz_index_for_library_wide_scan(self):
         root = Path(__file__).resolve().parents[1]
         app_source = app_family_source()
-        dedup_source = app_source[app_source.index('@app.post("/api/dedup/scan")'):app_source.index('@app.post("/api/dedup/cleanup")')]
+        dedup_source = "".join(app_unit_source(n) for n in ("start_dedup_scan", "dedup_ai_review", "dedup_scan_status"))
 
         self.assertIn("mb_trackid_index: Dict[str, list] = {}", dedup_source)
         self.assertIn("mb_trackid_index.setdefault(mbid, []).append(item)", dedup_source)
@@ -46,7 +46,7 @@ class DedupJobsTests(unittest.TestCase):
     def test_dedup_scan_skips_stale_paths_created_by_folder_merges(self):
         root = Path(__file__).resolve().parents[1]
         app_source = app_family_source()
-        dedup_source = app_source[app_source.index('@app.post("/api/dedup/scan")'):app_source.index('@app.post("/api/dedup/cleanup")')]
+        dedup_source = "".join(app_unit_source(n) for n in ("start_dedup_scan", "dedup_ai_review", "dedup_scan_status"))
         cleanup_source = (root / "backend" / "duplicate_identity.py").read_text(encoding="utf-8")
 
         self.assertIn("size = src.stat().st_size", dedup_source)
@@ -64,7 +64,7 @@ class DedupJobsTests(unittest.TestCase):
         # read is the other half of the fix.
         root = Path(__file__).resolve().parents[1]
         app_source = app_family_source()
-        dedup_source = app_source[app_source.index('@app.post("/api/dedup/scan")'):app_source.index('@app.post("/api/dedup/cleanup")')]
+        dedup_source = "".join(app_unit_source(n) for n in ("start_dedup_scan", "dedup_ai_review", "dedup_scan_status"))
 
         self.assertIn("from concurrent.futures import ThreadPoolExecutor", app_source)
         self.assertIn("ThreadPoolExecutor(max_workers=_DEDUP_IO_WORKERS)", dedup_source)
@@ -80,7 +80,7 @@ class DedupJobsTests(unittest.TestCase):
         # duplicate elsewhere in that same bucket was silently never found.
         root = Path(__file__).resolve().parents[1]
         app_source = app_family_source()
-        dedup_source = app_source[app_source.index('@app.post("/api/dedup/scan")'):app_source.index('@app.post("/api/dedup/cleanup")')]
+        dedup_source = "".join(app_unit_source(n) for n in ("start_dedup_scan", "dedup_ai_review", "dedup_scan_status"))
 
         self.assertIn("for canonical in results:", dedup_source)
         self.assertIn("for canonical in size_index[src_size]:", dedup_source)

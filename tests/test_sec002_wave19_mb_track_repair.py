@@ -31,6 +31,10 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -1216,8 +1220,7 @@ class WebManagerMutationProhibitionTests(unittest.TestCase):
     ]
 
     def _fn_source(self, name):
-        app_path = Path(app_module.__file__)
-        source = app_path.read_text(encoding="utf-8")
+        source = app_family_source()  # ARCH-001: app.py module family
         tree = ast.parse(source)
         fn_def = None
         for node in ast.walk(tree):

@@ -16,6 +16,10 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import source_between  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import source_between  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = app_family_source()
@@ -24,9 +28,7 @@ API_TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(en
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
-    start = src.index(start_marker)
-    end = src.index(end_marker, start)
-    return src[start:end]
+    return source_between(src, start_marker, end_marker)
 
 
 class StartAiBatchJobRaceTests(unittest.TestCase):
@@ -568,8 +570,7 @@ class BehavioralTestCase(unittest.TestCase):
         # accept it -- patch it in explicitly rather than relying on
         # production's trusted-root list happening to already cover an
         # arbitrary test scratch directory.
-        self._downloads_roots_patcher = mock.patch.object(
-            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(_BEHAVIORAL_TMP_ROOT)]
+        self._downloads_roots_patcher = patch_app_family(APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(_BEHAVIORAL_TMP_ROOT)]
         )
         self._downloads_roots_patcher.start()
         self.addCleanup(self._downloads_roots_patcher.stop)
@@ -1831,11 +1832,9 @@ class RetryReconciliationRegressionTests(BehavioralTestCase):
 
     def setUp(self):
         super().setUp()
-        self._suggestions_patcher = mock.patch.object(
-            APP, "_ai_batch_run_suggestions", return_value="done",
+        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_suggestions", return_value="done",
         )
-        self._decisions_patcher = mock.patch.object(
-            APP, "_ai_batch_process_decisions", return_value={},
+        self._decisions_patcher = patch_app_family(APP, "_ai_batch_process_decisions", return_value={},
         )
         self._suggestions_patcher.start()
         self._decisions_patcher.start()

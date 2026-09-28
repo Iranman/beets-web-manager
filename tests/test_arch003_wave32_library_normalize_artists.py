@@ -85,8 +85,7 @@ class LibraryNormalizeArtistsTests(unittest.TestCase):
         ) as mock_update, mock.patch.object(
             app_module.composite_workflows, "relocate_album",
             return_value={"ok": True, "dest_dir": "/data/media/music/Wu-Tang Clan"},
-        ) as mock_relocate, mock.patch.object(
-            app_module, "subprocess",
+        ) as mock_relocate, patch_app_family(app_module, "subprocess",
         ) as mock_subprocess:
             log = self._run([dirty], {dirty: [{"id": 1, "albumartist": dirty}]})
 

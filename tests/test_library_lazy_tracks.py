@@ -21,7 +21,7 @@ class LibraryLazyTracksTests(unittest.TestCase):
         self.assertIn("def _library_album_is_disk_only", app_source)
         self.assertIn("include_disk_only", app_source)
         self.assertIn("def _library_stats_for_artists", app_source)
-        self.assertIn('include_tracks = request.args.get("include_tracks", "0") == "1"', app_source)
+        self.assertIn('include_tracks=request.args.get("include_tracks", "0") == "1"', app_source)
         self.assertIn('@app.get("/api/albums/<int:aid>/tracks")', app_source)
         self.assertIn('"ok": False,', app_source)
         self.assertIn('"missing": False,', app_source)

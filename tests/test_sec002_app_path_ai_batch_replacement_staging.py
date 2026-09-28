@@ -217,8 +217,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         self.outside.mkdir(parents=True)
         (self.outside / "sentinel.flac").write_bytes(b"SHOULD_NOT_BE_SCANNED")
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
-        self._downloads_roots_patcher = mock.patch.object(
-            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(self.allowed_root)]
+        self._downloads_roots_patcher = patch_app_family(APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(self.allowed_root)]
         )
         self._downloads_roots_patcher.start()
         self.addCleanup(self._downloads_roots_patcher.stop)

@@ -172,10 +172,9 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self._patch(patch_app_family(app_module, "_maintenance_release_group_merge", side_effect=self._release_group_merge))
         self._patch(patch_app_family(app_module, "_maintenance_full_duplicate_scan", side_effect=self._duplicates))
         self._patch(patch_app_family(app_module, "_maintenance_final_verification", side_effect=self._final_verification))
-        self._patch(patch_app_family(app_module, "fetch_missing_art", side_effect=self._child_route("artwork", {"saved": 0})))
-        self._patch(patch_app_family(app_module, "library_fix_genres", side_effect=self._child_route("genres", {"changed_count": 0})))
-        self._patch(mock.patch.object(
-            app_module,
+        self._patch(patch_app_family(app_module, "start_fetch_missing_art", side_effect=self._child_route("artwork", {"saved": 0})))
+        self._patch(patch_app_family(app_module, "start_library_fix_genres", side_effect=self._child_route("genres", {"changed_count": 0})))
+        self._patch(patch_app_family(app_module,
             "playlist_sync_status",
             return_value=SimpleNamespace(get_json=lambda silent=True: {"enabled": False, "running": False}),
         ))
@@ -189,10 +188,10 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         return patcher.start()
 
     def _child_route(self, name, result):
-        def route():
+        def service(_payload=None):
             job = app_module.jobs.start_python(lambda log, cancel_event=None: result, label=f"fake {name}", metadata={"type": name})
-            return app_module.jsonify({"ok": True, "job_id": job.job_id})
-        return route
+            return {"ok": True, "job_id": job.job_id}, 200
+        return service
 
     def _scan_placeholders(self, *args, **kwargs):
         self.call_order.append("folder_scan")
@@ -286,8 +285,7 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
                 raise RuntimeError("artist folder merge boom")
             return {"candidates": [], "skipped": []}
 
-        scan = self._patch(mock.patch.object(
-            app_module,
+        scan = self._patch(patch_app_family(app_module,
             "_stamp_artist_folder_scan",
             side_effect=fail_once_then_succeed,
         ))
@@ -355,8 +353,7 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self._patch(patch_app_family(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
         self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
         self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
-        self._patch(mock.patch.object(
-            app_module, "_stamp_artist_folder_scan",
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan",
             return_value={"candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
         ))
         plan_mock = self._patch(mock.patch.object(
@@ -440,8 +437,7 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self._patch(patch_app_family(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
         self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
         self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
-        self._patch(mock.patch.object(
-            app_module, "_stamp_artist_folder_scan",
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan",
             return_value={"ok": True, "candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
         ))
         plan_mock = self._patch(mock.patch.object(

@@ -1,9 +1,9 @@
 import unittest
 from pathlib import Path
 try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
-    from _app_ast_cache import app_family_source  # noqa: E402
+    from _app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 except ImportError:  # pragma: no cover
-    from tests._app_ast_cache import app_family_source  # noqa: E402
+    from tests._app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 
 
 class DedupAcoustidFingerprintTests(unittest.TestCase):
@@ -18,9 +18,7 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
         cls.app_source = app_family_source()
-        start = cls.app_source.index('@app.post("/api/dedup/scan")')
-        end = cls.app_source.index('@app.post("/api/dedup/cleanup")')
-        cls.dedup_source = cls.app_source[start:end]
+        cls.dedup_source = app_unit_source("start_dedup_scan")
 
     def test_fingerprint_helpers_defined(self):
         self.assertIn("def _acoustid_fingerprint_ids(", self.app_source)
@@ -122,7 +120,7 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
 
     def test_ai_review_also_fingerprint_verifies_matches(self):
         ai_start = self.app_source.index('@app.post("/api/dedup/ai-review")')
-        ai_end = self.app_source.index('@app.post("/api/dedup/cleanup")')
+        ai_end = self.app_source.index("\n@app.", ai_start + 10)
         ai_source = self.app_source[ai_start:ai_end]
         self.assertIn('"type": "dedup-ai-review"', ai_source)
         self.assertIn("_acoustid_fingerprint_match(str(src), lib_path)", ai_source)

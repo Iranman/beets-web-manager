@@ -140,8 +140,7 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
             "/api/import/review-files/cleanup", method="POST",
             data=json.dumps({"path": "/data/media/music/Some Album", "review_item_id": "x", "files": []}),
             content_type="application/json",
-        ), mock.patch.object(
-            app_module, "_pending_review_matches", return_value=True,
+        ), patch_app_family(app_module, "_pending_review_matches", return_value=True,
         ), mock.patch.object(
             app_module.composite_workflows, "plan_import_review_cleanup",
             side_effect=app_module.BeetsError(leak, error_code="cleanup_failed", status_code=500),

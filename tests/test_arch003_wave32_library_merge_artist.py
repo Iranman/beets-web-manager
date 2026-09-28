@@ -79,8 +79,7 @@ class LibraryMergeArtistTests(unittest.TestCase):
         ) as mock_update, mock.patch.object(
             app_module.composite_workflows, "relocate_album",
             return_value={"ok": True, "dest_dir": "/data/media/music/New Artist"},
-        ) as mock_relocate, mock.patch.object(
-            app_module, "subprocess",
+        ) as mock_relocate, patch_app_family(app_module, "subprocess",
         ) as mock_subprocess:
             log = self._run("Old Artist", "New Artist", album_rows)
 

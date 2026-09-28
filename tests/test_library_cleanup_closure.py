@@ -347,12 +347,12 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
             "shutil.rmtree", "shutil.move", "shutil.copy", "os.unlink",
             "os.remove", "os.rename", "os.replace", "DELETE FROM items",
         )
-        for func in ("dedup_cleanup", "_album_cleanup_remove_empty_tree"):
+        for func in ("run_dedup_cleanup", "_album_cleanup_remove_empty_tree"):
             src = self._function_source(func)
             for needle in banned:
                 self.assertNotIn(needle, src, msg=f"{func} still contains {needle}")
-        self.assertIn("composite_workflows.plan_library_cleanup", self._function_source("dedup_cleanup"))
-        self.assertIn("composite_workflows.apply_library_cleanup", self._function_source("dedup_cleanup"))
+        self.assertIn("composite_workflows.plan_library_cleanup", self._function_source("run_dedup_cleanup"))
+        self.assertIn("composite_workflows.apply_library_cleanup", self._function_source("run_dedup_cleanup"))
         self.assertIn("composite_workflows.plan_folder_cleanup", self._function_source("_album_cleanup_remove_empty_tree"))
 
     def test_dedup_cleanup_engine_unavailable_fails_closed(self):

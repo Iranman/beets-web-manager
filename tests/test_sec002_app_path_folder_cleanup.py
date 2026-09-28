@@ -167,8 +167,7 @@ class SafeRenamesJobRootAndDestinationContainmentTests(unittest.TestCase):
 
     def test_root_itself_is_skipped_not_renamed(self):
         with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(
-                 app_module, "_folder_cleanup_path",
+             patch_app_family(app_module, "_folder_cleanup_path",
                  return_value=(Path("/data/media/music"), None),
              ), \
              mock.patch.object(Path, "rename") as mock_rename:
@@ -182,8 +181,7 @@ class SafeRenamesJobRootAndDestinationContainmentTests(unittest.TestCase):
         # second gate, not just a construction-time assumption.
         with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
              patch_app_family(app_module, "_folder_cleanup_path", return_value=None), \
-             mock.patch.object(
-                 app_module, "_scan_folder_name_placeholders",
+             patch_app_family(app_module, "_scan_folder_name_placeholders",
                  return_value=[{
                      "safe": True, "target_exists": False, "db_item_count": 0,
                      "folder": "/data/media/music/Weird [Placeholder]",

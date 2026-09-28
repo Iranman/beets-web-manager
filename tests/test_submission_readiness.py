@@ -8,6 +8,10 @@ passed, so a passed check could still render red remediation text under it.
 """
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import source_between  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import source_between  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,9 +22,7 @@ TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encodi
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
-    start = src.index(start_marker)
-    end = src.index(end_marker, start)
-    return src[start:end]
+    return source_between(src, start_marker, end_marker)
 
 
 class BackendCheckNormalizationTests(unittest.TestCase):

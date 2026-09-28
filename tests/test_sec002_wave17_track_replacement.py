@@ -31,6 +31,10 @@ from backend.transaction_engine import (
     execute_track_replacement_apply,
     rollback_track_replacement,
 )
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 ITEMS_SCHEMA = (
@@ -863,7 +867,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
         # default roots, which would silently mask whether the containment
         # check is actually being exercised (the identical Wave 6/7
         # pitfall this suite's sibling fixtures already avoid).
-        self._downloads_root_patch = mock.patch.object(flask_app, "DOWNLOADS_ROOT", self.staging_root)
+        self._downloads_root_patch = patch_app_family(flask_app, "DOWNLOADS_ROOT", self.staging_root)
         self._downloads_root_patch.start()
         self.addCleanup(self._downloads_root_patch.stop)
 
@@ -948,7 +952,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
 
     def test_plan_route_performs_no_mutation(self):
         with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan), \
-             patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
+             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.get_json()["ok"])
@@ -957,8 +961,8 @@ class RealEndToEndRouteTests(unittest.TestCase):
 
     def test_plan_refuses_when_fingerprint_unverified(self):
         with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan), \
-             patch.object(flask_app, "_acoustid_fingerprint_match", return_value=("", [], [])), \
-             patch.object(flask_app, "_acoustid_fingerprint_ids", return_value=[]):
+             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=("", [], [])), \
+             patch_app_family(flask_app, "_acoustid_fingerprint_ids", return_value=[]):
             resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
         self.assertEqual(resp.status_code, 400)
         data = resp.get_json()
@@ -980,7 +984,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
         probe = outside / "not_a_staging_file.flac"
         probe.write_bytes(b"whatever")
         with patch.object(flask_app.composite_workflows, "plan_track_replacement", side_effect=self.mock_plan) as plan_mock, \
-             patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
+             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(probe)})
         self.assertEqual(resp.status_code, 400)
         self.assertFalse(resp.get_json()["ok"])
@@ -991,7 +995,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
              patch.object(flask_app.composite_workflows, "apply_track_replacement", side_effect=self.mock_apply), \
              patch.object(flask_app.composite_workflows, "rollback_track_replacement", side_effect=self.mock_rollback), \
              patch.object(flask_app.composite_workflows, "get_transaction", side_effect=self.mock_get_transaction), \
-             patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
+             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             plan_resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
             self.assertEqual(plan_resp.status_code, 200)
             op_id = plan_resp.get_json()["operation_id"]
@@ -1019,7 +1023,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
              patch.object(flask_app.composite_workflows, "rollback_track_replacement", side_effect=self.mock_rollback) as mock_rb, \
              patch.object(flask_app.composite_workflows, "rollback_import_review_cleanup") as mock_ir_rb, \
              patch.object(flask_app.composite_workflows, "get_transaction", side_effect=self.mock_get_transaction), \
-             patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
+             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
             plan_resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(self.cand)})
             op_id = plan_resp.get_json()["operation_id"]
             self.client.post(f"/api/items/{self.item_id}/replacement/apply", json={"operation_id": op_id})

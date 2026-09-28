@@ -111,59 +111,64 @@ def _segment(lines: list, node: ast.stmt) -> str:
     return "".join(lines[start - 1:node.end_lineno])
 
 
+_ORDER_FILE = _REPO_ROOT / "tests" / "arch001_original_app_order.json"
+
+
+def _original_order() -> Dict[str, int]:
+    try:
+        units = json.loads(_ORDER_FILE.read_text(encoding="utf-8"))["units"]
+    except (OSError, ValueError, KeyError):
+        units = []
+    return {name: i for i, name in enumerate(units)}
+
+
 @functools.lru_cache(maxsize=1)
 def _family_source_cached(stamp: tuple) -> str:
-    app_text = _APP_PY_PATH.read_text(encoding="utf-8")
-    modules = {}
-    for path in app_family_paths():
-        if path == _APP_PY_PATH:
-            continue
+    """Lay the module family out in original (pre-ARCH-001) app.py order.
+
+    Every top-level unit named in tests/arch001_original_app_order.json takes
+    its original position; a unit without an original position follows the
+    unit before it in its current file. ARCH-001 re-export blocks vanish, and
+    extracted modules' own imports/docstrings trail at the end.
+    """
+    order = _original_order()
+    entries = []
+    tail = []
+    for file_idx, path in enumerate(app_family_paths()):
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines(keepends=True)
         tree = ast.parse(text)
-        by_name = {}
-        for node in tree.body:
-            for name in _bound_names(node):
-                by_name.setdefault(name, node)
-        modname = ".".join(path.relative_to(_REPO_ROOT).with_suffix("").parts)
-        modules[modname] = {"lines": lines, "tree": tree, "by_name": by_name, "emitted": set()}
-
-    # Rebuild app.py as it read before extraction: every ARCH-001 re-export
-    # block is replaced by the moved units, in their original relative order.
-    app_lines = app_text.splitlines(keepends=True)
-    out = []
-    cursor = 0
-    for node in ast.parse(app_text).body:
-        if not (isinstance(node, ast.ImportFrom) and node.module in modules
-                and "ARCH-001 extracted" in app_lines[node.lineno - 1]):
-            continue
-        info = modules[node.module]
-        out.append("".join(app_lines[cursor:node.lineno - 1]))
-        units = []
-        for alias in node.names:
-            unit = info["by_name"].get(alias.name)
-            if unit is not None and id(unit) not in info["emitted"]:
-                info["emitted"].add(id(unit))
-                units.append(unit)
-        units.sort(key=lambda n: n.lineno)
-        out.extend(_segment(info["lines"], unit) + "\n" for unit in units)
-        cursor = node.end_lineno
-    out.append("".join(app_lines[cursor:]))
-    # Module headers (imports, docstrings) and anything not re-exported.
-    for info in modules.values():
-        rest = [_segment(info["lines"], n) for n in info["tree"].body if id(n) not in info["emitted"]]
-        if rest:
-            out.append("\n\n" + "\n".join(rest) + "\n")
-    return "".join(out)
+        is_app = path == _APP_PY_PATH
+        anchor = -1
+        seq = 0
+        prev_end = 0
+        for node_idx, node in enumerate(tree.body):
+            start = node.lineno
+            for d in getattr(node, "decorator_list", None) or []:
+                start = min(start, d.lineno)
+            chunk = "".join(lines[prev_end:node.end_lineno])  # leading comments travel with the unit
+            prev_end = node.end_lineno
+            if is_app and isinstance(node, ast.ImportFrom) and "ARCH-001 extracted" in lines[node.lineno - 1]:
+                continue
+            if not is_app and (isinstance(node, (ast.Import, ast.ImportFrom)) or (
+                    node_idx == 0 and isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant))):
+                tail.append(chunk)
+                continue
+            idx = next((order[n] for n in _bound_names(node) if n in order), None)
+            if idx is not None:
+                anchor = idx
+                key = (idx, 0, file_idx, seq)
+            else:
+                key = (anchor, 1, file_idx, seq)
+            seq += 1
+            entries.append((key, chunk if chunk.endswith("\n") else chunk + "\n"))
+    entries.sort(key=lambda e: e[0])
+    return "".join(text for _, text in entries) + "\n\n" + "".join(tail)
 
 
 def app_family_source() -> str:
-    """Source of the app.py module family, laid out as the original app.py.
-
-    Re-export blocks in app.py are expanded in place with the extracted
-    units, so marker-to-marker source slices used by older tests keep their
-    original meaning; extracted-module headers follow at the end.
-    """
+    """Source of the app.py module family, laid out as the original app.py,
+    so marker-to-marker source slices used by older tests keep their meaning."""
     stamp = tuple((str(p), p.stat().st_mtime_ns) for p in app_family_paths())
     return _family_source_cached(stamp)
 
@@ -227,6 +232,35 @@ def load_app_closure(roots: Iterable[str], namespace: Dict[str, Any]) -> Dict[st
     for node in sorted(wanted.values(), key=lambda n: n.lineno):
         exec(compile("from __future__ import annotations\n" + _segment(lines, node).lstrip(), str(_APP_PY_PATH), "exec"), namespace)
     return namespace
+
+
+_SLICE_TREES: Dict[int, ast.Module] = {}
+
+
+def source_between(src: str, start_marker: str, end_marker: str) -> str:
+    """src[start_marker:end_marker], as older tests slice it.
+
+    ARCH-001 moves functions into owned modules, so an end marker that used
+    to follow a function can now precede it or live elsewhere. When the end
+    marker no longer follows the start, the slice ends with the top-level
+    definition that contains the start marker.
+    """
+    start = src.index(start_marker)
+    end = src.find(end_marker, start)
+    if end != -1:
+        return src[start:end]
+    key = hash(src)
+    tree = _SLICE_TREES.get(key)
+    if tree is None:
+        tree = get_app_ast() if src == app_family_source() else ast.parse(src)
+        _SLICE_TREES[key] = tree
+    line = src.count("\n", 0, start) + 1
+    lines = src.splitlines(keepends=True)
+    for node in tree.body:
+        if node.lineno <= line <= node.end_lineno:
+            stop = sum(len(l) for l in lines[:node.end_lineno])
+            return src[start:stop]
+    raise ValueError(f"{start_marker!r} is not inside a top-level definition")
 
 
 def get_app_ast() -> ast.Module:

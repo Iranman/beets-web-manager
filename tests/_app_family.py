@@ -107,3 +107,12 @@ class _FamilyPatch:
 
 def patch_app_family(target, attribute, new=mock.DEFAULT, **kwargs):
     return _FamilyPatch(target, attribute, new, **kwargs)
+
+
+def rebind_app_family(app_module, name, value):
+    """Permanently rebind app.<name> and every family module sharing it.
+
+    For tests that deliberately rebind a process-wide global (not a scoped
+    patch): the owned modules that now hold the code see the same value."""
+    for mod in _family_targets(app_module, name):
+        setattr(mod, name, value)

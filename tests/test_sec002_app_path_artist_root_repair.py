@@ -399,16 +399,14 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         log = []
         plan_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_2"})
         apply_mock = mock.MagicMock(return_value={"ok": True, "moved_files": 1})
-        with mock.patch.object(
-            app_module, "_scan_artist_folder_groups",
+        with patch_app_family(app_module, "_scan_artist_folder_groups",
             return_value=[{
                 "key": "bobmarley",
                 "canonical": {"path": str(dst), "name": "Bob Marley"},
                 "sources": [{"path": str(src), "name": "Bob  Marley"}],
                 "musicbrainz": {"id": "9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f"},
             }],
-        ), mock.patch.object(
-            app_module, "_artist_folder_fingerprint_confirms", return_value=True,
+        ), patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=True,
         ) as fp, mock.patch.object(
             app_module.composite_workflows, "plan_artist_folder_reconcile", plan_mock,
         ), mock.patch.object(
@@ -436,16 +434,14 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         dst.mkdir()
         (src / "track.mp3").write_bytes(b"fake-audio")
         log = []
-        with mock.patch.object(
-            app_module, "_scan_artist_folder_groups",
+        with patch_app_family(app_module, "_scan_artist_folder_groups",
             return_value=[{
                 "key": "bobmarley",
                 "canonical": {"path": str(dst), "name": "Bob Marley"},
                 "sources": [{"path": str(src), "name": "Bob  Marley"}],
                 "musicbrainz": {"id": "9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f"},
             }],
-        ), mock.patch.object(
-            app_module, "_artist_folder_fingerprint_confirms", return_value=False,
+        ), patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=False,
         ):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=True,

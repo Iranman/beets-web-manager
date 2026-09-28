@@ -28,6 +28,10 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_family import rebind_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import rebind_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,11 +106,11 @@ def _bind_app_globals_to_this_test_module(app_module, tmp_root: Path) -> str:
         except Exception:
             pass
     lib_path = str(tmp_root / "config" / "musiclibrary.blb")
-    app_module.LIB_PATH = lib_path
-    app_module.lib = Library(lib_path)
+    rebind_app_family(app_module, "LIB_PATH", lib_path)
+    rebind_app_family(app_module, "lib", Library(lib_path))
     state_dir = tmp_root / "ai_batch_jobs"
     state_dir.mkdir(parents=True, exist_ok=True)
-    app_module._AI_BATCH_STATE_DIR = state_dir
+    rebind_app_family(app_module, "_AI_BATCH_STATE_DIR", state_dir)
     return lib_path
 
 
@@ -253,24 +257,19 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self._patch(patch_app_family(APP, "_validate_import_source_audio", return_value=None))
         self._patch(patch_app_family(APP, "_prefer_album_mb_release", side_effect=lambda mbid, log: mbid))
         self._patch(patch_app_family(APP, "_delete_if_already_in_library", return_value=None))
-        self._patch(mock.patch.object(
-            APP, "_repair_album_mbid_sticking_once",
+        self._patch(patch_app_family(APP, "_repair_album_mbid_sticking_once",
             side_effect=lambda *a, **k: self.call_order.append(("recording_id_repair",)) or {"changed": False},
         ))
-        self._patch(mock.patch.object(
-            APP, "_repair_album_art",
+        self._patch(patch_app_family(APP, "_repair_album_art",
             side_effect=lambda aid, log, **k: self.call_order.append(("artwork_repair", aid)) or {"status": "saved", "saved_path": "/x/cover.jpg"},
         ))
         self._patch(patch_app_family(APP, "_remove_pending_review_for_path", return_value=None))
-        self._patch(mock.patch.object(
-            APP, "_auto_merge_case_duplicate_artist_folder",
+        self._patch(patch_app_family(APP, "_auto_merge_case_duplicate_artist_folder",
             side_effect=lambda *a, **k: self.call_order.append(("dedup",)),
         ))
-        self._patch(mock.patch.object(
-            APP, "_invalidate_lib_cache", side_effect=lambda: self.call_order.append(("invalidate_cache",)),
+        self._patch(patch_app_family(APP, "_invalidate_lib_cache", side_effect=lambda: self.call_order.append(("invalidate_cache",)),
         ))
-        self._patch(mock.patch.object(
-            APP, "_trigger_plex_refresh", side_effect=lambda *a, **k: self.call_order.append(("plex_refresh",)),
+        self._patch(patch_app_family(APP, "_trigger_plex_refresh", side_effect=lambda *a, **k: self.call_order.append(("plex_refresh",)),
         ))
         self._patch(patch_app_family(APP, "_record_ai_match", return_value=None))
         self._patch(mock.patch.object(APP.time, "sleep", return_value=None))

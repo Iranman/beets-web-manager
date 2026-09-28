@@ -41,6 +41,14 @@ from backend.transaction_engine import (
     create_existing_album_reconcile_plan,
     execute_existing_album_reconcile_apply,
 )
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -851,8 +859,7 @@ class AstStructuralTests(unittest.TestCase):
     }
 
     def setUp(self):
-        with open("app.py", "r", encoding="utf-8") as f:
-            self.app_source = f.read()
+        self.app_source = app_family_source()
         self.app_tree = ast.parse(self.app_source, filename="app.py")
         with open("backend/transaction_engine.py", "r", encoding="utf-8") as f:
             self.engine_source = f.read()
@@ -1014,11 +1021,11 @@ class RealProductionPathTests(unittest.TestCase):
             finally:
                 con.close()
 
-        self._db_patch = mock.patch.object(flask_app, "_db", _local_db)
+        self._db_patch = patch_app_family(flask_app, "_db", _local_db)
         self._db_patch.start()
         self.addCleanup(self._db_patch.stop)
 
-        self._music_root_patch = mock.patch.object(flask_app, "MUSIC_ROOT", self.music_root)
+        self._music_root_patch = patch_app_family(flask_app, "MUSIC_ROOT", self.music_root)
         self._music_root_patch.start()
         self.addCleanup(self._music_root_patch.stop)
 

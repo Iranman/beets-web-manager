@@ -64,7 +64,7 @@ class TestImportSourcePathDoesNotRequireLocalExistence(unittest.TestCase):
         self.app_source = app_family_source()
 
     def test_import_folder_with_id_does_not_require_local_existence(self):
-        idx = self.app_source.index("def import_folder_with_id()")
+        idx = self.app_source.index("def start_folder_import_with_id(")
         window = self.app_source[idx: idx + 6000]
         self.assertIn("require_exists=False", window)
         self.assertNotIn("require_exists=True", window)
@@ -167,7 +167,7 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
         self.app_source = app_family_source()
 
     def test_input_looks_like_release_group_is_assigned_before_use(self):
-        idx = self.app_source.index("def import_folder_with_id()")
+        idx = self.app_source.index("def start_folder_import_with_id(")
         assign_idx = self.app_source.index("input_looks_like_release_group =", idx)
         use_idx = self.app_source.index("if input_looks_like_release_group:", idx)
         self.assertLess(
@@ -176,7 +176,7 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
         )
 
     def test_source_is_library_is_assigned_before_use(self):
-        idx = self.app_source.index("def import_folder_with_id()")
+        idx = self.app_source.index("def start_folder_import_with_id(")
         assign_idx = self.app_source.index("source_is_library = _path_is_under", idx)
         first_use_idx = self.app_source.index("if source_is_library:", idx)
         self.assertLess(
@@ -185,7 +185,7 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
         )
 
     def test_already_present_and_combined_are_assigned_before_use(self):
-        idx = self.app_source.index("def import_folder_with_id()")
+        idx = self.app_source.index("def start_folder_import_with_id(")
         already_present_assign = self.app_source.index("already_present = False", idx)
         combined_assign = self.app_source.index('combined = ""', idx)
         first_use_idx = self.app_source.index(
@@ -230,7 +230,7 @@ class TestConfirmedImportV1ResultSkipsRedundantRawSqlRevalidation(unittest.TestC
         self.app_source = app_family_source()
 
     def test_confirmed_import_v1_result_is_trusted_without_calling_album_match_summary(self):
-        idx = self.app_source.index("def import_folder_with_id()")
+        idx = self.app_source.index("def start_folder_import_with_id(")
         loop_idx = self.app_source.index("for aid in album_ids:", idx)
         skip_idx = self.app_source.index(
             'strategy == "confirmed_import_v1 verified result"', idx

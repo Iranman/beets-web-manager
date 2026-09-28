@@ -26,6 +26,10 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -683,8 +687,8 @@ class WebManagerMutationProhibitionTests(unittest.TestCase):
     functions in-process)."""
 
     def test_artist_folder_functions_contain_no_direct_mutations(self):
-        with open("app.py", "r", encoding="utf-8") as f:
-            source = f.read()
+        if True:  # ARCH-001: the app.py module family
+            source = app_family_source()
             tree = ast.parse(source, filename="app.py")
 
         target_funcs = {
@@ -879,8 +883,7 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         the real outcome via transaction polling."""
         with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.mkdtemp())), \
              patch_app_family(app_module, "_security_auth_disabled", return_value=True):
-            with mock.patch.object(
-                app_module, "_stamp_artist_folder_scan",
+            with patch_app_family(app_module, "_stamp_artist_folder_scan",
                 return_value={"candidates": [{"source": "x"}], "skipped": []},
             ), mock.patch.object(
                 app_module.composite_workflows, "plan_artist_folder_reconcile",
@@ -1183,8 +1186,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         with mock.patch.object(
             app_module.composite_workflows, "get_artist_folder_inventory",
             return_value=[{"name": "Some Artist", "path": str(artist_dir), "audio_files": 1, "subfolders": 0}],
-        ), mock.patch.object(
-            app_module, "_stamp_artist_folder_album_mbid_counts",
+        ), patch_app_family(app_module, "_stamp_artist_folder_album_mbid_counts",
             return_value=({}, {}, "engine unavailable"),
         ):
             result = app_module._stamp_artist_folder_scan(self.root)

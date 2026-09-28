@@ -53,6 +53,10 @@ try:  # ARCH-001: app.py module family (works under discovery and tests.<module>
     from _app_ast_cache import app_family_source  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import source_between  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import source_between  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,9 +65,7 @@ LIBRARY_TSX_SOURCE = (ROOT / "frontend" / "src" / "views" / "Library.tsx").read_
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
-    start = src.index(start_marker)
-    end = src.index(end_marker, start)
-    return src[start:end]
+    return source_between(src, start_marker, end_marker)
 
 
 class LibraryPayloadExtractionTests(unittest.TestCase):
@@ -75,12 +77,11 @@ class LibraryPayloadExtractionTests(unittest.TestCase):
             APP_SOURCE, "def _refresh_library_cache() -> dict:", "\n\ndef _build_library_payload"
         )
         self.assertIn("payload = _build_library_payload()", fn)
-        self.assertIn("_lib_cache    = payload", fn)
-        self.assertIn("_lib_cache_ts = time.time()", fn)
+        self.assertIn("library_cache.store(payload)", fn)
         self.assertIn("return payload", fn)
 
     def test_route_delegates_to_refresh_helper_instead_of_building_inline(self):
-        fn = _function_source(APP_SOURCE, "def library_full():", "\n\ndef _refresh_library_cache")
+        fn = _function_source(APP_SOURCE, "def get_library_payload(", "\n\ndef _refresh_library_cache")
         self.assertIn("payload = _refresh_library_cache()", fn)
         # The route itself must not still contain the disk-walk build logic
         # inline -- that would mean the extraction duplicated instead of

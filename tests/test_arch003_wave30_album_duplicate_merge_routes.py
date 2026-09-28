@@ -213,8 +213,7 @@ class CleanRgidGroupRelinkTests(_MergeTestBase):
         with mock.patch.object(
             app_module.composite_workflows, "update_album_metadata",
             return_value={"ok": True, "album_fields_changed": 2},
-        ) as mock_update, mock.patch.object(
-            app_module, "_repair_album_mbid_sticking_once",
+        ) as mock_update, patch_app_family(app_module, "_repair_album_mbid_sticking_once",
             return_value={"changed": True},
         ), patch_app_family(app_module, "_mb_release_group_for_release", return_value=SAME_RGID):
             response, log = self._run_job_body(
