@@ -4772,9 +4772,10 @@
     "_album_track_fingerprint_check",
     "_merge_imported_album_into_existing",
     "_scan_album_track_integrity",
-    "_validate_wanted_album_items_with_acoustid"
+    "_validate_wanted_album_items_with_acoustid",
+    "item_replacement_plan"
    ],
-   "caller_count": 6,
+   "caller_count": 7,
    "dependencies": [
     "_s"
    ]
@@ -30278,10 +30279,10 @@
    "module": "routes_library.py",
    "lines": [
     4787,
-    4905
+    4907
    ],
-   "size": 119,
-   "body_lines": 110,
+   "size": 121,
+   "body_lines": 112,
    "route": {
     "method": "POST",
     "path": "/api/items/<int:iid>/replacement/plan"
@@ -30295,6 +30296,7 @@
    "dependencies": [
     "_acoustid_fingerprint_ids",
     "_acoustid_fingerprint_match",
+    "_album_item_abs_path",
     "_music_format_replacement_matching_contract",
     "_resolve_import_review_source_path",
     "_s"
@@ -30304,8 +30306,8 @@
    "name": "item_replacement_apply",
    "module": "routes_library.py",
    "lines": [
-    4909,
-    4930
+    4911,
+    4932
    ],
    "size": 22,
    "body_lines": 16,
@@ -30327,8 +30329,8 @@
    "name": "_start_library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    4933,
-    5211
+    4935,
+    5213
    ],
    "size": 279,
    "body_lines": 271,

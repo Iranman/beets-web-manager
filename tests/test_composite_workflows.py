@@ -178,6 +178,25 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.assertEqual(res["verification_problems"], ["track"])
         self.assertEqual(self.store.get(op_id)["status"], "Recovery Required")
 
+    def test_track_replacement_accepts_library_relative_paths_after_apply(self):
+        """The stock Beets web API reports paths relative to the library;
+        the engine returns the absolute path. That is not identity drift."""
+        album_item = {"id": 55, "album_id": 1935, "mb_trackid": "rec-1", "disc": 1, "track": 17,
+                      "path": "Artist/Album/17 Song.mp3"}
+        items = {55: dict(album_item), 77: {"id": 77, "path": "Artist/Album/song (00).flac"}}
+        self.mock_adapter.get_item.side_effect = lambda iid: items.get(iid)
+        op_id = plan_track_replacement({"item_id": 55, "source_item_id": 77}, adapter=self.mock_adapter,
+                                       store=self.store)["operation_id"]
+        self.store.update(op_id, status="Approved")
+        self.mock_adapter.replace_item_file.return_value = {"new_target_path": "/music/Artist/Album/17 Song.flac"}
+        items[55] = {**album_item, "path": "Artist/Album/17 Song.flac"}
+        res = apply_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
+        self.assertTrue(res["ok"], res)
+        # ...but a different file is still caught.
+        from backend.composite_workflows import _same_library_path
+        self.assertFalse(_same_library_path("Album/17 Song.flac", "/music/Other/17 Song.flac.bak"))
+        self.assertFalse(_same_library_path("Song.flac", "/music/Artist/Album/17 Song.flac"))
+
     def test_track_replacement_from_staged_file_fails_closed(self):
         res = plan_track_replacement(
             {"original_item_id": 55, "replacement_path": "/data/downloads/new.flac"},

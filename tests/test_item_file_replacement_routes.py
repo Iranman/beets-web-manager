@@ -95,6 +95,18 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
         self.assertEqual(tx["metadata"]["before"]["mb_trackid"], REC)
         self.adapter.replace_item_file.assert_not_called()
 
+    def test_plan_resolves_library_relative_paths_for_fingerprinting(self):
+        """The stock Beets web API reports paths relative to the library."""
+        import backend.acoustid_service as acoustid_service
+        root = self.mp3.parent
+        self.items[24258]["path"] = self.mp3.name
+        self.items[22575]["path"] = self.flac.name
+        with mock.patch.object(acoustid_service, "MUSIC_ROOT", root), \
+             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(REC, [REC], [REC])) as fp:
+            res = self.client.post("/api/items/24258/replacement/plan", json={"candidate_item_id": 22575})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        fp.assert_called_once_with(str(root / self.flac.name), str(root / self.mp3.name))
+
     def test_plan_refuses_an_unverified_candidate(self):
         res = self._plan(fingerprint=("", [], ["other-recording"]))
         self.assertEqual(res.status_code, 400)

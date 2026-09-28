@@ -776,6 +776,9 @@ class AstStructuralTests(unittest.TestCase):
         # source paths, reused here instead of a second ad hoc check
         # (CodeQL py/path-injection fix, final review).
         "_resolve_import_review_source_path",
+        # Reviewed: pure string join of a library-relative Beets path onto
+        # MUSIC_ROOT (no filesystem access, no mutation).
+        "_album_item_abs_path",
     }
 
     def setUp(self):
