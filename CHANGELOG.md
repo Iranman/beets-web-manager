@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.37 - 2026-09-28
+
 ### Fixed
 - Track replacement (preview → approve → apply → rollback) works again, now on the Beets engine. Before this fix, planning always failed: it read the wrong payload keys. Apply also tried to copy a file into the read-only music mount. Replacement now puts a tracked library copy (for example, a proven lossless duplicate) into an album slot:
   - The album item keeps its Release Group, Release ID, Recording ID, disc/track and tags.
