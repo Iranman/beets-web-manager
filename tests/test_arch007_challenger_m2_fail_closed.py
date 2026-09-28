@@ -32,6 +32,10 @@ from app import (
     _music_format_find_verified_replacement,
     _album_cleanup_item_id_for_path,
 )
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class TestArch007M2FailClosedAdversarial(unittest.TestCase):
@@ -53,7 +57,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
         self.db_spy = mock.MagicMock(
             side_effect=AssertionError("ARCH-007 VIOLATION: app._db() called during Beets engine down!")
         )
-        self.db_patcher = mock.patch("app._db", self.db_spy)
+        self.db_patcher = patch_app_family("app", "_db", self.db_spy)
         self.db_patcher.start()
 
     def tearDown(self):
@@ -101,9 +105,9 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
         """POST /api/items/<iid>/replacement/plan must return HTTP 503 on engine down."""
         fake_item = mock.Mock(path="/data/media/music/Artist/Album/track.mp3", mb_trackid="rec-123")
         with mock.patch("app.lib.get_item", return_value=fake_item), \
-             mock.patch("app._resolve_import_review_source_path", return_value=(Path("/data/staging/replacement.flac"), None)), \
+             patch_app_family("app", "_resolve_import_review_source_path", return_value=(Path("/data/staging/replacement.flac"), None)), \
              mock.patch("pathlib.Path.exists", return_value=True), \
-             mock.patch("app._acoustid_fingerprint_match", return_value=("rec-123", {"rec-123"}, {"rec-123"})), \
+             patch_app_family("app", "_acoustid_fingerprint_match", return_value=("rec-123", {"rec-123"}, {"rec-123"})), \
              mock.patch("app.composite_workflows.plan_track_replacement") as mock_plan:
             mock_plan.side_effect = BeetsUnavailableError("Connection refused")
 

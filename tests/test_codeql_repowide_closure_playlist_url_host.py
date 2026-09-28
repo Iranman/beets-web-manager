@@ -23,6 +23,10 @@ driving the full yt-dlp integration.
 import unittest
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class PlaylistUrlHostParsingTests(unittest.TestCase):
@@ -83,7 +87,7 @@ class PlaylistParseCredentialAttachmentTests(unittest.TestCase):
 
         with mock.patch.dict(sys.modules, {"yt_dlp": fake_yt_dlp}), \
              mock.patch.object(app_module._ytdlp_ready, "wait", return_value=True), \
-             mock.patch.object(app_module, "_apply_ytdlp_netrc") as mock_netrc, \
+             patch_app_family(app_module, "_apply_ytdlp_netrc") as mock_netrc, \
              app_module.app.test_request_context(
                  "/api/playlist/parse", method="POST",
                  json={"source": "url", "content": url},

@@ -26,20 +26,24 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
     def test_absolute_path_escape_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "mb-release-tracklists"
-            with mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
+            with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
                 outside = str(Path(tmp) / "elsewhere" / "evil")
                 self.assertIsNone(app_module._mb_release_tracklist_cache_path(outside))
 
     def test_relative_traversal_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "mb-release-tracklists"
-            with mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
+            with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
                 self.assertIsNone(
                     app_module._mb_release_tracklist_cache_path("../../../etc/cron.d/evil")
                 )
@@ -47,7 +51,7 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
     def test_embedded_separator_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "mb-release-tracklists"
-            with mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
+            with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
                 self.assertIsNone(
                     app_module._mb_release_tracklist_cache_path("aa/bb-cccc-dddd-eeee-ffffffffffff")
                 )
@@ -55,7 +59,7 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
     def test_valid_mbid_still_resolves_under_cache_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "mb-release-tracklists"
-            with mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
+            with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir):
                 mbid = "11111111-2222-3333-4444-555555555555"
                 path = app_module._mb_release_tracklist_cache_path(mbid)
         self.assertIsNotNone(path)
@@ -66,8 +70,8 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "mb-release-tracklists"
             outside = Path(tmp) / "elsewhere"
-            with mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir), \
-                 mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800):
+            with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir), \
+                 patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800):
                 app_module._mb_release_tracklist_write_disk(
                     str(outside / "evil"), {"tracks": []}
                 )
@@ -78,8 +82,8 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "mb-release-tracklists"
             mbid = "11111111-2222-3333-4444-555555555555"
-            with mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir), \
-                 mock.patch.object(app_module, "_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800):
+            with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir), \
+                 patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800):
                 app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"]})
                 cached = app_module._mb_release_tracklist_read_disk(mbid, __import__("time").time())
         self.assertEqual(cached, {"tracks": ["a"]})

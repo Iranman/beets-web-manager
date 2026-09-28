@@ -23,6 +23,10 @@ import unittest
 import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -232,17 +236,17 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
             return {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
-        self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
+        self._patch(patch_app_family(APP, "_acoustid_lookup_cached",
                                        side_effect=lambda path: self._acoustid_candidates))
-        self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
-        self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
+        self._patch(patch_app_family(APP, "_mb_recording_search", return_value=[]))
+        self._patch(patch_app_family(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
         self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=fake_update_item_metadata))
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
-        self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
-        self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
+        self._patch(patch_app_family(APP, "_invalidate_lib_cache", return_value=None))
+        self._patch(patch_app_family(APP, "_trigger_plex_refresh", return_value=None))
 
     def _patch(self, patcher):
         obj = patcher.start()
@@ -583,17 +587,17 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
             return {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
-        self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
+        self._patch(patch_app_family(APP, "_acoustid_lookup_cached",
                                        side_effect=lambda path: self._acoustid_candidates))
-        self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
-        self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
+        self._patch(patch_app_family(APP, "_mb_recording_search", return_value=[]))
+        self._patch(patch_app_family(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
         self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=fake_update_item_metadata))
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
-        self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
-        self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
+        self._patch(patch_app_family(APP, "_invalidate_lib_cache", return_value=None))
+        self._patch(patch_app_family(APP, "_trigger_plex_refresh", return_value=None))
 
     def _patch(self, patcher):
         obj = patcher.start()

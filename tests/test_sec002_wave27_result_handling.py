@@ -12,6 +12,10 @@ from types import SimpleNamespace
 
 from backend import transaction_engine as txn
 from tests.test_import_review_attach_enforcement import APP, _APP_IMPORT_ERROR
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 VALID_RELEASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -100,9 +104,9 @@ class AlbumAddMbidsRequiredStageTests(unittest.TestCase):
         self.inline = InlineJobs()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
-            mock.patch.object(APP, "_invalidate_lib_cache"),
-            mock.patch.object(APP, "_trigger_plex_refresh"),
-            mock.patch.object(APP, "_mb_release_group_for_release", return_value=VALID_RGID),
+            patch_app_family(APP, "_invalidate_lib_cache"),
+            patch_app_family(APP, "_trigger_plex_refresh"),
+            patch_app_family(APP, "_mb_release_group_for_release", return_value=VALID_RGID),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -147,17 +151,17 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
             mock.patch.object(APP.lib, "get_album", return_value=SimpleNamespace(albumartist="Artist", album="Album")),
-            mock.patch.object(APP, "_resolve_mb_release_id", return_value=VALID_RELEASE_ID),
-            mock.patch.object(APP, "_album_mb_match_plan", return_value={
+            patch_app_family(APP, "_resolve_mb_release_id", return_value=VALID_RELEASE_ID),
+            patch_app_family(APP, "_album_mb_match_plan", return_value={
                 "matched_count": 1,
                 "actual_count": 1,
                 "expected_count": 1,
                 "release_title": "Album",
                 "unmatched_items": [],
             }),
-            mock.patch.object(APP, "_match_tracks_from_mb", return_value=1),
-            mock.patch.object(APP, "_strip_year_from_album_name"),
-            mock.patch.object(APP, "_invalidate_lib_cache"),
+            patch_app_family(APP, "_match_tracks_from_mb", return_value=1),
+            patch_app_family(APP, "_strip_year_from_album_name"),
+            patch_app_family(APP, "_invalidate_lib_cache"),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -242,17 +246,17 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         self.client = APP.app.test_client()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
-            mock.patch.object(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            patch_app_family(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
             mock.patch.object(APP.lib, "get_album", return_value=None),
-            mock.patch.object(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
-            mock.patch.object(APP, "_album_duplicate_resolver_plan", return_value={
+            patch_app_family(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
+            patch_app_family(APP, "_album_duplicate_resolver_plan", return_value={
                 "ok": True,
                 "mb_albumid": VALID_RELEASE_ID,
                 "groups": [{"action_items": [{"id": 999, "album_id": 7, "filename": "wrong.mp3", "title": "Wrong title"}]}],
                 "missing_tracks": [{"mb_trackid": VALID_TRACK_ID, "disc": 1, "track": 1, "title": "Correct title"}],
             }),
-            mock.patch.object(APP, "_invalidate_lib_cache"),
-            mock.patch.object(APP, "_trigger_plex_refresh"),
+            patch_app_family(APP, "_invalidate_lib_cache"),
+            patch_app_family(APP, "_trigger_plex_refresh"),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -346,10 +350,10 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         self.client = APP.app.test_client()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
-            mock.patch.object(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            patch_app_family(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
             mock.patch.object(APP.lib, "get_album", return_value=None),
-            mock.patch.object(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
-            mock.patch.object(APP, "_album_duplicate_resolver_plan", return_value={
+            patch_app_family(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
+            patch_app_family(APP, "_album_duplicate_resolver_plan", return_value={
                 "ok": True,
                 "mb_albumid": VALID_RELEASE_ID,
                 "groups": [{"action_items": [
@@ -361,8 +365,8 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
                     {"mb_trackid": self.VALID_TRACK_ID_2, "disc": 1, "track": 2, "title": "Correct title B"},
                 ],
             }),
-            mock.patch.object(APP, "_invalidate_lib_cache"),
-            mock.patch.object(APP, "_trigger_plex_refresh"),
+            patch_app_family(APP, "_invalidate_lib_cache"),
+            patch_app_family(APP, "_trigger_plex_refresh"),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -574,7 +578,7 @@ class ArtistAliasFolderReconcileTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.music_root = Path(self.tmp.name)
         (self.music_root / "Old Name").mkdir()
-        self.patches = [mock.patch.object(APP, "MUSIC_ROOT", self.music_root)]
+        self.patches = [patch_app_family(APP, "MUSIC_ROOT", self.music_root)]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)

@@ -18,6 +18,10 @@ from unittest import mock
 
 import app as app_module
 from backend.duplicate_identity import release_relation
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 REL = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -62,7 +66,7 @@ class MaintenanceAutoSelectionTests(unittest.TestCase):
         for path in (self.a, self.b, self.c):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"audio")
-        patcher = mock.patch.object(app_module, "MUSIC_ROOT", self.root)
+        patcher = patch_app_family(app_module, "MUSIC_ROOT", self.root)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self.tmp.cleanup)
@@ -168,7 +172,7 @@ class ScanSourceContractTests(unittest.TestCase):
     def test_mb_track_id_matches_are_fingerprint_cross_checked(self):
         self.assertIn('match_type == "MB Track ID" or match_type.startswith("fuzzy match")', self.scan)
     def test_album_title_step_uses_a_defined_logger(self):
-        self.assertIn("logger_instance=app.logger", self.scan)
+        self.assertIn("logger_instance=_app_logger", self.scan)
 
     def test_album_title_helper_runs_without_name_error(self):
         library = mock.Mock()

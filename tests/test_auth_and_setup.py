@@ -20,6 +20,10 @@ from unittest import mock
 
 import app as app_module
 import routes_setup
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class AuthAndSetupTests(unittest.TestCase):
@@ -48,12 +52,12 @@ class AuthAndSetupTests(unittest.TestCase):
         self.env_patch.start()
 
         self.patches = [
-            mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", self.data_dir),
-            mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
-            mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
-            mock.patch.object(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
-            mock.patch.object(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
-            mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
+            patch_app_family(app_module, "WEB_MANAGER_DATA_DIR", self.data_dir),
+            patch_app_family(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
+            patch_app_family(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
+            patch_app_family(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
+            patch_app_family(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
+            patch_app_family(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
             mock.patch.object(routes_setup, "_SETUP_COMPLETE_MARKER", self.setup_complete_file),
             mock.patch.object(routes_setup, "_SETTINGS_FILE", self.data_dir / "app_settings.json"),
             mock.patch.object(routes_setup, "_SETUP_ENV_FILE", self.data_dir / ".env"),
@@ -214,7 +218,7 @@ class AuthAndSetupTests(unittest.TestCase):
         admin_pass = "correct horse battery staple"
         self.client.post("/api/setup/first-run", json={"username": "admin", "password": admin_pass}, headers=headers)
         with mock.patch.object(routes_setup, "_beets_plugin_diagnostics", return_value={"remote_reachable": True}), \
-             mock.patch.object(app_module, "_set_browser_setup_state", return_value=False):
+             patch_app_family(app_module, "_set_browser_setup_state", return_value=False):
             res = self.client.post("/api/setup/complete", headers=headers)
         self.assertEqual(res.status_code, 500)
         self.assertFalse(self.setup_complete_file.exists())
@@ -336,7 +340,7 @@ class AuthAndSetupTests(unittest.TestCase):
     def test_flask_secret_key_is_persisted_when_generated(self):
         """The generated Flask session secret survives process/container recreation."""
         secret_file = self.data_dir / ".flask_secret_key"
-        with mock.patch.object(app_module, "_FLASK_SECRET_KEY_FILE", secret_file), \
+        with patch_app_family(app_module, "_FLASK_SECRET_KEY_FILE", secret_file), \
              mock.patch.dict(os.environ, {"BEETS_WEB_SECRET_KEY": ""}, clear=False):
             first = app_module._get_or_create_flask_secret_key()
             second = app_module._get_or_create_flask_secret_key()

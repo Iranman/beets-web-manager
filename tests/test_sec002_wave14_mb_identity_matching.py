@@ -10,6 +10,10 @@ from backend.matching_contract import (
     AiState,
     _uuid,
 )
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
@@ -357,7 +361,7 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
             # fallback a folder with no local mount would use in production,
             # rather than relying on the web manager reading local disk
             # directly (the vulnerability being closed).
-            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
+            with patch_app_family("app", "_fetch_mb_release_tracklist", return_value=mb_mock_data), \
                  patch("app.composite_workflows.inspect_import_source", return_value={
                      "ok": True,
                      "audio_files": [{"relative_path": "track01.mp3", "properties": {}}],
@@ -401,7 +405,7 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
             empty_dir = Path(tmpdir) / "Some Artist" / "Some Release"
             empty_dir.mkdir(parents=True)
 
-            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
+            with patch_app_family("app", "_fetch_mb_release_tracklist", return_value=mb_mock_data), \
                  patch("app.composite_workflows.inspect_import_source", side_effect=RuntimeError("Beets Control Agent is unavailable")):
                 res = _folder_release_preflight(str(empty_dir), "11111111-1111-1111-1111-111111111111")
 
@@ -420,7 +424,7 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             album_dir = Path(tmpdir) / "Some Artist" / "Some Release"
             album_dir.mkdir(parents=True)
-            with patch("app._fetch_mb_release_tracklist", return_value={"ok": True, "tracks": []}):
+            with patch_app_family("app", "_fetch_mb_release_tracklist", return_value={"ok": True, "tracks": []}):
                 res = _folder_release_preflight(str(album_dir), "11111111-1111-1111-1111-111111111111")
 
         self.assertFalse(res["ok"])
@@ -649,7 +653,7 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
             # this tempdir is outside MUSIC_ROOT/DOWNLOADS_ROOT, so the
             # fixed local-scan gate (#6093/#6095) routes this through the
             # engine-side inspect_import_source() fallback instead.
-            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
+            with patch_app_family("app", "_fetch_mb_release_tracklist", return_value=mb_mock_data), \
                  patch("app.composite_workflows.inspect_import_source", return_value={
                      "ok": True,
                      "audio_files": [{"relative_path": "01 Track One.mp3", "properties": {}}],
@@ -733,7 +737,7 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
 
         with patch.object(app_module.composite_workflows, "get_album", return_value=album_row), \
              patch.object(app_module.composite_workflows, "find_all_items_by_album_id", return_value=[]), \
-             patch.object(app_module, "_fetch_mb_release_tracklist", return_value={
+             patch_app_family(app_module, "_fetch_mb_release_tracklist", return_value={
                  "ok": True,
                  "tracks": [{"title": "Track One", "track": 1}],
                  "release_group": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",  # different RGID

@@ -22,6 +22,10 @@ from backend.transaction_engine import (
     _engine_stamp_artist_folder_scan,
     list_artist_folder_inventory,
 )
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -627,11 +631,11 @@ class RealProductionPathTests(Wave21BaseTest):
             finally:
                 con.close()
 
-        self._db_patch = mock.patch.object(app_module, "_db", _local_db)
+        self._db_patch = patch_app_family(app_module, "_db", _local_db)
         self._db_patch.start()
         self.addCleanup(self._db_patch.stop)
 
-        self._music_root_patch = mock.patch.object(app_module, "MUSIC_ROOT", self.music_root)
+        self._music_root_patch = patch_app_family(app_module, "MUSIC_ROOT", self.music_root)
         self._music_root_patch.start()
         self.addCleanup(self._music_root_patch.stop)
 
@@ -662,8 +666,8 @@ class RealProductionPathTests(Wave21BaseTest):
             "musicbrainz": {"id": MBID_A},
         }]
 
-        with mock.patch.object(app_module, "_scan_artist_folder_groups", return_value=mock_groups):
-            with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True):
+        with patch_app_family(app_module, "_scan_artist_folder_groups", return_value=mock_groups):
+            with patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=True):
                 log = []
                 res = app_module._apply_artist_folder_groups(str(self.music_root), None, False, log, use_musicbrainz=False)
                 self.assertEqual(res.get("groups"), 1, f"Log output: {log}")
@@ -737,8 +741,8 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
 
     def setUp(self):
         self.patchers = []
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.2))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.2))
 
     def tearDown(self):
         for patcher in reversed(self.patchers):
@@ -873,8 +877,8 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         background job must call apply_artist_folder_reconcile at most
         once even when its own client-side call fails, and must recover
         the real outcome via transaction polling."""
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.mkdtemp())), \
-             mock.patch.object(app_module, "_security_auth_disabled", return_value=True):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.mkdtemp())), \
+             patch_app_family(app_module, "_security_auth_disabled", return_value=True):
             with mock.patch.object(
                 app_module, "_stamp_artist_folder_scan",
                 return_value={"candidates": [{"source": "x"}], "skipped": []},
@@ -1192,8 +1196,8 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         genuinely successful, empty scan may produce the "No artist folders
         need MB ID stamping" outcome -- an engine failure must be reported
         as a failure instead."""
-        with mock.patch.object(app_module, "MUSIC_ROOT", self.root), \
-             mock.patch.object(app_module, "_security_auth_disabled", return_value=True):
+        with patch_app_family(app_module, "MUSIC_ROOT", self.root), \
+             patch_app_family(app_module, "_security_auth_disabled", return_value=True):
             # Failure case: the real job must raise (fail closed), not
             # report "no artist folders need MB ID stamping".
             with mock.patch.object(
@@ -1249,8 +1253,8 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         contains the raw exception text, while still returning a safe
         status code and error_code."""
         sensitive = "postgresql://internal-user:hunter2@10.0.0.55:5432/beetsdb"
-        with mock.patch.object(app_module, "MUSIC_ROOT", self.root), \
-             mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
+        with patch_app_family(app_module, "MUSIC_ROOT", self.root), \
+             patch_app_family(app_module, "_security_auth_disabled", return_value=True), \
              mock.patch.object(
                  app_module.composite_workflows, "get_artist_folder_inventory",
                  side_effect=app_module.BeetsAuthError(
@@ -1277,8 +1281,8 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
         must not expose the raw exception either -- only the job must
         raise (fail closed), never the leaked internal detail."""
         sensitive = "s3://internal-bucket/private-config.yaml?sig=abcdef123456"
-        with mock.patch.object(app_module, "MUSIC_ROOT", self.root), \
-             mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
+        with patch_app_family(app_module, "MUSIC_ROOT", self.root), \
+             patch_app_family(app_module, "_security_auth_disabled", return_value=True), \
              mock.patch.object(
                  app_module.composite_workflows, "get_artist_folder_inventory",
                  side_effect=app_module.BeetsUnavailableError(f"connection to {sensitive} failed"),
@@ -1319,8 +1323,8 @@ class ResilientApplySanitizedErrorTests(unittest.TestCase):
 
     def setUp(self):
         self.patchers = []
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
-        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(patch_app_family(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
 
     def tearDown(self):
         for patcher in reversed(self.patchers):

@@ -25,6 +25,10 @@ from backend.matching_contract import (
     _uuid,
     _MB_UUID_RE,
 )
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 RGID = "11111111-1111-1111-1111-111111111111"
@@ -1666,7 +1670,7 @@ def _enrich(current, candidate, details=None, ai_state=None):
     # _fetch_mb_recording_details would otherwise make a real network call
     # whenever the candidate carries a valid mb_trackid and no details were
     # supplied -- exactly the call-site-1 production shape being tested.
-    with mock.patch.object(APP, "_fetch_mb_recording_details", return_value={}):
+    with patch_app_family(APP, "_fetch_mb_recording_details", return_value={}):
         return APP._enrich_track_ai_candidate(dict(current), dict(candidate), details, ai_state=ai_state)
 
 

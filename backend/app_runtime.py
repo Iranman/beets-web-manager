@@ -5,11 +5,15 @@ Boot environment loading, environment-derived settings, filesystem roots, shared
 
 from __future__ import annotations
 
-import os, re, sqlite3, threading, time
+import logging, os, platform, re, shutil, sqlite3, subprocess, threading, time
 import urllib.error, urllib.parse, urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# The Flask application's logger (Flask names it after the import name, "app").
+# Service modules log through this object instead of reaching for app.logger.
+_app_logger = logging.getLogger("app")
 
 # ── ARCH-001 extracted code ──
 
@@ -39,7 +43,10 @@ os.environ.setdefault(
 
 
 def _s(v: Any) -> str:
-    return str(v or "") if v is not None else ""
+    # Canonical text coercion. Bytes (e.g. Beets paths) decode as UTF-8 rather
+    # than rendering as "b'...'". app.py previously defined this twice; the
+    # later, bytes-aware definition was the one in effect and is kept here.
+    return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v or "")
 
 
 _BOOT_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -663,3 +670,289 @@ EDITABLE_FIELDS = [
     ("mb_albumid",  "MB Album ID"),
     ("mb_artistid", "MB Artist ID"),
 ]
+
+
+def _is_musl_linux() -> bool:
+    if platform.system().lower() != "linux":
+        return False
+    if any(Path("/lib").glob("ld-musl-*.so.1")):
+        return True
+    try:
+        ldd = shutil.which("ldd")
+        if ldd:
+            r = subprocess.run([ldd, "--version"], timeout=5, capture_output=True, text=True)
+            return "musl" in ((r.stdout or "") + (r.stderr or "")).lower()
+    except Exception:
+        pass
+    return False
+
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
+    r"(\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?(\[REDACTED\]|[^\s,;}\]\"]+)"
+)
+
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+_REDACTED_SECRET = "[REDACTED]"
+
+
+def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
+    if match.group(3) == _REDACTED_SECRET:
+        return match.group(0)
+    return f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}"
+
+
+# Matches userinfo credentials embedded directly in a URL, e.g.
+# "https://user:password@example.test/" -- these don't have a
+# "keyword: value" shape so _SECRET_ASSIGNMENT_RE never sees them.
+#
+# The username segment excludes ":" (unlike the password segment) so the
+# two adjacent runs can never both stretch across the same ":" -- that
+# exclusion, not a length cap, is what makes the ":" delimiter unambiguous
+# and rules out the polynomial-time backtracking CodeQL flagged originally.
+# A length cap on top of that would only make matching fail (and therefore
+# fail to redact) for any credential longer than the cap, so neither
+# segment is length-limited here.
+_URL_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@:]+:[^\s/@]+@")
+
+
+def _redact_security_text(value: Any) -> str:
+    text = _s(value)
+    text = _CONTROL_CHAR_RE.sub("?", text)
+    text = _URL_CREDENTIALS_RE.sub(lambda m: f"{m.group(1)}{_REDACTED_SECRET}@", text)
+    return _SECRET_ASSIGNMENT_RE.sub(_redact_secret_assignment_match, text)
+
+
+def _split_mbid_values(value: str) -> List[str]:
+    try:
+        parts = _split_beets_multi(value)
+    except NameError:
+        parts = re.split(r'[\0;,]', str(value or ""))
+    ids = []
+    for part in parts:
+        part = (part or "").strip().lower()
+        if _MB_UUID_RE.match(part):
+            ids.append(part)
+    return ids
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except Exception:
+        return False
+
+
+def _split_beets_multi(value: str) -> List[str]:
+    """Split beets multi-value artist fields without splitting normal names."""
+    text = _s(value).strip()
+    if not text:
+        return []
+    if "\0" in text:
+        parts = text.split("\0")
+    elif ";" in text:
+        parts = text.split(";")
+    else:
+        parts = [text]
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _split_collab_credit(value: str, known_artists: Optional[set] = None) -> List[str]:
+    """Conservatively split collaboration credits for display aliases.
+
+    We only split text credits when at least one side already exists as an artist
+    in the library. That avoids turning band names like "Earth, Wind & Fire"
+    into separate artists.
+    """
+    text = _normalize_name(_s(value)).strip()
+    if not text:
+        return []
+    parts = [p.strip() for p in re.split(r"\s+(?:&|and|x|X|\+|with)\s+", text) if p.strip()]
+    if len(parts) < 2:
+        return [text]
+    if known_artists:
+        known_norm = {a.casefold() for a in known_artists}
+        if not any(p.casefold() in known_norm for p in parts):
+            return [text]
+    return parts
+
+
+def _path_lexically_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+    except Exception:
+        return False
+
+
+def _path_has_symlink_component_under(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except Exception:
+        return True
+    current = root
+    parts = relative.parts if include_leaf else relative.parts[:-1]
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except Exception:
+            return True
+    return False
+
+
+# Unicode punctuation → ASCII equivalents
+_UNICODE_NORM = [
+    # Hyphens/dashes
+    ("‐", "-"),  # ‐ HYPHEN
+    ("‑", "-"),  # ‑ NON-BREAKING HYPHEN
+    ("‒", "-"),  # ‒ FIGURE DASH
+    ("–", "-"),  # – EN DASH
+    ("—", "-"),  # — EM DASH
+    ("―", "-"),  # ― HORIZONTAL BAR
+    ("﹘", "-"),  # ﹘ SMALL EM DASH
+    ("﹣", "-"),  # ﹣ SMALL HYPHEN-MINUS
+    ("－", "-"),  # － FULLWIDTH HYPHEN-MINUS
+    # Quotes
+    ("‘", "'"),  # ' LEFT SINGLE QUOTATION MARK
+    ("’", "'"),  # ' RIGHT SINGLE QUOTATION MARK
+    ("‚", "'"),  # ‚ SINGLE LOW-9 QUOTATION MARK
+    ("‛", "'"),  # ‛ SINGLE HIGH-REVERSED-9 QUOTATION MARK
+    ("“", '"'),  # " LEFT DOUBLE QUOTATION MARK
+    ("”", '"'),  # " RIGHT DOUBLE QUOTATION MARK
+    ("„", '"'),  # „ DOUBLE LOW-9 QUOTATION MARK
+    # Other punctuation
+    ("…", "..."),  # … HORIZONTAL ELLIPSIS
+    (" ", " "),    # non-breaking space
+    ("⁠", ""),     # WORD JOINER
+]
+
+
+def _normalize_name(s: str) -> str:
+    for old, new in _UNICODE_NORM:
+        s = s.replace(old, new)
+    return s.strip()
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        raw_p = str(path)
+        raw_r = str(root)
+        if "\x00" in raw_p or "\x00" in raw_r:
+            return False
+        rp = Path(os.path.realpath(raw_p))
+        rr = Path(os.path.realpath(raw_r))
+        return rp == rr or rr in rp.parents
+    except Exception:
+        return False
+
+
+def _safe_path_component(value: Any, fallback: str = "untitled") -> str:
+    import unicodedata
+    text = _s(value).strip() or fallback
+    text = text.replace("/", "_").replace("\\", "_")
+    text = re.sub(r'[\x00-\x1f<>:"?*|]', "_", text)
+    # Unicode format/control characters (bidi overrides such as U+202E, zero-
+    # width joiners/spaces, BOM, etc.) aren't covered by the ASCII-only class
+    # above but can still make a folder name render deceptively even though
+    # it's already fully contained under the trusted root -- strip them too
+    # rather than merely relying on path containment for what is ultimately
+    # a display-spoofing concern, not a traversal one.
+    text = "".join("_" if unicodedata.category(ch) in ("Cf", "Cc") else ch for ch in text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.rstrip(". ")
+    return text or fallback
+
+
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except Exception:
+        return str(left) == str(right)
+
+
+def _safe_beets_error_message(
+    ex: Exception, *, bad_request: str, not_found: str, generic: str, unexpected: str,
+) -> str:
+    """Map a Beets client exception to a short, safe, user-facing message --
+    never str(ex), which can carry internal URLs, paths, or transport
+    internals (CodeQL: information exposure through an exception). The real
+    exception must still be logged server-side by the caller (e.g.
+    app.logger.error(..., exc_info=True)); this is only what may reach an
+    HTTP response, a job result field, or a job-visible log line."""
+    if isinstance(ex, BeetsAuthError):
+        return "Authentication with Beets Control Agent failed."
+    if isinstance(ex, BeetsBadRequestError):
+        return bad_request
+    if isinstance(ex, BeetsNotFoundError):
+        return not_found
+    if isinstance(ex, BeetsUnavailableError):
+        return "Beets Control Agent is unavailable."
+    if isinstance(ex, BeetsError):
+        return generic
+    return unexpected
+
+
+def _safe_inventory_error_message(ex: Exception) -> str:
+    """Sanitized message for an artist-folder engine inventory failure --
+    see _safe_beets_error_message()."""
+    return _safe_beets_error_message(
+        ex,
+        bad_request="Beets Control Agent rejected the inventory request.",
+        not_found="The configured music library was not found by the Beets Engine.",
+        generic="Beets Control Agent could not provide the artist-folder inventory.",
+        unexpected="Artist-folder inventory failed.",
+    )
+
+
+def _safe_operation_status_error_message(ex: Exception) -> str:
+    """Sanitized message for a failed saved-operation transaction status
+    lookup (Clean All resume) -- see _safe_beets_error_message()."""
+    return _safe_beets_error_message(
+        ex,
+        bad_request="Beets Control Agent rejected the status request.",
+        not_found="Beets Control Agent no longer recognizes the saved operation.",
+        generic="Beets Control Agent could not confirm the saved operation's status.",
+        unexpected="Could not confirm the saved operation's status.",
+    )
+
+
+def _safe_apply_error_message(ex: Exception) -> str:
+    """Sanitized message for a failed/rejected artist-folder reconcile
+    Apply call, or a failed status poll following one -- see
+    _safe_beets_error_message()."""
+    return _safe_beets_error_message(
+        ex,
+        bad_request="Beets Control Agent rejected the apply request.",
+        not_found="Beets Control Agent no longer recognizes this operation.",
+        generic="Beets Control Agent could not complete the apply request.",
+        unexpected="The apply request failed.",
+    )
+
+
+def _norm(s):
+    return re.sub(r"[^\w\s]", "", (s or "").lower()).strip()
+
+
+# Imported last, after the boot environment above is loaded: backend.beets_adapter
+# builds its module-level client from BEETS_WEB_URL / API-key settings at import.
+from backend.beets_adapter import (  # noqa: E402
+    BeetsAuthError, BeetsBadRequestError, BeetsError, BeetsNotFoundError, BeetsUnavailableError,
+)
+
+
+# ── Process-wide service singletons ──
+# One in-memory job store and one transaction store per Web Manager process.
+# Every service module shares these objects; app.py re-exports them.
+from job_engine import JobStore  # noqa: E402
+from backend.transaction_engine import TransactionStore  # noqa: E402
+
+jobs = JobStore()
+transactions = TransactionStore()

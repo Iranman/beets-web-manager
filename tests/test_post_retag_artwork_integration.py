@@ -24,6 +24,10 @@ import unittest
 import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -186,7 +190,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
                 yield con
             finally:
                 con.close()
-        self._patch(mock.patch.object(APP, "_db", side_effect=_mock_db))
+        self._patch(patch_app_family(APP, "_db", side_effect=_mock_db))
 
         self.aid = _seed_album(APP, mb_albumid=MB_ALBUMID)
 
@@ -195,7 +199,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         self.fake_beet_run = fake_beet_run
-        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run, create=True))
+        self._patch(patch_app_family(APP, "_beet_run", side_effect=fake_beet_run, create=True))
 
         def fake_fetch_tracklist(mb_albumid, log=None):
             return {
@@ -237,7 +241,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self.fake_update_meta = fake_update_meta
         self.fake_relocate = fake_relocate
 
-        self._patch(mock.patch.object(APP, "_fetch_mb_release_tracklist", side_effect=fake_fetch_tracklist))
+        self._patch(patch_app_family(APP, "_fetch_mb_release_tracklist", side_effect=fake_fetch_tracklist))
         self._patch(mock.patch.object(APP.composite_workflows, "plan_confirmed_import", side_effect=fake_plan_confirmed_import))
         self._patch(mock.patch.object(APP.composite_workflows, "apply_confirmed_import", side_effect=fake_apply_confirmed_import))
         self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_mb_track))
@@ -245,10 +249,10 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self._patch(mock.patch.object(APP.composite_workflows, "update_album_metadata", side_effect=fake_update_meta))
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate))
 
-        self._patch(mock.patch.object(APP, "_preserve_torrent_source_path", return_value=False))
-        self._patch(mock.patch.object(APP, "_validate_import_source_audio", return_value=None))
-        self._patch(mock.patch.object(APP, "_prefer_album_mb_release", side_effect=lambda mbid, log: mbid))
-        self._patch(mock.patch.object(APP, "_delete_if_already_in_library", return_value=None))
+        self._patch(patch_app_family(APP, "_preserve_torrent_source_path", return_value=False))
+        self._patch(patch_app_family(APP, "_validate_import_source_audio", return_value=None))
+        self._patch(patch_app_family(APP, "_prefer_album_mb_release", side_effect=lambda mbid, log: mbid))
+        self._patch(patch_app_family(APP, "_delete_if_already_in_library", return_value=None))
         self._patch(mock.patch.object(
             APP, "_repair_album_mbid_sticking_once",
             side_effect=lambda *a, **k: self.call_order.append(("recording_id_repair",)) or {"changed": False},
@@ -257,7 +261,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
             APP, "_repair_album_art",
             side_effect=lambda aid, log, **k: self.call_order.append(("artwork_repair", aid)) or {"status": "saved", "saved_path": "/x/cover.jpg"},
         ))
-        self._patch(mock.patch.object(APP, "_remove_pending_review_for_path", return_value=None))
+        self._patch(patch_app_family(APP, "_remove_pending_review_for_path", return_value=None))
         self._patch(mock.patch.object(
             APP, "_auto_merge_case_duplicate_artist_folder",
             side_effect=lambda *a, **k: self.call_order.append(("dedup",)),
@@ -268,7 +272,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self._patch(mock.patch.object(
             APP, "_trigger_plex_refresh", side_effect=lambda *a, **k: self.call_order.append(("plex_refresh",)),
         ))
-        self._patch(mock.patch.object(APP, "_record_ai_match", return_value=None))
+        self._patch(patch_app_family(APP, "_record_ai_match", return_value=None))
         self._patch(mock.patch.object(APP.time, "sleep", return_value=None))
 
     def _patch(self, patcher):
@@ -330,7 +334,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
     # ---- artwork outcomes through the real function ------------------------
 
     def test_already_present_artwork_result(self):
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "skipped", "source": "local"}):
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "skipped", "source": "local"}):
             result = APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         self.assertEqual(result, {
             "album_id": self.aid,
@@ -341,7 +345,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         })
 
     def test_artwork_failure_keeps_metadata_import_successful(self):
-        with mock.patch.object(APP, "_repair_album_art", return_value={"status": "failed", "error": "no art found"}):
+        with patch_app_family(APP, "_repair_album_art", return_value={"status": "failed", "error": "no art found"}):
             result = APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         self.assertTrue(result["metadata_imported"])
         self.assertTrue(result["identity_verified"])
@@ -357,7 +361,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         # the one place that reload actually matters.
         mismatched_album = SimpleNamespace(mb_albumid="00000000-0000-0000-0000-000000000000")
         with mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: mismatched_album), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             result = APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
         self.assertTrue(result["metadata_imported"])
@@ -372,7 +376,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
             fake_con.execute.return_value.fetchone.return_value = None
             fake_con.execute.return_value.fetchall.return_value = []
             connect_mock.return_value = fake_con
-            with mock.patch.object(APP, "_repair_album_art") as repair:
+            with patch_app_family(APP, "_repair_album_art") as repair:
                 result = APP._ai_import_folder("/tmp/incidents-none", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
         self.assertEqual(result["artwork_status"], "skipped_no_album")
@@ -382,7 +386,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
 
     def test_import_failure_raises_before_any_later_stage(self):
         with mock.patch.object(APP.composite_workflows, "apply_confirmed_import", return_value={"ok": False, "error": "boom"}), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
@@ -390,35 +394,35 @@ class AiImportFolderSequenceTests(unittest.TestCase):
     def test_mbsync_cancellation_prevents_artwork_and_propagates(self):
         cancel_event = threading.Event()
         with mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": False, "error": "cancelled"}), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log, cancel_event)
         repair.assert_not_called()
 
     def test_write_timeout_returncode_raises_and_never_reaches_artwork(self):
         with mock.patch.object(APP.composite_workflows, "update_album_metadata", return_value={"ok": False, "error": "write failed"}), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_mbsync_timeout_returncode_raises_and_never_reaches_artwork(self):
         with mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", return_value={"ok": False, "error": "mbsync timeout"}), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_move_timeout_returncode_raises_and_never_reaches_artwork(self):
         with mock.patch.object(APP.composite_workflows, "relocate_album", return_value={"ok": False, "error": "move failed"}), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_import_timeout_returncode_raises_before_any_later_stage(self):
         with mock.patch.object(APP.composite_workflows, "apply_confirmed_import", return_value={"ok": False, "error": "timeout"}), \
-             mock.patch.object(APP, "_repair_album_art") as repair:
+             patch_app_family(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
@@ -429,7 +433,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         def cancel_in_artwork(aid, log, **kwargs):
             cancel_event.set()
             return {"status": "failed", "error": "cancelled"}
-        with mock.patch.object(APP, "_repair_album_art", side_effect=cancel_in_artwork):
+        with patch_app_family(APP, "_repair_album_art", side_effect=cancel_in_artwork):
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log, cancel_event)
 

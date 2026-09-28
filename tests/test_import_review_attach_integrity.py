@@ -43,6 +43,10 @@ from tests.test_import_review_attach_enforcement import (
     RELEASE_ID,
     RGID,
 )
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 def setUpModule():
@@ -244,15 +248,15 @@ class _AttachIntegrityTestCase(unittest.TestCase):
             return result if result is not None else {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=get_item))
-        self._patch(mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=acoustid_lookup))
-        self._patch(mock.patch.object(APP, "_mb_recording_search", side_effect=mb_search))
-        self._patch(mock.patch.object(APP, "_fetch_mb_recording_details", side_effect=fetch_details))
+        self._patch(patch_app_family(APP, "_acoustid_lookup_cached", side_effect=acoustid_lookup))
+        self._patch(patch_app_family(APP, "_mb_recording_search", side_effect=mb_search))
+        self._patch(patch_app_family(APP, "_fetch_mb_recording_details", side_effect=fetch_details))
         self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.composite_workflows, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=fake_update_item_metadata))
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
-        self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
-        self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
+        self._patch(patch_app_family(APP, "_invalidate_lib_cache", return_value=None))
+        self._patch(patch_app_family(APP, "_trigger_plex_refresh", return_value=None))
 
     @staticmethod
     def _iid_from_track_repair_payload(payload):
@@ -727,7 +731,7 @@ class SecuritySanitizationTests(_AttachIntegrityTestCase):
         def raising_lookup(path):
             raise RuntimeError("boom Authorization: Bearer recon-exc-secret Cookie: session=recon-cookie-secret")
 
-        with mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
+        with patch_app_family(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
              mock.patch.object(APP.app.logger, "error") as mock_log:
             resp = self._post_safe(iid)
 
@@ -804,7 +808,7 @@ class SecuritySanitizationTests(_AttachIntegrityTestCase):
         def raising_lookup(path):
             raise RuntimeError(f"boom https://svcuser:{long_password}@internal.example/api")
 
-        with mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
+        with patch_app_family(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
              mock.patch.object(APP.app.logger, "error") as mock_log:
             resp = self._post_safe(iid)
 

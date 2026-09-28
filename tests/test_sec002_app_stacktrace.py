@@ -11,6 +11,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class ClassifyOpenAiErrorSharedHelperTests(unittest.TestCase):
@@ -47,14 +51,14 @@ class FolderCleanupPathContainmentTests(unittest.TestCase):
         self.assertNotIn("LEAK_MARKER", error)
 
     def test_valid_path_under_music_root_still_resolves(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
             target = Path(tempfile.gettempdir()) / "some-album"
             path, error = app_module._folder_cleanup_path(str(target))
         self.assertIsNone(error)
         self.assertEqual(path, target.resolve(strict=False))
 
     def test_outside_root_path_still_rejected_with_safe_message(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir()) / "music-only"):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir()) / "music-only"):
             path, error = app_module._folder_cleanup_path("/etc")
         self.assertIsNone(path)
         self.assertEqual(error, "Path is outside the configured music library")
@@ -86,7 +90,7 @@ class FolderCleanRootFalsePositiveTests(unittest.TestCase):
             allowed_root = Path(tmp) / "allowed"
             allowed_root.mkdir()
             missing = allowed_root / "does-not-exist"
-            with mock.patch.object(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
+            with patch_app_family(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
                 with self.assertRaises(RuntimeError) as ctx:
                     app_module._folder_clean_root(str(missing))
         self.assertEqual(str(ctx.exception), "Path not found.")
@@ -102,7 +106,7 @@ class FolderCleanRootFalsePositiveTests(unittest.TestCase):
             outside_dir = Path(tmp) / "outside"
             allowed_root.mkdir()
             outside_dir.mkdir()
-            with mock.patch.object(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
+            with patch_app_family(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
                 with self.assertRaises(RuntimeError) as ctx:
                     app_module._folder_clean_root(str(outside_dir))
         self.assertIn("must be under", str(ctx.exception))
@@ -219,7 +223,7 @@ class PlexStatusExceptionSanitizationTests(unittest.TestCase):
         # its own "url" status field (not a leak); only the exception
         # text itself -- which could carry different/unexpected detail --
         # must never reach the "error" field.
-        with mock.patch.object(app_module, "_plex_settings", return_value={"url": "http://plex.internal.example:32400", "token": "secret"}), \
+        with patch_app_family(app_module, "_plex_settings", return_value={"url": "http://plex.internal.example:32400", "token": "secret"}), \
              mock.patch("urllib.request.urlopen", side_effect=OSError("LEAK_MARKER token=secret-xyz")):
             payload = app_module._plex_status_payload(force=True)
         self.assertNotIn("LEAK_MARKER", payload.get("error", ""))
@@ -253,9 +257,9 @@ class PlaylistDeleteExceptionSanitizationTests(unittest.TestCase):
 
     def test_engine_m3u_delete_failure_is_sanitized(self):
         with app_module.app.test_request_context("/api/playlists/Test%20Playlist", method="DELETE"), \
-             mock.patch.object(app_module, "_playlist_ensure_state_dirs"), \
-             mock.patch.object(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
-             mock.patch.object(app_module, "_playlist_key", return_value="pl_test_playlist"), \
+             patch_app_family(app_module, "_playlist_ensure_state_dirs"), \
+             patch_app_family(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
+             patch_app_family(app_module, "_playlist_key", return_value="pl_test_playlist"), \
              mock.patch.object(app_module.composite_workflows, "delete_playlist_m3u", side_effect=OSError("LEAK_MARKER /data/playlists")):
             response = app_module.playlist_delete("Test Playlist")
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
@@ -268,12 +272,12 @@ class PlaylistDeleteExceptionSanitizationTests(unittest.TestCase):
         with app_module.app.test_request_context(
             "/api/playlists/Test%20Playlist", method="DELETE",
             data=json.dumps({"delete_plex": True}), content_type="application/json",
-        ), mock.patch.object(app_module, "_playlist_ensure_state_dirs"), \
-           mock.patch.object(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
-           mock.patch.object(app_module, "_playlist_key", return_value="pl_test_playlist"), \
+        ), patch_app_family(app_module, "_playlist_ensure_state_dirs"), \
+           patch_app_family(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
+           patch_app_family(app_module, "_playlist_key", return_value="pl_test_playlist"), \
            mock.patch.object(app_module.composite_workflows, "delete_playlist_m3u", return_value={"ok": True, "deleted": True}), \
-           mock.patch.object(app_module, "_plex_settings", return_value={"token": "secret"}), \
-           mock.patch.object(app_module, "_plex_delete_playlist_by_title", side_effect=OSError("LEAK_MARKER plex.internal.example")):
+           patch_app_family(app_module, "_plex_settings", return_value={"token": "secret"}), \
+           patch_app_family(app_module, "_plex_delete_playlist_by_title", side_effect=OSError("LEAK_MARKER plex.internal.example")):
             response = app_module.playlist_delete("Test Playlist")
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
         self.assertNotIn("LEAK_MARKER", json.dumps(data))

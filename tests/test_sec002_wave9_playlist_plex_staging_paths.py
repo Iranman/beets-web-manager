@@ -15,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 def _record_staged_path(name, track, staged_path):
@@ -36,12 +40,12 @@ def _patched_playlist_state(base_dir):
     for d in (base, state_root, manifests, exports, jobs, membership):
         d.mkdir(parents=True, exist_ok=True)
     patches = [
-        mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", base),
-        mock.patch.object(app_module, "PLAYLIST_STATE_ROOT", state_root),
-        mock.patch.object(app_module, "PLAYLIST_MANIFESTS_DIR", manifests),
-        mock.patch.object(app_module, "PLAYLIST_EXPORTS_DIR", exports),
-        mock.patch.object(app_module, "PLAYLIST_JOB_STATE_DIR", jobs),
-        mock.patch.object(app_module, "PLAYLIST_MEMBERSHIP_DIR", membership),
+        patch_app_family(app_module, "WEB_MANAGER_DATA_DIR", base),
+        patch_app_family(app_module, "PLAYLIST_STATE_ROOT", state_root),
+        patch_app_family(app_module, "PLAYLIST_MANIFESTS_DIR", manifests),
+        patch_app_family(app_module, "PLAYLIST_EXPORTS_DIR", exports),
+        patch_app_family(app_module, "PLAYLIST_JOB_STATE_DIR", jobs),
+        patch_app_family(app_module, "PLAYLIST_MEMBERSHIP_DIR", membership),
     ]
     for patcher in patches:
         patcher.start()
@@ -87,7 +91,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
                  _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module.composite_workflows, "ensure_playlist_staging",
                                     return_value={"ok": True}) as mock_ensure:
@@ -104,7 +108,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
                  _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module.composite_workflows, "ensure_playlist_staging",
                                     side_effect=ConnectionError("engine unreachable")):
@@ -117,7 +121,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
                  _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module.composite_workflows, "ensure_playlist_staging",
                                     return_value={"ok": False, "error": "staging_unavailable"}):
@@ -182,7 +186,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             outside_mp3 = outside_dir / "secret.mp3"
             outside_mp3.write_bytes(b"audio data")
 
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
                  _patched_playlist_state(playlist_state_dir):
                 track = {"id": "tr1"}
                 _record_staged_path("MyPlaylist", track, outside_mp3)
@@ -201,7 +205,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             playlist_state_dir = Path(tmp) / "playlists"
             staging_root.mkdir()
             playlist_state_dir.mkdir()
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
                  _patched_playlist_state(playlist_state_dir):
                 # Nested under this playlist's own staging subfolder --
                 # real staged files always live there, never directly
@@ -234,9 +238,9 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             library_track.parent.mkdir(parents=True)
             library_track.write_bytes(b"library track")
 
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
                  _patched_playlist_state(playlist_state_dir), \
-                 mock.patch.object(app_module, "MUSIC_ROOT", music_root):
+                 patch_app_family(app_module, "MUSIC_ROOT", music_root):
                 track = {"id": "tr3"}
                 _record_staged_path("MyPlaylist", track, library_track)
                 with self.assertRaises(RuntimeError) as cm:
@@ -259,7 +263,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             staging_root.mkdir()
             playlist_state_dir.mkdir()
 
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
                  _patched_playlist_state(playlist_state_dir) as _patched:
                 playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
                 downloads = playlist_dir / "downloads"
@@ -289,7 +293,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             staging_root.mkdir()
             playlist_state_dir.mkdir()
 
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
                  _patched_playlist_state(playlist_state_dir) as _patched:
                 playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
                 playlist_downloads = playlist_dir / "downloads"
@@ -327,7 +331,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             staging_root.mkdir()
             playlist_state_dir.mkdir()
 
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
                  _patched_playlist_state(playlist_state_dir):
                 playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
                 playlist_downloads = playlist_dir / "downloads"
@@ -366,8 +370,8 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
             ]
 
             with _patched_playlist_state(Path(tmp) / "state"), \
-                 mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", playlist_dir), \
-                 mock.patch.object(app_module, "_plex_settings", return_value={"token": ""}), \
+                 patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", playlist_dir), \
+                 patch_app_family(app_module, "_plex_settings", return_value={"token": ""}), \
                  mock.patch.object(app_module.composite_workflows, "export_playlist_m3u", return_value={"ok": True, "playlist_key": "engine_key"}) as mock_export:
                 result = app_module._create_playlist_outputs("CleanPlaylist", items, sync_plex=False)
 
@@ -378,7 +382,7 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
             self.assertFalse((playlist_dir / "CleanPlaylist.m3u").exists())
 
     def test_plex_path_containment_rejects_prefix_collision(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             # /data/media/music2 must NOT be considered inside /data/media/music
             self.assertFalse(app_module._plex_path_is_under("/data/media/music2/song.mp3", "/data/media/music"))
             self.assertTrue(app_module._plex_path_is_under("/data/media/music/Artist/Album/01.mp3", "/data/media/music"))
@@ -395,10 +399,10 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
         not be silently reinterpreted as MUSIC_ROOT / <its basename> -- that
         invents a new, different, plausible-looking library path from
         attacker input instead of rejecting it."""
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", Path("/data/torrents/music/Playlist Downloads")), \
-             mock.patch.object(app_module, "DOWNLOADS_ROOT", Path("/data/torrents/music")), \
-             mock.patch.object(app_module, "PLAYLIST_PATH_ROOT_ALIASES", []):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", Path("/data/torrents/music/Playlist Downloads")), \
+             patch_app_family(app_module, "DOWNLOADS_ROOT", Path("/data/torrents/music")), \
+             patch_app_family(app_module, "PLAYLIST_PATH_ROOT_ALIASES", []):
             for unauthorized in ("/etc/passwd", "/data/media/music2/song.mp3", "/secret/outside/song.mp3"):
                 resolved = app_module._playlist_resolve_item_path(unauthorized)
                 self.assertEqual(resolved, app_module._PLAYLIST_UNRESOLVED_PATH, unauthorized)
@@ -410,7 +414,7 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
         """An empty item path must never become authority for the library
         root itself -- root-self must not silently satisfy downstream
         containment/existence checks."""
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             resolved = app_module._playlist_resolve_item_path("")
             self.assertNotEqual(resolved, app_module.MUSIC_ROOT)
             self.assertEqual(resolved, app_module._PLAYLIST_UNRESOLVED_PATH)
@@ -425,7 +429,7 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
             music_root.mkdir()
             outside_marker = Path(tmp) / "outside-secret.txt"
             outside_marker.write_text("do not expose")
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root):
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root):
                 resolved = app_module._playlist_resolve_item_path("../outside-secret.txt")
                 self.assertEqual(resolved, app_module._PLAYLIST_UNRESOLVED_PATH)
                 self.assertFalse(resolved.exists())
@@ -433,7 +437,7 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
     def test_relative_path_within_music_root_still_resolves_normally(self):
         """The fix must not regress the legitimate case: a plain
         library-relative path still resolves under MUSIC_ROOT."""
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             resolved = app_module._playlist_resolve_item_path("Artist/Album/01 - Track.mp3")
             self.assertEqual(resolved, Path("/data/media/music/Artist/Album/01 - Track.mp3"))
 
@@ -470,7 +474,7 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
             shared_root = Path(tmp) / "Playlist Downloads"
             playlist_state_dir = Path(tmp) / "playlists"
             playlist_state_dir.mkdir()
-            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", shared_root), \
+            with patch_app_family(app_module, "PLAYLIST_DOWNLOAD_ROOT", shared_root), \
                  _patched_playlist_state(playlist_state_dir):
                 playlist_b_dir = app_module.get_playlist_staging_root("Playlist B") / "downloads"
                 playlist_b_dir.mkdir(parents=True)

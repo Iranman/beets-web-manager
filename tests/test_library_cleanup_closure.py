@@ -14,6 +14,10 @@ try:  # ARCH-001: app.py module family (works under discovery and tests.<module>
     from _app_ast_cache import app_family_source  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_ast_cache import app_family_source  # noqa: E402
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -390,9 +394,9 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
             runtime_dir.mkdir()
             outside = root / "qjs"
             outside.write_text("outside", encoding="utf-8")
-            with mock.patch.object(app_module, "_YTDLP_RUNTIME_BIN_DIR", runtime_dir), \
-                 mock.patch.object(app_module, "_plugin_install_log", []), \
-                 mock.patch.object(app_module, "_probe_js_runtime", return_value={"ok": False, "error": "bad"}):
+            with patch_app_family(app_module, "_YTDLP_RUNTIME_BIN_DIR", runtime_dir), \
+                 patch_app_family(app_module, "_plugin_install_log", []), \
+                 patch_app_family(app_module, "_probe_js_runtime", return_value={"ok": False, "error": "bad"}):
                 app_module._cleanup_broken_managed_runtime("..\\qjs")
             self.assertTrue(outside.exists())
 
@@ -410,10 +414,10 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
                 self.skipTest(f"symlink creation unavailable: {ex}")
             persisted = root / "persisted_password"
             persisted.write_text("replacement", encoding="utf-8")
-            with mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", link), \
-                 mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", persisted), \
-                 mock.patch.object(app_module, "_first_config_secret", return_value=""), \
-                 mock.patch.object(app_module, "_browser_password_is_usable", return_value=True):
+            with patch_app_family(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", link), \
+                 patch_app_family(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", persisted), \
+                 patch_app_family(app_module, "_first_config_secret", return_value=""), \
+                 patch_app_family(app_module, "_browser_password_is_usable", return_value=True):
                 app_module._cleanup_initial_browser_password_if_replaced()
             self.assertTrue(link.exists())
             self.assertTrue(target.exists())

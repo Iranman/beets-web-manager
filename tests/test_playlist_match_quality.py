@@ -5,17 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
-    from _app_ast_cache import app_family_source  # noqa: E402
+    from _app_ast_cache import load_app_closure  # noqa: E402
 except ImportError:  # pragma: no cover
-    from tests._app_ast_cache import app_family_source  # noqa: E402
+    from tests._app_ast_cache import load_app_closure  # noqa: E402
 
 
 class PlaylistMatchQualityTests(unittest.TestCase):
     def _helpers(self, items):
         root = Path(__file__).resolve().parents[1]
-        source = app_family_source()
-        start = source.index("def _norm(s):")
-        end = source.index("def _playlist_item_payload")
         namespace = {
             "Any": Any,
             "Dict": Dict,
@@ -40,8 +37,7 @@ class PlaylistMatchQualityTests(unittest.TestCase):
             ).strip(),
             "lib": SimpleNamespace(items=lambda _query: items),
         }
-        exec(source[start:end], namespace)
-        return namespace
+        return load_app_closure(["_match_track"], namespace)
 
     def test_wrong_chris_brown_titles_stay_missing(self):
         items = [
@@ -83,8 +79,6 @@ class PlaylistMatchQualityTests(unittest.TestCase):
         self.assertGreaterEqual(score, 0.90)
 
     def _download_helpers(self):
-        root = Path(__file__).resolve().parents[1]
-        source = app_family_source()
         namespace = {
             "Any": Any,
             "Dict": Dict,
@@ -105,35 +99,7 @@ class PlaylistMatchQualityTests(unittest.TestCase):
                 "final_action": "accept" if (kwargs.get("text_match") or {}).get("ok") else "review",
             },
         }
-        exec(
-            source[
-                source.index("_TRACK_FILENAME_SOURCE_ID_SUFFIX_RE"):
-                source.index("def _track_filename_has_source_id_suffix")
-            ],
-            namespace,
-        )
-        exec(
-            source[
-                source.index("def _slskd_title_guess_from_name"):
-                source.index("def _wanted_track_key")
-            ],
-            namespace,
-        )
-        exec(
-            source[
-                source.index("def _norm(s):"):
-                source.index("def _playlist_item_text_variants")
-            ],
-            namespace,
-        )
-        exec(
-            source[
-                source.index("def _playlist_download_text_candidates"):
-                source.index("def _playlist_stamp_download_tags")
-            ],
-            namespace,
-        )
-        return namespace
+        return load_app_closure(["_playlist_download_match"], namespace)
 
     def assertDownloadMatch(self, filename, artist, title, min_artist=0.82):
         helpers = self._download_helpers()

@@ -32,8 +32,8 @@ class CallerAuditTests(unittest.TestCase):
         self.assertEqual(code, 0, err.getvalue())
 
     def test_needs_migration_is_zero(self):
-        units = json.loads(audit.CLASSIFICATION.read_text(encoding="utf-8"))["units"]
         hits = audit.hit_map()
+        units = audit.load_classification(hits)
         needs = {u for u in hits if units.get(u, [""])[0] == "NEEDS_MIGRATION"}
         self.assertLessEqual(needs, KNOWN_NEEDS_MIGRATION)
 

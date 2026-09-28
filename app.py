@@ -45,6 +45,7 @@ else:
     sys.modules.setdefault("app", sys.modules[__name__])
 
 from backend.app_runtime import (  # ARCH-001 extracted
+    _app_logger,
     ALBUM_FOLDER_CLEANUP_LAST_FILE,
     ARTIST_IMAGE_CACHE_DIR,
     ART_REPAIR_LAST_FILE,
@@ -259,19 +260,31 @@ def _js_runtime_available(runtime_name: str) -> bool:
     return False
 
 
-def _is_musl_linux() -> bool:
-    if platform.system().lower() != "linux":
-        return False
-    if any(Path("/lib").glob("ld-musl-*.so.1")):
-        return True
-    try:
-        ldd = shutil.which("ldd")
-        if ldd:
-            r = subprocess.run([ldd, "--version"], timeout=5, capture_output=True, text=True)
-            return "musl" in ((r.stdout or "") + (r.stderr or "")).lower()
-    except Exception:
-        pass
-    return False
+from backend.app_runtime import (  # ARCH-001 extracted
+    _CONTROL_CHAR_RE,
+    _REDACTED_SECRET,
+    _SECRET_ASSIGNMENT_RE,
+    _UNICODE_NORM,
+    _URL_CREDENTIALS_RE,
+    _is_musl_linux,
+    _norm,
+    _normalize_name,
+    _path_has_symlink_component_under,
+    _path_is_under,
+    _path_lexically_under,
+    _path_under,
+    _redact_secret_assignment_match,
+    _redact_security_text,
+    _safe_apply_error_message,
+    _safe_beets_error_message,
+    _safe_inventory_error_message,
+    _safe_operation_status_error_message,
+    _safe_path_component,
+    _same_resolved_path,
+    _split_beets_multi,
+    _split_collab_credit,
+    _split_mbid_values,
+)
 
 
 def _cleanup_broken_managed_runtime(name: str) -> None:
@@ -1436,8 +1449,14 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
 
 
 app   = Flask(__name__)
-jobs  = JobStore()
-transactions = TransactionStore()
+# Flask's app.logger is logging.getLogger("app") (shared as _app_logger by every
+# service module); touching it here attaches Flask's default handler.
+if app.logger is not _app_logger:  # pragma: no cover - Flask naming invariant
+    raise RuntimeError("Flask app logger is not the shared 'app' logger")
+from backend.app_runtime import (  # ARCH-001 extracted
+    jobs,
+    transactions,
+)
 APP_ROOT = Path(__file__).parent
 REACT_DIST_DIR = APP_ROOT / "frontend" / "dist"
 LEGACY_STATIC_DIR = APP_ROOT / "static"
@@ -1479,7 +1498,7 @@ def _persist_app_config_text(target_file: Path, content: str, *, is_secret: bool
         return True
     except (WebManagerConfigStoreError, OSError) as ex:
         try:
-            app.logger.error("Failed to persist %s: %s", target_file, type(ex).__name__)
+            _app_logger.error("Failed to persist %s: %s", target_file, type(ex).__name__)
         except Exception:
             pass
         return False
@@ -1584,12 +1603,6 @@ _FIRST_RUN_PUBLIC_ENDPOINTS = {
     ("GET", "api_auth_me"),
     ("HEAD", "api_auth_me"),
 }
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
-    r"(\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?(\[REDACTED\]|[^\s,;}\]\"]+)"
-)
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
-_REDACTED_SECRET = "[REDACTED]"
 _MIN_AUTH_SECRET_LENGTH = _env_int("BEETS_WEB_AUTH_MIN_LENGTH", 32, minimum=24, maximum=256)
 _PLACEHOLDER_AUTH_SECRETS = {
     "admin", "password", "password1", "changeme", "changeit", "secret", "token",
@@ -1750,7 +1763,7 @@ def _sync_transactions_from_jobs() -> None:
         try:
             transactions.update_from_job(str(tx_id), job)
         except Exception as ex:
-            app.logger.debug("transaction sync failed for %s: %s", tx_id, ex)
+            _app_logger.debug("transaction sync failed for %s: %s", tx_id, ex)
 
 
 _install_transaction_job_hooks()
@@ -1927,7 +1940,7 @@ def _set_browser_setup_state(state: str) -> bool:
     ok = _persist_file_atomically(_BROWSER_SETUP_STATE_FILE, state)
     if not ok:
         try:
-            app.logger.error("Could not persist browser setup state %r", state)
+            _app_logger.error("Could not persist browser setup state %r", state)
         except Exception:
             pass
     return ok
@@ -2066,7 +2079,7 @@ def _bootstrap_auth_token_if_missing() -> None:
             existing = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip()
     except Exception as ex:
         try:
-            app.logger.warning("Could not read token file %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
+            _app_logger.warning("Could not read token file %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
         except Exception:
             pass
         existing = ""
@@ -2124,7 +2137,7 @@ def _bootstrap_browser_password_if_missing() -> None:
         return
 
     try:
-        app.logger.error(
+        _app_logger.error(
             "Browser credential is missing, unreadable, or unusable on an "
             "installation already marked established. Refusing to "
             "auto-generate a replacement (fail-closed): Basic Auth will "
@@ -2141,10 +2154,10 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
     try:
         initial_file = _INITIAL_BROWSER_PASSWORD_FILE
         if initial_file.name != ".initial_admin_password":
-            app.logger.warning("Refusing initial password cleanup for unexpected file name: %s", initial_file)
+            _app_logger.warning("Refusing initial password cleanup for unexpected file name: %s", initial_file)
             return
         if initial_file.parent.is_symlink() or initial_file.is_symlink():
-            app.logger.warning("Refusing initial password cleanup through symlink: %s", initial_file)
+            _app_logger.warning("Refusing initial password cleanup through symlink: %s", initial_file)
             return
         if not initial_file.exists():
             return
@@ -2167,7 +2180,7 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
             initial_file.unlink(missing_ok=True)
     except Exception as ex:
         try:
-            app.logger.warning("Could not remove initial password file: %s", ex)
+            _app_logger.warning("Could not remove initial password file: %s", ex)
         except Exception:
             pass
 
@@ -2305,7 +2318,7 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
             update_config_yaml_plugins(cfg_dir / "config.yaml")
     except Exception as ex:
         try:
-            app.logger.warning("Auto plugin provisioning on startup skipped/failed: %s", ex)
+            _app_logger.warning("Auto plugin provisioning on startup skipped/failed: %s", ex)
         except Exception:
             pass
 
@@ -2588,33 +2601,6 @@ def _json_security_error(status: int, message: str):
     return response
 
 
-def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
-    if match.group(3) == _REDACTED_SECRET:
-        return match.group(0)
-    return f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}"
-
-
-# Matches userinfo credentials embedded directly in a URL, e.g.
-# "https://user:password@example.test/" -- these don't have a
-# "keyword: value" shape so _SECRET_ASSIGNMENT_RE never sees them.
-#
-# The username segment excludes ":" (unlike the password segment) so the
-# two adjacent runs can never both stretch across the same ":" -- that
-# exclusion, not a length cap, is what makes the ":" delimiter unambiguous
-# and rules out the polynomial-time backtracking CodeQL flagged originally.
-# A length cap on top of that would only make matching fail (and therefore
-# fail to redact) for any credential longer than the cap, so neither
-# segment is length-limited here.
-_URL_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@:]+:[^\s/@]+@")
-
-
-def _redact_security_text(value: Any) -> str:
-    text = _s(value)
-    text = _CONTROL_CHAR_RE.sub("?", text)
-    text = _URL_CREDENTIALS_RE.sub(lambda m: f"{m.group(1)}{_REDACTED_SECRET}@", text)
-    return _SECRET_ASSIGNMENT_RE.sub(_redact_secret_assignment_match, text)
-
-
 _CONFIRMATION_REASON_MAX_LEN = 500
 
 
@@ -2859,7 +2845,7 @@ def _handle_ai_batch_state_conflict(exc):
 @app.errorhandler(Exception)
 def _handle_unexpected_error(exc):
     import traceback as _tb
-    app.logger.error(
+    _app_logger.error(
         "Unhandled exception in route: %s\n%s",
         _redact_security_text(exc),
         _redact_security_text(_tb.format_exc()),
@@ -3136,7 +3122,7 @@ def stats():
         artists = len(beets_adapter.get_artists())
         return jsonify({"tracks": tracks, "albums": albums_count, "artists": artists})
     except Exception as ex:
-        app.logger.warning("Beets /stats unavailable: %s", ex)
+        _app_logger.warning("Beets /stats unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets library unavailable",
@@ -3366,7 +3352,7 @@ def items():
                 break
         return jsonify({"count": len(rows), "items": rows})
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
-        app.logger.warning("Beets items query unavailable: %s", ex)
+        _app_logger.warning("Beets items query unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets library unavailable",
@@ -3379,7 +3365,7 @@ def get_item(iid):
     try:
         item = lib.get_item(iid)
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
-        app.logger.warning("Beets get_item unavailable: %s", ex)
+        _app_logger.warning("Beets get_item unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets library unavailable",
@@ -3397,7 +3383,7 @@ def get_artists_list():
         artists = beets_adapter.get_artists()
         return jsonify({"ok": True, "count": len(artists), "artists": artists})
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
-        app.logger.warning("Beets get_artists unavailable: %s", ex)
+        _app_logger.warning("Beets get_artists unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets library unavailable",
@@ -3422,7 +3408,7 @@ def api_search():
             "albums_count": len(albums_rows),
         })
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
-        app.logger.warning("Beets search unavailable: %s", ex)
+        _app_logger.warning("Beets search unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets library unavailable",
@@ -3440,14 +3426,14 @@ def item_audio_file(iid: int):
     except BeetsAdapterNotFoundError:
         return jsonify({"ok": False, "error": "Item audio file not found"}), 404
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError) as ex:
-        app.logger.warning("Beets audio stream connection error for item %d: %s", iid, ex)
+        _app_logger.warning("Beets audio stream connection error for item %d: %s", iid, ex)
         return jsonify({
             "ok": False,
             "error": "Beets audio streaming unavailable",
             "error_code": "ENGINE_OFFLINE",
         }), 503
     except Exception as ex:
-        app.logger.warning("Beets audio stream error for item %d: %s", iid, ex)
+        _app_logger.warning("Beets audio stream error for item %d: %s", iid, ex)
         return jsonify({"ok": False, "error": "Audio stream failed"}), 500
 
     def generate_stream():
@@ -3867,7 +3853,7 @@ def item_attach_recording(iid: int):
         try:
             current, candidates, item_path, filename = _reconstruct_track_recording_candidates(item, iid)
         except Exception as exc:
-            app.logger.error(
+            _app_logger.error(
                 "attach-recording candidate reconstruction failed for item %s: %s: %s",
                 iid, type(exc).__name__, _redact_security_text(str(exc))[:300],
             )
@@ -4902,7 +4888,7 @@ def ai_suggest(iid):
                         "acoustid_candidates": acoustid_cands,
                         "discogs_candidates": discogs_cands})
     except Exception as exc:
-        app.logger.warning("AI track suggestion failed: %s", type(exc).__name__)
+        _app_logger.warning("AI track suggestion failed: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not generate suggestions."})
 
 
@@ -5126,19 +5112,6 @@ def _album_key(s: str) -> str:
 
 def _artist_name_key(s: str) -> str:
     return re.sub(r'[^a-z0-9]', '', (s or "").lower().replace("&", "and"))
-
-
-def _split_mbid_values(value: str) -> List[str]:
-    try:
-        parts = _split_beets_multi(value)
-    except NameError:
-        parts = re.split(r'[\0;,]', str(value or ""))
-    ids = []
-    for part in parts:
-        part = (part or "").strip().lower()
-        if _MB_UUID_RE.match(part):
-            ids.append(part)
-    return ids
 
 
 def _artist_library_mbid(artist_name: str) -> str:
@@ -5927,7 +5900,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 key=lambda p: str(p).lower(),
             )
     except Exception as ex:
-        app.logger.warning("Could not scan source folder locally: %s", type(ex).__name__)
+        _app_logger.warning("Could not scan source folder locally: %s", type(ex).__name__)
 
     scan_exception_reason = ""
     if not audio_files and folder_path:
@@ -10218,7 +10191,7 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
         log.append(f"  [artwork] Engine unreachable — artwork relocation not performed: {ex}")
         return target_dir
     except Exception as ex:
-        app.logger.error("Artwork relocation: unexpected engine communication failure: %s", ex)
+        _app_logger.error("Artwork relocation: unexpected engine communication failure: %s", ex)
         log.append("  [artwork] Unexpected engine communication failure — artwork relocation not performed.")
         return target_dir
 
@@ -10237,14 +10210,6 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
             pass
 
     return target_dir
-
-
-def _path_is_under(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
-    except Exception:
-        return False
 
 
 def _music_format_preferences() -> Dict[str, Any]:
@@ -10974,28 +10939,28 @@ def library_art_repair_report():
         report = _art_repair_build_report()
         return jsonify(_art_repair_attach_last_run(report))
     except BeetsUnavailableError as ex:
-        app.logger.warning("Artwork repair report failed: Beets engine unavailable")
+        _app_logger.warning("Artwork repair report failed: Beets engine unavailable")
         return jsonify({
             "ok": False,
             "error": "Beets engine is unavailable.",
             "error_code": "ENGINE_OFFLINE",
         }), 503
     except BeetsAuthError as ex:
-        app.logger.error("Artwork repair report failed: Control agent authentication failed (%s)", type(ex).__name__)
+        _app_logger.error("Artwork repair report failed: Control agent authentication failed (%s)", type(ex).__name__)
         return jsonify({
             "ok": False,
             "error": "Beets engine authentication failed.",
             "error_code": "ENGINE_AUTH_FAILED",
         }), 503
     except BeetsError as ex:
-        app.logger.error("Artwork repair report failed: %s", ex)
+        _app_logger.error("Artwork repair report failed: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Could not load artwork repair status.",
             "error_code": "ART_REPAIR_FAILED",
         }), 500
     except Exception as ex:
-        app.logger.exception("Artwork repair report unexpected failure")
+        _app_logger.exception("Artwork repair report unexpected failure")
         return jsonify({
             "ok": False,
             "error": "Could not load artwork repair status.",
@@ -11193,7 +11158,7 @@ def album_replace_art_from_url(aid):
         except AlbumArtRequestError as ex:
             raise RuntimeError(ex.message) from ex
         except BeetsError as ex:
-            app.logger.warning("Could not replace album artwork for album %s: %s", aid, type(ex).__name__)
+            _app_logger.warning("Could not replace album artwork for album %s: %s", aid, type(ex).__name__)
             raise RuntimeError("Could not update album artwork") from ex
         except Exception as ex:
             raise RuntimeError("Could not update album artwork") from ex
@@ -11239,7 +11204,7 @@ def album_upload_art(aid):
         except AlbumArtRequestError as ex:
             raise RuntimeError(ex.message) from ex
         except BeetsError as ex:
-            app.logger.warning("Could not upload album artwork for album %s: %s", aid, type(ex).__name__)
+            _app_logger.warning("Could not upload album artwork for album %s: %s", aid, type(ex).__name__)
             raise RuntimeError("Could not update album artwork") from ex
         except Exception as ex:
             raise RuntimeError("Could not update album artwork") from ex
@@ -11263,10 +11228,10 @@ def album_delete_art(aid):
     try:
         result = composite_workflows.delete_album_art(aid)
     except BeetsError as ex:
-        app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
+        _app_logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not delete album artwork."}), 400
     except Exception as ex:
-        app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
+        _app_logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not delete album artwork."}), 500
     if not result.get("ok"):
         return jsonify({"ok": False, "error": result.get("error") or "Could not delete album artwork."}), 400
@@ -11745,40 +11710,6 @@ def disk_art_serve():
     return send_file(str(p), mimetype=mime)
 
 
-def _split_beets_multi(value: str) -> List[str]:
-    """Split beets multi-value artist fields without splitting normal names."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    if "\0" in text:
-        parts = text.split("\0")
-    elif ";" in text:
-        parts = text.split(";")
-    else:
-        parts = [text]
-    return [p.strip() for p in parts if p and p.strip()]
-
-
-def _split_collab_credit(value: str, known_artists: Optional[set] = None) -> List[str]:
-    """Conservatively split collaboration credits for display aliases.
-
-    We only split text credits when at least one side already exists as an artist
-    in the library. That avoids turning band names like "Earth, Wind & Fire"
-    into separate artists.
-    """
-    text = _normalize_name(_s(value)).strip()
-    if not text:
-        return []
-    parts = [p.strip() for p in re.split(r"\s+(?:&|and|x|X|\+|with)\s+", text) if p.strip()]
-    if len(parts) < 2:
-        return [text]
-    if known_artists:
-        known_norm = {a.casefold() for a in known_artists}
-        if not any(p.casefold() in known_norm for p in parts):
-            return [text]
-    return parts
-
-
 def _artist_names_for_album(album: Dict[str, Any], fallback_artist: str,
                             known_artists: Optional[set] = None) -> List[str]:
     names = _split_beets_multi(album.get("albumartists", ""))
@@ -11902,7 +11833,7 @@ def unmatched_tracks():
     try:
         review_data = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
     except BeetsUnavailableError as ex:
-        app.logger.warning("unmatched_tracks: Beets engine unavailable: %s", ex)
+        _app_logger.warning("unmatched_tracks: Beets engine unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets engine unavailable",
@@ -12256,33 +12187,6 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
     return trusted
 
 
-def _path_lexically_under(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-    except Exception:
-        return False
-
-
-def _path_has_symlink_component_under(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
-    try:
-        relative = path.relative_to(root)
-    except Exception:
-        return True
-    current = root
-    parts = relative.parts if include_leaf else relative.parts[:-1]
-    for part in parts:
-        current = current / part
-        try:
-            if current.is_symlink():
-                return True
-        except Exception:
-            return True
-    return False
-
-
 def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -> Tuple[Optional[Path], Optional[str]]:
     error = _import_review_path_text_error(raw, allow_relative=False)
     if error:
@@ -12552,7 +12456,7 @@ def import_folder_stats():
             else:
                 other_count += 1
     except Exception as ex:
-        app.logger.warning("import_folder_stats failed for %r: %s", raw_path, type(ex).__name__)
+        _app_logger.warning("import_folder_stats failed for %r: %s", raw_path, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not scan this folder."})
     return jsonify({
         "ok": True, "path": raw_path, "exists": True,
@@ -12593,7 +12497,7 @@ def delete_import_review_folder():
     except ValueError as ex:
         return jsonify({"ok": False, "error": str(ex), "log": log}), 400
     except Exception as ex:
-        app.logger.warning("delete_import_review_folder failed for %r: %s", src_path, type(ex).__name__)
+        _app_logger.warning("delete_import_review_folder failed for %r: %s", src_path, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not delete source folder.", "log": log}), 500
 
 
@@ -12724,10 +12628,10 @@ def cleanup_import_review_files():
         # which could carry stack-trace-shaped text -- never interpolate it
         # directly into a client-facing response (see reimport_disk()'s
         # identical, already-hardened handling of this exact exception type).
-        app.logger.warning("cleanup_import_review_files BeetsError for %r: %s", folder_path, ex)
+        _app_logger.warning("cleanup_import_review_files BeetsError for %r: %s", folder_path, ex)
         return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 400
     except Exception as ex:
-        app.logger.exception("cleanup_import_review_files failed for %r", folder_path)
+        _app_logger.exception("cleanup_import_review_files failed for %r", folder_path)
         return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 500
 
 
@@ -12748,7 +12652,7 @@ def plan_album_cleanup_route(album_id: int = 0):
     except BeetsError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
     except Exception as ex:
-        app.logger.exception("plan_album_cleanup_route failed for album_id=%s", target_album_id)
+        _app_logger.exception("plan_album_cleanup_route failed for album_id=%s", target_album_id)
         return jsonify({"ok": False, "error": "Album cleanup planning failed"}), 500
 
 
@@ -12788,7 +12692,7 @@ def apply_album_cleanup_route():
         # without claiming to know whether anything changed.
         return jsonify({"ok": False, "error": str(ex), "error_kind": "other"}), 400
     except Exception as ex:
-        app.logger.exception("apply_album_cleanup_route failed for op_id=%s", op_id)
+        _app_logger.exception("apply_album_cleanup_route failed for op_id=%s", op_id)
         return jsonify({"ok": False, "error": "Album cleanup apply failed", "error_kind": "other"}), 500
 
 
@@ -12850,7 +12754,7 @@ def _delete_album_ids_from_db(album_ids: list, log: list, *,
             log.append(f"  Engine cleanup rejected album_id {aid}: {ex}")
             continue
         except Exception as ex:
-            app.logger.warning("Failed-import cleanup failed for album_id=%s: %s", aid, type(ex).__name__)
+            _app_logger.warning("Failed-import cleanup failed for album_id=%s: %s", aid, type(ex).__name__)
             log.append(f"  Engine cleanup failed for album_id {aid}")
             continue
         if not res.get("ok") and not res.get("success"):
@@ -13714,7 +13618,7 @@ def library_full():
             })
         except Exception as ex:
             if isinstance(ex, (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError, TimeoutError)):
-                app.logger.warning("get_items_page unavailable: %s: %s", type(ex).__name__, ex)
+                _app_logger.warning("get_items_page unavailable: %s: %s", type(ex).__name__, ex)
                 return jsonify({
                     "error": "Beets library is unavailable.",
                     "error_code": "ENGINE_OFFLINE",
@@ -14561,7 +14465,7 @@ def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
             page += 1
         return results, ""
     except Exception as exc:
-        app.logger.warning("Lidarr wanted-list fetch failed: %s", type(exc).__name__)
+        _app_logger.warning("Lidarr wanted-list fetch failed: %s", type(exc).__name__)
         return [], "Could not reach Lidarr"
 
 
@@ -15091,7 +14995,7 @@ def _classify_openai_error(exc: Exception) -> str:
         return "the AI provider request timed out"
     if isinstance(exc, urllib.error.URLError):
         return "the AI provider is unreachable"
-    app.logger.warning("Unclassified AI provider error: %s", type(exc).__name__)
+    _app_logger.warning("Unclassified AI provider error: %s", type(exc).__name__)
     return f"the AI provider request failed unexpectedly ({type(exc).__name__})"
 
 
@@ -15414,7 +15318,7 @@ def _ai_suggest_album_internal(
             "evidence": evidence,
         }
     except Exception as exc:
-        app.logger.warning("AI album suggestion failed: %s", type(exc).__name__)
+        _app_logger.warning("AI album suggestion failed: %s", type(exc).__name__)
         return {"ok": False, "error": "Could not generate suggestions."}
 
 
@@ -16177,7 +16081,7 @@ def library_mbid_status():
             if album_template_tokens:
                 albums_with_template_tokens += 1
     except Exception as exc:
-        app.logger.warning("Library health scan failed: %s", type(exc).__name__)
+        _app_logger.warning("Library health scan failed: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not scan library health."})
     return jsonify({
         "ok": True,
@@ -16506,28 +16410,28 @@ def import_review_queue():
     try:
         unmatched_data = composite_workflows.get_unmatched_review_items(limit=limit, offset=0, include_singletons=True)
     except BeetsUnavailableError as ex:
-        app.logger.warning("import_review_queue: Beets engine unavailable: %s", ex)
+        _app_logger.warning("import_review_queue: Beets engine unavailable: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets engine unavailable",
             "error_code": "ENGINE_UNAVAILABLE",
         }), 503
     except BeetsAuthError as ex:
-        app.logger.warning("import_review_queue: Beets engine auth failed: %s", ex)
+        _app_logger.warning("import_review_queue: Beets engine auth failed: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets engine auth failed",
             "error_code": "ENGINE_AUTH_ERROR",
         }), 502
     except BeetsError as ex:
-        app.logger.warning("import_review_queue: Beets engine error: %s", ex)
+        _app_logger.warning("import_review_queue: Beets engine error: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Beets engine error",
             "error_code": "ENGINE_ERROR",
         }), 502
     except Exception as ex:
-        app.logger.error("Unexpected error in import_review_queue: %s", ex)
+        _app_logger.error("Unexpected error in import_review_queue: %s", ex)
         return jsonify({
             "ok": False,
             "error": "Internal error loading review queue",
@@ -16790,7 +16694,7 @@ def import_cleanup_stale():
             if removed_folder_gone or removed_resolved:
                 _AI_PENDING_FILE.write_text(json.dumps(kept, indent=2))
     except Exception as ex:
-        app.logger.warning("Pending-review cleanup-stale failed: %s", type(ex).__name__)
+        _app_logger.warning("Pending-review cleanup-stale failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not clean up pending review."}), 500
     for decision, path, item, note in audit:
         try:
@@ -17378,7 +17282,7 @@ def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
             log=None,
         )
     except Exception as ex:
-        app.logger.warning("Preflight failed to run: %s", type(ex).__name__)
+        _app_logger.warning("Preflight failed to run: %s", type(ex).__name__)
         return {
             "ok": False,
             "matches": 0,
@@ -18250,7 +18154,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "evidence": evidence,
         }
     except Exception as exc:
-        app.logger.warning("AI folder suggestion failed: %s", type(exc).__name__)
+        _app_logger.warning("AI folder suggestion failed: %s", type(exc).__name__)
         return {"ok": False, "error": "Could not generate suggestions."}
 
 
@@ -18469,7 +18373,7 @@ def _candidate_track_comparison_payload(
     try:
         candidates = _candidate_track_local_candidates(trusted_folder)
     except Exception as ex:
-        app.logger.error("Import Review local folder scan failed: %s", type(ex).__name__)
+        _app_logger.error("Import Review local folder scan failed: %s", type(ex).__name__)
         return {"ok": False, "error": "Track comparison could not be completed."}
 
     selected_rgid = _extract_mb_uuid(release_group_id)
@@ -18836,7 +18740,7 @@ def import_review_manual_id_validate():
         else:
             body, status = _manual_review_validate_album_identifier(parsed, payload)
     except Exception as ex:
-        app.logger.error("Manual MusicBrainz validation failed: %s", type(ex).__name__)
+        _app_logger.error("Manual MusicBrainz validation failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "MusicBrainz validation could not be completed."}), 500
     return jsonify(body), status
 
@@ -20036,7 +19940,7 @@ def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
                         log.append(f"Handled format-policy rejection for {Path(path).name or path}: {outcome.get('note')}")
                     continue
                 failed += 1
-                app.logger.warning("Auto-enqueue failed for %r: %s", path, type(ex).__name__)
+                _app_logger.warning("Auto-enqueue failed for %r: %s", path, type(ex).__name__)
                 _mark_pending_review_status(path, "auto_enqueue_failed", reason)
                 results.append({"path": path, "queued": False, "error": "Could not queue this item."})
                 if log is not None:
@@ -20141,7 +20045,7 @@ def import_review_auto_enqueue():
                 "note": outcome.get("note"),
                 "eligibility": handled_eligibility,
             })
-        app.logger.warning("import_review_auto_enqueue failed: %s", type(ex).__name__)
+        _app_logger.warning("import_review_auto_enqueue failed: %s", type(ex).__name__)
         _import_review_auto_update(key, status="failed", error=reason)
         _mark_pending_review_status(
             _s(payload.get("path")).strip(),
@@ -20439,11 +20343,6 @@ def _import_review_revalidation_preflight(
             base["ok"] = True
             base["error"] = ""
     return base
-
-
-def _extract_mb_uuid(val: Any) -> str:
-    s = _s(val).strip().lower()
-    return s if _MB_UUID_RE.match(s) else ""
 
 
 def _import_review_build_revalidated_match(
@@ -24542,12 +24441,12 @@ try:
         # Corrupt/unrecognized legacy AI state must be visible, not
         # silently discarded -- the file itself is left in place by
         # migrate_legacy_files(); this is the operator-visible signal.
-        app.logger.warning(
+        _app_logger.warning(
             "AI batch state migration: %s: %s",
             _ai_migration_error.get("file", "?"), _ai_migration_error.get("error", "?"),
         )
 except Exception as _ai_migration_ex:
-    app.logger.warning("AI batch state migration failed unexpectedly: %s", _ai_migration_ex)
+    _app_logger.warning("AI batch state migration failed unexpectedly: %s", _ai_migration_ex)
 
 
 def _ai_batch_write_state(state: Dict[str, Any]) -> None:
@@ -26437,36 +26336,6 @@ def library_merge_artist():
     job = jobs.start_python(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
     return jsonify({"ok": True, "job_id": job.job_id})
 
-# Unicode punctuation → ASCII equivalents
-_UNICODE_NORM = [
-    # Hyphens/dashes
-    ("‐", "-"),  # ‐ HYPHEN
-    ("‑", "-"),  # ‑ NON-BREAKING HYPHEN
-    ("‒", "-"),  # ‒ FIGURE DASH
-    ("–", "-"),  # – EN DASH
-    ("—", "-"),  # — EM DASH
-    ("―", "-"),  # ― HORIZONTAL BAR
-    ("﹘", "-"),  # ﹘ SMALL EM DASH
-    ("﹣", "-"),  # ﹣ SMALL HYPHEN-MINUS
-    ("－", "-"),  # － FULLWIDTH HYPHEN-MINUS
-    # Quotes
-    ("‘", "'"),  # ' LEFT SINGLE QUOTATION MARK
-    ("’", "'"),  # ' RIGHT SINGLE QUOTATION MARK
-    ("‚", "'"),  # ‚ SINGLE LOW-9 QUOTATION MARK
-    ("‛", "'"),  # ‛ SINGLE HIGH-REVERSED-9 QUOTATION MARK
-    ("“", '"'),  # " LEFT DOUBLE QUOTATION MARK
-    ("”", '"'),  # " RIGHT DOUBLE QUOTATION MARK
-    ("„", '"'),  # „ DOUBLE LOW-9 QUOTATION MARK
-    # Other punctuation
-    ("…", "..."),  # … HORIZONTAL ELLIPSIS
-    (" ", " "),    # non-breaking space
-    ("⁠", ""),     # WORD JOINER
-]
-
-def _normalize_name(s: str) -> str:
-    for old, new in _UNICODE_NORM:
-        s = s.replace(old, new)
-    return s.strip()
 
 # Patterns that should never appear in albumartist
 _FEAT_RE = re.compile(
@@ -26690,7 +26559,7 @@ def create_unmatched_draft():
     try:
         draft_path.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        app.logger.warning("Could not create draft folder: %s", type(exc).__name__)
+        _app_logger.warning("Could not create draft folder: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not create folder."}), 500
 
     tracklist_lines = "\n".join(
@@ -26720,7 +26589,7 @@ def create_unmatched_draft():
             encoding="utf-8",
         )
     except Exception as exc:
-        app.logger.warning("Could not write draft files: %s", type(exc).__name__)
+        _app_logger.warning("Could not write draft files: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not write draft files."}), 500
 
     return jsonify({
@@ -27613,7 +27482,7 @@ def _apply_artist_folder_reconcile_resilient(
                 op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
             )
         except (BeetsBadRequestError, BeetsAuthError, BeetsNotFoundError) as ex:
-            app.logger.error("%s: apply definitively rejected for op_id=%s: %s", log_prefix, op_id, ex, exc_info=True)
+            _app_logger.error("%s: apply definitively rejected for op_id=%s: %s", log_prefix, op_id, ex, exc_info=True)
             safe_reason = _safe_apply_error_message(ex)
             log.append(f"{log_prefix}: Apply was rejected ({safe_reason}). Not retried and not polled.")
             return {
@@ -27624,13 +27493,13 @@ def _apply_artist_folder_reconcile_resilient(
                 "status_code": getattr(ex, "status_code", 0) or 0,
             }
         except (BeetsUnavailableError, BeetsError) as ex:
-            app.logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
+            _app_logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(
                 f"{log_prefix}: Apply response was lost ({_safe_apply_error_message(ex)}). The engine "
                 f"operation may still be running -- monitoring its transaction state instead of retrying Apply."
             )
         except Exception as ex:
-            app.logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
+            _app_logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(
                 f"{log_prefix}: Apply response was lost (unexpected error). The engine operation may "
                 f"still be running -- monitoring its transaction state instead of retrying Apply."
@@ -27665,7 +27534,7 @@ def _apply_artist_folder_reconcile_resilient(
             # CodeQL: information exposure through an exception -- log the
             # real exception server-side only; the job-visible log line
             # gets a sanitized reason.
-            app.logger.warning("%s: transaction status check for op_id=%s failed, retrying: %s", log_prefix, op_id, ex, exc_info=True)
+            _app_logger.warning("%s: transaction status check for op_id=%s failed, retrying: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(f"{log_prefix}: transaction status check for op_id={op_id} failed ({_safe_apply_error_message(ex)}); retrying.")
             tx = None
 
@@ -28084,7 +27953,7 @@ def import_preflight():
                     "audio_files": audio_here,
                 })
     except Exception as ex:
-        app.logger.warning("Could not scan path: %s", type(ex).__name__)
+        _app_logger.warning("Could not scan path: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not scan path."})
 
     tracked_dirs: set = set()
@@ -28345,7 +28214,7 @@ def _resolve_album_title_duplicate_candidate(
     Used by dedup_scan to match files where the source folder represents the album name.
     Returns (candidate_item, match_type_str). Returns (None, "") on no match or query failure.
     """
-    log = logger_instance or app.logger
+    log = logger_instance or _app_logger
     if not track_title or not folder_raw:
         return None, ""
 
@@ -28652,7 +28521,7 @@ def dedup_scan():
                     #    the source folder is "WILLOW (2019)" or "1999 - Californication"
                     if not lib_item and title:
                         cand_item, cand_match_type = _resolve_album_title_duplicate_candidate(
-                            lib, src.parent.name, title, logger_instance=app.logger
+                            lib, src.parent.name, title, logger_instance=_app_logger
                         )
                         if cand_item:
                             lib_item = cand_item
@@ -29386,7 +29255,7 @@ def dedup_cleanup():
                     removed.extend(removed_dirs)
                     current = current.parent
                 except (BeetsUnavailableError, BeetsError) as ex:
-                    app.logger.info("Engine empty-parent cleanup stopped at %s: %s", key, ex)
+                    _app_logger.info("Engine empty-parent cleanup stopped at %s: %s", key, ex)
                     break
         return removed
 
@@ -29629,7 +29498,7 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
             results[-1]["removed"] = True
             log.append(f"  Deleted folder tree: {folder}")
         except Exception as ex:
-            app.logger.warning("Could not delete folder tree %r: %s", str(folder), type(ex).__name__)
+            _app_logger.warning("Could not delete folder tree %r: %s", str(folder), type(ex).__name__)
             results[-1]["error"] = "Could not delete this folder."
             log.append(f"  WARN deleting {folder}: {ex}")
 
@@ -29962,14 +29831,14 @@ def clean_library_health():
             empty_limit=empty_limit,
         ))
     except BeetsUnavailableError as ex:
-        app.logger.warning("Library health scan failed: Beets engine unavailable")
+        _app_logger.warning("Library health scan failed: Beets engine unavailable")
         return jsonify({
             "ok": False,
             "error": "Beets engine is unavailable.",
             "error_code": "ENGINE_OFFLINE",
         }), 503
     except BeetsAuthError as ex:
-        app.logger.error("Library health scan failed: Control agent authentication failed (%s)", type(ex).__name__)
+        _app_logger.error("Library health scan failed: Control agent authentication failed (%s)", type(ex).__name__)
         return jsonify({
             "ok": False,
             "error": "Beets engine authentication failed.",
@@ -29980,7 +29849,7 @@ def clean_library_health():
         error_code = getattr(ex, "error_code", "")
         if not error_code or error_code in ("BEETS_ADAPTER_ERROR", "BEETS_ERROR"):
             error_code = "LIBRARY_HEALTH_FAILED"
-        app.logger.error("Library health scan failed: %s (code=%s, status=%s)", type(ex).__name__, error_code, status_code)
+        _app_logger.error("Library health scan failed: %s (code=%s, status=%s)", type(ex).__name__, error_code, status_code)
         if error_code == "INVALID_QUERY_PARAMETER":
             client_msg = "Invalid library health query parameters."
         else:
@@ -29991,7 +29860,7 @@ def clean_library_health():
             "error_code": error_code,
         }), status_code
     except Exception as ex:
-        app.logger.exception("Library health scan unexpected failure")
+        _app_logger.exception("Library health scan unexpected failure")
         return jsonify({
             "ok": False,
             "error": "Could not load library health.",
@@ -30956,7 +30825,7 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
                 continue
             if log is not None:
                 log.append("  MB fetch failed: MusicBrainz lookup failed.")
-            app.logger.error("MusicBrainz release lookup failed: %s", type(ex).__name__)
+            _app_logger.error("MusicBrainz release lookup failed: %s", type(ex).__name__)
             return {"ok": False, "error": "MusicBrainz lookup failed.", "tracks": []}
 
     release_artist_info = _playlist_artist_credit_info(mb_data.get("artist-credit") or [])
@@ -31964,7 +31833,7 @@ def album_duplicate_resolver(aid):
     try:
         return jsonify(_album_duplicate_resolver_plan(aid, mbid))
     except Exception as ex:
-        app.logger.warning("album_duplicate_resolver failed for album %s: %s", aid, type(ex).__name__)
+        _app_logger.warning("album_duplicate_resolver failed for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not build duplicate-resolver plan."}), 400
 
 
@@ -32234,7 +32103,7 @@ def album_mb_completeness(aid):
         data = _album_mb_completeness(aid, mbid)
         return jsonify(data)
     except Exception as ex:
-        app.logger.warning("album_mb_completeness failed for album %s: %s", aid, type(ex).__name__)
+        _app_logger.warning("album_mb_completeness failed for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not check MusicBrainz completeness."}), 400
 
 
@@ -32707,7 +32576,7 @@ def clean_album_tracks_scan():
         else:
             rows = composite_workflows.find_albums_with_mbid(limit=limit, sort="desc")
     except Exception as ex:
-        app.logger.warning("Could not read MusicBrainz-tagged albums: %s", type(ex).__name__)
+        _app_logger.warning("Could not read MusicBrainz-tagged albums: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not read albums."}), 500
     if album_id and not rows:
         return jsonify({"ok": False, "error": f"Album {album_id} not found"}), 404
@@ -33122,19 +32991,6 @@ def _scan_artist_folder_groups(root: str, *, use_musicbrainz: bool = False,
             "source_folders": len(sources),
         })
     return sorted(out, key=lambda g: g["canonical"]["name"].casefold())
-
-
-def _path_under(path: Path, root: Path) -> bool:
-    try:
-        raw_p = str(path)
-        raw_r = str(root)
-        if "\x00" in raw_p or "\x00" in raw_r:
-            return False
-        rp = Path(os.path.realpath(raw_p))
-        rr = Path(os.path.realpath(raw_r))
-        return rp == rr or rr in rp.parents
-    except Exception:
-        return False
 
 
 def _db_path_value(path: Path) -> str:
@@ -33799,7 +33655,7 @@ def qbit_hardlink_missing():
                 cancel_event=None,
             )
         except Exception as ex:
-            app.logger.warning("qBittorrent hardlink-missing dry-run failed: %s", type(ex).__name__)
+            _app_logger.warning("qBittorrent hardlink-missing dry-run failed: %s", type(ex).__name__)
             return jsonify({"ok": False, "error": "Could not run hardlink-missing scan.", "log": log}), 500
         return jsonify({
             "ok": True,
@@ -33884,23 +33740,6 @@ def _clean_malformed_release_group_stamps(value: str) -> str:
     return _MALFORMED_RELEASE_GROUP_STAMP_RE.sub(r"{\1}", _s(value))
 
 
-def _safe_path_component(value: Any, fallback: str = "untitled") -> str:
-    import unicodedata
-    text = _s(value).strip() or fallback
-    text = text.replace("/", "_").replace("\\", "_")
-    text = re.sub(r'[\x00-\x1f<>:"?*|]', "_", text)
-    # Unicode format/control characters (bidi overrides such as U+202E, zero-
-    # width joiners/spaces, BOM, etc.) aren't covered by the ASCII-only class
-    # above but can still make a folder name render deceptively even though
-    # it's already fully contained under the trusted root -- strip them too
-    # rather than merely relying on path containment for what is ultimately
-    # a display-spoofing concern, not a traversal one.
-    text = "".join("_" if unicodedata.category(ch) in ("Cf", "Cc") else ch for ch in text)
-    text = re.sub(r"\s+", " ", text).strip()
-    text = text.rstrip(". ")
-    return text or fallback
-
-
 def _track_filename_row_target(row: sqlite3.Row, current_path: Path) -> Optional[Path]:
     title = _safe_path_component(_strip_track_filename_id_suffix(row["title"]), "")
     if not title:
@@ -33940,13 +33779,6 @@ def _resolve_existing_template_token_file(path: Path) -> Path:
     except Exception:
         return path
     return path
-
-
-def _same_resolved_path(left: Path, right: Path) -> bool:
-    try:
-        return left.resolve(strict=False) == right.resolve(strict=False)
-    except Exception:
-        return str(left) == str(right)
 
 
 def _cleanup_filename_conflict(source: Path, target: Path) -> bool:
@@ -35290,7 +35122,7 @@ def _maintenance_artist_folder_merge_step(
             # carry internal URLs, paths, or transport details, and this
             # message flows into a job-visible log line and an "error"
             # field. Log the real exception server-side only.
-            app.logger.error(
+            _app_logger.error(
                 "Artist folder merge: status check for saved operation %s failed: %s",
                 resume_operation_id, ex, exc_info=True,
             )
@@ -35379,11 +35211,11 @@ def _maintenance_artist_folder_merge_step(
         # not flow into this "error" field (job-visible result). Log the
         # real exception server-side only.
         log.append("Engine unavailable; MBID stamping was not performed.")
-        app.logger.error("MBID stamping: engine unavailable: %s", ex, exc_info=True)
+        _app_logger.error("MBID stamping: engine unavailable: %s", ex, exc_info=True)
         return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": _safe_inventory_error_message(ex)}
     except Exception as ex:
         log.append("Engine communication failed; MBID stamping was not performed.")
-        app.logger.error("MBID stamping: unexpected engine communication failure: %s", ex, exc_info=True)
+        _app_logger.error("MBID stamping: unexpected engine communication failure: %s", ex, exc_info=True)
         return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": _safe_inventory_error_message(ex)}
 
     if not plan_res.get("ok"):
@@ -35984,7 +35816,7 @@ def maintenance_runner_report():
         exists = MAINTENANCE_RUNNER_LAST_FILE.exists()
         report = _maintenance_load_last_report() if exists else {}
     except Exception as exc:
-        app.logger.warning("Could not read maintenance report: %s", type(exc).__name__)
+        _app_logger.warning("Could not read maintenance report: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not read maintenance report."}), 500
     last_run = report.get("last_run") if isinstance(report.get("last_run"), dict) else None
     if last_run is not None and _s(last_run.get("status")).strip().lower() == "running" and not _maintenance_running_job():
@@ -36524,7 +36356,7 @@ def _folder_cleanup_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
             path = MUSIC_ROOT / path
         resolved = path.resolve(strict=False)
     except Exception as exc:
-        app.logger.warning("Invalid folder-cleanup path %r: %s", text, type(exc).__name__)
+        _app_logger.warning("Invalid folder-cleanup path %r: %s", text, type(exc).__name__)
         return None, "Invalid path."
     if not _path_under(resolved, MUSIC_ROOT):
         return None, "Path is outside the configured music library"
@@ -36969,7 +36801,7 @@ def apply_folder_placeholder_action_api():
 
     def _engine_exception(exc: Exception, *, phase: str, operation_id: str = ""):
         if isinstance(exc, BeetsUnavailableError):
-            app.logger.warning("Folder cleanup %s failed because engine is unavailable: %s", phase, type(exc).__name__)
+            _app_logger.warning("Folder cleanup %s failed because engine is unavailable: %s", phase, type(exc).__name__)
             return jsonify({
                 "ok": False,
                 "error": "Beets engine is unavailable; folder cleanup was not performed.",
@@ -36977,7 +36809,7 @@ def apply_folder_placeholder_action_api():
                 "code": "ENGINE_OFFLINE",
                 "operation_id": operation_id,
             }), 503
-        app.logger.warning("Folder cleanup %s rejected by engine: %s", phase, getattr(exc, "error_code", "") or type(exc).__name__)
+        _app_logger.warning("Folder cleanup %s rejected by engine: %s", phase, getattr(exc, "error_code", "") or type(exc).__name__)
         return jsonify({
             "ok": False,
             "error": "Beets engine rejected folder cleanup.",
@@ -37416,7 +37248,7 @@ def _album_cleanup_db_index(root: Path) -> Dict[str, Any]:
     try:
         rows = composite_workflows.get_album_cleanup_index()
     except BeetsUnavailableError as ex:
-        app.logger.warning("Beets engine unavailable in _album_cleanup_db_index: %s", ex)
+        _app_logger.warning("Beets engine unavailable in _album_cleanup_db_index: %s", ex)
         rows = []
 
     for row in rows:
@@ -39118,7 +38950,7 @@ def clean_album_folders_report():
                 report = loaded
                 exists = True
     except Exception as exc:
-        app.logger.warning("Could not read album-folder cleanup report: %s", type(exc).__name__)
+        _app_logger.warning("Could not read album-folder cleanup report: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not read album-folder cleanup report."}), 500
     return jsonify({"ok": True, "exists": exists, "report": report})
 
@@ -39233,7 +39065,7 @@ def clean_root_folders_report():
                 report = loaded
                 exists = True
     except Exception as exc:
-        app.logger.warning("Could not read root-folder repair report: %s", type(exc).__name__)
+        _app_logger.warning("Could not read root-folder repair report: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not read root-folder repair report."}), 500
     return jsonify({"ok": True, "exists": exists, "report": report})
 
@@ -39601,11 +39433,11 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
         plan_res = composite_workflows.plan_artist_folder_reconcile(op_payload)
     except (BeetsUnavailableError, BeetsError) as ex:
         log.append("Engine unavailable; artist folder merge was not performed.")
-        app.logger.error("Artist folder merge: engine unavailable: %s", ex)
+        _app_logger.error("Artist folder merge: engine unavailable: %s", ex)
         return summary
     except Exception as ex:
         log.append("Engine communication failed; artist folder merge was not performed.")
-        app.logger.error("Artist folder merge: unexpected engine communication failure: %s", ex)
+        _app_logger.error("Artist folder merge: unexpected engine communication failure: %s", ex)
         return summary
 
     if not plan_res.get("ok"):
@@ -39813,65 +39645,6 @@ def _stamp_folder_for_item_path(
     return None
 
 
-def _safe_beets_error_message(
-    ex: Exception, *, bad_request: str, not_found: str, generic: str, unexpected: str,
-) -> str:
-    """Map a Beets client exception to a short, safe, user-facing message --
-    never str(ex), which can carry internal URLs, paths, or transport
-    internals (CodeQL: information exposure through an exception). The real
-    exception must still be logged server-side by the caller (e.g.
-    app.logger.error(..., exc_info=True)); this is only what may reach an
-    HTTP response, a job result field, or a job-visible log line."""
-    if isinstance(ex, BeetsAuthError):
-        return "Authentication with Beets Control Agent failed."
-    if isinstance(ex, BeetsBadRequestError):
-        return bad_request
-    if isinstance(ex, BeetsNotFoundError):
-        return not_found
-    if isinstance(ex, BeetsUnavailableError):
-        return "Beets Control Agent is unavailable."
-    if isinstance(ex, BeetsError):
-        return generic
-    return unexpected
-
-
-def _safe_inventory_error_message(ex: Exception) -> str:
-    """Sanitized message for an artist-folder engine inventory failure --
-    see _safe_beets_error_message()."""
-    return _safe_beets_error_message(
-        ex,
-        bad_request="Beets Control Agent rejected the inventory request.",
-        not_found="The configured music library was not found by the Beets Engine.",
-        generic="Beets Control Agent could not provide the artist-folder inventory.",
-        unexpected="Artist-folder inventory failed.",
-    )
-
-
-def _safe_operation_status_error_message(ex: Exception) -> str:
-    """Sanitized message for a failed saved-operation transaction status
-    lookup (Clean All resume) -- see _safe_beets_error_message()."""
-    return _safe_beets_error_message(
-        ex,
-        bad_request="Beets Control Agent rejected the status request.",
-        not_found="Beets Control Agent no longer recognizes the saved operation.",
-        generic="Beets Control Agent could not confirm the saved operation's status.",
-        unexpected="Could not confirm the saved operation's status.",
-    )
-
-
-def _safe_apply_error_message(ex: Exception) -> str:
-    """Sanitized message for a failed/rejected artist-folder reconcile
-    Apply call, or a failed status poll following one -- see
-    _safe_beets_error_message()."""
-    return _safe_beets_error_message(
-        ex,
-        bad_request="Beets Control Agent rejected the apply request.",
-        not_found="Beets Control Agent no longer recognizes this operation.",
-        generic="Beets Control Agent could not complete the apply request.",
-        unexpected="The apply request failed.",
-    )
-
-
 def _stamp_artist_folder_album_mbid_counts(
     root: Path,
     folders: List[Path],
@@ -39885,7 +39658,7 @@ def _stamp_artist_folder_album_mbid_counts(
     try:
         rows = composite_workflows.get_artist_folder_album_mbids()
     except Exception as ex:
-        app.logger.error("Artist folder MBID counts: engine call failed: %s", ex, exc_info=True)
+        _app_logger.error("Artist folder MBID counts: engine call failed: %s", ex, exc_info=True)
         return {}, {}, _safe_inventory_error_message(ex)
 
     for row in rows:
@@ -39998,7 +39771,7 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
         # server-side only; return a sanitized message plus the structured
         # error_code/status_code fields (which are agent-controlled,
         # stable, and safe to expose).
-        app.logger.error("Artist folder inventory scan failed: %s", ex, exc_info=True)
+        _app_logger.error("Artist folder inventory scan failed: %s", ex, exc_info=True)
         return {
             "ok": False, "candidates": [], "skipped": [],
             "error": _safe_inventory_error_message(ex),
@@ -40006,7 +39779,7 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
             "status_code": getattr(ex, "status_code", 0) or 0,
         }
     except Exception as ex:
-        app.logger.error("Artist folder inventory scan failed with an unexpected error: %s", ex, exc_info=True)
+        _app_logger.error("Artist folder inventory scan failed with an unexpected error: %s", ex, exc_info=True)
         return {"ok": False, "candidates": [], "skipped": [], "error": _safe_inventory_error_message(ex), "error_code": "", "status_code": 0}
     existing_names = {f.name for f in folders}
 
@@ -40330,11 +40103,11 @@ def clean_artist_folders_stamp_mbid():
             plan_res = composite_workflows.plan_artist_folder_reconcile(payload)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append("Engine unavailable; MBID stamping was not performed.")
-            app.logger.error("MBID stamping: engine unavailable: %s", ex)
+            _app_logger.error("MBID stamping: engine unavailable: %s", ex)
             return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
         except Exception as ex:
             log.append("Engine communication failed; MBID stamping was not performed.")
-            app.logger.error("MBID stamping: unexpected engine communication failure: %s", ex)
+            _app_logger.error("MBID stamping: unexpected engine communication failure: %s", ex)
             return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
 
         if not plan_res.get("ok"):
@@ -40378,9 +40151,6 @@ def clean_artist_folders_stamp_mbid():
 
 
 # ── Playlist helpers ──────────────────────────────────────────────────────────
-
-def _norm(s):
-    return re.sub(r"[^\w\s]", "", (s or "").lower()).strip()
 
 
 def _playlist_title_variants(value):
@@ -41395,7 +41165,7 @@ def _playlist_ensure_state_dirs() -> None:
             # never reach a client-facing response (SEC-002 Wave 10 second
             # final review); the exception itself carries just the code and
             # a generic message.
-            app.logger.warning("Playlist state directory is unavailable: %s (%s)", d, type(exc).__name__)
+            _app_logger.warning("Playlist state directory is unavailable: %s (%s)", d, type(exc).__name__)
             raise PlaylistStateError(
                 "playlist_state_unavailable",
                 "Playlist state directory is unavailable.",
@@ -43631,7 +43401,7 @@ def _playlist_read_manifest(name: str,
         raise ValueError("manifest root is not an object")
     except Exception as exc:
         if raise_on_corrupt:
-            app.logger.warning("Playlist manifest %s is corrupt: %s", path, type(exc).__name__)
+            _app_logger.warning("Playlist manifest %s is corrupt: %s", path, type(exc).__name__)
             raise PlaylistStateError(
                 "manifest_corrupt",
                 "Playlist manifest is corrupt; refusing to overwrite it.",
@@ -44680,7 +44450,7 @@ def _plex_status_payload(force: bool = False) -> Dict[str, Any]:
     except urllib.error.HTTPError as ex:
         payload["error"] = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
     except Exception as ex:
-        app.logger.warning("Plex status check failed: %s", type(ex).__name__)
+        _app_logger.warning("Plex status check failed: %s", type(ex).__name__)
         payload["error"] = "Could not reach Plex."
     return payload
 
@@ -44727,7 +44497,7 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
             token = json.loads(r.read())["access_token"]
     except (urllib.error.URLError, socket.timeout, TimeoutError,
             json.JSONDecodeError, KeyError) as ex:
-        app.logger.warning("Spotify auth failed: %s", type(ex).__name__)
+        _app_logger.warning("Spotify auth failed: %s", type(ex).__name__)
         raise _SpotifyFetchError("Spotify authentication failed.") from ex
 
     tracks: List[Dict[str, str]] = []
@@ -44741,7 +44511,7 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
                 data = json.loads(r.read())
         except (urllib.error.URLError, socket.timeout, TimeoutError,
                 json.JSONDecodeError) as ex:
-            app.logger.warning("Spotify playlist fetch failed: %s", type(ex).__name__)
+            _app_logger.warning("Spotify playlist fetch failed: %s", type(ex).__name__)
             raise _SpotifyFetchError("Spotify playlist fetch failed.") from ex
         for item in data.get("items", []):
             trk = item.get("track") or {}
@@ -44885,7 +44655,7 @@ def playlist_parse():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(content, download=False)
             except Exception as exc:
-                app.logger.warning("yt-dlp playlist import failed: %s", type(exc).__name__)
+                _app_logger.warning("yt-dlp playlist import failed: %s", type(exc).__name__)
                 return jsonify({"ok": False, "error": "Could not read this playlist URL."})
 
             if not info:
@@ -44985,7 +44755,7 @@ def playlist_create():
         else:
             raise RuntimeError("No playlist tracks were provided")
     except Exception as exc:
-        app.logger.warning("Playlist M3U generation failed: %s", type(exc).__name__)
+        _app_logger.warning("Playlist M3U generation failed: %s", type(exc).__name__)
         cause = getattr(exc, "__cause__", None)
         if isinstance(exc, BeetsUnavailableError) or isinstance(cause, BeetsUnavailableError):
             return jsonify({
@@ -44994,7 +44764,7 @@ def playlist_create():
                 "error_code": "engine_unavailable",
             }), 503
         if isinstance(exc, PlaylistStateError):
-            app.logger.warning("Playlist creation state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+            _app_logger.warning("Playlist creation state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
             return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
         return jsonify({
             "ok": False,
@@ -46122,7 +45892,7 @@ def playlist_download():
         job_key = _playlist_job_key_payload(
             name, parse_source, parse_content, tracks, all_tracks, playlist_id=playlist_id)
     except PlaylistStateError as exc:
-        app.logger.warning("Playlist download identity error: %s (%s)", exc.code, type(exc).__name__)
+        _app_logger.warning("Playlist download identity error: %s (%s)", exc.code, type(exc).__name__)
         return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     job_key["action"] = pipeline_action
     jid = _playlist_job_id_for_key(job_key)
@@ -46163,7 +45933,7 @@ def playlist_download():
     try:
         saved_state = _playlist_load_job_state(jid, strict=True) if _playlist_job_state_path(jid).exists() else {}
     except PlaylistStateError as exc:
-        app.logger.warning("Playlist checkpoint load error: %s (%s)", exc.code, type(exc).__name__)
+        _app_logger.warning("Playlist checkpoint load error: %s (%s)", exc.code, type(exc).__name__)
         return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     if not tracks:
         # No tracks provided in the request — try to recover the track list so the
@@ -48007,7 +47777,7 @@ def _playlist_validate_staged_download(path_value: str, artist: str, title: str,
             return res
         reason = (res.get("error") if isinstance(res, dict) else None) or "engine validation failed"
     except Exception as ex:
-        app.logger.warning("Engine validate staged track IPC failed: %s", ex)
+        _app_logger.warning("Engine validate staged track IPC failed: %s", ex)
         reason = f"engine validation IPC failed: {ex}"
 
     # Engine ownership: staging/validation lives in the engine container.
@@ -48541,7 +48311,7 @@ def playlist_quality_cleanup():
         # unreachable", hiding real quality issues from the operator. The
         # underlying exception (which may carry connection/URL detail from
         # the IPC layer) is logged server-side only, never in the response.
-        app.logger.warning("Playlist quality-cleanup scan failed: %s", ex)
+        _app_logger.warning("Playlist quality-cleanup scan failed: %s", ex)
         return jsonify({"ok": False, "error": "Could not reach the Beets engine to scan for quality issues"}), 502
     summary = {
         "candidates": len(candidates),
@@ -48650,7 +48420,7 @@ def playlist_quality_place():
             filter_mode="repair",
         )
     except PlaylistQualityCandidatesUnavailableError as ex:
-        app.logger.warning("Playlist quality-place candidate lookup failed: %s", ex)
+        _app_logger.warning("Playlist quality-place candidate lookup failed: %s", ex)
         return jsonify({"ok": False, "error": "Could not reach the Beets engine to look up this item"}), 502
     candidate = next((c for c in candidates if int(c.get("id") or 0) == item_id), None)
     if not candidate:
@@ -49025,7 +48795,7 @@ def _playlist_manifest_name_from_file(path: Path, diagnostics: List[str]) -> Tup
             return _clean_playlist_name(fallback), {}
         manifest = _playlist_sanitize_manifest(data)
     except Exception as ex:
-        app.logger.warning("Playlist manifest parse failed for %r: %s", path.name, type(ex).__name__)
+        _app_logger.warning("Playlist manifest parse failed for %r: %s", path.name, type(ex).__name__)
         diagnostics.append(f"manifest parse failed: {path.name}")
         return _clean_playlist_name(fallback), {}
     clean_name = _clean_playlist_name(
@@ -49191,7 +48961,7 @@ def list_playlists():
         })
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
     if duration_ms > 500:
-        app.logger.info("/api/playlists listed %s playlist(s) in %.1f ms", len(out), duration_ms)
+        _app_logger.info("/api/playlists listed %s playlist(s) in %.1f ms", len(out), duration_ms)
     return jsonify({
         "playlists": out,
         "diagnostics": diagnostics,
@@ -49208,14 +48978,14 @@ def playlist_delete(name):
     try:
         _playlist_ensure_state_dirs()
     except PlaylistStateError as exc:
-        app.logger.warning("Playlist delete state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+        _app_logger.warning("Playlist delete state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
         return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     pid = ""
     try:
         pid = _playlist_resolve_stable_id(clean_name, playlist_id=playlist_id or None)
         key = _playlist_key(clean_name, playlist_id=pid or None, allocate=False)
     except PlaylistStateError as exc:
-        app.logger.warning("Playlist delete identity error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+        _app_logger.warning("Playlist delete identity error: %s (%s)", exc.code, _redact_security_text(str(exc)))
         return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     delete_plex = bool(payload.get("delete_plex", True))
 
@@ -49234,7 +49004,7 @@ def playlist_delete(name):
             }), 502
         deleted_m3u = bool(res.get("deleted"))
     except Exception as ex:
-        app.logger.warning("Engine M3U delete via IPC failed: %s", type(ex).__name__)
+        _app_logger.warning("Engine M3U delete via IPC failed: %s", type(ex).__name__)
         return jsonify({
             "ok": False,
             "error": "Engine is unavailable; could not delete authoritative M3U.",
@@ -49251,7 +49021,7 @@ def playlist_delete(name):
             manifest_path.unlink()
             deleted_manifest = True
     except Exception as ex:
-        app.logger.warning("Could not delete playlist manifest %r: %s", clean_name, type(ex).__name__)
+        _app_logger.warning("Could not delete playlist manifest %r: %s", clean_name, type(ex).__name__)
 
     try:
         for ckpt in _playlist_saved_job_states_for_name(clean_name, playlist_id=pid, strict=True):
@@ -49259,7 +49029,7 @@ def playlist_delete(name):
             if ckpt_jid:
                 _playlist_delete_job_state(ckpt_jid)
     except PlaylistStateError as exc:
-        app.logger.warning("Could not delete playlist checkpoint for %r: %s", clean_name, exc.code)
+        _app_logger.warning("Could not delete playlist checkpoint for %r: %s", clean_name, exc.code)
 
     # The engine M3U delete above is this route's one hard-required step
     # (a failure already returned before this point); once past it, the
@@ -49275,7 +49045,7 @@ def playlist_delete(name):
                     del index_data[pid]
                     _playlist_save_index(index_data)
         except PlaylistStateError as exc:
-            app.logger.warning("Could not retire playlist index entry %r: %s", pid, exc.code)
+            _app_logger.warning("Could not retire playlist index entry %r: %s", pid, exc.code)
 
     if delete_plex and _plex_settings().get("token"):
         stored_rating_key = _s((manifest_data.get("last_plex") or {}).get("rating_key") or "").strip()
@@ -49293,7 +49063,7 @@ def playlist_delete(name):
         except urllib.error.HTTPError as ex:
             plex_error = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
         except Exception as ex:
-            app.logger.warning("Plex playlist delete failed: %s", type(ex).__name__)
+            _app_logger.warning("Plex playlist delete failed: %s", type(ex).__name__)
             plex_error = "Could not delete this playlist from Plex."
     return jsonify({
         "ok": True,
@@ -49533,7 +49303,7 @@ def playlist_track_action(name):
             requested_path=_s(payload.get("path") or ""),
         )
     except Exception as ex:
-        app.logger.warning("Playlist track action failed: %s", type(ex).__name__)
+        _app_logger.warning("Playlist track action failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not apply this track action."}), 400
     normalized_action = _s(payload.get("action") or "").strip().lower().replace("-", "_")
     try:
@@ -49543,7 +49313,7 @@ def playlist_track_action(name):
         elif normalized_action == "retry_import":
             result["job"] = _playlist_start_direct_action(clean_name, "import_downloaded")
     except Exception as ex:
-        app.logger.warning("Playlist track retry failed: %s", type(ex).__name__)
+        _app_logger.warning("Playlist track retry failed: %s", type(ex).__name__)
         result["retry_error"] = "Could not retry this track."
     return jsonify(result)
 
@@ -50193,7 +49963,7 @@ def playlist_tracks_detail(name):
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
     payload["duration_ms"] = duration_ms
     if duration_ms > 500:
-        app.logger.info("/api/playlists/%s/tracks mode=%s built in %.1f ms", clean_name, payload.get("detail_mode") or mode, duration_ms)
+        _app_logger.info("/api/playlists/%s/tracks mode=%s built in %.1f ms", clean_name, payload.get("detail_mode") or mode, duration_ms)
     return jsonify(payload)
 
 
@@ -50841,7 +50611,7 @@ def playlist_pipeline_action(name, action):
                 _pl_dl_jobs.pop(checkpoint_id, None)
             return jsonify({"ok": True, "action": normalized})
     except Exception as ex:
-        app.logger.warning("Playlist pipeline action %r failed: %s", normalized, type(ex).__name__)
+        _app_logger.warning("Playlist pipeline action %r failed: %s", normalized, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not apply this pipeline action."}), 400
     return jsonify({"ok": False, "error": f"Unsupported pipeline action: {normalized}"}), 400
 
@@ -50918,7 +50688,7 @@ def save_music_format_preferences_route():
     try:
         prefs = _save_music_format_preferences(payload.get("preferences") or payload)
     except Exception as ex:
-        app.logger.warning("Could not save music format preferences: %s", type(ex).__name__)
+        _app_logger.warning("Could not save music format preferences: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save preferences."}), 400
     return jsonify({"ok": True, "preferences": prefs})
 
@@ -51518,7 +51288,7 @@ def item_replacement_plan(iid: int):
     except BeetsError as exc:
         return jsonify({"ok": False, "error": "Track replacement planning failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
-        app.logger.exception("item_replacement_plan failed for iid=%s", iid)
+        _app_logger.exception("item_replacement_plan failed for iid=%s", iid)
         return jsonify({"ok": False, "error": "Track replacement planning failed."}), 500
 
 
@@ -51543,7 +51313,7 @@ def item_replacement_apply(iid: int):
     except BeetsError as exc:
         return jsonify({"ok": False, "error": "Track replacement apply failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
-        app.logger.exception("item_replacement_apply failed for iid=%s op_id=%s", iid, op_id)
+        _app_logger.exception("item_replacement_apply failed for iid=%s op_id=%s", iid, op_id)
         return jsonify({"ok": False, "error": "Track replacement apply failed."}), 500
 
 
@@ -51902,9 +51672,6 @@ def revert_config():
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
-def _s(v):
-    return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v or "")
-
 def item_dict(item) -> Dict[str, Any]:
     return {
         "id":          item.id,
@@ -52027,7 +51794,7 @@ def api_transaction_settings_save():
     try:
         settings = transactions.save_settings(payload)
     except Exception as ex:
-        app.logger.warning("Could not save transaction settings: %s", type(ex).__name__)
+        _app_logger.warning("Could not save transaction settings: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save transaction settings."}), 400
     return jsonify({"ok": True, "settings": settings})
 

@@ -17,6 +17,10 @@ from unittest import mock
 
 import app as app_module
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 def _scan_row(item_id, album_id, db_path, resolved_path, safe=True, skip_reason=""):
@@ -53,7 +57,7 @@ class FixLeakedDbPathsTests(unittest.TestCase):
 
     def test_dry_run_never_calls_engine(self):
         row = _scan_row(1, 10, "Artist/%the{}/track.mp3", "/data/media/music/Artist/track.mp3")
-        with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
+        with patch_app_family(app_module, "_scan_leaked_db_paths", return_value=[row]), \
              mock.patch.object(app_module.composite_workflows, "repoint_item_db_path") as mock_repoint:
             log = self._run({"dry_run": True})
         mock_repoint.assert_not_called()
@@ -67,13 +71,13 @@ class FixLeakedDbPathsTests(unittest.TestCase):
         # computed new_path forwarded) without depending on how Path
         # renders separators on the platform running the test suite.
         row = _scan_row(1, 10, "Artist/%the{}/track.mp3", "/data/media/music/Artist/track.mp3")
-        with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
-             mock.patch.object(app_module, "_db_path_value", return_value="Artist/track.mp3") as mock_db_path_value, \
+        with patch_app_family(app_module, "_scan_leaked_db_paths", return_value=[row]), \
+             patch_app_family(app_module, "_db_path_value", return_value="Artist/track.mp3") as mock_db_path_value, \
              mock.patch.object(
                  app_module.composite_workflows, "repoint_item_db_path",
                  return_value={"ok": True, "repointed": True},
              ) as mock_repoint, \
-             mock.patch.object(app_module, "_invalidate_lib_cache"):
+             patch_app_family(app_module, "_invalidate_lib_cache"):
             log = self._run({"dry_run": False, "confirmed": True})
         mock_db_path_value.assert_called_once()
         mock_repoint.assert_called_once_with(1, 10, "Artist/%the{}/track.mp3", "Artist/track.mp3")
@@ -81,8 +85,8 @@ class FixLeakedDbPathsTests(unittest.TestCase):
 
     def test_item_with_no_album_id_is_skipped_not_crashed(self):
         row = _scan_row(2, 0, "orphan/%the{}/track.mp3", "/data/media/music/orphan/track.mp3")
-        with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
-             mock.patch.object(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
+        with patch_app_family(app_module, "_scan_leaked_db_paths", return_value=[row]), \
+             patch_app_family(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
              mock.patch.object(app_module.composite_workflows, "repoint_item_db_path") as mock_repoint:
             log = self._run({"dry_run": False, "confirmed": True})
         mock_repoint.assert_not_called()
@@ -90,8 +94,8 @@ class FixLeakedDbPathsTests(unittest.TestCase):
 
     def test_engine_rejection_is_logged_not_raised(self):
         row = _scan_row(1, 10, "Artist/%the{}/track.mp3", "/data/media/music/Artist/track.mp3")
-        with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
-             mock.patch.object(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
+        with patch_app_family(app_module, "_scan_leaked_db_paths", return_value=[row]), \
+             patch_app_family(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
              mock.patch.object(
                  app_module.composite_workflows, "repoint_item_db_path",
                  return_value={"ok": False, "error": "boom"},
@@ -101,8 +105,8 @@ class FixLeakedDbPathsTests(unittest.TestCase):
 
     def test_engine_unavailable_is_logged_not_raised(self):
         row = _scan_row(1, 10, "Artist/%the{}/track.mp3", "/data/media/music/Artist/track.mp3")
-        with mock.patch.object(app_module, "_scan_leaked_db_paths", return_value=[row]), \
-             mock.patch.object(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
+        with patch_app_family(app_module, "_scan_leaked_db_paths", return_value=[row]), \
+             patch_app_family(app_module, "MUSIC_ROOT", app_module.Path("/data/media/music")), \
              mock.patch.object(
                  app_module.composite_workflows, "repoint_item_db_path",
                  side_effect=BeetsUnavailableError("offline"),

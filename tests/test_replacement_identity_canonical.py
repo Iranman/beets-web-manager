@@ -7,6 +7,10 @@ from unittest import mock
 
 import app as app_module
 from backend.recording_review import resolve_recording_identity
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 REC = "33333333-3333-3333-3333-333333333333"
 OTHER = "66666666-6666-6666-6666-666666666666"
@@ -61,12 +65,12 @@ class ResolveRecordingIdentityTests(unittest.TestCase):
 class ReplacementWorkflowTests(unittest.TestCase):
     def _run(self, row, *, hits, text=()):
         log = []
-        with mock.patch.object(app_module, "_music_format_read_embedded_identity", return_value={}), \
-                mock.patch.object(app_module, "_acoustid_lookup_cached", return_value=hits), \
-                mock.patch.object(app_module, "_mb_recording_search", return_value=list(text)) as search, \
-                mock.patch.object(app_module, "_fetch_mb_recording_details", return_value={}), \
-                mock.patch.object(app_module, "_fetch_mb_release_candidate", return_value={}), \
-                mock.patch.object(app_module, "_resolve_release_group_to_release", return_value=""), \
+        with patch_app_family(app_module, "_music_format_read_embedded_identity", return_value={}), \
+                patch_app_family(app_module, "_acoustid_lookup_cached", return_value=hits), \
+                patch_app_family(app_module, "_mb_recording_search", return_value=list(text)) as search, \
+                patch_app_family(app_module, "_fetch_mb_recording_details", return_value={}), \
+                patch_app_family(app_module, "_fetch_mb_release_candidate", return_value={}), \
+                patch_app_family(app_module, "_resolve_release_group_to_release", return_value=""), \
                 mock.patch("pathlib.Path.is_file", return_value=True):
             result = app_module._music_format_resolve_replacement_identity(row, log)
         return result, search, log

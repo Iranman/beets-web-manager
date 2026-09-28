@@ -87,9 +87,146 @@ def app_family_paths() -> list:
     return [p for p in before + [_APP_PY_PATH] + after if p.exists()]
 
 
+def _bound_names(node: ast.stmt) -> list:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    targets = []
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        targets = [node.target]
+    names = []
+    for target in targets:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name):
+                names.append(sub.id)
+    return names
+
+
+def _segment(lines: list, node: ast.stmt) -> str:
+    start = node.lineno
+    decorators = getattr(node, "decorator_list", None) or []
+    if decorators:
+        start = min(start, min(d.lineno for d in decorators))
+    return "".join(lines[start - 1:node.end_lineno])
+
+
+@functools.lru_cache(maxsize=1)
+def _family_source_cached(stamp: tuple) -> str:
+    app_text = _APP_PY_PATH.read_text(encoding="utf-8")
+    modules = {}
+    for path in app_family_paths():
+        if path == _APP_PY_PATH:
+            continue
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        tree = ast.parse(text)
+        by_name = {}
+        for node in tree.body:
+            for name in _bound_names(node):
+                by_name.setdefault(name, node)
+        modname = ".".join(path.relative_to(_REPO_ROOT).with_suffix("").parts)
+        modules[modname] = {"lines": lines, "tree": tree, "by_name": by_name, "emitted": set()}
+
+    # Rebuild app.py as it read before extraction: every ARCH-001 re-export
+    # block is replaced by the moved units, in their original relative order.
+    app_lines = app_text.splitlines(keepends=True)
+    out = []
+    cursor = 0
+    for node in ast.parse(app_text).body:
+        if not (isinstance(node, ast.ImportFrom) and node.module in modules
+                and "ARCH-001 extracted" in app_lines[node.lineno - 1]):
+            continue
+        info = modules[node.module]
+        out.append("".join(app_lines[cursor:node.lineno - 1]))
+        units = []
+        for alias in node.names:
+            unit = info["by_name"].get(alias.name)
+            if unit is not None and id(unit) not in info["emitted"]:
+                info["emitted"].add(id(unit))
+                units.append(unit)
+        units.sort(key=lambda n: n.lineno)
+        out.extend(_segment(info["lines"], unit) + "\n" for unit in units)
+        cursor = node.end_lineno
+    out.append("".join(app_lines[cursor:]))
+    # Module headers (imports, docstrings) and anything not re-exported.
+    for info in modules.values():
+        rest = [_segment(info["lines"], n) for n in info["tree"].body if id(n) not in info["emitted"]]
+        if rest:
+            out.append("\n\n" + "\n".join(rest) + "\n")
+    return "".join(out)
+
+
 def app_family_source() -> str:
-    """Concatenated source of app.py and its extracted modules."""
-    return "\n\n".join(p.read_text(encoding="utf-8") for p in app_family_paths())
+    """Source of the app.py module family, laid out as the original app.py.
+
+    Re-export blocks in app.py are expanded in place with the extracted
+    units, so marker-to-marker source slices used by older tests keep their
+    original meaning; extracted-module headers follow at the end.
+    """
+    stamp = tuple((str(p), p.stat().st_mtime_ns) for p in app_family_paths())
+    return _family_source_cached(stamp)
+
+
+def app_unit_source(name: str) -> str:
+    """Source of one top-level definition, wherever it lives in the family."""
+    source = app_family_source()
+    lines = source.splitlines(keepends=True)
+    for node in get_app_ast().body:
+        if name in _bound_names(node):
+            return _segment(lines, node)
+    raise KeyError(name)
+
+
+def load_app_closure(roots: Iterable[str], namespace: Dict[str, Any]) -> Dict[str, Any]:
+    """Exec `roots` plus every top-level unit they transitively reference.
+
+    Names already present in `namespace` are treated as provided stubs and
+    are not loaded from source. Units run in family (original) order.
+    """
+    import logging
+    import threading
+    for mod in (collections, datetime, functools, hashlib, itertools, json, logging, math, os, re,
+                shutil, sys, threading, time, typing, unicodedata, uuid):
+        namespace.setdefault(mod.__name__, mod)
+    for alias in ("Any", "Callable", "Dict", "Iterable", "List", "Optional", "Set", "Tuple", "Union"):
+        namespace.setdefault(alias, getattr(typing, alias))
+    namespace.setdefault("Path", Path)
+    tree = get_app_ast()
+    lines = app_family_source().splitlines(keepends=True)
+    defs: Dict[str, ast.stmt] = {}
+    for node in tree.body:
+        for bound in _bound_names(node):
+            defs.setdefault(bound, node)
+    wanted: Dict[int, ast.stmt] = {}
+    stack = list(roots)
+    while stack:
+        name = stack.pop()
+        if name in namespace or name not in defs:
+            continue
+        node = defs[name]
+        if id(node) in wanted:
+            continue
+        wanted[id(node)] = node
+        local = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)) and sub is not node:
+                local.add(sub.id)
+            elif isinstance(sub, ast.arg):
+                local.add(sub.arg)
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and sub is not node:
+                local.add(sub.name)
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                local.update((a.asname or a.name).split(".")[0] for a in sub.names)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            local = set()
+        stack.extend(
+            sub.id for sub in ast.walk(node)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and sub.id not in local
+        )
+    for node in sorted(wanted.values(), key=lambda n: n.lineno):
+        exec(compile("from __future__ import annotations\n" + _segment(lines, node).lstrip(), str(_APP_PY_PATH), "exec"), namespace)
+    return namespace
 
 
 def get_app_ast() -> ast.Module:

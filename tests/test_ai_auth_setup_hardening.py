@@ -64,7 +64,7 @@ class ClassifyOpenAiErrorBehaviorTests(unittest.TestCase):
         class _StubApp:
             logger = logging.getLogger("test_classify_openai_error")
 
-        namespace = {"urllib": _urllib, "app": _StubApp()}
+        namespace = {"urllib": _urllib, "app": _StubApp(), "_app_logger": _StubApp().logger}
         namespace["urllib"].error = _urllib_error
         exec(compile(fn_src, "<classify_openai_error>", "exec"), namespace)
         cls._classify = staticmethod(namespace["_classify_openai_error"])

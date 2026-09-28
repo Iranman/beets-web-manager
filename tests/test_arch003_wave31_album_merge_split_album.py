@@ -20,6 +20,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class AlbumMergeSplitAlbumTests(unittest.TestCase):
@@ -46,11 +50,11 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
             finally:
                 con.close()
 
-        self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
+        self._db_patch = patch_app_family(app_module, "_db", side_effect=_mock_db_cm)
         self._db_patch.start()
-        self._root_patch = mock.patch.object(app_module, "MUSIC_ROOT", self.music_root)
+        self._root_patch = patch_app_family(app_module, "MUSIC_ROOT", self.music_root)
         self._root_patch.start()
-        self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
+        self._invalidate_patch = patch_app_family(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
 
         def _mock_get_album(album_id):

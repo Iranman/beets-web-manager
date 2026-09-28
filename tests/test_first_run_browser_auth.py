@@ -19,6 +19,10 @@ from unittest import mock
 
 import app as app_module
 import routes_setup
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 _MARKER_PWD = "MarkerInitialPassword123!Aa4567890"
@@ -63,12 +67,12 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
         self.env_patch.start()
 
         self.patches = [
-            mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", self.data_dir),
-            mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
-            mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
-            mock.patch.object(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
-            mock.patch.object(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
-            mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
+            patch_app_family(app_module, "WEB_MANAGER_DATA_DIR", self.data_dir),
+            patch_app_family(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
+            patch_app_family(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
+            patch_app_family(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
+            patch_app_family(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
+            patch_app_family(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
         ]
         for p in self.patches:
             p.start()

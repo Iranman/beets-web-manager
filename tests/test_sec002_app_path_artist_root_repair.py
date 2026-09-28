@@ -15,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 def _fake_folder_inventory(root):
@@ -54,8 +58,8 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.outside.mkdir()
         self.patches = [
             mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}),
-            mock.patch.object(app_module, "MUSIC_ROOT", self.music),
-            mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            patch_app_family(app_module, "MUSIC_ROOT", self.music),
+            patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
             mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
@@ -230,7 +234,7 @@ class ArtistFolderRepairRootHelperTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.music = Path(self.tmp.name).resolve() / "music"
         self.music.mkdir()
-        patch = mock.patch.object(app_module, "MUSIC_ROOT", self.music)
+        patch = patch_app_family(app_module, "MUSIC_ROOT", self.music)
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -244,7 +248,7 @@ class ArtistFolderRepairRootHelperTests(unittest.TestCase):
         # encoded sequence.
         percent_root = Path(self.tmp.name).resolve() / "100% Legit Music"
         percent_root.mkdir()
-        with mock.patch.object(app_module, "MUSIC_ROOT", percent_root):
+        with patch_app_family(app_module, "MUSIC_ROOT", percent_root):
             resolved, error = app_module._artist_folder_repair_root(str(percent_root))
         self.assertIsNone(error)
         self.assertEqual(resolved, percent_root.resolve())
@@ -283,8 +287,8 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         self.music = Path(self.tmp.name).resolve() / "music"
         self.music.mkdir()
         self.patches = [
-            mock.patch.object(app_module, "MUSIC_ROOT", self.music),
-            mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            patch_app_family(app_module, "MUSIC_ROOT", self.music),
+            patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
             mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
@@ -305,7 +309,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         (a / "track.mp3").write_bytes(b"fake-audio-a")
         (b / "track.mp3").write_bytes(b"fake-audio-b")
         log = []
-        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=False) as fp:
+        with patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=False) as fp:
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=False,
             )
@@ -335,7 +339,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         log = []
         plan_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_1"})
         apply_mock = mock.MagicMock(return_value={"ok": True, "moved_files": 1})
-        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp, \
+        with patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp, \
              mock.patch.object(app_module.composite_workflows, "plan_artist_folder_reconcile", plan_mock), \
              mock.patch.object(app_module.composite_workflows, "apply_artist_folder_reconcile", apply_mock):
             summary = app_module._apply_artist_folder_groups(
@@ -365,7 +369,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         (a / "track.mp3").write_bytes(b"fake-audio")
         b.mkdir()
         log = []
-        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True), \
+        with patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=True), \
              mock.patch.object(app_module.composite_workflows, "plan_artist_folder_reconcile", side_effect=ConnectionError("engine unreachable")):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=False,
@@ -465,7 +469,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         (a / "track.mp3").write_bytes(b"fake-audio-a")
         (b / "track.mp3").write_bytes(b"fake-audio-b")
         log = []
-        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=None) as fp:
+        with patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=None) as fp:
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=False,
             )
@@ -489,8 +493,8 @@ class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
         self.music = Path(self.tmp.name).resolve() / "music"
         self.music.mkdir()
         self.patches = [
-            mock.patch.object(app_module, "MUSIC_ROOT", self.music),
-            mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            patch_app_family(app_module, "MUSIC_ROOT", self.music),
+            patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
             mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
@@ -511,9 +515,9 @@ class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
 
     def test_plain_duplicate_not_a_candidate_when_fingerprint_unavailable(self):
         stamped, plain = self._stamped_and_plain_folders()
-        with mock.patch.object(app_module, "_stamp_artist_folder_album_mbid_counts", return_value=({}, {}, "")), \
-             mock.patch.object(app_module, "_mb_artist_lookup_by_id", return_value={"name": "Bob Marley"}), \
-             mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=None) as fp:
+        with patch_app_family(app_module, "_stamp_artist_folder_album_mbid_counts", return_value=({}, {}, "")), \
+             patch_app_family(app_module, "_mb_artist_lookup_by_id", return_value={"name": "Bob Marley"}), \
+             patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=None) as fp:
             result = app_module._stamp_artist_folder_scan(self.music)
         self.assertTrue(fp.called)
         candidate_paths = {c["path"] for c in result["candidates"]}
@@ -523,9 +527,9 @@ class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
 
     def test_plain_duplicate_is_a_candidate_when_fingerprint_confirms(self):
         stamped, plain = self._stamped_and_plain_folders()
-        with mock.patch.object(app_module, "_stamp_artist_folder_album_mbid_counts", return_value=({}, {}, "")), \
-             mock.patch.object(app_module, "_mb_artist_lookup_by_id", return_value={"name": "Bob Marley"}), \
-             mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp:
+        with patch_app_family(app_module, "_stamp_artist_folder_album_mbid_counts", return_value=({}, {}, "")), \
+             patch_app_family(app_module, "_mb_artist_lookup_by_id", return_value={"name": "Bob Marley"}), \
+             patch_app_family(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp:
             result = app_module._stamp_artist_folder_scan(self.music)
         self.assertTrue(fp.called)
         candidate_paths = {c["path"] for c in result["candidates"]}

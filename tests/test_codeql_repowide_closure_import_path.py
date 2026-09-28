@@ -34,6 +34,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class ImportSourcePathContainmentTests(unittest.TestCase):
@@ -194,7 +198,7 @@ class DedupScanPathContainmentTests(unittest.TestCase):
     the later scan_path.rglob("*") walk."""
 
     def _roots(self, music_root: Path, downloads_root: Path):
-        return mock.patch.object(app_module, "_BROWSE_ALLOWED_ROOTS", (music_root, downloads_root))
+        return patch_app_family(app_module, "_BROWSE_ALLOWED_ROOTS", (music_root, downloads_root))
 
     def test_outside_allowed_roots_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

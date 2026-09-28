@@ -12,6 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class FolderCleanupPathContainmentTests(unittest.TestCase):
@@ -20,7 +24,7 @@ class FolderCleanupPathContainmentTests(unittest.TestCase):
     here as the foundation the rest of this cluster depends on."""
 
     def test_outside_root_rejected(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir()) / "music-only"):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir()) / "music-only"):
             path, error = app_module._folder_cleanup_path("/etc")
         self.assertIsNone(path)
         self.assertEqual(error, "Path is outside the configured music library")
@@ -29,7 +33,7 @@ class FolderCleanupPathContainmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             music_root = Path(tmp)
             (music_root / "Artist").mkdir()
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root):
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root):
                 path, error = app_module._folder_cleanup_path("Artist")
             self.assertIsNone(error)
             self.assertEqual(path, (music_root / "Artist").resolve())
@@ -42,7 +46,7 @@ class FolderCleanupPathContainmentTests(unittest.TestCase):
             outside.mkdir()
             link = music_root / "escape"
             link.symlink_to(outside, target_is_directory=True)
-            with mock.patch.object(app_module, "MUSIC_ROOT", music_root):
+            with patch_app_family(app_module, "MUSIC_ROOT", music_root):
                 path, error = app_module._folder_cleanup_path(str(link))
             self.assertIsNone(path)
             self.assertEqual(error, "Path is outside the configured music library")
@@ -59,15 +63,15 @@ class ApprovedRootSelfRefusalTests(unittest.TestCase):
         # Documents the underlying library behavior this fix must guard
         # against, so the guard's necessity stays visible if that
         # semantic ever appears to change.
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             self.assertTrue(app_module._path_under(Path("/data/media/music"), app_module.MUSIC_ROOT))
 
     def test_is_approved_root_true_for_root_itself(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             self.assertTrue(app_module._folder_cleanup_is_approved_root(Path("/data/media/music")))
 
     def test_is_approved_root_false_for_subfolder(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             self.assertFalse(app_module._folder_cleanup_is_approved_root(Path("/data/media/music/Artist")))
 
     def _post_apply(self, payload):
@@ -78,8 +82,8 @@ class ApprovedRootSelfRefusalTests(unittest.TestCase):
             return app_module.apply_folder_placeholder_action_api()
 
     def test_remove_empty_source_refuses_the_root_itself(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)), \
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)), \
              mock.patch.object(Path, "rmdir") as mock_rmdir:
             response = self._post_apply({
                 "action": "remove_empty_source", "confirmed": True,
@@ -91,8 +95,8 @@ class ApprovedRootSelfRefusalTests(unittest.TestCase):
         mock_rmdir.assert_not_called()
 
     def test_safe_rename_refuses_the_root_itself_as_source(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)), \
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)), \
              mock.patch.object(Path, "rename") as mock_rename:
             response = self._post_apply({
                 "action": "safe_rename", "confirmed": True,
@@ -104,9 +108,9 @@ class ApprovedRootSelfRefusalTests(unittest.TestCase):
         mock_rename.assert_not_called()
 
     def test_merge_source_files_refuses_the_root_itself_as_source(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)), \
-             mock.patch.object(app_module, "_folder_cleanup_merge_preview") as mock_preview:
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)), \
+             patch_app_family(app_module, "_folder_cleanup_merge_preview") as mock_preview:
             response = self._post_apply({
                 "action": "merge_source_files", "confirmed": True,
                 "source_path": "/data/media/music", "target_path": "/data/media/other",
@@ -120,8 +124,8 @@ class ApprovedRootSelfRefusalTests(unittest.TestCase):
     def test_mark_reviewed_is_not_blocked_by_root_refusal(self):
         # mark_reviewed/skip are non-destructive no-ops; the root-refusal
         # guard must not accidentally block them.
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "_folder_cleanup_path", return_value=(Path("/data/media/music"), None)):
             response = self._post_apply({
                 "action": "mark_reviewed", "confirmed": True,
                 "source_path": "/data/media/music",
@@ -162,7 +166,7 @@ class SafeRenamesJobRootAndDestinationContainmentTests(unittest.TestCase):
             return response, captured.get("log", [])
 
     def test_root_itself_is_skipped_not_renamed(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
              mock.patch.object(
                  app_module, "_folder_cleanup_path",
                  return_value=(Path("/data/media/music"), None),
@@ -176,8 +180,8 @@ class SafeRenamesJobRootAndDestinationContainmentTests(unittest.TestCase):
         # Simulate a row that (however it was constructed) points outside
         # MUSIC_ROOT, proving the pre-rename containment check is a real
         # second gate, not just a construction-time assumption.
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "_folder_cleanup_path", return_value=None), \
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "_folder_cleanup_path", return_value=None), \
              mock.patch.object(
                  app_module, "_scan_folder_name_placeholders",
                  return_value=[{
@@ -204,8 +208,8 @@ class FolderCleanupEngineErrorResponseTests(unittest.TestCase):
     crashing."""
 
     def _post_apply(self, payload, source=Path("/data/media/music/Artist/Album")):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
-             mock.patch.object(app_module, "_folder_cleanup_path", return_value=(source, None)):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             patch_app_family(app_module, "_folder_cleanup_path", return_value=(source, None)):
             with app_module.app.test_request_context(
                 "/api/clean/folder-placeholder/apply", method="POST",
                 data=json.dumps(payload), content_type="application/json",

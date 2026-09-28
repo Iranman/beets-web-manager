@@ -27,11 +27,15 @@ from unittest import mock
 
 import app as app_module
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class LibraryMergeArtistTests(unittest.TestCase):
     def setUp(self):
-        self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
+        self._invalidate_patch = patch_app_family(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
 
     def tearDown(self):
@@ -60,7 +64,7 @@ class LibraryMergeArtistTests(unittest.TestCase):
 
     def test_no_matching_albums_is_a_clean_no_op(self):
         with mock.patch.object(app_module.composite_workflows, "update_album_metadata") as mock_update, \
-             mock.patch.object(app_module, "subprocess") as mock_subprocess:
+             patch_app_family(app_module, "subprocess") as mock_subprocess:
             log = self._run("Ghost Artist", "New Artist", [])
         mock_update.assert_not_called()
         mock_subprocess.run.assert_not_called()

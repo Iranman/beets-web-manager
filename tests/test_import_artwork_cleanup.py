@@ -2,9 +2,9 @@
 import unittest
 from pathlib import Path
 try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
-    from _app_ast_cache import app_family_source  # noqa: E402
+    from _app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 except ImportError:  # pragma: no cover
-    from tests._app_ast_cache import app_family_source  # noqa: E402
+    from tests._app_ast_cache import app_family_source, app_unit_source  # noqa: E402
 
 
 def _app_source() -> str:
@@ -13,10 +13,7 @@ def _app_source() -> str:
 
 
 def _artwork_helper_source(src: str) -> str:
-    return src[
-        src.index("def _move_artwork_to_target"):
-        src.index("def _path_is_under")
-    ]
+    return app_unit_source("_move_artwork_to_target")
 
 
 def _cleanup_block_source(src: str) -> str:

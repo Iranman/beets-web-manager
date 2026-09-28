@@ -15,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class AiBatchStateFileContainmentTests(unittest.TestCase):
@@ -94,7 +98,7 @@ class FolderImportTrackCountRootContainmentTests(unittest.TestCase):
             shutil.rmtree(outside, ignore_errors=True)
 
     def test_folder_under_music_root_is_still_counted(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
             album_dir = Path(tempfile.mkdtemp(dir=tempfile.gettempdir(), prefix="sec002-inroot-"))
             try:
                 (album_dir / "01.flac").write_text("x", encoding="utf-8")
@@ -128,7 +132,7 @@ class FolderTrackSearchTitlesRootContainmentTests(unittest.TestCase):
             shutil.rmtree(outside, ignore_errors=True)
 
     def test_folder_under_music_root_is_still_scanned(self):
-        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
+        with patch_app_family(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
             album_dir = Path(tempfile.mkdtemp(dir=tempfile.gettempdir(), prefix="sec002-inroot-"))
             try:
                 (album_dir / "01 - Opening Track.flac").write_text("x", encoding="utf-8")

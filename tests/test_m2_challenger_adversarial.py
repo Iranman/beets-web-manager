@@ -18,13 +18,17 @@ from unittest import mock
 
 import app as app_module
 from backend.beets_adapter import BeetsUnavailableError, BeetsError
+try:  # ARCH-001: patch app.py and the modules extracted from it
+    from _app_family import patch_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family  # noqa: E402
 
 
 class M2AdversarialBase(unittest.TestCase):
     def setUp(self):
-        self._inv_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
+        self._inv_patch = patch_app_family(app_module, "_invalidate_lib_cache")
         self._inv_patch.start()
-        self._plex_patch = mock.patch.object(app_module, "_trigger_plex_refresh")
+        self._plex_patch = patch_app_family(app_module, "_trigger_plex_refresh")
         self._plex_patch.start()
 
         # Guard against any Beets subprocess invocation in app
