@@ -142,14 +142,16 @@ def _family_source_cached(stamp: tuple) -> str:
         anchor = -1
         seq = 0
         prev_end = 0
+        pending = ""
         for node_idx, node in enumerate(tree.body):
-            start = node.lineno
-            for d in getattr(node, "decorator_list", None) or []:
-                start = min(start, d.lineno)
-            chunk = "".join(lines[prev_end:node.end_lineno])  # leading comments travel with the unit
+            trivia = "".join(lines[prev_end:node.lineno - 1])  # leading comments travel with the unit
+            node_text = "".join(lines[node.lineno - 1:node.end_lineno])
             prev_end = node.end_lineno
             if is_app and isinstance(node, ast.ImportFrom) and "ARCH-001 extracted" in lines[node.lineno - 1]:
+                pending += trivia  # a re-export block vanishes; its comments stay in place
                 continue
+            chunk = pending + trivia + node_text
+            pending = ""
             if not is_app and (isinstance(node, (ast.Import, ast.ImportFrom)) or (
                     node_idx == 0 and isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant))):
                 tail.append(chunk)

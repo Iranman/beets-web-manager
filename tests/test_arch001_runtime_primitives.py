@@ -35,9 +35,13 @@ class RuntimePrimitiveTests(unittest.TestCase):
         self.assertIs(app._extract_mb_uuid, app_runtime._extract_mb_uuid)
 
     def test_no_duplicate_top_level_definitions_across_the_app_family(self):
+        # Every module carved out of app.py: one definition per name, or a
+        # re-export/patch would silently target the wrong copy.
         seen = {}
         dupes = []
-        paths = [ROOT / "app.py", ROOT / "backend" / "app_runtime.py"]
+        import json
+        inventory = json.loads((ROOT / "docs" / "arch001_app_ownership.json").read_text(encoding="utf-8"))
+        paths = [ROOT / "app.py"] + [ROOT / rel for rel in inventory["extracted_modules"]]
         for path in paths:
             for node in ast.parse(path.read_text(encoding="utf-8")).body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

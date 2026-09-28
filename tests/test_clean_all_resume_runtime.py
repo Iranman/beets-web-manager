@@ -175,8 +175,8 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self._patch(patch_app_family(app_module, "start_fetch_missing_art", side_effect=self._child_route("artwork", {"saved": 0})))
         self._patch(patch_app_family(app_module, "start_library_fix_genres", side_effect=self._child_route("genres", {"changed_count": 0})))
         self._patch(patch_app_family(app_module,
-            "playlist_sync_status",
-            return_value=SimpleNamespace(get_json=lambda silent=True: {"enabled": False, "running": False}),
+            "playlist_sync_status_payload",
+            return_value={"enabled": False, "running": False},
         ))
 
     def tearDown(self):

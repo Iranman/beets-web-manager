@@ -17,7 +17,11 @@ class SqliteDbTimeoutTests(unittest.TestCase):
         source = APP_SOURCE[start:end]
 
         self.assertIn("BEETS_SQLITE_TIMEOUT", source)
-        self.assertIn("get_db_connection(path)", source)
+        # ARCH-001: _db() referenced a control-agent helper removed with the
+        # custom engine (it could only raise NameError). It now fails closed
+        # explicitly; the Web Manager never opens the Beets database.
+        self.assertIn("direct Beets database access is not available in the Web Manager", source)
+        self.assertNotIn("get_db_connection", source)
         self.assertNotIn("sqlite3.connect", source)
         self.assertIn("def _sqlite_write_retry", source)
         self.assertIn("database locked while", source)

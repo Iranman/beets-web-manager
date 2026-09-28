@@ -13,6 +13,10 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+try:  # ARCH-001: app.py module family
+    from _app_family import rebind_app_family  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import rebind_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,7 +71,7 @@ class MigrationInvariantsTests(unittest.TestCase):
         from unittest import mock
 
         orig_lib = getattr(app_module, "lib", None)
-        app_module.lib = StockBeetsLibrary(app_module.beets_adapter)
+        rebind_app_family(app_module, "lib", StockBeetsLibrary(app_module.beets_adapter))
         try:
             with mock.patch.dict("os.environ", {"BEETS_WEB_AUTH_DISABLED": "1"}):
                 with app_module.app.test_client() as client:
@@ -90,7 +94,7 @@ class MigrationInvariantsTests(unittest.TestCase):
                         data = res.get_json()
                         self.assertEqual(data.get("error_code"), "ENGINE_OFFLINE")
         finally:
-            app_module.lib = orig_lib
+            rebind_app_family(app_module, "lib", orig_lib)
 
 
 if __name__ == "__main__":

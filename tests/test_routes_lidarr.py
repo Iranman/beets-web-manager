@@ -14,7 +14,7 @@ GITIGNORE_SOURCE = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
 class LidarrRoutesStaticTests(unittest.TestCase):
     def test_route_module_is_loaded_and_tracked(self):
-        self.assertIn("import routes_lidarr", APP_SOURCE)
+        self.assertIn('"routes_lidarr"', APP_SOURCE)  # listed in app.ROUTE_MODULES (ARCH-001)
         self.assertTrue((ROOT / "routes_lidarr.py").exists())
 
     def test_expected_frontend_routes_exist(self):

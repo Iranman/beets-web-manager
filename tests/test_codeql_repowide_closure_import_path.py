@@ -38,6 +38,10 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_family import patch_app_family_multiple  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family_multiple  # noqa: E402
 
 
 class ImportSourcePathContainmentTests(unittest.TestCase):
@@ -45,7 +49,7 @@ class ImportSourcePathContainmentTests(unittest.TestCase):
     _folder_cleanup_path() test pattern (tests/test_sec002_app_path_folder_cleanup.py)."""
 
     def _roots(self, torrent_root: Path, music_root: Path):
-        return mock.patch.multiple(
+        return patch_app_family_multiple(
             app_module,
             TORRENT_SOURCE_ROOTS=(torrent_root,),
             MUSIC_ROOT=music_root,
@@ -157,7 +161,7 @@ class ImportRouteRejectsOutOfRootPathBeforeAnyFilesystemOp(unittest.TestCase):
             torrent_root = Path(tmp) / "torrents"
             music_root = Path(tmp) / "music"
             outside_target = Path(tmp) / "outside" / "should-not-be-created"
-            with mock.patch.multiple(
+            with patch_app_family_multiple(
                 app_module,
                 TORRENT_SOURCE_ROOTS=(torrent_root,),
                 MUSIC_ROOT=music_root,
@@ -177,7 +181,7 @@ class ImportRouteRejectsOutOfRootPathBeforeAnyFilesystemOp(unittest.TestCase):
             torrent_root = Path(tmp) / "torrents"
             music_root = Path(tmp) / "music"
             outside = Path(tmp) / "elsewhere"
-            with mock.patch.multiple(
+            with patch_app_family_multiple(
                 app_module,
                 TORRENT_SOURCE_ROOTS=(torrent_root,),
                 MUSIC_ROOT=music_root,

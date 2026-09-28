@@ -35,6 +35,14 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_family import patch_app_family_multiple  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_family import patch_app_family_multiple  # noqa: E402
+try:  # ARCH-001: app.py module family
+    from _app_ast_cache import app_family_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
 ITEMS_SCHEMA = (
@@ -772,8 +780,7 @@ class AstStructuralTests(unittest.TestCase):
 
     def setUp(self):
         app_path = flask_app.__file__
-        with open(app_path, "r", encoding="utf-8") as f:
-            self.source = f.read()
+        self.source = app_family_source()  # ARCH-001: app.py module family
         self.tree = ast.parse(self.source, filename=app_path)
 
     def test_no_direct_mutation_calls(self):
@@ -881,7 +888,7 @@ class RealEndToEndRouteTests(unittest.TestCase):
         # actually being exercised. This is the identical Wave 6/7 pitfall
         # already avoided by this suite's other fixtures; neutralize the
         # roots this fixture doesn't intentionally use.
-        self._other_roots_patch = mock.patch.multiple(
+        self._other_roots_patch = patch_app_family_multiple(
             flask_app,
             PLAYLIST_DOWNLOAD_ROOT=Path("/nonexistent-playlist-root-for-tests"),
             _DOWNLOADS_ROOTS=[],

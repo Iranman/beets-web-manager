@@ -212,8 +212,11 @@ class MbReleaseGroupCandidatesHelperTests(unittest.TestCase):
         self.assertIn("release-group/{rg_mbid}", src)
 
     def test_imported_into_app(self):
+        # ARCH-001: the callers moved into owned services; they import the
+        # shared helper directly (app.<name> still resolves it).
+        import re
         src = _app_source()
-        self.assertIn("_mb_release_group_candidates,", src)
+        self.assertRegex(src, re.compile(r"from helpers_mb import [^\n]*\b_mb_release_group_candidates\b"))
 
 
 if __name__ == "__main__":

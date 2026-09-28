@@ -38,8 +38,9 @@ def _family_targets(app_module, name):
     targets = [app_module]
     if not isinstance(app_module, types.ModuleType) or not str(getattr(app_module, "__file__", "")).endswith("app.py"):
         return targets  # not the app module (e.g. the Flask object): plain patch
+    instances = getattr(app_module, "_ROUTE_MODULE_INSTANCES", {}) or {}
     for modname in family_module_names():
-        mod = sys.modules.get(modname)
+        mod = instances.get(modname) or sys.modules.get(modname)
         if mod is None:
             try:
                 mod = importlib.import_module(modname)
@@ -116,3 +117,30 @@ def rebind_app_family(app_module, name, value):
     patch): the owned modules that now hold the code see the same value."""
     for mod in _family_targets(app_module, name):
         setattr(mod, name, value)
+
+
+class _FamilyPatchMultiple:
+    """Drop-in for mock.patch.multiple(app, NAME=value, ...) over the family."""
+
+    def __init__(self, target, **values):
+        self._patches = [_FamilyPatch(target, name, value) for name, value in values.items()]
+
+    def start(self):
+        for patcher in self._patches:
+            patcher.start()
+        return {}
+
+    def stop(self):
+        for patcher in reversed(self._patches):
+            patcher.stop()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+def patch_app_family_multiple(target, **values):
+    return _FamilyPatchMultiple(target, **values)

@@ -19,7 +19,7 @@ SUBMISSIONS_SOURCE = (ROOT / "frontend" / "src" / "views" / "Submissions.tsx").r
 
 class MetadataSubmissionsStaticTests(unittest.TestCase):
     def test_submission_route_module_is_loaded(self):
-        self.assertIn("import routes_submissions", APP_SOURCE)
+        self.assertIn('"routes_submissions"', APP_SOURCE)  # listed in app.ROUTE_MODULES (ARCH-001)
 
     def test_acoustid_submit_routes_use_beet_submit_jobs(self):
         self.assertIn('@app.post("/api/albums/<int:aid>/acoustid-submit")', ROUTES_SOURCE)
