@@ -6,6 +6,17 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+Duplicate cleanup requires audio proof (found with live AcoustID).
+
+### Fixed
+- Unattended duplicate cleanup treated a shared embedded MusicBrainz Recording ID as proof that two files were the same audio. With a working AcoustID key the live library showed this was wrong: in 6 of 7 duplicate groups the fingerprint contradicted the shared embedded Recording ID, and one proposed deletion ("Rush") had no fingerprint result at all. Unattended deletion now requires one of two things:
+  - both copies fingerprint to a shared recording;
+  - the files are byte-identical.
+  Otherwise the pair is left for review.
+- The dedup scan now fingerprint-checks "MB Track ID" matches the same way it checks fuzzy matches. A confirmed fingerprint mismatch rejects the candidate.
+
+### Verified
+- Live proposal: 6 deletions (one per audio-proven group; no group loses every copy). The unproven "Rush" pair is left for review. Previously there were 7 deletions.
 ## v0.1.29 - 2026-09-27
 
 Final matching and identity closure: canonical import reconciliation, release-group identity contracts, and AcoustID key roles. **ARCH-002 and ARCH-009 are closed.**

@@ -76,7 +76,7 @@ class MaintenanceAutoSelectionTests(unittest.TestCase):
             "release_relation": relation,
             "match_type": match_type,
             "confidence": "high",
-            "fingerprint_verified": False,
+            "fingerprint_verified": True,
         }
         data.update(extra)
         return data
@@ -92,8 +92,21 @@ class MaintenanceAutoSelectionTests(unittest.TestCase):
         ]}
         self.assertEqual(app_module._maintenance_duplicate_cleanup_paths(scan), [str(self.b.resolve())])
 
+    def test_shared_embedded_recording_id_without_audio_proof_is_not_auto_deleted(self):
+        # Live finding: embedded Recording IDs shared by "duplicates" were
+        # contradicted by the fingerprint in 6 of 7 groups.
+        scan = {"duplicates": [self._dup(self.b, self.a, 11, 10, "same_release_position",
+                                         match_type="MB Track ID", fingerprint_verified=False)]}
+        self.assertEqual(app_module._maintenance_duplicate_cleanup_paths(scan), [])
+
+    def test_byte_identical_copy_without_fingerprint_is_selected(self):
+        self.a.write_bytes(b"same-bytes")
+        self.b.write_bytes(b"same-bytes")
+        scan = {"duplicates": [self._dup(self.b, self.a, 11, 10, "same_release_position",
+                                         match_type="identical file size", fingerprint_verified=False)]}
+        self.assertEqual(app_module._maintenance_duplicate_cleanup_paths(scan), [str(self.b.resolve())])
     def test_fuzzy_text_match_without_fingerprint_is_not_auto_deleted(self):
-        scan = {"duplicates": [self._dup(self.b, self.a, 11, 10, "same_album_position", match_type="fuzzy match 93%")]}
+        scan = {"duplicates": [self._dup(self.b, self.a, 11, 10, "same_album_position", match_type="fuzzy match 93%", fingerprint_verified=False)]}
         self.assertEqual(app_module._maintenance_duplicate_cleanup_paths(scan), [])
 
     def test_same_recording_at_another_position_is_not_auto_deleted(self):
@@ -147,10 +160,13 @@ class ScanSourceContractTests(unittest.TestCase):
         cls.scan = src[start:src.index('@app.post("/api/dedup/cleanup")')]
 
     def test_fuzzy_match_plus_acoustid_disagreement_is_rejected(self):
-        self.assertIn('match_type.startswith("fuzzy match") or match_type.startswith("album+title")', self.scan)
+        self.assertIn('match_type.startswith("fuzzy match")', self.scan)
+        self.assertIn('match_type.startswith("album+title")', self.scan)
         self.assertIn("elif src_fp_ids and lib_fp_ids:", self.scan)
         self.assertIn("REJECTED", self.scan)
 
+    def test_mb_track_id_matches_are_fingerprint_cross_checked(self):
+        self.assertIn('match_type == "MB Track ID" or match_type.startswith("fuzzy match")', self.scan)
     def test_album_title_step_uses_a_defined_logger(self):
         self.assertIn("logger_instance=app.logger", self.scan)
 
@@ -185,7 +201,7 @@ class DuplicateGroupSafetyTests(unittest.TestCase):
                 dups = [
                     {"source_path": str(paths[a]), "lib_path": str(paths[b]), "source_item_id": ids[a],
                      "lib_id": ids[b], "release_relation": "same_release_position",
-                     "match_type": "MB Track ID", "confidence": "high", "fingerprint_verified": False}
+                     "match_type": "MB Track ID", "confidence": "high", "fingerprint_verified": True}
                     for a, b in itertools.permutations(range(size), 2)
                 ]
                 rng.shuffle(dups)
