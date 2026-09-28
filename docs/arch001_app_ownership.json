@@ -30278,10 +30278,10 @@
    "module": "routes_library.py",
    "lines": [
     4787,
-    4888
+    4905
    ],
-   "size": 102,
-   "body_lines": 93,
+   "size": 119,
+   "body_lines": 110,
    "route": {
     "method": "POST",
     "path": "/api/items/<int:iid>/replacement/plan"
@@ -30304,8 +30304,8 @@
    "name": "item_replacement_apply",
    "module": "routes_library.py",
    "lines": [
-    4892,
-    4913
+    4909,
+    4930
    ],
    "size": 22,
    "body_lines": 16,
@@ -30327,8 +30327,8 @@
    "name": "_start_library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    4916,
-    5194
+    4933,
+    5211
    ],
    "size": 279,
    "body_lines": 271,
@@ -32624,14 +32624,35 @@
    "dependencies": []
   },
   {
+   "name": "_item_file_replacement_response",
+   "module": "routes_maintenance.py",
+   "lines": [
+    686,
+    696
+   ],
+   "size": 11,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "REPLACEMENT",
+   "desired_owner": "backend/replacement_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "api_transaction_apply",
+    "api_transaction_rollback"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    687,
-    700
+    700,
+    715
    ],
-   "size": 14,
-   "body_lines": 13,
+   "size": 16,
+   "body_lines": 15,
    "route": {
     "method": "POST",
     "path": "/api/transactions/<transaction_id>/apply"
@@ -32643,6 +32664,7 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
+    "_item_file_replacement_response",
     "_start_metadata_apply_transaction"
    ]
   },
@@ -32650,11 +32672,11 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    704,
-    840
+    719,
+    857
    ],
-   "size": 137,
-   "body_lines": 136,
+   "size": 139,
+   "body_lines": 138,
    "route": {
     "method": "POST",
     "path": "/api/transactions/<transaction_id>/rollback"
@@ -32666,6 +32688,7 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
+    "_item_file_replacement_response",
     "_run_item_metadata_restore",
     "_run_item_recording_id_restore",
     "_sync_transactions_from_jobs"
@@ -32675,8 +32698,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    844,
-    853
+    861,
+    870
    ],
    "size": 10,
    "body_lines": 9,
@@ -32696,8 +32719,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    856,
-    861
+    873,
+    878
    ],
    "size": 6,
    "body_lines": 5,

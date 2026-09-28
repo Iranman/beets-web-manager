@@ -633,6 +633,39 @@ class BeetsAdapter:
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/move", json_data=payload, headers=headers)
 
+    def replace_item_file(
+        self,
+        target_item_id: int,
+        source_item_id: int,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Make the tracked source item's file the target (album-slot)
+        item's file via the stock-Beets integration plugin. The target
+        keeps its identity and tags; its old file is quarantined by the
+        engine (never deleted); the source row is removed; Beets moves the
+        file to its canonical path."""
+        payload = {"target_item_id": int(target_item_id), "source_item_id": int(source_item_id)}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/replace-item-file", json_data=payload, headers=headers)
+
+    def rollback_replace_item_file(
+        self,
+        target_item_id: int,
+        target_snapshot: Dict[str, Any],
+        source_snapshot: Dict[str, Any],
+        quarantine_path: str,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Undo replace_item_file() from the snapshots it returned."""
+        payload = {
+            "target_item_id": int(target_item_id),
+            "target_snapshot": target_snapshot,
+            "source_snapshot": source_snapshot,
+            "quarantine_path": quarantine_path or "",
+        }
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/replace-item-file/rollback", json_data=payload, headers=headers)
+
     def mbsync(
         self,
         item_ids: Optional[List[int]] = None,

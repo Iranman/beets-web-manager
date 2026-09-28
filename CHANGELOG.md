@@ -6,6 +6,19 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- Track replacement (preview → approve → apply → rollback) works again, now on the Beets engine. Before this fix, planning always failed: it read the wrong payload keys. Apply also tried to copy a file into the read-only music mount. Replacement now puts a tracked library copy (for example, a proven lossless duplicate) into an album slot:
+  - The album item keeps its Release Group, Release ID, Recording ID, disc/track and tags.
+  - Its old file is moved to an engine quarantine folder (`/config/webmanager-quarantine/<operation>/`) and is never deleted.
+  - The replacement's own library row is removed.
+  - Beets moves the file to its canonical path.
+- Apply requires an approved transaction. It verifies afterwards that the album slot kept its identity; if not, the transaction is marked Recovery Required.
+- Replacing from an untracked staged file now fails closed with `staged_replacement_unsupported`.
+
+### Added
+- Beets plugin 1.1.0: `POST /webmanager/replace-item-file` and `/webmanager/replace-item-file/rollback` (capability `replace_item_file`). Both are idempotent and run under the mutation lock.
+- `POST /api/items/<id>/replacement/plan` accepts `candidate_item_id`. The candidate's path comes from Beets, and the pair must match by AcoustID fingerprint. The generic `/api/transactions/<id>/apply` and `/rollback` routes handle these transactions.
+
 ## v0.1.36 - 2026-09-28
 
 ### Changed

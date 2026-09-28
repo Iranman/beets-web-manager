@@ -4795,8 +4795,12 @@ def item_replacement_plan(iid: int):
     separate, explicit user action (see item_replacement_apply)."""
     payload = request.get_json(silent=True) or {}
     candidate_path_raw = _s(payload.get("candidate_path") or payload.get("replacement_path") or "").strip()
-    if not candidate_path_raw:
-        return jsonify({"ok": False, "error": "candidate_path is required."}), 400
+    try:
+        candidate_item_id = int(payload.get("candidate_item_id") or payload.get("replacement_item_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "candidate_item_id must be an integer."}), 400
+    if not candidate_path_raw and not candidate_item_id:
+        return jsonify({"ok": False, "error": "candidate_item_id (or candidate_path) is required."}), 400
 
     item = lib.get_item(iid)
     if item is None:
@@ -4814,11 +4818,21 @@ def item_replacement_plan(iid: int):
     # re-verified after resolve(). The engine independently re-validates
     # its own candidate_allowed_roots at Plan and Apply time -- this is
     # defense-in-depth, not the only boundary.
-    cand_p, cand_path_error = _resolve_import_review_source_path(
-        candidate_path_raw, allow_music=False, expected_type="file", require_exists=True,
-    )
-    if cand_path_error or cand_p is None:
-        return jsonify({"ok": False, "error": cand_path_error or "Candidate file was not found or is not accessible."}), 400
+    if candidate_item_id:
+        # A tracked library item (e.g. a proven lossless duplicate of this
+        # album track). Its path comes from Beets, never from the client.
+        cand_item = lib.get_item(candidate_item_id)
+        if cand_item is None or candidate_item_id == iid:
+            return jsonify({"ok": False, "error": "Replacement item not found."}), 404
+        cand_p = Path(_s(getattr(cand_item, "path", "") or ""))
+        if not cand_p.is_file():
+            return jsonify({"ok": False, "error": "Replacement item's file is not accessible."}), 400
+    else:
+        cand_p, cand_path_error = _resolve_import_review_source_path(
+            candidate_path_raw, allow_music=False, expected_type="file", require_exists=True,
+        )
+        if cand_path_error or cand_p is None:
+            return jsonify({"ok": False, "error": cand_path_error or "Candidate file was not found or is not accessible."}), 400
 
     # Real AcoustID fingerprint verification -- reusing
     # _acoustid_fingerprint_match / _acoustid_fingerprint_ids, the exact
@@ -4848,6 +4862,7 @@ def item_replacement_plan(iid: int):
     if not fingerprint_validation:
         return jsonify({
             "ok": False,
+            "fingerprint": {"candidate_recording_ids": cand_ids[:5] if cand_ids else [], "expected_recording_id": expected_mbid},
             "error": "Could not verify the replacement candidate is the same recording via AcoustID fingerprint. Refusing to plan an unverified replacement.",
             "code": "candidate_not_verified",
         }), 400
@@ -4862,9 +4877,11 @@ def item_replacement_plan(iid: int):
 
     try:
         res = composite_workflows.plan_track_replacement({
+            "fingerprint_validation": fingerprint_validation,
             "original_item_id": iid,
             "original_path": original_path,
             "replacement_path": str(cand_p),
+            "replacement_item_id": candidate_item_id or None,
             "reason": _s(payload.get("reason") or "Manual track replacement"),
             "matching_contract": matching_contract,
         })

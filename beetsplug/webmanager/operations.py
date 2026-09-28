@@ -225,7 +225,7 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
-_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "operations", "status"]
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "operations", "status"]
 _PLUGIN_GATED_CAPABILITIES = ["mbsync", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
@@ -930,3 +930,7 @@ def run_mbsubmit_route():
         return lambda: plugin_ops.run_mbsubmit(lib, item_ids, api_key=api_key)
 
     return _run_plugin_gated_operation("mbsubmit", "mbsubmit", _build)
+
+
+# Routes defined in sibling modules register on webmanager_bp at import time.
+from . import replace_ops  # noqa: E402,F401

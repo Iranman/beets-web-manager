@@ -676,55 +676,105 @@ def rollback_library_cleanup(
 # -----------------------------------------------------------------------------
 
 
+ITEM_FILE_REPLACEMENT_FAMILY = "item_file_replacement_v1"
+
+# Identity fields the replacement must preserve on the album-slot item.
+_REPLACEMENT_IDENTITY_FIELDS = (
+    "album_id", "mb_trackid", "mb_albumid", "mb_releasegroupid", "disc", "track",
+)
+
+
+def _replacement_side(item: Dict[str, Any]) -> Dict[str, Any]:
+    side = {k: item.get(k) for k in _REPLACEMENT_IDENTITY_FIELDS}
+    side.update({
+        "item_id": item.get("id"),
+        "path": _decode_path(item.get("path")),
+        "title": item.get("title", ""),
+        "format": item.get("format", ""),
+        "bitrate": item.get("bitrate"),
+        "samplerate": item.get("samplerate"),
+        "bitdepth": item.get("bitdepth"),
+    })
+    return side
+
+
 def plan_track_replacement(
     payload: Dict[str, Any],
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Plan replacing an existing lower-quality track with a higher-quality file."""
+    """Preview replacing an album-slot item's audio file with another
+    tracked library item's file (same recording, better copy).
+
+    Planning never mutates. Apply requires the transaction to be Approved,
+    then asks the Beets engine to do the whole change (see
+    beetsplug/webmanager/replace_ops.py): the album item keeps its identity
+    and tags, its old file is quarantined by the engine, the replacement's
+    own library row is removed, and Beets moves the file to its canonical
+    path. Replacing from an untracked staged file is not supported here --
+    that would need a local write into the read-only music mount.
+    """
     ad = adapter or beets_adapter
     st = _get_store(store)
 
-    item_id = int(payload.get("item_id") or payload.get("target_id") or 0)
-    source_path = _decode_path(payload.get("source_path") or payload.get("source") or "")
+    target_id = int(payload.get("original_item_id") or payload.get("item_id") or payload.get("target_id") or 0)
+    source_id = int(payload.get("replacement_item_id") or payload.get("source_item_id") or 0)
+    if not source_id:
+        return {
+            "ok": False,
+            "code": "staged_replacement_unsupported",
+            "error": "Replacement must be a tracked library item (replacement_item_id); "
+                     "replacing from an untracked staged file is not supported.",
+        }
+    if not target_id or target_id == source_id:
+        return {"ok": False, "code": "invalid_items", "error": "A distinct original item and replacement item are required."}
 
-    item = ad.get_item(item_id)
-    if not item:
-        return {"ok": False, "error": f"Item {item_id} not found in library"}
-    if not source_path or not os.path.exists(source_path):
-        return {"ok": False, "error": f"Candidate source audio file not found: {source_path}"}
-    if not _is_safe_staging_path(source_path):
-        return {"ok": False, "error": "Replacement source must be within a staging/download root"}
+    target = ad.get_item(target_id)
+    source = ad.get_item(source_id)
+    if not target:
+        return {"ok": False, "code": "item_not_found", "error": f"Item {target_id} not found in library"}
+    if not source:
+        return {"ok": False, "code": "item_not_found", "error": f"Replacement item {source_id} not found in library"}
+    if not target.get("album_id"):
+        return {"ok": False, "code": "target_not_in_album",
+                "error": f"Item {target_id} is not attached to an album slot"}
 
-    target_path = _decode_path(item.get("path"))
+    before, candidate = _replacement_side(target), _replacement_side(source)
     changes = [{
-        "item_id": item_id,
-        "old_path": target_path,
-        "new_source": source_path,
-        "title": item.get("title", ""),
+        "item_id": target_id,
+        "title": before["title"],
+        "old_path": before["path"],
+        "old_format": before["format"],
+        "replacement_item_id": source_id,
+        "replacement_path": candidate["path"],
+        "replacement_format": candidate["format"],
+        "preserved": {k: before[k] for k in _REPLACEMENT_IDENTITY_FIELDS},
     }]
-
     tx = st.create(
         operation_type="Replace",
         status="Preview",
-        summary=f"Replace track {item_id} ({item.get('title')}) with {Path(source_path).name}",
+        summary=f"Replace the {before['format'] or 'audio'} file of item {target_id} ({before['title']}) "
+                f"with item {source_id}'s {candidate['format'] or 'audio'} file",
         changes=changes,
         rollback_available=True,
         metadata={
-            "item_id": item_id,
-            "target_path": target_path,
-            "source_path": source_path,
-            "backup_dir": str(Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "quarantine"),
+            "mutation_family": ITEM_FILE_REPLACEMENT_FAMILY,
+            "target_item_id": target_id,
+            "source_item_id": source_id,
+            "before": before,
+            "candidate": candidate,
+            "reason": _s(payload.get("reason")),
+            "matching_contract": payload.get("matching_contract") or {},
         },
     )
-
     return {
         "ok": True,
         "operation_id": tx["id"],
         "token": tx["id"],
         "status": "Preview",
-        "target_item": item,
-        "source_path": source_path,
+        "requires_approval": True,
+        "target_item": before,
+        "replacement_item": candidate,
         "changes": changes,
     }
 
@@ -734,39 +784,59 @@ def apply_track_replacement(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Execute audio file replacement, preserving quarantine backup."""
+    """Apply an Approved item-file replacement through the Beets engine,
+    then verify the album slot kept its identity and points to the new file."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != ITEM_FILE_REPLACEMENT_FAMILY:
+        return {"ok": False, "code": "wrong_family", "error": "Not an item file replacement transaction."}
+    if meta.get("engine_result"):
+        return {"ok": False, "code": "already_applied", "error": "This replacement was already applied."}
+    if tx.get("status") != "Approved":
+        return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
 
-    item_id = meta.get("item_id")
-    target_path = meta.get("target_path")
-    source_path = meta.get("source_path")
-    backup_dir = Path(meta.get("backup_dir") or (Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / "quarantine"))
+    target_id, source_id = int(meta["target_item_id"]), int(meta["source_item_id"])
+    before = meta.get("before") or {}
+    st.update(operation_id, status="Running")
+    try:
+        res = ad.replace_item_file(target_id, source_id, idempotency_key=operation_id)
+    except Exception:
+        st.update(operation_id, status="Failed",
+                  logs=["Engine replace-item-file failed; the engine restored the original file."])
+        raise
+    engine = res.get("result") if isinstance(res.get("result"), dict) else res
 
-    if not os.path.exists(source_path):
-        raise FileNotFoundError(f"Candidate source file missing: {source_path}")
-
-    # Backup existing file
-    backup_file = None
-    if os.path.exists(target_path):
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup_file = backup_dir / f"{operation_id}_{Path(target_path).name}"
-        shutil.copy2(target_path, str(backup_file))
-
-    # Overwrite target with source
-    shutil.copy2(source_path, target_path)
-
-    # Sync tags through Beets
-    ad.modify(fields={}, item_ids=[int(item_id)], write=True)
-
+    after_item = ad.get_item(target_id) or {}
+    after = _replacement_side(after_item) if after_item else {}
+    problems = [k for k in _REPLACEMENT_IDENTITY_FIELDS if _s(after.get(k)) != _s(before.get(k))]
+    if not after or after.get("path") != engine.get("new_target_path"):
+        problems.append("path")
+    status = "Completed" if not problems else "Recovery Required"
     st.update(
         operation_id,
-        status="Completed",
-        metadata={**meta, "quarantine_backup": str(backup_file) if backup_file else None},
+        status=status,
+        metadata={**meta, "engine_result": engine, "after": after, "verification_problems": problems},
+        logs=[
+            f"Item {target_id} now points to {engine.get('new_target_path')}",
+            f"Old file quarantined at {engine.get('quarantine_path') or '(none)'}",
+            f"Replacement item {source_id} row removed (its file now belongs to item {target_id})",
+        ] + ([f"Verification mismatch: {', '.join(problems)}"] if problems else []),
     )
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    return {
+        "ok": not problems,
+        "operation_id": operation_id,
+        "status": status,
+        "new_path": engine.get("new_target_path"),
+        "quarantined_to": engine.get("quarantine_path") or "",
+        "before": before,
+        "after": after,
+        "verification_problems": problems,
+    }
 
 
 def rollback_track_replacement(
@@ -774,23 +844,37 @@ def rollback_track_replacement(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Roll back track replacement by restoring quarantine file."""
+    """Undo an applied item-file replacement through the Beets engine."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-
-    item_id = meta.get("item_id")
-    target_path = meta.get("target_path")
-    backup_file = meta.get("quarantine_backup")
-
-    if backup_file and os.path.exists(backup_file) and target_path:
-        shutil.copy2(backup_file, target_path)
-        ad.modify(fields={}, item_ids=[int(item_id)], write=True)
-        st.update(operation_id, status="Rolled Back")
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    if meta.get("mutation_family") != ITEM_FILE_REPLACEMENT_FAMILY or not engine:
+        return {"ok": False, "code": "not_applied", "error": "No applied item file replacement to roll back."}
+    if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
-
-    return {"ok": False, "error": "No backup file available for rollback"}
+    res = ad.rollback_replace_item_file(
+        int(meta["target_item_id"]),
+        engine.get("target_snapshot") or {},
+        engine.get("source_snapshot") or {},
+        engine.get("quarantine_path") or "",
+        idempotency_key=f"{operation_id}:rollback",
+    )
+    result = res.get("result") if isinstance(res.get("result"), dict) else res
+    st.update(
+        operation_id,
+        status="Rolled Back",
+        metadata={**meta, "rollback_result": result},
+        logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
+              f"replacement re-added as item {result.get('recreated_source_item_id')}"],
+    )
+    out = {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    out.update({k: result.get(k) for k in ("restored_target_path", "recreated_source_item_id", "recreated_source_path")})
+    return out
 
 
 def plan_bulk_import_replacement(
