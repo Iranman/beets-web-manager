@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.38 - 2026-09-28
+
 ### Fixed
 - Track replacement resolves the library-relative paths the stock Beets web API reports: the plan route fingerprints the real files under the music root, and the post-apply check accepts the engine's absolute path for the same file.
 
