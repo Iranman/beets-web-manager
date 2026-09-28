@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.31 - 2026-09-28
+
 `app.py` decomposed into owned services (ARCH-001). No API, route, or behavior changes are intended.
 
 ### Changed
