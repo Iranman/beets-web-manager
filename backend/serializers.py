@@ -11,6 +11,7 @@ from backend.app_runtime import DOWNLOADS_ROOT, MUSIC_ROOT, PLAYLIST_DOWNLOAD_RO
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under
 
 from flask import jsonify
+from backend.beets_adapter import BeetsError
 
 # ── ARCH-001 extracted code ──
 
@@ -385,3 +386,36 @@ def json_route_result(body: Any, status: int = 200):
     (Response, status) otherwise, so direct in-process callers are unchanged."""
     response = jsonify(body)
     return response if status == 200 else (response, status)
+
+
+# Stable (error_code, http_status, message) mapping shared by all three
+# routes below -- keeps status codes/messages consistent without
+# interpolating raw exception text (which may embed up to 200 characters of
+# an unrecognized upstream error body; see composite_workflows._request()) into
+# any browser-facing response.
+_CONFIG_ERROR_RESPONSES = {
+    "config_not_found":             (404, "Beets config.yaml not found on the engine."),
+    "config_permission_denied":     (403, "Beets config.yaml is not accessible (permission denied)."),
+    "config_backup_not_found":      (404, "No config.yaml backup found."),
+    "config_empty":                 (400, "Empty config rejected."),
+    "config_invalid_json":          (400, "Invalid config request body."),
+    "config_invalid_content":       (400, "Config content must be a string."),
+    "config_too_large":             (413, "Config content is too large."),
+    "config_missing_revision":      (428, "Config revision is required before saving."),
+    "config_revision_conflict":     (409, "Config was changed by another writer; reload before saving."),
+    "config_invalid_yaml":          (400, "Invalid Beets configuration YAML."),
+    "config_invalid_structure":     (400, "Invalid Beets configuration structure."),
+    "config_beets_validation_failed": (400, "Beets rejected the candidate configuration."),
+    "config_post_write_validation_failed": (500, "Beets rejected the committed configuration; the previous config was restored."),
+    "config_read_failed":           (502, "Could not read config.yaml from the Beets engine."),
+    "config_write_failed":          (502, "Could not save config.yaml on the Beets engine."),
+    "config_revert_failed":         (502, "Could not revert config.yaml on the Beets engine."),
+}
+
+
+_CONFIG_ERROR_DEFAULT = (502, "Beets engine returned an unexpected error.")
+
+
+def _config_error_response(exc: "BeetsError"):
+    status, message = _CONFIG_ERROR_RESPONSES.get(exc.error_code, _CONFIG_ERROR_DEFAULT)
+    return jsonify({"ok": False, "error": message, "code": exc.error_code or "config_engine_error"}), status

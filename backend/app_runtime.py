@@ -42,6 +42,8 @@ os.environ.setdefault(
 )
 
 
+# ── Data helpers ──────────────────────────────────────────────────────────────
+
 def _s(v: Any) -> str:
     # Canonical text coercion. Bytes (e.g. Beets paths) decode as UTF-8 rather
     # than rendering as "b'...'". app.py previously defined this twice; the
@@ -641,16 +643,6 @@ def _sqlite_write_retry(label: str, fn, *, log=None, attempts: int = 5):
             time.sleep(min(2.0, 0.2 * (2 ** (attempt - 1))))
 
 
-@contextmanager
-def _db(path=None, *, text_factory=None, row_factory=None):
-    """Context manager: yield a RemoteSQLiteConnection to the Beets control agent."""
-    con = get_db_connection(path)
-    if row_factory is not None:
-        con.row_factory = row_factory
-    try:
-        yield con
-    finally:
-        con.close()
 
 
 EDITABLE_FIELDS = [
@@ -937,8 +929,23 @@ def _safe_apply_error_message(ex: Exception) -> str:
     )
 
 
+# ── Playlist helpers ──────────────────────────────────────────────────────────
+
 def _norm(s):
     return re.sub(r"[^\w\s]", "", (s or "").lower()).strip()
+
+
+
+@contextmanager
+def _db(path=None, *, text_factory=None, row_factory=None):
+    """Fail closed: the Web Manager never opens the Beets library database.
+
+    Stock Beets owns musiclibrary.blb; reads go through backend.beets_adapter.
+    This name survives only as a patch target for older tests. (It used to
+    route to a removed control-agent helper and would have raised NameError.)
+    """
+    raise RuntimeError("direct Beets database access is not available in the Web Manager")
+    yield  # pragma: no cover
 
 
 # Imported last, after the boot environment above is loaded: backend.beets_adapter

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from backend.app_runtime import _app_logger, _plugin_install_log, _read_beets_plugin_list
 from backend.app_runtime import _REDACTED_SECRET
-from flask import jsonify
 from backend.beets_adapter import BeetsError
 from backend.auth_service import _auth_secret_is_usable, _browser_password_is_usable, _security_auth_password, _security_auth_token
 
@@ -156,6 +155,20 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
             pass
 
 
+# ── Config editor ─────────────────────────────────────────────────────────────
+#
+# config.yaml lives on the Beets *engine* container's own /config mount, not
+# the web manager's -- the two-service architecture cutover (2026-07-28)
+# gave each its own separate /config volume. This used to read/write a
+# local /config/config.yaml path that never existed in the web-manager
+# container in the real deployed topology, so every call 500'd (BUG-1,
+# found during the v0.1.11 TrueNAS rollout). Routes now proxy through
+# composite_workflows -> the control agent's /config endpoints (BEETSDIR-relative
+# on the engine side), matching the same architecture already used for
+# library reads/writes. Redaction stays here (unchanged) rather than moving
+# to the agent: the agent is the trusted internal boundary and returns raw
+# content; the browser-facing boundary is where secrets must never cross.
+
 # Secret-key line matching used to be a regex
 # (r"(?im)^(\s*(?:apikey|...)\s*:\s*)(.+)$") -- CodeQL (py/polynomial-redos)
 # correctly flagged it as a polynomial-time expression run against
@@ -211,39 +224,6 @@ def _contains_redacted_config_secret(text: str) -> bool:
     return False
 
 
-# Stable (error_code, http_status, message) mapping shared by all three
-# routes below -- keeps status codes/messages consistent without
-# interpolating raw exception text (which may embed up to 200 characters of
-# an unrecognized upstream error body; see composite_workflows._request()) into
-# any browser-facing response.
-_CONFIG_ERROR_RESPONSES = {
-    "config_not_found":             (404, "Beets config.yaml not found on the engine."),
-    "config_permission_denied":     (403, "Beets config.yaml is not accessible (permission denied)."),
-    "config_backup_not_found":      (404, "No config.yaml backup found."),
-    "config_empty":                 (400, "Empty config rejected."),
-    "config_invalid_json":          (400, "Invalid config request body."),
-    "config_invalid_content":       (400, "Config content must be a string."),
-    "config_too_large":             (413, "Config content is too large."),
-    "config_missing_revision":      (428, "Config revision is required before saving."),
-    "config_revision_conflict":     (409, "Config was changed by another writer; reload before saving."),
-    "config_invalid_yaml":          (400, "Invalid Beets configuration YAML."),
-    "config_invalid_structure":     (400, "Invalid Beets configuration structure."),
-    "config_beets_validation_failed": (400, "Beets rejected the candidate configuration."),
-    "config_post_write_validation_failed": (500, "Beets rejected the committed configuration; the previous config was restored."),
-    "config_read_failed":           (502, "Could not read config.yaml from the Beets engine."),
-    "config_write_failed":          (502, "Could not save config.yaml on the Beets engine."),
-    "config_revert_failed":         (502, "Could not revert config.yaml on the Beets engine."),
-}
-
-
-_CONFIG_ERROR_DEFAULT = (502, "Beets engine returned an unexpected error.")
-
-
-def _config_error_response(exc: "BeetsError"):
-    status, message = _CONFIG_ERROR_RESPONSES.get(exc.error_code, _CONFIG_ERROR_DEFAULT)
-    return jsonify({"ok": False, "error": message, "code": exc.error_code or "config_engine_error"}), status
-
-
 # ── Plugin Control Endpoints ─────────────────────────────────────────────────
 # Subcommands allowed through /api/plugins/run (prevents arbitrary execution)
 _PLUGIN_MODULES = OrderedDict([
@@ -283,3 +263,6 @@ def _plugin_status_payload() -> Dict[str, Any]:
         "enabled": enabled,
         "status": status,
     }
+
+
+_PLUGIN_CMDS = set(_PLUGIN_MODULES)

@@ -639,6 +639,8 @@ def _prefer_album_mb_release(mb_albumid: str, log: list) -> str:
     return mb_albumid
 
 
+# ── Clean: artist folder merge ────────────────────────────────────────────────
+
 def _artist_folder_key(name: str) -> str:
     """Case/punctuation-insensitive key for duplicate artist folder detection."""
     text = _normalize_name(name).casefold()

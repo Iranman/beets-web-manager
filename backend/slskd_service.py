@@ -27,6 +27,8 @@ def _slskd_api_key_from_file() -> str:
 SLSKD_API_KEY = os.environ.get("SLSKD_API_KEY", "").strip() or _slskd_api_key_from_file()
 
 
+# ── slskd + yt-dlp Album Download ─────────────────────────────────────────────
+
 def _slskd_req(method: str, path: str, body=None) -> Any:
     """Thin wrapper for slskd REST API using the API key."""
     if not SLSKD_API_KEY:

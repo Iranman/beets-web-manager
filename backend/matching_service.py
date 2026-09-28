@@ -143,6 +143,8 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
     return summary
 
 
+# ── Discography / Wanted ──────────────────────────────────────────────────────
+
 def _normalize_album(s: str) -> str:
     """Normalise album title for fuzzy disk-vs-discography comparison."""
     s = _restore_time_colon_title(s or "").lower()
@@ -931,6 +933,8 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
 
 _ALBUM_MB_SUGGESTIONS_FILE = Path("/config/album_mb_suggestions.json")
 
+
+# ── Clean: album track validation ────────────────────────────────────────────
 
 _ALBUM_TRACK_PREFIX_RE = re.compile(
     r'^(?:.*?\s+[-–—]\s+)?(?:\d+|%\w+\{[^}]+\})\s*[-–—\.]\s*',

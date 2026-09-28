@@ -371,6 +371,8 @@ def _normalize_albumartist(s: str) -> str:
     return s
 
 
+# ── Dedup scan ────────────────────────────────────────────────────────────────
+
 AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".opus", ".wma", ".ape", ".alac"}
 
 

@@ -578,3 +578,22 @@ def _content_security_policy(html: Optional[str] = None) -> str:
         "form-action 'self'; "
         "frame-ancestors 'self'"
     )
+
+
+def _client_ip_is_lan() -> bool:
+    try:
+        import ipaddress as _ipaddress
+        ip = _ipaddress.ip_address(_request_client_identity())
+        return bool(ip.is_private or ip.is_loopback)
+    except Exception:
+        return False
+
+
+def _transaction_user_label() -> str:
+    try:
+        auth = request.authorization
+        if auth and auth.username:
+            return str(auth.username)
+    except RuntimeError:
+        pass
+    return os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "operator"

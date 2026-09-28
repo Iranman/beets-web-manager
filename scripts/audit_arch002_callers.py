@@ -50,13 +50,19 @@ def hit_map():
     units = Counter()
     for rel in production_files():
         src = (ROOT / rel).read_text(encoding="utf-8")
+        tree = ast.parse(src)
         spans = [
             (n.lineno, n.end_lineno, n.name)
-            for n in ast.walk(ast.parse(src))
+            for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
+        # An import line naming a threshold/score helper decides nothing.
+        import_lines = {
+            ln for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+            for ln in range(n.lineno, n.end_lineno + 1)
+        }
         for lineno, line in enumerate(src.splitlines(), 1):
-            if not PATTERN.search(line):
+            if lineno in import_lines or not PATTERN.search(line):
                 continue
             containing = [s for s in spans if s[0] <= lineno <= s[1]]
             name = min(containing, key=lambda s: s[0])[2] if containing else "<module>"
