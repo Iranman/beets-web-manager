@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.35 - 2026-09-28
+
 ### Changed
 - Unattended duplicate cleanup now picks which copy to keep by an explicit policy:
   1. a copy attached to the album row over a loose/singleton copy;
