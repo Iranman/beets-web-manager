@@ -104,31 +104,94 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.assertTrue(rb_res["ok"])
 
     def test_track_replacement_flow(self):
-        stg_file = Path(self.tmpdir.name) / "better_quality.flac"
-        stg_file.write_bytes(b"FLAC_DATA_NEW")
-        target_file = Path(self.tmpdir.name) / "old_quality.mp3"
-        target_file.write_bytes(b"MP3_DATA_OLD")
-
-        self.mock_adapter.get_item.return_value = {
-            "id": 55, "title": "Song", "path": str(target_file)
-        }
+        """Preview -> Approve -> Apply through the engine op -> Rollback."""
+        rec, rel, rg = "rec-1", "rel-1", "rg-1"
+        album_item = {"id": 55, "title": "Exotic", "album_id": 1935, "mb_trackid": rec, "mb_albumid": rel,
+                      "mb_releasegroupid": rg, "disc": 1, "track": 17, "format": "MP3",
+                      "path": "/music/BossMan Dlow/2 Slippery/17 Exotic.mp3"}
+        flac_item = {"id": 77, "title": "exotic (00)", "album_id": None, "mb_trackid": "", "format": "FLAC",
+                     "disc": 0, "track": 17, "path": "/music/loose/exotic (00).flac"}
+        items = {55: dict(album_item), 77: dict(flac_item)}
+        self.mock_adapter.get_item.side_effect = lambda iid: items.get(iid)
 
         plan_res = plan_track_replacement(
-            {"item_id": 55, "source_path": str(stg_file)},
-            adapter=self.mock_adapter,
-            store=self.store,
+            {"original_item_id": 55, "replacement_item_id": 77},
+            adapter=self.mock_adapter, store=self.store,
         )
-        self.assertTrue(plan_res["ok"])
+        self.assertTrue(plan_res["ok"], plan_res)
         op_id = plan_res["operation_id"]
+        self.assertEqual(self.store.get(op_id)["status"], "Preview")
+        self.mock_adapter.replace_item_file.assert_not_called()
 
+        # Apply refuses until the transaction is approved.
+        not_yet = apply_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
+        self.assertEqual(not_yet["code"], "not_approved")
+        self.mock_adapter.replace_item_file.assert_not_called()
+
+        self.store.update(op_id, status="Approved")
+        new_path = "/music/BossMan Dlow/2 Slippery/17 Exotic.flac"
+        self.mock_adapter.replace_item_file.return_value = {
+            "operation_id": op_id, "success": True, "new_target_path": new_path,
+            "quarantine_id": "0" * 32,
+            "quarantine_path": "/config/webmanager-quarantine/x/17 Exotic.mp3",
+            "target_snapshot": {"id": 55, "path": album_item["path"]},
+            "source_snapshot": {"id": 77, "path": flac_item["path"]},
+        }
+        items[55] = {**album_item, "format": "FLAC", "path": new_path}
+        items.pop(77)
         apply_res = apply_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
-        self.assertTrue(apply_res["ok"])
-        self.assertEqual(target_file.read_bytes(), b"FLAC_DATA_NEW")
+        self.assertTrue(apply_res["ok"], apply_res)
+        self.assertEqual(apply_res["status"], "Completed")
+        self.assertEqual(apply_res["new_path"], new_path)
+        self.mock_adapter.replace_item_file.assert_called_once_with(55, 77, idempotency_key=op_id)
+        self.assertEqual(self.store.get(op_id)["status"], "Completed")
 
-        # Rollback restores old data
+        # A second apply (e.g. after a re-approve) never re-runs the engine op.
+        self.store.update(op_id, status="Approved")
+        again = apply_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
+        self.assertEqual(again["code"], "already_applied")
+        self.assertEqual(self.mock_adapter.replace_item_file.call_count, 1)
+
+        self.mock_adapter.rollback_replace_item_file.return_value = {
+            "success": True, "restored_target_path": album_item["path"],
+            "recreated_source_item_id": 78, "recreated_source_path": flac_item["path"],
+        }
         rb_res = rollback_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
         self.assertTrue(rb_res["ok"])
-        self.assertEqual(target_file.read_bytes(), b"MP3_DATA_OLD")
+        self.assertEqual(rb_res["recreated_source_item_id"], 78)
+        self.mock_adapter.rollback_replace_item_file.assert_called_once_with(
+            "0" * 32, idempotency_key=f"{op_id}:rollback",
+        )
+        self.assertEqual(self.store.get(op_id)["status"], "Rolled Back")
+
+    def test_track_replacement_flags_identity_drift_after_apply(self):
+        album_item = {"id": 55, "album_id": 1935, "mb_trackid": "rec-1", "disc": 1, "track": 17, "path": "/music/a.mp3"}
+        items = {55: dict(album_item), 77: {"id": 77, "path": "/music/b.flac"}}
+        self.mock_adapter.get_item.side_effect = lambda iid: items.get(iid)
+        op_id = plan_track_replacement({"item_id": 55, "source_item_id": 77}, adapter=self.mock_adapter,
+                                       store=self.store)["operation_id"]
+        self.store.update(op_id, status="Approved")
+        self.mock_adapter.replace_item_file.return_value = {"new_target_path": "/music/a.flac"}
+        items[55] = {**album_item, "track": 3, "path": "/music/a.flac"}
+        res = apply_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["verification_problems"], ["track"])
+        self.assertEqual(self.store.get(op_id)["status"], "Recovery Required")
+
+    def test_track_replacement_from_staged_file_fails_closed(self):
+        res = plan_track_replacement(
+            {"original_item_id": 55, "replacement_path": "/data/downloads/new.flac"},
+            adapter=self.mock_adapter, store=self.store,
+        )
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], "staged_replacement_unsupported")
+        self.mock_adapter.get_item.assert_not_called()
+
+    def test_track_replacement_requires_an_album_slot_target(self):
+        self.mock_adapter.get_item.side_effect = lambda iid: {"id": iid, "album_id": None, "path": f"/music/{iid}.mp3"}
+        res = plan_track_replacement({"original_item_id": 55, "replacement_item_id": 77},
+                                     adapter=self.mock_adapter, store=self.store)
+        self.assertEqual(res["code"], "target_not_in_album")
 
     def test_album_mb_track_repair_flow(self):
         self.mock_adapter.get_album.return_value = {"id": 20, "album": "Repair Album"}

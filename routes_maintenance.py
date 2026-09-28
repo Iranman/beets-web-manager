@@ -683,10 +683,25 @@ def api_transaction_cancel(transaction_id):
     return jsonify({"ok": True, "transaction": tx})
 
 
+def _item_file_replacement_response(fn, transaction_id):
+    """Run an item-file replacement apply/rollback with the same error
+    mapping as the item replacement routes (no raw engine text leaks)."""
+    try:
+        res = fn(transaction_id)
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return jsonify({"ok": False, "error": "Track replacement failed.", "code": exc.error_code or "beets_error"}), 400
+    status_code = 200 if res.get("ok") else (409 if res.get("code") in ("not_approved", "already_applied") else 400)
+    return jsonify(res), status_code
+
+
 @app.post("/api/transactions/<transaction_id>/apply")
 def api_transaction_apply(transaction_id):
     try:
         tx = transactions.get(transaction_id)
+        if (tx.get("metadata") or {}).get("mutation_family") == composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY:
+            return _item_file_replacement_response(composite_workflows.apply_track_replacement, transaction_id)
         if tx.get("operation_type") == "Metadata Update":
             job = _start_metadata_apply_transaction(transaction_id)
         else:
@@ -775,6 +790,8 @@ def api_transaction_rollback(transaction_id):
             return jsonify({"ok": False, "error": "Rollback failed.", "code": exc.error_code or "beets_error"}), 400
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    if (tx.get("metadata") or {}).get("mutation_family") == composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY:
+        return _item_file_replacement_response(composite_workflows.rollback_track_replacement, transaction_id)
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:
