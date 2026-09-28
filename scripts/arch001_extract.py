@@ -312,7 +312,19 @@ def extracted_modules():
     return out
 
 
-def plan(module_path, requested_names, requested_domains, pull=True, line_range=None, exclude_domains=(), exclude_regex=None):
+def _is_app_bound(u):
+    """Units that must stay in app.py: route/hook handlers and the app object."""
+    if "app" in u.defines:
+        return True
+    if isinstance(u.node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for d in u.node.decorator_list:
+            target = d.func if isinstance(d, ast.Call) else d
+            if isinstance(target, ast.Attribute) and getattr(target.value, "id", "") == "app":
+                return True
+    return False
+
+
+def plan(module_path, requested_names, requested_domains, pull=True, line_range=None, exclude_domains=(), exclude_regex=None, no_routes=False, closure=False):
     src = APP.read_text(encoding="utf-8")
     tree, lines, units = build_units(src)
     owner = {}
@@ -337,6 +349,10 @@ def plan(module_path, requested_names, requested_domains, pull=True, line_range=
                 selected.add(u.idx)
     excluded = set()
     for u in units:
+        if no_routes and _is_app_bound(u):
+            selected.discard(u.idx)
+            excluded.add(u.idx)
+            continue
         fn_domain = domain_of.get(u.node.name) if isinstance(u.node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
         text = lines[u.node.lineno - 1]
         if (fn_domain and fn_domain in exclude_domains) or (exclude_regex and re.search(exclude_regex, text)):
@@ -369,6 +385,13 @@ def plan(module_path, requested_names, requested_domains, pull=True, line_range=
                 if v is None or v.idx in selected or v.is_import or n in ext_owner or v.idx in excluded:
                     continue
                 if v.idx == idx:
+                    continue
+                if closure:
+                    # Layered extraction: every not-yet-extracted dependency
+                    # moves down with its (lowest) consumer; app.py re-exports it.
+                    if not _is_app_bound(v):
+                        selected.add(v.idx)
+                        changed = True
                     continue
                 # pull if every user of every name v defines is selected
                 all_users = set()
@@ -430,12 +453,18 @@ def apply(module_path, p, header_doc, lower_modules):
     for idx in selected:
         u = units[idx]
         used |= {r[0] for r in u.runtime_refs + u.import_refs}
+    already_bound = set()
+    if target.exists():
+        for n in ast.parse(target.read_text(encoding="utf-8")).body:
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    already_bound.add((a.asname or a.name).split(".")[0])
     for iu in import_units:
         node = iu.node
         keep = []
         for a in node.names:
             name = (a.asname or a.name).split(".")[0]
-            if name in used:
+            if name in used and name not in already_bound:
                 keep.append(a)
         if keep:
             if isinstance(node, ast.Import):
@@ -449,6 +478,8 @@ def apply(module_path, p, header_doc, lower_modules):
     cross_lines = []
     qualify = {}
     for mod, names in sorted(p["cross"].items()):
+        if mod == mod_name:
+            continue  # already defined in the target module itself
         if mod in lower_modules:
             cross_lines.append(f"from {mod} import " + ", ".join(sorted(names)))
         else:
@@ -520,13 +551,17 @@ def main(argv):
     ap.add_argument("--range", default="")
     ap.add_argument("--exclude-domains", default="")
     ap.add_argument("--exclude-regex", default="")
+    ap.add_argument("--no-routes", action="store_true")
+    ap.add_argument("--closure", action="store_true",
+                    help="pull every non-route dependency still in app.py (bottom-up layering)")
     args = ap.parse_args(argv)
     names = [n for n in args.names.split(",") if n]
     domains = [d for d in args.domains.split(",") if d]
     rng = tuple(int(x) for x in args.range.split(":")) if args.range else None
     p = plan(args.module, names, domains, pull=not args.nopull, line_range=rng,
              exclude_domains=[d for d in args.exclude_domains.split(",") if d],
-             exclude_regex=args.exclude_regex or None)
+             exclude_regex=args.exclude_regex or None, no_routes=args.no_routes,
+             closure=args.closure)
     size = sum(p["units"][i].end - p["units"][i].start + 1 for i in p["selected"])
     print(f"selected units: {len(p['selected'])}  lines: {size}  names: {len(p['moved_names'])}")
     if p["cross"]:
