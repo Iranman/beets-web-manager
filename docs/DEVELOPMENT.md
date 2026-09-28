@@ -4,7 +4,7 @@ Developer setup, project layout, validation commands, and the engineering constr
 
 ## Project Layout
 
-- `app.py`: primary Flask application — routes, import workflows, matching adjudication, and job tracking. Talks to stock Beets only through `backend/beets_adapter.py`.
+- `app.py`: Flask application glue (app creation, request hooks, security headers, static/SPA serving, route-module loading). Workflows live in layered services under `backend/*_service.py` and HTTP handlers in `routes_*.py`; see `docs/arch001_service_decomposition.md`. `python scripts/audit_arch001_ownership.py` checks that no domain code returns to `app.py`.
 - `routes_jobs.py`, `routes_lidarr.py`, `routes_setup.py`, `routes_submissions.py`: split route modules for jobs, Lidarr/wanted endpoints, setup/auth/config, and MusicBrainz/AcoustID submissions.
 - `job_engine.py`: in-memory `PythonJob`/`JobStore`, structured state, cooperative cancellation.
 - `helpers_mb.py`: MusicBrainz and AcoustID helpers. No `app.py` dependency — the strongest current provider boundary.
@@ -22,7 +22,7 @@ See `docs/ARCHITECTURE.md` for current system shape and intended dependency dire
 Run from the repository root before opening a change:
 
 ```bash
-python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/verify_security_config.py
+python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/verify_security_config.py
 python -m unittest discover -s tests -p "test_*.py"
 python scripts/security_secret_scan.py
 python scripts/validate_compose_security.py
