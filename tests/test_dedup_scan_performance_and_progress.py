@@ -105,6 +105,13 @@ class LibraryCacheGenerationTests(unittest.TestCase):
 class DedupScanPerformanceAndProgressTests(unittest.TestCase):
     def setUp(self):
         library_cache.invalidate()
+        # These scans patch pathlib.Path.stat globally; keep the job-hook
+        # transaction store (a real directory owned by whichever test module
+        # created it) out of that blast radius.
+        import backend.transaction_service as transaction_service
+        store = patch.object(transaction_service, "transactions", MagicMock())
+        store.start()
+        self.addCleanup(store.stop)
 
     def test_3000_item_library_scan_loads_data_once_and_emits_live_progress(self):
         """A 3000-item library scan must call lib.items([]) exactly once at startup and 0 times during iteration."""
