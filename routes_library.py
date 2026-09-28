@@ -1947,7 +1947,7 @@ def album_deduplicate(aid):
     label = f"Dedup: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"
 
     def _do(log, cancel_event=None):
-        _MROOT   = "/data/media/music"
+        _MROOT   = str(MUSIC_ROOT)
 
         # Resolve which MB album ID to use
         mb_albumid = mb_override
@@ -2938,7 +2938,7 @@ def recent():
     limit = min(int(request.args.get("limit", 50)), 200)
     # Filter: items whose file exists on disk AND whose path is under the music library root.
     # Fall back to all items if none qualify (e.g., beets DB has legacy paths).
-    music_root = "/data/media/music"
+    music_root = str(MUSIC_ROOT)
     all_sorted = sorted(lib.items([]), key=lambda x: getattr(x, "added", 0), reverse=True)
     library_items = [i for i in all_sorted if _s(i.path).startswith(music_root)]
     if not library_items:

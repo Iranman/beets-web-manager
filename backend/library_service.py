@@ -610,7 +610,7 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
     return any(_path_is_under(path, root) for root in roots)
 
 
-_MUSIC_LIBRARY_ROOT = "/data/media/music"
+_MUSIC_LIBRARY_ROOT = str(MUSIC_ROOT)
 
 
 def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) -> bool:
@@ -1716,7 +1716,7 @@ def _build_library_payload() -> dict:
     # Build lookup: file path → beets item (for import-status annotation)
     # Beets stores paths relative to the music root (e.g. "Artist/Album/song.flac").
     # We register BOTH the relative form AND the absolute form so the disk-walk lookup works.
-    _MROOT = "/data/media/music"
+    _MROOT = str(MUSIC_ROOT)
     _TYPE_ORDER = {"album": 0, "ep": 1, "mixtape": 2, "single": 3,
                    "broadcast": 4, "other": 5, "": 6}
     path_to_id:   Dict[str, int] = {}

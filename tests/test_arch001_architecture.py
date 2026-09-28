@@ -257,8 +257,16 @@ class ApiContractTests(unittest.TestCase):
     def test_url_map_matches_the_v0_1_30_baseline(self):
         import app
         baseline = json.loads((ROOT / "tests" / "arch001_route_baseline.json").read_text(encoding="utf-8"))["rules"]
-        live = sorted([r.rule, r.endpoint, sorted(r.methods)] for r in app.app.url_map.iter_rules())
-        self.assertEqual({(a, b, tuple(c)) for a, b, c in live}, {(a, b, tuple(c)) for a, b, c in baseline})
+        live = {(r.rule, r.endpoint, tuple(sorted(r.methods))) for r in app.app.url_map.iter_rules()}
+        base = {(a, b, tuple(c)) for a, b, c in baseline}
+        # Every v0.1.30 route survives unchanged; new routes are listed here explicitly.
+        added_since = {
+            ("/api/dedup/unattended-cleanup", "dedup_unattended_cleanup_status"),
+            ("/api/dedup/unattended-cleanup", "dedup_unattended_cleanup_set"),
+            ("/api/dedup/maintenance-run", "dedup_maintenance_run"),
+        }
+        self.assertEqual(base - live, set())
+        self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)
 
     def test_route_results_keep_their_historical_shape(self):
         import app

@@ -602,7 +602,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         _guess_album = _restore_time_colon_title(
             re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', Path(aldir).name).strip()
         )
-        source_is_music_library = str(aldir).rstrip("/").startswith("/data/media/music/")
+        source_is_music_library = str(aldir).rstrip("/").startswith(str(MUSIC_ROOT).rstrip("/") + "/")
         # SEC-002 Wave 8 final mutation binding: torrent-staged sources are no
         # longer preserved here as a separate up-front step. reimport_source_atomic()
         # (called at the actual import mutation below) detects a torrent-staged
@@ -978,7 +978,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                     for _it in _existing_items:
                                         _p = _s(_it.get("path"))
                                         _abs = (
-                                            "/data/media/music/" + _p.lstrip("/")
+                                            str(MUSIC_ROOT / _p.lstrip("/"))
                                             if _p and not _p.startswith("/")
                                             else _p
                                         )
@@ -1192,7 +1192,6 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # Only do this for new/unowned folders.  Existing albums are preserved
         # until after the selected MB release has passed preflight; deleting the
         # current rows first can lose a valid library album when the MBID is wrong.
-        MUSIC_ROOT = "/data/media/music"
         if existing_album_id:
             log.append(
                 f"  Existing album repair: preserving current DB rows for album_id {existing_album_id}"
@@ -2859,7 +2858,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
     def _do(log, cancel_event=None):
         nonlocal mb_albumid, selected_releasegroupid
-        music_root = "/data/media/music"
+        music_root = str(MUSIC_ROOT)
         source_folder_path = folder_path
         import_folder_path = folder_path
         # Wave 25 Docker acceptance round (second NameError found by the same

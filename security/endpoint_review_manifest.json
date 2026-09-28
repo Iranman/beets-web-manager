@@ -4510,6 +4510,63 @@
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_import_reconciliation.py"
       ]
+    },
+    {
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "invokes_external_services_or_subprocesses": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_dedup_unattended_authorization.py"
+      ],
+      "method": "GET",
+      "endpoint": "dedup_unattended_cleanup_status",
+      "purpose": "Unattended duplicate deletion authorization state and the last run's review proposal (read-only).",
+      "accesses_files": true,
+      "creates_background_job": false,
+      "destructive_or_high_impact": false
+    },
+    {
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "invokes_external_services_or_subprocesses": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_dedup_unattended_authorization.py"
+      ],
+      "method": "POST",
+      "endpoint": "dedup_unattended_cleanup_set",
+      "purpose": "Explicitly enable (exact confirmation phrase required) or disable unattended duplicate deletion.",
+      "accesses_files": true,
+      "creates_background_job": false,
+      "destructive_or_high_impact": true
+    },
+    {
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "invokes_external_services_or_subprocesses": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_dedup_unattended_authorization.py"
+      ],
+      "method": "POST",
+      "endpoint": "dedup_maintenance_run",
+      "purpose": "Run the scheduled duplicate step alone: scan, AcoustID verification, review proposal; deletes only when unattended deletion is authorized.",
+      "accesses_files": true,
+      "creates_background_job": true,
+      "destructive_or_high_impact": true
     }
   ]
 }

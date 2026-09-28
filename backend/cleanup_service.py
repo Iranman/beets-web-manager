@@ -531,7 +531,7 @@ def _folder_clean_root(raw_root: str) -> Path:
     root_res = _resolved_path(root)
     allowed = [_resolved_path(p) for p in FOLDER_CLEAN_ROOTS]
     if not any(_path_under(root_res, ar) or root_res == ar for ar in allowed):
-        raise RuntimeError("Root must be under /data/media/music, /data/torrents/music, or downloads")
+        raise RuntimeError(f"Root must be under {MUSIC_ROOT}, /data/torrents/music, or downloads")
     if not root_res.exists() or not root_res.is_dir():
         raise RuntimeError("Path not found.")
     return root_res

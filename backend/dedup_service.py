@@ -28,6 +28,9 @@ from backend.import_review_service import _import_review_cleanup_destination, _u
 from backend.serializers import _json_from_flask_response
 from backend.maintenance_service import _library_health_payload, _maintenance_extract_child_job_id, _maintenance_same_file_hash, _maintenance_save_last_report
 
+import backend.dedup_authorization as _dedup_authorization
+from backend.app_runtime import WEB_MANAGER_DATA_DIR
+
 # ── ARCH-001 extracted code ──
 
 
@@ -527,7 +530,7 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     lib_path = _s(lib_item.path)
                     # Normalise relative paths stored without the music root prefix
                     if lib_path and not lib_path.startswith("/"):
-                        lib_path = "/data/media/music/" + lib_path
+                        lib_path = str(MUSIC_ROOT / lib_path)
                     if str(src) == lib_path:          # same file — skip
                         continue
                     if not Path(lib_path).exists():   # library file gone — skip
@@ -542,6 +545,8 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     #    marks the pair fingerprint-verified; a confirmed mismatch
                     #    rejects the candidate instead of risking a wrong-file
                     #    deletion.
+                    src_fp_ids: List[str] = [fingerprint_mbid] if fingerprint_mbid else []
+                    lib_fp_ids: List[str] = [fingerprint_mbid] if fingerprint_mbid else []
                     if (match_type == "MB Track ID" or match_type.startswith("fuzzy match")
                             or match_type.startswith("album+title")):
                         shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
@@ -604,6 +609,18 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         "confidence":           confidence,
                         "reason":               reason,
                         "fingerprint_verified": fingerprint_verified,
+                        # Review evidence (unattended-cleanup proposal): the
+                        # embedded IDs, what AcoustID actually heard, and the
+                        # release slot of each copy.
+                        "fingerprint_mbid":         fingerprint_mbid,
+                        "source_fingerprint_ids":   list(src_fp_ids or []),
+                        "lib_fingerprint_ids":      list(lib_fp_ids or []),
+                        "source_recording_id":      _s(getattr(source_item, "mb_trackid", "") or "") if source_item is not None else "",
+                        "lib_recording_id":         _s(getattr(lib_item, "mb_trackid", "") or ""),
+                        "source_disc":              getattr(source_item, "disc", None) if source_item is not None else None,
+                        "source_track":             getattr(source_item, "track", None) if source_item is not None else None,
+                        "lib_disc":                 getattr(lib_item, "disc", None),
+                        "lib_track":                getattr(lib_item, "track", None),
                     }
                     duplicates.append(dup)
                     state["found"] = len(duplicates)
@@ -1237,6 +1254,69 @@ def _maintenance_duplicate_cleanup_paths(scan_result: Dict[str, Any]) -> List[st
     )
 
 
+def _file_size(path: str) -> Optional[int]:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
+def _maintenance_duplicate_proposal(scan_result: Dict[str, Any], cleanup_paths: List[str]) -> List[Dict[str, Any]]:
+    """Review rows for the unattended selection: what would be deleted, what
+    is kept, and the evidence (embedded IDs, fingerprint, release slot)."""
+    rows: List[Dict[str, Any]] = []
+    by_source: Dict[str, Dict[str, Any]] = {}
+    for dup in scan_result.get("duplicates") or []:
+        if not isinstance(dup, dict):
+            continue
+        try:
+            key = str(Path(_s(dup.get("source_path"))).resolve(strict=False))
+        except Exception:
+            continue
+        by_source.setdefault(key, dup)
+    for path in cleanup_paths:
+        dup = by_source.get(path) or {}
+        delete_path = _s(dup.get("source_path")) or path
+        keep_path = _s(dup.get("lib_path"))
+        shared = _s(dup.get("fingerprint_mbid"))
+        embedded = {_s(dup.get("source_recording_id")).lower(), _s(dup.get("lib_recording_id")).lower()} - {""}
+        rows.append({
+            "delete": {
+                "path": delete_path, "size": _file_size(delete_path), "item_id": dup.get("source_item_id"),
+                "album_id": dup.get("source_album_id"), "recording_id": _s(dup.get("source_recording_id")),
+                "disc": dup.get("source_disc"), "track": dup.get("source_track"),
+            },
+            "keep": {
+                "path": keep_path, "size": _file_size(keep_path), "item_id": dup.get("lib_id"),
+                "album_id": dup.get("lib_album_id"), "recording_id": _s(dup.get("lib_recording_id")),
+                "disc": dup.get("lib_disc"), "track": dup.get("lib_track"),
+            },
+            "match_type": _s(dup.get("match_type")),
+            "release_relation": _s(dup.get("release_relation")),
+            "fingerprint": {
+                "verified": bool(dup.get("fingerprint_verified")),
+                "shared_recording_id": shared,
+                "delete_copy_recording_ids": list(dup.get("source_fingerprint_ids") or []),
+                "keep_copy_recording_ids": list(dup.get("lib_fingerprint_ids") or []),
+            },
+            # True when the embedded Recording ID is not what AcoustID heard:
+            # the tag should be repaired even though the audio is proven equal.
+            "embedded_id_contradicts_fingerprint": bool(shared) and bool(embedded) and embedded != {shared.lower()},
+        })
+    return rows
+
+
+def _maintenance_duplicate_proposal_line(row: Dict[str, Any]) -> str:
+    d, k, fp = row["delete"], row["keep"], row["fingerprint"]
+    return (
+        f"[duplicates] PROPOSED delete {d['path']} ({d['size']} bytes, item {d['item_id']}, "
+        f"disc {d['disc']} track {d['track']}, embedded {d['recording_id'] or '-'}) "
+        f"-- keep {k['path']} ({k['size']} bytes, item {k['item_id']}, embedded {k['recording_id'] or '-'}); "
+        f"slot {row['release_relation']}; fingerprint shared {fp['shared_recording_id'] or '-'}"
+        f"{' (embedded ID contradicts fingerprint)' if row['embedded_id_contradicts_fingerprint'] else ''}"
+    )
+
+
 def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any] = None,
                                      progress: Optional[Any] = None) -> Dict[str, Any]:
     if _running_job_of_type({"dedup-scan", "dedup-ai-review", "dedup-cleanup"}):
@@ -1270,6 +1350,12 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
     duplicates = scan_result.get("duplicates") or []
     cleanup_paths = _maintenance_duplicate_cleanup_paths(scan_result)
     skipped_candidates = max(0, len(duplicates) - len(cleanup_paths))
+    proposal = _maintenance_duplicate_proposal(scan_result, cleanup_paths)
+    # Deleting without review needs an explicit operator authorization that
+    # is independent of MUSIC_ROOT or any other configuration.
+    authorized = _dedup_authorization.unattended_delete_enabled(WEB_MANAGER_DATA_DIR)
+    for row in proposal:
+        log.append(_maintenance_duplicate_proposal_line(row))
     cleanup_result: Dict[str, Any] = {
         "ok": True,
         "deleted": 0,
@@ -1277,7 +1363,12 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
         "folders_removed": 0,
         "results": [],
     }
-    if cleanup_paths:
+    if cleanup_paths and not authorized:
+        log.append(
+            f"[duplicates] Unattended deletion is disabled: {len(cleanup_paths)} audio-proven duplicate(s) "
+            f"proposed for review, nothing deleted; {skipped_candidates} other candidate(s) left for review."
+        )
+    elif cleanup_paths:
         log.append(
             f"[duplicates] Resolving {len(cleanup_paths)} verified duplicate recording(s); "
             f"{skipped_candidates} candidate(s) left for review."
@@ -1302,6 +1393,8 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
         "scanned_files": int(scan_result.get("scanned") or scan_result.get("total") or 0),
         "duplicate_tracks_found": len(duplicates),
         "auto_selected": len(cleanup_paths),
+        "unattended_delete_enabled": authorized,
+        "proposed_deletions": len(cleanup_paths),
         "deleted_files": deleted,
         "db_rows_removed": db_rows_removed,
         "folders_removed": int(cleanup_result.get("folders_removed") or 0),
@@ -1313,6 +1406,7 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
         "scan_job_id": child_id,
         "scan": scan_result,
         "cleanup": cleanup_result,
+        "proposal": proposal,
         "final_summary": final_summary,
     }
     log.append(

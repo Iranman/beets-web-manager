@@ -35,6 +35,7 @@ import type {
   ImportWithIdPayload,
   JobResponse,
   JobStartResponse,
+  UnattendedCleanupStatus,
   AttachRecordingResponse,
   LibraryImportAllLastResponse,
   DownloadAlbumPayload,
@@ -678,7 +679,7 @@ export function removeAlbumTracksBatch(
 export function scanArtistFolders(root?: string): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(
     '/api/clean/artist-folders/scan',
-    jsonRequest('POST', { root: root ?? '/data/media/music' }),
+    jsonRequest('POST', root ? { root } : {}),  // server defaults to its MUSIC_ROOT
   );
 }
 
@@ -689,7 +690,7 @@ export function mergeArtistFolders(
 ): Promise<JobStartResponse & { dry_run?: boolean; summary?: unknown; log?: string[] }> {
   return apiJson(
     '/api/clean/artist-folders/merge',
-    jsonRequest('POST', { keys, root: root ?? '/data/media/music', dry_run: dryRun }),
+    jsonRequest('POST', { keys, ...(root ? { root } : {}), dry_run: dryRun }),
   );
 }
 
@@ -711,7 +712,7 @@ export function stampMbidFolders(opts: {
   return apiJson(
     '/api/clean/artist-folders/stamp-mbid',
     jsonRequest('POST', {
-      root: opts.root ?? '/data/media/music',
+      ...(opts.root ? { root: opts.root } : {}),
       dry_run: opts.dryRun ?? true,
       folders: opts.folders ?? [],
     }),
@@ -1640,4 +1641,21 @@ export function resolveReconciliationReview(reviewId: string, choice: Reconcilia
     `/api/import-reconciliation/reviews/${encodeURIComponent(reviewId)}/resolve`,
     jsonRequest('POST', { choice }),
   );
+}
+
+// ── Unattended duplicate deletion ─────────────────────────────────────────────
+
+export function getUnattendedCleanup(): Promise<UnattendedCleanupStatus> {
+  return apiJson<UnattendedCleanupStatus>('/api/dedup/unattended-cleanup');
+}
+
+export function setUnattendedCleanup(enabled: boolean, confirm = '', reason = ''): Promise<UnattendedCleanupStatus> {
+  return apiJson<UnattendedCleanupStatus>(
+    '/api/dedup/unattended-cleanup',
+    jsonRequest('POST', { enabled, confirm, reason }),
+  );
+}
+
+export function runDuplicateMaintenance(): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>('/api/dedup/maintenance-run', jsonRequest('POST', {}));
 }

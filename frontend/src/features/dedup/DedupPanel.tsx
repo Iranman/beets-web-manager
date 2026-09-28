@@ -4,7 +4,7 @@ import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   runDedupCleanup,
@@ -15,10 +15,11 @@ import { CleanActionBar, CleanEmptyState, CleanMetricGrid, CleanPanelHeader } fr
 import { LogViewer } from '../../components/LogViewer';
 import type { DedupDuplicate } from '../../api/types';
 import { useDedupScan } from '../../lib/hooks';
+import { UnattendedDuplicateReview } from './UnattendedDuplicateReview';
 
-const MUSIC_ROOT    = '/data/media/music';
+// Replaced by the server's configured MUSIC_ROOT once loaded.
+const INITIAL_MUSIC_ROOT = '/music';
 const DOWNLOADS_ROOT = '/data/torrents/music';
-const DEFAULT_PATH  = MUSIC_ROOT;
 type DedupScanKind = 'standard' | 'ai';
 
 function shortScanId(scanId: string | null) {
@@ -99,7 +100,14 @@ function ScanProgress({ scanned, total }: { scanned: number; total: number }) {
 
 export function DedupPanel() {
   const navigate = useNavigate();
-  const [path, setPath] = useState(DEFAULT_PATH);
+  const [musicRoot, setMusicRoot] = useState(INITIAL_MUSIC_ROOT);
+  const [path, setPath] = useState(INITIAL_MUSIC_ROOT);
+  const DEFAULT_PATH = musicRoot;
+  const MUSIC_ROOT = musicRoot;
+  const handleMusicRoot = useCallback((root: string) => {
+    setMusicRoot(root);
+    setPath((current) => (current === INITIAL_MUSIC_ROOT ? root : current));
+  }, []);
   const [starting, setStarting] = useState(false);
   const [scanJid, setScanJid] = useState<string | null>(null);
   const [scanKind, setScanKind] = useState<DedupScanKind>('standard');
@@ -203,6 +211,7 @@ export function DedupPanel() {
 
   return (
     <div className="space-y-4">
+      <UnattendedDuplicateReview onMusicRoot={handleMusicRoot} />
       <CleanPanelHeader
         title="Duplicate Files"
         description={isLibrary

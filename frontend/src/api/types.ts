@@ -3049,3 +3049,40 @@ export interface ReconciliationReviewsResponse {
 }
 
 export type ReconciliationChoice = 'keep_existing' | 'keep_imported' | 'keep_both';
+
+// ── Unattended duplicate deletion (authorization + review proposal) ─────────
+export interface DuplicateProposalCopy {
+  path: string;
+  size: number | null;
+  item_id: number | null;
+  album_id: number | null;
+  recording_id: string;
+  disc: number | null;
+  track: number | null;
+}
+
+export interface DuplicateProposalRow {
+  delete: DuplicateProposalCopy;
+  keep: DuplicateProposalCopy;
+  match_type: string;
+  release_relation: string;
+  fingerprint: {
+    verified: boolean;
+    shared_recording_id: string;
+    delete_copy_recording_ids: string[];
+    keep_copy_recording_ids: string[];
+  };
+  embedded_id_contradicts_fingerprint: boolean;
+}
+
+export interface UnattendedCleanupStatus extends ApiOkResponse {
+  authorization: {
+    unattended_delete_enabled: boolean;
+    changed_at: number | null;
+    changed_by: string;
+    reason: string;
+  };
+  music_root: string;
+  last_run_summary: Record<string, unknown>;
+  proposal: DuplicateProposalRow[];
+}
