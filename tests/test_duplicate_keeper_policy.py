@@ -140,6 +140,32 @@ class KeeperPolicyTests(unittest.TestCase):
             [str(single.resolve())],
         )
 
+    def test_lossy_album_copy_vs_lossless_duplicate_requires_replacement_review(self):
+        """Exotic: the album slot holds a 2.4 MB MP3, a proven duplicate is a
+        FLAC loose single. Deleting either is wrong -- nothing is deleted and
+        the pair is flagged for a reviewed replacement."""
+        mp3 = self._file("BossMan Dlow - 2 Slippery - 17 - Exotic.mp3", 24)
+        flac = self._file("bossman dlow - 2 Slippery - 17 - exotic (00).flac", 148)
+        dup = self._dup(
+            mp3, 24258, meta(album_id=1935, recording_id=REC, track=17, format="MP3", bitrate=128000),
+            flac, 22575, meta(album_id=None, recording_id="", disc=0, track=17, format="FLAC", bitrate=900000),
+        )
+        [decision] = self._plan(dup)
+        self.assertEqual(decision["action"], "replacement_review")
+        self.assertEqual(decision["keep"]["path"], str(mp3.resolve()))
+        self.assertIn("replacement review", decision["keep_reason"])
+        self.assertEqual(select_unattended_cleanup_paths({"duplicates": [dup]}, self.root, lambda p, r: True), [])
+
+    def test_lossless_album_copy_still_cleans_a_lossy_loose_duplicate(self):
+        flac = self._file("Album - 17 - Song.flac", 148)
+        mp3 = self._file("song (00).mp3", 24)
+        [decision] = self._plan(self._dup(
+            flac, 24258, meta(album_id=1935, recording_id=REC, format="FLAC"),
+            mp3, 22575, meta(album_id=None, format="MP3", bitrate=128000),
+        ))
+        self.assertEqual(decision["action"], "delete")
+        self.assertEqual(decision["delete"]["path"], str(mp3.resolve()))
+
 
 if __name__ == "__main__":
     unittest.main()

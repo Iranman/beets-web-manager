@@ -1361,7 +1361,7 @@ def _maintenance_duplicate_plan(scan_result: Dict[str, Any]) -> List[Dict[str, A
 
 
 def _maintenance_duplicate_cleanup_paths(scan_result: Dict[str, Any]) -> List[str]:
-    return [d["delete"]["path"] for d in _maintenance_duplicate_plan(scan_result)]
+    return [d["delete"]["path"] for d in _maintenance_duplicate_plan(scan_result) if d.get("action") == "delete"]
 
 
 def _file_size(path: str) -> Optional[int]:
@@ -1390,6 +1390,7 @@ def _maintenance_duplicate_proposal(plan: List[Dict[str, Any]]) -> List[Dict[str
         shared = _s(decision.get("shared_recording_id"))
         embedded = {_s((side.get("meta") or {}).get("recording_id")).lower() for side in (drop, keep)} - {""}
         rows.append({
+            "action": decision.get("action") or "delete",
             "delete": _copy(drop),
             "keep": _copy(keep),
             "keep_reason": decision.get("keep_reason") or "",
@@ -1410,8 +1411,9 @@ def _maintenance_duplicate_proposal(plan: List[Dict[str, Any]]) -> List[Dict[str
 
 def _maintenance_duplicate_proposal_line(row: Dict[str, Any]) -> str:
     d, k, fp = row["delete"], row["keep"], row["fingerprint"]
+    verb = "REPLACEMENT REVIEW (no deletion) for" if row.get("action") == "replacement_review" else "PROPOSED delete"
     return (
-        f"[duplicates] PROPOSED delete {d['path']} ({d['size']} bytes, item {d['item_id']}, "
+        f"[duplicates] {verb} {d['path']} ({d['size']} bytes, item {d['item_id']}, "
         f"disc {d['disc']} track {d['track']}, embedded {d['recording_id'] or '-'}) "
         f"-- keep {k['path']} ({k['size']} bytes, item {k['item_id']}, embedded {k['recording_id'] or '-'}); "
         f"slot {row['release_relation']}; fingerprint shared {fp['shared_recording_id'] or '-'}; "
@@ -1454,7 +1456,13 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
         scan_result = {}
     duplicates = scan_result.get("duplicates") or []
     plan = _maintenance_duplicate_plan(scan_result)
-    cleanup_paths = [d["delete"]["path"] for d in plan]
+    cleanup_paths = [d["delete"]["path"] for d in plan if d.get("action") == "delete"]
+    review_rows = [d for d in plan if d.get("action") == "replacement_review"]
+    if review_rows:
+        log.append(
+            f"[duplicates] {len(review_rows)} pair(s) need replacement review "
+            "(lossy album copy vs lossless duplicate); neither copy will be deleted."
+        )
     skipped_candidates = max(0, len(duplicates) - len(cleanup_paths))
     proposal = _maintenance_duplicate_proposal(plan)
     # Deleting without review needs an explicit operator authorization that
@@ -1501,6 +1509,7 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
         "auto_selected": len(cleanup_paths),
         "unattended_delete_enabled": authorized,
         "proposed_deletions": len(cleanup_paths),
+        "replacement_review_required": len(review_rows),
         "deleted_files": deleted,
         "db_rows_removed": db_rows_removed,
         "folders_removed": int(cleanup_result.get("folders_removed") or 0),

@@ -137,6 +137,19 @@ def _is_uuid(value: Any) -> bool:
     return bool(_UUID_RE.match(_s(value).strip().lower()))
 
 
+def _format(copy: Dict[str, Any]) -> str:
+    return _s((copy.get("meta") or {}).get("format")).strip().lower()
+
+
+def _is_lossless(copy: Dict[str, Any]) -> bool:
+    return _format(copy) in _LOSSLESS_FORMATS
+
+
+def _is_lossy(copy: Dict[str, Any]) -> bool:
+    fmt = _format(copy)
+    return bool(fmt) and fmt not in _LOSSLESS_FORMATS
+
+
 def keeper_rank(copy: Dict[str, Any]) -> tuple:
     """Higher sorts better. The order is the policy:
 
@@ -256,6 +269,10 @@ def plan_unattended_cleanup(
     keeper. Album-slot gate: a copy attached to an album row is never deleted
     unless the keeper is a tracked item in that same album row, so no album
     slot is ever left without a retained tracked item.
+
+    Replacement review: when the preferred (album-attached) copy is lossy and
+    a proven duplicate is lossless, nothing in that group is deleted; every
+    pair is returned with action "replacement_review" instead of "delete".
     """
     root = music_root.resolve(strict=False)
     copies: Dict[str, Dict[str, Any]] = {}
@@ -307,6 +324,10 @@ def plan_unattended_cleanup(
             continue
         keeper = max(members, key=lambda p: keeper_rank(copies[p]))
         keep = copies[keeper]
+        # Lossy album copy vs a proven lossless duplicate: neither is deleted.
+        # The right fix is replacing the album file with the lossless copy
+        # (a reviewed replacement transaction), so the whole group goes to review.
+        lossless_rival = [p for p in members if p != keeper and _is_lossless(copies[p]) and _is_lossy(keep)]
         for path in sorted(members):
             if path == keeper:
                 continue
@@ -314,10 +335,19 @@ def plan_unattended_cleanup(
             if pair is None:
                 continue  # no direct proof against the retained copy: review
             drop = copies[path]
+            if lossless_rival:
+                decisions.append({
+                    "action": "replacement_review", "delete": drop, "keep": keep,
+                    "keep_reason": "replacement review required: the album copy is lossy and a proven "
+                                   "duplicate is lossless -- replace the album file instead of deleting either",
+                    **pair,
+                })
+                continue
             drop_album = drop["meta"].get("album_id")
             if drop_album and drop_album != keep["meta"].get("album_id"):
                 continue  # album-slot gate: would leave that album slot without a tracked item
-            decisions.append({"delete": drop, "keep": keep, "keep_reason": keeper_reason(keep, drop), **pair})
+            decisions.append({"action": "delete", "delete": drop, "keep": keep,
+                              "keep_reason": keeper_reason(keep, drop), **pair})
     decisions.sort(key=lambda d: d["delete"]["path"])
     return decisions
 
@@ -330,4 +360,8 @@ def select_unattended_cleanup_paths(
     same_file: Callable[[Path, Path], bool] = same_file_hash,
 ) -> List[str]:
     """Paths plan_unattended_cleanup() would delete (see its rules)."""
-    return [d["delete"]["path"] for d in plan_unattended_cleanup(scan_result, music_root, path_under, same_file=same_file)]
+    return [
+        d["delete"]["path"]
+        for d in plan_unattended_cleanup(scan_result, music_root, path_under, same_file=same_file)
+        if d.get("action") == "delete"
+    ]
