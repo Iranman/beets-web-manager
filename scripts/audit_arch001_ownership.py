@@ -63,6 +63,33 @@ OWNERS = {
     "CORE": "backend/app_runtime.py",
 }
 
+# A domain may own several modules (a service split for layering, plus its
+# HTTP route module). Code living in any of them is EXTRACTED; code living in a
+# different domain's module (a helper shared with a lower layer) is
+# EXTRACTED_SHARED.
+EXTRA_OWNERS = {
+    "AI": ["backend/ai_batch_state_service.py", "backend/ai_evidence_service.py", "routes_import.py"],
+    "IMPORT_REVIEW": ["backend/pending_review_store.py", "routes_import.py"],
+    "IMPORT": ["routes_import.py"],
+    "IMPORT_RECONCILIATION": ["routes_import.py"],
+    "LIBRARY": ["routes_library.py"],
+    "ARTWORK": ["routes_library.py"],
+    "CLEANUP": ["routes_cleanup.py"],
+    "DEDUP": ["routes_cleanup.py"],
+    "PLAYLIST": ["routes_playlist.py"],
+    "PLEX": ["routes_playlist.py"],
+    "MAINTENANCE": ["routes_maintenance.py"],
+    "TRANSACTIONS": ["routes_maintenance.py"],
+    "ACQUISITION": ["routes_acquisition.py"],
+    "YTDLP": ["routes_acquisition.py"],
+    "REPLACEMENT": ["routes_acquisition.py"],
+    "CONFIG": ["routes_system.py", "backend/serializers.py"],
+    "AUTH": ["routes_system.py", "app.py"],
+    "ROUTE_ONLY": ["routes_system.py", "app.py"],
+    "BOOTSTRAP": ["app.py"],
+    "COMPATIBILITY": ["app.py"],
+}
+
 ROUTE_RULES = [
     ("/api/import-reconciliation", "IMPORT_RECONCILIATION"),
     ("/api/import-review", "IMPORT_REVIEW"),
@@ -224,9 +251,12 @@ def analyze(overrides=None):
         route = _decorator_route(fn)
         domain = classify(fn.name, route, overrides)
         owner = OWNERS.get(domain, "UNCLASSIFIED")
+        owners = [owner] + EXTRA_OWNERS.get(domain, [])
         if module == "app.py":
-            status = "IN_APP"
-        elif module == owner:
+            # app.py keeps only application creation, request hooks, static /
+            # SPA serving and compatibility glue (BOOTSTRAP/AUTH hook/COMPAT).
+            status = "APP_GLUE" if domain in ("BOOTSTRAP", "COMPATIBILITY", "AUTH", "ROUTE_ONLY") else "IN_APP"
+        elif module in owners:
             status = "EXTRACTED"
         else:
             # Layered extraction: a helper shared across domains lives in the
@@ -279,6 +309,13 @@ def main(argv):
         for domain, stats in summarize(rows).items():
             print(f"{domain:24s} functions={stats['functions']:4d} lines={stats['lines']:6d}")
     missing = [r for r in rows if r["domain"] == "UNCLASSIFIED" and r["body_lines"] >= SUBSTANTIAL_LINES]
+    # ARCH-001 closure: app.py holds application glue only; domain code in
+    # app.py fails the check (move it to its owning service or route module).
+    in_app = [r for r in rows if r["migration_status"] == "IN_APP"]
+    for r in in_app:
+        print(f"domain code left in app.py: {r['name']} ({r['domain']})", file=sys.stderr)
+    if in_app:
+        return 1
     if "--write" in argv:
         by_status = defaultdict(int)
         for r in rows:

@@ -302,14 +302,34 @@ def load_state():
 
 
 def extracted_modules():
-    """module import path -> set of names it defines (from app's re-export lines)."""
-    src = APP.read_text(encoding="utf-8")
+    """module import path -> set of names it defines (every module extracted so far)."""
     out = {}
-    for m in re.finditer(r"^from (backend\.[a-z0-9_.]+|routes_[a-z0-9_]+) import \(  # ARCH-001 extracted\n(.*?)^\)",
-                         src, re.M | re.S):
-        names = re.findall(r"^\s+([A-Za-z_][A-Za-z0-9_]*),", m.group(2), re.M)
-        out.setdefault(m.group(1), set()).update(names)
+    for rel in load_state().get("extracted_modules") or []:
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        names = set()
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                for t in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                    names.update(_target_names(t))
+        out[_module_name(rel)] = names
     return out
+
+
+ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "route"}
+
+
+def _is_route(u):
+    if not isinstance(u.node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    for d in u.node.decorator_list:
+        if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and \
+                getattr(d.func.value, "id", "") == "app" and d.func.attr in ROUTE_METHODS:
+            return True
+    return False
 
 
 def _is_app_bound(u):
@@ -324,7 +344,7 @@ def _is_app_bound(u):
     return False
 
 
-def plan(module_path, requested_names, requested_domains, pull=True, line_range=None, exclude_domains=(), exclude_regex=None, no_routes=False, closure=False):
+def plan(module_path, requested_names, requested_domains, pull=True, line_range=None, exclude_domains=(), exclude_regex=None, no_routes=False, closure=False, route_module=False):
     src = APP.read_text(encoding="utf-8")
     tree, lines, units = build_units(src)
     owner = {}
@@ -341,6 +361,8 @@ def plan(module_path, requested_names, requested_domains, pull=True, line_range=
         if names & set(requested_names):
             selected.add(u.idx)
         elif isinstance(u.node, (ast.FunctionDef, ast.AsyncFunctionDef)) and domain_of.get(u.node.name) in requested_domains:
+            if route_module and not _is_route(u):
+                continue  # a route module takes routes; helpers only via the pull rule
             selected.add(u.idx)
     if line_range:
         lo, hi = line_range
@@ -404,18 +426,22 @@ def plan(module_path, requested_names, requested_domains, pull=True, line_range=
     moved_names = set().union(*(units[i].defines for i in selected)) if selected else set()
     blockers = defaultdict(set)
     cross = defaultdict(set)
+    app_names = set()
     for idx in sorted(selected):
         u = units[idx]
         for n in refs_of(u):
             v = owner.get(n)
+            if n in ext_owner and (v is None or v.is_import):
+                cross[ext_owner[n]].add(n)
+                continue
             if v is None:
                 continue
             if v.idx in selected:
                 continue
             if v.is_import:
                 continue
-            if n in ext_owner:
-                cross[ext_owner[n]].add(n)
+            if route_module and not v.is_import:
+                app_names.add(n)  # route modules load last and may import app.py's names
                 continue
             blockers[n].add(sorted(u.defines)[0])
         for g in u.global_rebinds:
@@ -430,6 +456,7 @@ def plan(module_path, requested_names, requested_domains, pull=True, line_range=
     return {
         "src": src, "lines": lines, "units": units, "selected": sorted(selected),
         "moved_names": moved_names, "blockers": blockers, "cross": cross, "ext_owner": ext_owner,
+        "app_names": app_names, "route_module": route_module,
     }
 
 
@@ -459,8 +486,17 @@ def apply(module_path, p, header_doc, lower_modules):
             if isinstance(n, (ast.Import, ast.ImportFrom)):
                 for a in n.names:
                     already_bound.add((a.asname or a.name).split(".")[0])
+    if target.exists():
+        for n in ast.parse(target.read_text(encoding="utf-8")).body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                already_bound.add(n.name)
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+                for t_ in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    already_bound.update(_target_names(t_))
     for iu in import_units:
         node = iu.node
+        if isinstance(node, ast.ImportFrom) and (node.module == mod_name or "ARCH-001 extracted" in lines[node.lineno - 1]):
+            continue  # re-export blocks: cross-module imports come from ext_owner
         keep = []
         for a in node.names:
             name = (a.asname or a.name).split(".")[0]
@@ -481,6 +517,9 @@ def apply(module_path, p, header_doc, lower_modules):
     for mod, names in sorted(p["cross"].items()):
         if mod == mod_name:
             continue  # already defined in the target module itself
+        names = {n for n in names if n not in already_bound}
+        if not names:
+            continue
         if mod in lower_modules:
             cross_lines.append(f"from {mod} import " + ", ".join(sorted(names)))
         else:
@@ -501,6 +540,14 @@ def apply(module_path, p, header_doc, lower_modules):
                 chunk_lines[li] = line[:col] + f"{qualify[name]}.{name}" + line[end_col:]
         out_chunks.append("\n".join(chunk_lines))
     body = "\n\n\n".join(out_chunks)
+    if p.get("route_module"):
+        # Route modules are imported at the end of app.py, after app and every
+        # app-level name exist, so they may take those names from app.
+        names = sorted(n for n in p["app_names"] if n != "app")
+        app_import = "from app import app  # noqa: E402  (route modules load after app.py defines app)"
+        if names:
+            app_import += "\nfrom app import (  # noqa: E402\n" + "".join(f"    {n},\n" for n in names) + ")"
+        cross_lines = cross_lines + [app_import]
     if target.exists():
         existing = target.read_text(encoding="utf-8").rstrip("\n")
         # merge new imports into existing header (append if missing)
@@ -523,18 +570,24 @@ def apply(module_path, p, header_doc, lower_modules):
     first = units[selected[0]]
     reexport = (f"from {mod_name} import (  # ARCH-001 extracted\n"
                 + "".join(f"    {n},\n" for n in moved_public) + ")")
+    if p.get("route_module"):
+        reexport = None
     remove = set()
     for idx in selected:
         u = units[idx]
         remove.update(range(u.start, u.end + 1))
     new_lines = []
     for i, line in enumerate(lines, 1):
-        if i == first.start:
+        if i == first.start and reexport:
             new_lines.append(reexport)
         if i in remove:
             continue
         new_lines.append(line)
     text = "\n".join(new_lines) + "\n"
+    if p.get("route_module") and f"import {mod_name}  " not in text:
+        anchor = "import routes_submissions  # noqa: F401, E402\n"
+        assert anchor in text, "route-module import anchor missing in app.py"
+        text = text.replace(anchor, anchor + f"import {mod_name}  # noqa: F401, E402\n", 1)
     text = re.sub(r"\n{4,}", "\n\n\n", text)
     APP.write_text(text, encoding="utf-8", newline="\n")
     return len(selected), len(moved_public)
@@ -553,6 +606,8 @@ def main(argv):
     ap.add_argument("--exclude-domains", default="")
     ap.add_argument("--exclude-regex", default="")
     ap.add_argument("--no-routes", action="store_true")
+    ap.add_argument("--route-module", action="store_true",
+                    help="move routes of --domains into a top-level routes_*.py module")
     ap.add_argument("--closure", action="store_true",
                     help="pull every non-route dependency still in app.py (bottom-up layering)")
     args = ap.parse_args(argv)
@@ -562,7 +617,7 @@ def main(argv):
     p = plan(args.module, names, domains, pull=not args.nopull, line_range=rng,
              exclude_domains=[d for d in args.exclude_domains.split(",") if d],
              exclude_regex=args.exclude_regex or None, no_routes=args.no_routes,
-             closure=args.closure)
+             closure=args.closure, route_module=args.route_module)
     size = sum(p["units"][i].end - p["units"][i].start + 1 for i in p["selected"])
     print(f"selected units: {len(p['selected'])}  lines: {size}  names: {len(p['moved_names'])}")
     if p["cross"]:

@@ -22,11 +22,18 @@ _EXCLUDED_DIR_NAMES = {
     ".venv", "dist", "build", "scripts",
 }
 
-# Production Python entry points this scan covers.
+# Production Python entry points this scan covers. Every top-level route
+# module (routes_*.py) is included automatically: ARCH-001 moved route
+# families out of app.py, and a route module must never escape the scan.
 _DEFAULT_ROOTS = [
     "app.py", "routes_jobs.py", "routes_lidarr.py", "routes_setup.py",
     "routes_submissions.py", "job_engine.py", "helpers_mb.py", "backend",
 ]
+
+
+def _default_roots(repo_root: Path) -> List[str]:
+    route_modules = sorted(p.name for p in repo_root.glob("routes_*.py"))
+    return list(dict.fromkeys(_DEFAULT_ROOTS[:1] + route_modules + _DEFAULT_ROOTS[1:]))
 
 _FS_UNAMBIGUOUS_METHOD_SINKS = {
     "unlink", "rmdir", "mkdir", "touch", "write_text", "write_bytes",
@@ -403,7 +410,7 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
 
 
 def discover_all(repo_root: Path, roots: Optional[Iterable[str]] = None) -> List[MutationSink]:
-    roots = list(roots) if roots is not None else _DEFAULT_ROOTS
+    roots = list(roots) if roots is not None else _default_roots(repo_root)
     files: List[Path] = []
     for root_name in roots:
         p = repo_root / root_name

@@ -40,7 +40,10 @@ def production_files():
     tracked = subprocess.check_output(
         ["git", "ls-files", "backend/*.py", "beetsplug/*.py"], cwd=ROOT, text=True
     ).split()
-    return [f for f in TOP_LEVEL + tracked if (ROOT / f).exists() and not f.startswith("tests/")]
+    # ARCH-001: every top-level route module is production code too.
+    routes = sorted(p.name for p in ROOT.glob("routes_*.py"))
+    files = list(dict.fromkeys(TOP_LEVEL + routes + tracked))
+    return [f for f in files if (ROOT / f).exists() and not f.startswith("tests/")]
 
 
 def hit_map():
