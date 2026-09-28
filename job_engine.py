@@ -53,6 +53,8 @@ class PythonJob:
     @property
     def status(self):
         if self.finished_at is not None:
+            if self._cancel.is_set() or self.returncode == -1:
+                return "cancelled"
             return "success" if self.returncode == 0 else "failed"
         return "running"
 
@@ -107,10 +109,18 @@ class PythonJob:
                 ret = self._fn(self.log)
             if ret is not None:
                 self.result = ret
-            self.returncode = 0
+            if self._cancel.is_set():
+                self.returncode = -1
+            else:
+                self.returncode = 0
         except Exception as exc:
-            self.log.append(f"ERROR: {exc}")
-            self.returncode = 1
+            if self._cancel.is_set() or str(exc).strip().lower() == "cancelled":
+                self.returncode = -1
+                if not any("cancel" in str(line).lower() for line in self.log[-3:]):
+                    self.log.append("Job cancelled by user.")
+            else:
+                self.log.append(f"ERROR: {exc}")
+                self.returncode = 1
         finally:
             self.finished_at = time.time()
 

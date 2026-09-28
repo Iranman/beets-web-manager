@@ -86,7 +86,10 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             return True
         if re.match(r"^\[\d+/\d+\]", text):
             return False
-        if "DUPLICATE [" in text or "REJECTED [" in text:
+        if "DUPLICATE [" in text or "REJECTED [" in text or any(marker in text for marker in (
+            "CANDIDATE [", "VERIFIED [", "REVIEW REQUIRED [",
+            "[CANDIDATE]", "[FINGERPRINT VERIFIED]", "[BYTE VERIFIED]", "[REVIEW REQUIRED]", "[REJECTED]"
+        )):
             return False
         if text.startswith(("skipped stale path:", "skipped unreadable path:")):
             return False

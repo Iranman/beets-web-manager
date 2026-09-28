@@ -6,6 +6,17 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- The tracked-library duplicate scan is single-pass:
+  - It loads the library once and builds every index (Recording ID, size, path, album, fuzzy title) once.
+  - It makes no full-library lookups per file.
+  - Fuzzy matches resolve to the real Beets item, so release-slot evidence stays intact.
+- Scan progress is reported live: N / total, percentage, current file, candidate count, files per minute and ETA in the Jobs view.
+- Match scores shown in the log and UI are clamped to 100%.
+- Log lines name their evidence: `FINGERPRINT VERIFIED`, `BYTE VERIFIED`, `CANDIDATE`, `REVIEW REQUIRED` or `REJECTED`.
+- A cancelled job now reports `cancelled` instead of `failed`. Cancelled import jobs stay retryable.
+- The playlist library index is keyed on a stable cache generation instead of a timestamp.
+
 ## v0.1.33 - 2026-09-28
 
 ### Changed
