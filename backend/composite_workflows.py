@@ -698,6 +698,18 @@ def _replacement_side(item: Dict[str, Any]) -> Dict[str, Any]:
     return side
 
 
+def _same_library_path(a: Any, b: Any) -> bool:
+    """Equal paths, allowing one side to be library-relative (the stock
+    Beets web API reports relative paths; the engine op returns absolute)."""
+    a, b = _decode_path(a), _decode_path(b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    rel, full = (a, b) if not a.startswith("/") else (b, a)
+    return not rel.startswith("/") and full.startswith("/") and full.endswith("/" + rel)
+
+
 def plan_track_replacement(
     payload: Dict[str, Any],
     adapter: Optional[BeetsAdapter] = None,
@@ -814,7 +826,7 @@ def apply_track_replacement(
     after_item = ad.get_item(target_id) or {}
     after = _replacement_side(after_item) if after_item else {}
     problems = [k for k in _REPLACEMENT_IDENTITY_FIELDS if _s(after.get(k)) != _s(before.get(k))]
-    if not after or after.get("path") != engine.get("new_target_path"):
+    if not after or not _same_library_path(after.get("path"), engine.get("new_target_path")):
         problems.append("path")
     status = "Completed" if not problems else "Recovery Required"
     st.update(

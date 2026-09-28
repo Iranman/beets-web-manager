@@ -4712,7 +4712,7 @@
       "route": "/api/items/<int:iid>/replacement/apply",
       "endpoint": "item_replacement_apply",
       "source_file": "routes_library.py",
-      "line": 4908,
+      "line": 4910,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": true,

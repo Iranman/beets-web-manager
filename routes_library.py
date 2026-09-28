@@ -17,7 +17,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_lookup_cached, _normalize_albumartist
+from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _album_item_abs_path, _acoustid_lookup_cached, _normalize_albumartist
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
 from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet
@@ -4806,7 +4806,9 @@ def item_replacement_plan(iid: int):
     if item is None:
         return jsonify({"ok": False, "error": "Item not found."}), 404
 
-    original_path = _s(getattr(item, "path", "") or "")
+    # The stock Beets web API reports library-relative paths; resolve them
+    # against MUSIC_ROOT so the fingerprint step reads the real file.
+    original_path = _album_item_abs_path(_s(getattr(item, "path", "") or ""))
     # SEC-002 Wave 17 final review: this used to build cand_p from the raw
     # client string and stat() it directly (a Path-under-MUSIC_ROOT
     # fallback for relative input, no less -- wrong root for a replacement
@@ -4824,7 +4826,7 @@ def item_replacement_plan(iid: int):
         cand_item = lib.get_item(candidate_item_id)
         if cand_item is None or candidate_item_id == iid:
             return jsonify({"ok": False, "error": "Replacement item not found."}), 404
-        cand_p = Path(_s(getattr(cand_item, "path", "") or ""))
+        cand_p = Path(_album_item_abs_path(_s(getattr(cand_item, "path", "") or "")))
         if not cand_p.is_file():
             return jsonify({"ok": False, "error": "Replacement item's file is not accessible."}), 400
     else:
