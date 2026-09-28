@@ -27,12 +27,14 @@ export interface JobState {
   current_task?: string | null;
   current_item?: string | null;
   current_path?: string | null;
+  current_file?: string | null;
   scan_scope?: string | null;
   scan_path?: string | null;
   scanned_count?: number | null;
   total_count?: number | null;
   remaining_count?: number | null;
   found_count?: number | null;
+  progress_percent?: number | null;
   affected_count?: number | null;
   placeholder_count?: number | null;
   target_exists_count?: number | null;

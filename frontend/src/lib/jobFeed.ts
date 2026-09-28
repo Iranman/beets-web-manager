@@ -474,8 +474,14 @@ function progressFromState(job: Job) {
   const state = job.state;
   const scanned = numberValue(state?.scanned_count ?? state?.scanned ?? state?.done);
   const total = numberValue(state?.total_count ?? state?.total);
+  const found = numberValue(state?.found_count ?? state?.found);
   if (scanned !== null && total !== null && total > 0) {
-    return `${numberFmt.format(scanned)} of ${numberFmt.format(total)} items processed`;
+    const pct = Math.round((scanned / total) * 100);
+    let text = `${numberFmt.format(scanned)} / ${numberFmt.format(total)} (${pct}%)`;
+    if (found !== null && found > 0) {
+      text += ` · ${numberFmt.format(found)} candidate${found === 1 ? '' : 's'} found`;
+    }
+    return text;
   }
   const matched = numberValue(job.result?.matched_count ?? job.result?.matched);
   const resultTotal = numberValue(job.result?.total_count ?? job.result?.total);

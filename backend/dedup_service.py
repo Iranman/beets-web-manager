@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, DOWNLOADS_ROOT, MUSIC_ROOT, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _s
 from backend.library_service import _scan_scope_label
-from backend.playlist_service import _match_track
+from backend.playlist_service import (
+    _match_track,
+    _norm,
+    _playlist_item_text_variants,
+    _playlist_library_match_candidates,
+    _playlist_match_payload_from_candidates,
+    _playlist_quality_for_item,
+)
 from backend.cleanup_service import _album_cleanup_merge_plan
 from backend.app_runtime import _path_is_under, _path_under
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
@@ -94,19 +101,29 @@ def _dedup_structured_state(state: Dict[str, Any], **updates: Any) -> Dict[str, 
         state.update(updates)
     scanned = int(state.get("scanned") or 0)
     total = int(state.get("total") or 0)
+    found = int(state.get("found") or 0)
+    current_path = _s(state.get("current_path") or "")
+    current_file = Path(current_path).name if current_path else ""
+    progress_pct = round((scanned / total) * 100) if total else 0
     payload: Dict[str, Any] = {
         "category": "Duplicates",
         "current_task": state.get("current_task") or "Scanning files for duplicates",
+        "current_result": state.get("current_result") or (
+            f"Scanning {scanned}/{total} ({progress_pct}%) · {found} duplicate candidate(s) found" if total else ""
+        ),
         "scan_scope": state.get("scan_scope"),
         "scan_path": state.get("scan_path"),
         "scanned_count": scanned,
-        "found_count": int(state.get("found") or 0),
+        "found_count": found,
+        "progress_percent": progress_pct,
     }
+    if current_file:
+        payload["current_file"] = current_file
     if total:
         payload["total_count"] = total
         payload["remaining_count"] = max(0, total - scanned)
-    for key in ("current_path", "current_item", "current_result", "duplicate_type"):
-        if state.get(key):
+    for key in ("current_path", "current_item", "duplicate_type", "error_summary", "error_count", "final_summary"):
+        if state.get(key) is not None:
             payload[key] = state.get(key)
     return payload
 
@@ -185,6 +202,7 @@ def _resolve_album_title_duplicate_candidate(
     track_title: str,
     threshold: float = _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD,
     logger_instance: Optional[Any] = None,
+    album_index: Optional[Dict[str, List[Any]]] = None,
 ) -> Tuple[Optional[Any], str]:
     """Find duplicate library track candidate by extracting folder album name and comparing track title.
 
@@ -203,7 +221,15 @@ def _resolve_album_title_duplicate_candidate(
 
     try:
         from difflib import SequenceMatcher
-        candidates = list(library.items(f"album:{folder_album}"))
+        if album_index is not None:
+            folder_album_lower = folder_album.lower()
+            candidates = list(album_index.get(folder_album_lower, []))
+            if not candidates:
+                for alb_key, alb_items in album_index.items():
+                    if alb_key and SequenceMatcher(None, alb_key, folder_album_lower).ratio() >= 0.8:
+                        candidates.extend(alb_items)
+        else:
+            candidates = list(library.items(f"album:{folder_album}"))
         for cand in candidates:
             cand_album = (getattr(cand, "album", None) or getattr(cand, "get", lambda k, d="": "")("album") or "").lower()
             if cand_album and SequenceMatcher(None, cand_album, folder_album.lower()).ratio() < 0.8:
@@ -211,7 +237,7 @@ def _resolve_album_title_duplicate_candidate(
             cand_title = (getattr(cand, "title", None) or getattr(cand, "get", lambda k, d="": "")("title") or "").lower()
             score = SequenceMatcher(None, cand_title, track_title.lower()).ratio()
             if score >= threshold:
-                return cand, f"album+title ({score:.0%})"
+                return cand, f"album+title ({min(1.0, score):.0%})"
     except BeetsError as ex:
         log.warning("Album duplicate candidate search failed for '%s': %s", folder_album, ex)
     except Exception as ex:
@@ -342,9 +368,11 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             state["log"].append(f"Scanning downloads folder: {scan_path}")
         state["log"].append(f"Comparing against library items in beets database …")
         try:
+            _dedup_raise_if_cancelled(cancel, state)
+            all_items = list(lib.items([]))
             if tracked_only:
                 scan_root = scan_path.resolve(strict=False)
-                tracked = {Path(_item_library_path(it)) for it in lib.items([])}
+                tracked = {Path(_item_library_path(it)) for it in all_items}
                 source_files = sorted(
                     p for p in tracked
                     if p.resolve(strict=False).is_relative_to(scan_root)
@@ -379,28 +407,65 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 current_result=f"Found {total} source audio file(s)",
             ))
 
-        # Build fast library indexes for duplicate identity checks. Also index
-        # by path so a source file that is itself already a known library item
-        # (the common case when this scan runs against the library itself,
-        # e.g. "Clean All", rather than a downloads folder) can reuse its
-        # already-loaded DB tags instead of re-stat'ing and re-parsing the
-        # file from disk below.
+        # Build fast library indexes for duplicate identity checks ONCE.
         size_index: Dict[int, list] = {}
         mb_trackid_index: Dict[str, list] = {}
         path_to_item: Dict[str, Any] = {}
+        album_index: Dict[str, list] = {}
+        items_by_id: Dict[int, Any] = {}
+        fuzzy_candidates_all: List[Dict[str, Any]] = []
+        fuzzy_candidates_by_title: Dict[str, List[Dict[str, Any]]] = {}
         _dedup_raise_if_cancelled(cancel, state)
-        for item in lib.items([]):
+        for item in all_items:
             _dedup_raise_if_cancelled(cancel, state)
             lp = _item_library_path(item)
             mbid = _s(getattr(item, "mb_trackid", "") or "").strip()
             if mbid:
                 mb_trackid_index.setdefault(mbid, []).append(item)
             try:
+                items_by_id[int(getattr(item, "id", 0) or 0)] = item
+            except (TypeError, ValueError):
+                pass
+            alb = _s(getattr(item, "album", "") or "").strip().lower()
+            if alb:
+                album_index.setdefault(alb, []).append(item)
+            try:
                 sz = Path(lp).stat().st_size
                 size_index.setdefault(sz, []).append(item)
                 path_to_item[_path_key(lp)] = (item, sz)
             except Exception:
                 pass
+
+            # Build fuzzy candidate rows
+            try:
+                path_text = _s(getattr(item, "path", ""))
+                quality = _playlist_quality_for_item(item, path_text)
+                payload = {
+                    "id": getattr(item, "id", 0),
+                    "title": getattr(item, "title", ""),
+                    "artist": getattr(item, "artist", ""),
+                    "album": getattr(item, "album", ""),
+                    "path": path_text,
+                }
+                payload.update(quality)
+                seen: set = set()
+                for cand_artist, cand_title in _playlist_item_text_variants(item):
+                    key = (_norm(cand_artist), _norm(cand_title))
+                    if not key[1] or key in seen:
+                        continue
+                    seen.add(key)
+                    row = {
+                        "artist": cand_artist,
+                        "title": cand_title,
+                        "quality": quality,
+                        "payload": payload,
+                    }
+                    fuzzy_candidates_all.append(row)
+                    fuzzy_candidates_by_title.setdefault(key[1], []).append(row)
+            except Exception:
+                pass
+
+        fuzzy_candidates = {"all": fuzzy_candidates_all, "by_title": fuzzy_candidates_by_title}
 
         def _prepare_source(src: Path) -> Dict[str, Any]:
             """I/O step for one source file: size + mb_trackid/artist/title.
@@ -456,8 +521,8 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     _dedup_raise_if_cancelled(cancel, state)
                     state["scanned"] = i + 1
                     state["current_path"] = str(src)
-                    state["current_task"] = "Checking source files against the library"
-                    state["current_result"] = f"{len(duplicates)} duplicate file(s) found so far"
+                    state["current_task"] = "Scanning"
+                    state["current_result"] = f"Scanning {i+1}/{total} ({round((i+1)/total*100) if total else 0}%) · {len(duplicates)} duplicate candidate(s) found"
                     if update_state and (i == 0 or i % 10 == 0 or i == total - 1):
                         update_state(_dedup_structured_state(state))
                     if i % 10 == 0 or i == total - 1:
@@ -503,18 +568,30 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
                     # 3. Fuzzy artist + title match (threshold 0.88)
                     if not lib_item and title:
-                        res = _match_track(artist, title)
-                        if res:
-                            candidate, score = res
+                        cand_payload = _playlist_match_payload_from_candidates(artist, title, fuzzy_candidates)
+                        if cand_payload:
+                            score = float(cand_payload.get("score") or 0)
                             if score >= 0.88:
-                                lib_item   = candidate
-                                match_type = f"fuzzy match {score:.0%}"
+                                # Resolve to the real Beets item so release-slot
+                                # evidence (album, disc, track, IDs) stays intact.
+                                try:
+                                    real_item = items_by_id.get(int(cand_payload.get("id") or 0))
+                                except (TypeError, ValueError):
+                                    real_item = None
+                                if real_item is not None:
+                                    lib_item = real_item
+                                else:
+                                    cand_item = type("PlaylistMatchedItem", (), {})()
+                                    for k, v in cand_payload.items():
+                                        setattr(cand_item, k, v)
+                                    lib_item = cand_item
+                                match_type = f"fuzzy match {min(1.0, score):.0%}"
 
                     # 4. Album-folder + title match — catches beets-renamed files where
                     #    the source folder is "WILLOW (2019)" or "1999 - Californication"
                     if not lib_item and title:
                         cand_item, cand_match_type = _resolve_album_title_duplicate_candidate(
-                            lib, src.parent.name, title, logger_instance=_app_logger
+                            lib, src.parent.name, title, logger_instance=_app_logger, album_index=album_index
                         )
                         if cand_item:
                             lib_item = cand_item
@@ -570,7 +647,7 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             fingerprint_mbid = shared_id
                         elif src_fp_ids and lib_fp_ids:
                             state["log"].append(
-                                f"  ✗ REJECTED [{match_type}]  {src.name}"
+                                f"  [REJECTED] [{match_type}] {src.name}"
                                 f"  — AcoustID fingerprint disagrees with library candidate"
                             )
                             continue
@@ -640,11 +717,21 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     duplicates.append(dup)
                     state["found"] = len(duplicates)
                     state["duplicate_type"] = match_type
-                    state["current_result"] = "Duplicate candidate found"
+                    state["current_result"] = f"Scanning {i+1}/{total} ({round((i+1)/total*100) if total else 0}%) · {len(duplicates)} duplicate candidate(s) found"
                     if update_state:
                         update_state(_dedup_structured_state(state))
+
+                    if release_relation in ("different_release", "different_position"):
+                        evidence_tag = "REVIEW REQUIRED"
+                    elif fingerprint_verified:
+                        evidence_tag = "FINGERPRINT VERIFIED"
+                    elif match_type == "identical file size":
+                        evidence_tag = "BYTE VERIFIED"
+                    else:
+                        evidence_tag = "CANDIDATE"
+
                     state["log"].append(
-                        f"  ✓ DUPLICATE [{match_type}]{' [fingerprint-verified]' if fingerprint_verified else ''}  {src.name}"
+                        f"  [{evidence_tag}] [{match_type}] {src.name}"
                         f"  →  {lib_item.artist or ''} – {lib_item.title or lib_path}"
                     )
 

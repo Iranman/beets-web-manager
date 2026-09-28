@@ -233,6 +233,13 @@ function formatClock(ts?: number) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s remaining`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}m ${s}s remaining`;
+}
+
 function formatDuration(job: Job) {
   if (!job.started_at) return '';
   const end = job.finished_at ?? Date.now() / 1000;
@@ -1956,6 +1963,26 @@ function JobSummaryHeader({
   const canRetry = job.status === 'failed' && Boolean(retryablePlaylistAction(job)) && Boolean(onRetry);
   const showResult = job.status !== 'running' || summary.needsAttention;
 
+  const state = structuredState(job);
+  const scanned = stateNumber(state, 'scanned_count', 'scanned');
+  const total = stateNumber(state, 'total_count', 'total');
+  const found = stateNumber(state, 'found_count', 'found');
+  const rawPath = stateText(state, 'current_path');
+  const currentFile = stateText(state, 'current_file') || (rawPath ? rawPath.split(/[/\\]/).filter(Boolean).pop() : '');
+  const hasCount = scanned !== null && total !== null && total > 0;
+  const pct = hasCount
+    ? Math.max(0, Math.min(100, Math.round(((scanned ?? 0) / (total ?? 1)) * 100)))
+    : (stateNumber(state, 'progress_percent') ?? null);
+
+  const startTs = job.started_at ?? job.created_at;
+  const endTs = job.finished_at ?? (Date.now() / 1000);
+  const elapsedSec = startTs ? Math.max(0, endTs - startTs) : 0;
+  const filesPerMin = scanned && scanned > 0 && elapsedSec > 2 ? Math.round((scanned / elapsedSec) * 60) : null;
+  const remaining = total && scanned !== null ? Math.max(0, total - scanned) : null;
+  const etaSec = filesPerMin && filesPerMin > 0 && remaining && remaining > 0 && (scanned ?? 0) >= 5 && elapsedSec >= 3
+    ? Math.round(remaining / (filesPerMin / 60))
+    : null;
+
   return (
     <div className="shrink-0 border-b border-graphite-800 px-3 py-3">
       <div className="flex flex-wrap items-start gap-2">
@@ -1983,13 +2010,50 @@ function JobSummaryHeader({
           <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Elapsed</div>
           <div className="mt-0.5 text-zinc-200">{formatDuration(job) || 'Working...'}</div>
         </div>
-        <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5 sm:col-span-2">
+        <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5">
           <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Progress</div>
-          <div className="mt-0.5 text-zinc-200">{summary.progressText || (job.status === 'running' ? 'Working...' : 'No count reported')}</div>
+          <div className="mt-0.5 text-zinc-200">
+            {hasCount
+              ? `${numberFmt.format(scanned!)} / ${numberFmt.format(total!)} (${pct}%)`
+              : summary.progressText || (job.status === 'running' ? 'Working...' : 'No count reported')}
+          </div>
+        </div>
+        <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5">
+          <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Speed / ETA</div>
+          <div className="mt-0.5 text-zinc-200">
+            {filesPerMin !== null ? (
+              <span>
+                {filesPerMin} files/min{etaSec !== null ? ` · ${formatEta(etaSec)}` : ''}
+              </span>
+            ) : (
+              '—'
+            )}
+          </div>
         </div>
       </div>
 
-      {job.status === 'running' && !summary.progressText ? <LinearProgress sx={{ borderRadius: 1, mt: 1.5 }} /> : null}
+      {currentFile || (found !== null && found >= 0) ? (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+          {currentFile ? (
+            <div className="truncate max-w-md">
+              <span className="text-[0.62rem] uppercase tracking-wide text-zinc-600 mr-1.5">Current file:</span>
+              <span className="text-zinc-300 font-mono">{currentFile}</span>
+            </div>
+          ) : null}
+          {found !== null && found >= 0 ? (
+            <div>
+              <span className="text-[0.62rem] uppercase tracking-wide text-zinc-600 mr-1.5">Duplicates/candidates:</span>
+              <span className="font-semibold text-amber-400">{found} found</span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {job.status === 'running' && (pct !== null && pct > 0 ? (
+        <LinearProgress variant="determinate" value={pct} sx={{ borderRadius: 1, mt: 1.5 }} />
+      ) : !summary.progressText ? (
+        <LinearProgress sx={{ borderRadius: 1, mt: 1.5 }} />
+      ) : null)}
       {loading ? <LinearProgress sx={{ borderRadius: 1, mt: 1.5 }} /> : null}
 
       {showResult && summary.resultTitle ? (
@@ -2338,6 +2402,13 @@ function RunningJobCard({
   const currentStep = [...model.items].reverse().find((item) => item.status === 'running') ?? model.items.at(-1);
   const canCancel = job.status === 'running';
   const canRetry = job.status === 'failed' && Boolean(retryablePlaylistAction(job));
+  const state = structuredState(job);
+  const scanned = stateNumber(state, 'scanned_count', 'scanned');
+  const total = stateNumber(state, 'total_count', 'total');
+  const hasCount = scanned !== null && total !== null && total > 0;
+  const pct = hasCount
+    ? Math.max(0, Math.min(100, Math.round(((scanned ?? 0) / (total ?? 1)) * 100)))
+    : (stateNumber(state, 'progress_percent') ?? null);
   const progress = summary.progressText || jobProgressText(job);
 
   return (
@@ -2363,7 +2434,11 @@ function RunningJobCard({
             <Button size="small" variant="outlined" onClick={() => onSelectJob(job, { raw: false })}>Details</Button>
           </div>
         </div>
-        {job.status === 'running' && !progress ? <LinearProgress sx={{ mt: 1.5, borderRadius: 1 }} /> : null}
+        {job.status === 'running' && (pct !== null && pct > 0 ? (
+          <LinearProgress variant="determinate" value={pct} sx={{ mt: 1.5, borderRadius: 1 }} />
+        ) : !progress ? (
+          <LinearProgress sx={{ mt: 1.5, borderRadius: 1 }} />
+        ) : null)}
       </div>
 
       <div className="p-3">

@@ -833,7 +833,7 @@ def import_review_auto_enqueue_reconcile():
             "reconciled": True,
             "job_id": job.job_id,
             "job_status": job.status,
-            "retryable": job.status == "failed",
+            "retryable": job.status in ("failed", "cancelled"),
             "note": note,
             "eligibility": eligibility,
         })

@@ -2651,13 +2651,10 @@ def _playlist_item_identity(item: Dict[str, Any]) -> tuple:
 
 
 def _playlist_library_index() -> Dict[str, Any]:
-    try:
-        mtime = library_cache.ts or time.time()
-    except Exception:
-        mtime = time.time()
+    gen = getattr(library_cache, "generation", 1)
     with library_cache.playlist_index_lock:
         cached = library_cache.playlist_index.get("index")
-        if cached is not None and float(library_cache.playlist_index.get("mtime") or 0) == float(mtime):
+        if cached is not None and library_cache.playlist_index.get("generation") == gen:
             return cached
         by_path: Dict[str, Dict[str, Any]] = {}
         by_text: Dict[tuple, Dict[str, Any]] = {}
@@ -2692,7 +2689,8 @@ def _playlist_library_index() -> Dict[str, Any]:
             "match_all": match_all,
             "match_by_title": match_by_title,
         }
-        library_cache.playlist_index["mtime"] = float(mtime)
+        library_cache.playlist_index["generation"] = gen
+        library_cache.playlist_index["mtime"] = float(getattr(library_cache, "ts", 0.0) or 0.0)
         library_cache.playlist_index["index"] = index
         return index
 
