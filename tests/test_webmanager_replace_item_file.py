@@ -146,12 +146,8 @@ class ReplaceItemFileTests(unittest.TestCase):
 
     def test_rollback_restores_both_items_and_files(self):
         data = self._replace().get_json()
-        res = self.client.post("/webmanager/replace-item-file/rollback", headers=self.auth, json={
-            "target_item_id": self.target.id,
-            "target_snapshot": data["target_snapshot"],
-            "source_snapshot": data["source_snapshot"],
-            "quarantine_path": data["quarantine_path"],
-        })
+        res = self.client.post("/webmanager/replace-item-file/rollback", headers=self.auth,
+                               json={"quarantine_id": data["quarantine_id"]})
         self.assertEqual(res.status_code, 200, res.get_json())
         out = res.get_json()
         item = self.lib.get_item(self.target.id)
@@ -165,16 +161,23 @@ class ReplaceItemFileTests(unittest.TestCase):
         self.assertEqual((recreated.format, recreated.title, recreated.album_id), ("FLAC", "exotic (00)", None))
         self.assertTrue(os.path.isfile(self.source_path))
 
-    def test_rollback_refuses_a_quarantine_path_outside_the_engine_folder(self):
+    def test_rollback_only_accepts_an_engine_replacement_id(self):
+        self._replace()
+        for bad in ("../../etc", "0" * 31, "Z" * 32, None, 5):
+            res = self.client.post("/webmanager/replace-item-file/rollback", headers=self.auth,
+                                   json={"quarantine_id": bad})
+            self.assertEqual(res.status_code, 400, bad)
+            self.assertEqual(res.get_json()["error_code"], "INVALID_QUARANTINE_ID")
+        res = self.client.post("/webmanager/replace-item-file/rollback", headers=self.auth,
+                               json={"quarantine_id": "f" * 32})
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.get_json()["error_code"], "REPLACEMENT_NOT_FOUND")
+
+    def test_manifest_is_written_in_the_engine_quarantine_folder(self):
         data = self._replace().get_json()
-        res = self.client.post("/webmanager/replace-item-file/rollback", headers=self.auth, json={
-            "target_item_id": self.target.id,
-            "target_snapshot": data["target_snapshot"],
-            "source_snapshot": data["source_snapshot"],
-            "quarantine_path": os.path.join(self.td, "elsewhere.wav"),
-        })
-        self.assertEqual(res.status_code, 400)
-        self.assertEqual(res.get_json()["error_code"], "QUARANTINE_PATH_INVALID")
+        manifest = os.path.join(self.quarantine, data["quarantine_id"], "manifest.json")
+        self.assertTrue(os.path.isfile(manifest))
+        self.assertEqual(os.path.dirname(data["quarantine_path"]), os.path.dirname(manifest))
 
     def test_rejects_a_target_that_is_not_in_an_album(self):
         res = self.client.post("/webmanager/replace-item-file", headers=self.auth, json={

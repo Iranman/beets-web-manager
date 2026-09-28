@@ -650,19 +650,12 @@ class BeetsAdapter:
 
     def rollback_replace_item_file(
         self,
-        target_item_id: int,
-        target_snapshot: Dict[str, Any],
-        source_snapshot: Dict[str, Any],
-        quarantine_path: str,
+        quarantine_id: str,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Undo replace_item_file() from the snapshots it returned."""
-        payload = {
-            "target_item_id": int(target_item_id),
-            "target_snapshot": target_snapshot,
-            "source_snapshot": source_snapshot,
-            "quarantine_path": quarantine_path or "",
-        }
+        """Undo replace_item_file(). The engine restores from its own
+        manifest; only the quarantine_id it returned is sent."""
+        payload = {"quarantine_id": str(quarantine_id or "")}
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/replace-item-file/rollback", json_data=payload, headers=headers)
 

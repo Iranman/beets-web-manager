@@ -9,21 +9,26 @@ POST /webmanager/replace-item-file
     the target's tags are written into it, and Beets moves it to its
     canonical path (so a FLAC gets a .flac name). The source item's library
     row is then removed -- its file now belongs to the target.
+    The engine records both items' snapshots in a manifest inside its own
+    quarantine folder and returns the folder's id (``quarantine_id``).
 
 POST /webmanager/replace-item-file/rollback
-    {"target_item_id": T, "target_snapshot": {...}, "source_snapshot": {...},
-     "quarantine_path": "..."}
-    Puts the replacement file back at the source's old path as a re-created
-    singleton row, restores the quarantined original to the target's old
-    path, and restores the target row.
+    {"quarantine_id": "<32 hex>"}
+    Reads the engine's own manifest -- never paths or snapshots supplied by
+    the caller -- puts the replacement file back at the source's old path as
+    a re-created singleton row, restores the quarantined original to the
+    target's old path, and restores the target row.
 
 Both run under the shared mutation lock and the idempotency registry. The
 Web Manager decides *whether* to replace (fingerprint proof, a reviewed and
 approved transaction); this module only performs the change inside Beets.
 """
 
+import json
 import os
+import re
 import shutil
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from beets import config as beets_config
@@ -39,7 +44,8 @@ AUDIO_PROPERTY_FIELDS = frozenset({
     "format", "samplerate", "bitdepth", "channels",
 })
 _NOT_RESTORED = frozenset({"id", "path", "mtime"}) | AUDIO_PROPERTY_FIELDS
-
+_QUARANTINE_ID = re.compile(r"[0-9a-f]{32}")
+MANIFEST_NAME = "manifest.json"
 
 _QUARANTINE_ROOT_OVERRIDE: Optional[str] = None
 
@@ -52,8 +58,8 @@ def set_quarantine_root(root: Optional[str]) -> None:
 
 def _quarantine_root() -> str:
     if _QUARANTINE_ROOT_OVERRIDE:
-        return _QUARANTINE_ROOT_OVERRIDE
-    return os.path.join(beets_config.config_dir(), "webmanager-quarantine")
+        return os.path.abspath(_QUARANTINE_ROOT_OVERRIDE)
+    return os.path.abspath(os.path.join(beets_config.config_dir(), "webmanager-quarantine"))
 
 
 def _fspath(value: Any) -> str:
@@ -82,26 +88,36 @@ def _error(message: str, code: str, status: int = 400):
     return jsonify({"error": message, "error_code": code}), status
 
 
-def _load_pair(lib, data: Dict[str, Any]) -> Tuple[Optional[Item], Optional[Item], Optional[tuple]]:
+def _load_pair(lib, data: Dict[str, Any]) -> Tuple[Optional[Item], Optional[Item], Optional[Tuple[str, str, int]]]:
     try:
         target_id = int(data.get("target_item_id"))
         source_id = int(data.get("source_item_id"))
     except (TypeError, ValueError):
-        return None, None, _error("target_item_id and source_item_id must be integers", "INVALID_IDS")
+        return None, None, ("target_item_id and source_item_id must be integers", "INVALID_IDS", 400)
     if target_id == source_id:
-        return None, None, _error("target and source must be different items", "SAME_ITEM")
+        return None, None, ("target and source must be different items", "SAME_ITEM", 400)
     target, source = lib.get_item(target_id), lib.get_item(source_id)
     if target is None or source is None:
-        return None, None, _error("target or source item not found", "ITEM_NOT_FOUND", 404)
+        return None, None, ("target or source item not found", "ITEM_NOT_FOUND", 404)
     if not target.album_id:
-        return None, None, _error("target item is not attached to an album slot", "TARGET_NOT_IN_ALBUM")
+        return None, None, ("target item is not attached to an album slot", "TARGET_NOT_IN_ALBUM", 400)
     source_path = _fspath(source.path)
     if not os.path.isfile(source_path) or not _inside_allowed(source_path):
-        return None, None, _error("source file missing or outside allowed roots", "SOURCE_PATH_INVALID")
-    target_path = _fspath(target.path)
-    if not _inside_allowed(target_path):
-        return None, None, _error("target path outside allowed roots", "TARGET_PATH_INVALID")
+        return None, None, ("source file missing or outside allowed roots", "SOURCE_PATH_INVALID", 400)
+    if not _inside_allowed(_fspath(target.path)):
+        return None, None, ("target path outside allowed roots", "TARGET_PATH_INVALID", 400)
     return target, source, None
+
+
+def _manifest_dir(quarantine_id: str) -> Optional[str]:
+    """The engine's folder for one replacement, or None for a malformed id."""
+    if not isinstance(quarantine_id, str) or not _QUARANTINE_ID.fullmatch(quarantine_id):
+        return None
+    root = _quarantine_root()
+    folder = os.path.normpath(os.path.join(root, quarantine_id))
+    if not folder.startswith(root + os.sep):
+        return None
+    return folder
 
 
 @ops.webmanager_bp.route("/replace-item-file", methods=["POST"])
@@ -115,23 +131,22 @@ def run_replace_item_file():
         return early
     target, source, err = _load_pair(lib, data)
     if err is not None:
-        body, status = err
-        ops.update_operation(op_id, "failed", error=body.get_json()["error"], error_code=body.get_json()["error_code"])
-        return err
+        message, code, status = err
+        ops.update_operation(op_id, "failed", error=message, error_code=code)
+        return _error(message, code, status)
 
     target_snapshot, source_snapshot = _snapshot(target), _snapshot(source)
     old_target_path = _fspath(target.path)
     source_path = _fspath(source.path)
+    quarantine_id = uuid.uuid4().hex
+    qdir = os.path.join(_quarantine_root(), quarantine_id)
     quarantine_path = ""
-    moved_to_quarantine = False
     try:
         with ops.mutation_lock:
+            os.makedirs(qdir)
             if os.path.exists(old_target_path):
-                qdir = os.path.join(_quarantine_root(), op_id)
-                os.makedirs(qdir, exist_ok=True)
                 quarantine_path = os.path.join(qdir, os.path.basename(old_target_path))
                 shutil.move(old_target_path, quarantine_path)
-                moved_to_quarantine = True
 
             # The target keeps every identity/metadata field; only the file
             # (and the audio properties read from it) change.
@@ -146,12 +161,25 @@ def run_replace_item_file():
             target.store()
             new_target_path = _fspath(target.path)
 
+            manifest = {
+                "target_item_id": target.id,
+                "old_target_path": old_target_path,
+                "new_target_path": new_target_path,
+                "source_path": source_path,
+                "quarantine_path": quarantine_path,
+                "target_snapshot": target_snapshot,
+                "source_snapshot": source_snapshot,
+            }
+            with open(os.path.join(qdir, MANIFEST_NAME), "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh)
+
         result = {
             "success": True,
             "target_item_id": target.id,
             "removed_source_item_id": source_snapshot.get("id"),
             "old_target_path": old_target_path,
             "new_target_path": new_target_path,
+            "quarantine_id": quarantine_id,
             "quarantine_path": quarantine_path,
             "format": _jsonable(target.get("format")),
             "target_snapshot": target_snapshot,
@@ -163,7 +191,7 @@ def run_replace_item_file():
         ops.log.exception("replace-item-file failed; restoring")
         try:
             with ops.mutation_lock:
-                if moved_to_quarantine and not os.path.exists(old_target_path):
+                if quarantine_path and os.path.exists(quarantine_path) and not os.path.exists(old_target_path):
                     shutil.move(quarantine_path, old_target_path)
                 restored = lib.get_item(target_snapshot.get("id"))
                 if restored is not None:
@@ -180,25 +208,26 @@ def run_replace_item_file():
 def run_replace_item_file_rollback():
     data = request.get_json(force=True, silent=True) or {}
     lib = g.lib
+    folder = _manifest_dir(data.get("quarantine_id"))
+    if folder is None:
+        return _error("quarantine_id is not a valid engine replacement id", "INVALID_QUARANTINE_ID")
     try:
-        target_id = int(data.get("target_item_id"))
-    except (TypeError, ValueError):
-        return _error("target_item_id must be an integer", "INVALID_IDS")
-    target_snapshot = data.get("target_snapshot") or {}
-    source_snapshot = data.get("source_snapshot") or {}
-    quarantine_path = _fspath(data.get("quarantine_path"))
-    if not isinstance(target_snapshot, dict) or not isinstance(source_snapshot, dict):
-        return _error("snapshots must be objects", "INVALID_SNAPSHOT")
-    old_target_path = _fspath(target_snapshot.get("path"))
-    old_source_path = _fspath(source_snapshot.get("path"))
-    target = lib.get_item(target_id)
+        with open(os.path.join(folder, MANIFEST_NAME), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return _error("no engine replacement record for this id", "REPLACEMENT_NOT_FOUND", 404)
+
+    target_snapshot = manifest.get("target_snapshot") or {}
+    source_snapshot = manifest.get("source_snapshot") or {}
+    old_target_path = _fspath(manifest.get("old_target_path"))
+    old_source_path = _fspath(manifest.get("source_path"))
+    quarantine_path = _fspath(manifest.get("quarantine_path"))
+    target = lib.get_item(manifest.get("target_item_id"))
     if target is None:
         return _error("target item not found", "ITEM_NOT_FOUND", 404)
     for path in (old_target_path, old_source_path):
         if not path or not _inside_allowed(path):
-            return _error("snapshot path missing or outside allowed roots", "SNAPSHOT_PATH_INVALID")
-    if quarantine_path and not quarantine_path.startswith(_quarantine_root() + os.sep):
-        return _error("quarantine path is not an engine quarantine file", "QUARANTINE_PATH_INVALID")
+            return _error("recorded path is outside allowed roots", "SNAPSHOT_PATH_INVALID")
     current_path = _fspath(target.path)
     if os.path.exists(old_source_path) and os.path.abspath(old_source_path) != os.path.abspath(current_path):
         return _error("the source's old path is occupied", "SOURCE_PATH_OCCUPIED", 409)

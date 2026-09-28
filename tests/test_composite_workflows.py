@@ -132,6 +132,7 @@ class TestCompositeWorkflows(unittest.TestCase):
         new_path = "/music/BossMan Dlow/2 Slippery/17 Exotic.flac"
         self.mock_adapter.replace_item_file.return_value = {
             "operation_id": op_id, "success": True, "new_target_path": new_path,
+            "quarantine_id": "0" * 32,
             "quarantine_path": "/config/webmanager-quarantine/x/17 Exotic.mp3",
             "target_snapshot": {"id": 55, "path": album_item["path"]},
             "source_snapshot": {"id": 77, "path": flac_item["path"]},
@@ -159,8 +160,7 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.assertTrue(rb_res["ok"])
         self.assertEqual(rb_res["recreated_source_item_id"], 78)
         self.mock_adapter.rollback_replace_item_file.assert_called_once_with(
-            55, {"id": 55, "path": album_item["path"]}, {"id": 77, "path": flac_item["path"]},
-            "/config/webmanager-quarantine/x/17 Exotic.mp3", idempotency_key=f"{op_id}:rollback",
+            "0" * 32, idempotency_key=f"{op_id}:rollback",
         )
         self.assertEqual(self.store.get(op_id)["status"], "Rolled Back")
 

@@ -117,7 +117,7 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/transactions/{op_id}/approve").status_code, 200)
         new_path = str(self.mp3.with_suffix(".flac"))
         self.adapter.replace_item_file.return_value = {
-            "success": True, "new_target_path": new_path, "quarantine_path": "/config/webmanager-quarantine/x/a.mp3",
+            "success": True, "new_target_path": new_path, "quarantine_id": "0" * 32, "quarantine_path": "/config/webmanager-quarantine/x/a.mp3",
             "target_snapshot": {"id": 24258}, "source_snapshot": {"id": 22575},
         }
         self.items[24258] = {**self.items[24258], "format": "FLAC", "path": new_path}

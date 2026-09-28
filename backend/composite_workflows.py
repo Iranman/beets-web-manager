@@ -853,17 +853,11 @@ def rollback_track_replacement(
         return {"ok": False, "code": "not_found", "error": "Transaction not found"}
     meta = tx.get("metadata") or {}
     engine = meta.get("engine_result") or {}
-    if meta.get("mutation_family") != ITEM_FILE_REPLACEMENT_FAMILY or not engine:
+    if meta.get("mutation_family") != ITEM_FILE_REPLACEMENT_FAMILY or not engine.get("quarantine_id"):
         return {"ok": False, "code": "not_applied", "error": "No applied item file replacement to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
-    res = ad.rollback_replace_item_file(
-        int(meta["target_item_id"]),
-        engine.get("target_snapshot") or {},
-        engine.get("source_snapshot") or {},
-        engine.get("quarantine_path") or "",
-        idempotency_key=f"{operation_id}:rollback",
-    )
+    res = ad.rollback_replace_item_file(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else res
     st.update(
         operation_id,
