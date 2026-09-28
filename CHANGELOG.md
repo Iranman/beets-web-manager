@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.36 - 2026-09-28
+
 ### Changed
 - Unattended duplicate cleanup no longer deletes either copy when the preferred album copy is lossy and a proven duplicate is lossless. Such a group is flagged for replacement review instead: the right fix is replacing the album file through the reviewed replacement transaction. The review shows in the job log, the proposal (`action: replacement_review`) and the Duplicate Files panel.
 
