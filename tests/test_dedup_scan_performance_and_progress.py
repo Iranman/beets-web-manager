@@ -109,7 +109,12 @@ class DedupScanPerformanceAndProgressTests(unittest.TestCase):
         # transaction store (a real directory owned by whichever test module
         # created it) out of that blast radius.
         import backend.transaction_service as transaction_service
-        store = patch.object(transaction_service, "transactions", MagicMock())
+        fake_store = MagicMock()
+        fake_tx = {"id": "txn_dedup_scan_test", "status": "Running", "metadata": {}}
+        fake_store.create.return_value = dict(fake_tx)
+        fake_store.update.return_value = dict(fake_tx)
+        fake_store.get.return_value = dict(fake_tx)
+        store = patch.object(transaction_service, "transactions", fake_store)
         store.start()
         self.addCleanup(store.stop)
 
