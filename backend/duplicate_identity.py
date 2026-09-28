@@ -13,10 +13,6 @@ import hashlib
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-#: Match types that already carry deterministic recording identity.
-DETERMINISTIC_MATCH_TYPES = frozenset({"MB Track ID", "AcoustID fingerprint"})
-
-
 def item_album_id(item: Any) -> Optional[int]:
     if item is None:
         return None
@@ -108,8 +104,8 @@ def select_unattended_cleanup_paths(
     """Source paths a scheduled maintenance run may delete without review.
 
     Requires: high confidence; source under the music root; both files
-    present; deterministic identity (Recording ID / AcoustID / fingerprint
-    verified) or a byte-identical file; both copies tracked items occupying
+    present; audio identity of the pair proven (both fingerprint to a shared
+    recording) or a byte-identical file; both copies tracked items occupying
     the SAME release slot (same album row or same release, same disc/track);
     and only the higher item id of a pair -- so a mutual A<->B pair can never
     select both copies. Everything else stays for review.
@@ -140,9 +136,13 @@ def select_unattended_cleanup_paths(
             continue
         if not library_copy.exists() or not library_copy.is_file():
             continue
-        strong_identity = bool(dup.get("fingerprint_verified") or match_type in DETERMINISTIC_MATCH_TYPES)
+        # Audio identity of the PAIR must be proven: both copies fingerprint to
+        # a shared recording, or the files are byte-identical. A shared
+        # embedded Recording ID alone is not proof -- it can be wrong, and the
+        # fingerprint may even contradict it.
+        audio_proven = bool(dup.get("fingerprint_verified"))
         exact_hash = match_type == "identical file size" and same_file(source, library_copy)
-        if not (strong_identity or exact_hash):
+        if not (audio_proven or exact_hash):
             continue
         if _s(dup.get("release_relation")) not in SAME_SLOT_RELATIONS:
             continue

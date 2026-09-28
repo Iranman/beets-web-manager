@@ -29010,14 +29010,17 @@ def dedup_scan():
                     if not Path(lib_path).exists():   # library file gone — skip
                         continue
 
-                    # 6. Fingerprint-verify weaker text-based matches before trusting
-                    #    them as high-confidence duplicates. MB Track ID and AcoustID
-                    #    matches are already fingerprint-grade; identical file size is
-                    #    byte-grade. Fuzzy/album+title matches get an AcoustID
-                    #    cross-check when fingerprinting is available — a confirmed
-                    #    match upgrades confidence, a confirmed mismatch rejects the
-                    #    candidate outright instead of risking a wrong-file deletion.
-                    if match_type.startswith("fuzzy match") or match_type.startswith("album+title"):
+                    # 6. Fingerprint-verify every non-byte-identical match before
+                    #    trusting it as a duplicate. AcoustID-fingerprint matches are
+                    #    already audio-proven; identical file size is byte-grade. An
+                    #    embedded MB Track ID is NOT audio proof: live data showed
+                    #    duplicate groups whose shared embedded Recording ID the
+                    #    fingerprint contradicts. A confirmed shared recording
+                    #    marks the pair fingerprint-verified; a confirmed mismatch
+                    #    rejects the candidate instead of risking a wrong-file
+                    #    deletion.
+                    if (match_type == "MB Track ID" or match_type.startswith("fuzzy match")
+                            or match_type.startswith("album+title")):
                         shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
                         if shared_id:
                             fingerprint_verified = True
