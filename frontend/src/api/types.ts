@@ -3076,6 +3076,7 @@ export interface DuplicateProposalRow {
   };
   embedded_id_contradicts_fingerprint: boolean;
   keep_reason?: string;
+  action?: 'delete' | 'replacement_review';
   byte_identical?: boolean;
 }
 

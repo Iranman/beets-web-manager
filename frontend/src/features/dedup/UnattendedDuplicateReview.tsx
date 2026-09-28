@@ -14,11 +14,14 @@ function formatSize(size: number | null): string {
   return `${Math.round(size / 1024)} KB`;
 }
 
-function CopyCell({ copy, role }: { copy: DuplicateProposalCopy; role: 'delete' | 'keep' }) {
+function CopyCell({ copy, role, review }: { copy: DuplicateProposalCopy; role: 'delete' | 'keep'; review?: boolean }) {
+  const label = review
+    ? (role === 'delete' ? 'Lossless candidate (not deleted)' : 'Album copy to replace (not deleted)')
+    : (role === 'delete' ? 'Would delete' : 'Keeps');
   return (
     <div className="min-w-0">
-      <div className={role === 'delete' ? 'text-red-300' : 'text-emerald-300'}>
-        {role === 'delete' ? 'Would delete' : 'Keeps'}
+      <div className={review ? 'text-amber-300' : role === 'delete' ? 'text-red-300' : 'text-emerald-300'}>
+        {label}
       </div>
       <div className="break-all font-mono text-xs text-zinc-200">{copy.path}</div>
       <div className="text-xs text-zinc-400">
@@ -31,12 +34,13 @@ function CopyCell({ copy, role }: { copy: DuplicateProposalCopy; role: 'delete' 
 
 function ProposalRow({ row }: { row: DuplicateProposalRow }) {
   const fp = row.fingerprint;
+  const review = row.action === 'replacement_review';
   return (
     <div className="grid gap-3 rounded border border-zinc-800 p-3 md:grid-cols-2">
-      <CopyCell copy={row.delete} role="delete" />
-      <CopyCell copy={row.keep} role="keep" />
+      <CopyCell copy={row.delete} role="delete" review={review} />
+      <CopyCell copy={row.keep} role="keep" review={review} />
       {row.keep_reason ? (
-        <div className="text-xs text-emerald-200 md:col-span-2">Kept because: {row.keep_reason}</div>
+        <div className={`text-xs md:col-span-2 ${review ? 'text-amber-200' : 'text-emerald-200'}`}>{review ? '' : 'Kept because: '}{row.keep_reason}</div>
       ) : null}
       <div className="text-xs text-zinc-400 md:col-span-2">
         <Chip size="small" label={row.release_relation || 'unknown slot'} sx={{ mr: 1 }} />

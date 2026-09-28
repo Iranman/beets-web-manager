@@ -27421,10 +27421,10 @@
    "module": "backend/dedup_service.py",
    "lines": [
     1374,
-    1408
+    1409
    ],
-   "size": 35,
-   "body_lines": 31,
+   "size": 36,
+   "body_lines": 32,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27443,11 +27443,11 @@
    "name": "_maintenance_duplicate_proposal_line",
    "module": "backend/dedup_service.py",
    "lines": [
-    1411,
-    1420
+    1412,
+    1422
    ],
-   "size": 10,
-   "body_lines": 9,
+   "size": 11,
+   "body_lines": 10,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27463,11 +27463,11 @@
    "name": "_maintenance_full_duplicate_scan",
    "module": "backend/dedup_service.py",
    "lines": [
-    1423,
-    1525
+    1425,
+    1534
    ],
-   "size": 103,
-   "body_lines": 101,
+   "size": 110,
+   "body_lines": 108,
    "route": null,
    "mutation_capable": false,
    "domain": "DEDUP",
@@ -27495,8 +27495,8 @@
    "name": "_album_cleanup_count_duplicate_files",
    "module": "backend/dedup_service.py",
    "lines": [
-    1528,
-    1529
+    1537,
+    1538
    ],
    "size": 2,
    "body_lines": 1,
