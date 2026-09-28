@@ -5,6 +5,7 @@ Opens the beets library directly. No plugin system, no S6, no beet web.
 """
 import base64, copy, datetime, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, string, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
+import logging
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
 install_secure_urllib()
@@ -160,7 +161,7 @@ def _probe_js_runtime(binary: str) -> Dict[str, Any]:
             "error": "" if r.returncode == 0 else output[:240],
         }
     except Exception as ex:
-        app.logger.warning("JS runtime probe failed for %r: %s", binary, type(ex).__name__)
+        logging.getLogger("app").warning("JS runtime probe failed for %r: %s", binary, type(ex).__name__)
         return {
             "ok": False,
             "returncode": None,
@@ -1260,7 +1261,7 @@ def _binary_status(name: str) -> Dict[str, Any]:
             "returncode": r.returncode,
         })
     except Exception as ex:
-        app.logger.warning("Binary version check failed for %r: %s", path, type(ex).__name__)
+        logging.getLogger("app").warning("Binary version check failed for %r: %s", path, type(ex).__name__)
         result["error"] = f"Could not run {path}."
     return result
 
@@ -1328,7 +1329,7 @@ def _ytdlp_po_provider_status() -> Dict[str, Any]:
     except urllib.error.HTTPError as ex:
         result.update({"reachable": ex.code < 500, "status": ex.code, "error": f"HTTP {ex.code}"})
     except Exception as ex:
-        app.logger.warning("PO provider reachability check failed: %s", type(ex).__name__)
+        logging.getLogger("app").warning("PO provider reachability check failed: %s", type(ex).__name__)
         result["error"] = "Could not reach the PO token provider."
     return result
 
