@@ -956,3 +956,20 @@ from backend.transaction_engine import TransactionStore  # noqa: E402
 
 jobs = JobStore()
 transactions = TransactionStore()
+
+
+# ── Flask application handle ──
+# Service modules never import app.py. Code that must run inside an
+# application context from a worker thread asks for the registered app.
+_FLASK_APP = None
+
+
+def register_flask_app(flask_app) -> None:
+    global _FLASK_APP
+    _FLASK_APP = flask_app
+
+
+def registered_flask_app():
+    if _FLASK_APP is None:
+        raise RuntimeError("the Flask application has not been registered")
+    return _FLASK_APP

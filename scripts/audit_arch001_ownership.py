@@ -32,35 +32,35 @@ SUBSTANTIAL_LINES = 25
 
 # Domain -> desired owner module. Existing modules are preferred owners.
 OWNERS = {
-    "ROUTE_ONLY": "route modules (Blueprints)",
+    "ROUTE_ONLY": "app.py (routes)",
     "IMPORT": "backend/import_service.py",
     "IMPORT_REVIEW": "backend/import_review_service.py",
-    "IMPORT_RECONCILIATION": "backend/import_reconciliation.py",
+    "IMPORT_RECONCILIATION": "backend/import_reconciliation_service.py",
     "LIBRARY": "backend/library_service.py",
-    "MATCHING": "backend/matching/",
+    "MATCHING": "backend/matching_service.py",
     "CLEANUP": "backend/cleanup_service.py",
     "DEDUP": "backend/dedup_service.py",
     "MAINTENANCE": "backend/maintenance_service.py",
     "PLAYLIST": "backend/playlist_service.py",
     "REPLACEMENT": "backend/replacement_service.py",
-    "MUSICBRAINZ": "helpers_mb.py",
-    "ACOUSTID": "helpers_mb.py",
+    "MUSICBRAINZ": "backend/musicbrainz_service.py",
+    "ACOUSTID": "backend/acoustid_service.py",
     "AI": "backend/ai_service.py",
     "PLEX": "backend/plex_service.py",
     "LIDARR": "routes_lidarr.py",
-    "SLSKD": "backend/slskd.py",
+    "SLSKD": "backend/slskd_service.py",
     "YTDLP": "backend/ytdlp_service.py",
     "ACQUISITION": "backend/acquisition_service.py",
     "ARTWORK": "backend/artwork_service.py",
-    "CONFIG": "backend/config_manager.py",
-    "SETUP": "routes_setup.py",
-    "AUTH": "backend/security.py",
-    "TRANSACTIONS": "backend/transaction_engine.py",
-    "JOBS": "job_engine.py",
+    "CONFIG": "backend/config_service.py",
+    "SETUP": "backend/setup_service.py",
+    "AUTH": "backend/auth_service.py",
+    "TRANSACTIONS": "backend/transaction_service.py",
+    "JOBS": "backend/job_service.py",
     "DISPLAY/SERIALIZATION": "backend/serializers.py",
     "COMPATIBILITY": "app.py (compatibility glue)",
     "BOOTSTRAP": "app.py (application creation)",
-    "CORE": "backend/app_core.py",
+    "CORE": "backend/app_runtime.py",
 }
 
 ROUTE_RULES = [
@@ -187,15 +187,24 @@ def classify(name, route, overrides):
     return "UNCLASSIFIED"
 
 
+def family_paths():
+    """app.py plus the modules ARCH-001 extracted from it (inventory order)."""
+    inv = load_inventory()
+    mods = [ROOT / m for m in (inv.get("extracted_modules") or [])]
+    return [APP] + [m for m in mods if m.exists()]
+
+
 def analyze(overrides=None):
     overrides = overrides or {}
-    src = APP.read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    top_names = {n.name for n in funcs}
+    parsed = []
+    for path in family_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(ROOT).as_posix()
+        parsed += [(rel, n) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    top_names = {n.name for _, n in parsed}
     refs = {}
     mutation = {}
-    for fn in funcs:
+    for _, fn in parsed:
         used, mut = set(), False
         for sub in ast.walk(fn):
             if isinstance(sub, ast.Name) and sub.id in top_names and sub.id != fn.name:
@@ -211,19 +220,29 @@ def analyze(overrides=None):
         for u in used:
             callers[u].add(name)
     rows = []
-    for fn in funcs:
+    for module, fn in parsed:
         route = _decorator_route(fn)
         domain = classify(fn.name, route, overrides)
+        owner = OWNERS.get(domain, "UNCLASSIFIED")
+        if module == "app.py":
+            status = "IN_APP"
+        elif module == owner:
+            status = "EXTRACTED"
+        else:
+            # Layered extraction: a helper shared across domains lives in the
+            # lowest-layer module that uses it (see docs/arch001_service_decomposition.md).
+            status = "EXTRACTED_SHARED"
         rows.append({
             "name": fn.name,
+            "module": module,
             "lines": [fn.lineno, fn.end_lineno],
             "size": fn.end_lineno - fn.lineno + 1,
             "body_lines": _body_lines(fn),
             "route": {"method": route[0], "path": route[1]} if route else None,
             "mutation_capable": mutation[fn.name],
             "domain": domain,
-            "desired_owner": OWNERS.get(domain, "UNCLASSIFIED"),
-            "migration_status": "IN_APP",
+            "desired_owner": owner,
+            "migration_status": status,
             "callers": sorted(callers[fn.name])[:25],
             "caller_count": len(callers[fn.name]),
             "dependencies": sorted(refs[fn.name])[:40],
@@ -240,6 +259,8 @@ def load_inventory():
 def summarize(rows):
     by = defaultdict(lambda: [0, 0])
     for r in rows:
+        if r.get("module", "app.py") != "app.py":
+            continue
         by[r["domain"]][0] += 1
         by[r["domain"]][1] += r["size"]
     return {k: {"functions": v[0], "lines": v[1]} for k, v in sorted(by.items(), key=lambda kv: -kv[1][1])}
@@ -258,13 +279,19 @@ def main(argv):
         for domain, stats in summarize(rows).items():
             print(f"{domain:24s} functions={stats['functions']:4d} lines={stats['lines']:6d}")
     missing = [r for r in rows if r["domain"] == "UNCLASSIFIED" and r["body_lines"] >= SUBSTANTIAL_LINES]
+    if "--write" in argv:
+        by_status = defaultdict(int)
+        for r in rows:
+            by_status[r["migration_status"]] += 1
+        print("migration status:", dict(by_status))
     if missing:
         for r in missing:
             print(f"UNCLASSIFIED substantial app.py function: {r['name']} ({r['body_lines']} lines)", file=sys.stderr)
         return 1
     if "--write" not in argv and "--summary" not in argv:
-        print(f"ARCH-001 ownership check passed: {len(rows)} app.py functions, "
-              f"{sum(r['size'] for r in rows)} lines, 0 unclassified substantial functions")
+        in_app = [r for r in rows if r["module"] == "app.py"]
+        print(f"ARCH-001 ownership check passed: {len(rows)} functions ({len(in_app)} still in app.py, "
+              f"{sum(r['size'] for r in in_app)} lines), 0 unclassified substantial functions")
     return 0
 
 

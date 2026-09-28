@@ -537,10 +537,11 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             if func in (
                 "_delete_staged_import_folder",
                 "import_folder_with_id._do",
+                "start_folder_import_with_id._do",  # ARCH-001: request-free service behind the route
                 "_validate_wanted_download_identity_before_import",
             ):
                 return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
-            if func == "reimport_disk._do" and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
+            if func in ("reimport_disk._do", "start_reimport_disk._do") and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-pretracking-filename-repair"
             if func == "_maintenance_safe_folder_renames":
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-orphan-folder-rename"

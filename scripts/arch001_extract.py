@@ -466,6 +466,7 @@ def apply(module_path, p, header_doc, lower_modules):
             name = (a.asname or a.name).split(".")[0]
             if name in used and name not in already_bound:
                 keep.append(a)
+                already_bound.add(name)  # app.py sometimes imports a name twice
         if keep:
             if isinstance(node, ast.Import):
                 needed_imports.append("import " + ", ".join(
