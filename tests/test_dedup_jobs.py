@@ -54,7 +54,8 @@ class DedupJobsTests(unittest.TestCase):
         self.assertIn('"error": "stale path"', dedup_source)
         self.assertIn("skipped {info['error']}", dedup_source)
         self.assertIn('"source_size":          source_size', dedup_source)
-        self.assertIn("if not source.exists() or not source.is_file():", cleanup_source)
+        # Both copies must still exist as files (stale paths after folder merges are skipped).
+        self.assertIn("if not path_under(path, root) or not path.exists() or not path.is_file():", cleanup_source)
 
     def test_dedup_scan_batches_io_with_a_thread_pool(self):
         # Perf fix: scanning the library against itself ("Clean All") was

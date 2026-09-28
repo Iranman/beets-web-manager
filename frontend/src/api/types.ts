@@ -3059,6 +3059,8 @@ export interface DuplicateProposalCopy {
   recording_id: string;
   disc: number | null;
   track: number | null;
+  format?: string;
+  bitrate?: number | null;
 }
 
 export interface DuplicateProposalRow {
@@ -3073,6 +3075,8 @@ export interface DuplicateProposalRow {
     keep_copy_recording_ids: string[];
   };
   embedded_id_contradicts_fingerprint: boolean;
+  keep_reason?: string;
+  byte_identical?: boolean;
 }
 
 export interface UnattendedCleanupStatus extends ApiOkResponse {

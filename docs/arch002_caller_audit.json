@@ -317,6 +317,10 @@
       "DISPLAY_ONLY",
       "AI threshold constants moved verbatim from app.py (ARCH-001); each consumer is classified separately."
     ],
+    "backend/duplicate_identity.py::plan_unattended_cleanup": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Unattended duplicate deletion plan: requires fingerprint or byte proof plus the same release slot (moved here from select_unattended_cleanup_paths); keeper ranking only orders already-proven copies."
+    ],
     "backend/duplicate_identity.py::select_unattended_cleanup_paths": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Unattended duplicate deletion: deterministic identity or identical bytes AND same release slot (album row or release + disc/track); keeps one copy per pair."

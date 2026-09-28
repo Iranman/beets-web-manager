@@ -246,9 +246,9 @@ class DuplicateSafetyInvariantTests(unittest.TestCase):
     def test_scheduled_duplicate_cleanup_delegates_to_the_identity_rules(self):
         import inspect
         from backend import dedup_service
-        selector = inspect.getsource(dedup_service._maintenance_duplicate_cleanup_paths)
-        self.assertIn("_duplicate_identity.select_unattended_cleanup_paths(", selector)
-        self.assertIn("_maintenance_duplicate_cleanup_paths(", inspect.getsource(dedup_service._maintenance_full_duplicate_scan))
+        selector = inspect.getsource(dedup_service._maintenance_duplicate_plan)
+        self.assertIn("_duplicate_identity.plan_unattended_cleanup(", selector)
+        self.assertIn("_maintenance_duplicate_plan(", inspect.getsource(dedup_service._maintenance_full_duplicate_scan))
 
 
 class ApiContractTests(unittest.TestCase):

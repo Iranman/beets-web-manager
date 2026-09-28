@@ -10,6 +10,7 @@ byte-identical file) AND both copies belonging to the same album.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -94,6 +95,233 @@ def _s(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_LOSSLESS_FORMATS = {"flac", "alac", "ape", "wav", "aiff", "aif", "wv", "wavpack", "dsf", "dff"}
+# Beets' own duplicate-name suffix ("Song.1.flac") and download/source-id
+# decorations ("(01)", "{source-id}") mark a copy as not the canonical path.
+_NONCANONICAL_NAME_RE = re.compile(
+    r"(\.\d+\.[A-Za-z0-9]+$)|(\{[^{}]+\}\.[A-Za-z0-9]+$)|(\s\(\d{2}\)(\{[^{}]*\})?\.[A-Za-z0-9]+$)"
+)
+
+
+def copy_meta(item: Any) -> Dict[str, Any]:
+    """Keeper-ranking facts for one tracked copy (read from the Beets item)."""
+    if item is None:
+        return {}
+
+    def _get(name: str) -> Any:
+        return getattr(item, name, None)
+
+    return {
+        "album_id": item_album_id(item),
+        "recording_id": _s(_get("mb_trackid")).strip(),
+        "release_id": _s(_get("mb_albumid")).strip(),
+        "releasegroup_id": _s(_get("mb_releasegroupid")).strip(),
+        "disc": _get("disc"),
+        "track": _get("track"),
+        "format": _s(_get("format")).strip(),
+        "bitrate": _get("bitrate"),
+        "samplerate": _get("samplerate"),
+        "bitdepth": _get("bitdepth"),
+    }
+
+
+def _num(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_uuid(value: Any) -> bool:
+    return bool(_UUID_RE.match(_s(value).strip().lower()))
+
+
+def keeper_rank(copy: Dict[str, Any]) -> tuple:
+    """Higher sorts better. The order is the policy:
+
+    1. attached to an album row (the album slot) over a loose/singleton copy;
+    2. valid canonical metadata (Recording ID, Release Group ID, release ID,
+       disc/track position);
+    3. embedded Recording ID agrees with AcoustID;
+    4. canonical Beets-managed path over a duplicate/decorated filename;
+    5. file quality: lossless over lossy, bitrate, sample rate, bit depth;
+       file size only between copies of the same known format;
+    6. lowest item id -- only as the final deterministic tie-breaker.
+    """
+    meta = copy.get("meta") or {}
+    canonical = sum((
+        _is_uuid(meta.get("recording_id")),
+        _is_uuid(meta.get("releasegroup_id")),
+        _is_uuid(meta.get("release_id")),
+        _num(meta.get("disc")) > 0 and _num(meta.get("track")) > 0,
+    ))
+    fp_ids = {_s(x).strip().lower() for x in copy.get("fingerprint_ids") or []}
+    recording = _s(meta.get("recording_id")).strip().lower()
+    agrees = bool(recording) and recording in fp_ids
+    name = Path(_s(copy.get("path"))).name
+    canonical_path = not _NONCANONICAL_NAME_RE.search(name)
+    fmt = _s(meta.get("format")).strip().lower()
+    lossless = fmt in _LOSSLESS_FORMATS
+    return (
+        bool(meta.get("album_id")),
+        canonical,
+        agrees,
+        canonical_path,
+        (lossless, _num(meta.get("bitrate")), _num(meta.get("samplerate")), _num(meta.get("bitdepth"))),
+        (fmt, _num(copy.get("size"))) if fmt else ("", 0.0),
+        -int(copy.get("item_id") or 0),
+    )
+
+
+_RANK_REASONS = (
+    "attached to the album slot (the other copy is a loose/singleton item)",
+    "more complete canonical metadata (Recording/Release Group/release IDs, disc/track)",
+    "embedded Recording ID agrees with AcoustID",
+    "canonical Beets library path (the other has a duplicate/decorated filename)",
+    "better audio quality (lossless/bitrate/sample rate/bit depth)",
+    "larger file of the same format",
+    "lower item id (deterministic tie-breaker; the copies are otherwise equal)",
+)
+
+
+def keeper_reason(keep: Dict[str, Any], drop: Dict[str, Any]) -> str:
+    rk, rd = keeper_rank(keep), keeper_rank(drop)
+    for idx, (a, b) in enumerate(zip(rk, rd)):
+        if a == b:
+            continue
+        if idx == 5 and a[0] != b[0]:
+            continue  # sizes of different formats are not compared
+        return _RANK_REASONS[idx]
+    return _RANK_REASONS[-1]
+
+
+def _copies_from_dup(dup: Dict[str, Any], root: Path, path_under: Callable[[Path, Path], bool]):
+    raw_source = _s(dup.get("source_path")).strip()
+    raw_lib = _s(dup.get("lib_path")).strip()
+    if not raw_source or not raw_lib:
+        return None
+    try:
+        source = Path(raw_source).resolve(strict=False)
+        library_copy = Path(raw_lib).resolve(strict=False)
+    except Exception:
+        return None
+    if source == library_copy:
+        return None
+    for path in (source, library_copy):
+        if not path_under(path, root) or not path.exists() or not path.is_file():
+            return None
+    try:
+        source_item_id = int(dup.get("source_item_id") or 0)
+        lib_item_id = int(dup.get("lib_id") or 0)
+    except Exception:
+        return None
+    if not source_item_id or not lib_item_id:
+        return None
+
+    def _side(prefix: str, path: Path, item_id: int, album_id: Any, fp: Any) -> Dict[str, Any]:
+        meta = dict(dup.get(f"{prefix}_meta") or {})
+        meta.setdefault("album_id", album_id)
+        meta.setdefault("recording_id", _s(dup.get(f"{prefix}_recording_id")))
+        meta.setdefault("disc", dup.get(f"{prefix}_disc"))
+        meta.setdefault("track", dup.get(f"{prefix}_track"))
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        return {"path": str(path), "item_id": item_id, "meta": meta, "fingerprint_ids": list(fp or []), "size": size}
+
+    return (
+        _side("source", source, source_item_id, dup.get("source_album_id"), dup.get("source_fingerprint_ids")),
+        _side("lib", library_copy, lib_item_id, dup.get("lib_album_id"), dup.get("lib_fingerprint_ids")),
+    )
+
+
+def plan_unattended_cleanup(
+    scan_result: Dict[str, Any],
+    music_root: Path,
+    path_under: Callable[[Path, Path], bool],
+    *,
+    same_file: Callable[[Path, Path], bool] = same_file_hash,
+) -> List[Dict[str, Any]]:
+    """Deletions a scheduled maintenance run may make without review.
+
+    A pair is eligible only with: high confidence; both copies present,
+    tracked and under the music root; audio identity proven (both copies
+    fingerprint to a shared recording) or a byte-identical file -- a shared
+    embedded Recording ID alone is not proof; and the SAME release slot.
+
+    Eligible pairs form groups; each group keeps its best copy by
+    keeper_rank(), and a copy is deleted only with direct proof against that
+    keeper. Album-slot gate: a copy attached to an album row is never deleted
+    unless the keeper is a tracked item in that same album row, so no album
+    slot is ever left without a retained tracked item.
+    """
+    root = music_root.resolve(strict=False)
+    copies: Dict[str, Dict[str, Any]] = {}
+    pairs: Dict[frozenset, Dict[str, Any]] = {}
+    for dup in scan_result.get("duplicates") or []:
+        if not isinstance(dup, dict) or _s(dup.get("confidence")).lower() != "high":
+            continue
+        if _s(dup.get("release_relation")) not in SAME_SLOT_RELATIONS:
+            continue
+        sides = _copies_from_dup(dup, root, path_under)
+        if sides is None:
+            continue
+        a, b = sides
+        audio_proven = bool(dup.get("fingerprint_verified"))
+        exact_hash = _s(dup.get("match_type")) == "identical file size" and same_file(Path(a["path"]), Path(b["path"]))
+        if not (audio_proven or exact_hash):
+            continue
+        for side in (a, b):
+            known = copies.get(side["path"])
+            if known is None or (not known["meta"].get("format") and side["meta"].get("format")):
+                copies[side["path"]] = side
+        key = frozenset((a["path"], b["path"]))
+        pairs.setdefault(key, {
+            "release_relation": _s(dup.get("release_relation")),
+            "match_type": _s(dup.get("match_type")),
+            "fingerprint_verified": audio_proven,
+            "byte_identical": exact_hash,
+            "shared_recording_id": _s(dup.get("fingerprint_mbid")),
+        })
+
+    parent: Dict[str, str] = {p: p for p in copies}
+
+    def _find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for key in pairs:
+        a, b = tuple(key)
+        parent[_find(a)] = _find(b)
+    groups: Dict[str, List[str]] = {}
+    for path in copies:
+        groups.setdefault(_find(path), []).append(path)
+
+    decisions: List[Dict[str, Any]] = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        keeper = max(members, key=lambda p: keeper_rank(copies[p]))
+        keep = copies[keeper]
+        for path in sorted(members):
+            if path == keeper:
+                continue
+            pair = pairs.get(frozenset((path, keeper)))
+            if pair is None:
+                continue  # no direct proof against the retained copy: review
+            drop = copies[path]
+            drop_album = drop["meta"].get("album_id")
+            if drop_album and drop_album != keep["meta"].get("album_id"):
+                continue  # album-slot gate: would leave that album slot without a tracked item
+            decisions.append({"delete": drop, "keep": keep, "keep_reason": keeper_reason(keep, drop), **pair})
+    decisions.sort(key=lambda d: d["delete"]["path"])
+    return decisions
+
+
 def select_unattended_cleanup_paths(
     scan_result: Dict[str, Any],
     music_root: Path,
@@ -101,61 +329,5 @@ def select_unattended_cleanup_paths(
     *,
     same_file: Callable[[Path, Path], bool] = same_file_hash,
 ) -> List[str]:
-    """Source paths a scheduled maintenance run may delete without review.
-
-    Requires: high confidence; source under the music root; both files
-    present; audio identity of the pair proven (both fingerprint to a shared
-    recording) or a byte-identical file; both copies tracked items occupying
-    the SAME release slot (same album row or same release, same disc/track);
-    and only the higher item id of a pair -- so a mutual A<->B pair can never
-    select both copies. Everything else stays for review.
-    """
-    selected: List[str] = []
-    seen: set = set()
-    root = music_root.resolve(strict=False)
-    for dup in scan_result.get("duplicates") or []:
-        if not isinstance(dup, dict):
-            continue
-        if _s(dup.get("confidence")).lower() != "high":
-            continue
-        match_type = _s(dup.get("match_type"))
-        raw_source = _s(dup.get("source_path")).strip()
-        raw_lib = _s(dup.get("lib_path")).strip()
-        if not raw_source or not raw_lib:
-            continue
-        try:
-            source = Path(raw_source).resolve(strict=False)
-            library_copy = Path(raw_lib).resolve(strict=False)
-        except Exception:
-            continue
-        if source == library_copy:
-            continue
-        if not path_under(source, root):
-            continue
-        if not source.exists() or not source.is_file():
-            continue
-        if not library_copy.exists() or not library_copy.is_file():
-            continue
-        # Audio identity of the PAIR must be proven: both copies fingerprint to
-        # a shared recording, or the files are byte-identical. A shared
-        # embedded Recording ID alone is not proof -- it can be wrong, and the
-        # fingerprint may even contradict it.
-        audio_proven = bool(dup.get("fingerprint_verified"))
-        exact_hash = match_type == "identical file size" and same_file(source, library_copy)
-        if not (audio_proven or exact_hash):
-            continue
-        if _s(dup.get("release_relation")) not in SAME_SLOT_RELATIONS:
-            continue
-        try:
-            source_item_id = int(dup.get("source_item_id") or 0)
-            lib_item_id = int(dup.get("lib_id") or 0)
-        except Exception:
-            continue
-        if not source_item_id or not lib_item_id or source_item_id <= lib_item_id:
-            continue
-        key = str(source).casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        selected.append(str(source))
-    return selected
+    """Paths plan_unattended_cleanup() would delete (see its rules)."""
+    return [d["delete"]["path"] for d in plan_unattended_cleanup(scan_result, music_root, path_under, same_file=same_file)]

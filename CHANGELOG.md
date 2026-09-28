@@ -6,6 +6,19 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+- Unattended duplicate cleanup now picks which copy to keep by an explicit policy:
+  1. a copy attached to the album row over a loose/singleton copy;
+  2. valid canonical metadata (Recording ID, Release Group ID, release ID, disc/track);
+  3. an embedded Recording ID that agrees with AcoustID;
+  4. the canonical Beets path over a duplicate or decorated filename;
+  5. audio quality (lossless over lossy, then bitrate, sample rate and bit depth; file size only between copies of the same format);
+  6. the lowest item id, only as the final tie-breaker.
+- Each proposal row states why its copy is kept.
+
+### Added
+- Album-slot gate: unattended cleanup never deletes a copy that is attached to an album row unless the retained copy is a tracked item in that same row. No album slot is ever left without a retained tracked item.
+
 ## v0.1.34 - 2026-09-28
 
 ### Fixed
