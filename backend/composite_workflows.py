@@ -643,35 +643,6 @@ def plan_library_cleanup(
     return {"ok": True, "operation_id": tx["id"], "status": "Preview", "changes": changes}
 
 
-def apply_library_cleanup(
-    operation_id: str,
-    adapter: Optional[BeetsAdapter] = None,
-    store: Optional[TransactionStore] = None,
-) -> Dict[str, Any]:
-    st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-    paths = meta.get("paths", [])
-    for p in paths:
-        try:
-            if os.path.exists(p):
-                os.unlink(p)
-        except Exception as exc:
-            log.warning("Failed to delete %s during library cleanup: %s", p, exc)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
-
-
-def rollback_library_cleanup(
-    operation_id: str,
-    adapter: Optional[BeetsAdapter] = None,
-    store: Optional[TransactionStore] = None,
-) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
-
-
 # -----------------------------------------------------------------------------
 # 5. Track Replacement & Bulk Import Replacement
 # -----------------------------------------------------------------------------
@@ -890,30 +861,6 @@ def rollback_track_replacement(
     out = {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     out.update({k: result.get(k) for k in ("restored_target_path", "recreated_source_item_id", "recreated_source_path")})
     return out
-
-
-def plan_bulk_import_replacement(
-    payload: Dict[str, Any],
-    adapter: Optional[BeetsAdapter] = None,
-    store: Optional[TransactionStore] = None,
-) -> Dict[str, Any]:
-    return plan_track_replacement(payload, adapter=adapter, store=store)
-
-
-def apply_bulk_import_replacement(
-    operation_id: str,
-    adapter: Optional[BeetsAdapter] = None,
-    store: Optional[TransactionStore] = None,
-) -> Dict[str, Any]:
-    return apply_track_replacement(operation_id, adapter=adapter, store=store)
-
-
-def rollback_bulk_import_replacement(
-    operation_id: str,
-    adapter: Optional[BeetsAdapter] = None,
-    store: Optional[TransactionStore] = None,
-) -> Dict[str, Any]:
-    return rollback_track_replacement(operation_id, adapter=adapter, store=store)
 
 
 # -----------------------------------------------------------------------------

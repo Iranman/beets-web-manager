@@ -14,6 +14,7 @@ from backend.audio_preferences import load_replacement_statuses as _load_music_f
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _clean_for_mb, _resolve_release_group_to_release, _fetch_mb_release_candidate
 from backend.beets_adapter import beets_adapter
 import backend.composite_workflows as composite_workflows
+import backend.item_replacement as _item_replacement
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_lookup_cached, _playlist_artist_name_score, _playlist_title_score, _read_file_media_tags
 from backend.job_service import _wait_for_child_job
@@ -455,39 +456,35 @@ def _music_format_remove_original_after_replacement(original_path: str, final_pa
                                                     original_item_id: int = 0,
                                                     resolved: Optional[Dict[str, Any]] = None,
                                                     replacement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Execute engine-owned track replacement transaction without direct local filesystem or DB mutations (SEC-002 Wave 17)."""
-    result = {"removed": False, "quarantined_to": "", "reason": ""}
+    """Plan the canonical item-file replacement for a verified quality upgrade.
+
+    The imported replacement must be a tracked library item; the one
+    replacement authority (backend.item_replacement) re-proves it by
+    AcoustID and previews the transaction. Nothing is replaced until an
+    operator approves it: the result reports ``awaiting_approval`` with the
+    transaction id, and both files stay in place meanwhile."""
+    result = {"removed": False, "awaiting_approval": False, "operation_id": "", "quarantined_to": "", "reason": ""}
     if not original_path or not final_path:
         result["reason"] = "original or replacement path missing"
         return result
-
-    matching_contract = _music_format_replacement_matching_contract(resolved or {}, replacement or {})
-
     try:
-        plan_res = composite_workflows.plan_track_replacement({
-            "original_item_id": int(original_item_id or 0),
-            "original_path": original_path,
-            "replacement_path": final_path,
-            "reason": "Music format quality replacement",
-            "matching_contract": matching_contract,
-        })
+        source_id = _item_replacement.tracked_item_id_for_path(final_path)
+        if not source_id:
+            result["reason"] = "the imported replacement is not a tracked library item"
+            log.append(f"Track replacement not planned: {result['reason']}")
+            return result
+        expected = _s((resolved or {}).get("mb_trackid") or "")
+        plan_res = _item_replacement.plan_verified_replacement(
+            int(original_item_id or 0), source_id,
+            reason="Music format quality replacement", expected_recording_id=expected)
         if not plan_res.get("ok"):
-            error_msg = plan_res.get("error") or "track replacement plan failed"
-            log.append(f"Track replacement plan failed: {error_msg}")
-            result["reason"] = error_msg
+            result["reason"] = plan_res.get("error") or plan_res.get("code") or "track replacement plan failed"
+            log.append(f"Track replacement plan refused: {result['reason']}")
             return result
-
-        op_id = plan_res.get("operation_id")
-        apply_res = composite_workflows.apply_track_replacement(op_id)
-        if not apply_res.get("ok"):
-            error_msg = apply_res.get("error") or "track replacement apply failed"
-            log.append(f"Track replacement apply failed: {error_msg}")
-            result["reason"] = error_msg
-            return result
-
-        result["removed"] = True
-        result["quarantined_to"] = apply_res.get("quarantined_to") or ""
-        log.append("Original removed after verified replacement via engine transaction")
+        result["awaiting_approval"] = True
+        result["operation_id"] = _s(plan_res.get("operation_id"))
+        log.append(f"Replacement planned and awaiting approval: transaction {result['operation_id']} "
+                   f"(item {original_item_id} <- item {source_id}); both files kept until approved.")
         return result
     except Exception as ex:
         result["reason"] = str(ex)
@@ -611,10 +608,12 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
                 resolved=resolved,
                 replacement=replacement,
             )
-            if not removal.get("removed"):
-                raise RuntimeError(removal.get("reason") or "original was not removed after replacement")
+            if not removal.get("awaiting_approval"):
+                raise RuntimeError(removal.get("reason") or "replacement could not be planned")
             complete += 1
-            _mark_music_format_needs_replacement([{**resolved, "status": "Replacement complete", "replacement_status": "Replacement complete", "replacement_path": replacement.get("path"), "reason": "Replacement imported and verified", "queued_retry": False, "retryable": False, "attempt_count": attempt_count}])
+            # Terminal until an operator approves the replacement transaction:
+            # not retryable, so the pipeline never re-downloads it meanwhile.
+            _mark_music_format_needs_replacement([{**resolved, "status": "Replacement awaiting approval", "replacement_status": "Replacement awaiting approval", "replacement_path": replacement.get("path"), "operation_id": removal.get("operation_id"), "reason": "Replacement imported and verified; approve the replacement transaction to swap the file", "queued_retry": False, "retryable": False, "attempt_count": attempt_count}])
         except Exception as ex:
             failed += 1
             reason = str(ex)

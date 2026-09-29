@@ -193,6 +193,24 @@ class _FakeEngine:
         return {"ok": True}
 
 
+class _FakeReplacer:
+    """Stands in for backend.item_replacement (the replacement authority)."""
+
+    def __init__(self, plan_ok=True):
+        self.plan_ok = plan_ok
+        self.calls = []
+
+    def plan_verified_replacement(self, target, source, *, reason, expected_recording_id=""):
+        self.calls.append(("plan", target, source, expected_recording_id))
+        if not self.plan_ok:
+            return {"ok": False, "code": "fingerprint_disagreement", "error": "not the same recording"}
+        return {"ok": True, "operation_id": "tx-repl"}
+
+    def approve_and_apply(self, operation_id, *, approved_by):
+        self.calls.append(("approve_and_apply", operation_id, approved_by))
+        return {"ok": True, "status": "Completed"}
+
+
 class ResolveReviewTests(unittest.TestCase):
     def _store(self, tmp, album_proven=True):
         from backend.import_reconciliation import record_reviews
@@ -223,17 +241,31 @@ class ResolveReviewTests(unittest.TestCase):
             self.assertEqual(plan["dup_details"][0]["survivor_item_ids"], [1])
             self.assertEqual(plan["move_item_ids"], [])
 
-    def test_keep_imported_replaces_existing_then_moves_import(self):
+    def test_keep_imported_uses_the_canonical_replacement_with_reviewer_approval(self):
+        """keep_imported puts the imported file into the existing slot through
+        the one replacement authority (AcoustID re-proof, canonical
+        transaction); the reviewer's decision is the approval."""
         from backend.import_reconciliation import resolve_review
         with tempfile.TemporaryDirectory() as tmp:
             path, rid = self._store(tmp)
-            engine = _FakeEngine()
-            out = resolve_review(rid, "keep_imported", engine, path=path)
+            engine, replacer = _FakeEngine(), _FakeReplacer()
+            out = resolve_review(rid, "keep_imported", engine, path=path, replacer=replacer)
             self.assertTrue(out["ok"])
-            self.assertTrue(out["moved_into_existing_album"])
-            names = [c[0] for c in engine.calls]
-            self.assertEqual(names, ["plan_replace", "apply_replace", "plan_reconcile", "apply_reconcile"])
-            self.assertEqual(engine.calls[0][1]["mappings"][0]["identity_source"], "user_reviewed_reconciliation")
+            self.assertEqual(out["operation_ids"], ["tx-repl"])
+            self.assertEqual(engine.calls, [])  # no legacy bulk or move transactions
+            self.assertEqual(replacer.calls[0], ("plan", 1, 2, TARGET_TRACK["mb_trackid"]))
+            self.assertEqual(replacer.calls[1][0:2], ("approve_and_apply", "tx-repl"))
+
+    def test_keep_imported_without_audio_proof_keeps_both_and_stays_open(self):
+        from backend.import_reconciliation import resolve_review
+        with tempfile.TemporaryDirectory() as tmp:
+            path, rid = self._store(tmp)
+            replacer = _FakeReplacer(plan_ok=False)
+            out = resolve_review(rid, "keep_imported", _FakeEngine(), path=path, replacer=replacer)
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["code"], "fingerprint_disagreement")
+            self.assertEqual([c[0] for c in replacer.calls], ["plan"])
+            self.assertEqual(json.loads(path.read_text())[0]["status"], "open")
 
     def test_resolution_is_one_shot(self):
         from backend.import_reconciliation import resolve_review

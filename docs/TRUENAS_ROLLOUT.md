@@ -64,9 +64,11 @@ the first half passes:
 
 1. **Pre-flight (read-only):** resolve Compose file and container mounts;
    verify Compose resolves the `beets-web-manager` service to exactly
-   `ghcr.io/iranman/beets-web-manager:${VERSION}`; verify the authoritative
-   database (`PRAGMA quick_check` = `ok`, readable item/album counts, not
-   suspiciously low, distinct path/inode/checksum from any stale DB);
+   `ghcr.io/iranman/beets-web-manager:${VERSION}`; take the **online
+   semantic snapshot** of the running library (see "Database integrity"
+   below: counts not suspiciously low, identity digest, plugin healthy) and
+   check the authoritative DB file is distinct in path/inode/checksum from
+   any stale DB;
    inspect the stale DB if present (same checks, plus refusing anything that
    looks like real library data); inspect the persistent auth token; plan
    (not create) the backup directory.
@@ -75,8 +77,8 @@ the first half passes:
    `chmod 700`, containing the Compose file, `.env` (if present), resolved
    `docker compose config`, the current container's `docker inspect` output,
    the previous image ID/ref and its labels, token metadata (contents never
-   printed), and the authoritative DB's metadata (path/size/checksum/counts --
-   **never a copy of the authoritative DB itself**).
+   printed), and the authoritative DB's metadata (path/size/live main-file
+   hash/counts -- **never a copy of the authoritative DB itself**).
 3. **Stop** only `beets-web-manager`, confirm it stopped.
 4. **Archive the stale DB** (only after confirming, via `lsof`/`fuser`, that
    the exact files `musiclibrary.blb`, `musiclibrary.blb-wal`,
@@ -97,11 +99,45 @@ the first half passes:
    every other Compose service's container ID is snapshotted before and
    after and asserted unchanged -- the Beets engine, Plex, Lidarr, etc. are
    never touched.
-8. **Post-deploy verification:** re-run the authoritative DB's
-   quick_check/counts/checksum and assert byte-for-byte unchanged; restart
+8. **Post-deploy verification:** take the online semantic snapshot again and
+   assert counts and the identity digest are unchanged (the live main-file
+   hash is logged for reference only -- see below); restart
    `beets-web-manager` a second time and confirm the token checksum survives
    the restart; confirm no `musiclibrary.blb*` file reappeared under
    `/web-manager-data`; run the endpoint checks below.
+
+## Database integrity: online semantics vs. offline bytes
+
+Beets runs its SQLite library in WAL mode: committed changes can sit in
+`musiclibrary.blb-wal` until a checkpoint copies them into
+`musiclibrary.blb`. A hash of the main file taken while Beets runs therefore
+proves nothing either way -- it can change with no logical change (a
+checkpoint) and stay identical while the WAL holds new data. The rollout
+never calls a live main-file hash "unchanged database"; it logs it as
+informational only.
+
+**Online semantic integrity** (every dry run and deploy): inside the Beets
+container, through its own web API and never by opening SQLite, the script
+reads `/stats` (item/album counts), `/item/` and `/album/` (an identity
+digest over every item's id, album row, Recording/Release/Release Group
+IDs, disc, track and path, and every album's IDs), and `/webmanager/status`
+(plugin health; the plugin key is read inside the container and never
+printed). Deploy fails if counts or the digest change.
+
+**Offline byte identity** (explicit, separate mode; briefly stops Beets):
+
+```bash
+STACK_DIR=/path/to/docker-stack /bin/bash deploy_truenas_web_manager.sh --offline-db-identity
+# optionally BASELINE_DB_SHA256=<hex> to compare with an earlier run
+```
+
+It takes a semantic snapshot, stops only the `beets` service gracefully so
+SQLite closes and settles its WAL, records whether `-wal`/`-shm` exist and
+their sizes, and only when the WAL is absent or empty runs `PRAGMA
+quick_check` and hashes `musiclibrary.blb` -- that hash is the database's
+byte identity. If the WAL still holds data it refuses to claim identity.
+Beets is always restarted (also on any failure) and the plugin health and
+identity digest are verified again before it reports.
 
 ## Endpoint verification
 

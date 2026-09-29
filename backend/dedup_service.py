@@ -36,6 +36,7 @@ from backend.serializers import _json_from_flask_response
 from backend.maintenance_service import _library_health_payload, _maintenance_extract_child_job_id, _maintenance_same_file_hash, _maintenance_save_last_report
 
 import backend.dedup_authorization as _dedup_authorization
+import backend.duplicate_cleanup as _duplicate_cleanup
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
 
 # ── ARCH-001 extracted code ──
@@ -793,7 +794,42 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
 # Service behind POST /api/dedup/cleanup (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
+def _dedup_pairs_for_paths(paths: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Reviewed-cleanup pairs whose delete side is one of ``paths``.
+
+    A path qualifies only as the source copy of a duplicate pair found by a
+    scan (newest scans first) or the last maintenance proposal, with both
+    copies tracked. Everything else is returned as unmatched."""
+    wanted = {_dedup_norm_path(p): _s(p) for p in paths if _s(p).strip()}
+    pairs: Dict[str, Dict[str, Any]] = {}
+    states = sorted(_dedup_scans.values(), key=lambda st: float(st.get("created_at") or 0), reverse=True)
+    for state in states:
+        for dup in state.get("duplicates") or []:
+            key = _dedup_norm_path(dup.get("source_path"))
+            if key in wanted and key not in pairs and dup.get("source_item_id") and dup.get("lib_id"):
+                pairs[key] = {"delete_item_id": int(dup["source_item_id"]), "keep_item_id": int(dup["lib_id"])}
+    from backend.maintenance_service import _maintenance_load_last_report
+    report = _maintenance_load_last_report()
+    proposal = ((report.get("duplicates") or {}) if isinstance(report.get("duplicates"), dict) else {}).get("proposal")
+    for pair in _duplicate_cleanup.pairs_from_proposal(proposal or []):
+        key = _dedup_norm_path((pair["expected"]["delete"] or {}).get("path"))
+        if key in wanted:
+            pairs[key] = pair
+    unmatched = [orig for key, orig in wanted.items() if key not in pairs]
+    return list(pairs.values()), unmatched
+
+
 def run_dedup_cleanup(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
+    """Manual duplicate cleanup for explicit paths.
+
+    dry_run (the default) previews only. A live run goes through the
+    reviewed-cleanup authority (backend.duplicate_cleanup): every path must
+    be the source copy of a proven duplicate pair, both copies tracked; the
+    pair is re-verified against live Beets and the engine quarantines the
+    file (never deletes it). The caller's explicit live request, made after
+    its preview, is the Approve step. Anything unproven stays in place.
+    The Web Manager never touches /music itself (it is mounted read-only).
+    """
     payload = payload_in
     paths = payload.get("paths", [])
     dry_run_raw = payload.get("dry_run", True)
@@ -802,121 +838,52 @@ def run_dedup_cleanup(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if not isinstance(paths, list):
         return {"ok": False, "error": "paths must be a list"}, 400
 
-    plan_payload = {
-        "action": "dedup_cleanup",
-        "paths": [_s(p) for p in paths],
-        "requested_root": root,
-    }
-    try:
-        plan_res = composite_workflows.plan_library_cleanup(plan_payload)
-    except BeetsUnavailableError as ex:
-        return {
-            "ok": False,
-            "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
-            "code": getattr(ex, "error_code", "") or "beets_unavailable",
-            "dry_run": dry_run,
-        }, 503
-    except BeetsError as ex:
-        return {
-            "ok": False,
-            "error": "Beets engine rejected duplicate cleanup planning.",
-            "code": getattr(ex, "error_code", "") or "beets_error",
-            "dry_run": dry_run,
-        }, getattr(ex, "status_code", 400) or 400
-
-    results = []
-    for rec in plan_res.get("results") or []:
-        out = dict(rec)
-        out.setdefault("folders_removed", [])
-        out["dry_run"] = dry_run
-        out["deleted"] = bool(out.get("ok")) if dry_run else False
-        results.append(out)
-
-    planned = int(plan_res.get("planned_count") or 0)
-    skipped = int(plan_res.get("skipped_count") or sum(1 for r in results if not r.get("ok")))
-    if dry_run or planned <= 0:
-        return {
-            "ok": True,
-            "results": results,
-            "deleted": planned if dry_run else 0,
-            "skipped": skipped,
-            "folders_removed": 0,
-            "dry_run": dry_run,
-            "operation_id": plan_res.get("operation_id"),
-            "plan": plan_res,
-        }, 200
-
-    op_id = _s(plan_res.get("operation_id")).strip()
-    if not op_id:
-        return {"ok": False, "error": "Engine did not return a cleanup operation_id", "results": results}, 502
+    if dry_run or not paths:
+        try:
+            plan_res = composite_workflows.plan_library_cleanup(
+                {"action": "dedup_cleanup", "paths": [_s(p) for p in paths], "requested_root": root})
+        except BeetsUnavailableError as ex:
+            return {"ok": False, "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
+                    "code": getattr(ex, "error_code", "") or "beets_unavailable", "dry_run": dry_run}, 503
+        except BeetsError as ex:
+            return {"ok": False, "error": "Beets engine rejected duplicate cleanup planning.",
+                    "code": getattr(ex, "error_code", "") or "beets_error", "dry_run": dry_run},                 getattr(ex, "status_code", 400) or 400
+        results = [{**dict(rec), "folders_removed": [], "dry_run": dry_run, "deleted": bool(rec.get("ok")) and dry_run}
+                   for rec in plan_res.get("results") or []]
+        planned = int(plan_res.get("planned_count") or len(paths) if paths else 0)
+        return {"ok": True, "results": results, "deleted": planned if dry_run else 0,
+                "skipped": int(plan_res.get("skipped_count") or 0), "folders_removed": 0, "dry_run": dry_run,
+                "operation_id": plan_res.get("operation_id"), "plan": plan_res}, 200
 
     try:
-        apply_res = composite_workflows.apply_library_cleanup(op_id)
+        pairs, unmatched = _dedup_pairs_for_paths([_s(p) for p in paths])
+        plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason="Manual duplicate cleanup") if pairs else             {"ok": False, "skipped": []}
+        applied: Dict[str, Any] = {}
+        if plan.get("ok"):
+            composite_workflows.get_default_store().update(
+                plan["operation_id"], status="Approved",
+                metadata={"approved_by": "manual duplicate cleanup request (confirmed after preview)"})
+            applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
     except BeetsUnavailableError as ex:
-        return {
-            "ok": False,
-            "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
-            "code": getattr(ex, "error_code", "") or "beets_unavailable",
-            "operation_id": op_id,
-            "results": results,
-            "dry_run": dry_run,
-        }, 503
+        return {"ok": False, "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
+                "code": getattr(ex, "error_code", "") or "beets_unavailable", "dry_run": False}, 503
     except BeetsError as ex:
-        return {
-            "ok": False,
-            "error": "Beets engine rejected duplicate cleanup apply.",
-            "code": getattr(ex, "error_code", "") or "beets_error",
-            "operation_id": op_id,
-            "results": results,
-            "dry_run": dry_run,
-        }, getattr(ex, "status_code", 409) or 409
+        return {"ok": False, "error": "Beets engine refused duplicate cleanup.",
+                "code": getattr(ex, "error_code", "") or "beets_error", "dry_run": False},             getattr(ex, "status_code", 409) or 409
 
-    def _cleanup_empty_parents(parent_folders: List[str]) -> List[str]:
-        removed: List[str] = []
-        seen: set = set()
-        for folder_str in sorted({_s(p).strip() for p in parent_folders if _s(p).strip()}, key=len, reverse=True):
-            current = Path(folder_str)
-            for _ in range(12):
-                key = _s(current)
-                if not key or key in seen:
-                    break
-                seen.add(key)
-                try:
-                    folder_plan = composite_workflows.plan_folder_cleanup({"action": "remove_empty", "source": key})
-                    if not folder_plan.get("ok") or int(folder_plan.get("removals_count") or 0) <= 0:
-                        break
-                    folder_op = _s(folder_plan.get("operation_id")).strip()
-                    if not folder_op:
-                        break
-                    folder_apply = composite_workflows.apply_folder_cleanup(folder_op)
-                    if not folder_apply.get("ok") or not folder_apply.get("mutated"):
-                        break
-                    removed_dirs = [_s(p) for p in folder_apply.get("removed_dirs") or [key] if _s(p)]
-                    removed.extend(removed_dirs)
-                    current = current.parent
-                except (BeetsUnavailableError, BeetsError) as ex:
-                    _app_logger.info("Engine empty-parent cleanup stopped at %s: %s", key, ex)
-                    break
-        return removed
-
-    removed_folders = _cleanup_empty_parents(apply_res.get("candidate_parent_folders") or plan_res.get("candidate_parent_folders") or [])
+    removed = {_dedup_norm_path(r.get("original_path")) for r in applied.get("removed") or []}
+    results = [{"path": _s(p), "ok": _dedup_norm_path(p) in removed, "deleted": _dedup_norm_path(p) in removed,
+                "quarantined": _dedup_norm_path(p) in removed, "dry_run": False, "folders_removed": []}
+               for p in paths]
+    reasons = {int(s.get("delete_item_id") or 0): s.get("reasons") for s in plan.get("skipped") or []}
     for rec in results:
-        if rec.get("ok"):
-            rec["deleted"] = True
-            rec["quarantined"] = True
-            rec["folders_removed"] = list(removed_folders)
-
-    deleted = int(apply_res.get("quarantined_count") or apply_res.get("deleted_items") or planned)
-    return {
-        "ok": True,
-        "results": results,
-        "deleted": deleted,
-        "skipped": skipped,
-        "folders_removed": len(removed_folders),
-        "dry_run": dry_run,
-        "operation_id": op_id,
-        "apply": apply_res,
-    }, 200
+        if not rec["ok"]:
+            rec["error"] = ("not a tracked copy with a proven duplicate twin; left in place"
+                            if rec["path"] in unmatched else "failed re-verification; left in place for review")
+    return {"ok": bool(applied.get("ok", not pairs)), "results": results, "deleted": len(removed),
+            "skipped": len(paths) - len(removed), "folders_removed": 0, "dry_run": False,
+            "operation_id": plan.get("operation_id"), "skipped_reasons": reasons,
+            "verification_problems": applied.get("verification_problems") or []}, 200
 
 
 # ── Clean: library database health ────────────────────────────────────────────
@@ -1422,6 +1389,30 @@ def _maintenance_duplicate_proposal_line(row: Dict[str, Any]) -> str:
     )
 
 
+def _unattended_reviewed_cleanup(proposal: List[Dict[str, Any]], log: List[str]) -> Dict[str, Any]:
+    """Unattended deletion uses the same reviewed-cleanup authority as a
+    manual review: every pair re-verified live, the engine quarantines the
+    files (never deletes), and the result is verified. The operator's
+    explicit unattended authorization stands in for the Approve step."""
+    pairs = _duplicate_cleanup.pairs_from_proposal(proposal)
+    plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason="Unattended duplicate cleanup (operator-authorized)")
+    for skipped in plan.get("skipped") or []:
+        log.append(f"[duplicates] Kept for review: item {skipped.get('delete_item_id')} "
+                   f"({', '.join(skipped.get('reasons') or [])})")
+    if not plan.get("ok"):
+        return {"ok": True, "deleted": 0, "skipped": len(pairs), "folders_removed": 0, "results": []}
+    op_id = plan["operation_id"]
+    composite_workflows.get_default_store().update(
+        op_id, status="Approved", metadata={"approved_by": "unattended duplicate deletion authorization"})
+    applied = _duplicate_cleanup.apply_reviewed_cleanup(op_id)
+    removed = applied.get("removed") or []
+    log.append(f"[duplicates] Reviewed cleanup {op_id}: {len(removed)} file(s) quarantined "
+               f"({applied.get('status')}).")
+    return {"ok": bool(applied.get("ok")), "deleted": len(removed), "skipped": len(plan.get("skipped") or []),
+            "folders_removed": 0, "operation_id": op_id,
+            "results": [{"path": r.get("original_path"), "quarantined": True, "db_rows_removed": 1} for r in removed]}
+
+
 def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any] = None,
                                      progress: Optional[Any] = None) -> Dict[str, Any]:
     if _running_job_of_type({"dedup-scan", "dedup-ai-review", "dedup-cleanup"}):
@@ -1487,9 +1478,7 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
             f"[duplicates] Resolving {len(cleanup_paths)} verified duplicate recording(s); "
             f"{skipped_candidates} candidate(s) left for review."
         )
-        cleanup_response = run_dedup_cleanup({"paths": cleanup_paths, "dry_run": False, "root": str(MUSIC_ROOT)},
-        )
-        cleanup_result = _json_from_flask_response(cleanup_response)
+        cleanup_result = _unattended_reviewed_cleanup(proposal, log)
     else:
         log.append(
             f"[duplicates] Found {len(duplicates)} duplicate candidate(s); "

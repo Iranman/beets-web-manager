@@ -12,16 +12,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from unittest.mock import patch
 
 import app as flask_app
+import backend.acoustid_service as acoustid_service
 import backend.composite_workflows as composite_workflows
+import backend.item_replacement as item_replacement
 from backend.transaction_engine import TransactionStore
-
-try:
-    from _app_family import patch_app_family  # noqa: E402
-except ImportError:  # pragma: no cover
-    from tests._app_family import patch_app_family  # noqa: E402
 
 REC = "2513c401-c500-42fe-9113-ce9d9c3295d5"
 
@@ -62,9 +58,10 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
             p = mock.patch.object(target, attr, side_effect=value)
             p.start()
             self.addCleanup(p.stop)
-        p = mock.patch.object(composite_workflows, "beets_adapter", self.adapter)
-        p.start()
-        self.addCleanup(p.stop)
+        for module in (composite_workflows, item_replacement):
+            p = mock.patch.object(module, "beets_adapter", self.adapter)
+            p.start()
+            self.addCleanup(p.stop)
         p = mock.patch.object(composite_workflows, "_default_store", self.store)
         p.start()
         self.addCleanup(p.stop)
@@ -80,8 +77,9 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
         self.client = flask_app.app.test_client()
 
     def _plan(self, fingerprint=(REC, [REC], [REC])):
-        with patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=fingerprint), \
-             patch_app_family(flask_app, "_acoustid_fingerprint_ids", return_value=[]):
+        # The replacement authority reads fingerprints from the AcoustID service.
+        with mock.patch.object(acoustid_service, "_acoustid_fingerprint_match", return_value=fingerprint), \
+             mock.patch.object(acoustid_service, "_acoustid_fingerprint_ids", return_value=[]):
             return self.client.post("/api/items/24258/replacement/plan", json={"candidate_item_id": 22575})
 
     def test_plan_with_candidate_item_creates_preview_without_mutation(self):
@@ -97,12 +95,11 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
 
     def test_plan_resolves_library_relative_paths_for_fingerprinting(self):
         """The stock Beets web API reports paths relative to the library."""
-        import backend.acoustid_service as acoustid_service
         root = self.mp3.parent
         self.items[24258]["path"] = self.mp3.name
         self.items[22575]["path"] = self.flac.name
         with mock.patch.object(acoustid_service, "MUSIC_ROOT", root), \
-             patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(REC, [REC], [REC])) as fp:
+             mock.patch.object(acoustid_service, "_acoustid_fingerprint_match", return_value=(REC, [REC], [REC])) as fp:
             res = self.client.post("/api/items/24258/replacement/plan", json={"candidate_item_id": 22575})
         self.assertEqual(res.status_code, 200, res.get_json())
         fp.assert_called_once_with(str(root / self.flac.name), str(root / self.mp3.name))
@@ -156,7 +153,7 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
         self.assertEqual([f for f in self.store.root.glob("*.json") if f.name != "settings.json"], [])
 
     def test_plan_rejects_unknown_candidate_item(self):
-        with patch_app_family(flask_app, "_acoustid_fingerprint_match", return_value=(REC, [REC], [REC])):
+        with mock.patch.object(acoustid_service, "_acoustid_fingerprint_match", return_value=(REC, [REC], [REC])):
             res = self.client.post("/api/items/24258/replacement/plan", json={"candidate_item_id": 999})
         self.assertEqual(res.status_code, 404)
 

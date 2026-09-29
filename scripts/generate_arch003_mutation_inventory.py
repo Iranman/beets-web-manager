@@ -490,6 +490,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             # Atomic write of web-manager-data/duplicate_cleanup_authorization.json
             # (the operator's unattended-deletion switch); never library media.
             return "APP_STATE", "", "dedup-authorization-state-file"
+        if file in ("backend/library_integrity_service.py", "backend/untracked_inventory.py"):
+            # Read-only integrity reports: the only writes are the report and
+            # evidence files under web-manager-data; /music is only read.
+            return "APP_STATE", "", "read-only-integrity-report-state"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
         if file == "backend/ai_batch_state_store.py":

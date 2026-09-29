@@ -186,7 +186,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.1.1")
+        self.assertEqual(status_data["plugin_version"], "1.2.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -292,7 +292,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
             os.makedirs(target_plugin_dir, exist_ok=True)
             src_plugin_dir = os.path.join(repo_root, "beetsplug", "webmanager")
-            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "replace_ops.py"]:
+            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "replace_ops.py", "remove_ops.py"]:
                 shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
             # 2. Provision 64-hex secret API key file (256-bit entropy)
@@ -425,7 +425,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.1.1")
+                    self.assertEqual(status_res["plugin_version"], "1.2.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -552,6 +552,43 @@ webmanager:
                 with _raw_urlopen(req_verify, timeout=5) as resp:
                     ver_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(ver_res["genre"], "Synthesized Electro")
+
+                # Step 9: quarantine-remove on a real Werkzeug request thread
+                # (library-relative DB paths must resolve to the real file).
+                container_path = resolved
+                sha = subprocess.run(
+                    ["docker", "exec", container_name, "sha256sum", container_path],
+                    capture_output=True, text=True, check=True,
+                ).stdout.split()[0]
+                req_q = urllib.request.Request(
+                    f"{base_url}/webmanager/quarantine-remove-items",
+                    data=json.dumps({"items": [{"item_id": imported_item["id"], "sha256": sha}]}).encode("utf-8"),
+                    headers=auth_header,
+                    method="POST",
+                )
+                with _raw_urlopen(req_q, timeout=30) as resp:
+                    q_res = json.loads(resp.read().decode("utf-8"))
+                    self.assertTrue(q_res["success"], q_res)
+                gone = subprocess.run(["docker", "exec", container_name, "test", "-e", container_path])
+                self.assertNotEqual(gone.returncode, 0, "file must have moved into the engine quarantine")
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    _raw_urlopen(urllib.request.Request(f"{base_url}/item/{imported_item['id']}"), timeout=5)
+                self.assertEqual(missing.exception.code, 404)
+
+                # Step 10: rollback from the engine's own manifest.
+                req_rb = urllib.request.Request(
+                    f"{base_url}/webmanager/quarantine-remove-items/rollback",
+                    data=json.dumps({"quarantine_id": q_res["quarantine_id"]}).encode("utf-8"),
+                    headers=auth_header,
+                    method="POST",
+                )
+                with _raw_urlopen(req_rb, timeout=30) as resp:
+                    rb_res = json.loads(resp.read().decode("utf-8"))
+                    [restored] = rb_res["restored"]
+                back = subprocess.run(["docker", "exec", container_name, "test", "-f", container_path])
+                self.assertEqual(back.returncode, 0, "file must be back at its original path")
+                with _raw_urlopen(urllib.request.Request(f"{base_url}/item/{restored['new_item_id']}"), timeout=5) as resp:
+                    self.assertEqual(json.loads(resp.read().decode("utf-8"))["title"], "Synthetic Anthem")
 
             finally:
                 if orig_allowlist is not None:

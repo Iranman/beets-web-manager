@@ -333,7 +333,10 @@ def plan_reconciliation(existing_items: Iterable[Dict[str, Any]], imported_items
     Nothing moves unless album identity is proven. Imported rows in empty
     slots move. Contested slots follow ``decide_slot``; any non-destructive
     outcome holds the imported row where it is (both files and both rows
-    preserved) and records a review decision.
+    preserved) and records a review decision. A KEEP_IMPORTED slot becomes
+    one ``mapping_pairs`` entry for the canonical item-file replacement
+    (backend.item_replacement) and its imported row stays put until that
+    replacement is approved and applied.
     """
     plan = ReconciliationPlan(album=album)
     imported_rows = sorted(imported_items, key=lambda r: (*slot_key(r), _int(r.get("id"))))
@@ -365,15 +368,19 @@ def plan_reconciliation(existing_items: Iterable[Dict[str, Any]], imported_items
                     plan.duplicate_rows.append(row)
                     plan.survivors_by_slot[key] = [_int(ex.get("id")) for ex in occupants]
                     continue
-                if outcomes == {ReconciliationOutcome.KEEP_IMPORTED}:
+                if outcomes == {ReconciliationOutcome.KEEP_IMPORTED} and len(occupants) == 1:
+                    # One canonical item-file replacement: the existing slot row
+                    # keeps its identity and takes the imported file; the
+                    # imported row is consumed by it once approved, so it does
+                    # not move. (Several occupants cannot share one file: review.)
                     plan.replace_rows.extend(occupants)
-                    for ex in occupants:
-                        plan.mapping_pairs.append({
-                            "old_item_id": _int(ex.get("id")),
-                            "new_item_id": _int(row.get("id")),
-                            "identity_source": "canonical_recording_identity",
-                        })
-                    by_slot[key] = []
+                    plan.mapping_pairs.append({
+                        "old_item_id": _int(occupants[0].get("id")),
+                        "new_item_id": _int(row.get("id")),
+                        "expected_recording_id": decisions[0].target_recording_id,
+                        "identity_source": "canonical_recording_identity",
+                    })
+                    continue
                 else:
                     plan.held_item_ids.append(_int(row.get("id")))
                     continue
@@ -455,17 +462,21 @@ def _write_reviews(records: List[Dict[str, Any]], target: Path) -> None:
 RESOLUTION_CHOICES = ("keep_existing", "keep_imported", "keep_both")
 
 
-def resolve_review(review_id: str, choice: str, engine: Any, *, path: Optional[Path] = None) -> Dict[str, Any]:
+def resolve_review(review_id: str, choice: str, engine: Any, *, path: Optional[Path] = None,
+                   replacer: Any = None) -> Dict[str, Any]:
     """Apply a reviewer's decision for one open reconciliation review.
 
     ``keep_both`` records the decision and changes nothing. ``keep_existing``
-    retires the imported copy and ``keep_imported`` retires the existing row
-    and moves the import onto the existing album -- both only through the
-    engine's controlled, rollback-capable transactions (existing album
-    reconcile / bulk import replacement), never by direct file or DB access.
+    retires the imported copy (existing album reconcile) and
+    ``keep_imported`` puts the imported file into the existing slot through
+    the canonical item-file replacement (backend.item_replacement) -- both
+    only through the engine's rollback-capable transactions, never by
+    direct file or DB access.
     An album-identity review can only be dismissed (keep both): merging
     albums whose Release Group is unproven is not offered.
     """
+    if replacer is None:
+        import backend.item_replacement as replacer  # the one replacement authority
     choice = _s(choice).strip().lower()
     if choice not in RESOLUTION_CHOICES:
         return {"ok": False, "error": "choice must be keep_existing, keep_imported or keep_both", "code": "invalid_choice"}
@@ -503,35 +514,21 @@ def resolve_review(review_id: str, choice: str, engine: Any, *, path: Optional[P
                 return {"ok": False, "error": applied.get("error") or "reconcile apply failed", "code": "engine_apply_failed"}
             operations.append(_s(plan.get("operation_id")))
         elif choice == "keep_imported":
-            plan = engine.plan_bulk_import_replacement({
-                "existing_album_id": existing_album,
-                "old_item_ids": [existing_id],
-                "mappings": [{"old_item_id": existing_id, "new_item_id": imported_id,
-                              "identity_source": "user_reviewed_reconciliation"}],
-                "source_folder": _s(record.get("source_folder")),
-                "mb_albumid": _s(record.get("release_id")),
-                "reason": "Reconciliation review: keep imported",
-            })
+            # The canonical replacement: the existing slot row keeps its
+            # identity and takes the imported file (the imported row goes).
+            # Still AcoustID-proven -- a reviewer's choice never substitutes
+            # for audio evidence. The reviewer's decision is the approval.
+            plan = replacer.plan_verified_replacement(
+                existing_id, imported_id, reason="Reconciliation review: keep imported",
+                expected_recording_id=_s(record.get("target_recording_id")))
             if not plan.get("ok"):
-                return {"ok": False, "error": plan.get("error") or "replacement plan rejected", "code": "engine_plan_failed"}
-            applied = engine.apply_bulk_import_replacement(plan.get("operation_id"))
+                return {"ok": False, "error": plan.get("error") or "replacement plan rejected",
+                        "code": plan.get("code") or "engine_plan_failed"}
+            applied = replacer.approve_and_apply(plan.get("operation_id"), approved_by="reconciliation reviewer")
             if not applied.get("ok"):
                 return {"ok": False, "error": applied.get("error") or "replacement apply failed", "code": "engine_apply_failed"}
             operations.append(_s(plan.get("operation_id")))
-            move = engine.plan_existing_album_reconcile({
-                "imported_album_id": imported_album,
-                "existing_album_id": existing_album,
-                "dup_item_ids": [],
-                "dup_details": [],
-                "move_item_ids": [imported_id],
-                "source_folder": _s(record.get("source_folder")),
-                "reason": "Reconciliation review: move kept import",
-            })
-            if move.get("ok"):
-                moved = engine.apply_existing_album_reconcile(move.get("operation_id"))
-                if moved.get("ok"):
-                    operations.append(_s(move.get("operation_id")))
-                    moved_into_existing = True
+            moved_into_existing = True
         record.update({"status": "resolved", "resolution": choice, "resolved_at": time.time(),
                        "operation_ids": operations, "moved_into_existing_album": moved_into_existing})
         _write_reviews(records, target)
