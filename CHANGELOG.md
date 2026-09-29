@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.39 - 2026-09-29
+
 ### Fixed
 - Beets plugin 1.1.1: `/webmanager` operations now act on the real absolute file paths. Beets 2.x stores paths relative to the library and expands them through a context variable, which is set only in the thread that opened the library. Web server request threads started with it empty, so every `item.path` loaded relative. As a result, replace-item-file refused files that existed, and `move` and file-deleting `remove` would have used the wrong paths. Each `/webmanager` request now binds the library's music directory first.
 - Replacement failure recovery is complete. If the engine fails part-way, it now also moves the replacement file back to its original path and re-creates the replacement's library row, in addition to restoring the album item and its original file.
