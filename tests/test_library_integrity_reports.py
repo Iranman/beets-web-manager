@@ -83,7 +83,7 @@ class CacheOnlyFingerprintTests(unittest.TestCase):
             audio = Path(td) / "x.flac"
             audio.write_bytes(b"audio")
             with mock.patch.object(acoustid_service, "_ACOUSTID_FILE_CACHE_DIR", Path(td) / "cache"), \
-                    mock.patch.object(acoustid_service, "_acoustid_lookup") as lookup:
+                    mock.patch.object(acoustid_service, "acoustid_lookup_outcome") as lookup:
                 self.assertIsNone(acoustid_service._acoustid_cached_fingerprint_ids(str(audio)))
                 _path, key = acoustid_service._audio_cache_file_identity(str(audio))
                 entry = Path(td) / "cache" / key[:2] / f"{key}.json"

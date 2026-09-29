@@ -1180,30 +1180,22 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
         mb_url,
         headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}
     )
-    mb_data: Dict[str, Any] = {}
-    transient_codes = {429, 500, 502, 503, 504}
-    for attempt in range(1, 4):
-        try:
-            with _ur.urlopen(req, timeout=30) as resp:
-                mb_data = json.loads(resp.read())
-            break
-        except Exception as ex:
-            code = getattr(ex, "code", None)
-            reason = str(getattr(ex, "reason", "") or "").lower()
-            transient = code in transient_codes or "timed out" in reason or "temporarily" in reason
-            if transient and attempt < 3:
-                if log is not None:
-                    public_reason = code if code is not None else "transient network error"
-                    log.append(
-                        f"  MB fetch transient error ({public_reason}); "
-                        f"retrying {attempt + 1}/3"
-                    )
-                time.sleep(1.5 * attempt)
-                continue
-            if log is not None:
-                log.append("  MB fetch failed: MusicBrainz lookup failed.")
-            _app_logger.error("MusicBrainz release lookup failed: %s", type(ex).__name__)
-            return {"ok": False, "error": "MusicBrainz lookup failed.", "tracks": []}
+    from backend.provider_boundary import ProviderOutcome, ProviderResult, call_with_retry
+
+    def _once():
+        with _ur.urlopen(req, timeout=30) as resp:
+            return ProviderResult("musicbrainz", ProviderOutcome.CONFIRMED, data=json.loads(resp.read()))
+
+    fetched = call_with_retry("musicbrainz", _once, max_attempts=3, base_backoff=1.5)
+    if fetched.outcome != ProviderOutcome.CONFIRMED:
+        # 404 is an answer (no such release); everything else means MusicBrainz
+        # could not be asked -- reported as such, never as "no tracks".
+        outcome = ProviderOutcome.NO_RESULT if fetched.status_code == 404 else fetched.outcome
+        if log is not None:
+            log.append(f"  MB fetch failed: MusicBrainz lookup {outcome.value}.")
+        _app_logger.error("MusicBrainz release lookup failed: %s", outcome.value)
+        return {"ok": False, "error": "MusicBrainz lookup failed.", "tracks": [], "outcome": outcome.value}
+    mb_data: Dict[str, Any] = fetched.data or {}
 
     release_artist_info = _playlist_artist_credit_info(mb_data.get("artist-credit") or [])
     release_artist = release_artist_info.get("albumartist", "")
@@ -1226,6 +1218,7 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
     result = {
         "ok": bool(tracks),
         "error": "" if tracks else "MusicBrainz release has no tracks",
+        "outcome": "confirmed" if tracks else "no_result",
         "tracks": tracks,
         "release_title": _s(mb_data.get("title", "")).strip(),
         "release_artist": release_artist,

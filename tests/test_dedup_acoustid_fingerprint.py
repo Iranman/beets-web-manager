@@ -38,11 +38,12 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         self.assertIn("st_mtime_ns", body)
 
     def test_acoustid_cache_skips_missing_files(self):
-        idx = self.app_source.index("def _acoustid_lookup_cached(")
-        body = self.app_source[idx: idx + 1000]
+        # The cache lives in the typed variant; the list API delegates to it.
+        idx = self.app_source.index("def _acoustid_lookup_cached_outcome(")
+        body = self.app_source[idx: idx + 1800]
         self.assertIn("_audio_cache_file_identity(file_path)", body)
-        self.assertIn("return []", body)
-        self.assertIn("_acoustid_lookup(str(path))", body)
+        self.assertIn("file not readable", body)          # missing file -> no lookup
+        self.assertIn("acoustid_lookup_outcome(str(path))", body)
     def test_scan_falls_back_to_fingerprint_when_unmatched(self):
         self.assertIn("_acoustid_fingerprint_ids(str(src))", self.dedup_source)
         self.assertIn("AcoustID fingerprint", self.dedup_source)

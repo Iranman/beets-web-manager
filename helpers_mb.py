@@ -655,63 +655,14 @@ def _note_acoustid_service_error(http_status: int, body: Any) -> None:
     )
 
 
-def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
-    """Run fpcalc + AcoustID lookup. Returns list of MB recording candidate dicts."""
-    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
-    if not Path(fpcalc).exists():
-        return []
-    try:
-        r = subprocess.run([fpcalc, "-json", file_path], capture_output=True, text=True, timeout=30)
-        if r.returncode != 0 or not r.stdout.strip():
-            return []
-        fp_data = json.loads(r.stdout)
-        duration = int(fp_data.get("duration") or 0)
-        fingerprint = (fp_data.get("fingerprint") or "").strip()
-        if not fingerprint or duration < 5:
-            return []
-    except Exception:
-        return []
-    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"  # env var or test fallback
-    params = _up.urlencode({
-        "client":      aid_key,
-        "meta":        "recordings releases releasegroups",
-        "duration":    duration,
-        "fingerprint": fingerprint,
-        "format":      "json",
-    })
-    data = {}
-    req = _ur.Request(
-        f"https://api.acoustid.org/v2/lookup?{params}",
-        headers={"User-Agent": "BeetsWebControl/1.0"}
-    )
-    for attempt in range(2):
-        try:
-            global _ACOUSTID_NEXT_LOOKUP_AT
-            with _ACOUSTID_LOOKUP_LOCK:
-                now = time.monotonic()
-                if _ACOUSTID_NEXT_LOOKUP_AT > now:
-                    time.sleep(_ACOUSTID_NEXT_LOOKUP_AT - now)
-                _ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _ACOUSTID_MIN_INTERVAL_SECONDS
-            with _ur.urlopen(req, timeout=15) as r2:
-                data = json.loads(r2.read())
-            break
-        except urllib.error.HTTPError as http_err:
-            # A rejected request (invalid API key, bad fingerprint) is a
-            # service error, not "no match". It still returns [] to callers,
-            # but must never be silent.
-            try:
-                data = json.loads(http_err.read() or b"{}")
-            except Exception:
-                data = {}
-            _note_acoustid_service_error(http_err.code, data)
-            return []
-        except Exception:
-            if attempt >= 1:
-                return []
-            time.sleep(1.0)
-    if data.get("status") != "ok":
-        _note_acoustid_service_error(0, data)
-        return []
+#: AcoustID service error codes (https://acoustid.org/webservice) that mean
+#: "we could not ask", never "no match".
+_ACOUSTID_AUTH_CODES = {4, 6}          # invalid API key / invalid user API key
+_ACOUSTID_THROTTLE_CODES = {14}        # too many requests
+_ACOUSTID_UNAVAILABLE_CODES = {5}      # internal error
+
+
+def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     out = []
     seen_mbids: set = set()
     for result in (data.get("results") or [])[:5]:
@@ -761,6 +712,100 @@ def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
                 "release_group": rg_title,
             })
     return out
+
+
+def acoustid_lookup_outcome(file_path: str):
+    """fpcalc + AcoustID lookup as a typed ProviderResult (ARCH-006).
+
+    confirmed/no_result are answers; a missing fpcalc, a rejected key, a
+    throttle, an outage or a timeout is reported as such and is never
+    presented -- or cached by callers -- as "no match"."""
+    from backend.provider_boundary import (
+        ProviderError, ProviderOutcome, ProviderResult, call_with_retry, classify_http,
+    )
+
+    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
+    if not Path(fpcalc).exists():
+        return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc is not installed")
+    try:
+        r = subprocess.run([fpcalc, "-json", file_path], capture_output=True, text=True, timeout=30)
+        fp_data = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    except subprocess.TimeoutExpired:
+        return ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out")
+    except (OSError, ValueError):
+        fp_data = {}
+    duration = int(fp_data.get("duration") or 0)
+    fingerprint = (fp_data.get("fingerprint") or "").strip()
+    if not fingerprint or duration < 5:
+        # The file itself cannot be fingerprinted: an answer about this
+        # exact file, not a provider failure.
+        return ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[],
+                              message="audio could not be fingerprinted", evidence={"fingerprintable": False})
+    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"  # env var or test fallback
+    params = _up.urlencode({
+        "client":      aid_key,
+        "meta":        "recordings releases releasegroups",
+        "duration":    duration,
+        "fingerprint": fingerprint,
+        "format":      "json",
+    })
+    req = _ur.Request(
+        f"https://api.acoustid.org/v2/lookup?{params}",
+        headers={"User-Agent": "BeetsWebControl/1.0"}
+    )
+
+    def _once():
+        global _ACOUSTID_NEXT_LOOKUP_AT
+        with _ACOUSTID_LOOKUP_LOCK:
+            now = time.monotonic()
+            if _ACOUSTID_NEXT_LOOKUP_AT > now:
+                time.sleep(_ACOUSTID_NEXT_LOOKUP_AT - now)
+            _ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _ACOUSTID_MIN_INTERVAL_SECONDS
+        try:
+            with _ur.urlopen(req, timeout=15) as r2:
+                data = json.loads(r2.read())
+            status_code = 200
+        except urllib.error.HTTPError as http_err:
+            try:
+                data = json.loads(http_err.read() or b"{}")
+            except Exception:
+                data = {}
+            _note_acoustid_service_error(http_err.code, data)
+            code = ((data.get("error") or {}) if isinstance(data, dict) else {}).get("code")
+            if code in _ACOUSTID_AUTH_CODES:
+                raise ProviderError(ProviderOutcome.AUTHENTICATION_ERROR, "AcoustID rejected the API key",
+                                    status_code=http_err.code)
+            if code in _ACOUSTID_THROTTLE_CODES:
+                raise ProviderError(ProviderOutcome.RATE_LIMITED, "AcoustID throttled the request",
+                                    status_code=http_err.code)
+            raise ProviderError(classify_http(http_err.code, http_err.headers), f"AcoustID HTTP {http_err.code}",
+                                status_code=http_err.code)
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            _note_acoustid_service_error(0, data if isinstance(data, dict) else {})
+            code = ((data.get("error") or {}) if isinstance(data, dict) else {}).get("code")
+            if code in _ACOUSTID_AUTH_CODES:
+                raise ProviderError(ProviderOutcome.AUTHENTICATION_ERROR, "AcoustID rejected the API key")
+            if code in _ACOUSTID_THROTTLE_CODES:
+                raise ProviderError(ProviderOutcome.RATE_LIMITED, "AcoustID throttled the request")
+            if code in _ACOUSTID_UNAVAILABLE_CODES:
+                raise ProviderError(ProviderOutcome.UNAVAILABLE, "AcoustID internal error")
+            raise ProviderError(ProviderOutcome.TRANSIENT_ERROR, "AcoustID returned an error status")
+        out = _acoustid_parse_candidates(data)
+        return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if out else ProviderOutcome.NO_RESULT,
+                              data=out, status_code=status_code)
+
+    result = call_with_retry("acoustid", _once, max_attempts=2, base_backoff=1.0)
+    if result.data is None:
+        result.data = []
+    return result
+
+
+def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
+    """Run fpcalc + AcoustID lookup. Returns list of MB recording candidate dicts.
+
+    Compatibility wrapper: [] for "no match" AND for "could not ask". Callers
+    that must tell those apart (or cache) use acoustid_lookup_outcome()."""
+    return list(acoustid_lookup_outcome(file_path).data or [])
 
 
 def _resolve_release_group_to_release(rg_mbid: str, log: list,
