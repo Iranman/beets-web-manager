@@ -1104,7 +1104,7 @@ export interface LibraryImportAllLastResponse extends ApiOkResponse {
   failed_albums?: Array<Record<string, unknown>>;
 }
 
-export type JobStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'killed' | 'missing';
+export type JobStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'recovery_required' | 'killed' | 'missing';
 
 export interface JobResponse extends ApiOkResponse {
   job_id?: string;
@@ -3090,4 +3090,52 @@ export interface UnattendedCleanupStatus extends ApiOkResponse {
   music_root: string;
   last_run_summary: Record<string, unknown>;
   proposal: DuplicateProposalRow[];
+}
+
+// ── Untracked files (ARCH-021) ──────────────────────────────────────────────
+// The backend owns action, eligibility, safety result and reason; the UI only
+// displays them.
+export interface UntrackedCandidateRow {
+  path: string;
+  size?: number;
+  category: string;
+  action: 'attach' | 'track_for_replacement' | 'quarantine' | null;
+  action_eligibility: 'plannable' | 'not_eligible';
+  requires_review: boolean;
+  safety_result: string;
+  conflicts: string[];
+  reason: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface UntrackedCandidatesResponse extends ApiOkResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: UntrackedCandidateRow[];
+}
+
+export interface UntrackedInventorySummaryResponse extends ApiOkResponse {
+  summary: {
+    untracked_audio_files: number;
+    audio_files_on_disk: number;
+    counts: Record<string, number>;
+    stats: Record<string, unknown>;
+  } | null;
+}
+
+export interface UntrackedRecoveryPlanResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  action?: string;
+  code?: string;
+  error?: string;
+  evidence?: Record<string, unknown>;
+  files?: Array<{ path: string; sha256: string; duplicate_of: string }>;
+  refused?: Array<{ path: string; reason: string }>;
+}
+
+export interface UntrackedTransactionResponse extends ApiOkResponse {
+  status?: string;
+  verification_problems?: string[];
 }

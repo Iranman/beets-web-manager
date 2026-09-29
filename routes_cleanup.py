@@ -34,6 +34,8 @@ from backend.job_service import _running_job_of_type
 from backend.maintenance_service import _maintenance_load_last_report
 import backend.duplicate_cleanup as _duplicate_cleanup
 import backend.library_integrity_service as _library_integrity
+import backend.album_row_merge as _album_row_merge
+import backend.untracked_recovery_service as _untracked_recovery
 
 # ── ARCH-001 extracted code ──
 
@@ -2185,6 +2187,51 @@ def library_untracked_inventory_run():
         return jsonify({"ok": False, "error": "An untracked-file inventory is already running"}), 409
     job = _library_integrity.start_untracked_inventory_job()
     return jsonify({"ok": True, "job_id": job.job_id})
+
+
+@app.post("/api/library/album-duplicate-analysis/plan-merge")
+def library_album_row_merge_plan():
+    """Plan step (no mutation): merge the duplicate album rows of one
+    Release Group -- only when the live analysis proves it deterministic.
+    Approve/apply/rollback through /api/transactions/<id>/..."""
+    payload = request.get_json(silent=True) or {}
+    rg = _s(payload.get("release_group_id")).strip().lower()
+    if not _MB_UUID_RE.match(rg):
+        return jsonify({"ok": False, "error": "release_group_id must be a MusicBrainz id"}), 400
+    try:
+        res = _album_row_merge.plan_album_row_merge(rg)
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    return jsonify(res), (200 if res.get("ok") else 409)
+
+
+@app.get("/api/library/untracked-recovery/candidates")
+def library_untracked_recovery_candidates():
+    """Read-only page of the persisted inventory with the backend-owned
+    action, eligibility, safety result and reason for every file."""
+    try:
+        limit = max(1, min(200, int(request.args.get("limit", 50))))
+        offset = max(0, int(request.args.get("offset", 0)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "limit/offset must be integers"}), 400
+    res = _untracked_recovery.candidates(_s(request.args.get("category")).strip() or None, limit=limit, offset=offset)
+    return jsonify(res), (200 if res.get("ok") else 404)
+
+
+@app.post("/api/library/untracked-recovery/plan")
+def library_untracked_recovery_plan():
+    """Plan step (no mutation) for one recovery action -- attach,
+    track_for_replacement or quarantine -- after identity is re-proven.
+    Approve/apply/rollback through /api/transactions/<id>/..."""
+    payload = request.get_json(silent=True) or {}
+    paths = payload.get("paths")
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return jsonify({"ok": False, "error": "paths must be a list of strings"}), 400
+    try:
+        res = _untracked_recovery.plan_recovery(_s(payload.get("action")), paths)
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    return jsonify(res), (200 if res.get("ok") else 409)
 
 
 @app.post("/api/dedup/maintenance-run")
