@@ -276,6 +276,27 @@ def _acoustid_fingerprint_ids(file_path: str, limit: int = 5) -> List[str]:
     return ids
 
 
+def _acoustid_cached_fingerprint_ids(file_path: str, limit: int = 5) -> Optional[List[str]]:
+    """Recording IDs from the AcoustID file cache only -- never fingerprints
+    or calls the AcoustID API. None when this exact file (path, size, mtime)
+    has no cache entry, so read-only inventories can report "not cached"
+    instead of spending API calls."""
+    path, cache_key = _audio_cache_file_identity(file_path)
+    if not path or not cache_key:
+        return None
+    cache_path = _ACOUSTID_FILE_CACHE_DIR / cache_key[:2] / f"{cache_key}.json"
+    try:
+        cands = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ids: List[str] = []
+    for c in (cands if isinstance(cands, list) else [])[:limit]:
+        rid = _s((c or {}).get("mb_trackid") or "").strip().lower()
+        if rid and rid not in ids:
+            ids.append(rid)
+    return ids
+
+
 def _acoustid_fingerprint_match(source_path: str, lib_path: str) -> Tuple[str, List[str], List[str]]:
     """Fingerprint-verify that two audio files are the same recording via AcoustID.
 
