@@ -17,6 +17,7 @@ const STATUS_STYLES: Record<string, string> = {
   failed:    'border-red-900/55 bg-red-950/16',
   killed:    'border-red-900/55 bg-red-950/16',
   cancelled: 'border-graphite-700 bg-graphite-900/55',
+  recovery_required: 'border-orange-800/60 bg-orange-950/20',
 };
 
 const STATUS_DOT: Record<string, string> = {
@@ -25,6 +26,7 @@ const STATUS_DOT: Record<string, string> = {
   failed:    'bg-red-400',
   killed:    'bg-red-400',
   cancelled: 'bg-zinc-500',
+  recovery_required: 'bg-orange-400',
 };
 
 const STATUS_TEXT: Record<string, string> = {
@@ -33,6 +35,7 @@ const STATUS_TEXT: Record<string, string> = {
   failed:    'text-red-300',
   killed:    'text-red-300',
   cancelled: 'text-zinc-400',
+  recovery_required: 'text-orange-300',
 };
 
 export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' }: Props) {

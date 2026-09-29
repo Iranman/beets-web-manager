@@ -791,16 +791,38 @@ def apply_track_replacement(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
 
     target_id, source_id = int(meta["target_item_id"]), int(meta["source_item_id"])
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    with resource_locks().hold([f"item:{min(target_id, source_id)}", f"item:{max(target_id, source_id)}"],
+                               attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+        # Recorded before the engine call: a restart mid-call is finished from
+        # engine evidence by backend/transaction_recovery.py, never replayed.
+        st.update(operation_id, status="Running", metadata={"engine_request": {"operation_id": operation_id}})
+        try:
+            displace = meta.get("displace_destination") or {}
+            res = ad.replace_item_file(target_id, source_id, idempotency_key=operation_id,
+                                       displace_destination_sha256=displace.get("sha256") or None)
+        except Exception:
+            st.update(operation_id, status="Failed",
+                      logs=["Engine replace-item-file failed; the engine restored the original file."])
+            raise
+        return finish_track_replacement(operation_id, res, adapter=ad, store=st)
+
+
+def finish_track_replacement(
+    operation_id: str,
+    res: Dict[str, Any],
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Verify an applied replacement from the engine's result and record the
+    outcome (also used by restart recovery -- never re-applies)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    meta = st.get(operation_id).get("metadata") or {}
+    target_id, source_id = int(meta["target_item_id"]), int(meta["source_item_id"])
     before = meta.get("before") or {}
-    st.update(operation_id, status="Running")
-    try:
-        displace = meta.get("displace_destination") or {}
-        res = ad.replace_item_file(target_id, source_id, idempotency_key=operation_id,
-                                   displace_destination_sha256=displace.get("sha256") or None)
-    except Exception:
-        st.update(operation_id, status="Failed",
-                  logs=["Engine replace-item-file failed; the engine restored the original file."])
-        raise
     engine = res.get("result") if isinstance(res.get("result"), dict) else res
 
     after_item = ad.get_item(target_id) or {}

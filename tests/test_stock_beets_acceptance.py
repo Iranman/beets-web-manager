@@ -186,7 +186,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.2.0")
+        self.assertEqual(status_data["plugin_version"], "1.3.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -292,7 +292,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
             os.makedirs(target_plugin_dir, exist_ok=True)
             src_plugin_dir = os.path.join(repo_root, "beetsplug", "webmanager")
-            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "replace_ops.py", "remove_ops.py"]:
+            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py"]:
                 shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
             # 2. Provision 64-hex secret API key file (256-bit entropy)
@@ -425,7 +425,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.2.0")
+                    self.assertEqual(status_res["plugin_version"], "1.3.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -590,6 +590,12 @@ webmanager:
                 with _raw_urlopen(urllib.request.Request(f"{base_url}/item/{restored['new_item_id']}"), timeout=5) as resp:
                     self.assertEqual(json.loads(resp.read().decode("utf-8"))["title"], "Synthetic Anthem")
 
+                # Steps 11-14: album-row merge + rollback, untracked attach /
+                # quarantine + rollback, and idempotent replay -- all against
+                # the real stock container (ARCH-020 / ARCH-021).
+                self._accept_merge_and_untracked(base_url, auth_header, container_name, downloads_dir, music_dir,
+                                                 _raw_urlopen)
+
             finally:
                 if orig_allowlist is not None:
                     os.environ["BEETS_OUTBOUND_ALLOWLIST"] = orig_allowlist
@@ -605,6 +611,134 @@ webmanager:
                     stderr=subprocess.DEVNULL,
                 )
             shutil.rmtree(td, ignore_errors=True)
+
+
+    def _accept_merge_and_untracked(self, base_url, auth_header, container_name, downloads_dir, music_dir, urlopen):
+        rel = "45347542-db98-422a-a307-ae95d5371f60"
+        rg = "ef4b6576-ac7c-4f72-bee6-e7a6b6cf019d"
+
+        def call(method, path, body=None, key=None, expect=None):
+            headers = dict(auth_header)
+            if key:
+                headers["Idempotency-Key"] = key
+            req = urllib.request.Request(f"{base_url}{path}", method=method, headers=headers,
+                                         data=json.dumps(body).encode("utf-8") if body is not None else None)
+            try:
+                with urlopen(req, timeout=60) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as ex:
+                raw = ex.read().decode("utf-8", errors="replace")
+                try:
+                    return ex.code, json.loads(raw or "{}")
+                except ValueError:  # stock Beets answers 404 with an HTML page
+                    return ex.code, {"raw": raw[:200]}
+
+        def container_path(shown):
+            return shown if shown.startswith("/") else "/music/" + shown
+
+        def csha(path):
+            out = subprocess.run(["docker", "exec", container_name, "sha256sum", path],
+                                 capture_output=True, text=True, check=True).stdout
+            return out.split()[0]
+
+        def exists(path):
+            return subprocess.run(["docker", "exec", container_name, "test", "-e", path]).returncode == 0
+
+        # Two album rows of one release: import two folders as albums, then
+        # give both rows the same Release Group + Release ID via modify.
+        album_ids = []
+        for name, tracks in (("MergeA", (1, 2)), ("MergeB", (3,))):
+            folder = os.path.join(downloads_dir, name)
+            os.makedirs(folder, exist_ok=True)
+            for t in tracks:
+                _create_synthetic_audio(os.path.join(folder, f"{t:02d}.wav"), title=f"Merge {t}",
+                                        artist="Merge Bot", album=f"Merge LP {name}")
+            if os.name != "nt":
+                os.chmod(folder, 0o777)
+                for f in os.listdir(folder):
+                    os.chmod(os.path.join(folder, f), 0o666)
+            key = f"accept-import-{name}-{uuid.uuid4().hex[:6]}"
+            status, _ = call("POST", "/webmanager/import", {"paths": [f"/downloads/{name}"], "autotag": False,
+                                                            "singletons": False, "move": True, "write": False,
+                                                            "duplicate_action": "keep"}, key=key)
+            self.assertIn(status, (200, 202))
+            for _ in range(60):
+                _s, op = call("GET", f"/webmanager/operations/{key}")
+                if op.get("status") in ("succeeded", "failed"):
+                    break
+                time.sleep(1)
+            self.assertEqual(op.get("status"), "succeeded", op)
+            _s, albums = call("GET", "/album/")
+            album_ids.append(next(a["id"] for a in albums["albums"] if a["album"] == f"Merge LP {name}"))
+        status, _ = call("POST", "/webmanager/modify", {"album_ids": album_ids, "write": False, "move": False,
+                                                        "fields": {"mb_albumid": rel, "mb_releasegroupid": rg}})
+        self.assertEqual(status, 200)
+        target_id, source_id = album_ids
+        _s, source_album = call("GET", f"/album/{source_id}?expand")
+        source_items = source_album.get("items") or []
+        _s, target_album = call("GET", f"/album/{target_id}?expand")
+        for idx, it in enumerate((target_album.get("items") or []) + source_items, start=1):
+            status, _ = call("POST", "/webmanager/modify", {"item_ids": [it["id"]], "write": False, "move": False,
+                                                            "fields": {"track": idx, "disc": 1,
+                                                                       "mb_trackid": f"00000000-0000-0000-0000-{idx:012d}"}})
+            self.assertEqual(status, 200)
+        _s, source_album = call("GET", f"/album/{source_id}?expand")
+        items = [{"item_id": it["id"], "source_album_id": source_id, "sha256": csha(container_path(it["path"])),
+                  "mb_trackid": it["mb_trackid"], "disc": it["disc"], "track": it["track"]}
+                 for it in source_album["items"]]
+        merge_key = f"accept-merge-{uuid.uuid4().hex[:8]}"
+        body = {"target_album_id": target_id, "source_album_ids": [source_id], "expected_release_group_id": rg,
+                "expected_release_id": rel, "items": items}
+        status, merged = call("POST", "/webmanager/album-row-merge", body, key=merge_key)
+        self.assertEqual(status, 200, merged)
+        self.assertEqual(call("GET", f"/album/{source_id}")[0], 404)
+        for it in items:
+            self.assertEqual(call("GET", f"/item/{it['item_id']}")[1]["album_id"], target_id)
+        status, replay = call("POST", "/webmanager/album-row-merge", body, key=merge_key)
+        self.assertTrue(replay.get("replayed"), replay)
+        status, rolled = call("POST", "/webmanager/album-row-merge/rollback", {"merge_id": merged["merge_id"]})
+        self.assertEqual(status, 200, rolled)
+        self.assertEqual(call("GET", f"/album/{source_id}")[0], 200)  # the original album id is back
+        for it in items:
+            self.assertEqual(call("GET", f"/item/{it['item_id']}")[1]["album_id"], source_id)
+        self.assertTrue(call("POST", "/webmanager/album-row-merge/rollback",
+                             {"merge_id": merged["merge_id"]})[1].get("replayed"))
+
+        # Untracked: attach a tagged loose file as a singleton, roll back;
+        # quarantine it, roll back.
+        from mediafile import MediaFile
+        loose_dir = os.path.join(music_dir, "Loose")
+        os.makedirs(loose_dir, exist_ok=True)
+        host_file = os.path.join(loose_dir, "loose.wav")
+        _create_synthetic_audio(host_file, title="Loose", artist="Loose Bot", album="Loose LP")
+        mf = MediaFile(host_file)
+        mf.mb_trackid, mf.mb_albumid, mf.track, mf.disc = "00000000-0000-0000-0000-000000000099", rel, 9, 1
+        mf.save()
+        if os.name != "nt":
+            os.chmod(loose_dir, 0o777)
+            os.chmod(host_file, 0o666)
+        path = "/music/Loose/loose.wav"
+        digest = csha(path)
+        attach_key = f"accept-attach-{uuid.uuid4().hex[:8]}"
+        status, attached = call("POST", "/webmanager/untracked/attach",
+                                {"path": path, "sha256": digest, "album_id": None,
+                                 "expected": {"mb_trackid": "00000000-0000-0000-0000-000000000099", "mb_albumid": rel,
+                                              "disc": 1, "track": 9}}, key=attach_key)
+        self.assertEqual(status, 200, attached)
+        self.assertEqual(call("GET", f"/item/{attached['item_id']}")[0], 200)
+        self.assertTrue(call("POST", "/webmanager/untracked/attach", {"path": path}, key=attach_key)[1].get("replayed"))
+        status, rb = call("POST", "/webmanager/untracked/rollback", {"record_id": attached["record_id"]})
+        self.assertEqual(status, 200, rb)
+        self.assertEqual(call("GET", f"/item/{attached['item_id']}")[0], 404)
+        self.assertTrue(exists(path))
+        status, quarantined = call("POST", "/webmanager/untracked/quarantine",
+                                   {"files": [{"path": path, "sha256": digest}]},
+                                   key=f"accept-quarantine-{uuid.uuid4().hex[:8]}")
+        self.assertEqual(status, 200, quarantined)
+        self.assertFalse(exists(path))
+        status, rb = call("POST", "/webmanager/untracked/rollback", {"record_id": quarantined["record_id"]})
+        self.assertEqual(status, 200, rb)
+        self.assertEqual(csha(path), digest)
 
 
 if __name__ == "__main__":

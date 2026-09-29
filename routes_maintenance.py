@@ -9,6 +9,8 @@ from flask import Response, jsonify, request
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 import backend.duplicate_cleanup as duplicate_cleanup
+import backend.album_row_merge as album_row_merge
+import backend.untracked_recovery_service as untracked_recovery
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
 from backend.job_service import _running_job_of_type, _wait_for_child_job
@@ -698,14 +700,28 @@ def _item_file_replacement_response(fn, transaction_id):
     return jsonify(res), status_code
 
 
+#: Engine-backed transaction families: (apply, rollback). Each apply needs an
+#: Approved transaction, holds its durable resource locks, records the engine
+#: request first and verifies afterwards; see backend/transaction_recovery.py.
+_ENGINE_FAMILIES = {
+    composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY: (composite_workflows.apply_track_replacement,
+                                                       composite_workflows.rollback_track_replacement),
+    duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: (duplicate_cleanup.apply_reviewed_cleanup,
+                                                duplicate_cleanup.rollback_reviewed_cleanup),
+    album_row_merge.ALBUM_ROW_MERGE_FAMILY: (album_row_merge.apply_album_row_merge,
+                                             album_row_merge.rollback_album_row_merge),
+    untracked_recovery.ATTACH_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
+    untracked_recovery.QUARANTINE_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
+}
+
+
 @app.post("/api/transactions/<transaction_id>/apply")
 def api_transaction_apply(transaction_id):
     try:
         tx = transactions.get(transaction_id)
-        if (tx.get("metadata") or {}).get("mutation_family") == composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY:
-            return _item_file_replacement_response(composite_workflows.apply_track_replacement, transaction_id)
-        if (tx.get("metadata") or {}).get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
-            return _item_file_replacement_response(duplicate_cleanup.apply_reviewed_cleanup, transaction_id)
+        engine_family = _ENGINE_FAMILIES.get((tx.get("metadata") or {}).get("mutation_family"))
+        if engine_family:
+            return _item_file_replacement_response(engine_family[0], transaction_id)
         if tx.get("operation_type") == "Metadata Update":
             job = _start_metadata_apply_transaction(transaction_id)
         else:
@@ -788,10 +804,9 @@ def api_transaction_rollback(transaction_id):
             return jsonify({"ok": False, "error": "Rollback failed.", "code": exc.error_code or "beets_error"}), 400
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
-    if (tx.get("metadata") or {}).get("mutation_family") == composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY:
-        return _item_file_replacement_response(composite_workflows.rollback_track_replacement, transaction_id)
-    if (tx.get("metadata") or {}).get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
-        return _item_file_replacement_response(duplicate_cleanup.rollback_reviewed_cleanup, transaction_id)
+    engine_family = _ENGINE_FAMILIES.get((tx.get("metadata") or {}).get("mutation_family"))
+    if engine_family:
+        return _item_file_replacement_response(engine_family[1], transaction_id)
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:
@@ -812,8 +827,10 @@ def api_transaction_rollback(transaction_id):
             "rollback_available": False,
         }), 409
 
+    # Pre-mark status before launching background job to prevent status-overwrite races
+    transactions.update(transaction_id, status="Running")
+
     def _do(log, cancel_event=None):
-        transactions.update(transaction_id, status="Running")
         ok_count = 0
         failed_count = 0
         try:
@@ -853,7 +870,7 @@ def api_transaction_rollback(transaction_id):
         label=f"Rollback transaction {transaction_id}",
         metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
     )
-    transactions.update(transaction_id, status="Running", metadata={"rollback_job_id": job.job_id})
+    transactions.update(transaction_id, metadata={"rollback_job_id": job.job_id})
     return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})
 
 

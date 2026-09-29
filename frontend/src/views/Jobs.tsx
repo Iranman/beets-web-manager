@@ -173,6 +173,7 @@ const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
   { value: 'failed', label: 'Failed' },
   { value: 'success', label: 'Completed' },
   { value: 'cancelled', label: 'Cancelled' },
+  { value: 'recovery_required', label: 'Recovery required' },
 ];
 const HISTORY_STATUS_OPTIONS = STATUS_OPTIONS.filter((option) => option.value !== 'running');
 

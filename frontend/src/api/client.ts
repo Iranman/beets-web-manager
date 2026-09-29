@@ -1,4 +1,9 @@
 import type {
+  UntrackedCandidatesResponse,
+  UntrackedInventorySummaryResponse,
+  UntrackedRecoveryPlanResponse,
+} from './types';
+import type {
   AcquisitionDownloadAllActiveResponse,
   AcquisitionDownloadAllPayload,
   AcquisitionDownloadAllStartResponse,
@@ -304,6 +309,26 @@ export function applyTransaction(transactionId: string): Promise<TransactionDeta
 
 export function rollbackTransaction(transactionId: string): Promise<TransactionDetailResponse> {
   return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}/rollback`, jsonRequest('POST'));
+}
+
+// ── Untracked files (ARCH-021) ──────────────────────────────────────────────
+
+export function getUntrackedInventorySummary(): Promise<UntrackedInventorySummaryResponse> {
+  return apiJson<UntrackedInventorySummaryResponse>('/api/library/untracked-inventory');
+}
+
+export function startUntrackedInventory(): Promise<{ ok: boolean; job_id?: string; error?: string }> {
+  return apiJson<{ ok: boolean; job_id?: string; error?: string }>('/api/library/untracked-inventory', jsonRequest('POST', {}));
+}
+
+export function getUntrackedCandidates(category: string, limit = 50, offset = 0): Promise<UntrackedCandidatesResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (category) params.set('category', category);
+  return apiJson<UntrackedCandidatesResponse>(`/api/library/untracked-recovery/candidates?${params.toString()}`);
+}
+
+export function planUntrackedRecovery(action: string, paths: string[]): Promise<UntrackedRecoveryPlanResponse> {
+  return apiJson<UntrackedRecoveryPlanResponse>('/api/library/untracked-recovery/plan', jsonRequest('POST', { action, paths }));
 }
 
 export function transactionExportUrl(transactionId: string, format: 'json' | 'csv' | 'markdown'): string {

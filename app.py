@@ -545,6 +545,10 @@ for _route_module_name in ROUTE_MODULES:
 
 
 if __name__ == "__main__":
+    # ARCH-004: finish engine-backed transactions a previous process left
+    # Running, from engine evidence (never by replaying them).
+    import backend.transaction_recovery as _transaction_recovery
+    _transaction_recovery.start_background_sweep()
     _start_playlist_auto_sync_worker()
     if os.environ.get("PLAYLIST_WARM_INDEX", "0") not in ("0", "", "false", "False", "no"):
         _start_playlist_index_warm_worker()

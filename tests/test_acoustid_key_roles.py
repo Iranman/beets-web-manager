@@ -44,7 +44,8 @@ class AcoustidKeyRoleTests(unittest.TestCase):
 
     def test_lookup_never_reads_the_user_key(self):
         src = (ROOT / "helpers_mb.py").read_text(encoding="utf-8")
-        start = src.index("def _acoustid_lookup(")
+        # The key is read by the typed lookup the compatibility wrapper uses.
+        start = src.index("def acoustid_lookup_outcome(")
         body = src[start:src.index("\ndef ", start + 10)]
         self.assertIn('os.environ.get("ACOUSTID_API_KEY")', body)
         self.assertNotIn("ACOUSTID_USER_KEY", body)

@@ -541,6 +541,10 @@
       "CANDIDATE_GENERATION_ONLY",
       "AcoustID provider lookup; classified canonically by consumers."
     ],
+    "helpers_mb.py::_acoustid_parse_candidates": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Parses an AcoustID response into recording candidates (extracted from _acoustid_lookup for the typed provider outcome); classified canonically by consumers."
+    ],
     "routes_submissions.py::_describe_ytdlp_entry": [
       "DISPLAY_ONLY",
       "Per-field provenance labels for proposed submission metadata (user-confirmed)."

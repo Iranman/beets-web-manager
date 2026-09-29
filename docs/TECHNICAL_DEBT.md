@@ -2,12 +2,14 @@
 
 Current, unresolved architecture and security debt only. Statuses: Open, Accepted Risk. Resolved items are removed from this document once closed — their history lives in Git and in the pull request that closed them, not here.
 
+Status stages (never collapsed): IMPLEMENTED (code merged-ready with tests) -> CI VERIFIED (all repository gates green) -> LIVE VERIFIED (production acceptance on TrueNAS) -> CLOSED (desired state reached).
+
 Each entry: affected area, evidence, current risk, desired state, safe migration approach, priority, status.
 
 ## ARCH-001 Route Handlers Still Orchestrate Workflows
 
 - Affected area: route modules `routes_library.py`, `routes_cleanup.py`, `routes_import.py`, `routes_maintenance.py`, `routes_playlist.py`, `routes_acquisition.py`.
-- Evidence: v0.1.31 decomposed `app.py` (52,665 -> ~570 lines of application glue) into layered owned services with CI guards (see `docs/arch001_service_decomposition.md`; inventory `docs/arch001_app_ownership.json`). What remains: 26 route handlers over 100 lines still orchestrate inline (largest: `start_maintenance_runner` 494, `dedup_ai_review` 430, `item_attach_recording` 396, `ai_suggest` 338, `import_review_queue` 279, `apply_album_duplicate_resolver` 256), and 155 helpers live in a lower-layer module than their domain (`EXTRACTED_SHARED`).
+- Evidence: v0.1.31 decomposed `app.py` (52,665 -> ~570 lines of application glue) into layered owned services with CI guards (see `docs/arch001_service_decomposition.md`; inventory `docs/arch001_app_ownership.json`). What remains (re-measured for v0.1.42: still 26): 26 route handlers over 100 lines still orchestrate inline (largest: `start_maintenance_runner` 494, `dedup_ai_review` 430, `item_attach_recording` 396, `ai_suggest` 338, `import_review_queue` 279, `apply_album_duplicate_resolver` 256), and 155 helpers live in a lower-layer module than their domain (`EXTRACTED_SHARED`).
 - Current risk: Workflow logic inside a handler is only reachable through HTTP and is harder to reuse or test directly; shared helpers sit in a neighbor domain's module.
 - Desired state: Every handler parses input, calls one service, and shapes the response. Owners: library/artwork -> `library_service`/`artwork_service`; cleanup/dedup -> `cleanup_service`/`dedup_service`; import/review/AI -> `import_service`/`import_review_service`/`ai_service`; maintenance/transactions -> `maintenance_service`/`transaction_service`; playlist -> `playlist_service`; acquisition -> `acquisition_service`.
 - Safe migration approach: Move one handler body at a time into its service as a request-free function returning `(json_body, status)` (the pattern used for the in-process route calls in v0.1.31); keep the route shape via `serializers.json_route_result`; `tests/test_arch001_architecture.py` keeps layering intact.
@@ -20,7 +22,12 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: Process restart, retry, or duplicate starts can repeat completed steps, lose progress, or leave stale active status unless each workflow implemented its own protections correctly.
 - Desired state: Shared job requirements for operation identifiers, idempotency, resource locks, bounded retries, checkpoints, heartbeats, cancellation checks, and terminal-state recovery.
 - Safe migration approach: Add job contract tests and a reusable idempotency/checkpoint helper. Migrate long-running workflows by risk, starting with import/replacement/playlist mutations.
-- Priority: P1. Status: Open.
+- v0.1.42 progress (IMPLEMENTED; CI and live acceptance pending):
+  - `JobStore` is durable (`<data>/jobs/*.json`): throttled progress writes, checkpoints persisted immediately, heartbeats, terminal states `success`/`failed`/`cancelled`/`recovery_required`. A job interrupted by a restart is never re-run: read-only jobs become `failed`, anything else `recovery_required`.
+  - Durable hierarchical resource locks (`backend/resource_locks.py`, `<data>/locks`): cross-process exclusive, order-enforced, heartbeat-kept, reclaimed only when the owner process is provably gone.
+  - Engine-backed transactions (item replacement, reviewed duplicate cleanup, album-row merge, untracked attach/quarantine) record the engine request before calling it; `backend/transaction_recovery.py` finishes a transaction a restart left Running from engine evidence (manifest or operation registry) and never replays it.
+- Remaining (why this is not Closed): playlist download/sync, import review, AI batch, acquisition and the maintenance runner still keep their own ad hoc protections; they neither publish resumable checkpoints nor hold the shared locks. Those jobs are safe after a restart only in the sense that they become `recovery_required` rather than being re-run.
+- Priority: P1. Status: Open (narrowed).
 
 ## ARCH-005 Frontend Decision Logic Can Drift From Backend Authority
 
@@ -29,6 +36,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: UI can enable, hide, or label actions differently than backend eligibility; explanations can diverge from backend safety decisions.
 - Desired state: Backend returns authoritative evidence, conflicts, safety result, and action eligibility. Frontend displays those fields and only handles presentation state.
 - Safe migration approach: Extend backend contracts first, then simplify frontend helpers as contract consumers. Add static and UI tests for visible evidence and disabled/destructive actions.
+- v0.1.42: the new Untracked files panel follows the desired state (backend returns `action`, `action_eligibility`, `safety_result`, `conflicts`, `reason`, `requires_review`; the panel only displays/filters/confirms). The documented high-risk area is unchanged: `ImportReviewPage.tsx` still computes blocked buckets and eligibility locally (e.g. `shouldShowBlockedBucket`, the local `blocked` filter).
 - Priority: P1. Status: Open.
 
 ## ARCH-006 Provider Boundaries Are Inconsistent
@@ -38,7 +46,9 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: Retry, rate-limit, secret redaction, and failure representation differ by provider.
 - Desired state: Each provider has a small adapter with typed inputs/outputs, explicit transient/permanent failure classification, bounded retries, and redaction.
 - Safe migration approach: Extract adapters only when changing a workflow for a real bug. Preserve API responses and add contract tests.
-- Priority: P2. Status: Open.
+- v0.1.42 progress (IMPLEMENTED; CI and live pending): `backend/provider_boundary.py` defines the typed outcomes (`confirmed`, `no_result`, `ambiguous`, `conflict`, `unavailable`, `rate_limited`, `authentication_error`, `transient_error`), bounded Retry-After-aware retries and redaction. Production callers: the AcoustID lookup (`helpers_mb.acoustid_lookup_outcome`) and its file cache, which now caches only real answers -- previously an outage, throttle or rejected key was cached permanently as "no match" -- and the MusicBrainz release tracklist fetch. The untracked recovery workflow consumes both outcomes and fails as "could not ask", never as "no match".
+- Remaining: Plex, Lidarr, SLSKD, yt-dlp, OpenAI/AI and the other MusicBrainz calls do not use the boundary yet.
+- Priority: P2. Status: Open (narrowed).
 
 ## ARCH-010 Composite Mutation Workflows Still Call The Retired `backend/beets_client.py`
 
@@ -51,6 +61,8 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Affected area: `composite_workflows.plan/apply_album_duplicate_merge`, the webmanager plugin's `modify` allowlist.
 - Evidence: the existing album-merge Apply reassigns items through `/webmanager/modify` with `album_id`, which `ALLOWED_ITEM_FIELDS` deliberately excludes, so it cannot move items between album rows. The read-only `POST /api/library/album-duplicate-analysis` (v0.1.40) now produces a per-Release-Group merge proposal, but nothing can apply it yet.
 - Desired state: an engine op that moves items into a retained album row by Release Group proof (keeping Release/Recording IDs, disc/track), with Plan → Approve → Apply → Verify → Rollback, used only for groups the analysis marks deterministic.
+- v0.1.42 (IMPLEMENTED; CI and live acceptance pending): engine op `/webmanager/album-row-merge` (+ rollback, + status) changes item ownership only (no tag write, no move), requires Release Group AND Release ID, full coverage, unchanged identity/content and no slot overlap, retires source rows after verified moves, and rolls back to the ORIGINAL album ids; `backend/album_row_merge.py` plans only deterministic groups.
+- Separate, still open: the legacy `composite_workflows.plan/apply_album_duplicate_merge` (used by import `existing_album_reconcile` and the merge-duplicate-album job) still reassigns `album_id` through `/webmanager/modify`, which the engine refuses; those callers need migrating onto a partial-move variant of the new op.
 - Priority: P2. Status: Open.
 
 ## ARCH-021 Untracked Files Under The Music Root
@@ -58,7 +70,12 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Affected area: `/music`.
 - Evidence: roughly 103k audio files are not tracked by Beets. v0.1.40 adds a read-only inventory (`POST /api/library/untracked-inventory`) that classifies them and persists evidence; no cleanup or import exists for them yet.
 - Desired state: category-scoped, reviewed recovery (import canonical-looking album files) and cleanup (exact duplicates of tracked files, import artifacts) through engine-owned quarantine, never by name alone.
-- Priority: P2. Status: Open (discovery done).
+- v0.1.42 (IMPLEMENTED; CI and live acceptance pending): incremental inventory (reuses persisted records; hashes only new/changed files); engine ops `/webmanager/untracked/attach` and `/webmanager/untracked/quarantine` (+ rollback, + status); `backend/untracked_recovery_service.py`:
+  - Class A: quarantine only byte-identical copies of tracked files. A naming pattern alone is never eligible.
+  - Class B: attach into a free album slot. Requires tags that name one album row, MusicBrainz confirming the recording at that position, and AcoustID confirming the audio.
+  - Class C: tracked as a singleton, then a replacement is planned through `backend/item_replacement.py`.
+  - Class D: no action.
+- Priority: P2. Status: Open (recovery implemented; live acceptance pending).
 
 ## ARCH-019 Job/Transaction-Status Test Can Be Intermittently Flaky Under CI Load
 
@@ -67,7 +84,8 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: Low but real — points at a possible race between a rollback job reporting success and the transaction store's own status field committing its terminal value, that only manifests under genuine concurrent load.
 - Desired state: The test polls/rechecks status with a short bounded retry instead of asserting immediately after the job reports success, unless a real ordering bug in the production rollback path is confirmed, in which case that path itself should not report the job "success" until the transaction record's status update has actually committed.
 - Safe migration approach: Reproduce deliberately under artificial CI-like load before deciding which side needs the fix — do not guess from a single observed instance.
-- Priority: P3. Status: Open.
+- v0.1.42 (IMPLEMENTED; CI pending): root cause confirmed in production ordering -- the rollback route started the job and only then wrote `status="Running"`, overwriting a fast job's committed "Rolled Back". The route now marks Running before the job starts and touches only metadata afterwards. `tests/test_arch019_rollback_ordering.py` fails against the old ordering and passes now, including a durable-JobStore + slowed-store + concurrent-poller case.
+- Priority: P3. Status: Open (fix implemented; closes once CI verifies).
 
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 

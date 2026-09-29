@@ -6,6 +6,7 @@ Manager data directory for later, separately reviewed cleanup work."""
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -46,18 +47,25 @@ def load_album_duplicate_analysis() -> Optional[Dict[str, Any]]:
 
 def start_untracked_inventory_job() -> Any:
     def _run(log, cancel_event=None, update_state=None):
-        log.append(f"[inventory] Read-only walk of {MUSIC_ROOT}; AcoustID cache only, no API calls.")
-        items = beets_adapter.get_items() or []
-        summary = untracked_inventory.build_inventory(
-            Path(MUSIC_ROOT), items, abs_path=_album_item_abs_path,
-            cached_ids=_acoustid_cached_fingerprint_ids, out_dir=_data_dir() / INVENTORY_DIR,
-            progress=update_state, cancel=(lambda: bool(cancel_event and cancel_event.is_set())))
+        from backend.resource_locks import locks as resource_locks
+        log.append(f"[inventory] Read-only incremental walk of {MUSIC_ROOT}; AcoustID cache only, no API calls.")
+        with resource_locks().hold(["untracked-inventory"], f"inventory-{int(time.time())}", timeout=5):
+            items = beets_adapter.get_items() or []
+            summary = untracked_inventory.build_inventory(
+                Path(MUSIC_ROOT), items, abs_path=_album_item_abs_path,
+                cached_ids=_acoustid_cached_fingerprint_ids, out_dir=_data_dir() / INVENTORY_DIR,
+                progress=update_state, cancel=(lambda: bool(cancel_event and cancel_event.is_set())))
+        stats = summary["stats"]
         log.append(f"[inventory] {summary['untracked_audio_files']} untracked of "
                    f"{summary['audio_files_on_disk']} audio files: {summary['counts']}")
+        log.append(f"[inventory] reused {stats['records_reused']} record(s), reclassified "
+                   f"{stats['files_reclassified']}, hashed {stats['files_rehashed']}")
         return {"ok": True, "summary": summary}
 
+    # Read-only: an interrupted run is simply failed and can be started again
+    # (it resumes from the persisted records of the last completed run).
     return jobs.start_python(_run, label="Untracked file inventory (read-only)",
-                             metadata={"type": INVENTORY_JOB_TYPE, "path": str(MUSIC_ROOT)})
+                             metadata={"type": INVENTORY_JOB_TYPE, "path": str(MUSIC_ROOT), "mutating": False})
 
 
 def load_untracked_inventory_summary() -> Optional[Dict[str, Any]]:

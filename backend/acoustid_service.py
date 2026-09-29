@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import METADATA_CACHE_ROOT, MUSIC_ROOT, _s
 from backend.app_runtime import _norm, _normalize_name
 from backend.matching import verify_audio_against_request
-from helpers_mb import _acoustid_lookup
+from helpers_mb import acoustid_lookup_outcome
+from backend.provider_boundary import ProviderOutcome, ProviderResult
 import backend.recording_review as recording_review
 
 # ── ARCH-001 extracted code ──
@@ -74,30 +75,43 @@ def _audio_cache_file_identity(file_path: str) -> Tuple[Optional[Path], Optional
         return None, None
 
 
-def _acoustid_lookup_cached(file_path: str) -> List[Dict[str, Any]]:
-    """AcoustID lookup with file-level disk cache keyed by resolved path + size + mtime_ns.
+def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
+    """AcoustID lookup through the file-level disk cache, as a typed result.
 
-    Cache entries never expire — a changed file produces a new cache key.
-    Returns the same format as _acoustid_lookup (list of recording candidate dicts).
-    """
+    The cache is keyed by resolved path + size + mtime_ns and never expires
+    (a changed file gets a new key). Only real answers -- confirmed or
+    no_result -- are cached; an outage, throttle, rejected key or timeout is
+    returned as such and NOT cached, so it can never become a permanent
+    "no match"."""
     path, cache_key = _audio_cache_file_identity(file_path)
     if not path or not cache_key:
-        return []
+        return ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[], message="file not readable")
     cache_path = _ACOUSTID_FILE_CACHE_DIR / cache_key[:2] / f"{cache_key}.json"
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            return cached if isinstance(cached, list) else []
+            if isinstance(cached, list):
+                return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if cached else ProviderOutcome.NO_RESULT,
+                                      data=cached, from_cache=True, attempts=0)
         except Exception:
             pass
 
-    result = _acoustid_lookup(str(path))
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(result), encoding="utf-8")
-    except Exception:
-        pass
+    result = acoustid_lookup_outcome(str(path))
+    if result.outcome in (ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT):
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(result.data or []), encoding="utf-8")
+        except Exception:
+            pass
     return result
+
+
+def _acoustid_lookup_cached(file_path: str) -> List[Dict[str, Any]]:
+    """AcoustID candidates for a file (cached answers only; see
+    _acoustid_lookup_cached_outcome). Returns [] when there is no match AND
+    when the provider could not be asked -- callers that must distinguish
+    those use the _outcome variant."""
+    return list(_acoustid_lookup_cached_outcome(file_path).data or [])
 
 
 def _audio_identity_score(candidate: Dict[str, Any]) -> float:

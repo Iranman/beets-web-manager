@@ -234,7 +234,8 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
 
     def test_acoustid_lookup_has_retry_rate_limit_and_release_group_fields(self):
         self.assertIn("_ACOUSTID_LOOKUP_LOCK", HELPERS_SOURCE)
-        self.assertIn("for attempt in range(2)", HELPERS_SOURCE)
+        # Bounded retry now goes through the provider boundary (ARCH-006).
+        self.assertIn('call_with_retry("acoustid", _once, max_attempts=2', HELPERS_SOURCE)
         self.assertIn('"acoustid_id"', HELPERS_SOURCE)
         self.assertIn('"mb_releasegroupid"', HELPERS_SOURCE)
 

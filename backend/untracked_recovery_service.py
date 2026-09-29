@@ -1,0 +1,354 @@
+"""Reviewed recovery and cleanup of files Beets does not track (ARCH-021).
+
+Action classes, decided here (the frontend only displays them):
+
+* Class A ``quarantine``   -- ONLY a byte-identical copy of a tracked file
+  (inventory category ``exact_duplicate_of_tracked``, re-proven by SHA-256
+  of both files at plan time). Naming patterns alone ("import artifact")
+  are never proof of redundancy and are not eligible.
+* Class B ``attach``       -- a canonical-looking album file missing from
+  Beets goes into its album row's free slot when identity is deterministic:
+  the file's own tags name a Release ID that exactly one album row carries
+  and a free (disc, track) slot; MusicBrainz confirms that release has that
+  Recording at that position; AcoustID confirms the audio is that Recording.
+* Class C ``track_for_replacement`` -- a different encoding of a recording
+  the library already has: tracked as a singleton on the same evidence,
+  then a replacement is PLANNED through backend/item_replacement.py (the one
+  replacement authority) for an operator to approve.
+* Class D -- everything else: no action.
+
+Every mutation is Plan -> Approve -> Apply -> Verify -> Rollback through the
+engine ops in beetsplug/webmanager/untracked_ops.py, under the durable
+``untracked-inventory`` lock (plus ``album:<id>`` for an attach). A provider
+that cannot be asked (outage, throttle, rejected key) fails the plan as
+exactly that -- never as "no match".
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from backend.beets_adapter import BeetsAdapter, beets_adapter
+from backend.composite_workflows import _decode_path, _get_store, _s
+from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+from backend.transaction_engine import TransactionStore
+
+ATTACH_FAMILY = "untracked_attach_v1"
+QUARANTINE_FAMILY = "untracked_quarantine_v1"
+
+ACTIONS = {
+    "exact_duplicate_of_tracked": ("quarantine", "Byte-identical copy of a tracked file."),
+    "canonical_album_file_missing_from_beets": ("attach", "Album file missing from Beets; attach after identity proof."),
+    "same_recording_other_encoding": ("track_for_replacement",
+                                      "Another encoding of a tracked recording; replacement review after tracking."),
+    "import_artifact": (None, "Naming pattern alone is not proof of redundancy; no action."),
+    "loose_singleton": (None, "No deterministic identity; no action."),
+    "unknown": (None, "No deterministic identity; no action."),
+}
+
+
+def record_id_for(kind: str, operation_id: str) -> str:
+    """The engine record id for this transaction (see untracked_ops.record_id_for)."""
+    return hashlib.sha256(f"untracked-{kind}|{operation_id}".encode("utf-8")).hexdigest()[:32]
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _deps() -> Dict[str, Any]:
+    from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path
+    from backend.app_runtime import MUSIC_ROOT, WEB_MANAGER_DATA_DIR
+    from backend.matching_service import _fetch_mb_release_tracklist
+    return {"music_root": Path(MUSIC_ROOT), "inventory_dir": Path(WEB_MANAGER_DATA_DIR) / "untracked_inventory",
+            "abs_path": _album_item_abs_path, "acoustid": _acoustid_lookup_cached_outcome,
+            "mb_tracklist": _fetch_mb_release_tracklist, "read_tags": read_identity_tags}
+
+
+def read_identity_tags(path: str) -> Dict[str, Any]:
+    """Identity tags straight from the file (never a remote call)."""
+    from mediafile import MediaFile
+    mf = MediaFile(path)
+    return {"mb_trackid": _s(mf.mb_trackid).lower(), "mb_albumid": _s(mf.mb_albumid).lower(),
+            "mb_releasegroupid": _s(mf.mb_releasegroupid).lower(), "disc": int(mf.disc or 1),
+            "track": int(mf.track or 0), "title": _s(mf.title)}
+
+
+def _safe_music_path(root: Path, rel_or_abs: str) -> Optional[str]:
+    base = os.path.realpath(str(root))
+    candidate = rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(base, rel_or_abs)
+    real = os.path.realpath(candidate)
+    return real if real.startswith(base + os.sep) else None
+
+
+def candidates(category: Optional[str] = None, *, limit: int = 50, offset: int = 0,
+               deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Page through the persisted inventory with backend-owned eligibility."""
+    d = deps or _deps()
+    rows, total = [], 0
+    try:
+        fh = open(Path(d["inventory_dir"]) / "untracked_inventory.jsonl", encoding="utf-8")
+    except OSError:
+        return {"ok": False, "code": "no_inventory", "error": "Run the untracked inventory first.", "rows": []}
+    with fh:
+        for line in fh:
+            rec = json.loads(line)
+            if category and rec.get("category") != category:
+                continue
+            total += 1
+            if total <= offset or len(rows) >= limit:
+                continue
+            action, reason = ACTIONS.get(rec.get("category"), (None, "No action."))
+            rows.append({
+                "path": rec["path"], "size": rec.get("size"), "category": rec.get("category"),
+                "action": action,
+                "action_eligibility": "plannable" if action else "not_eligible",
+                "requires_review": True,
+                "safety_result": "identity re-proven at plan time" if action else "no mutation",
+                "conflicts": [],
+                "reason": reason,
+                "evidence": {k: rec.get(k) for k in ("sha256", "duplicate_of", "recording_ids", "acoustid") if rec.get(k)},
+            })
+    return {"ok": True, "total": total, "offset": offset, "limit": limit, "rows": rows}
+
+
+def _fail(code: str, error: str, **extra: Any) -> Dict[str, Any]:
+    return {"ok": False, "code": code, "error": error, **extra}
+
+
+def _prove_identity(path: str, *, want_album: bool, adapter: BeetsAdapter, d: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic identity for an untracked file, or a reasoned refusal."""
+    tags = d["read_tags"](path)
+    if not tags.get("mb_trackid"):
+        return _fail("no_recording_id", "The file has no Recording ID tag; tag it before recovery.")
+    evidence: Dict[str, Any] = {"tags": tags}
+    album = None
+    if want_album:
+        if not tags.get("mb_albumid") or not tags.get("track"):
+            return _fail("no_release_position", "The file has no Release ID or track position tag.", evidence=evidence)
+        rows = [a for a in (adapter.find_all_albums_by_mb_albumid(tags["mb_albumid"]) or [])
+                if _s(a.get("mb_albumid")).lower() == tags["mb_albumid"]]
+        if len(rows) != 1:
+            return _fail("album_row_not_unique" if rows else "no_album_row",
+                         f"{len(rows)} album rows carry this Release ID; exactly one is required.", evidence=evidence)
+        album = rows[0]
+        taken = {(int(i.get("disc") or 1), int(i.get("track") or 0))
+                 for i in adapter.find_all_items_by_album_id(int(album["id"])) or []}
+        if (tags["disc"], tags["track"]) in taken:
+            return _fail("slot_occupied", "That album slot is already filled; use duplicate review instead.",
+                         evidence=evidence)
+        mb = d["mb_tracklist"](tags["mb_albumid"])
+        evidence["musicbrainz"] = mb.get("outcome") or ("confirmed" if mb.get("ok") else "unknown")
+        if not mb.get("ok"):
+            return _fail(f"musicbrainz_{evidence['musicbrainz']}",
+                         "MusicBrainz could not confirm the release tracklist.", evidence=evidence)
+        slot = next((t for t in mb.get("tracks") or [] if (int(t.get("disc") or 1), int(t.get("track") or 0))
+                     == (tags["disc"], tags["track"])), None)
+        if not slot or _s(slot.get("mb_trackid")).lower() != tags["mb_trackid"]:
+            return _fail("slot_recording_mismatch",
+                         "MusicBrainz lists a different recording at that position.", evidence=evidence)
+    heard = d["acoustid"](path)
+    evidence["acoustid"] = {"outcome": heard.outcome.value, "from_cache": heard.from_cache,
+                            "recording_ids": [_s(c.get("mb_trackid")).lower() for c in heard.data or []][:5]}
+    if not heard.answered:
+        return _fail(f"acoustid_{heard.outcome.value}", "AcoustID could not be asked; nothing was concluded.",
+                     evidence=evidence)
+    if tags["mb_trackid"] not in evidence["acoustid"]["recording_ids"]:
+        return _fail("fingerprint_disagreement", "AcoustID does not confirm the tagged recording.", evidence=evidence)
+    return {"ok": True, "tags": tags, "album": album, "evidence": evidence}
+
+
+def plan_recovery(action: str, rel_paths: Iterable[str], *, adapter: Optional[BeetsAdapter] = None,
+                  store: Optional[TransactionStore] = None, deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    d = deps or _deps()
+    paths = list(rel_paths or [])
+    if not paths:
+        return _fail("no_paths", "No files were selected.")
+    if action in ("attach", "track_for_replacement"):
+        if len(paths) != 1:
+            return _fail("one_file_per_plan", "Plan one recovery per file.")
+        path = _safe_music_path(d["music_root"], paths[0])
+        if path is None or not os.path.isfile(path):
+            return _fail("file_missing", "The file is not under the music root or no longer exists.")
+        from backend.item_replacement import tracked_item_id_for_path
+        if tracked_item_id_for_path(path, adapter=ad, abs_path=d["abs_path"]):
+            return _fail("already_tracked", "The file is already tracked.")
+        proof = _prove_identity(path, want_album=(action == "attach"), adapter=ad, d=d)
+        if not proof["ok"]:
+            return proof
+        target = None
+        if action == "track_for_replacement":
+            same = [i for i in ad.find_all_items_by_mbid(proof["tags"]["mb_trackid"]) or [] if i.get("album_id")]
+            if len(same) != 1:
+                return _fail("replacement_target_not_unique",
+                             f"{len(same)} album items carry this recording; exactly one is required.")
+            target = int(same[0]["id"])
+        album = proof["album"]
+        tags = proof["tags"]
+        tx = st.create(
+            operation_type="Import", status="Preview",
+            summary=(f"Attach {Path(path).name} to album {album['id']} slot {tags['disc']}/{tags['track']}" if album
+                     else f"Track {Path(path).name} as a singleton, then plan its replacement review"),
+            changes=[{"path": path, "album_id": album["id"] if album else None, "disc": tags["disc"],
+                      "track": tags["track"], "mb_trackid": tags["mb_trackid"]}],
+            rollback_available=True,
+            metadata={"mutation_family": ATTACH_FAMILY, "action": action, "path": path, "sha256": _sha256(path),
+                      "album_id": album["id"] if album else None, "replacement_target_item_id": target,
+                      "expected": {k: tags[k] for k in ("mb_trackid", "mb_albumid", "disc", "track")},
+                      "evidence": proof["evidence"]})
+        return {"ok": True, "operation_id": tx["id"], "status": "Preview", "requires_approval": True,
+                "action": action, "path": path, "album_id": album["id"] if album else None,
+                "evidence": proof["evidence"]}
+    if action == "quarantine":
+        from backend.untracked_inventory import load_previous
+        records = load_previous(Path(d["inventory_dir"]))
+        files, refused = [], []
+        for rel in paths:
+            rec = records.get(rel)
+            path = _safe_music_path(d["music_root"], rel)
+            if not rec or rec.get("category") != "exact_duplicate_of_tracked" or path is None:
+                refused.append({"path": rel, "reason": "only byte-identical copies of tracked files are eligible"})
+                continue
+            twin = rec.get("duplicate_of") or ""
+            if not os.path.isfile(path) or not os.path.isfile(twin):
+                refused.append({"path": rel, "reason": "file or its tracked twin is gone"})
+                continue
+            sha = _sha256(path)
+            from backend.item_replacement import tracked_item_id_for_path
+            if sha != _sha256(twin) or not tracked_item_id_for_path(twin, adapter=ad, abs_path=d["abs_path"]):
+                refused.append({"path": rel, "reason": "no longer byte-identical to a tracked file"})
+                continue
+            files.append({"path": path, "sha256": sha, "duplicate_of": twin})
+        if not files:
+            return _fail("nothing_eligible", "No selected file is a proven redundant copy.", refused=refused)
+        tx = st.create(operation_type="Delete", status="Preview",
+                       summary=f"Quarantine {len(files)} byte-identical untracked cop(ies) of tracked files",
+                       changes=[{"path": f["path"], "duplicate_of": f["duplicate_of"]} for f in files],
+                       rollback_available=True,
+                       metadata={"mutation_family": QUARANTINE_FAMILY, "files": files, "refused": refused})
+        return {"ok": True, "operation_id": tx["id"], "status": "Preview", "requires_approval": True,
+                "files": files, "refused": refused}
+    return _fail("unknown_action", "Unknown recovery action.")
+
+
+def apply_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
+                   store: Optional[TransactionStore] = None) -> Dict[str, Any]:
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return _fail("not_found", "Transaction not found")
+    meta = tx.get("metadata") or {}
+    family = meta.get("mutation_family")
+    if family not in (ATTACH_FAMILY, QUARANTINE_FAMILY):
+        return _fail("wrong_family", "Not an untracked recovery transaction.")
+    if meta.get("engine_result"):
+        return _fail("already_applied", "This recovery was already applied.")
+    if tx.get("status") != "Approved":
+        return _fail("not_approved", "Approve the transaction before applying it.")
+    keys = ["untracked-inventory"] + ([f"album:{meta['album_id']}"] if meta.get("album_id") else [])
+    with resource_locks().hold(keys, attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+        items_before = int((ad.get_stats() or {}).get("items") or 0)
+        st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
+        try:
+            if family == ATTACH_FAMILY:
+                res = ad.untracked_attach(meta["path"], meta["sha256"], meta.get("album_id"), meta["expected"],
+                                          idempotency_key=operation_id)
+            else:
+                res = ad.untracked_quarantine([{"path": f["path"], "sha256": f["sha256"]} for f in meta["files"]],
+                                              idempotency_key=operation_id)
+        except Exception:
+            st.update(operation_id, status="Failed", logs=["Engine refused or failed; it kept nothing."])
+            raise
+        return finish_recovery(operation_id, res, adapter=ad, store=st)
+
+
+def finish_recovery(operation_id: str, res: Dict[str, Any], *, adapter: Optional[BeetsAdapter] = None,
+                    store: Optional[TransactionStore] = None) -> Dict[str, Any]:
+    """Verify an applied recovery from engine evidence (also used by restart
+    recovery -- never re-applies)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    meta = st.get(operation_id).get("metadata") or {}
+    engine = res.get("result") if isinstance(res.get("result"), dict) else res
+    problems: List[str] = []
+    items_before = int(((meta.get("engine_request") or {}).get("items_before")) or 0)
+    items_after = int((ad.get_stats() or {}).get("items") or 0)
+    next_plan = None
+    if meta["mutation_family"] == ATTACH_FAMILY:
+        item = ad.get_item(int(engine.get("item_id") or 0)) or {}
+        if not item:
+            problems.append("attached item not found")
+        else:
+            if (int(item.get("album_id") or 0) or None) != meta.get("album_id"):
+                problems.append("attached item is in the wrong album row")
+            if _s(item.get("mb_trackid")).lower() != meta["expected"]["mb_trackid"]:
+                problems.append("attached item has the wrong Recording ID")
+        if items_before and items_after - items_before != 1:
+            problems.append(f"item count changed by {items_after - items_before}, expected +1")
+        if not problems and meta.get("replacement_target_item_id"):
+            from backend.item_replacement import plan_verified_replacement
+            next_plan = plan_verified_replacement(int(meta["replacement_target_item_id"]), int(engine["item_id"]),
+                                                  reason="Untracked recovery: better encoding of a tracked recording",
+                                                  expected_recording_id=meta["expected"]["mb_trackid"], adapter=ad)
+    else:
+        for f in meta["files"]:
+            if os.path.exists(f["path"]):
+                problems.append(f"{f['path']} is still in place")
+        if items_before and items_after != items_before:
+            problems.append("the library item count changed")
+    status = "Completed" if not problems else "Recovery Required"
+    st.update(operation_id, status=status,
+              metadata={"engine_result": engine, "verification_problems": problems, "items_after": items_after,
+                        "replacement_plan": next_plan},
+              logs=[f"Engine record {engine.get('record_id')}: {meta['mutation_family']} applied"]
+              + [f"Verification problem: {p}" for p in problems])
+    return {"ok": not problems, "operation_id": operation_id, "status": status, "record_id": engine.get("record_id"),
+            "item_id": engine.get("item_id"), "items_before": items_before, "items_after": items_after,
+            "verification_problems": problems, "replacement_plan": next_plan}
+
+
+def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
+                      store: Optional[TransactionStore] = None) -> Dict[str, Any]:
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return _fail("not_found", "Transaction not found")
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    if meta.get("mutation_family") not in (ATTACH_FAMILY, QUARANTINE_FAMILY) or not engine.get("record_id"):
+        return _fail("not_applied", "No applied untracked recovery to roll back.")
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    keys = ["untracked-inventory"] + ([f"album:{meta['album_id']}"] if meta.get("album_id") else [])
+    with resource_locks().hold(keys, attempt_owner(f"{operation_id}:rollback"), timeout=10):
+        res = ad.untracked_rollback(engine["record_id"], idempotency_key=f"{operation_id}:rollback")
+        problems = []
+        if meta["mutation_family"] == ATTACH_FAMILY:
+            if ad.get_item(int(engine.get("item_id") or 0)):
+                problems.append("the attached item is still in the library")
+            if not os.path.isfile(meta["path"]):
+                problems.append("the file is missing")
+        else:
+            for f in meta["files"]:
+                if not os.path.isfile(f["path"]) or _sha256(f["path"]) != f["sha256"]:
+                    problems.append(f"{f['path']} was not restored intact")
+        status = "Rolled Back" if not problems else "Recovery Required"
+        st.update(operation_id, status=status, metadata={"rollback_result": res, "rollback_problems": problems},
+                  logs=["Rolled back through the engine record"] + [f"Rollback problem: {p}" for p in problems])
+    return {"ok": not problems, "operation_id": operation_id, "status": status, "rollback_problems": problems}
