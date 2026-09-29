@@ -7,8 +7,14 @@
 #
 # Design goals:
 #   - Never touch the authoritative Beets database (/config/musiclibrary.blb
-#     under the `beets` engine's own mount) -- read-only, checksum-verified
-#     before AND after.
+#     under the `beets` engine's own mount). While Beets runs, integrity is
+#     ONLINE SEMANTIC INTEGRITY: counts, an identity digest over every item
+#     and album, and plugin health, all read through the running engine's
+#     own web API -- never by opening its SQLite file, and never by hashing
+#     only the main .blb file (in WAL mode committed changes can live in
+#     musiclibrary.blb-wal, so a matching main-file hash proves nothing).
+#     OFFLINE BYTE IDENTITY is a separate, explicit mode
+#     (--offline-db-identity) that stops Beets first.
 #   - Never guess container names, host paths, or the deployed image --
 #     everything is resolved from `docker inspect` / `docker compose config`
 #     and independently re-verified.
@@ -24,6 +30,9 @@
 #   /bin/bash scripts/deploy_truenas_web_manager.sh              # real rollout
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --dry-run     # inspect only
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --rollback DIR
+#   /bin/bash scripts/deploy_truenas_web_manager.sh --offline-db-identity
+#       (stops the Beets engine briefly, hashes the settled database file,
+#        restarts it and re-verifies; BASELINE_DB_SHA256=<hex> to compare)
 #
 # Configuration (env vars):
 #   STACK_DIR (required for --dry-run/deploy/--rollback; not for --help),
@@ -92,6 +101,10 @@ while [[ $# -gt 0 ]]; do
       MODE="dry-run"
       shift
       ;;
+    --offline-db-identity)
+      MODE="offline-db-identity"
+      shift
+      ;;
     --rollback)
       MODE="rollback"
       ROLLBACK_DIR="${2:-}"
@@ -152,6 +165,7 @@ report_failure() {
 
 die() {
   printf '[%s] FATAL (%s): %s\n' "$(date -u +%H:%M:%S)" "$STAGE" "$*" >&2
+  restart_engine_if_stopped
   report_failure 1
   exit 1
 }
@@ -159,8 +173,19 @@ die() {
 on_error() {
   local ec=$?
   [[ "$ec" -eq 0 ]] && return 0
+  restart_engine_if_stopped
   report_failure "$ec"
   exit "$ec"
+}
+
+# Set while --offline-db-identity has the Beets engine stopped; every exit
+# path (die, ERR trap) restarts it so a failed check never leaves it down.
+ENGINE_STOPPED_BY_US=0
+restart_engine_if_stopped() {
+  [[ "$ENGINE_STOPPED_BY_US" -eq 1 ]] || return 0
+  ENGINE_STOPPED_BY_US=0
+  printf '[%s] Restarting %s after an offline check failure...\n' "$(date -u +%H:%M:%S)" "${ENGINE_SERVICE}" >&2
+  docker compose -f "$COMPOSE_FILE" start "$ENGINE_SERVICE" >&2 || true
 }
 trap on_error ERR
 
@@ -264,6 +289,64 @@ try:
 finally:
     con.close()
 PYEOF
+}
+
+# ONLINE SEMANTIC INTEGRITY: read the library through the running engine's
+# own interfaces (stock Beets web API /stats, /item/, /album/ and the
+# webmanager plugin's /webmanager/status) inside the engine container. The
+# SQLite file is never opened. The digest covers every item's identity
+# (id, album row, Recording/Release/Release Group IDs, disc, track, path)
+# and every album's identity, so any unexpected mutation changes it. The
+# plugin API key is read inside the container and never printed.
+SEMANTIC_SNAPSHOT_PY='
+import hashlib, json, urllib.request
+BASE = "http://127.0.0.1:8337"
+def get(path, headers=None):
+    req = urllib.request.Request(BASE + path, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+stats = get("/stats")
+items = get("/item/").get("items") or []
+albums = get("/album/").get("albums") or []
+digest = hashlib.sha256()
+for it in sorted(items, key=lambda r: r.get("id") or 0):
+    digest.update(json.dumps([it.get(k) for k in ("id", "album_id", "mb_trackid", "mb_albumid",
+                                                    "mb_releasegroupid", "disc", "track", "path")]).encode())
+digest.update(b"|albums|")
+for al in sorted(albums, key=lambda r: r.get("id") or 0):
+    digest.update(json.dumps([al.get(k) for k in ("id", "mb_albumid", "mb_releasegroupid",
+                                                    "albumartist", "album")]).encode())
+status = {}
+try:
+    key = open("/config/.webmanager_api_key", encoding="utf-8").read().strip()
+    status = get("/webmanager/status", {"Authorization": "Bearer " + key})
+except Exception:
+    status = {}
+print(json.dumps({"items": stats.get("items"), "albums": stats.get("albums"),
+                  "listed_items": len(items), "listed_albums": len(albums),
+                  "digest": digest.hexdigest(),
+                  "plugin_version": status.get("plugin_version") or ""}))
+'
+
+beets_semantic_snapshot() {
+  docker exec "$ENGINE_CID" python3 -c "$SEMANTIC_SNAPSHOT_PY" | tr -d '\r'
+}
+
+snapshot_field() {
+  _py -c 'import json,sys; v=json.loads(sys.argv[1]).get(sys.argv[2]); print("" if v is None else v)' "$1" "$2"
+}
+
+# Takes a semantic snapshot and validates it; prints the JSON on stdout.
+checked_semantic_snapshot() {
+  local label="$1" snap items listed plugin
+  snap="$(beets_semantic_snapshot)" || die "${label}: could not read the library through the Beets engine's web API"
+  items="$(snapshot_field "$snap" items)"
+  listed="$(snapshot_field "$snap" listed_items)"
+  plugin="$(snapshot_field "$snap" plugin_version)"
+  [[ "$items" =~ ^[0-9]+$ ]] || die "${label}: engine /stats returned no valid item count"
+  [[ "$items" == "$listed" ]] || die "${label}: engine /stats reports ${items} items but /item/ listed ${listed}"
+  [[ -n "$plugin" ]] || die "${label}: webmanager plugin is not healthy (no /webmanager/status)"
+  printf '%s\n' "$snap"
 }
 
 file_is_open() {
@@ -416,24 +499,18 @@ verify_compose_image() {
 # Phase A.3 -- Authoritative database safety checks (read-only)
 # ---------------------------------------------------------------------------
 AUTH_DB_SIZE="" AUTH_DB_SHA256="" AUTH_DB_INODE="" AUTH_DB_OWNER="" AUTH_DB_MODE=""
-AUTH_ITEM_COUNT="" AUTH_ALBUM_COUNT=""
+AUTH_ITEM_COUNT="" AUTH_ALBUM_COUNT="" AUTH_SEMANTIC="" AUTH_SEMANTIC_DIGEST=""
 
 verify_authoritative_database() {
   STAGE="authoritative-db-verification"
   [[ -f "$AUTH_DB_PATH" ]] || die "authoritative database missing: ${AUTH_DB_PATH}"
 
-  local quick_check
-  if ! quick_check="$(sqlite_ro_query "$AUTH_DB_PATH" 'PRAGMA quick_check;')"; then
-    die "PRAGMA quick_check failed to execute against authoritative database (${AUTH_DB_PATH}) -- refusing to continue"
-  fi
-  [[ "$quick_check" == "ok" ]] || die "authoritative database failed PRAGMA quick_check: '${quick_check}'"
-
-  if ! AUTH_ITEM_COUNT="$(sqlite_ro_query "$AUTH_DB_PATH" 'SELECT count(*) FROM items;')"; then
-    die "could not read item count from authoritative database -- refusing to continue"
-  fi
-  if ! AUTH_ALBUM_COUNT="$(sqlite_ro_query "$AUTH_DB_PATH" 'SELECT count(*) FROM albums;')"; then
-    die "could not read album count from authoritative database -- refusing to continue"
-  fi
+  # Online: the engine owns this file and may be writing it (WAL mode), so
+  # the library is read through its own web API, never by opening SQLite.
+  AUTH_SEMANTIC="$(checked_semantic_snapshot "pre-deploy")"
+  AUTH_ITEM_COUNT="$(snapshot_field "$AUTH_SEMANTIC" items)"
+  AUTH_ALBUM_COUNT="$(snapshot_field "$AUTH_SEMANTIC" albums)"
+  AUTH_SEMANTIC_DIGEST="$(snapshot_field "$AUTH_SEMANTIC" digest)"
   [[ "$AUTH_ITEM_COUNT" =~ ^[0-9]+$ ]] || die "authoritative item count is not a valid integer: '${AUTH_ITEM_COUNT}'"
   [[ "$AUTH_ALBUM_COUNT" =~ ^[0-9]+$ ]] || die "authoritative album count is not a valid integer: '${AUTH_ALBUM_COUNT}'"
   [[ "$AUTH_ITEM_COUNT" -ge "$MIN_ITEM_COUNT" ]] || die "authoritative item count (${AUTH_ITEM_COUNT}) is below MIN_ITEM_COUNT (${MIN_ITEM_COUNT}) -- suspiciously low, refusing to continue"
@@ -457,8 +534,9 @@ verify_authoritative_database() {
     [[ "$AUTH_DB_SHA256" != "$stale_sha" ]] || die "authoritative and stale database have identical SHA-256 checksums -- refusing to continue"
   fi
 
-  log "Authoritative DB verified: path=${AUTH_DB_PATH} size=${AUTH_DB_SIZE} sha256=${AUTH_DB_SHA256}"
-  log "Authoritative DB counts:   items=${AUTH_ITEM_COUNT} albums=${AUTH_ALBUM_COUNT} owner=${AUTH_DB_OWNER} mode=${AUTH_DB_MODE}"
+  log "Authoritative DB file: path=${AUTH_DB_PATH} size=${AUTH_DB_SIZE} owner=${AUTH_DB_OWNER} mode=${AUTH_DB_MODE}"
+  log "  live main-file sha256=${AUTH_DB_SHA256} (informational only: in WAL mode the main file alone is not the logical database)"
+  log "Online semantic integrity (engine API): items=${AUTH_ITEM_COUNT} albums=${AUTH_ALBUM_COUNT} digest=${AUTH_SEMANTIC_DIGEST} plugin=$(snapshot_field "$AUTH_SEMANTIC" plugin_version)"
 }
 
 # ---------------------------------------------------------------------------
@@ -898,16 +976,17 @@ print('\n'.join(s for s in data.get('services', {}) if s != '$SERVICE'))
 }
 
 assert_authoritative_db_unchanged() {
-  local quick_check item_count album_count sha
-  quick_check="$(sqlite_ro_query "$AUTH_DB_PATH" 'PRAGMA quick_check;')" || die "post-deploy PRAGMA quick_check failed against authoritative database"
-  [[ "$quick_check" == "ok" ]] || die "post-deploy authoritative database quick_check is not ok: '${quick_check}'"
-  item_count="$(sqlite_ro_query "$AUTH_DB_PATH" 'SELECT count(*) FROM items;')" || die "post-deploy item count query failed"
-  album_count="$(sqlite_ro_query "$AUTH_DB_PATH" 'SELECT count(*) FROM albums;')" || die "post-deploy album count query failed"
-  sha="$(sha256_file "$AUTH_DB_PATH")"
+  local snap item_count album_count digest sha
+  snap="$(checked_semantic_snapshot "post-deploy")"
+  item_count="$(snapshot_field "$snap" items)"
+  album_count="$(snapshot_field "$snap" albums)"
+  digest="$(snapshot_field "$snap" digest)"
   [[ "$item_count" == "$AUTH_ITEM_COUNT" ]] || die "authoritative item count changed: was ${AUTH_ITEM_COUNT}, now ${item_count}"
   [[ "$album_count" == "$AUTH_ALBUM_COUNT" ]] || die "authoritative album count changed: was ${AUTH_ALBUM_COUNT}, now ${album_count}"
-  [[ "$sha" == "$AUTH_DB_SHA256" ]] || die "authoritative database SHA-256 changed: was ${AUTH_DB_SHA256}, now ${sha}"
-  log "Authoritative database confirmed unchanged post-deploy (items=${item_count} albums=${album_count} sha256=${sha})."
+  [[ "$digest" == "$AUTH_SEMANTIC_DIGEST" ]] || die "library identity digest changed during deploy: was ${AUTH_SEMANTIC_DIGEST}, now ${digest}"
+  sha="$(sha256_file "$AUTH_DB_PATH")"
+  log "ONLINE SEMANTIC INTEGRITY confirmed post-deploy (items=${item_count} albums=${album_count} digest=${digest})."
+  log "  live main-file sha256 before=${AUTH_DB_SHA256} after=${sha} (informational only; NOT a byte-identity claim -- use --offline-db-identity)"
 }
 
 assert_no_local_db_recreated() {
@@ -972,6 +1051,82 @@ persist_deployed_version() {
   chmod 600 "$tmp"
   mv "$tmp" "$env_file"
   log "Persisted BEETS_WEB_MANAGER_VERSION=${VERSION} to ${env_file} (survives future recreations not run through this script)."
+}
+
+# ---------------------------------------------------------------------------
+# OFFLINE BYTE IDENTITY (explicit mode; briefly stops the Beets engine)
+# ---------------------------------------------------------------------------
+wait_for_engine_semantics() {
+  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS)) snap
+  while (( SECONDS < deadline )); do
+    if snap="$(beets_semantic_snapshot 2>/dev/null)" && [[ -n "$(snapshot_field "$snap" plugin_version 2>/dev/null)" ]]; then
+      printf '%s\n' "$snap"
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+run_offline_db_identity() {
+  STAGE="offline-db-identity"
+  log "=== Offline database byte-identity check (the Beets engine is stopped briefly) ==="
+  resolve_compose_file
+  discover_and_verify_mounts
+  local before after wal_path shm_path wal_size shm_size settled quick_check sha status
+  before="$(checked_semantic_snapshot "before stop")"
+  wal_path="$(dirname "$AUTH_DB_PATH")/${WAL_FILENAME}"
+  shm_path="$(dirname "$AUTH_DB_PATH")/${SHM_FILENAME}"
+
+  log "Stopping ${ENGINE_SERVICE} gracefully so SQLite closes and settles its WAL..."
+  ENGINE_STOPPED_BY_US=1
+  _compose stop -t 60 "$ENGINE_SERVICE" >&2
+  status="$(docker inspect --format '{{.State.Status}}' "$ENGINE_CID")"
+  [[ "$status" == "exited" ]] || die "${ENGINE_SERVICE} did not stop (status=${status})"
+
+  wal_size="absent"; shm_size="absent"
+  [[ -e "$wal_path" ]] && wal_size="$(file_size "$wal_path")"
+  [[ -e "$shm_path" ]] && shm_size="$(file_size "$shm_path")"
+  settled=1
+  if [[ "$wal_size" != "absent" && "$wal_size" != "0" ]]; then
+    settled=0
+    warn "WAL still holds ${wal_size} bytes after a clean stop: byte identity is NOT claimed (the main file alone is not the database)."
+  fi
+  sha="not-claimed"
+  if [[ "$settled" -eq 1 ]]; then
+    quick_check="$(sqlite_ro_query "$AUTH_DB_PATH" 'PRAGMA quick_check;')" || die "offline PRAGMA quick_check failed to execute"
+    [[ "$quick_check" == "ok" ]] || die "offline PRAGMA quick_check is not ok: '${quick_check}'"
+    sha="$(sha256_file "$AUTH_DB_PATH")"
+  fi
+
+  log "Restarting ${ENGINE_SERVICE}..."
+  _compose start "$ENGINE_SERVICE" >&2
+  ENGINE_STOPPED_BY_US=0
+  after="$(wait_for_engine_semantics)" || die "${ENGINE_SERVICE} did not come back with a healthy webmanager plugin within ${HEALTH_TIMEOUT_SECONDS}s"
+  [[ "$(snapshot_field "$before" digest)" == "$(snapshot_field "$after" digest)" ]] \
+    || die "library identity digest differs across the stop/start -- investigate before trusting this check"
+
+  local verdict="n/a (no BASELINE_DB_SHA256 given)"
+  if [[ -n "${BASELINE_DB_SHA256:-}" && "$sha" != "not-claimed" ]]; then
+    if [[ "$sha" == "$BASELINE_DB_SHA256" ]]; then verdict="IDENTICAL to baseline"; else verdict="DIFFERENT from baseline"; fi
+  fi
+  {
+    echo "OFFLINE BYTE IDENTITY"
+    echo "  engine stopped cleanly:   yes"
+    echo "  WAL (${WAL_FILENAME}):     ${wal_size}"
+    echo "  SHM (${SHM_FILENAME}):     ${shm_size}"
+    echo "  WAL settled:              $([[ "$settled" -eq 1 ]] && echo yes || echo NO)"
+    echo "  PRAGMA quick_check:       ${quick_check:-not run (WAL unsettled)}"
+    echo "  database sha256:          ${sha}"
+    echo "  baseline comparison:      ${verdict}"
+    echo "ONLINE SEMANTIC INTEGRITY (before stop / after restart)"
+    echo "  items:  $(snapshot_field "$before" items) / $(snapshot_field "$after" items)"
+    echo "  albums: $(snapshot_field "$before" albums) / $(snapshot_field "$after" albums)"
+    echo "  digest: $(snapshot_field "$before" digest) / $(snapshot_field "$after" digest)"
+    echo "  plugin: $(snapshot_field "$after" plugin_version)"
+  }
+  [[ "$settled" -eq 1 ]] || die "offline byte identity could not be established (WAL unsettled); engine restarted and semantically verified"
+  log "=== Offline check complete; ${ENGINE_SERVICE} restarted and verified. ==="
 }
 
 run_deploy() {
@@ -1096,6 +1251,7 @@ main() {
   case "$MODE" in
     dry-run)  run_dry_run ;;
     rollback) run_rollback ;;
+    offline-db-identity) run_offline_db_identity ;;
     deploy)   run_deploy ;;
     *) die "unknown mode: $MODE" ;;
   esac

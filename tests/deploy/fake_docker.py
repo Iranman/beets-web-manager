@@ -2,7 +2,8 @@
 """Fake `docker` CLI used only by tests/test_deploy_truenas_rollout.py.
 
 Emulates just enough of `docker inspect`, `docker image inspect`, and
-`docker compose {ps,config,pull,up,stop,restart}` -- reading/writing a JSON
+`docker compose {ps,config,pull,up,stop,start,restart}`, and `docker exec`
+(the engine's semantic snapshot) -- reading/writing a JSON
 "world state" file (path from FAKE_DOCKER_STATE) -- to drive
 scripts/deploy_truenas_web_manager.sh through its real code paths
 without touching a real Docker daemon or TrueNAS host.
@@ -203,6 +204,15 @@ def cmd_compose(args, state):
             _save(state)
         return 0
 
+    if sub == "start":
+        svc = rest[-1]
+        cid = state["service_containers"].get(svc)
+        if cid:
+            state["containers"][cid]["State"] = {"Status": "running", "Health": {"Status": "healthy"}}
+            state.setdefault("started", []).append(svc)
+            _save(state)
+        return 0
+
     if sub == "restart":
         svc = rest[-1]
         cid = state["service_containers"].get(svc)
@@ -218,6 +228,27 @@ def cmd_compose(args, state):
     return 1
 
 
+def cmd_exec(args, state):
+    """`docker exec <cid> python3 -c <snapshot>`: the engine's semantic
+    snapshot. state["semantic_snapshots"] is consumed in order (the last one
+    repeats); a stopped container or state["exec_should_fail"] fails."""
+    target = args[0] if args else ""
+    cont = _lookup_container_or_image(target, state) or {}
+    if state.get("exec_should_fail") or (cont.get("State") or {}).get("Status") != "running":
+        print("fake_docker: exec failed", file=sys.stderr)
+        return 1
+    snaps = state.get("semantic_snapshots") or [state.get("semantic_snapshot")]
+    snap = snaps[0]
+    if len(snaps) > 1:
+        state["semantic_snapshots"] = snaps[1:]
+        _save(state)
+    if snap is None:
+        print("fake_docker: no semantic snapshot configured", file=sys.stderr)
+        return 1
+    print(json.dumps(snap))
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     if not argv:
@@ -228,6 +259,8 @@ def main():
         return cmd_compose(argv[1:], state)
     if argv[0] == "inspect":
         return cmd_inspect(argv[1:], state)
+    if argv[0] == "exec":
+        return cmd_exec(argv[1:], state)
     if argv[0] == "image" and len(argv) > 1 and argv[1] == "inspect":
         return cmd_image_inspect(argv[2:], state)
     print(f"fake_docker: unsupported command: {argv}", file=sys.stderr)

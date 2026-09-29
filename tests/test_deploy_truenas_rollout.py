@@ -160,6 +160,22 @@ class RolloutScriptTestBase(unittest.TestCase):
         self._write_wrapper("docker", FAKE_DOCKER)
         self._write_wrapper("curl", FAKE_CURL)
         self.set_open_files([])  # default: lsof reports nothing open
+        self.docker_state = os.path.join(self.tmp, "docker_state.json")
+        self.set_semantic()
+
+    def set_semantic(self, *, exec_fail=False, **fields):
+        """The running engine's online semantic snapshot (what the script
+        reads through the Beets web API via `docker exec`)."""
+        snap = {"items": 100, "albums": 10, "listed_items": 100, "listed_albums": 10,
+                "digest": "d" * 64, "plugin_version": "1.2.0"}
+        snap.update(fields)
+        if "items" in fields and "listed_items" not in fields:
+            snap["listed_items"] = fields["items"]
+        state = {"containers": {"cid-beets": {"Name": "/beets", "State": {"Status": "running"}}},
+                 "service_containers": {"beets": "cid-beets"}, "images": {},
+                 "semantic_snapshot": snap, "exec_should_fail": exec_fail}
+        with open(self.docker_state, "w", encoding="utf-8") as f:
+            json.dump(state, f)
 
     def _write_wrapper(self, name, target_py):
         path = os.path.join(self.fakebin, name)
@@ -184,6 +200,7 @@ class RolloutScriptTestBase(unittest.TestCase):
         env["PATH"] = self.fakebin + os.pathsep + env["PATH"]
         env["STACK_DIR"] = self.tmp
         env["VERSION"] = "0.1.6"
+        env["FAKE_DOCKER_STATE"] = self.docker_state
         for k, v in extra.items():
             env[k] = str(v)
         return env
@@ -193,6 +210,7 @@ class RolloutScriptTestBase(unittest.TestCase):
         with open(snippet_path, "w", newline="\n") as f:
             f.write("#!/usr/bin/env bash\nset -Eeuo pipefail\n")
             f.write(f'source "{SCRIPT.as_posix()}"\n')
+            f.write('ENGINE_CID="cid-beets"\n')
             f.write(body + "\n")
         return subprocess.run(
             [BASH, snippet_path], env=env or self.base_env(),
@@ -237,7 +255,10 @@ verify_authoritative_database
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("authoritative database missing", res.stderr)
 
-    def test_query_failure_on_non_sqlite_file_is_rejected(self):
+    def test_online_check_reads_the_engine_api_never_the_live_sqlite_file(self):
+        """While Beets runs the live file is never opened: even bytes that
+        are not SQLite pass, because counts and identity come from the
+        engine's own web API (the main file is only hashed, informationally)."""
         bad = os.path.join(self.tmp, "musiclibrary.blb")
         with open(bad, "wb") as f:
             f.write(b"this is not a sqlite database file at all")
@@ -245,25 +266,52 @@ verify_authoritative_database
 AUTH_DB_PATH="{bad}"
 STALE_DB_PATH="{self.tmp}/missing/musiclibrary.blb"
 verify_authoritative_database
+echo "ITEMS=$AUTH_ITEM_COUNT DIGEST=$AUTH_SEMANTIC_DIGEST"
 """)
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("quick_check failed to execute", res.stderr)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("ITEMS=100 DIGEST=" + "d" * 64, res.stdout)
+        self.assertIn("informational only", res.stderr)
 
-    def test_corrupted_but_openable_db_fails_quick_check(self):
+    def test_engine_api_unreachable_is_rejected(self):
         db = os.path.join(self.tmp, "musiclibrary.blb")
         make_sqlite_db(db, items=500, albums=50)
-        corrupt_db_keep_openable(db)
+        self.set_semantic(exec_fail=True)
         res = self.run_snippet(f"""
 AUTH_DB_PATH="{db}"
 STALE_DB_PATH="{self.tmp}/missing/musiclibrary.blb"
 verify_authoritative_database
 """)
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("quick_check", res.stderr)
+        self.assertIn("could not read the library through", res.stderr)
+
+    def test_unhealthy_plugin_is_rejected(self):
+        db = os.path.join(self.tmp, "musiclibrary.blb")
+        make_sqlite_db(db)
+        self.set_semantic(plugin_version="")
+        res = self.run_snippet(f"""
+AUTH_DB_PATH="{db}"
+STALE_DB_PATH="{self.tmp}/missing/musiclibrary.blb"
+verify_authoritative_database
+""")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("webmanager plugin is not healthy", res.stderr)
+
+    def test_stats_and_listing_disagreement_is_rejected(self):
+        db = os.path.join(self.tmp, "musiclibrary.blb")
+        make_sqlite_db(db)
+        self.set_semantic(items=100, listed_items=99)
+        res = self.run_snippet(f"""
+AUTH_DB_PATH="{db}"
+STALE_DB_PATH="{self.tmp}/missing/musiclibrary.blb"
+verify_authoritative_database
+""")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("listed 99", res.stderr)
 
     def test_suspiciously_low_item_count_is_rejected(self):
         db = os.path.join(self.tmp, "musiclibrary.blb")
         make_sqlite_db(db, items=2, albums=1)
+        self.set_semantic(items=2, albums=1)
         res = self.run_snippet(f"""
 AUTH_DB_PATH="{db}"
 STALE_DB_PATH="{self.tmp}/missing/musiclibrary.blb"
@@ -718,25 +766,44 @@ class AuthoritativeDbUnchangedPostDeployTests(RolloutScriptTestBase):
         res = self.run_snippet(f"""
 AUTH_DB_PATH="{db}"
 AUTH_ITEM_COUNT=999
-AUTH_ALBUM_COUNT=2
+AUTH_ALBUM_COUNT=10
 AUTH_DB_SHA256="deadbeef"
 assert_authoritative_db_unchanged
 """)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("item count changed", res.stderr)
 
-    def test_checksum_change_is_detected(self):
+    def test_live_main_file_hash_change_alone_is_informational_not_a_verdict(self):
+        """In WAL mode the main .blb can change (checkpoint) with no logical
+        change, and stay identical while the WAL holds changes: the live
+        hash is recorded, never used as proof either way."""
         db = os.path.join(self.tmp, "musiclibrary.blb")
         make_sqlite_db(db, items=10, albums=2)
         res = self.run_snippet(f"""
 AUTH_DB_PATH="{db}"
-AUTH_ITEM_COUNT=10
-AUTH_ALBUM_COUNT=2
+AUTH_ITEM_COUNT=100
+AUTH_ALBUM_COUNT=10
+AUTH_SEMANTIC_DIGEST="{"d" * 64}"
 AUTH_DB_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 assert_authoritative_db_unchanged
 """)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("ONLINE SEMANTIC INTEGRITY confirmed", res.stderr)
+        self.assertIn("NOT a byte-identity claim", res.stderr)
+
+    def test_identity_digest_change_is_detected(self):
+        db = os.path.join(self.tmp, "musiclibrary.blb")
+        make_sqlite_db(db, items=10, albums=2)
+        res = self.run_snippet(f"""
+AUTH_DB_PATH="{db}"
+AUTH_ITEM_COUNT=100
+AUTH_ALBUM_COUNT=10
+AUTH_SEMANTIC_DIGEST="{"e" * 64}"
+AUTH_DB_SHA256="x"
+assert_authoritative_db_unchanged
+""")
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("SHA-256 changed", res.stderr)
+        self.assertIn("identity digest changed", res.stderr)
 
     def test_unchanged_db_passes(self):
         db = os.path.join(self.tmp, "musiclibrary.blb")
@@ -911,6 +978,8 @@ class EndToEndFixture(unittest.TestCase):
             "service_containers": {
                 "beets": "cid-beets", "beets-web-manager": "cid-webmgr", "lidarr": "cid-lidarr",
             },
+            "semantic_snapshot": {"items": 3144, "albums": 200, "listed_items": 3144, "listed_albums": 200,
+                                  "digest": "a" * 64, "plugin_version": "1.2.0"},
             "images": {
                 self.GOOD_IMAGE: {
                     "Id": "sha256:goodimageid",
@@ -1215,3 +1284,78 @@ class HelpAndCliLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(BASH, _NO_BASH_REASON)
+class OfflineDbIdentityTests(EndToEndFixture):
+    """--offline-db-identity: stop Beets, hash only a settled database,
+    always restart it, and re-verify semantics."""
+
+    def _state(self):
+        with open(self.state_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def _sha(self):
+        import hashlib
+        with open(self.auth_db, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def test_settled_database_is_hashed_and_engine_restarted(self):
+        res = self.run_script("--offline-db-identity")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("OFFLINE BYTE IDENTITY", res.stdout)
+        self.assertIn("WAL settled:              yes", res.stdout)
+        self.assertIn(self._sha(), res.stdout)
+        self.assertIn("beets", self._state().get("started", []))
+        self.assertEqual(self._state()["containers"]["cid-beets"]["State"]["Status"], "running")
+
+    def test_baseline_comparison(self):
+        res = self.run_script("--offline-db-identity", env=self.env(BASELINE_DB_SHA256=self._sha()))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("IDENTICAL to baseline", res.stdout)
+
+    def test_unsettled_wal_is_never_claimed_and_engine_still_restarts(self):
+        with open(self.auth_db + "-wal", "wb") as f:
+            f.write(b"\x00" * 4096)
+        res = self.run_script("--offline-db-identity")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("NOT claimed", res.stderr)
+        self.assertIn("database sha256:          not-claimed", res.stdout)
+        self.assertNotIn(self._sha(), res.stdout)
+        self.assertIn("beets", self._state().get("started", []))
+
+    def test_digest_change_across_restart_fails_and_engine_is_left_running(self):
+        state = self._state()
+        snap = dict(state["semantic_snapshot"])
+        state["semantic_snapshots"] = [snap, {**snap, "digest": "b" * 64}]
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        res = self.run_script("--offline-db-identity")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("digest differs", res.stderr)
+        self.assertEqual(self._state()["containers"]["cid-beets"]["State"]["Status"], "running")
+
+
+class DbIntegrityWordingTests(unittest.TestCase):
+    """A live main-file hash is never presented as proof of DB identity."""
+
+    def _body(self, name):
+        m = re.search(r"^%s\(\) \{\n(.*?)^\}" % re.escape(name), SCRIPT_SOURCE, re.S | re.M)
+        self.assertIsNotNone(m, name)
+        return m.group(1)
+
+    def test_online_checks_never_open_sqlite(self):
+        for fn in ("verify_authoritative_database", "assert_authoritative_db_unchanged"):
+            self.assertNotIn("sqlite_ro_query", self._body(fn), fn)
+
+    def test_live_hash_is_not_a_verdict(self):
+        self.assertNotIn("authoritative database SHA-256 changed", SCRIPT_SOURCE)
+        self.assertNotIn("byte-identical", SCRIPT_SOURCE.lower())
+        self.assertIn("informational only", self._body("assert_authoritative_db_unchanged"))
+
+    def test_offline_hash_requires_a_stopped_engine_and_settled_wal(self):
+        body = self._body("run_offline_db_identity")
+        stop, hash_at = body.index("stop -t 60"), body.index('sha="$(sha256_file')
+        self.assertLess(stop, hash_at)
+        self.assertIn('if [[ "$settled" -eq 1 ]]', body)
+        self.assertIn('_compose start "$ENGINE_SERVICE"', body)
