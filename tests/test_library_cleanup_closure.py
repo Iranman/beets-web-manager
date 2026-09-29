@@ -351,8 +351,12 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
             src = self._function_source(func)
             for needle in banned:
                 self.assertNotIn(needle, src, msg=f"{func} still contains {needle}")
+        # Dry run previews; a live run goes only through the reviewed-cleanup
+        # authority (re-verified pairs, engine quarantine, verification).
         self.assertIn("composite_workflows.plan_library_cleanup", self._function_source("run_dedup_cleanup"))
-        self.assertIn("composite_workflows.apply_library_cleanup", self._function_source("run_dedup_cleanup"))
+        self.assertIn("_duplicate_cleanup.plan_reviewed_cleanup", self._function_source("run_dedup_cleanup"))
+        self.assertIn("_duplicate_cleanup.apply_reviewed_cleanup", self._function_source("run_dedup_cleanup"))
+        self.assertNotIn("apply_library_cleanup", self._function_source("run_dedup_cleanup"))
         self.assertIn("composite_workflows.plan_folder_cleanup", self._function_source("_album_cleanup_remove_empty_tree"))
 
     def test_dedup_cleanup_engine_unavailable_fails_closed(self):
@@ -361,7 +365,11 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             candidate = Path(td) / "song.mp3"
             candidate.write_bytes(b"audio")
-            with mock.patch.object(app_module.composite_workflows, "plan_library_cleanup", side_effect=BeetsUnavailableError("offline")):
+            import backend.dedup_service as dedup_service
+            pair = {"delete_item_id": 2, "keep_item_id": 1}
+            with mock.patch.object(dedup_service, "_dedup_pairs_for_paths", return_value=([pair], [])), \
+                    mock.patch.object(dedup_service._duplicate_cleanup, "plan_reviewed_cleanup",
+                                      side_effect=BeetsUnavailableError("offline")):
                 with app_module.app.test_request_context(
                     "/api/dedup/cleanup",
                     method="POST",

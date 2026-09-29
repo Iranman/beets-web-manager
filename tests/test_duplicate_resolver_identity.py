@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import app as app_module
+import backend.duplicate_cleanup as duplicate_cleanup
 from backend.duplicate_identity import release_relation
 try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
@@ -141,7 +142,7 @@ class ManualCleanupContractTests(unittest.TestCase):
     def test_no_explicit_paths_deletes_nothing(self):
         with mock.patch.object(app_module.composite_workflows, "plan_library_cleanup",
                                return_value={"ok": False, "results": [], "planned_count": 0}) as plan, \
-                mock.patch.object(app_module.composite_workflows, "apply_library_cleanup") as apply_:
+                mock.patch.object(duplicate_cleanup, "apply_reviewed_cleanup") as apply_:
             with self._post({}):
                 response = app_module.dedup_cleanup()
         data = response.get_json()
@@ -153,7 +154,7 @@ class ManualCleanupContractTests(unittest.TestCase):
         planned = {"ok": True, "results": [{"path": "/music/x.flac", "ok": True}], "planned_count": 1,
                    "operation_id": "op-1"}
         with mock.patch.object(app_module.composite_workflows, "plan_library_cleanup", return_value=planned), \
-                mock.patch.object(app_module.composite_workflows, "apply_library_cleanup") as apply_:
+                mock.patch.object(duplicate_cleanup, "apply_reviewed_cleanup") as apply_:
             with self._post({"paths": ["/music/x.flac"]}):
                 response = app_module.dedup_cleanup()
         data = response.get_json()

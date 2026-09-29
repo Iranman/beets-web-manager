@@ -132,14 +132,14 @@ class ScheduledDuplicateStepTests(unittest.TestCase):
             "source_recording_id": "3xjazw6zbadid", "lib_recording_id": "3xjazw6zbadid",
             "source_disc": 1, "source_track": 1, "lib_disc": 1, "lib_track": 1,
         }]}
-        cleanup = mock.Mock(return_value=({"ok": True, "deleted": 1, "results": []}, 200))
+        cleanup = mock.Mock(return_value={"ok": True, "deleted": 1, "skipped": 0, "folders_removed": 0, "results": []})
         patches = [
             patch_app_family(app_module, "MUSIC_ROOT", root),
             patch_app_family(app_module, "WEB_MANAGER_DATA_DIR", data),
             patch_app_family(app_module, "_running_job_of_type", return_value=None),
             patch_app_family(app_module, "start_dedup_scan", return_value=({"ok": True, "job_id": "j1"}, 200)),
             patch_app_family(app_module, "_wait_for_child_job", return_value=scan),
-            patch_app_family(app_module, "run_dedup_cleanup", cleanup),
+            patch_app_family(app_module, "_unattended_reviewed_cleanup", cleanup),
             patch_app_family(app_module, "_maintenance_save_last_report"),
         ]
         for p in patches:
@@ -173,9 +173,11 @@ class ScheduledDuplicateStepTests(unittest.TestCase):
 
     def test_only_the_explicit_authorization_lets_the_step_delete(self):
         _result, cleanup, _log, drop, _keep = self._run(authorized=True)
+        # Authorized runs go through the reviewed-cleanup authority (re-verify,
+        # engine quarantine, verify) with exactly the proposed delete rows.
         cleanup.assert_called_once()
-        self.assertEqual(cleanup.call_args.args[0]["paths"], [str(drop.resolve())])
-        self.assertFalse(cleanup.call_args.args[0]["dry_run"])
+        proposal = cleanup.call_args.args[0]
+        self.assertEqual([row["delete"]["path"] for row in proposal if row["action"] == "delete"], [str(drop)])
 
 
 class AuthorizationRouteTests(unittest.TestCase):

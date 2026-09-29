@@ -32,6 +32,8 @@ from backend.auth_service import _transaction_user_label
 from backend.dedup_service import _maintenance_full_duplicate_scan
 from backend.job_service import _running_job_of_type
 from backend.maintenance_service import _maintenance_load_last_report
+import backend.duplicate_cleanup as _duplicate_cleanup
+import backend.library_integrity_service as _library_integrity
 
 # ── ARCH-001 extracted code ──
 
@@ -2118,6 +2120,71 @@ def dedup_unattended_cleanup_set():
     )
     _app_logger.warning("Unattended duplicate deletion %s", "ENABLED" if enabled else "disabled")
     return jsonify(_unattended_cleanup_status())
+
+
+@app.post("/api/dedup/reviewed-cleanup/plan")
+def dedup_reviewed_cleanup_plan():
+    """Preview removing reviewed duplicate copies (Plan step; nothing changes).
+
+    Body: {"pairs": [{"delete_item_id", "keep_item_id"}, ...]}; without
+    "pairs", every "delete" row of the last scan proposal. Each pair is
+    re-verified against live Beets; drifted pairs are returned as skipped.
+    Approve and apply through /api/transactions/<id>/approve and /apply."""
+    payload = request.get_json(silent=True) or {}
+    status = _unattended_cleanup_status()
+    raw = payload.get("pairs")
+    if raw is not None and not isinstance(raw, list):
+        return jsonify({"ok": False, "error": "pairs must be a list"}), 400
+    try:
+        wanted = [(int(p["delete_item_id"]), int(p["keep_item_id"])) for p in raw] if raw else None
+    except (TypeError, ValueError, KeyError):
+        return jsonify({"ok": False, "error": "each pair needs integer delete_item_id and keep_item_id"}), 400
+    pairs = _duplicate_cleanup.pairs_from_proposal(status["proposal"], wanted)
+    known = {(p["delete_item_id"], p["keep_item_id"]) for p in pairs}
+    pairs += [{"delete_item_id": d, "keep_item_id": k} for d, k in (wanted or []) if (d, k) not in known]
+    if not pairs:
+        return jsonify({"ok": False, "error": "no reviewed pairs to plan"}), 400
+    try:
+        res = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=_s(payload.get("reason") or "Reviewed duplicate cleanup"))
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    return jsonify(res), (200 if res.get("ok") else 409)
+
+
+@app.get("/api/library/album-duplicate-analysis")
+def library_album_duplicate_analysis_last():
+    """The last read-only duplicate-album analysis (see POST)."""
+    report = _library_integrity.load_album_duplicate_analysis()
+    return jsonify({"ok": report is not None, "report": report}), (200 if report is not None else 404)
+
+
+@app.post("/api/library/album-duplicate-analysis")
+def library_album_duplicate_analysis_run():
+    """Read-only: group album rows by Release Group and propose a merge plan
+    per group (retained row, item moves, overlapping slots, blockers).
+    Nothing is merged; the report is saved for review."""
+    try:
+        return jsonify({"ok": True, "report": _library_integrity.run_album_duplicate_analysis()})
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+
+
+@app.get("/api/library/untracked-inventory")
+def library_untracked_inventory_last():
+    """Summary of the last read-only untracked-file inventory (see POST)."""
+    summary = _library_integrity.load_untracked_inventory_summary()
+    return jsonify({"ok": summary is not None, "summary": summary}), (200 if summary is not None else 404)
+
+
+@app.post("/api/library/untracked-inventory")
+def library_untracked_inventory_run():
+    """Start the read-only inventory of audio files Beets does not track:
+    one walk of the music root, AcoustID cache only (no API calls), evidence
+    saved under the data directory. Nothing is deleted, imported or moved."""
+    if _running_job_of_type({_library_integrity.INVENTORY_JOB_TYPE}):
+        return jsonify({"ok": False, "error": "An untracked-file inventory is already running"}), 409
+    job = _library_integrity.start_untracked_inventory_job()
+    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/dedup/maintenance-run")

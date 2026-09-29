@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from flask import Response, jsonify, request
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
+import backend.duplicate_cleanup as duplicate_cleanup
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
 from backend.job_service import _running_job_of_type, _wait_for_child_job
@@ -684,14 +685,15 @@ def api_transaction_cancel(transaction_id):
 
 
 def _item_file_replacement_response(fn, transaction_id):
-    """Run an item-file replacement apply/rollback with the same error
-    mapping as the item replacement routes (no raw engine text leaks)."""
+    """Run an engine-backed apply/rollback (item-file replacement, reviewed
+    duplicate cleanup) with the same error mapping as the item replacement
+    routes (no raw engine text leaks)."""
     try:
         res = fn(transaction_id)
     except BeetsUnavailableError as exc:
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
     except BeetsError as exc:
-        return jsonify({"ok": False, "error": "Track replacement failed.", "code": exc.error_code or "beets_error"}), 400
+        return jsonify({"ok": False, "error": "The engine refused the operation.", "code": exc.error_code or "beets_error"}), 400
     status_code = 200 if res.get("ok") else (409 if res.get("code") in ("not_approved", "already_applied") else 400)
     return jsonify(res), status_code
 
@@ -702,6 +704,8 @@ def api_transaction_apply(transaction_id):
         tx = transactions.get(transaction_id)
         if (tx.get("metadata") or {}).get("mutation_family") == composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY:
             return _item_file_replacement_response(composite_workflows.apply_track_replacement, transaction_id)
+        if (tx.get("metadata") or {}).get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
+            return _item_file_replacement_response(duplicate_cleanup.apply_reviewed_cleanup, transaction_id)
         if tx.get("operation_type") == "Metadata Update":
             job = _start_metadata_apply_transaction(transaction_id)
         else:
@@ -751,14 +755,8 @@ def api_transaction_rollback(transaction_id):
         mutation_family = (engine_tx.get("metadata") or {}).get("mutation_family")
 
         try:
-            if mutation_family == "track_replacement_v1":
-                res = composite_workflows.rollback_track_replacement(transaction_id)
-            elif mutation_family == "import_review_cleanup_v1":
+            if mutation_family == "import_review_cleanup_v1":
                 res = composite_workflows.rollback_import_review_cleanup(transaction_id)
-            elif mutation_family == "bulk_import_replacement_v1":
-                # SEC-002 Wave 18 final review: explicit, known dispatch --
-                # no "unknown family -> try bulk replacement" fallback.
-                res = composite_workflows.rollback_bulk_import_replacement(transaction_id)
             elif mutation_family == "album_mb_track_repair_v1":
                 res = composite_workflows.rollback_album_mb_track_repair(transaction_id)
             elif mutation_family == "existing_album_reconcile_v1":
@@ -792,6 +790,8 @@ def api_transaction_rollback(transaction_id):
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
     if (tx.get("metadata") or {}).get("mutation_family") == composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY:
         return _item_file_replacement_response(composite_workflows.rollback_track_replacement, transaction_id)
+    if (tx.get("metadata") or {}).get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
+        return _item_file_replacement_response(duplicate_cleanup.rollback_reviewed_cleanup, transaction_id)
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:
