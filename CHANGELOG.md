@@ -6,6 +6,29 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+- **Album-row merge (ARCH-020).** Beets plugin 1.3.0 adds `/webmanager/album-row-merge` with rollback and status endpoints.
+  - It merges the duplicate album rows of one canonical album by changing item ownership only: no tag write, no file move.
+  - It requires Release Group **and** Release ID proof, full source coverage, unchanged identity and content, and no slot overlap.
+  - Rollback restores the original album rows at their original ids.
+  - `POST /api/library/album-duplicate-analysis/plan-merge` plans only groups the live analysis proves deterministic.
+- **Untracked recovery (ARCH-021).** Engine ops `/webmanager/untracked/attach` and `/untracked/quarantine`, with rollback and status.
+  - `GET /api/library/untracked-recovery/candidates` and `POST /api/library/untracked-recovery/plan` expose four action classes, with backend-owned eligibility:
+    - quarantine only byte-identical copies of tracked files;
+    - attach a missing album file after tag, MusicBrainz and AcoustID proof;
+    - track a better encoding, then plan its replacement through the one replacement authority;
+    - no action otherwise.
+  - The inventory is incremental: it reuses persisted records and hashes only new or changed files.
+- **Durable jobs and locks (ARCH-004).**
+  - Job records persist under `<data>/jobs` with checkpoints, heartbeats and a new terminal status, `recovery_required`. After a restart, an interrupted job is never re-run: read-only jobs become `failed`, other jobs `recovery_required`.
+  - Durable, hierarchical, cross-process resource locks live under `<data>/locks`.
+  - Engine-backed transactions interrupted by a restart are finished from engine evidence, never replayed.
+- **Provider boundary (ARCH-006):** typed outcomes (`confirmed`, `no_result`, `unavailable`, `rate_limited`, `authentication_error`, `transient_error`, and others), bounded Retry-After-aware retries and redaction. Used by AcoustID lookups and MusicBrainz release fetches.
+
+### Fixed
+- An AcoustID outage, throttle, rejected key or timeout was cached permanently as "no match" for that file. Only real answers are cached now.
+- A rollback job could report success after its transaction's "Rolled Back" status had been overwritten back to "Running" (ARCH-019). The route now marks the transaction Running before the job starts.
+
 ## v0.1.41 - 2026-09-29
 
 ### Fixed

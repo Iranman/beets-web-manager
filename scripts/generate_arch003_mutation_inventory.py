@@ -455,6 +455,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "ENGINE_NATIVE_BEETS", "", "job-engine-beet-runner"
         if sink.kind == "filesystem" and ("replace(" in text or "rename(" in text) and not _text_looks_path_like(text):
             return "READ_ONLY_FALSE_POSITIVE", "", "string-replace-false-positive"
+        if func.startswith(("JobStore.", "PythonJob.")):
+            # ARCH-004 durable job records: atomic writes/deletes of
+            # <web-manager-data>/jobs/<id>.json only; never library media.
+            return "APP_STATE", "", "durable-job-record-state"
         return "NEEDS_REVIEW", "", "job-engine-sink-not-individually-reviewed"
 
     # 7. helpers_mb.py
@@ -490,6 +494,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             # Atomic write of web-manager-data/duplicate_cleanup_authorization.json
             # (the operator's unattended-deletion switch); never library media.
             return "APP_STATE", "", "dedup-authorization-state-file"
+        if file == "backend/resource_locks.py":
+            # ARCH-004 durable lock records under <web-manager-data>/locks
+            # (O_EXCL create, atomic replace, owner-checked delete); never media.
+            return "APP_STATE", "", "durable-resource-lock-state"
         if file in ("backend/library_integrity_service.py", "backend/untracked_inventory.py"):
             # Read-only integrity reports: the only writes are the report and
             # evidence files under web-manager-data; /music is only read.
