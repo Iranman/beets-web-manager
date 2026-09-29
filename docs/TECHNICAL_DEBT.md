@@ -46,6 +46,20 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Status: Closed / Completed (v0.1.25).
 - Resolution: All composite workflows were migrated to `backend/composite_workflows.py` backed by `backend/beets_adapter.py` and `TransactionStore`. `backend/config_manager.py` was introduced for safe atomic configuration updates. `backend/beets_client.py` and all legacy control-agent references were completely eliminated (zero active references). Full 2,675 test suite and architecture invariants verified.
 
+## ARCH-020 Duplicate Album Rows Need A Working Engine Merge
+
+- Affected area: `composite_workflows.plan/apply_album_duplicate_merge`, the webmanager plugin's `modify` allowlist.
+- Evidence: the existing album-merge Apply reassigns items through `/webmanager/modify` with `album_id`, which `ALLOWED_ITEM_FIELDS` deliberately excludes, so it cannot move items between album rows. The read-only `POST /api/library/album-duplicate-analysis` (v0.1.40) now produces a per-Release-Group merge proposal, but nothing can apply it yet.
+- Desired state: an engine op that moves items into a retained album row by Release Group proof (keeping Release/Recording IDs, disc/track), with Plan → Approve → Apply → Verify → Rollback, used only for groups the analysis marks deterministic.
+- Priority: P2. Status: Open.
+
+## ARCH-021 Untracked Files Under The Music Root
+
+- Affected area: `/music`.
+- Evidence: roughly 103k audio files are not tracked by Beets. v0.1.40 adds a read-only inventory (`POST /api/library/untracked-inventory`) that classifies them and persists evidence; no cleanup or import exists for them yet.
+- Desired state: category-scoped, reviewed recovery (import canonical-looking album files) and cleanup (exact duplicates of tracked files, import artifacts) through engine-owned quarantine, never by name alone.
+- Priority: P2. Status: Open (discovery done).
+
 ## ARCH-019 Job/Transaction-Status Test Can Be Intermittently Flaky Under CI Load
 
 - Affected area: `tests/test_import_review_attach_enforcement.py::test_undo_restores_previous_identity_values`, which asserts a transaction's `status` is already `"Rolled Back"` immediately after its rollback job reports `success`.

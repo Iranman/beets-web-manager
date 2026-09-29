@@ -6,6 +6,38 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- Unattended duplicate cleanup no longer uses the old cleanup path. That path ran `os.unlink` inside the Web Manager on the read-only `/music` mount: the delete failed, only a warning was logged, and the transaction was still marked Completed with the file reported deleted. Its "rollback" did nothing. The path is removed.
+- Manual live duplicate cleanup (`/api/dedup/cleanup` with `dry_run: false`) goes through the reviewed-cleanup authority. Every path must be the source copy of a proven duplicate pair; anything else is left in place and reported.
+
+### Added
+- **Reviewed duplicate cleanup** (`duplicate_cleanup_v1`): Plan → Approve → Apply → Verify → Rollback.
+  - `POST /api/dedup/reviewed-cleanup/plan` re-proves every reviewed pair against live Beets using the scan's own policy: shared AcoustID recording, same release slot, keeper policy, album-slot gate, and no lossless rival.
+  - It also checks that paths, sizes and slot evidence have not drifted since the proposal. A drifted pair is skipped and stays in review.
+  - Apply needs approval, then verifies keepers, album slots and the exact library-count change.
+  - Unattended cleanup, when an operator authorizes it, uses the same authority.
+- Beets plugin 1.2.0: `POST /webmanager/quarantine-remove-items` and its rollback. The engine refuses the whole request unless every file still matches its reviewed SHA-256. It moves each file into the engine quarantine (never deleted) and removes the row through Beets, recording both in a manifest. On failure it puts everything back. Rollback re-adds the rows, into their album row when that row still exists.
+- **One replacement authority** (`backend/item_replacement.py`). The item route, the music-format quality pipeline, import album merges and reconciliation reviews all plan through it onto the canonical engine-backed item-file replacement:
+  - AcoustID decides; text never does.
+  - The slot keeps its identity.
+  - An occupied destination is displaced only for identical audio.
+  - Anything unproven fails closed, with both files kept.
+- Import merges and the music-format pipeline now *plan* replacements and leave them for approval, instead of applying them unreviewed. The pipeline records "Replacement awaiting approval" and never re-downloads a pending replacement.
+- Read-only library integrity reports:
+  - `POST /api/library/album-duplicate-analysis` groups album rows by Release Group and proposes a merge plan per group: retained row, item moves, overlapping slots, edition differences, blockers. It merges nothing.
+  - `POST /api/library/untracked-inventory` runs a one-walk inventory of audio files Beets does not track. It reads AcoustID from the cache only, saves evidence under `/web-manager-data/untracked_inventory/`, and mutates nothing.
+- `scripts/deploy_truenas_web_manager.sh --offline-db-identity`: stops Beets briefly, hashes the database only when its WAL is settled, restarts Beets and re-verifies it.
+
+### Changed
+- Deploy verification is WAL-aware. Online checks read the library through the Beets web API (counts, an identity digest over every item and album, plugin health) instead of opening SQLite. A live main-file hash is logged as informational only, never as proof of an unchanged database.
+
+### Removed
+- The legacy replacement engine and its bulk import wrappers:
+  - `transaction_engine` track and bulk replacement functions.
+  - `composite_workflows.plan/apply/rollback_bulk_import_replacement`.
+  - The `unlink`-based `apply_library_cleanup` / `rollback_library_cleanup`.
+- None of these have production callers left.
+
 ## v0.1.39 - 2026-09-29
 
 ### Fixed

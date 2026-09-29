@@ -2835,7 +2835,7 @@
       "method": "POST",
       "endpoint": "dedup_cleanup",
       "security_classification": "ADMIN_ONLY",
-      "purpose": "dedup cleanup",
+      "purpose": "Manual duplicate cleanup for explicit paths: dry run previews; a live run goes through the reviewed-cleanup authority (live re-verification, engine quarantine by content hash, verification). No local file mutation.",
       "required_role_or_privilege": "owner/admin shared application secret",
       "handles_secrets": false,
       "accesses_files": true,
@@ -2845,8 +2845,9 @@
       "rate_limit_required": true,
       "rate_limit_implemented": false,
       "existing_security_tests": [
-        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
-        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+        "tests/test_duplicate_cleanup.py",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
       ]
     },
     {
@@ -2907,7 +2908,7 @@
       "method": "POST",
       "endpoint": "fix_leaked_db_paths",
       "security_classification": "ADMIN_ONLY",
-      "purpose": "Fix leaked path DB rows (DB-only update — no files are moved).",
+      "purpose": "Fix leaked path DB rows (DB-only update \u2014 no files are moved).",
       "required_role_or_privilege": "owner/admin shared application secret",
       "handles_secrets": false,
       "accesses_files": true,
@@ -3194,7 +3195,7 @@
       "method": "POST",
       "endpoint": "item_replacement_plan",
       "security_classification": "ADMIN_ONLY",
-      "purpose": "SEC-002 Wave 17: manual, human-reviewed counterpart to the automatic music-format replacement job. Verifies a user-supplied replacement candidate against the existing track via real AcoustID fingerprint matching, then creates a track_replacement_v1 engine transaction plan (Plan step only -- no mutation).",
+      "purpose": "Plan step only (no mutation): replace an album item's file with another tracked library item's file through the one replacement authority (backend.item_replacement) -- AcoustID re-proof, canonical-destination check, item_file_replacement_v1 Preview transaction. Untracked/staged candidate files are refused.",
       "required_role_or_privilege": "owner/admin",
       "handles_secrets": false,
       "accesses_files": true,
@@ -3204,7 +3205,9 @@
       "rate_limit_required": true,
       "rate_limit_implemented": true,
       "existing_security_tests": [
-        "tests/test_sec002_wave17_track_replacement.py"
+        "tests/test_sec002_wave17_track_replacement.py",
+        "tests/test_item_file_replacement_routes.py",
+        "tests/test_replacement_authority.py"
       ]
     },
     {
@@ -4567,6 +4570,97 @@
       "accesses_files": true,
       "creates_background_job": true,
       "destructive_or_high_impact": true
+    },
+    {
+      "method": "POST",
+      "endpoint": "dedup_reviewed_cleanup_plan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Plan step only (no mutation): re-verify reviewed duplicate pairs against live Beets (AcoustID, release slot, keeper policy, album-slot gate, content hash) and create a duplicate_cleanup_v1 Preview transaction; apply needs /api/transactions/<id>/approve then /apply.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_duplicate_cleanup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_album_duplicate_analysis_last",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_library_integrity_reports.py"
+      ],
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "purpose": "Read the last saved read-only duplicate-album analysis report."
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_album_duplicate_analysis_run",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_library_integrity_reports.py"
+      ],
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "purpose": "Read-only duplicate-album analysis by Release Group through the Beets web API (AcoustID cache only); saves a merge-proposal report, merges nothing."
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_untracked_inventory_last",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_library_integrity_reports.py"
+      ],
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "purpose": "Read the last saved untracked-file inventory summary."
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_untracked_inventory_run",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_library_integrity_reports.py"
+      ],
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "purpose": "Start a read-only inventory job over the read-only music mount (AcoustID cache only, no API calls); saves evidence, mutates nothing."
     }
   ]
 }

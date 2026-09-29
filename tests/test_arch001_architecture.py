@@ -264,6 +264,11 @@ class ApiContractTests(unittest.TestCase):
             ("/api/dedup/unattended-cleanup", "dedup_unattended_cleanup_status"),
             ("/api/dedup/unattended-cleanup", "dedup_unattended_cleanup_set"),
             ("/api/dedup/maintenance-run", "dedup_maintenance_run"),
+            ("/api/dedup/reviewed-cleanup/plan", "dedup_reviewed_cleanup_plan"),
+            ("/api/library/album-duplicate-analysis", "library_album_duplicate_analysis_last"),
+            ("/api/library/album-duplicate-analysis", "library_album_duplicate_analysis_run"),
+            ("/api/library/untracked-inventory", "library_untracked_inventory_last"),
+            ("/api/library/untracked-inventory", "library_untracked_inventory_run"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)
