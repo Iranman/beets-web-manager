@@ -141,7 +141,11 @@ report_failure() {
   _FAILURE_REPORTED=1
   {
     echo ""
-    echo "==================== ROLLOUT FAILED ===================="
+    if [[ "$MODE" == "offline-db-identity" ]]; then
+      echo "=============== OFFLINE DB CHECK FAILED ================"
+    else
+      echo "==================== ROLLOUT FAILED ===================="
+    fi
     echo "Failed stage:          ${STAGE}"
     echo "Backup directory:      ${BACKUP_DIR:-<none created yet>}"
     echo "Previous image ID:     ${PREVIOUS_IMAGE_ID:-<unknown/not reached>}"
@@ -1068,17 +1072,45 @@ wait_for_engine_semantics() {
   return 1
 }
 
+# Settles a WAL-mode database on a private COPY: main file + WAL are copied
+# into a temp dir, the copy is checkpointed and quick_checked, and the
+# settled copy is hashed. The authoritative files are only read.
+settle_copy_and_hash() {
+  local db="$1" wal="$2" tmp
+  tmp="$(mktemp -d)"
+  cp -p "$db" "${tmp}/${DB_FILENAME}"
+  [[ -e "$wal" ]] && cp -p "$wal" "${tmp}/${WAL_FILENAME}"
+  _py - "${tmp}/${DB_FILENAME}" <<'PYEOF'
+import hashlib, sqlite3, sys
+path = sys.argv[1]
+con = sqlite3.connect(path)
+try:
+    busy, log_frames, checkpointed = con.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+    check = con.execute("PRAGMA quick_check;").fetchone()[0]
+finally:
+    con.close()
+if busy:
+    print("busy"); sys.exit(2)
+digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+print(f"{check}|{digest}|{log_frames}|{checkpointed}")
+PYEOF
+  local rc=$?
+  rm -rf -- "$tmp"
+  return $rc
+}
+
 run_offline_db_identity() {
-  STAGE="offline-db-identity"
   log "=== Offline database byte-identity check (the Beets engine is stopped briefly) ==="
   resolve_compose_file
   discover_and_verify_mounts
-  local before after wal_path shm_path wal_size shm_size settled quick_check sha status
+  STAGE="offline-db-identity"
+  local before after wal_path shm_path wal_size shm_size settled quick_check sha status method
+  local orig_main_sha orig_wal_sha result frames
   before="$(checked_semantic_snapshot "before stop")"
   wal_path="$(dirname "$AUTH_DB_PATH")/${WAL_FILENAME}"
   shm_path="$(dirname "$AUTH_DB_PATH")/${SHM_FILENAME}"
 
-  log "Stopping ${ENGINE_SERVICE} gracefully so SQLite closes and settles its WAL..."
+  log "Stopping ${ENGINE_SERVICE} gracefully..."
   ENGINE_STOPPED_BY_US=1
   _compose stop -t 60 "$ENGINE_SERVICE" >&2
   status="$(docker inspect --format '{{.State.Status}}' "$ENGINE_CID")"
@@ -1088,15 +1120,29 @@ run_offline_db_identity() {
   [[ -e "$wal_path" ]] && wal_size="$(file_size "$wal_path")"
   [[ -e "$shm_path" ]] && shm_size="$(file_size "$shm_path")"
   settled=1
-  if [[ "$wal_size" != "absent" && "$wal_size" != "0" ]]; then
-    settled=0
-    warn "WAL still holds ${wal_size} bytes after a clean stop: byte identity is NOT claimed (the main file alone is not the database)."
-  fi
-  sha="not-claimed"
+  [[ "$wal_size" != "absent" && "$wal_size" != "0" ]] && settled=0
+
+  orig_main_sha="$(sha256_file "$AUTH_DB_PATH")"
+  orig_wal_sha="absent"
+  [[ -e "$wal_path" ]] && orig_wal_sha="$(sha256_file "$wal_path")"
   if [[ "$settled" -eq 1 ]]; then
+    method="main file (WAL empty or absent)"
     quick_check="$(sqlite_ro_query "$AUTH_DB_PATH" 'PRAGMA quick_check;')" || die "offline PRAGMA quick_check failed to execute"
-    [[ "$quick_check" == "ok" ]] || die "offline PRAGMA quick_check is not ok: '${quick_check}'"
-    sha="$(sha256_file "$AUTH_DB_PATH")"
+    sha="$orig_main_sha"
+  else
+    # Beets' web server does not close SQLite on stop, so its WAL is left
+    # unsettled. Never checkpoint the authoritative file: settle a copy.
+    warn "WAL holds ${wal_size} bytes after stop; settling a private copy (the authoritative files are only read)."
+    method="settled copy of main file + WAL (checkpointed off to the side)"
+    result="$(settle_copy_and_hash "$AUTH_DB_PATH" "$wal_path")" || die "could not settle a copy of the database"
+    quick_check="${result%%|*}"
+    sha="$(printf '%s' "$result" | cut -d'|' -f2)"
+    frames="$(printf '%s' "$result" | cut -d'|' -f3-)"
+  fi
+  [[ "$quick_check" == "ok" ]] || die "offline PRAGMA quick_check is not ok: '${quick_check}'"
+  [[ "$(sha256_file "$AUTH_DB_PATH")" == "$orig_main_sha" ]] || die "the authoritative database file changed while the engine was stopped"
+  if [[ -e "$wal_path" ]]; then
+    [[ "$(sha256_file "$wal_path")" == "$orig_wal_sha" ]] || die "the authoritative WAL changed while the engine was stopped"
   fi
 
   log "Restarting ${ENGINE_SERVICE}..."
@@ -1107,7 +1153,7 @@ run_offline_db_identity() {
     || die "library identity digest differs across the stop/start -- investigate before trusting this check"
 
   local verdict="n/a (no BASELINE_DB_SHA256 given)"
-  if [[ -n "${BASELINE_DB_SHA256:-}" && "$sha" != "not-claimed" ]]; then
+  if [[ -n "${BASELINE_DB_SHA256:-}" ]]; then
     if [[ "$sha" == "$BASELINE_DB_SHA256" ]]; then verdict="IDENTICAL to baseline"; else verdict="DIFFERENT from baseline"; fi
   fi
   {
@@ -1115,9 +1161,11 @@ run_offline_db_identity() {
     echo "  engine stopped cleanly:   yes"
     echo "  WAL (${WAL_FILENAME}):     ${wal_size}"
     echo "  SHM (${SHM_FILENAME}):     ${shm_size}"
-    echo "  WAL settled:              $([[ "$settled" -eq 1 ]] && echo yes || echo NO)"
-    echo "  PRAGMA quick_check:       ${quick_check:-not run (WAL unsettled)}"
+    echo "  WAL settled by engine:    $([[ "$settled" -eq 1 ]] && echo yes || echo "NO (settled on a private copy${frames:+; wal frames/checkpointed ${frames/|//}})")"
+    echo "  hashed:                   ${method}"
+    echo "  PRAGMA quick_check:       ${quick_check}"
     echo "  database sha256:          ${sha}"
+    echo "  authoritative files:      unchanged (main ${orig_main_sha:0:16}..., WAL ${orig_wal_sha:0:16}...)"
     echo "  baseline comparison:      ${verdict}"
     echo "ONLINE SEMANTIC INTEGRITY (before stop / after restart)"
     echo "  items:  $(snapshot_field "$before" items) / $(snapshot_field "$after" items)"
@@ -1125,7 +1173,6 @@ run_offline_db_identity() {
     echo "  digest: $(snapshot_field "$before" digest) / $(snapshot_field "$after" digest)"
     echo "  plugin: $(snapshot_field "$after" plugin_version)"
   }
-  [[ "$settled" -eq 1 ]] || die "offline byte identity could not be established (WAL unsettled); engine restarted and semantically verified"
   log "=== Offline check complete; ${ENGINE_SERVICE} restarted and verified. ==="
 }
 

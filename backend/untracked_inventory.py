@@ -13,8 +13,9 @@ Categories (first that applies):
 * ``same_recording_other_encoding`` -- the cached AcoustID recordings of the
   file include a Recording ID a tracked item carries.
 * ``import_artifact`` -- staged/historical import naming: Beets ``.N.ext``
-  duplicate suffix, download ``(NN)`` / ``{source-id}`` decorations, or a
-  staging/temp folder.
+  duplicate suffix, download ``(NN)`` / ``{source-id}`` decorations, a
+  never-resolved naming token such as ``{Album MbId}``, or a staging/temp
+  folder.
 * ``canonical_album_file_missing_from_beets`` -- sits in an album folder
   laid out like the library (``Artist (mbid)/Album (year) {rgid}/``) with a
   canonical ``Artist - Album - NN - Title.ext`` name.
@@ -44,6 +45,9 @@ _STAGING_DIR = re.compile(r"(^|/)(_?staging|\.?tmp|temp|incomplete|downloads?|sl
 _ARTIST_DIR = re.compile(r"\([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)$", re.I)
 _ALBUM_DIR = re.compile(r"\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$", re.I)
 _CANONICAL_NAME = re.compile(r"^.+ - .+ - \d{2,3} - .+\.[A-Za-z0-9]+$")
+# A naming-template token an old import never resolved, e.g. "{Album MbId}"
+# or "{Track ArtistMbId}" (Title Case words; real "{mbid}" suffixes are hex).
+_UNRESOLVED_NAMING_TOKEN = re.compile(r"\{[A-Z][A-Za-z]*(?: [A-Z][A-Za-z]*)*\}")
 
 CachedIds = Callable[[str], Optional[List[str]]]
 
@@ -106,7 +110,8 @@ def classify(rel: str, *, size: int, path: str, size_index: Dict[int, List[str]]
 
     name = os.path.basename(rel)
     parts = rel.split("/")
-    if _BEETS_DUP_SUFFIX.search(name) or _DOWNLOAD_DECORATION.search(name) or _STAGING_DIR.search(rel):
+    if (_BEETS_DUP_SUFFIX.search(name) or _DOWNLOAD_DECORATION.search(name) or _STAGING_DIR.search(rel)
+            or _UNRESOLVED_NAMING_TOKEN.search(rel)):
         return {"category": "import_artifact", **evidence}
     if len(parts) >= 3 and _ARTIST_DIR.search(parts[-3]) and _ALBUM_DIR.search(parts[-2]) and _CANONICAL_NAME.match(name):
         return {"category": "canonical_album_file_missing_from_beets", **evidence}

@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- `--offline-db-identity` works with the stock Beets engine. Its web server does not close SQLite on a graceful stop, so the WAL is never settled by the engine. The check now copies the main file and WAL to a private temp directory, then checkpoints, `quick_check`s and hashes the settled copy. It never writes the authoritative files, and it verifies both are byte-for-byte unchanged afterwards. A failure prints "OFFLINE DB CHECK FAILED" with the right stage, not a rollout banner.
+- The untracked inventory classifies folders and files carrying a never-resolved naming token (for example `{Album MbId}`) as import artifacts, not unknown.
+
 ## v0.1.40 - 2026-09-29
 
 ### Fixed

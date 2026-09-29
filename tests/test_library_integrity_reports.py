@@ -146,6 +146,15 @@ class UntrackedInventoryTests(unittest.TestCase):
         self.assertEqual(by_name["top notch.mp3"]["recording_ids"], [REC])
         self.assertTrue((self.out / "untracked_inventory_summary.json").is_file())
 
+    def test_unresolved_naming_tokens_are_import_artifacts_but_mbid_suffixes_are_not(self):
+        from backend.untracked_inventory import classify
+        kw = dict(size=1, path="x", size_index={}, tracked_recordings=set(), cached_ids=None, hash_cache={})
+        self.assertEqual(classify("Al Campbell (x)/Deeper Roots (1){Album MbId}/Al Campbell - Deeper Roots - 01 - A.mp3",
+                                  **kw)["category"], "import_artifact")
+        canonical = ("A (44fac0de-d5ae-4bea-a68c-948fedc3d9c5)/B (2023) {ef4b6576-ac7c-4f72-bee6-e7a6b6cf019d}/"
+                     "A - B - 13 - Parmesan.flac")
+        self.assertEqual(classify(canonical, **kw)["category"], "canonical_album_file_missing_from_beets")
+
     def test_uncached_files_are_counted_not_fingerprinted(self):
         summary = self._run({})
         self.assertEqual(summary["counts"]["same_recording_other_encoding"], 0)
