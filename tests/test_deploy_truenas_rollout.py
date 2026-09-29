@@ -1304,7 +1304,7 @@ class OfflineDbIdentityTests(EndToEndFixture):
         res = self.run_script("--offline-db-identity")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("OFFLINE BYTE IDENTITY", res.stdout)
-        self.assertIn("WAL settled:              yes", res.stdout)
+        self.assertIn("WAL settled by engine:    yes", res.stdout)
         self.assertIn(self._sha(), res.stdout)
         self.assertIn("beets", self._state().get("started", []))
         self.assertEqual(self._state()["containers"]["cid-beets"]["State"]["Status"], "running")
@@ -1314,14 +1314,37 @@ class OfflineDbIdentityTests(EndToEndFixture):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("IDENTICAL to baseline", res.stdout)
 
-    def test_unsettled_wal_is_never_claimed_and_engine_still_restarts(self):
-        with open(self.auth_db + "-wal", "wb") as f:
-            f.write(b"\x00" * 4096)
+    def test_unsettled_wal_is_settled_on_a_copy_never_on_the_live_file(self):
+        """Beets leaves its WAL unsettled on stop: the check settles a
+        private copy, hashes that, and proves the originals were untouched."""
+        import sqlite3
+        con = sqlite3.connect(self.auth_db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.execute("INSERT INTO items (title) VALUES ('only-in-wal')")
+        con.commit()
+        # Snapshot main + WAL while the connection is open (the committed row
+        # lives only in the WAL), then leave them behind as an engine that
+        # never closes would.
+        wal = self.auth_db + "-wal"
+        with open(wal, "rb") as f:
+            wal_bytes = f.read()
+        with open(self.auth_db, "rb") as f:
+            main_bytes = f.read()
+        con.close()
+        with open(self.auth_db, "wb") as f:
+            f.write(main_bytes)
+        with open(wal, "wb") as f:
+            f.write(wal_bytes)
+        main_before = self._sha()
         res = self.run_script("--offline-db-identity")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("NOT claimed", res.stderr)
-        self.assertIn("database sha256:          not-claimed", res.stdout)
-        self.assertNotIn(self._sha(), res.stdout)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("settled on a private copy", res.stdout)
+        self.assertIn("hashed:                   settled copy", res.stdout)
+        self.assertEqual(self._sha(), main_before)          # live file untouched
+        with open(wal, "rb") as f:
+            self.assertEqual(f.read(), wal_bytes)           # live WAL untouched
+        self.assertNotIn(main_before, res.stdout.split("database sha256:")[1].splitlines()[0])
         self.assertIn("beets", self._state().get("started", []))
 
     def test_digest_change_across_restart_fails_and_engine_is_left_running(self):
@@ -1358,4 +1381,6 @@ class DbIntegrityWordingTests(unittest.TestCase):
         stop, hash_at = body.index("stop -t 60"), body.index('sha="$(sha256_file')
         self.assertLess(stop, hash_at)
         self.assertIn('if [[ "$settled" -eq 1 ]]', body)
+        self.assertIn("settle_copy_and_hash", body)
+        self.assertNotIn("wal_checkpoint", body)  # never on the authoritative file
         self.assertIn('_compose start "$ENGINE_SERVICE"', body)
