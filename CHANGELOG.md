@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.42 - 2026-09-29
+
 ### Added
 - **Album-row merge (ARCH-020).** Beets plugin 1.3.0 adds `/webmanager/album-row-merge` with rollback and status endpoints.
   - It merges the duplicate album rows of one canonical album by changing item ownership only: no tag write, no file move.
