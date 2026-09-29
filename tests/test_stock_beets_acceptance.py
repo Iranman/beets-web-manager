@@ -627,7 +627,11 @@ webmanager:
                 with urlopen(req, timeout=60) as resp:
                     return resp.status, json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as ex:
-                return ex.code, json.loads(ex.read().decode("utf-8") or "{}")
+                raw = ex.read().decode("utf-8", errors="replace")
+                try:
+                    return ex.code, json.loads(raw or "{}")
+                except ValueError:  # stock Beets answers 404 with an HTML page
+                    return ex.code, {"raw": raw[:200]}
 
         def container_path(shown):
             return shown if shown.startswith("/") else "/music/" + shown
