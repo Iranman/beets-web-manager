@@ -22,7 +22,8 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: Process restart, retry, or duplicate starts can repeat completed steps, lose progress, or leave stale active status unless each workflow implemented its own protections correctly.
 - Desired state: Shared job requirements for operation identifiers, idempotency, resource locks, bounded retries, checkpoints, heartbeats, cancellation checks, and terminal-state recovery.
 - Safe migration approach: Add job contract tests and a reusable idempotency/checkpoint helper. Migrate long-running workflows by risk, starting with import/replacement/playlist mutations.
-- v0.1.42 progress (IMPLEMENTED; CI and live acceptance pending):
+- v0.1.42 progress (IMPLEMENTED, CI VERIFIED, LIVE VERIFIED for the scope below):
+  - Live: an untracked-inventory job was SIGKILLed at a persisted checkpoint (processed 10,000 of 104,198). After the container was recreated it resolved to `failed` ("read-only job, safe to start again") with its checkpoint and last heartbeat kept; nothing re-ran it. Its orphaned lock was refused inside its 120 s TTL (the new container cannot see the old process), reclaimed after it, and released by the next run. The engine-backed transaction restart path (engine request recorded, finished from evidence, never replayed) is CI verified (A–G matrix) but was not crash-tested live.
   - `JobStore` is durable (`<data>/jobs/*.json`): throttled progress writes, checkpoints persisted immediately, heartbeats, terminal states `success`/`failed`/`cancelled`/`recovery_required`. A job interrupted by a restart is never re-run: read-only jobs become `failed`, anything else `recovery_required`.
   - Durable hierarchical resource locks (`backend/resource_locks.py`, `<data>/locks`): cross-process exclusive, order-enforced, heartbeat-kept, reclaimed only when the owner process is provably gone.
   - Engine-backed transactions (item replacement, reviewed duplicate cleanup, album-row merge, untracked attach/quarantine) record the engine request before calling it; `backend/transaction_recovery.py` finishes a transaction a restart left Running from engine evidence (manifest or operation registry) and never replays it.
@@ -46,7 +47,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: Retry, rate-limit, secret redaction, and failure representation differ by provider.
 - Desired state: Each provider has a small adapter with typed inputs/outputs, explicit transient/permanent failure classification, bounded retries, and redaction.
 - Safe migration approach: Extract adapters only when changing a workflow for a real bug. Preserve API responses and add contract tests.
-- v0.1.42 progress (IMPLEMENTED; CI and live pending): `backend/provider_boundary.py` defines the typed outcomes (`confirmed`, `no_result`, `ambiguous`, `conflict`, `unavailable`, `rate_limited`, `authentication_error`, `transient_error`), bounded Retry-After-aware retries and redaction. Production callers: the AcoustID lookup (`helpers_mb.acoustid_lookup_outcome`) and its file cache, which now caches only real answers -- previously an outage, throttle or rejected key was cached permanently as "no match" -- and the MusicBrainz release tracklist fetch. The untracked recovery workflow consumes both outcomes and fails as "could not ask", never as "no match".
+- v0.1.42 progress (IMPLEMENTED, CI VERIFIED, LIVE VERIFIED for AcoustID: a live lookup returned `confirmed`; no key value in either container's logs or the data directory): `backend/provider_boundary.py` defines the typed outcomes (`confirmed`, `no_result`, `ambiguous`, `conflict`, `unavailable`, `rate_limited`, `authentication_error`, `transient_error`), bounded Retry-After-aware retries and redaction. Production callers: the AcoustID lookup (`helpers_mb.acoustid_lookup_outcome`) and its file cache, which now caches only real answers -- previously an outage, throttle or rejected key was cached permanently as "no match" -- and the MusicBrainz release tracklist fetch. The untracked recovery workflow consumes both outcomes and fails as "could not ask", never as "no match".
 - Remaining: Plex, Lidarr, SLSKD, yt-dlp, OpenAI/AI and the other MusicBrainz calls do not use the boundary yet.
 - Priority: P2. Status: Open (narrowed).
 
@@ -61,8 +62,8 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Affected area: `composite_workflows.plan/apply_album_duplicate_merge`, the webmanager plugin's `modify` allowlist.
 - Evidence: the existing album-merge Apply reassigns items through `/webmanager/modify` with `album_id`, which `ALLOWED_ITEM_FIELDS` deliberately excludes, so it cannot move items between album rows. The read-only `POST /api/library/album-duplicate-analysis` (v0.1.40) now produces a per-Release-Group merge proposal, but nothing can apply it yet.
 - Desired state: an engine op that moves items into a retained album row by Release Group proof (keeping Release/Recording IDs, disc/track), with Plan → Approve → Apply → Verify → Rollback, used only for groups the analysis marks deterministic.
-- v0.1.42 (IMPLEMENTED; CI and live acceptance pending): engine op `/webmanager/album-row-merge` (+ rollback, + status) changes item ownership only (no tag write, no move), requires Release Group AND Release ID, full coverage, unchanged identity/content and no slot overlap, retires source rows after verified moves, and rolls back to the ORIGINAL album ids; `backend/album_row_merge.py` plans only deterministic groups.
-- Separate, still open: the legacy `composite_workflows.plan/apply_album_duplicate_merge` (used by import `existing_album_reconcile` and the merge-duplicate-album job) still reassigns `album_id` through `/webmanager/modify`, which the engine refuses; those callers need migrating onto a partial-move variant of the new op.
+- v0.1.42 (IMPLEMENTED, CI VERIFIED, LIVE VERIFIED): live on Al Green – *He Is the Light* (RG 32922e5a): Preview → Approve → Apply (row 1428 retired, albums 413 → 412, second Apply refused) → Verify (identity, path, size, mtime, SHA-256 unchanged) → Rollback (row 1428 restored at its original id; albums, items and file hashes exactly equal to the baseline; second rollback idempotent) → Preview → Apply → Verify again. 311 – *Dammit!* was refused at Preview (`file_missing`: the source item's file is gone from disk). The three overlapping-slot groups stay review-only: Dennis Brown is audio-identical (same FLAC MD5), Sevyn Streeter has no FLAC MD5 to compare, and Al Campbell is two different masters (24-bit vs 16-bit). Engine op `/webmanager/album-row-merge` (+ rollback, + status) changes item ownership only (no tag write, no move), requires Release Group AND Release ID, full coverage, unchanged identity/content and no slot overlap, retires source rows after verified moves, and rolls back to the ORIGINAL album ids; `backend/album_row_merge.py` plans only deterministic groups.
+- Why this stays Open: the legacy `composite_workflows.plan/apply_album_duplicate_merge` (used by import `existing_album_reconcile` and the merge-duplicate-album job) still reassigns `album_id` through `/webmanager/modify`, which the engine refuses; those callers need migrating onto a partial-move variant of the new op.
 - Priority: P2. Status: Open.
 
 ## ARCH-021 Untracked Files Under The Music Root
@@ -70,22 +71,24 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Affected area: `/music`.
 - Evidence: roughly 103k audio files are not tracked by Beets. v0.1.40 adds a read-only inventory (`POST /api/library/untracked-inventory`) that classifies them and persists evidence; no cleanup or import exists for them yet.
 - Desired state: category-scoped, reviewed recovery (import canonical-looking album files) and cleanup (exact duplicates of tracked files, import artifacts) through engine-owned quarantine, never by name alone.
-- v0.1.42 (IMPLEMENTED; CI and live acceptance pending): incremental inventory (reuses persisted records; hashes only new/changed files); engine ops `/webmanager/untracked/attach` and `/webmanager/untracked/quarantine` (+ rollback, + status); `backend/untracked_recovery_service.py`:
+- v0.1.42 (IMPLEMENTED, CI VERIFIED): incremental inventory (reuses persisted records; hashes only new/changed files); engine ops `/webmanager/untracked/attach` and `/webmanager/untracked/quarantine` (+ rollback, + status); `backend/untracked_recovery_service.py`:
   - Class A: quarantine only byte-identical copies of tracked files. A naming pattern alone is never eligible.
   - Class B: attach into a free album slot. Requires tags that name one album row, MusicBrainz confirming the recording at that position, and AcoustID confirming the audio.
   - Class C: tracked as a singleton, then a replacement is planned through `backend/item_replacement.py`.
   - Class D: no action.
-- Priority: P2. Status: Open (recovery implemented; live acceptance pending).
-
-## ARCH-019 Job/Transaction-Status Test Can Be Intermittently Flaky Under CI Load
-
-- Affected area: `tests/test_import_review_attach_enforcement.py::test_undo_restores_previous_identity_values`, which asserts a transaction's `status` is already `"Rolled Back"` immediately after its rollback job reports `success`.
-- Evidence: Observed once on real GitHub Actions CI when this repository's own dual-workflow-trigger setup (push + pull_request) ran two independent job instances against the identical commit simultaneously — one passed, the other failed on exactly this assertion under real resource contention. Never reproduced locally or in an unloaded CI run; an immediate re-run of the identical commit passed cleanly.
-- Current risk: Low but real — points at a possible race between a rollback job reporting success and the transaction store's own status field committing its terminal value, that only manifests under genuine concurrent load.
-- Desired state: The test polls/rechecks status with a short bounded retry instead of asserting immediately after the job reports success, unless a real ordering bug in the production rollback path is confirmed, in which case that path itself should not report the job "success" until the transaction record's status update has actually committed.
-- Safe migration approach: Reproduce deliberately under artificial CI-like load before deciding which side needs the fix — do not guess from a single observed instance.
-- v0.1.42 (IMPLEMENTED; CI pending): root cause confirmed in production ordering -- the rollback route started the job and only then wrote `status="Running"`, overwriting a fast job's committed "Rolled Back". The route now marks Running before the job starts and touches only metadata afterwards. `tests/test_arch019_rollback_ordering.py` fails against the old ordering and passes now, including a durable-JobStore + slowed-store + concurrent-poller case.
-- Priority: P3. Status: Open (fix implemented; closes once CI verifies).
+- v0.1.42 live (LIVE VERIFIED for Class B; Class A has no live candidate):
+  - Incremental inventory:
+    - Pass 1 (library just changed): 104,198 untracked of 107,236, 33 s, 50 files hashed.
+    - Pass 2: all 104,198 records reused, 0 rehashed, 0 AcoustID and MusicBrainz calls, 20 checkpoints, 6.9 s, peak 503 MB.
+  - Class B attach: Alicia Keys – *HERE* – 12 into the free slot 1/12 of album 1823, with tags, MusicBrainz `confirmed` and AcoustID `confirmed`. Preview → Approve → Apply (items 3139 → 3140, file bytes unchanged, second Apply refused) → Rollback (verified, idempotent) → re-apply (verified). It stays applied.
+  - Refused at Preview:
+    - 10 candidates with no Recording ID tag;
+    - one file AcoustID did not recognize (`no_result`, a real answer).
+  - Of the 17,360 files classified as canonical album files, only 284 have tags naming exactly one album row with a free slot; 16,524 name a Release ID with no album row in Beets.
+  - Class A: 0 byte-identical copies exist, so no quarantine was previewed.
+  - Class C was not exercised live.
+- Why this stays Open: the 69,828 import artifacts and 16,919 unknown files have no cleanup path, which is deliberate: a naming pattern is not proof. The 16,524 files for releases not in Beets need an import workflow, not attach.
+- Priority: P2. Status: Open (recovery implemented and live verified for attach).
 
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 

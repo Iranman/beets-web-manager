@@ -92,8 +92,9 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
                 self.assertIn(debt_id, content)
         # Closed: ARCH-002 (canonical matching authority, CI-enforced by
         # scripts/audit_arch002_callers.py) and ARCH-009 (release-group
-        # identity contracts, docs/arch009_identity_fields.md).
-        for closed_id in ("ARCH-002", "ARCH-009"):
+        # identity contracts, docs/arch009_identity_fields.md) and ARCH-019
+        # (rollback status ordering, tests/test_arch019_rollback_ordering.py).
+        for closed_id in ("ARCH-002", "ARCH-009", "ARCH-019"):
             with self.subTest(closed_id=closed_id):
                 self.assertNotIn(closed_id, content)
 
