@@ -317,6 +317,10 @@
       "DISPLAY_ONLY",
       "AI threshold constants moved verbatim from app.py (ARCH-001); each consumer is classified separately."
     ],
+    "backend/duplicate_cleanup.py::verify_pair": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Reviewed duplicate cleanup re-verification: requires a shared AcoustID recording, refuses an embedded Recording ID that contradicts it, then defers the decision to duplicate_identity.plan_unattended_cleanup (same slot, keeper policy, album-slot gate)."
+    ],
     "backend/duplicate_identity.py::plan_unattended_cleanup": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Unattended duplicate deletion plan: requires fingerprint or byte proof plus the same release slot (moved here from select_unattended_cleanup_paths); keeper ranking only orders already-proven copies."
