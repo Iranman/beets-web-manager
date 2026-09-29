@@ -687,6 +687,59 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/quarantine-remove-items/rollback",
                              json_data={"quarantine_id": str(quarantine_id or "")}, headers=headers)
 
+    def album_row_merge(
+        self,
+        target_album_id: int,
+        source_album_ids: List[int],
+        items: List[Dict[str, Any]],
+        expected_release_group_id: str,
+        expected_release_id: str,
+        idempotency_key: str,
+    ) -> Dict[str, Any]:
+        """Move every item of the source album rows into the target row
+        (ownership only) through the stock-Beets integration plugin; the
+        engine re-proves identity, content and slots first (ARCH-020)."""
+        payload = {
+            "target_album_id": int(target_album_id),
+            "source_album_ids": [int(x) for x in source_album_ids],
+            "items": items,
+            "expected_release_group_id": expected_release_group_id,
+            "expected_release_id": expected_release_id,
+        }
+        return self._request("POST", "/webmanager/album-row-merge", json_data=payload,
+                             headers={"Idempotency-Key": idempotency_key})
+
+    def get_album_row_merge(self, merge_id: str) -> Dict[str, Any]:
+        """The engine's durable record of an album-row merge."""
+        return self._request("GET", f"/webmanager/album-row-merge/{merge_id}")
+
+    def rollback_album_row_merge(self, merge_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        """Undo album_row_merge() from the engine's own manifest."""
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-row-merge/rollback",
+                             json_data={"merge_id": str(merge_id or "")}, headers=headers)
+
+    def untracked_attach(self, path: str, sha256: str, album_id: Optional[int], expected: Dict[str, Any],
+                         idempotency_key: str) -> Dict[str, Any]:
+        """Add an untracked file to the library (album slot or singleton)
+        without writing or moving it (ARCH-021)."""
+        payload = {"path": path, "sha256": sha256, "album_id": album_id, "expected": expected}
+        return self._request("POST", "/webmanager/untracked/attach", json_data=payload,
+                             headers={"Idempotency-Key": idempotency_key})
+
+    def untracked_quarantine(self, files: List[Dict[str, Any]], idempotency_key: str) -> Dict[str, Any]:
+        """Move reviewed untracked files into the engine quarantine (ARCH-021)."""
+        return self._request("POST", "/webmanager/untracked/quarantine", json_data={"files": files},
+                             headers={"Idempotency-Key": idempotency_key})
+
+    def untracked_rollback(self, record_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/untracked/rollback", json_data={"record_id": str(record_id or "")},
+                             headers=headers)
+
+    def get_untracked_record(self, record_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/webmanager/untracked/{record_id}")
+
     def mbsync(
         self,
         item_ids: Optional[List[int]] = None,
