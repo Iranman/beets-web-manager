@@ -247,16 +247,40 @@ def apply_reviewed_cleanup(
     if tx.get("status") != "Approved":
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
     pairs = meta.get("pairs") or []
-    items_before = int((ad.get_stats() or {}).get("items") or 0)
-    st.update(operation_id, status="Running")
-    try:
-        res = ad.quarantine_remove_items(
-            [{"item_id": p["delete_item_id"], "sha256": p["delete_sha256"]} for p in pairs],
-            idempotency_key=operation_id,
-        )
-    except Exception:
-        st.update(operation_id, status="Failed", logs=["Engine quarantine-remove failed; nothing was removed."])
-        raise
+    ids = sorted({int(p["delete_item_id"]) for p in pairs} | {int(p["keep_item_id"]) for p in pairs})
+    from backend.resource_locks import locks as resource_locks
+    with resource_locks().hold([f"item:{i}" for i in ids], operation_id, timeout=10):
+        items_before = int((ad.get_stats() or {}).get("items") or 0)
+        # Recorded before the engine call: a restart mid-call is finished from
+        # engine evidence by backend/transaction_recovery.py, never replayed.
+        st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
+        try:
+            res = ad.quarantine_remove_items(
+                [{"item_id": p["delete_item_id"], "sha256": p["delete_sha256"]} for p in pairs],
+                idempotency_key=operation_id,
+            )
+        except Exception:
+            st.update(operation_id, status="Failed", logs=["Engine quarantine-remove failed; nothing was removed."])
+            raise
+        return finish_reviewed_cleanup(operation_id, res, adapter=ad, store=st, abs_path=to_abs)
+
+
+def finish_reviewed_cleanup(
+    operation_id: str,
+    res: Dict[str, Any],
+    *,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+    abs_path: Optional[AbsPath] = None,
+) -> Dict[str, Any]:
+    """Verify an applied cleanup from the engine's result and record the
+    outcome (also used by restart recovery -- never re-applies)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    to_abs = abs_path or _default_deps()["abs_path"]
+    meta = st.get(operation_id).get("metadata") or {}
+    pairs = meta.get("pairs") or []
+    items_before = int(((meta.get("engine_request") or {}).get("items_before")) or 0)
     engine = res.get("result") if isinstance(res.get("result"), dict) else res
 
     problems: List[str] = []

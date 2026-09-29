@@ -36,6 +36,10 @@ _up = urllib.parse
 # and with WEB_MANAGER_DATA_DIR -- state written under one path (the real
 # bind mount, /data) can never be found again at the other (the container's
 # un-mounted, non-persistent built-in /web-manager-data directory).
+# Whether the deployment named its data dir explicitly (containers do); only
+# then are Jobs durable by default -- a test process must not write job
+# records into whatever directory the default happens to point at.
+_DATA_DIR_EXPLICIT = "WEB_MANAGER_DATA_DIR" in os.environ
 os.environ.setdefault(
     "WEB_MANAGER_DATA_DIR",
     "/data" if os.path.exists("/data") else "/web-manager-data",
@@ -965,7 +969,15 @@ from backend.beets_adapter import (  # noqa: E402
 from job_engine import JobStore  # noqa: E402
 from backend.transaction_engine import TransactionStore  # noqa: E402
 
-jobs = JobStore()
+def _durable_jobs_dir() -> Optional[Path]:
+    """<data dir>/jobs when Jobs should be durable (ARCH-004), else None.
+    BEETS_WEB_DURABLE_JOBS=1/0 forces it on/off."""
+    flag = os.environ.get("BEETS_WEB_DURABLE_JOBS", "").strip().lower()
+    enabled = flag in ("1", "true", "yes", "on") if flag else _DATA_DIR_EXPLICIT
+    return Path(os.environ["WEB_MANAGER_DATA_DIR"]) / "jobs" if enabled else None
+
+
+jobs = JobStore(_durable_jobs_dir())
 transactions = TransactionStore()
 
 

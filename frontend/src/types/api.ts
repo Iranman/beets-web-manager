@@ -1,6 +1,6 @@
 // ── Jobs ─────────────────────────────────────────────────────────────────────
 
-export type JobStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'killed' | 'missing';
+export type JobStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'recovery_required' | 'killed' | 'missing';
 
 export interface JobMetadata {
   [key: string]: string | number | boolean | undefined;
