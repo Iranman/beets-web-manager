@@ -8,6 +8,14 @@ The project uses Semantic Versioning.
 
 ### Fixed
 - Beets plugin 1.1.1: `/webmanager` operations now act on the real absolute file paths. Beets 2.x stores paths relative to the library and expands them through a context variable, which is set only in the thread that opened the library. Web server request threads started with it empty, so every `item.path` loaded relative. As a result, replace-item-file refused files that existed, and `move` and file-deleting `remove` would have used the wrong paths. Each `/webmanager` request now binds the library's music directory first.
+- Replacement failure recovery is complete. If the engine fails part-way, it now also moves the replacement file back to its original path and re-creates the replacement's library row, in addition to restoring the album item and its original file.
+
+### Added
+- Track replacement handles an occupied canonical destination. Suppose an untracked file already has the name Beets will give the replacement (Beets would otherwise add a `.1` suffix):
+  - The plan step decodes both files with ffmpeg and compares PCM MD5s. The occupant may be displaced only if its audio is identical to the replacement's. Anything else fails closed with `destination_occupied`.
+  - The Preview transaction records the occupant's SHA-256.
+  - On apply, the engine displaces the file only if it is still untracked and its SHA-256 still matches; otherwise it refuses before changing anything.
+  - The occupant goes to the engine quarantine folder and is never deleted. Rollback puts it back.
 
 ## v0.1.38 - 2026-09-28
 

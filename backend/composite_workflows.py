@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import time
@@ -752,6 +753,9 @@ def plan_track_replacement(
                 "error": f"Item {target_id} is not attached to an album slot"}
 
     before, candidate = _replacement_side(target), _replacement_side(source)
+    displace = payload.get("displace_destination") or None
+    if displace and not re.fullmatch(r"[0-9a-f]{64}", _s(displace.get("sha256"))):
+        return {"ok": False, "code": "invalid_displacement", "error": "Displacement needs the occupant's SHA-256."}
     changes = [{
         "item_id": target_id,
         "title": before["title"],
@@ -761,6 +765,7 @@ def plan_track_replacement(
         "replacement_path": candidate["path"],
         "replacement_format": candidate["format"],
         "preserved": {k: before[k] for k in _REPLACEMENT_IDENTITY_FIELDS},
+        "displaced_occupant": displace,
     }]
     tx = st.create(
         operation_type="Replace",
@@ -777,6 +782,7 @@ def plan_track_replacement(
             "candidate": candidate,
             "reason": _s(payload.get("reason")),
             "matching_contract": payload.get("matching_contract") or {},
+            "displace_destination": displace,
         },
     )
     return {
@@ -785,6 +791,7 @@ def plan_track_replacement(
         "token": tx["id"],
         "status": "Preview",
         "requires_approval": True,
+        "displace_destination": displace,
         "target_item": before,
         "replacement_item": candidate,
         "changes": changes,
@@ -816,7 +823,9 @@ def apply_track_replacement(
     before = meta.get("before") or {}
     st.update(operation_id, status="Running")
     try:
-        res = ad.replace_item_file(target_id, source_id, idempotency_key=operation_id)
+        displace = meta.get("displace_destination") or {}
+        res = ad.replace_item_file(target_id, source_id, idempotency_key=operation_id,
+                                   displace_destination_sha256=displace.get("sha256") or None)
     except Exception:
         st.update(operation_id, status="Failed",
                   logs=["Engine replace-item-file failed; the engine restored the original file."])

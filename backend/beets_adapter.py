@@ -638,6 +638,7 @@ class BeetsAdapter:
         target_item_id: int,
         source_item_id: int,
         idempotency_key: Optional[str] = None,
+        displace_destination_sha256: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Make the tracked source item's file the target (album-slot)
         item's file via the stock-Beets integration plugin. The target
@@ -645,6 +646,10 @@ class BeetsAdapter:
         engine (never deleted); the source row is removed; Beets moves the
         file to its canonical path."""
         payload = {"target_item_id": int(target_item_id), "source_item_id": int(source_item_id)}
+        if displace_destination_sha256:
+            # An untracked, reviewed occupant of the canonical destination
+            # (identified by content hash) may be moved to the engine quarantine.
+            payload["displace_destination_sha256"] = displace_destination_sha256
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/replace-item-file", json_data=payload, headers=headers)
 

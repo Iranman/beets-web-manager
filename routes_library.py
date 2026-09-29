@@ -36,7 +36,7 @@ from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album
 from backend.musicbrainz_service import _discogs_artist_discography, _discogs_track_search, _ensure_release_group_art, _mb_release_group_for_release
 from backend.pending_review_store import _is_music_root_path, _queue_folder_for_manual_review
 from backend.plex_service import _trigger_plex_refresh
-from backend.replacement_service import _music_format_replacement_matching_contract
+from backend.replacement_service import _music_format_replacement_matching_contract, _replacement_destination_check
 from backend.serializers import _format_duration, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result
 from backend.transaction_service import _item_metadata_transaction_payload, _start_metadata_apply_transaction
 from app import app  # noqa: E402  (route modules load after app.py defines app)
@@ -4877,8 +4877,17 @@ def item_replacement_plan(iid: int):
         resolved_evidence, {"fingerprint_validation": fingerprint_validation},
     )
 
+    displace = None
+    if candidate_item_id:
+        destination = _replacement_destination_check(original_path, str(cand_p))
+        if not destination.get("ok"):
+            return jsonify({"ok": False, "code": destination.get("code"), "error": destination.get("error"),
+                            "destination": destination.get("destination")}), 409
+        displace = destination.get("displace")
+
     try:
         res = composite_workflows.plan_track_replacement({
+            "displace_destination": displace,
             "fingerprint_validation": fingerprint_validation,
             "original_item_id": iid,
             "original_path": original_path,

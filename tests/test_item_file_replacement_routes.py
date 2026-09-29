@@ -107,6 +107,48 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.get_json())
         fp.assert_called_once_with(str(root / self.flac.name), str(root / self.mp3.name))
 
+    def _occupy_canonical_flac(self):
+        occupant = self.mp3.with_suffix(".flac")  # where Beets will put the FLAC
+        occupant.write_bytes(b"FLAC-untracked")
+        return occupant
+
+    def test_identical_audio_occupant_is_planned_for_displacement(self):
+        import hashlib
+        import backend.replacement_service as replacement_service
+        occupant = self._occupy_canonical_flac()
+        with mock.patch.object(replacement_service, "_decoded_audio_md5", return_value="a" * 32):
+            res = self._plan()
+        self.assertEqual(res.status_code, 200, res.get_json())
+        displace = res.get_json()["displace_destination"]
+        self.assertEqual(displace["path"], str(occupant))
+        self.assertEqual(displace["sha256"], hashlib.sha256(b"FLAC-untracked").hexdigest())
+        op_id = res.get_json()["operation_id"]
+
+        self.client.post(f"/api/transactions/{op_id}/approve")
+        self.adapter.replace_item_file.return_value = {"new_target_path": str(occupant), "quarantine_id": "0" * 32}
+        self.items[24258] = {**self.items[24258], "path": str(occupant)}
+        self.client.post(f"/api/transactions/{op_id}/apply")
+        self.adapter.replace_item_file.assert_called_once_with(
+            24258, 22575, idempotency_key=op_id, displace_destination_sha256=displace["sha256"])
+        self.assertTrue(occupant.exists())  # the Web Manager itself never moves it
+
+    def test_different_audio_occupant_fails_closed(self):
+        import backend.replacement_service as replacement_service
+        occupant = self._occupy_canonical_flac()
+        md5s = {str(self.flac): "a" * 32, str(occupant): "b" * 32}
+        with mock.patch.object(replacement_service, "_decoded_audio_md5", side_effect=lambda p: md5s[p]):
+            res = self._plan()
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["code"], "destination_occupied")
+        self.assertEqual([f for f in self.store.root.glob("*.json") if f.name != "settings.json"], [])
+
+    def test_undecodable_occupant_fails_closed(self):
+        import backend.replacement_service as replacement_service
+        self._occupy_canonical_flac()
+        with mock.patch.object(replacement_service, "_decoded_audio_md5", return_value=""):
+            res = self._plan()
+        self.assertEqual(res.status_code, 409)
+
     def test_plan_refuses_an_unverified_candidate(self):
         res = self._plan(fingerprint=("", [], ["other-recording"]))
         self.assertEqual(res.status_code, 400)
@@ -136,12 +178,35 @@ class ItemFileReplacementRouteTests(unittest.TestCase):
         res = self.client.post(f"/api/transactions/{op_id}/apply")
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual(res.get_json()["status"], "Completed")
-        self.adapter.replace_item_file.assert_called_once_with(24258, 22575, idempotency_key=op_id)
+        self.adapter.replace_item_file.assert_called_once_with(24258, 22575, idempotency_key=op_id, displace_destination_sha256=None)
 
         self.adapter.rollback_replace_item_file.return_value = {"success": True, "recreated_source_item_id": 30000}
         rb = self.client.post(f"/api/transactions/{op_id}/rollback")
         self.assertEqual(rb.status_code, 200, rb.get_json())
         self.assertEqual(self.store.get(op_id)["status"], "Rolled Back")
+
+
+@unittest.skipUnless(__import__("shutil").which("ffmpeg"), "ffmpeg not installed")
+class DecodedAudioMd5Tests(unittest.TestCase):
+    def test_same_audio_matches_and_different_audio_does_not(self):
+        import wave
+        from backend.audio_preferences import decoded_audio_md5
+        with tempfile.TemporaryDirectory() as td:
+            def wav(name, frames):
+                path = os.path.join(td, name)
+                with wave.open(path, "w") as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(8000)
+                    w.writeframes(frames)
+                return path
+            a = wav("a.wav", b"\x00\x01" * 4000)
+            b = wav("b.wav", b"\x00\x01" * 4000)
+            c = wav("c.wav", b"\x00\x02" * 4000)
+            self.assertRegex(decoded_audio_md5(a), r"^[0-9a-f]{32}$")
+            self.assertEqual(decoded_audio_md5(a), decoded_audio_md5(b))
+            self.assertNotEqual(decoded_audio_md5(a), decoded_audio_md5(c))
+            self.assertEqual(decoded_audio_md5(os.path.join(td, "missing.wav")), "")
 
 
 if __name__ == "__main__":

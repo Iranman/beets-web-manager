@@ -9,6 +9,10 @@ POST /webmanager/replace-item-file
     the target's tags are written into it, and Beets moves it to its
     canonical path (so a FLAC gets a .flac name). The source item's library
     row is then removed -- its file now belongs to the target.
+    Optional "displace_destination_sha256": if an *untracked* file already
+    holds the canonical destination and its SHA-256 matches, it is moved to
+    the quarantine folder first (so the replacement gets the clean name);
+    a tracked or changed occupant makes the request fail before any change.
     The engine records both items' snapshots in a manifest inside its own
     quarantine folder and returns the folder's id (``quarantine_id``).
 
@@ -24,6 +28,7 @@ Web Manager decides *whether* to replace (fingerprint proof, a reviewed and
 approved transaction); this module only performs the change inside Beets.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -32,6 +37,7 @@ import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from beets import config as beets_config
+from beets.dbcore.query import PathQuery
 from beets.library import Item
 from flask import g, jsonify, request
 
@@ -45,6 +51,7 @@ AUDIO_PROPERTY_FIELDS = frozenset({
 })
 _NOT_RESTORED = frozenset({"id", "path", "mtime"}) | AUDIO_PROPERTY_FIELDS
 _QUARANTINE_ID = re.compile(r"[0-9a-f]{32}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 MANIFEST_NAME = "manifest.json"
 
 _QUARANTINE_ROOT_OVERRIDE: Optional[str] = None
@@ -120,6 +127,28 @@ def _manifest_dir(quarantine_id: str) -> Optional[str]:
     return folder
 
 
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _planned_destination(target: Item, new_file: str) -> str:
+    """Where Beets will put `target` once its file is `new_file` (no mutation)."""
+    saved = target.path
+    try:
+        target.path = os.fsencode(new_file)
+        return _fspath(target.destination())
+    finally:
+        target.path = saved
+
+
+def _is_tracked(lib, path: str) -> bool:
+    return any(True for _ in lib.items(PathQuery("path", os.fsencode(path))))
+
+
 @ops.webmanager_bp.route("/replace-item-file", methods=["POST"])
 def run_replace_item_file():
     data = request.get_json(force=True, silent=True) or {}
@@ -129,24 +158,54 @@ def run_replace_item_file():
     op_id, _fingerprint, early = ops._idempotency_precheck("replace_item_file", data)
     if early is not None:
         return early
-    target, source, err = _load_pair(lib, data)
-    if err is not None:
-        message, code, status = err
+
+    def fail(message: str, code: str, status: int = 400):
         ops.update_operation(op_id, "failed", error=message, error_code=code)
         return _error(message, code, status)
+
+    target, source, err = _load_pair(lib, data)
+    if err is not None:
+        return fail(*err)
+    displace_sha = data.get("displace_destination_sha256")
+    if displace_sha is not None and not (isinstance(displace_sha, str) and _SHA256.fullmatch(displace_sha)):
+        return fail("displace_destination_sha256 must be a SHA-256 hex digest", "INVALID_DISPLACEMENT")
 
     target_snapshot, source_snapshot = _snapshot(target), _snapshot(source)
     old_target_path = _fspath(target.path)
     source_path = _fspath(source.path)
+
+    # An untracked file may already hold the canonical destination; Beets
+    # would then add a ".1" suffix. It is displaced (quarantined, never
+    # deleted) only when the caller names it by content hash -- after its
+    # own review proved the audio identical -- and it is still untracked
+    # and unchanged. Checked before anything is mutated.
+    destination = _planned_destination(target, source_path)
+    occupant = ""
+    if os.path.exists(destination) and not os.path.samefile(destination, source_path) \
+            and os.path.abspath(destination) != os.path.abspath(old_target_path):
+        occupant = destination
+    if displace_sha and occupant:
+        if not _inside_allowed(occupant):
+            return fail("destination outside allowed roots", "DESTINATION_PATH_INVALID")
+        if _is_tracked(lib, occupant):
+            return fail("the destination is a tracked library item; not displacing it", "DESTINATION_TRACKED", 409)
+        if _sha256_file(occupant) != displace_sha:
+            return fail("the destination file changed since it was reviewed", "DESTINATION_CHANGED", 409)
+
     quarantine_id = uuid.uuid4().hex
     qdir = os.path.join(_quarantine_root(), quarantine_id)
-    quarantine_path = ""
+    quarantine_path = displaced_quarantine_path = ""
+    source_removed = False
     try:
         with ops.mutation_lock:
             os.makedirs(qdir)
             if os.path.exists(old_target_path):
                 quarantine_path = os.path.join(qdir, os.path.basename(old_target_path))
                 shutil.move(old_target_path, quarantine_path)
+            if displace_sha and occupant:
+                os.makedirs(os.path.join(qdir, "displaced"))
+                displaced_quarantine_path = os.path.join(qdir, "displaced", os.path.basename(occupant))
+                shutil.move(occupant, displaced_quarantine_path)
 
             # The target keeps every identity/metadata field; only the file
             # (and the audio properties read from it) change.
@@ -156,6 +215,7 @@ def run_replace_item_file():
             target.update(keep)
             target.store()
             source.remove(delete=False, with_album=True)
+            source_removed = True
             target.try_write()
             target.move()
             target.store()
@@ -167,6 +227,8 @@ def run_replace_item_file():
                 "new_target_path": new_target_path,
                 "source_path": source_path,
                 "quarantine_path": quarantine_path,
+                "displaced_path": occupant if displaced_quarantine_path else "",
+                "displaced_quarantine_path": displaced_quarantine_path,
                 "target_snapshot": target_snapshot,
                 "source_snapshot": source_snapshot,
             }
@@ -181,6 +243,9 @@ def run_replace_item_file():
             "new_target_path": new_target_path,
             "quarantine_id": quarantine_id,
             "quarantine_path": quarantine_path,
+            "displaced_path": manifest["displaced_path"],
+            "displaced_quarantine_path": displaced_quarantine_path,
+            "destination_occupied": bool(occupant) and not displaced_quarantine_path,
             "format": _jsonable(target.get("format")),
             "target_snapshot": target_snapshot,
             "source_snapshot": source_snapshot,
@@ -191,6 +256,18 @@ def run_replace_item_file():
         ops.log.exception("replace-item-file failed; restoring")
         try:
             with ops.mutation_lock:
+                # Put the replacement file back where the source had it.
+                current = _fspath(target.path)
+                if current != source_path and os.path.exists(current) and not os.path.exists(source_path):
+                    shutil.move(current, source_path)
+                if source_removed and lib.get_item(source_snapshot.get("id")) is None:
+                    recreated = Item(**{k: v for k, v in source_snapshot.items() if k not in ("id", "path")})
+                    recreated.path = os.fsencode(source_path)
+                    recreated.album_id = None
+                    lib.add(recreated)
+                if displaced_quarantine_path and os.path.exists(displaced_quarantine_path) \
+                        and not os.path.exists(occupant):
+                    shutil.move(displaced_quarantine_path, occupant)
                 if quarantine_path and os.path.exists(quarantine_path) and not os.path.exists(old_target_path):
                     shutil.move(quarantine_path, old_target_path)
                 restored = lib.get_item(target_snapshot.get("id"))
@@ -247,7 +324,12 @@ def run_replace_item_file_rollback():
             recreated.album_id = None
             lib.add(recreated)
             recreated.try_write()
-            # 2. the original target file comes back from quarantine.
+            # 2. a displaced occupant of the canonical destination comes back.
+            displaced = _fspath(manifest.get("displaced_path"))
+            displaced_q = _fspath(manifest.get("displaced_quarantine_path"))
+            if displaced and displaced_q.startswith(folder + os.sep) and os.path.exists(displaced_q)                     and not os.path.exists(displaced) and _inside_allowed(displaced):
+                shutil.move(displaced_q, displaced)
+            # 3. the original target file comes back from quarantine.
             if quarantine_path and os.path.exists(quarantine_path):
                 os.makedirs(os.path.dirname(old_target_path), exist_ok=True)
                 shutil.move(quarantine_path, old_target_path)

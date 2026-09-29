@@ -4,6 +4,7 @@ Real Beets Library, real audio files: the album track is a WAV (standing in
 for the lossy album copy), the replacement is a minimal valid FLAC singleton.
 """
 
+import hashlib
 import os
 import shutil
 import struct
@@ -11,6 +12,7 @@ import tempfile
 import unittest
 import uuid
 import wave
+from unittest import mock
 
 from beets import config as beets_config
 from beets.library import Item, Library
@@ -159,6 +161,92 @@ class ReplaceItemFileTests(unittest.TestCase):
         self.assertTrue(os.path.isabs(res.get_json()["new_target_path"]))
         self.assertEqual(item.format, "FLAC")
         self.assertTrue(os.path.isfile(os.fsdecode(item.path)))
+
+    def _occupy_destination(self):
+        dest = replace_mod._planned_destination(self.target, self.source_path)
+        self.assertTrue(dest.endswith(".flac"))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        write_flac(dest)
+        with open(dest, "ab") as f:
+            f.write(b"untracked-copy-tags")  # same audio, different bytes
+        with open(dest, "rb") as f:
+            data = f.read()
+        return dest, data, hashlib.sha256(data).hexdigest()
+
+    def test_displaces_a_reviewed_untracked_occupant_and_takes_the_clean_name(self):
+        dest, occ_bytes, sha = self._occupy_destination()
+        res = self._replace(displace_destination_sha256=sha)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        data = res.get_json()
+        self.assertEqual(data["new_target_path"], dest)  # no ".1" suffix
+        self.assertEqual(data["displaced_path"], dest)
+        self.assertTrue(data["displaced_quarantine_path"].startswith(self.quarantine + os.sep))
+        with open(data["displaced_quarantine_path"], "rb") as f:
+            self.assertEqual(f.read(), occ_bytes)
+        self.assertEqual(os.fsdecode(self.lib.get_item(self.target.id).path), dest)
+
+        rb = self.client.post("/webmanager/replace-item-file/rollback", headers=self.auth,
+                              json={"quarantine_id": data["quarantine_id"]})
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), occ_bytes)  # occupant back in place
+        self.assertTrue(os.path.isfile(self.source_path))
+        self.assertEqual(os.fsdecode(self.lib.get_item(self.target.id).path), self.old_target_path)
+
+    def test_without_displacement_beets_keeps_the_occupant_and_suffixes(self):
+        dest, occ_bytes, _sha = self._occupy_destination()
+        data = self._replace().get_json()
+        self.assertTrue(data["destination_occupied"])
+        self.assertNotEqual(data["new_target_path"], dest)
+        self.assertTrue(data["new_target_path"].endswith(".1.flac"), data["new_target_path"])
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), occ_bytes)
+
+    def test_a_changed_occupant_is_refused_before_any_change(self):
+        dest, occ_bytes, _sha = self._occupy_destination()
+        res = self._replace(displace_destination_sha256="0" * 64)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "DESTINATION_CHANGED")
+        self._assert_untouched()
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), occ_bytes)
+
+    def test_a_tracked_occupant_is_never_displaced(self):
+        dest, _occ, sha = self._occupy_destination()
+        self.lib.add(Item(path=os.fsencode(dest), title="tracked occupant"))
+        res = self._replace(displace_destination_sha256=sha)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "DESTINATION_TRACKED")
+        self._assert_untouched()
+        self.assertTrue(os.path.isfile(dest))
+
+    def test_malformed_displacement_hash_is_rejected(self):
+        res = self._replace(displace_destination_sha256="not-a-hash")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "INVALID_DISPLACEMENT")
+        self._assert_untouched()
+
+    def test_failure_mid_way_restores_files_rows_and_occupant(self):
+        dest, occ_bytes, sha = self._occupy_destination()
+        with mock.patch.object(Item, "move", side_effect=OSError("disk full")):
+            res = self._replace(displace_destination_sha256=sha)
+        self.assertEqual(res.status_code, 500)
+        item = self.lib.get_item(self.target.id)
+        self.assertEqual(os.fsdecode(item.path), self.old_target_path)
+        self.assertEqual(item.album_id, self.album.id)
+        with open(self.old_target_path, "rb") as f:
+            self.assertEqual(f.read(), self.old_bytes)
+        self.assertTrue(os.path.isfile(self.source_path))
+        rows = [i for i in self.lib.items() if os.fsdecode(i.path) == self.source_path]
+        self.assertEqual(len(rows), 1)
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), occ_bytes)
+
+    def _assert_untouched(self):
+        self.assertTrue(os.path.isfile(self.old_target_path))
+        self.assertTrue(os.path.isfile(self.source_path))
+        self.assertIsNotNone(self.lib.get_item(self.source.id))
+        self.assertEqual(os.fsdecode(self.lib.get_item(self.target.id).path), self.old_target_path)
 
     def test_retry_with_same_key_replays_instead_of_failing(self):
         self.replay_key = f"op-{uuid.uuid4()}"

@@ -519,8 +519,16 @@ webmanager:
                     imported_item = items[0]
                     self.assertEqual(imported_item["title"], "Synthetic Anthem")
                     self.assertEqual(imported_item["artist"], "Acceptance Bot")
-                    # Verify include_paths displays path in /music
-                    self.assertIn("/music", imported_item.get("path", ""))
+                    # include_paths shows the path. Beets 2.x stores it relative to
+                    # the library directory (/music) when the importing thread has
+                    # the library's music-dir context -- as /webmanager requests now
+                    # do -- so accept library-relative or absolute-under-/music.
+                    shown = imported_item.get("path", "")
+                    self.assertTrue(shown, "include_paths must show the item path")
+                    resolved = shown if shown.startswith("/") else "/music/" + shown
+                    self.assertTrue(resolved.startswith("/music/"), shown)
+                    self.assertNotIn("..", shown.split("/"))
+                    self.assertTrue(resolved.endswith("Synthetic Anthem.wav"), shown)
 
                 # Step 7: Exercise Disposable Mutation (POST /webmanager/modify)
                 modify_payload = {

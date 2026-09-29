@@ -779,6 +779,10 @@ class AstStructuralTests(unittest.TestCase):
         # Reviewed: pure string join of a library-relative Beets path onto
         # MUSIC_ROOT (no filesystem access, no mutation).
         "_album_item_abs_path",
+        # Reviewed: read-only destination check (ffmpeg decode to an MD5 and
+        # a file hash; no mutation) -- proves an occupant of the canonical
+        # destination is audio-identical before the engine may displace it.
+        "_replacement_destination_check",
     }
 
     def setUp(self):

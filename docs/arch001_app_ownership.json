@@ -25530,6 +25530,26 @@
    ]
   },
   {
+   "name": "_replacement_destination_check",
+   "module": "backend/replacement_service.py",
+   "lines": [
+    638,
+    672
+   ],
+   "size": 35,
+   "body_lines": 23,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "REPLACEMENT",
+   "desired_owner": "backend/replacement_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "item_replacement_plan"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_do_scan_job",
    "module": "backend/maintenance_service.py",
    "lines": [
@@ -30279,10 +30299,10 @@
    "module": "routes_library.py",
    "lines": [
     4787,
-    4907
+    4916
    ],
-   "size": 121,
-   "body_lines": 112,
+   "size": 130,
+   "body_lines": 121,
    "route": {
     "method": "POST",
     "path": "/api/items/<int:iid>/replacement/plan"
@@ -30298,6 +30318,7 @@
     "_acoustid_fingerprint_match",
     "_album_item_abs_path",
     "_music_format_replacement_matching_contract",
+    "_replacement_destination_check",
     "_resolve_import_review_source_path",
     "_s"
    ]
@@ -30306,8 +30327,8 @@
    "name": "item_replacement_apply",
    "module": "routes_library.py",
    "lines": [
-    4911,
-    4932
+    4920,
+    4941
    ],
    "size": 22,
    "body_lines": 16,
@@ -30329,8 +30350,8 @@
    "name": "_start_library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    4935,
-    5213
+    4944,
+    5222
    ],
    "size": 279,
    "body_lines": 271,
