@@ -664,6 +664,29 @@ class BeetsAdapter:
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/replace-item-file/rollback", json_data=payload, headers=headers)
 
+    def quarantine_remove_items(
+        self,
+        items: List[Dict[str, Any]],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove tracked items through the engine, moving each file into the
+        engine quarantine (never deleted). ``items`` is a list of
+        {"item_id", "sha256"}; the engine refuses the whole request if any
+        file changed since review."""
+        payload = {"items": [{"item_id": int(i["item_id"]), "sha256": str(i["sha256"])} for i in items]}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/quarantine-remove-items", json_data=payload, headers=headers)
+
+    def rollback_quarantine_remove_items(
+        self,
+        quarantine_id: str,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Undo quarantine_remove_items() from the engine's own manifest."""
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/quarantine-remove-items/rollback",
+                             json_data={"quarantine_id": str(quarantine_id or "")}, headers=headers)
+
     def mbsync(
         self,
         item_ids: Optional[List[int]] = None,
