@@ -186,7 +186,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.1.0")
+        self.assertEqual(status_data["plugin_version"], "1.1.1")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -425,7 +425,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.1.0")
+                    self.assertEqual(status_res["plugin_version"], "1.1.1")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -519,8 +519,16 @@ webmanager:
                     imported_item = items[0]
                     self.assertEqual(imported_item["title"], "Synthetic Anthem")
                     self.assertEqual(imported_item["artist"], "Acceptance Bot")
-                    # Verify include_paths displays path in /music
-                    self.assertIn("/music", imported_item.get("path", ""))
+                    # include_paths shows the path. Beets 2.x stores it relative to
+                    # the library directory (/music) when the importing thread has
+                    # the library's music-dir context -- as /webmanager requests now
+                    # do -- so accept library-relative or absolute-under-/music.
+                    shown = imported_item.get("path", "")
+                    self.assertTrue(shown, "include_paths must show the item path")
+                    resolved = shown if shown.startswith("/") else "/music/" + shown
+                    self.assertTrue(resolved.startswith("/music/"), shown)
+                    self.assertNotIn("..", shown.split("/"))
+                    self.assertTrue(resolved.endswith("Synthetic Anthem.wav"), shown)
 
                 # Step 7: Exercise Disposable Mutation (POST /webmanager/modify)
                 modify_payload = {

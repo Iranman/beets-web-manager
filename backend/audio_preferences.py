@@ -229,6 +229,28 @@ def _audio_probe_timeout(name: str, default: int) -> int:
         return default
 
 
+def decoded_audio_md5(path_value: str, *, ffmpeg_bin: Optional[str] = None) -> str:
+    """MD5 of the decoded PCM audio stream (ffmpeg's md5 muxer), or "".
+
+    Two files with the same value carry identical audio, whatever their
+    tags or container metadata. Read-only; "" on any failure."""
+    ffmpeg = ffmpeg_bin or shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-v", "error", "-nostdin", "-i", str(path_value), "-map", "0:a:0", "-f", "md5", "-"],
+            timeout=_audio_probe_timeout("AUDIO_DECODE_MD5_TIMEOUT", 120),
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not out.startswith("MD5="):
+        return ""
+    digest = out[4:].strip().lower()
+    return digest if re.fullmatch(r"[0-9a-f]{32}", digest) else ""
+
+
 def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) -> Dict[str, Any]:
     path = Path(path_value)
     ffprobe = ffprobe_bin or shutil.which("ffprobe") or "/usr/bin/ffprobe"

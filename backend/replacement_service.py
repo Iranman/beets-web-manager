@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-import os, re, time, unicodedata
+import hashlib, os, re, time, unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, _MB_UUID_RE, _s
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.acquisition_service import start_album_download
 from backend.playlist_service import _music_format_preferences
-from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences
+from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, decoded_audio_md5 as _decoded_audio_md5
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _clean_for_mb, _resolve_release_group_to_release, _fetch_mb_release_candidate
 from backend.beets_adapter import beets_adapter
 import backend.composite_workflows as composite_workflows
@@ -633,3 +633,40 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
             update_state({"phase": "Replacing", "processed": index, "total": len(pending), "complete": complete, "failed": failed, "skipped": skipped})
     log.append(f"Replacement retry complete: {complete} complete, {failed} failed, {skipped} skipped")
     return {"total": len(pending), "complete": complete, "failed": failed, "skipped": skipped}
+
+
+def _replacement_destination_check(original_path: str, candidate_path: str) -> Dict[str, Any]:
+    """Where Beets will put the replacement, and what already sits there.
+
+    Beets keeps the album item's path template and takes the extension from
+    the new file, so the destination is the original path with the
+    candidate's extension. If an *other* file already occupies it, Beets
+    would add a ".1" suffix instead. That occupant may be displaced (moved
+    to the engine quarantine) only when its decoded audio is identical to
+    the candidate's; anything else fails closed. Read-only.
+
+    Returns {"ok": True, "displace": None | {...}} or {"ok": False, "code", "error"}.
+    """
+    orig, cand = Path(original_path), Path(candidate_path)
+    if not orig.suffix or not cand.suffix or orig.suffix == cand.suffix:
+        return {"ok": True, "displace": None}
+    dest = orig.with_suffix(cand.suffix)
+    if not dest.exists() or dest.resolve() == cand.resolve():
+        return {"ok": True, "displace": None}
+    cand_md5 = _decoded_audio_md5(str(cand))
+    dest_md5 = _decoded_audio_md5(str(dest))
+    if not cand_md5 or cand_md5 != dest_md5:
+        return {
+            "ok": False,
+            "code": "destination_occupied",
+            "error": "The canonical destination is occupied by a file whose decoded audio does not match the "
+                     "replacement (or could not be decoded); refusing to displace it.",
+            "destination": str(dest),
+        }
+    digest = hashlib.sha256()
+    with open(dest, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return {"ok": True, "displace": {
+        "path": str(dest), "sha256": digest.hexdigest(), "size": dest.stat().st_size, "audio_md5": dest_md5,
+    }}

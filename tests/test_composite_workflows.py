@@ -143,7 +143,7 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.assertTrue(apply_res["ok"], apply_res)
         self.assertEqual(apply_res["status"], "Completed")
         self.assertEqual(apply_res["new_path"], new_path)
-        self.mock_adapter.replace_item_file.assert_called_once_with(55, 77, idempotency_key=op_id)
+        self.mock_adapter.replace_item_file.assert_called_once_with(55, 77, idempotency_key=op_id, displace_destination_sha256=None)
         self.assertEqual(self.store.get(op_id)["status"], "Completed")
 
         # A second apply (e.g. after a re-approve) never re-runs the engine op.

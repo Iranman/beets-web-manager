@@ -38,6 +38,26 @@ MAX_COMPLETED_OPERATIONS = 1000
 webmanager_bp = Blueprint("webmanager", __name__, url_prefix="/webmanager")
 
 
+@webmanager_bp.before_request
+def _bind_library_music_dir():
+    """Beets stores item paths relative to the library directory and
+    expands them through a ContextVar that Library() sets only in the
+    thread that created it. Werkzeug serves each request on another thread,
+    where the var is empty and every item.path loads relative -- so file
+    checks, moves and tag writes would act on the wrong path. Bind the
+    library's directory for this request's thread."""
+    lib = getattr(g, "lib", None)
+    directory = getattr(lib, "directory", None)
+    if not directory:
+        return None
+    try:
+        from beets import context as beets_context
+    except ImportError:  # Beets before relative path storage: nothing to bind
+        return None
+    beets_context.set_music_dir(directory)
+    return None
+
+
 def compute_fingerprint(data: Dict[str, Any]) -> str:
     """Compute stable SHA-256 fingerprint of request payload."""
     try:
