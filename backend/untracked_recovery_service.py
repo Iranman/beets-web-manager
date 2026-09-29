@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from backend.beets_adapter import BeetsAdapter, beets_adapter
 from backend.composite_workflows import _decode_path, _get_store, _s
-from backend.resource_locks import locks as resource_locks
+from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
 ATTACH_FAMILY = "untracked_attach_v1"
@@ -258,7 +258,9 @@ def apply_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
     if tx.get("status") != "Approved":
         return _fail("not_approved", "Approve the transaction before applying it.")
     keys = ["untracked-inventory"] + ([f"album:{meta['album_id']}"] if meta.get("album_id") else [])
-    with resource_locks().hold(keys, operation_id, timeout=10):
+    with resource_locks().hold(keys, attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
         items_before = int((ad.get_stats() or {}).get("items") or 0)
         st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
         try:
@@ -334,7 +336,7 @@ def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = No
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     keys = ["untracked-inventory"] + ([f"album:{meta['album_id']}"] if meta.get("album_id") else [])
-    with resource_locks().hold(keys, f"{operation_id}:rollback", timeout=10):
+    with resource_locks().hold(keys, attempt_owner(f"{operation_id}:rollback"), timeout=10):
         res = ad.untracked_rollback(engine["record_id"], idempotency_key=f"{operation_id}:rollback")
         problems = []
         if meta["mutation_family"] == ATTACH_FAMILY:

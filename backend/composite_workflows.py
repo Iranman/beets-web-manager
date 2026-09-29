@@ -791,9 +791,11 @@ def apply_track_replacement(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
 
     target_id, source_id = int(meta["target_item_id"]), int(meta["source_item_id"])
-    from backend.resource_locks import locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
     with resource_locks().hold([f"item:{min(target_id, source_id)}", f"item:{max(target_id, source_id)}"],
-                               operation_id, timeout=10):
+                               attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
         # Recorded before the engine call: a restart mid-call is finished from
         # engine evidence by backend/transaction_recovery.py, never replayed.
         st.update(operation_id, status="Running", metadata={"engine_request": {"operation_id": operation_id}})

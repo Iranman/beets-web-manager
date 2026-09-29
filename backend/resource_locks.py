@@ -283,6 +283,23 @@ class ResourceLocks:
             self.release(keys, owner)
 
 
+def attempt_owner(operation_id: str) -> str:
+    """A lock owner unique to one attempt. Locks are re-entrant per owner, so
+    two concurrent attempts on the same transaction must not share one."""
+    return f"{operation_id}:{uuid.uuid4().hex[:12]}"
+
+
+def claim_approved(store, operation_id: str) -> Optional[Dict[str, Any]]:
+    """Re-read the transaction INSIDE the held lock and move it Approved ->
+    Running; None if another attempt already claimed or applied it."""
+    tx = store.get(operation_id)
+    meta = tx.get("metadata") or {}
+    if tx.get("status") != "Approved" or meta.get("engine_result"):
+        return None
+    store.update(operation_id, status="Running")
+    return tx
+
+
 _override: Optional[ResourceLocks] = None
 _by_root: Dict[str, ResourceLocks] = {}
 _default_lock = threading.Lock()

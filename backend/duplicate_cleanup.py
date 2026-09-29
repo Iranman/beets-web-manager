@@ -248,8 +248,10 @@ def apply_reviewed_cleanup(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
     pairs = meta.get("pairs") or []
     ids = sorted({int(p["delete_item_id"]) for p in pairs} | {int(p["keep_item_id"]) for p in pairs})
-    from backend.resource_locks import locks as resource_locks
-    with resource_locks().hold([f"item:{i}" for i in ids], operation_id, timeout=10):
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    with resource_locks().hold([f"item:{i}" for i in ids], attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
         items_before = int((ad.get_stats() or {}).get("items") or 0)
         # Recorded before the engine call: a restart mid-call is finished from
         # engine evidence by backend/transaction_recovery.py, never replayed.
