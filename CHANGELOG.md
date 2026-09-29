@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.40 - 2026-09-29
+
 ### Fixed
 - Unattended duplicate cleanup no longer uses the old cleanup path. That path ran `os.unlink` inside the Web Manager on the read-only `/music` mount: the delete failed, only a warning was logged, and the transaction was still marked Completed with the file reported deleted. Its "rollback" did nothing. The path is removed.
 - Manual live duplicate cleanup (`/api/dedup/cleanup` with `dry_run: false`) goes through the reviewed-cleanup authority. Every path must be the source copy of a proven duplicate pair; anything else is left in place and reported.
