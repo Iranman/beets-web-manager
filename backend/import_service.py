@@ -24,6 +24,7 @@ from backend.title_normalize import restore_time_colon_title as _restore_time_co
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
+import backend.item_replacement as _item_replacement
 from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_multi_file, _album_item_abs_path, _album_track_fingerprint_check
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
@@ -246,33 +247,22 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
 
         replace_ok = True
         reconcile_ok = True
-        if plan.replace_rows:
-            replace_ids = sorted({int(r["id"]) for r in plan.replace_rows})
+        for pair in plan.mapping_pairs:
+            # One canonical item-file replacement per slot, left in Preview:
+            # both files and rows stay until an operator approves it.
             try:
-                plan_res = composite_workflows.plan_bulk_import_replacement({
-                    "existing_album_id": existing_album_id,
-                    "old_item_ids": replace_ids,
-                    "mappings": plan.mapping_pairs,
-                    "source_folder": source_folder,
-                    "mb_albumid": mb_albumid,
-                    "reason": "Bulk import album merge replacement",
-                })
-                if plan_res.get("ok"):
-                    op_id = plan_res.get("operation_id")
-                    apply_res = composite_workflows.apply_bulk_import_replacement(op_id)
-                    if apply_res.get("ok"):
-                        log.append(f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
-                                   f"to engine bulk replacement tx {op_id}.")
-                    else:
-                        # Fail closed: both versions coexist rather than losing a copy.
-                        replace_ok = False
-                        log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
-                else:
-                    replace_ok = False
-                    log.append(f"  [merge] WARN bulk replacement plan failed, old rows left in place: {plan_res.get('error')}")
+                plan_res = _item_replacement.plan_verified_replacement(
+                    int(pair["old_item_id"]), int(pair["new_item_id"]),
+                    reason="Import album merge: verified replacement",
+                    expected_recording_id=_s(pair.get("expected_recording_id")))
             except Exception as ex:
-                replace_ok = False
-                log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
+                plan_res = {"ok": False, "error": str(ex)}
+            if plan_res.get("ok"):
+                log.append(f"  [merge] Replacement of item {pair['old_item_id']} by imported item "
+                           f"{pair['new_item_id']} planned (tx {plan_res.get('operation_id')}); awaiting approval.")
+            else:
+                log.append(f"  [merge] Replacement of item {pair['old_item_id']} not planned, both kept for review: "
+                           f"{plan_res.get('error') or plan_res.get('code')}")
 
         if plan.duplicate_rows or plan.move_ids:
             dup_item_ids = [int(r["id"]) for r in plan.duplicate_rows]
@@ -310,7 +300,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         # Report existing_album_id only when what was attempted succeeded.
         # Rows held for review stay untouched in the imported album row; the
         # caller then validates the existing album and never the held rows.
-        attempted = bool(plan.move_ids or plan.duplicate_rows or plan.replace_rows)
+        attempted = bool(plan.move_ids or plan.duplicate_rows)
         succeeded = replace_ok and reconcile_ok
         return existing_album_id if (attempted and succeeded) else imported_album_id
     except Exception as ex:

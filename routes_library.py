@@ -17,7 +17,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _album_item_abs_path, _acoustid_lookup_cached, _normalize_albumartist
+from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached, _normalize_albumartist
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
 from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet
@@ -36,7 +36,7 @@ from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album
 from backend.musicbrainz_service import _discogs_artist_discography, _discogs_track_search, _ensure_release_group_art, _mb_release_group_for_release
 from backend.pending_review_store import _is_music_root_path, _queue_folder_for_manual_review
 from backend.plex_service import _trigger_plex_refresh
-from backend.replacement_service import _music_format_replacement_matching_contract, _replacement_destination_check
+import backend.item_replacement as _item_replacement
 from backend.serializers import _format_duration, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result
 from backend.transaction_service import _item_metadata_transaction_payload, _start_metadata_apply_transaction
 from app import app  # noqa: E402  (route modules load after app.py defines app)
@@ -4785,128 +4785,28 @@ def scan_folder_placeholders_job():
 
 @app.post("/api/items/<int:iid>/replacement/plan")
 def item_replacement_plan(iid: int):
-    """Manual, human-reviewed counterpart to the automatic music-format
-    replacement job (SEC-002 Wave 17 final review): a user supplies a
-    specific replacement candidate file for a specific track, this route
-    verifies it via the SAME established AcoustID fingerprint
-    infrastructure the automatic job already uses (no new fingerprint
-    stack), and only then asks the engine to Plan a track_replacement_v1
-    transaction. Planning never mutates anything -- Apply is a distinct,
-    separate, explicit user action (see item_replacement_apply)."""
+    """Plan replacing this album item's file with another tracked item's
+    file (e.g. a proven lossless duplicate). Planning never mutates; the
+    one replacement authority (backend.item_replacement) re-proves the pair
+    by AcoustID and checks the canonical destination. Approve and apply the
+    returned transaction separately. Untracked/staged candidate files are
+    not supported: that would need a local write into the read-only /music."""
     payload = request.get_json(silent=True) or {}
-    candidate_path_raw = _s(payload.get("candidate_path") or payload.get("replacement_path") or "").strip()
     try:
         candidate_item_id = int(payload.get("candidate_item_id") or payload.get("replacement_item_id") or 0)
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "candidate_item_id must be an integer."}), 400
-    if not candidate_path_raw and not candidate_item_id:
-        return jsonify({"ok": False, "error": "candidate_item_id (or candidate_path) is required."}), 400
-
-    item = lib.get_item(iid)
-    if item is None:
-        return jsonify({"ok": False, "error": "Item not found."}), 404
-
-    # The stock Beets web API reports library-relative paths; resolve them
-    # against MUSIC_ROOT so the fingerprint step reads the real file.
-    original_path = _album_item_abs_path(_s(getattr(item, "path", "") or ""))
-    # SEC-002 Wave 17 final review: this used to build cand_p from the raw
-    # client string and stat() it directly (a Path-under-MUSIC_ROOT
-    # fallback for relative input, no less -- wrong root for a replacement
-    # *candidate*, which must come from a staging/acquisition area, not
-    # the music library). Reuse the already-hardened, already-tested
-    # _resolve_import_review_source_path() (Wave 6/7/8) instead of a
-    # second, weaker ad hoc check: candidate/staging roots only
-    # (allow_music=False), full symlink-component walk, containment
-    # re-verified after resolve(). The engine independently re-validates
-    # its own candidate_allowed_roots at Plan and Apply time -- this is
-    # defense-in-depth, not the only boundary.
-    if candidate_item_id:
-        # A tracked library item (e.g. a proven lossless duplicate of this
-        # album track). Its path comes from Beets, never from the client.
-        cand_item = lib.get_item(candidate_item_id)
-        if cand_item is None or candidate_item_id == iid:
-            return jsonify({"ok": False, "error": "Replacement item not found."}), 404
-        cand_p = Path(_album_item_abs_path(_s(getattr(cand_item, "path", "") or "")))
-        if not cand_p.is_file():
-            return jsonify({"ok": False, "error": "Replacement item's file is not accessible."}), 400
-    else:
-        cand_p, cand_path_error = _resolve_import_review_source_path(
-            candidate_path_raw, allow_music=False, expected_type="file", require_exists=True,
-        )
-        if cand_path_error or cand_p is None:
-            return jsonify({"ok": False, "error": cand_path_error or "Candidate file was not found or is not accessible."}), 400
-
-    # Real AcoustID fingerprint verification -- reusing
-    # _acoustid_fingerprint_match / _acoustid_fingerprint_ids, the exact
-    # same functions the automatic replacement job uses. AI is never
-    # consulted here and could not authorize this even if it were.
-    shared_id = ""
-    if original_path and Path(original_path).exists():
-        shared_id, _src_ids, cand_ids = _acoustid_fingerprint_match(str(cand_p), original_path)
-    else:
-        cand_ids = _acoustid_fingerprint_ids(str(cand_p))
-
-    fingerprint_validation: Dict[str, Any] = {}
-    expected_mbid = _s(getattr(item, "mb_trackid", "") or "").strip().lower()
-    if shared_id:
-        fingerprint_validation = {
-            "fingerprint_status": "matched",
-            "mb_recording_id_candidate": shared_id,
-            "decision_reason": f"Replacement AcoustID fingerprint matches original recording {shared_id}.",
-        }
-    elif expected_mbid and expected_mbid in (cand_ids or []):
-        fingerprint_validation = {
-            "fingerprint_status": "matched",
-            "mb_recording_id_candidate": expected_mbid,
-            "decision_reason": "Replacement AcoustID fingerprint matches the track's known MusicBrainz recording.",
-        }
-
-    if not fingerprint_validation:
-        return jsonify({
-            "ok": False,
-            "fingerprint": {"candidate_recording_ids": cand_ids[:5] if cand_ids else [], "expected_recording_id": expected_mbid},
-            "error": "Could not verify the replacement candidate is the same recording via AcoustID fingerprint. Refusing to plan an unverified replacement.",
-            "code": "candidate_not_verified",
-        }), 400
-
-    resolved_evidence = {
-        "mb_trackid": _s(getattr(item, "mb_trackid", "") or ""),
-        "mb_releasegroupid": _s(getattr(item, "mb_releasegroupid", "") or getattr(item, "album_mb_releasegroupid", "") or ""),
-    }
-    matching_contract = _music_format_replacement_matching_contract(
-        resolved_evidence, {"fingerprint_validation": fingerprint_validation},
-    )
-
-    displace = None
-    if candidate_item_id:
-        destination = _replacement_destination_check(original_path, str(cand_p))
-        if not destination.get("ok"):
-            return jsonify({"ok": False, "code": destination.get("code"), "error": destination.get("error"),
-                            "destination": destination.get("destination")}), 409
-        displace = destination.get("displace")
-
+    if not candidate_item_id:
+        if _s(payload.get("candidate_path") or payload.get("replacement_path") or "").strip():
+            return jsonify({"ok": False, "code": "staged_replacement_unsupported",
+                            "error": "Replacement must be a tracked library item (candidate_item_id); "
+                                     "replacing from an untracked staged file is not supported."}), 400
+        return jsonify({"ok": False, "error": "candidate_item_id is required."}), 400
     try:
-        res = composite_workflows.plan_track_replacement({
-            "displace_destination": displace,
-            "fingerprint_validation": fingerprint_validation,
-            "original_item_id": iid,
-            "original_path": original_path,
-            "replacement_path": str(cand_p),
-            "replacement_item_id": candidate_item_id or None,
-            "reason": _s(payload.get("reason") or "Manual track replacement"),
-            "matching_contract": matching_contract,
-        })
-        status_code = 200 if res.get("ok") else 400
-        return jsonify(res), status_code
+        res = _item_replacement.plan_verified_replacement(
+            iid, candidate_item_id, reason=_s(payload.get("reason") or "Manual track replacement"))
     except BeetsUnavailableError as exc:
-        # Never interpolate the raw exception text into a client-facing
-        # response: BeetsClient._request() falls back to embedding up to
-        # 200 raw response-body characters for any non-JSON error response
-        # it doesn't recognize (e.g. an unexpected proxy/framework error
-        # page), which could carry stack-trace-shaped text -- the same
-        # established precedent as get_config()/_config_error_response()
-        # above. error_code is a short, fixed identifier string, never
-        # free text, so it's safe to echo.
+        # error_code is a short fixed identifier, never raw engine text.
         err_code = "beets_unavailable" if not exc.error_code or exc.error_code in ("BEETS_UNREACHABLE", "BEETS_TIMEOUT", "BEETS_ADAPTER_ERROR") else exc.error_code
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": err_code}), 503
     except BeetsError as exc:
@@ -4914,6 +4814,12 @@ def item_replacement_plan(iid: int):
     except Exception:
         _app_logger.exception("item_replacement_plan failed for iid=%s", iid)
         return jsonify({"ok": False, "error": "Track replacement planning failed."}), 500
+    if res.get("ok"):
+        return jsonify(res), 200
+    status = {"item_not_found": 404, "destination_occupied": 409}.get(_s(res.get("code")), 400)
+    if res.get("code") in ("fingerprint_disagreement", "fingerprint_unavailable"):
+        res = {**res, "code": "candidate_not_verified", "reason_code": res.get("code")}
+    return jsonify(res), status
 
 
 @app.post("/api/items/<int:iid>/replacement/apply")

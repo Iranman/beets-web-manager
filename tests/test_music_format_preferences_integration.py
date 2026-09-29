@@ -88,8 +88,9 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertNotIn('replace_rows.extend(forced_replace_rows)', APP_SOURCE)
         self.assertIn('replacement failed verification', APP_SOURCE)
         self.assertIn('Replacement found: imported', APP_SOURCE)
-        self.assertIn('Original removed after verified replacement', APP_SOURCE)
-        self.assertIn('plan_track_replacement', APP_SOURCE)
+        # The pipeline plans the canonical replacement and leaves it for approval.
+        self.assertIn('Replacement planned and awaiting approval', APP_SOURCE)
+        self.assertIn('plan_verified_replacement', APP_SOURCE)
         replace_source = APP_SOURCE[APP_SOURCE.index('def _music_format_replace_rows('):APP_SOURCE.index('@app.post("/api/library/music-format/replace")')]
         verify_index = replace_source.index('replacement = _music_format_find_verified_replacement(resolved, prefs)')
         remove_index = replace_source.index('_music_format_remove_original_after_replacement(')

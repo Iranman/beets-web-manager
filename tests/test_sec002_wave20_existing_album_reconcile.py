@@ -1030,7 +1030,7 @@ class RollbackTests(Wave20FixtureBase):
 
 
 class Wave18InteractionTests(Wave20FixtureBase):
-    def test_merge_job_routes_replace_rows_to_wave18_and_dup_move_to_wave20(self):
+    def test_merge_job_never_applies_a_replacement_and_moves_the_rest(self):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
@@ -1038,13 +1038,14 @@ class Wave18InteractionTests(Wave20FixtureBase):
         self._create_item(20, 2, "Track 1 New", 1, 1, "track1_imported.wav", staging=True)
         self._create_item(21, 2, "Track 2 New", 1, 2, "track2_imported.wav", staging=True)
 
-        plan_bulk_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_bulk_18"})
-        apply_bulk_mock = mock.MagicMock(return_value={"ok": True})
+        import backend.item_replacement as item_replacement
+        plan_repl_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_repl"})
+        apply_repl_mock = mock.MagicMock(return_value={"ok": True})
         plan_rec_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_rec_20"})
         apply_rec_mock = mock.MagicMock(return_value={"ok": True})
 
-        with mock.patch.object(app_module.composite_workflows, "plan_bulk_import_replacement", plan_bulk_mock), \
-             mock.patch.object(app_module.composite_workflows, "apply_bulk_import_replacement", apply_bulk_mock), \
+        with mock.patch.object(item_replacement, "plan_verified_replacement", plan_repl_mock), \
+             mock.patch.object(app_module.composite_workflows, "apply_track_replacement", apply_repl_mock), \
              mock.patch.object(app_module.composite_workflows, "plan_existing_album_reconcile", plan_rec_mock), \
              mock.patch.object(app_module.composite_workflows, "apply_existing_album_reconcile", apply_rec_mock):
 
@@ -1052,6 +1053,9 @@ class Wave18InteractionTests(Wave20FixtureBase):
                 2, 1, str(self.staging_root), [], mb_albumid=""
             )
 
+        # A replacement is only ever planned (Preview) during an import;
+        # applying it needs an operator's approval.
+        apply_repl_mock.assert_not_called()
         plan_rec_mock.assert_called_once()
         apply_rec_mock.assert_called_once_with("op_rec_20")
         self.assertEqual(res, 1)

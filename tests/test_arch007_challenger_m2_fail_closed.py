@@ -103,17 +103,13 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_item_replacement_plan_fails_closed_503_on_beets_unavailable(self):
         """POST /api/items/<iid>/replacement/plan must return HTTP 503 on engine down."""
-        fake_item = mock.Mock(path="/data/media/music/Artist/Album/track.mp3", mb_trackid="rec-123")
-        with mock.patch("app.lib.get_item", return_value=fake_item), \
-             patch_app_family("app", "_resolve_import_review_source_path", return_value=(Path("/data/staging/replacement.flac"), None)), \
-             mock.patch("pathlib.Path.exists", return_value=True), \
-             patch_app_family("app", "_acoustid_fingerprint_match", return_value=("rec-123", {"rec-123"}, {"rec-123"})), \
-             mock.patch("app.composite_workflows.plan_track_replacement") as mock_plan:
+        import backend.item_replacement as item_replacement
+        with mock.patch.object(item_replacement, "plan_verified_replacement") as mock_plan:
             mock_plan.side_effect = BeetsUnavailableError("Connection refused")
 
             response = self.client.post(
                 "/api/items/42/replacement/plan",
-                json={"candidate_path": "/data/staging/replacement.flac"},
+                json={"candidate_item_id": 43},
             )
 
             self.assertEqual(response.status_code, 503)
