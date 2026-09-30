@@ -26,7 +26,7 @@ from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROO
 from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
 from backend.cleanup_service import _classify_album_cleanup_apply_failure, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
-from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_duplicate_resolver_plan
+from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_duplicate_resolver_plan, evaluate_resolver_retag, apply_resolver_retag
 from backend.import_reconciliation_service import _run_artist_folder_reconcile_for_alias_merge
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
@@ -4178,138 +4178,77 @@ def apply_album_duplicate_resolver(aid):
         retagged_ids: List[int] = []
         retag_failures: List[Dict[str, Any]] = []
         if retags:
+            target_album_row = lib.get_album(aid)
+            target_album_dict = (
+                dict(target_album_row._fields) if target_album_row and hasattr(target_album_row, "_fields")
+                else (dict(target_album_row) if target_album_row else {"id": int(aid), "mb_albumid": mbid})
+            )
+            if "mb_albumid" not in target_album_dict or not target_album_dict["mb_albumid"]:
+                target_album_dict["mb_albumid"] = mbid or _s(plan.get("mb_albumid") or "")
             if dry_run:
                 for entry in retags:
                     item = entry["item"]
                     target = entry["target"]
-                    log.append(
-                        "  Would retag item {id}: {old} -> {disc}.{track:02d} {title}".format(
-                            id=int(item.get("id") or 0),
-                            old=_s(item.get("filename") or item.get("title") or ""),
-                            disc=int(target.get("disc") or 1),
-                            track=int(target.get("track") or 0),
-                            title=_s(target.get("title") or ""),
-                        )
-                    )
-                retagged = len(retags)
-            else:
-                # ARCH-020 (v0.1.44): the album-row merge is an ownership
-                # change only and refuses this payload
-                # (identity_rewrite_not_supported) -- it rewrote Recording
-                # ID and disc/track on the moved items without audio proof.
-                # Each source is therefore reported in retag_failures until
-                # retag is rebuilt on the recording-attach workflow (see
-                # docs/TECHNICAL_DEBT.md ARCH-020).
-                #
-                # ARCH-003 Wave 33 continuation: decomposed into N single-
-                # source-album album_duplicate_merge_v1 calls (one per
-                # distinct source album among the selected retag items)
-                # rather than extending that shared family's Plan/Apply/
-                # Rollback control flow to support multiple source albums
-                # in one call -- the family has other real callers, and
-                # touching its core flow for this one edge case risked
-                # regressing them. adopt_target_fields=True makes each
-                # moved item inherit the target album's own current
-                # album/albumartist/year/mb_albumid; item_field_overrides
-                # gives each moved item its own specific
-                # mb_trackid/disc/track/title (the actual retag: each
-                # duplicate item assigned to a different missing-track
-                # slot). album_duplicate_merge_v1's own Apply already
-                # retires a source album row that becomes empty -- no
-                # separate cleanup step is needed here the way the old
-                # raw-SQL code needed one.
-                #
-                # DELIBERATE, ACCEPTED TRADE-OFF (see docs/TECHNICAL_DEBT.md):
-                # this sacrifices the old code's whole-batch atomicity
-                # (one SQL transaction covering every retagged item
-                # across every source album at once) for N independent
-                # atomic operations, one per source album. A later
-                # source's merge failing after an earlier one already
-                # committed is a real, possible partial-completion
-                # outcome now -- reported truthfully below (per-source
-                # success/failure in retag_failures, never silently
-                # folded into an overall "ok": true), and each
-                # succeeded source's merge remains individually
-                # rollback-able through the family's own existing
-                # rollback endpoint exactly as any other
-                # album_duplicate_merge_v1 operation would be.
-                by_source: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-                for entry in retags:
-                    by_source[int(entry["item"].get("album_id") or 0)].append(entry)
-
-                for src_aid, entries in sorted(by_source.items()):
-                    item_ids = [int(e["item"].get("id") or 0) for e in entries]
-                    if src_aid <= 0:
+                    eval_res = evaluate_resolver_retag(item, target, target_album_dict, adapter=lib)
+                    if not eval_res.get("ok"):
                         retag_failures.append({
-                            "source_album_id": src_aid, "item_ids": item_ids,
-                            "error": "Retag item does not have a valid source album_id",
+                            "item_id": int(item.get("id") or 0),
+                            "source_album_id": int(item.get("album_id") or 0),
+                            "error": eval_res.get("error"),
+                            "code": eval_res.get("code"),
                         })
-                        continue
+                        log.append(f"  Retag item {item.get('id')} dry-run evaluation failed: {eval_res.get('error')}")
+                    else:
+                        retagged += 1
+                        log.append(
+                            "  Would retag item {id}: {old} -> {disc}.{track:02d} {title}".format(
+                                id=int(item.get("id") or 0),
+                                old=_s(item.get("filename") or item.get("title") or ""),
+                                disc=int(target.get("disc") or 1),
+                                track=int(target.get("track") or 0),
+                                title=_s(target.get("title") or ""),
+                            )
+                        )
+            else:
+                for entry in retags:
                     if cancel_event is not None and cancel_event.is_set():
                         raise RuntimeError("cancelled")
-
-                    item_field_overrides = {
-                        str(int(e["item"].get("id") or 0)): {
-                            "mb_trackid": _s(e["target"].get("mb_trackid") or ""),
-                            "disc": int(e["target"].get("disc") or 1),
-                            "track": int(e["target"].get("track") or 0),
-                            "title": _s(e["target"].get("title") or ""),
-                        }
-                        for e in entries
-                    }
-                    merge_payload = {
-                        "target_album_id": int(aid),
-                        "source_album_id": src_aid,
-                        "item_ids": item_ids,
-                        "adopt_target_fields": True,
-                        "item_field_overrides": item_field_overrides,
-                    }
-                    try:
-                        plan_res = composite_workflows.plan_album_duplicate_merge(merge_payload)
-                    except Exception as ex:
-                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
-                        log.append(f"  Retag from album {src_aid} failed (plan): {ex}")
+                    item = entry["item"]
+                    target = entry["target"]
+                    item_id = int(item.get("id") or 0)
+                    src_aid = int(item.get("album_id") or 0)
+                    eval_res = evaluate_resolver_retag(item, target, target_album_dict, adapter=lib)
+                    if not eval_res.get("ok"):
+                        retag_failures.append({
+                            "item_id": item_id,
+                            "source_album_id": src_aid,
+                            "error": eval_res.get("error"),
+                            "code": eval_res.get("code"),
+                        })
+                        log.append(f"  Retag item {item_id} refused: {eval_res.get('error')}")
                         continue
-                    if not plan_res.get("ok") or not plan_res.get("operation_id"):
-                        err = plan_res.get("error") or "plan rejected"
-                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": err})
-                        log.append(f"  Retag from album {src_aid} failed (plan): {err}")
-                        continue
-                    try:
-                        apply_res = composite_workflows.apply_album_duplicate_merge(plan_res["operation_id"])
-                    except Exception as ex:
-                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
-                        log.append(f"  Retag from album {src_aid} failed (apply): {ex}")
-                        continue
+                    apply_res = apply_resolver_retag(eval_res, write_tags=write_tags, dry_run=False, adapter=lib)
                     if not apply_res.get("ok"):
-                        err = apply_res.get("error") or "apply failed"
-                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": err})
-                        log.append(f"  Retag from album {src_aid} failed (apply): {err}")
+                        retag_failures.append({
+                            "item_id": item_id,
+                            "source_album_id": src_aid,
+                            "error": apply_res.get("error"),
+                            "code": apply_res.get("code"),
+                        })
+                        log.append(f"  Retag item {item_id} failed: {apply_res.get('error')}")
                         continue
-
-                    retagged += len(item_ids)
-                    retagged_ids.extend(item_ids)
-                    for e in entries:
-                        item = e["item"]
-                        target = e["target"]
-                        item_id = int(item.get("id") or 0)
-                        label = f"{int(target.get('disc') or 1)}.{int(target.get('track') or 0):02d} {_s(target.get('title') or '')}"
-                        log.append(f"  Retagged item {item_id}: {label}")
+                    retagged += 1
+                    retagged_ids.append(item_id)
+                    label = f"{eval_res['target_disc']}.{eval_res['target_track']:02d} {eval_res['target_title']}"
+                    log.append(f"  Retagged item {item_id}: {label}")
 
                 if retag_failures:
                     log.append(
-                        f"  {len(retag_failures)} source album(s) failed to retag "
+                        f"  {len(retag_failures)} item(s) failed to retag "
                         f"(see above); {retagged} item(s) succeeded across the rest."
                     )
 
                 if retagged:
-                    # album_duplicate_merge_v1 never touches the target
-                    # album's own row -- adopt_target_fields only ever
-                    # copies FROM it into moved items. Stamp the target's
-                    # own mb_albumid to the selected release separately,
-                    # through the same controlled per-album metadata
-                    # update every other album-level field write in this
-                    # route already uses.
                     stamp_mbid = _s(plan.get("mb_albumid") or "")
                     if stamp_mbid:
                         stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})

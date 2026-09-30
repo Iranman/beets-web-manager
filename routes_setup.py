@@ -3095,11 +3095,48 @@ def setup_test_acoustid():
         })
         req = urllib.request.Request(f"https://api.acoustid.org/v2/lookup?{params}")
         with provider_boundary.opened("acoustid", req, timeout=10, max_attempts=1) as r:
-            data = json.loads(r.read())
+            raw = r.read()
+        data = json.loads(raw)
         if data.get("status") == "error":
-            result.update({"ok": False, "status": "failed", "error": data.get("error", {}).get("message", "AcoustID rejected the request.")})
+            err_obj = data.get("error") or {}
+            err_code = err_obj.get("code")
+            err_msg = err_obj.get("message", "AcoustID rejected the request.")
+            if err_code in (3, 5):
+                # Code 3: invalid fingerprint, Code 5: invalid duration; key is accepted and service is reachable
+                result.update({"ok": True, "status": "ready"})
+            elif err_code == 4 or "api key" in err_msg.lower():
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID API key was rejected: {err_msg or 'invalid API key'}."})
+            else:
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID error: {err_msg}"})
         else:
             result.update({"ok": True, "status": "ready"})
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+            err_data = json.loads(err_body)
+            err_obj = err_data.get("error") or {}
+            err_code = err_obj.get("code")
+            err_msg = err_obj.get("message", "")
+            if err_code in (3, 5) or (exc.code == 400 and ("fingerprint" in err_msg.lower() or "duration" in err_msg.lower())):
+                # Service reachable and API key accepted; test probe fingerprint was invalid
+                result.update({"ok": True, "status": "ready"})
+            elif err_code == 4 or exc.code in (401, 403) or "api key" in err_msg.lower() or "invalid client" in err_msg.lower():
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID API key was rejected: {err_msg or 'invalid API key'}."})
+            elif exc.code == 429:
+                result.update({"ok": False, "status": "failed", "error": "AcoustID rate limit exceeded."})
+            elif exc.code >= 500:
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID service unavailable (HTTP {exc.code})."})
+            else:
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID rejected request: {err_msg or f'HTTP {exc.code}'}"})
+        except Exception:
+            if exc.code in (401, 403):
+                result.update({"ok": False, "status": "failed", "error": "AcoustID API key was rejected as invalid."})
+            elif exc.code == 429:
+                result.update({"ok": False, "status": "failed", "error": "AcoustID rate limit exceeded."})
+            elif exc.code >= 500:
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID service unavailable (HTTP {exc.code})."})
+            else:
+                result.update({"ok": False, "status": "failed", "error": f"AcoustID returned HTTP {exc.code}."})
     except Exception as ex:
         app.logger.warning("AcoustID connectivity test failed: %s", type(ex).__name__)
         result.update({"ok": False, "status": "failed", "error": "Could not reach AcoustID."})

@@ -6,7 +6,7 @@ release-slot safeguards (backend.duplicate_identity).
 
 from __future__ import annotations
 
-import difflib, re, time, uuid
+import difflib, os, re, time, uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1271,6 +1271,222 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
         "groups": groups,
         "group_count": len(groups),
         "action_item_count": sum(len(group.get("action_items") or []) for group in groups),
+    }
+
+
+def _resolver_retag_deps() -> Dict[str, Any]:
+    from backend.matching import evaluate_recording_candidate, acoustid_evidence_from_hits
+    from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path
+    from backend.matching_service import _fetch_mb_release_tracklist
+    from backend.app_runtime import MUSIC_ROOT
+    return {
+        "eval_recording": evaluate_recording_candidate,
+        "acoustid_evidence": acoustid_evidence_from_hits,
+        "acoustid_lookup": _acoustid_lookup_cached_outcome,
+        "mb_tracklist": _fetch_mb_release_tracklist,
+        "abs_path": _album_item_abs_path,
+        "music_root": Path(MUSIC_ROOT),
+    }
+
+
+def evaluate_resolver_retag(
+    item: Dict[str, Any],
+    target: Dict[str, Any],
+    target_album: Dict[str, Any],
+    *,
+    adapter: Optional[Any] = None,
+    deps: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Evaluate one duplicate-resolver retag request against canonical authorities (ARCH-020).
+
+    Evaluates explicitly:
+    - current Recording ID
+    - proposed Recording ID
+    - expected album Release Group
+    - edition Release ID
+    - disc/track position
+    - AcoustID result
+    - MusicBrainz recording/tracklist result
+    """
+    d = deps or _resolver_retag_deps()
+    from backend.beets_adapter import beets_adapter
+    ad = adapter or beets_adapter
+
+    proposed_recording_id = _s(target.get("mb_trackid") or "").strip().lower()
+    current_recording_id = _s(item.get("mb_trackid") or "").strip().lower()
+    edition_release_id = _s(target_album.get("mb_albumid") or "").strip().lower()
+    expected_rg_id = _s(target_album.get("mb_releasegroupid") or "").strip().lower()
+    target_disc = int(target.get("disc") or 1)
+    target_track = int(target.get("track") or 0)
+    target_title = _s(target.get("title") or "")
+
+    if not proposed_recording_id:
+        return {"ok": False, "code": "recording_id_required", "error": "Proposed target has no Recording ID"}
+    if not edition_release_id:
+        return {"ok": False, "code": "edition_required", "error": "Target album has no Release ID"}
+
+    # 1. MusicBrainz tracklist verification
+    mb_res = d["mb_tracklist"](edition_release_id)
+    mb_outcome = mb_res.get("outcome") or ("confirmed" if mb_res.get("ok") else "unavailable")
+    if not mb_res.get("ok"):
+        return {"ok": False, "code": f"musicbrainz_{mb_outcome}", "error": "MusicBrainz release tracklist could not be fetched"}
+
+    mb_rg = _s(mb_res.get("release_group") or mb_res.get("mb_releasegroupid") or "").strip().lower()
+    if expected_rg_id and mb_rg and mb_rg != expected_rg_id:
+        return {"ok": False, "code": "release_group_mismatch", "error": "MusicBrainz release belongs to a different Release Group than the album row"}
+
+    tracks = mb_res.get("tracks") or []
+    mb_slot = next((t for t in tracks if (int(t.get("disc") or 1), int(t.get("track") or 0)) == (target_disc, target_track)), None)
+    if not mb_slot:
+        return {"ok": False, "code": "mb_tracklist_mismatch", "error": f"No track found at disc {target_disc} track {target_track} in release"}
+    if _s(mb_slot.get("mb_trackid")).strip().lower() != proposed_recording_id:
+        return {"ok": False, "code": "mb_tracklist_mismatch", "error": f"MusicBrainz tracklist position ({target_disc}, {target_track}) has recording {_s(mb_slot.get('mb_trackid'))}, not {proposed_recording_id}"}
+
+    # 2. Target slot occupancy check (disc/track conflict)
+    target_items = ad.find_all_items_by_album_id(int(target_album["id"])) or []
+    for it in target_items:
+        if int(it.get("id") or 0) != int(item.get("id") or 0):
+            if (int(it.get("disc") or 1), int(it.get("track") or 0)) == (target_disc, target_track):
+                return {"ok": False, "code": "disc_track_conflict", "error": f"Target album slot ({target_disc}, {target_track}) is already occupied by item {it.get('id')}"}
+
+    # 3. Check if already correct
+    already_correct = (
+        current_recording_id == proposed_recording_id
+        and int(item.get("disc") or 1) == target_disc
+        and int(item.get("track") or 0) == target_track
+        and int(item.get("album_id") or 0) == int(target_album["id"])
+        and _s(item.get("mb_albumid")).strip().lower() == edition_release_id
+    )
+
+    # 4. AcoustID Audio Evidence and Recording Verification
+    raw_path = _s(item.get("path") or "")
+    item_path = d["abs_path"](raw_path) if raw_path else ""
+    if not item_path or not os.path.exists(item_path):
+        return {"ok": False, "code": "file_missing", "error": "Item audio file is missing"}
+
+    heard = d["acoustid_lookup"](item_path)
+    if not heard.answered:
+        return {"ok": False, "code": f"acoustid_{heard.outcome.value}", "error": f"AcoustID provider unavailable ({heard.outcome.value})"}
+
+    acoustid_candidates = heard.data or []
+    acoustid_rids = [_s(c.get("mb_trackid")).strip().lower() for c in acoustid_candidates if c.get("mb_trackid")]
+
+    # If AcoustID returned hits that contradict the proposed recording ID -> conflict
+    if acoustid_rids and proposed_recording_id not in acoustid_rids:
+        return {"ok": False, "code": "fingerprint_conflict", "error": "AcoustID fingerprint contradicts proposed recording ID"}
+
+    # Canonical evaluation
+    local_meta = {
+        "title": item.get("title") or "",
+        "artist": item.get("artist") or item.get("albumartist") or "",
+        "album": item.get("album") or "",
+        "duration_seconds": float(item.get("length") or 0),
+        "recording_id": proposed_recording_id if proposed_recording_id in acoustid_rids else current_recording_id,
+        "disc": int(item.get("disc") or 1),
+        "track": int(item.get("track") or 0),
+        "filename": Path(item_path).name,
+    }
+    candidate_meta = {
+        "recording_id": proposed_recording_id,
+        "title": target_title or (_s(mb_slot.get("title")) if mb_slot else ""),
+        "artist": target.get("artist") or target_album.get("albumartist") or "",
+        "release_group_id": expected_rg_id,
+        "disc": target_disc,
+        "track": target_track,
+    }
+    eval_res = d["eval_recording"](
+        local_meta,
+        candidate_meta,
+        acoustid=d["acoustid_evidence"](acoustid_candidates, proposed_recording_id),
+    )
+
+    if eval_res.hard_conflicts and not (len(eval_res.hard_conflicts) == 1 and "recording_id_conflict" in eval_res.hard_conflicts and proposed_recording_id in acoustid_rids):
+        return {"ok": False, "code": next(iter(eval_res.hard_conflicts)), "error": f"Hard conflict in recording evaluation: {', '.join(eval_res.hard_conflicts)}"}
+
+    # Proving audio identity:
+    # Deterministic if AcoustID confirms proposed_recording_id OR (already correct / embedded matches with no conflict)
+    proven_by_acoustid = bool(proposed_recording_id in acoustid_rids)
+    proven_by_embedded = bool(current_recording_id == proposed_recording_id and not acoustid_rids)
+    if not (proven_by_acoustid or proven_by_embedded or eval_res.identity_established()):
+        return {"ok": False, "code": "insufficient_proof", "error": "Audio identity could not be deterministically proven"}
+
+    return {
+        "ok": True,
+        "already_correct": already_correct,
+        "item_id": int(item.get("id") or 0),
+        "proposed_recording_id": proposed_recording_id,
+        "target_disc": target_disc,
+        "target_track": target_track,
+        "target_title": target_title or (_s(mb_slot.get("title")) if mb_slot else ""),
+        "edition_release_id": edition_release_id,
+        "expected_rg_id": expected_rg_id,
+        "source_album_id": int(item.get("album_id") or 0),
+        "target_album_id": int(target_album["id"]),
+        "eval_result": eval_res,
+    }
+
+
+def apply_resolver_retag(
+    eval_result: Dict[str, Any],
+    *,
+    write_tags: bool = True,
+    dry_run: bool = False,
+    adapter: Optional[Any] = None,
+    store: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Execute the evaluated resolver retag: recording identity repair followed
+    by canonical album-row merge ownership move if needed (ARCH-020)."""
+    if not eval_result.get("ok"):
+        return eval_result
+    if eval_result.get("already_correct"):
+        return {"ok": True, "changed": False, "reason": "already_correct", "item_id": eval_result["item_id"]}
+
+    item_id = eval_result["item_id"]
+    proposed_recording_id = eval_result["proposed_recording_id"]
+    target_disc = eval_result["target_disc"]
+    target_track = eval_result["target_track"]
+    target_title = eval_result["target_title"]
+    edition_release_id = eval_result["edition_release_id"]
+    expected_rg_id = eval_result["expected_rg_id"]
+    source_album_id = eval_result["source_album_id"]
+    target_album_id = eval_result["target_album_id"]
+
+    if dry_run:
+        return {"ok": True, "dry_run": True, "item_id": item_id, "moved": source_album_id != target_album_id}
+
+    from backend.beets_adapter import beets_adapter
+    ad = adapter or beets_adapter
+
+    # Step 1: Repair item recording identity
+    item_fields = {
+        "mb_trackid": proposed_recording_id,
+        "disc": target_disc,
+        "track": target_track,
+        "title": target_title,
+        "mb_albumid": edition_release_id,
+        "mb_releasegroupid": expected_rg_id,
+    }
+    modify_res = ad.modify_item(item_id, item_fields)
+    if not modify_res.get("success", False):
+        return {"ok": False, "code": "item_modify_failed", "error": modify_res.get("error", "Failed to update item metadata")}
+
+    # Step 2: Move album ownership if needed
+    merge_res = None
+    if source_album_id != target_album_id:
+        merge_res = composite_workflows.merge_split_album_items(
+            target_album_id, source_album_id, [item_id], adapter=ad, store=store
+        )
+        if not merge_res.get("ok"):
+            return {"ok": False, "code": merge_res.get("code", "merge_failed"), "error": merge_res.get("error", "Failed to move item to target album")}
+
+    return {
+        "ok": True,
+        "changed": True,
+        "item_id": item_id,
+        "recording_id": proposed_recording_id,
+        "disc": target_disc,
+        "track": target_track,
+        "merge_res": merge_res,
     }
 
 

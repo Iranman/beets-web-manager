@@ -7,6 +7,7 @@ routes_setup, matching how a real Flask blueprint would be exercised without
 the rest of the application's side effects.
 """
 import importlib
+import io
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import tempfile
 import types
 import unittest
 import unittest.mock as mock
+import urllib.error
 from pathlib import Path
 
 
@@ -556,6 +558,78 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
         self.assertIn("fpcalc_available", body)
+
+    def test_acoustid_test_dummy_fingerprint_code_3_reports_ready(self):
+        diagnostics = {
+            "remote_reachable": True,
+            "loaded_plugins": ["chroma"],
+            "fpcalc_path": "/usr/bin/fpcalc",
+            "capabilities": {
+                "acoustid_lookup": {
+                    "fpcalc_available": True,
+                    "chroma_loaded": True,
+                    "pyacoustid_available": True,
+                }
+            },
+        }
+        err_response = io.BytesIO(b'{"status":"error","error":{"code":3,"message":"invalid fingerprint"}}')
+        http_err = urllib.error.HTTPError("https://api.acoustid.org/v2/lookup", 400, "Bad Request", {}, err_response)
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics), \
+             mock.patch.object(self.module.urllib.request, "urlopen", side_effect=http_err):
+            r = self.client.post("/api/setup/test/acoustid", json={"api_key": "valid-acoustid-key"})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "ready")
+
+    def test_acoustid_test_http_error_invalid_key_reports_failed(self):
+        diagnostics = {
+            "remote_reachable": True,
+            "loaded_plugins": ["chroma"],
+            "fpcalc_path": "/usr/bin/fpcalc",
+            "capabilities": {
+                "acoustid_lookup": {
+                    "fpcalc_available": True,
+                    "chroma_loaded": True,
+                    "pyacoustid_available": True,
+                }
+            },
+        }
+        err_response = io.BytesIO(b'{"status":"error","error":{"code":4,"message":"invalid API key"}}')
+        http_err = urllib.error.HTTPError("https://api.acoustid.org/v2/lookup", 400, "Bad Request", {}, err_response)
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics), \
+             mock.patch.object(self.module.urllib.request, "urlopen", side_effect=http_err):
+            r = self.client.post("/api/setup/test/acoustid", json={"api_key": "bad-key"})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("rejected", body["error"])
+        self.assertIn("invalid API key", body["error"])
+
+    def test_acoustid_test_rate_limited_429(self):
+        diagnostics = {
+            "remote_reachable": True,
+            "loaded_plugins": ["chroma"],
+            "fpcalc_path": "/usr/bin/fpcalc",
+            "capabilities": {
+                "acoustid_lookup": {
+                    "fpcalc_available": True,
+                    "chroma_loaded": True,
+                    "pyacoustid_available": True,
+                }
+            },
+        }
+        err_response = io.BytesIO(b'{"status":"error","error":{"code":2,"message":"rate limit exceeded"}}')
+        http_err = urllib.error.HTTPError("https://api.acoustid.org/v2/lookup", 429, "Too Many Requests", {}, err_response)
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics), \
+             mock.patch.object(self.module.urllib.request, "urlopen", side_effect=http_err):
+            r = self.client.post("/api/setup/test/acoustid", json={"api_key": "some-key"})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("rate limit", body["error"])
 
 
 class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
