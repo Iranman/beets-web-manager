@@ -43,7 +43,8 @@ def _staged_entries_source(src: str) -> str:
 
 
 def _run_fn_source(src: str) -> str:
-    start = src.index("def _run(job_log: Optional[List[str]] = None, cancel_event=None):")
+    # update_state: the job contract publishes the resumable position (ARCH-004).
+    start = src.index("def _run(job_log: Optional[List[str]] = None, cancel_event=None, update_state=None):")
     end = src.index("    job = jobs.start_python(", start)
     return src[start:end]
 

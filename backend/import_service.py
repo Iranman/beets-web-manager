@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy, hashlib, json, math, os, re, sqlite3, threading, time
+import backend.job_contract as job_contract
 from backend.matching import AcoustIDStatus
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1745,7 +1746,9 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("cancelled")
             log.append("[reimport] Import slot acquired — starting…")
-            return _do(log, cancel_event)
+            # The slot, held durably: one import at a time across processes.
+            with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
+                return _do(log, cancel_event)
 
     job = jobs.start_python(_do_locked, label=f"Tag+Import disk: {Path(aldir).name}",
                             metadata={"aldir": aldir, "mb_albumid": mb_albumid,
@@ -4030,7 +4033,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         path=folder_path,
                     )
                 log.append(f"[import] Import slot acquired — starting… selected_files={len(selected_source_files)}")
-                result = _do(log, cancel_event)
+                # The slot, held durably: one import at a time across processes.
+                with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
+                    result = _do(log, cancel_event)
                 if auto_import_idempotency_key:
                     _import_review_auto_update(
                         auto_import_idempotency_key,

@@ -13,6 +13,7 @@ import backend.album_row_merge as album_row_merge
 import backend.untracked_recovery_service as untracked_recovery
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
+import backend.job_contract as job_contract
 from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
@@ -195,6 +196,12 @@ def start_maintenance_runner():
             if error:
                 last_run["error"] = error
             _maintenance_save_last_report({"last_run": last_run}, log)
+            if update_state:
+                # The resumable position, also in the durable job record.
+                update_state({"checkpoint": {
+                    "workflow": "maintenance-runner", "stage": status,
+                    "completed_task_ids": last_run["completed_task_ids"], "next_task": last_run["next_task"],
+                    "at": last_run["updated_at"]}})
 
         def task_is_complete(task_id: str) -> bool:
             task = tasks[task_index[task_id]]
@@ -590,9 +597,10 @@ def start_maintenance_runner():
             log.append(f"Clean All failed: {failed_message}")
             raise
     job = jobs.start_python(
-        _run_with_app_context(_run),
+        job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner"),
         label="Clean All",
-        metadata={"type": "maintenance-runner", "workflow": "clean-all", "category": "Cleanup", "resumed": resume_requested},
+        metadata={"type": "maintenance-runner", "workflow": "clean-all", "category": "Cleanup", "resumed": resume_requested,
+                  **job_contract.contract_metadata("maintenance-runner")},
     )
     resume_payload = _maintenance_resume_summary({
         "last_run": {

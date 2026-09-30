@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy, os, re, threading
 from typing import Any, Dict, List
 from flask import jsonify, request
+import backend.job_contract as job_contract
 from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses
 from backend.acquisition_service import _DOWNLOAD_METHODS, _acq_download_all_record, _acq_download_payload, _acq_item_mbid, _acq_start_download_job, _acq_trim_batch_log, _build_acquisition_queue_payload, _load_acq_download_all_last, _qbit_hardlink_missing_impl, _qbit_status_payload, _save_acq_download_all_last, start_album_download
 from backend.app_runtime import QBIT_CATEGORY, QBIT_FILTER, QBIT_URL, YTDLP_ALLOW_BROWSER_COOKIES, _app_logger, _s, _ytdlp_ready, jobs
@@ -271,9 +272,10 @@ def acquisition_download_all():
             )
         )
 
-    def _do(log, cancel_event=None):
+    def _do(log, cancel_event=None, update_state=None):
         if not _acq_download_all_lock.acquire(blocking=False):
             raise RuntimeError("another Acquire Download All job is already running")
+        contract = None
         batch_source_fallback_enabled = bool(try_source_fallback)
         totals = {
             "total": len(selected),
@@ -284,6 +286,9 @@ def acquisition_download_all():
             "failures": [],
         }
         try:
+            contract = job_contract.enter(
+                "acquisition-download-all", log=log, cancel_event=cancel_event, update_state=update_state,
+                progress=lambda: {k: totals[k] for k in ("total", "success", "failed", "skipped")})
             try:
                 log.append(
                     f"Acquire Download All starting: {len(selected)} item(s), "
@@ -339,12 +344,14 @@ def acquisition_download_all():
                 _persist("failed", totals, log, error=str(exc))
                 raise
         finally:
+            if contract is not None:
+                contract.close()
             _acq_download_all_lock.release()
 
     job = jobs.start_python(
         _do,
         label=label,
-        metadata=job_metadata,
+        metadata=job_contract.contract_metadata("acquisition-download-all", job_metadata),
     )
     job_ref["job_id"] = job.job_id
     return jsonify({"ok": True, "job_id": job.job_id, "count": len(selected), "skipped": skipped})
@@ -494,8 +501,9 @@ def start_music_format_replacement_retry():
             limit=limit, method=method, reset_retry_state=reset_retry_state)
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="music-format-replace", fail_fast_in_process=True),
         label="Music format replacement retry",
-        metadata={"type": "music-format-replace", "category": "cleanup"},
+        metadata={"type": "music-format-replace", "category": "cleanup",
+                  **job_contract.contract_metadata("music-format-replace")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
