@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import json, mimetypes, re, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -42,7 +43,7 @@ def _discogs_track_search(title: str, artist: str, limit: int = 5) -> List[Dict[
     }
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{params}", headers=headers)
-        with _ur.urlopen(req, timeout=12) as r:
+        with provider_boundary.opened("discogs", req, timeout=12) as r:
             data = json.loads(r.read())
     except Exception:
         return []
@@ -111,7 +112,7 @@ def _discogs_artist_discography(artist_name: str) -> Dict[str, Any]:
     headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
-        with _ur.urlopen(req, timeout=15) as r:
+        with provider_boundary.opened("discogs", req, timeout=15) as r:
             results = json.loads(r.read()).get("results") or []
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -128,7 +129,7 @@ def _discogs_artist_discography(artist_name: str) -> Dict[str, Any]:
         q2 = _up.urlencode({"sort": "year", "sort_order": "asc", "per_page": 100, "page": page, "token": DISCOGS_TOKEN})
         try:
             req2 = _ur.Request(f"https://api.discogs.com/artists/{artist_id}/releases?{q2}", headers=headers)
-            with _ur.urlopen(req2, timeout=15) as r2:
+            with provider_boundary.opened("discogs", req2, timeout=15) as r2:
                 page_data = json.loads(r2.read())
         except Exception:
             break
@@ -404,7 +405,7 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
             data = {}
             for attempt in range(1, 4):
                 try:
-                    with _ur.urlopen(req, timeout=25) as resp:
+                    with provider_boundary.opened("musicbrainz", req, timeout=25) as resp:
                         data = json.loads(resp.read())
                     break
                 except Exception as ex:
@@ -467,7 +468,7 @@ def _release_art_download(mbid: str, url: str, source: str) -> str:
     try:
         RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
-        with _ur.urlopen(req, timeout=15) as r:
+        with provider_boundary.opened("artwork", req, timeout=15) as r:
             content_type = r.headers.get("Content-Type", "")
             ext = _artist_image_ext(url, content_type)
             if not ext:
@@ -519,7 +520,7 @@ def _fetch_release_group_art_discogs(artist_name: str, album_title: str) -> str:
     headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
-        with _ur.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("discogs", req, timeout=10) as r:
             results = json.loads(r.read()).get("results") or []
         if results:
             return results[0].get("cover_image") or results[0].get("thumb") or ""
@@ -680,7 +681,7 @@ def _mb_artist_search_one(name: str) -> Dict[str, Any]:
                 f"https://musicbrainz.org/ws/2/artist?{params}",
                 headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}
             )
-            with _ur.urlopen(req, timeout=8) as resp:
+            with provider_boundary.opened("musicbrainz", req, timeout=8) as resp:
                 data = json.loads(resp.read())
         except Exception:
             continue
@@ -733,7 +734,7 @@ def _mb_artist_lookup_by_id(mb_artistid: str) -> Dict[str, Any]:
             f"https://musicbrainz.org/ws/2/artist/{mbid}?fmt=json",
             headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}
         )
-        with _ur.urlopen(req, timeout=8) as resp:
+        with provider_boundary.opened("musicbrainz", req, timeout=8) as resp:
             data = json.loads(resp.read())
         mb_name = _s(data.get("name", "")).strip()
         if mb_name:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import base64, copy, difflib, hashlib, json, os, re, shutil, socket, sqlite3, subprocess, threading, time, unicodedata, uuid
 import urllib.error
 import backend.job_contract as job_contract
@@ -3096,7 +3097,7 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
         headers={"Authorization": f"Basic {auth}",
                  "Content-Type": "application/x-www-form-urlencoded"})
     try:
-        with urllib.request.urlopen(tok_req, timeout=10) as r:
+        with provider_boundary.opened("spotify", tok_req, timeout=10) as r:
             token = json.loads(r.read())["access_token"]
     except (urllib.error.URLError, socket.timeout, TimeoutError,
             json.JSONDecodeError, KeyError) as ex:
@@ -3110,7 +3111,7 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
                f"?limit=100&offset={offset}&fields=items(track(name,artists)),next")
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with provider_boundary.opened("spotify", req, timeout=10) as r:
                 data = json.loads(r.read())
         except (urllib.error.URLError, socket.timeout, TimeoutError,
                 json.JSONDecodeError) as ex:
@@ -5108,7 +5109,7 @@ def _playlist_release_group_albumartist_info(mb_releasegroupid: str,
             url,
             headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"},
         )
-        with _ur.urlopen(req, timeout=20) as resp:
+        with provider_boundary.opened("musicbrainz", req, timeout=20) as resp:
             data = json.loads(resp.read())
         info = _playlist_artist_credit_info(data.get("artist-credit") or [])
         if info.get("albumartist"):

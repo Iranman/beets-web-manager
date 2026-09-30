@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import json, math, os, re, socket, threading, time, unicodedata, uuid
 import urllib.error, urllib.parse, urllib.request
 from collections import Counter
@@ -429,7 +430,7 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     last_exc: Optional[BaseException] = None
     for attempt in range(max(1, int(attempts or 1))):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with provider_boundary.opened("plex", req, timeout=timeout) as r:
                 raw = r.read()
             break
         except urllib.error.HTTPError:

@@ -5,6 +5,7 @@ Candidate generation and display only; final decisions stay in backend.matching.
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import json, re
 import urllib.error
 from backend.matching import normalize_track_title_for_matching, similarity as _canonical_similarity
@@ -327,7 +328,7 @@ def _ai_suggest_genre(albumartist: str, album: str, year, api_key: str, log: lis
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with provider_boundary.opened("ai", req, timeout=15) as r:
             data = json.loads(r.read())
         genre = data["choices"][0]["message"]["content"].strip().strip('"').strip("'")
         return genre

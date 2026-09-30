@@ -6,6 +6,16 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+- **Every external provider call goes through one boundary (ARCH-006).** All 48 outbound HTTP call sites (MusicBrainz, AcoustID, Discogs, Spotify, artwork downloads, Plex, Lidarr, SLSKD, qBittorrent, the yt-dlp PO provider and the AI provider) now open their connection with `provider_boundary.opened(provider, request, ...)`.
+  - Each provider has a declared policy: attempts and backoff. Retries are bounded, honour Retry-After (capped at 30 s), and apply only to requests that are safe to repeat (GET/HEAD). A POST is never repeated.
+  - A 4xx refusal (400, 404, 422) is classified `rejected` and never retried. Previously the retry helper treated it as transient.
+  - Each call site keeps its own error handling: on final failure the original exception is raised.
+  - `PROVIDER_MAX_ATTEMPTS=1` turns retries off.
+
+### Added
+- `GET /api/providers/health`: the last classified outcome, attempt count and retry policy per provider since start-up. Redacted: no URLs, no keys.
+
 ## v0.1.47 - 2026-09-30
 
 ### Changed

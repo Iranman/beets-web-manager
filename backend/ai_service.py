@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import hashlib, json, os, re, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
@@ -592,7 +593,7 @@ def _ai_suggest_album_internal(
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with provider_boundary.opened("ai", req, timeout=30) as r:
                 data = json.loads(r.read())
             msg = (data.get("choices") or [{}])[0].get("message") or {}
             if msg.get("refusal"):
@@ -1286,7 +1287,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with provider_boundary.opened("ai", req, timeout=30) as r:
                 data = json.loads(r.read())
             # Check for refusal
             msg = (data.get("choices") or [{}])[0].get("message") or {}

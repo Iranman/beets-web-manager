@@ -1,4 +1,5 @@
 """MusicBrainz / AcoustID API helpers — no app.py dependencies."""
+import backend.provider_boundary as provider_boundary
 import json, logging, os, re, shutil, subprocess, threading, time
 import urllib.error, urllib.parse, urllib.request
 from backend.security import install_secure_urllib
@@ -149,7 +150,7 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
            "?inc=releases+release-groups+artist-credits+media+genres+label-info&fmt=json")
     req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
     try:
-        with _ur.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("musicbrainz", req, timeout=10) as r:
             data = json.loads(r.read())
     except Exception:
         return {}
@@ -253,7 +254,7 @@ def _mb_recording_search(title: str, artist: str, limit: int = 8):
     url = f"https://musicbrainz.org/ws/2/recording?{params}"
     req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"})
     try:
-        with _ur.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("musicbrainz", req, timeout=10) as r:
             data = json.loads(r.read())
         out = []
         for rec in data.get("recordings", []):
@@ -324,7 +325,7 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
     transient_codes = {429, 500, 502, 503, 504}
     for attempt in range(1, 4):
         try:
-            with _ur.urlopen(req, timeout=25) as r:
+            with provider_boundary.opened("musicbrainz", req, timeout=25) as r:
                 data = json.loads(r.read())
             break
         except Exception as ex:
@@ -528,7 +529,7 @@ def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
         url = (f"https://musicbrainz.org/ws/2/release/{mb_id}"
                "?inc=artist-credits+media+label-info+release-groups&fmt=json")
         req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
-        with _ur.urlopen(req, timeout=15) as r:
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as r:
             rel = json.loads(r.read())
     except Exception:
         return None
@@ -762,7 +763,7 @@ def acoustid_lookup_outcome(file_path: str):
                 time.sleep(_ACOUSTID_NEXT_LOOKUP_AT - now)
             _ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _ACOUSTID_MIN_INTERVAL_SECONDS
         try:
-            with _ur.urlopen(req, timeout=15) as r2:
+            with provider_boundary.opened("acoustid", req, timeout=15, max_attempts=1) as r2:
                 data = json.loads(r2.read())
             status_code = 200
         except urllib.error.HTTPError as http_err:
@@ -817,7 +818,7 @@ def _resolve_release_group_to_release(rg_mbid: str, log: list,
     try:
         api_url = f"https://musicbrainz.org/ws/2/release-group/{rg_mbid}?inc=releases&fmt=json"
         req = _ur.Request(api_url, headers={"User-Agent": "BeetsWebControl/1.0"})
-        with _ur.urlopen(req, timeout=15) as resp:
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as resp:
             data = json.loads(resp.read())
         releases = data.get("releases", []) or []
     except Exception as ex:
@@ -858,7 +859,7 @@ def _mb_release_group_candidates(rg_mbid: str, log: Optional[list] = None) -> Li
     try:
         api_url = f"https://musicbrainz.org/ws/2/release-group/{rg_mbid}?inc=releases+media&fmt=json"
         req = _ur.Request(api_url, headers={"User-Agent": "BeetsWebControl/1.0"})
-        with _ur.urlopen(req, timeout=15) as resp:
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as resp:
             data = json.loads(resp.read())
         releases = data.get("releases", []) or []
     except Exception as ex:
@@ -899,7 +900,7 @@ def _resolve_mb_release_id(mb_input: str, log: list) -> str:
                        f"?inc=releases&fmt=json")
             req = urllib.request.Request(api_url, headers={
                 "User-Agent": "BeetsWebControl/1.0 (beets-web@localhost)"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with provider_boundary.opened("musicbrainz", req, timeout=15) as resp:
                 data = json.loads(resp.read())
             releases = data.get("releases", [])
             official = [r for r in releases if r.get("status") == "Official"]
@@ -929,7 +930,7 @@ def fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None)
     transient_codes = {429, 500, 502, 503, 504}
     for attempt in range(1, 4):
         try:
-            with _ur.urlopen(req, timeout=30) as resp:
+            with provider_boundary.opened("musicbrainz", req, timeout=30) as resp:
                 mb_data = json.loads(resp.read())
             break
         except Exception as ex:

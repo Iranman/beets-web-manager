@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import json, os, re, sqlite3, threading, time, uuid
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -1216,7 +1217,7 @@ def _fetch_discography(artist_name: str) -> Dict[str, Any]:
         req = _ur.Request(f"https://musicbrainz.org/ws/2/artist/{mbid}?fmt=json",
                           headers={"User-Agent": "BeetsWebControl/1.0"})
         try:
-            with _ur.urlopen(req, timeout=20) as r:
+            with provider_boundary.opened("musicbrainz", req, timeout=20) as r:
                 adata = json.loads(r.read())
             mb_artist = adata.get("name") or artist_name
         except Exception:
@@ -1225,7 +1226,7 @@ def _fetch_discography(artist_name: str) -> Dict[str, Any]:
         q = _up.urlencode({"query": f'artist:"{artist_name}"', "limit": 8, "fmt": "json"})
         req = _ur.Request(f"https://musicbrainz.org/ws/2/artist?{q}",
                           headers={"User-Agent": "BeetsWebControl/1.0"})
-        with _ur.urlopen(req, timeout=20) as r:
+        with provider_boundary.opened("musicbrainz", req, timeout=20) as r:
             adata = json.loads(r.read())
 
         artists = adata.get("artists", [])
@@ -1255,7 +1256,7 @@ def _fetch_discography(artist_name: str) -> Dict[str, Any]:
         req = _ur.Request(f"https://musicbrainz.org/ws/2/release-group?{p}",
                           headers={"User-Agent": "BeetsWebControl/1.0"})
         try:
-            with _ur.urlopen(req, timeout=20) as r:
+            with provider_boundary.opened("musicbrainz", req, timeout=20) as r:
                 rdata = json.loads(r.read())
         except Exception:
             break

@@ -61,7 +61,14 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: Each provider has a small adapter with typed inputs/outputs, explicit transient/permanent failure classification, bounded retries, and redaction.
 - Safe migration approach: Extract adapters only when changing a workflow for a real bug. Preserve API responses and add contract tests.
 - v0.1.42 progress (IMPLEMENTED, CI VERIFIED, LIVE VERIFIED for AcoustID: a live lookup returned `confirmed`; no key value in either container's logs or the data directory): `backend/provider_boundary.py` defines the typed outcomes (`confirmed`, `no_result`, `ambiguous`, `conflict`, `unavailable`, `rate_limited`, `authentication_error`, `transient_error`), bounded Retry-After-aware retries and redaction. Production callers: the AcoustID lookup (`helpers_mb.acoustid_lookup_outcome`) and its file cache, which now caches only real answers -- previously an outage, throttle or rejected key was cached permanently as "no match" -- and the MusicBrainz release tracklist fetch. The untracked recovery workflow consumes both outcomes and fails as "could not ask", never as "no match".
-- Remaining: Plex, Lidarr, SLSKD, yt-dlp, OpenAI/AI and the other MusicBrainz calls do not use the boundary yet.
+- v0.1.48 (IMPLEMENTED; CI and live acceptance pending): every outbound provider call (48 sites: MusicBrainz, AcoustID, Discogs, Spotify, artwork, Plex, Lidarr, SLSKD, qBittorrent, yt-dlp PO provider, AI) opens its connection through `provider_boundary.opened(provider, request, ...)`.
+  - Per-provider policy (`POLICIES`): bounded, Retry-After-aware retries for repeatable requests only; a POST is never repeated; a 4xx refusal is `rejected` and never retried.
+  - The classified outcome of every call is recorded, redacted, and served by `GET /api/providers/health`.
+  - `tests/test_provider_boundary_opened.py` fails the build if any application module calls `urlopen` directly, uses another HTTP client, or names a provider without a policy.
+- Remaining (why this is not Closed):
+  - Transport is uniform; interpretation is not. Call sites still parse responses and map failures to their own result shapes; only the AcoustID lookup and the MusicBrainz release fetch return a typed `ProviderResult` to their callers. A site that swallows an exception can still report an outage as an empty result.
+  - yt-dlp and SLSKD downloads run as subprocesses or long-polls outside this boundary.
+  - The AI provider is never retried (every call is a POST).
 - Priority: P2. Status: Open (narrowed).
 
 ## ARCH-010 Composite Mutation Workflows Still Call The Retired `backend/beets_client.py`

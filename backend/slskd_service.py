@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import difflib, json, math, os, re, time, uuid
 import urllib.error
 from backend.matching import strip_track_filename_id_suffix as _canonical_strip_track_filename_id_suffix
@@ -43,7 +44,7 @@ def _slskd_req(method: str, path: str, body=None) -> Any:
         data = json.dumps(body).encode()
     req = _ur.Request(url, data=data, headers=hdrs, method=method)
     try:
-        with _ur.urlopen(req, timeout=20) as r:
+        with provider_boundary.opened("slskd", req, timeout=20) as r:
             raw = r.read()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
