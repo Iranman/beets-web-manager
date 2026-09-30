@@ -347,6 +347,7 @@ def evaluate_restart_recovery(
 
 def contract_metadata(workflow: str, metadata: Optional[Dict[str, Any]] = None,
                       keys: Optional[Iterable[str]] = None,
+                      resource_keys: Optional[Iterable[str]] = None,
                       classification: str = JOB_CLASSIFICATION_NON_RESUMABLE_SIDE_EFFECT) -> Dict[str, Any]:
     """Job metadata for a contract job: never treated as read-only unless resumable computation,
     and the durable record names its workflow, locks, and classification."""
@@ -355,9 +356,11 @@ def contract_metadata(workflow: str, metadata: Optional[Dict[str, Any]] = None,
         out.setdefault("mutating", False)
     else:
         out.setdefault("mutating", True)
+    actual_keys = list(resource_keys or keys or [workflow_key(workflow)])
     out["workflow_contract"] = {
         "workflow": workflow,
-        "lock_keys": list(keys or [workflow_key(workflow)]),
+        "lock_keys": actual_keys,
+        "resource_keys": actual_keys,
         "classification": classification,
     }
     return out
