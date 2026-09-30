@@ -186,7 +186,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.4.0")
+        self.assertEqual(status_data["plugin_version"], "1.5.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -425,7 +425,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.4.0")
+                    self.assertEqual(status_res["plugin_version"], "1.5.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -793,6 +793,49 @@ webmanager:
         status, rb = call("POST", "/webmanager/untracked/rollback", {"record_id": quarantined["record_id"]})
         self.assertEqual(status, 200, rb)
         self.assertEqual(csha(path), digest)
+
+        # New album row from untracked files of a release Beets does not have
+        # yet, in place (ARCH-021): refused for a release that has a row;
+        # applied; replayed by key; rolled back with the files untouched.
+        new_rel, new_rg = "9d3c1b2a-7e4f-4c6d-8a1b-2f3e4d5c6b7a", "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+        new_dir = os.path.join(music_dir, "NewRelease")
+        os.makedirs(new_dir, exist_ok=True)
+        album_files = []
+        for t in (1, 2):
+            host = os.path.join(new_dir, f"{t:02d}.wav")
+            _create_synthetic_audio(host, title=f"New {t}", artist="New Bot", album="New LP")
+            mf = MediaFile(host)
+            mf.mb_trackid, mf.mb_albumid, mf.mb_releasegroupid = f"00000000-0000-0000-0000-{200 + t:012d}", new_rel, new_rg
+            mf.track, mf.disc = t, 1
+            mf.save()
+            if os.name != "nt":
+                os.chmod(host, 0o666)
+            cpath = f"/music/NewRelease/{t:02d}.wav"
+            album_files.append({"path": cpath, "sha256": csha(cpath),
+                                "expected": {"mb_trackid": f"00000000-0000-0000-0000-{200 + t:012d}",
+                                             "disc": 1, "track": t}})
+        if os.name != "nt":
+            os.chmod(new_dir, 0o777)
+        status, refused = call("POST", "/webmanager/untracked/attach-album",
+                               {"release_id": rel, "release_group_id": rg, "files": album_files},
+                               key=f"accept-album-{uuid.uuid4().hex[:8]}")
+        self.assertEqual((status, refused.get("error_code")), (409, "ALBUM_ROW_EXISTS"), refused)
+        album_key = f"accept-album-{uuid.uuid4().hex[:8]}"
+        album_body = {"release_id": new_rel, "release_group_id": new_rg, "files": album_files}
+        status, made = call("POST", "/webmanager/untracked/attach-album", album_body, key=album_key)
+        self.assertEqual(status, 200, made)
+        status, new_album = call("GET", f"/album/{made['album_id']}?expand")
+        self.assertEqual((new_album["mb_albumid"], new_album["mb_releasegroupid"]), (new_rel, new_rg))
+        self.assertEqual(sorted(i["track"] for i in new_album["items"]), [1, 2])
+        self.assertEqual([csha(f["path"]) for f in album_files], [f["sha256"] for f in album_files])
+        self.assertTrue(call("POST", "/webmanager/untracked/attach-album", album_body, key=album_key)[1].get("replayed"))
+        status, rb = call("POST", "/webmanager/untracked/rollback", {"record_id": made["record_id"]})
+        self.assertEqual(status, 200, rb)
+        self.assertTrue(rb["files_untouched"])
+        self.assertEqual(call("GET", f"/album/{made['album_id']}")[0], 404)
+        for iid in made["item_ids"]:
+            self.assertEqual(call("GET", f"/item/{iid}")[0], 404)
+        self.assertEqual([csha(f["path"]) for f in album_files], [f["sha256"] for f in album_files])
 
 
 if __name__ == "__main__":

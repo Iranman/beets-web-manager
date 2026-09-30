@@ -712,6 +712,7 @@ _ENGINE_FAMILIES = {
                                              album_row_merge.rollback_album_row_merge),
     untracked_recovery.ATTACH_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
     untracked_recovery.QUARANTINE_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
+    untracked_recovery.ATTACH_ALBUM_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
 }
 
 

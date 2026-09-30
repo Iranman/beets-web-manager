@@ -2908,7 +2908,7 @@
       "method": "POST",
       "endpoint": "fix_leaked_db_paths",
       "security_classification": "ADMIN_ONLY",
-      "purpose": "Fix leaked path DB rows (DB-only update \u2014 no files are moved).",
+      "purpose": "Fix leaked path DB rows (DB-only update — no files are moved).",
       "required_role_or_privilege": "owner/admin shared application secret",
       "handles_secrets": false,
       "accesses_files": true,
@@ -4700,6 +4700,24 @@
       ]
     },
     {
+      "method": "GET",
+      "endpoint": "library_untracked_recovery_album_candidates",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "purpose": "Read-only: folders of untracked album files from the persisted inventory (no disk or tag read).",
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_untracked_ops_and_recovery.py"
+      ]
+    },
+    {
       "method": "POST",
       "endpoint": "library_untracked_recovery_plan",
       "security_classification": "ADMIN_ONLY",
@@ -4708,10 +4726,10 @@
       "accesses_files": true,
       "rate_limit_required": true,
       "rate_limit_implemented": false,
-      "creates_background_job": false,
+      "creates_background_job": true,
       "invokes_external_services_or_subprocesses": true,
       "destructive_or_high_impact": false,
-      "purpose": "Plan step only (no mutation): re-proves identity (tags, MusicBrainz, AcoustID) or byte identity and creates an untracked_attach_v1 / untracked_quarantine_v1 Preview transaction; approve/apply/rollback through /api/transactions/<id>/...",
+      "purpose": "Plan step (no mutation) for an untracked recovery action after identity is re-proven; attach_album plans one album folder in a read-only job.",
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",

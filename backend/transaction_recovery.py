@@ -46,6 +46,9 @@ def _families() -> Dict[str, Dict[str, Any]]:
         untracked.ATTACH_FAMILY: {
             "kind": "manifest", "finish": untracked.finish_recovery,
             "record": lambda ad, op, meta: ad.get_untracked_record(untracked.record_id_for("attach", op))},
+        untracked.ATTACH_ALBUM_FAMILY: {
+            "kind": "manifest", "finish": untracked.finish_recovery,
+            "record": lambda ad, op, meta: ad.get_untracked_record(untracked.record_id_for("attach_album", op))},
         untracked.QUARANTINE_FAMILY: {
             "kind": "manifest", "finish": untracked.finish_recovery,
             "record": lambda ad, op, meta: ad.get_untracked_record(untracked.record_id_for("quarantine", op))},

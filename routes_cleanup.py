@@ -2221,15 +2221,45 @@ def library_untracked_recovery_candidates():
     return jsonify(res), (200 if res.get("ok") else 404)
 
 
+@app.get("/api/library/untracked-recovery/album-candidates")
+def library_untracked_recovery_album_candidates():
+    """Read-only: folders of untracked album files from the persisted
+    inventory (no disk or tag read), largest first."""
+    try:
+        limit = max(1, min(200, int(request.args.get("limit", 50))))
+        offset = max(0, int(request.args.get("offset", 0)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "limit/offset must be integers"}), 400
+    res = _untracked_recovery.album_candidates(limit=limit, offset=offset)
+    return jsonify(res), (200 if res.get("ok") else 404)
+
+
 @app.post("/api/library/untracked-recovery/plan")
 def library_untracked_recovery_plan():
     """Plan step (no mutation) for one recovery action -- attach,
-    track_for_replacement or quarantine -- after identity is re-proven.
-    Approve/apply/rollback through /api/transactions/<id>/..."""
+    track_for_replacement, quarantine or attach_album -- after identity is
+    re-proven. Approve/apply/rollback through /api/transactions/<id>/...
+
+    attach_album (paths = one album folder) proves every file against
+    MusicBrainz and AcoustID, so it runs as a job whose result is the plan."""
     payload = request.get_json(silent=True) or {}
     paths = payload.get("paths")
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         return jsonify({"ok": False, "error": "paths must be a list of strings"}), 400
+    if _s(payload.get("action")) == "attach_album":
+        if len(paths) != 1:
+            return jsonify({"ok": False, "error": "Plan one album folder at a time."}), 400
+        folder = paths[0]
+
+        def _plan(log, cancel_event=None, update_state=None):
+            res = _untracked_recovery.plan_album_attach(
+                folder, progress=(lambda info: update_state(**info)) if update_state else None)
+            log.append(f"Album attach plan: {'ok, tx ' + _s(res.get('operation_id')) if res.get('ok') else res.get('code')}")
+            return res
+
+        job = jobs.start_python(_plan, label="Plan new album row from untracked files",
+                                metadata={"type": "untracked-album-plan", "mutating": False})
+        return jsonify({"ok": True, "job_id": job.job_id}), 202
     try:
         res = _untracked_recovery.plan_recovery(_s(payload.get("action")), paths)
     except BeetsUnavailableError as exc:

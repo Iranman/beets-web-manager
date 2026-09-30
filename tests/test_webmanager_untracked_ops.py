@@ -204,5 +204,132 @@ class UntrackedOpsTests(unittest.TestCase):
         self.assertIn("untracked_quarantine", caps)
 
 
+REL_NEW = "9d3c1b2a-7e4f-4c6d-8a1b-2f3e4d5c6b7a"
+RG_NEW = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+
+def write_new_release_flac(path, *, track, rel=REL_NEW, rg=RG_NEW):
+    write_flac(path, track=track, mb_trackid=rec(100 + track), mb_albumid=rel, samples=44000 + track)
+    mf = MediaFile(path)
+    mf.mb_releasegroupid, mf.album, mf.albumartist = rg, "New Album", "New Artist"
+    mf.save()
+
+
+class AttachAlbumTests(UntrackedOpsTests):
+    """A release with no album row yet becomes a new album row, in place."""
+
+    def setUp(self):
+        super().setUp()
+        self.new_dir = os.path.join(self.music, "New Artist", "New Album")
+        self.files = []
+        for track in (1, 2, 3):
+            path = os.path.join(self.new_dir, f"{track:02d}.flac")
+            write_new_release_flac(path, track=track)
+            self.files.append(path)
+
+    def _body(self, paths=None, **overrides):
+        body = {"release_id": REL_NEW, "release_group_id": RG_NEW, "files": [
+            {"path": p, "sha256": sha(p),
+             "expected": {"mb_trackid": rec(100 + int(os.path.basename(p)[:2])), "disc": 1,
+                          "track": int(os.path.basename(p)[:2])}} for p in (paths or self.files)]}
+        body.update(overrides)
+        return body
+
+    def _attach_album(self, key=None, **kwargs):
+        return self._post("/webmanager/untracked/attach-album", self._body(**kwargs), key=key)
+
+    def _files_state(self):
+        return {p: (sha(p), os.stat(p).st_mtime_ns) for p in self.files}
+
+    def test_attach_album_creates_one_row_in_place_and_rollback_removes_it(self):
+        before, files_before = self._library(), self._files_state()
+        albums_before = len(list(self.lib.albums()))
+        res = self._attach_album()
+        self.assertEqual(res.status_code, 200, res.get_json())
+        data = res.get_json()
+        album = self.lib.get_album(data["album_id"])
+        self.assertEqual((album.mb_albumid, album.mb_releasegroupid), (REL_NEW, RG_NEW))
+        self.assertEqual(sorted(os.fsdecode(i.path) for i in album.items()), sorted(self.files))
+        self.assertEqual(sorted(i.track for i in album.items()), [1, 2, 3])
+        self.assertEqual(len(list(self.lib.albums())), albums_before + 1)
+        self.assertEqual(self._files_state(), files_before)  # no tag write, no move
+
+        rb = self._post("/webmanager/untracked/rollback", {"record_id": data["record_id"]})
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        self.assertTrue(rb.get_json()["files_untouched"])
+        self.assertEqual(self._library(), before)
+        self.assertEqual(len(list(self.lib.albums())), albums_before)
+        self.assertEqual(self._files_state(), files_before)
+        again = self._post("/webmanager/untracked/rollback", {"record_id": data["record_id"]})
+        self.assertTrue(again.get_json()["replayed"])
+
+    def test_attach_album_replays_by_key(self):
+        first = self._attach_album(key="tx-album").get_json()
+        again = self._attach_album(key="tx-album").get_json()
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["album_id"], first["album_id"])
+        self.assertEqual(len([a for a in self.lib.albums() if a.mb_albumid == REL_NEW]), 1)
+
+    def test_attach_album_refusals_change_nothing(self):
+        before = self._library()
+        cases = []
+        cases.append(("ALBUM_ROW_EXISTS", dict(release_id=REL, release_group_id=RG)))
+        cases.append(("EDITION_DIFFERS", dict(release_group_id=RG)))
+        cases.append(("IDENTITY_REQUIRED", dict(release_group_id="")))
+        cases.append(("INVALID_FILES", dict(files=[])))
+        for code, overrides in cases:
+            with self.subTest(code=code):
+                res = self._attach_album(**overrides)
+                self.assertEqual(res.get_json()["error_code"], code, res.get_json())
+        body = self._body()
+        body["files"][0]["sha256"] = "0" * 64
+        self.assertEqual(self._post("/webmanager/untracked/attach-album", body).get_json()["error_code"], "CONTENT_DRIFT")
+        body = self._body()
+        body["files"][1]["expected"]["mb_trackid"] = rec(999)
+        self.assertEqual(self._post("/webmanager/untracked/attach-album", body).get_json()["error_code"], "IDENTITY_MISMATCH")
+        body = self._body()
+        body["files"].append(dict(body["files"][0]))
+        self.assertEqual(self._post("/webmanager/untracked/attach-album", body).get_json()["error_code"], "DUPLICATE_PATH")
+        body = self._body()
+        body["files"][0]["path"] = os.path.join(self.td, "outside.flac")
+        self.assertEqual(self._post("/webmanager/untracked/attach-album", body).get_json()["error_code"], "PATH_INVALID")
+        self.assertEqual(self._library(), before)
+
+    def test_two_files_in_one_slot_are_refused(self):
+        twin = os.path.join(self.new_dir, "01 (copy).flac")
+        write_new_release_flac(twin, track=1)
+        body = self._body()
+        body["files"].append({"path": twin, "sha256": sha(twin),
+                              "expected": {"mb_trackid": rec(101), "disc": 1, "track": 1}})
+        res = self._post("/webmanager/untracked/attach-album", body)
+        self.assertEqual(res.get_json()["error_code"], "SLOT_OVERLAP")
+
+    def test_a_tracked_file_is_refused(self):
+        self.lib.add(Item.from_path(self.files[0]))
+        self.assertEqual(self._attach_album().get_json()["error_code"], "FILE_IS_TRACKED")
+
+    def test_failure_mid_way_leaves_no_rows(self):
+        before = self._library()
+        albums_before = len(list(self.lib.albums()))
+        with mock.patch("beetsplug.webmanager.untracked_ops._fspath", side_effect=RuntimeError("boom")):
+            res = self._attach_album()
+        self.assertEqual(res.status_code, 500)
+        self.assertEqual(self._library(), before)
+        self.assertEqual(len(list(self.lib.albums())), albums_before)
+
+    def test_rollback_refuses_when_the_album_row_changed(self):
+        data = self._attach_album().get_json()
+        extra = os.path.join(self.new_dir, "04.flac")
+        write_new_release_flac(extra, track=4)
+        item = Item.from_path(extra)
+        item.album_id = data["album_id"]
+        self.lib.add(item)
+        rb = self._post("/webmanager/untracked/rollback", {"record_id": data["record_id"]})
+        self.assertEqual((rb.status_code, rb.get_json()["error_code"]), (409, "ALBUM_DRIFT"))
+
+    def test_capability_is_advertised(self):
+        self.assertIn("untracked_attach_album", ops_mod.get_capabilities())
+
+
 if __name__ == "__main__":
     unittest.main()

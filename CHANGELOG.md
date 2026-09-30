@@ -6,6 +6,13 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+- **New album rows from untracked files of releases Beets does not have yet (ARCH-021).** These are the files a single-file attach cannot place, because no album row exists for their release.
+  - `GET /api/library/untracked-recovery/album-candidates` lists the folders of untracked album files from the persisted inventory.
+  - `POST /api/library/untracked-recovery/plan` with `action: "attach_album"` and one folder plans a new album row in a read-only job. A file is included only when its tags carry Recording, Release and Release Group IDs and a track position, MusicBrainz lists that recording at that position of that release (and gives the same Release Group), and AcoustID confirms the audio. Other files are excluded with a reason and stay untracked.
+  - Beets plugin 1.5.0: `/webmanager/untracked/attach-album` creates the row in place (no tag write, no move) and refuses a release that already has a row. Rollback removes the rows and leaves the files untouched.
+  - Approve, apply and roll back through the transaction routes, like every other recovery.
+
 ## v0.1.44 - 2026-09-30
 
 ### Changed
