@@ -2335,6 +2335,62 @@ def library_untracked_recovery_plan():
     return jsonify(res), (200 if res.get("ok") else 409)
 
 
+@app.post("/api/library/untracked-recovery/plan-batch")
+def library_untracked_recovery_plan_batch():
+    """Start durable background batch planning for untracked album folders.
+    Proves identity against MusicBrainz and AcoustID; generates Preview transactions
+    requiring human approval. Read-only / non-mutating job."""
+    if _running_job_of_type({"untracked-batch-plan", "untracked-album-plan"}):
+        return jsonify({"ok": False, "error": "An untracked album batch plan is already running"}), 409
+    payload = request.get_json(silent=True) or {}
+    folders = payload.get("folders")
+    if folders is not None and (not isinstance(folders, list) or not all(isinstance(f, str) for f in folders)):
+        return jsonify({"ok": False, "error": "folders must be a list of strings if provided"}), 400
+    try:
+        max_folders = max(1, min(500, int(payload.get("max_folders", 50))))
+        max_acoustid = max(1, min(2000, int(payload.get("max_acoustid_lookups", 200))))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "max_folders / max_acoustid_lookups must be integers"}), 400
+
+    def _batch_plan(log, cancel_event=None, update_state=None):
+        log.append("Starting durable untracked album batch planning...")
+        res = _untracked_recovery.plan_untracked_batch(
+            folders,
+            max_folders=max_folders,
+            max_acoustid_lookups=max_acoustid,
+            progress=(lambda info: update_state(**info)) if update_state else None,
+            cancel_event=cancel_event,
+        )
+        log.append(f"Batch plan completed: {res.get('planned_count', 0)} planned, {res.get('skipped_count', 0)} skipped.")
+        return res
+
+    job = jobs.start_python(
+        job_contract.guarded(_batch_plan, workflow="untracked-batch-plan"),
+        label="Batch plan untracked albums",
+        metadata=job_contract.contract_metadata("untracked-batch-plan", {"type": "untracked-batch-plan", "mutating": False}),
+    )
+    return jsonify({"ok": True, "job_id": job.job_id}), 202
+
+
+@app.post("/api/library/untracked-recovery/plan-quarantine-batch")
+def library_untracked_recovery_plan_quarantine_batch():
+    """Plan batch quarantine for proven duplicate files and associated artifacts.
+    Generates a Preview transaction requiring human approval."""
+    payload = request.get_json(silent=True) or {}
+    paths = payload.get("paths")
+    if paths is not None and (not isinstance(paths, list) or not all(isinstance(p, str) for p in paths)):
+        return jsonify({"ok": False, "error": "paths must be a list of strings if provided"}), 400
+    include_sidecars = bool(payload.get("include_sidecars", True))
+    try:
+        res = _untracked_recovery.plan_untracked_quarantine_batch(
+            paths,
+            include_sidecars=include_sidecars,
+        )
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    return jsonify(res), (200 if res.get("ok") else 409)
+
+
 @app.post("/api/dedup/maintenance-run")
 def dedup_maintenance_run():
     """Run the scheduled duplicate step on its own (scan, AcoustID

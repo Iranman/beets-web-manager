@@ -144,14 +144,31 @@ def plan_verified_replacement(
     return res
 
 
-def tracked_item_id_for_path(path: str, *, adapter: Optional[BeetsAdapter] = None,
-                             abs_path: Optional[Callable[[str], str]] = None) -> int:
-    """The id of the tracked item whose file is ``path`` (0 if untracked)."""
+def build_item_path_index(adapter: Optional[BeetsAdapter] = None,
+                          abs_path: Optional[Callable[[str], str]] = None) -> Dict[str, int]:
+    """Build a mapping of normalized absolute file path -> item ID for all library items."""
     ad = adapter or beets_adapter
     to_abs = abs_path or _default_deps()["abs_path"]
+    index: Dict[str, int] = {}
+    for item in ad.get_items() or []:
+        candidate = to_abs(_decode_path(item.get("path")))
+        if candidate:
+            resolved = str(Path(candidate).resolve(strict=False))
+            index[resolved] = int(item.get("id") or 0)
+    return index
+
+
+def tracked_item_id_for_path(path: str, *, adapter: Optional[BeetsAdapter] = None,
+                             abs_path: Optional[Callable[[str], str]] = None,
+                             item_path_index: Optional[Dict[str, int]] = None) -> int:
+    """The id of the tracked item whose file is ``path`` (0 if untracked)."""
     wanted = str(Path(_s(path)).resolve(strict=False)) if _s(path) else ""
     if not wanted:
         return 0
+    if item_path_index is not None:
+        return int(item_path_index.get(wanted, 0))
+    ad = adapter or beets_adapter
+    to_abs = abs_path or _default_deps()["abs_path"]
     for item in ad.get_items() or []:
         candidate = to_abs(_decode_path(item.get("path")))
         if candidate and str(Path(candidate).resolve(strict=False)) == wanted:

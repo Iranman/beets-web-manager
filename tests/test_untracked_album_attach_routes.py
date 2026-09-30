@@ -63,6 +63,34 @@ class UntrackedAlbumAttachRouteTests(unittest.TestCase):
         self.assertIs(apply_fn, svc.apply_recovery)
         self.assertIs(rollback_fn, svc.rollback_recovery)
 
+    def test_plan_batch_endpoint_starts_durable_background_job(self):
+        batch_result = {"ok": True, "total_candidates": 1, "planned_count": 1, "skipped_count": 0, "planned": [{"folder": "A/B"}], "skipped": []}
+        with mock.patch.object(svc, "plan_untracked_batch", return_value=batch_result) as batch_planner:
+            status, body = self._call(routes_cleanup.library_untracked_recovery_plan_batch,
+                                      "/api/library/untracked-recovery/plan-batch", method="POST",
+                                      json={"folders": ["A/B"], "max_folders": 10, "max_acoustid_lookups": 50})
+            self.assertEqual(status, 202)
+            self.assertIn("job_id", body)
+            job = routes_cleanup.jobs.get(body["job_id"])
+            deadline = time.time() + 10
+            while job.status == "running" and time.time() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(job.status, "success")
+        self.assertEqual(job.result, batch_result)
+        batch_planner.assert_called_once()
+        self.assertEqual(job.metadata.get("workflow_contract", {}).get("workflow"), "untracked-batch-plan")
+
+    def test_plan_quarantine_batch_endpoint(self):
+        q_result = {"ok": True, "operation_id": "tx-q-1", "audio_count": 2, "sidecar_count": 1, "files": [], "refused": []}
+        with mock.patch.object(svc, "plan_untracked_quarantine_batch", return_value=q_result) as q_planner:
+            status, body = self._call(routes_cleanup.library_untracked_recovery_plan_quarantine_batch,
+                                      "/api/library/untracked-recovery/plan-quarantine-batch", method="POST",
+                                      json={"paths": ["a/dup.flac"], "include_sidecars": True})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["operation_id"], "tx-q-1")
+            q_planner.assert_called_once_with(["a/dup.flac"], include_sidecars=True)
+
 
 if __name__ == "__main__":
     unittest.main()
+

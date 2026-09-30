@@ -198,7 +198,9 @@ def _prove_identity(path: str, *, want_album: bool, adapter: BeetsAdapter, d: Di
 
 def plan_album_attach(folder: str, *, adapter: Optional[BeetsAdapter] = None,
                       store: Optional[TransactionStore] = None, deps: Optional[Dict[str, Any]] = None,
-                      progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
+                      progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+                      item_path_index: Optional[Dict[str, int]] = None,
+                      inventory_records: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Plan step (no mutation): the untracked album files of one folder as a
     NEW album row of the release their tags name.
 
@@ -218,8 +220,12 @@ def plan_album_attach(folder: str, *, adapter: Optional[BeetsAdapter] = None,
     real = _safe_music_path(d["music_root"], rel_folder) if rel_folder else None
     if real is None or not os.path.isdir(real):
         return _fail("folder_missing", "The folder is not under the music root or no longer exists.")
-    records = [r for path, r in sorted(load_previous(Path(d["inventory_dir"])).items())
-               if r.get("category") == ALBUM_CATEGORY and path.rsplit("/", 1)[0] == rel_folder]
+    if inventory_records is not None:
+        records = [r for r in inventory_records
+                   if r.get("category") == ALBUM_CATEGORY and (r.get("path", "").rsplit("/", 1)[0] == rel_folder if "/" in r.get("path", "") else rel_folder == "")]
+    else:
+        records = [r for path, r in sorted(load_previous(Path(d["inventory_dir"])).items())
+                   if r.get("category") == ALBUM_CATEGORY and path.rsplit("/", 1)[0] == rel_folder]
     if not records:
         return _fail("no_candidates", "The inventory lists no untracked album files directly in that folder.")
     if len(records) > MAX_ALBUM_FILES:
@@ -232,7 +238,7 @@ def plan_album_attach(folder: str, *, adapter: Optional[BeetsAdapter] = None,
         if path is None or not os.path.isfile(path):
             excluded.append({"path": rec["path"], "reason": "file_missing"})
             continue
-        if tracked_item_id_for_path(path, adapter=ad, abs_path=d["abs_path"]):
+        if tracked_item_id_for_path(path, adapter=ad, abs_path=d["abs_path"], item_path_index=item_path_index):
             excluded.append({"path": rec["path"], "reason": "already_tracked"})
             continue
         try:
@@ -559,3 +565,281 @@ def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = No
         st.update(operation_id, status=status, metadata={"rollback_result": res, "rollback_problems": problems},
                   logs=["Rolled back through the engine record"] + [f"Rollback problem: {p}" for p in problems])
     return {"ok": not problems, "operation_id": operation_id, "status": status, "rollback_problems": problems}
+
+
+SIDECAR_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif",
+    ".cue", ".log", ".nfo", ".sfv", ".m3u", ".m3u8", ".txt", ".accurip",
+}
+
+
+def plan_untracked_batch(
+    folders: Optional[List[str]] = None,
+    *,
+    max_folders: int = 50,
+    max_acoustid_lookups: int = 200,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+    deps: Optional[Dict[str, Any]] = None,
+    progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    cancel_event: Any = None,
+) -> Dict[str, Any]:
+    """Batch plan untracked album folders into preview transactions under the shared contract.
+
+    - Builds an in-memory item path index once (O(1) path lookup).
+    - Pre-indexes inventory records by folder once.
+    - Rate-limited AcoustID budgeting across the batch.
+    - Partial exclusions/failures of single folders do not fail the entire batch.
+    - Outputs a list of generated Preview transactions for human review.
+    """
+    from backend.item_replacement import build_item_path_index
+    from backend.untracked_inventory import load_previous
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    d = deps or _deps()
+
+    # Build path index once for fast lookups
+    item_path_index = build_item_path_index(adapter=ad, abs_path=d["abs_path"])
+
+    # Load inventory once
+    try:
+        all_inv = load_previous(Path(d["inventory_dir"]))
+    except Exception:
+        all_inv = {}
+
+    records_by_folder: Dict[str, List[Dict[str, Any]]] = {}
+    for path, r in all_inv.items():
+        if r.get("category") == ALBUM_CATEGORY:
+            folder = path.rsplit("/", 1)[0] if "/" in path else ""
+            records_by_folder.setdefault(folder, []).append(r)
+
+    if folders is not None:
+        candidate_folders = [_s(f).replace("\\", "/").strip("/") for f in folders if _s(f).strip("/")]
+    else:
+        # Sort folders by file count descending
+        candidate_folders = sorted(records_by_folder.keys(), key=lambda f: (-len(records_by_folder[f]), f))
+
+    if max_folders > 0:
+        candidate_folders = candidate_folders[:max_folders]
+
+    # Budget AcoustID lookups
+    acoustid_calls = [0]
+    orig_acoustid = d.get("acoustid")
+    def budgeted_acoustid(path: str):
+        if acoustid_calls[0] >= max_acoustid_lookups:
+            from backend.provider_boundary import ProviderOutcome, ProviderResult
+            return ProviderResult("acoustid", ProviderOutcome.RATE_LIMITED, data=[])
+        res = orig_acoustid(path) if orig_acoustid else None
+        if res and not getattr(res, "from_cache", False):
+            acoustid_calls[0] += 1
+        return res
+
+    batch_deps = dict(d, acoustid=budgeted_acoustid)
+
+    planned: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    budget_reached = False
+
+    total = len(candidate_folders)
+    for idx, folder in enumerate(candidate_folders, 1):
+        if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+            break
+
+        if progress:
+            progress({
+                "phase": "batch_planning",
+                "folder": folder,
+                "index": idx,
+                "total": total,
+                "planned_count": len(planned),
+                "skipped_count": len(skipped),
+                "acoustid_lookups": acoustid_calls[0],
+            })
+
+        res = plan_album_attach(
+            folder,
+            adapter=ad,
+            store=st,
+            deps=batch_deps,
+            item_path_index=item_path_index,
+            inventory_records=records_by_folder.get(folder, []),
+        )
+
+        if res.get("ok"):
+            planned.append({
+                "folder": folder,
+                "operation_id": res.get("operation_id"),
+                "release": res.get("release"),
+                "release_id": res.get("release_id"),
+                "release_group_id": res.get("release_group_id"),
+                "files": res.get("files"),
+                "release_track_count": res.get("release_track_count"),
+                "excluded": res.get("excluded", []),
+            })
+        else:
+            code = res.get("code") or "failed"
+            if code == "acoustid_rate_limited" and acoustid_calls[0] >= max_acoustid_lookups:
+                budget_reached = True
+                skipped.append({"folder": folder, "code": "acoustid_budget_exceeded", "error": "AcoustID lookup budget reached for batch."})
+                break
+            skipped.append({
+                "folder": folder,
+                "code": code,
+                "error": res.get("error", "Plan refused"),
+                "excluded": res.get("excluded", []),
+            })
+
+    return {
+        "ok": True,
+        "total_candidates": total,
+        "processed_folders": len(planned) + len(skipped),
+        "planned_count": len(planned),
+        "skipped_count": len(skipped),
+        "acoustid_lookups": acoustid_calls[0],
+        "budget_reached": budget_reached,
+        "planned": planned,
+        "skipped": skipped,
+    }
+
+
+def plan_untracked_quarantine_batch(
+    paths_or_folders: Optional[Iterable[str]] = None,
+    *,
+    include_sidecars: bool = True,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+    deps: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Batch plan quarantine for proven duplicate files and safe associated artifacts.
+
+    Policy:
+    - Audio files: ONLY byte-identical copies of tracked library items (re-proven by SHA-256).
+    - Sidecars in quarantined folders (.jpg, .cue, .log, .nfo):
+      If ALL audio files in the folder are proven exact duplicates, sidecars are categorized as
+      `associated_artifact` and planned for quarantine with full rollback hashes.
+    - If a folder contains unverified audio or other non-sidecar files, sidecars are preserved
+      (`unverified_context_kept`) and excluded from quarantine.
+    - Unverified / ambiguous files: never deleted or quarantined (Class D / kept).
+    - Output: a Preview transaction in TransactionStore requiring explicit human approval.
+    """
+    from backend.item_replacement import build_item_path_index, tracked_item_id_for_path
+    from backend.untracked_inventory import load_previous
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    d = deps or _deps()
+
+    item_path_index = build_item_path_index(adapter=ad, abs_path=d["abs_path"])
+    records = load_previous(Path(d["inventory_dir"]))
+
+    if paths_or_folders is not None:
+        target_set = set(paths_or_folders)
+    else:
+        target_set = {p for p, r in records.items() if r.get("category") == "exact_duplicate_of_tracked"}
+
+    files_to_quarantine: List[Dict[str, Any]] = []
+    refused_files: List[Dict[str, Any]] = []
+    folders_checked: Dict[str, Dict[str, Any]] = {}
+
+    for rel in sorted(target_set):
+        rec = records.get(rel)
+        path = _safe_music_path(d["music_root"], rel)
+        if not rec or rec.get("category") != "exact_duplicate_of_tracked" or path is None:
+            refused_files.append({"path": rel, "reason": "only byte-identical copies of tracked files are eligible"})
+            continue
+        twin = rec.get("duplicate_of") or ""
+        if not os.path.isfile(path) or not os.path.isfile(twin):
+            refused_files.append({"path": rel, "reason": "file or its tracked twin is gone"})
+            continue
+        sha = _sha256(path)
+        if sha != _sha256(twin) or not tracked_item_id_for_path(twin, adapter=ad, abs_path=d["abs_path"], item_path_index=item_path_index):
+            refused_files.append({"path": rel, "reason": "no longer byte-identical to a tracked file"})
+            continue
+        files_to_quarantine.append({
+            "path": path,
+            "rel_path": rel,
+            "sha256": sha,
+            "duplicate_of": twin,
+            "artifact_type": "audio_duplicate",
+        })
+        parent_folder = os.path.dirname(path)
+        folders_checked.setdefault(parent_folder, {"audio_duplicates": set(), "all_audio": set(), "sidecars": set()})
+        folders_checked[parent_folder]["audio_duplicates"].add(path)
+
+    # If include_sidecars, inspect folders where duplicates live
+    if include_sidecars and folders_checked:
+        from backend.acoustid_service import AUDIO_EXTS
+        for folder_path, folder_info in list(folders_checked.items()):
+            try:
+                entries = list(os.scandir(folder_path))
+            except OSError:
+                continue
+            all_audio = set()
+            sidecars = set()
+            unknown_files = set()
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                ext = Path(entry.name).suffix.lower()
+                full_p = entry.path
+                if ext in AUDIO_EXTS:
+                    all_audio.add(full_p)
+                elif ext in SIDECAR_EXTENSIONS:
+                    sidecars.add(full_p)
+                else:
+                    unknown_files.add(full_p)
+            folder_info["all_audio"] = all_audio
+            folder_info["sidecars"] = sidecars
+
+            # Safe policy: Only quarantine sidecars if ALL audio files in the folder are proven duplicates
+            # and there are no unknown non-sidecar files
+            if all_audio and all_audio.issubset(folder_info["audio_duplicates"]) and not unknown_files:
+                for sc in sorted(sidecars):
+                    sc_sha = _sha256(sc)
+                    files_to_quarantine.append({
+                        "path": sc,
+                        "rel_path": os.path.relpath(sc, str(d["music_root"])).replace("\\", "/"),
+                        "sha256": sc_sha,
+                        "duplicate_of": None,
+                        "artifact_type": "associated_artifact",
+                    })
+            elif sidecars:
+                for sc in sorted(sidecars):
+                    refused_files.append({
+                        "path": os.path.relpath(sc, str(d["music_root"])).replace("\\", "/"),
+                        "reason": "unverified_context_kept (folder contains non-duplicate or unverified audio/files)",
+                    })
+
+    if not files_to_quarantine:
+        return _fail("nothing_eligible", "No selected file is a proven redundant copy.", refused=refused_files)
+
+    audio_count = sum(1 for f in files_to_quarantine if f.get("artifact_type") == "audio_duplicate")
+    sidecar_count = sum(1 for f in files_to_quarantine if f.get("artifact_type") == "associated_artifact")
+
+    tx = st.create(
+        operation_type="Delete",
+        status="Preview",
+        summary=f"Quarantine {audio_count} duplicate audio file(s) and {sidecar_count} associated artifact(s)",
+        changes=[{"path": f["path"], "sha256": f["sha256"], "artifact_type": f["artifact_type"],
+                  "duplicate_of": f.get("duplicate_of")} for f in files_to_quarantine],
+        rollback_available=True,
+        metadata={
+            "mutation_family": QUARANTINE_FAMILY,
+            "files": [{"path": f["path"], "sha256": f["sha256"]} for f in files_to_quarantine],
+            "file_details": files_to_quarantine,
+            "audio_count": audio_count,
+            "sidecar_count": sidecar_count,
+            "refused": refused_files,
+        },
+    )
+
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "status": "Preview",
+        "requires_approval": True,
+        "audio_count": audio_count,
+        "sidecar_count": sidecar_count,
+        "files": files_to_quarantine,
+        "refused": refused_files,
+    }
+
