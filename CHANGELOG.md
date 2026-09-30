@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.48 - 2026-09-30
+
 ### Changed
 - **Every external provider call goes through one boundary (ARCH-006).** All 48 outbound HTTP call sites (MusicBrainz, AcoustID, Discogs, Spotify, artwork downloads, Plex, Lidarr, SLSKD, qBittorrent, the yt-dlp PO provider and the AI provider) now open their connection with `provider_boundary.opened(provider, request, ...)`.
   - Each provider has a declared policy: attempts and backoff. Retries are bounded, honour Retry-After (capped at 30 s), and apply only to requests that are safe to repeat (GET/HEAD). A POST is never repeated.
