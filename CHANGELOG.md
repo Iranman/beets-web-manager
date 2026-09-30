@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.45 - 2026-09-30
+
 ### Added
 - **New album rows from untracked files of releases Beets does not have yet (ARCH-021).** These are the files a single-file attach cannot place, because no album row exists for their release.
   - `GET /api/library/untracked-recovery/album-candidates` lists the folders of untracked album files from the persisted inventory.
