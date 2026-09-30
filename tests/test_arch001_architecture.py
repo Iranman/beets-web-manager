@@ -273,6 +273,8 @@ class ApiContractTests(unittest.TestCase):
             ("/api/library/untracked-recovery/candidates", "library_untracked_recovery_candidates"),
             ("/api/library/untracked-recovery/album-candidates", "library_untracked_recovery_album_candidates"),
             ("/api/library/untracked-recovery/plan", "library_untracked_recovery_plan"),
+            ("/api/library/untracked-recovery/plan-batch", "library_untracked_recovery_plan_batch"),
+            ("/api/library/untracked-recovery/plan-quarantine-batch", "library_untracked_recovery_plan_quarantine_batch"),
             ("/api/import-review/decision", "import_review_decision"),
             ("/api/providers/health", "providers_health"),
         }
