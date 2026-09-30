@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import copy, difflib, json, re, time
 import urllib.error
 from pathlib import Path
@@ -1028,7 +1029,7 @@ def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
                 "&pageSize=100&sortKey=releaseDate&sortDirection=descending"
             )
             req = _ur.Request(url, headers={"X-Api-Key": LIDARR_KEY})
-            with _ur.urlopen(req, timeout=10) as r:
+            with provider_boundary.opened("lidarr", req, timeout=10) as r:
                 data = json.loads(r.read())
             records = data.get("records", [])
             for rec in records:
@@ -1358,7 +1359,7 @@ def _qbit_login_cookie() -> str:
         data=data,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with provider_boundary.opened("qbittorrent", req, timeout=20) as resp:
         status = int(getattr(resp, "status", 200) or 200)
         body = resp.read().decode("utf-8", errors="replace").strip()
         cookie = resp.headers.get("Set-Cookie", "")
@@ -1373,7 +1374,7 @@ def _qbit_request_json(api_path: str, params: Optional[Dict[str, Any]] = None,
     url = f"{QBIT_URL}{api_path}" + (f"?{query}" if query else "")
     headers = {"Cookie": cookie} if cookie else {}
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with provider_boundary.opened("qbittorrent", req, timeout=30) as resp:
         body = resp.read().decode("utf-8", errors="replace")
     return json.loads(body) if body.strip() else None
 
@@ -1384,7 +1385,7 @@ def _qbit_post(api_path: str, data: Dict[str, Any], cookie: str = "") -> str:
     if cookie:
         headers["Cookie"] = cookie
     req = urllib.request.Request(f"{QBIT_URL}{api_path}", data=encoded, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with provider_boundary.opened("qbittorrent", req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 

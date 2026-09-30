@@ -3,6 +3,7 @@
 Registered after app.py initializes. Keeps submission-only Beets commands out of
 the main app module while reusing the existing JobStore and Beets config helpers.
 """
+import backend.provider_boundary as provider_boundary
 import hashlib
 import importlib.util
 import json
@@ -1267,7 +1268,7 @@ def _fetch_discogs_release(entity_type: str, entity_id: str) -> Dict[str, Any]:
     if DISCOGS_TOKEN:
         headers["Authorization"] = f"Discogs token={DISCOGS_TOKEN}"
     req = urllib.request.Request(f"https://api.discogs.com/{endpoint}/{entity_id}", headers=headers)
-    with urllib.request.urlopen(req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
+    with provider_boundary.opened("discogs", req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
         data = json.loads(resp.read(_REFERENCE_MAX_BYTES))
 
     artists = data.get("artists") or []
@@ -1320,7 +1321,7 @@ def _fetch_open_graph_metadata(url: str) -> Dict[str, Any]:
     # must not depend on every future caller remembering to check first.
     validate_outbound_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "beets-web-manager reference-url fetcher"})
-    with urllib.request.urlopen(req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
+    with provider_boundary.opened("reference-url", req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
         raw = resp.read(_REFERENCE_MAX_BYTES)
     html = raw.decode("utf-8", errors="replace")
     og: Dict[str, str] = {}

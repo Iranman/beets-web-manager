@@ -10,6 +10,9 @@ A provider call yields a ``ProviderResult`` whose ``outcome`` is one of:
 * ``rate_limited``         -- 429 or the provider's own throttling code.
 * ``authentication_error`` -- 401/403 or a rejected API key.
 * ``transient_error``      -- timeouts, connection resets, malformed replies.
+* ``rejected``             -- the provider refused this request (a 4xx such
+  as 400 or 404): asking again unchanged cannot help, so it is never
+  retried. Whether a 404 means "no such record" is the caller's call.
 
 Only ``confirmed`` and ``no_result`` are answers. Every other outcome means
 "we could not ask" and must never be treated -- or cached -- as "no match".
@@ -17,17 +20,32 @@ Only ``confirmed`` and ``no_result`` are answers. Every other outcome means
 ``call_with_retry`` retries only ``rate_limited``, ``unavailable`` and
 ``transient_error``, a bounded number of times, honouring a provider's
 Retry-After (capped). Messages are redacted before they are stored or logged.
+
+``opened(provider, request, timeout=...)`` is the one way application code
+opens an HTTP connection to a provider. It is a drop-in for
+``urllib.request.urlopen`` used as a context manager: the same response
+object, and on final failure the ORIGINAL exception, so a call site's own
+error handling is unchanged. What it adds, uniformly for every provider:
+
+* the provider's policy (``POLICIES``): how many attempts, which backoff;
+* bounded retries of retryable outcomes -- only for requests that are safe
+  to repeat (GET/HEAD), never for a POST;
+* the classified outcome of every call in ``provider_health()``, redacted.
 """
 
 from __future__ import annotations
 
 import enum
+import os
 import re
 import socket
+import threading
 import time
 import urllib.error
+import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 
 class ProviderOutcome(str, enum.Enum):
@@ -39,6 +57,7 @@ class ProviderOutcome(str, enum.Enum):
     RATE_LIMITED = "rate_limited"
     AUTHENTICATION_ERROR = "authentication_error"
     TRANSIENT_ERROR = "transient_error"
+    REJECTED = "rejected"
 
 
 ANSWERS = frozenset({ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT,
@@ -113,6 +132,10 @@ def classify_http(code: int, headers: Any = None) -> ProviderOutcome:
         return ProviderOutcome.RATE_LIMITED
     if code >= 500:
         return ProviderOutcome.UNAVAILABLE
+    if code == 408:
+        return ProviderOutcome.TRANSIENT_ERROR
+    if 400 <= code < 500:
+        return ProviderOutcome.REJECTED  # the request itself was refused: never retried
     return ProviderOutcome.TRANSIENT_ERROR
 
 
@@ -152,3 +175,129 @@ def call_with_retry(provider: str, fn: Callable[[], ProviderResult], *, max_atte
                                   retry_after=err.retry_after, attempts=attempts)
         delay = err.retry_after if err.retry_after is not None else base_backoff * (2 ** (attempts - 1))
         sleep(min(MAX_RETRY_AFTER_SECONDS, delay))
+
+
+# -- one entry point for every provider ------------------------------------------
+
+@dataclass(frozen=True)
+class ProviderPolicy:
+    """How a provider is called: total attempts for a repeatable request and
+    the first backoff (doubled each retry, capped by MAX_RETRY_AFTER_SECONDS)."""
+    max_attempts: int = 1
+    base_backoff: float = 1.0
+
+
+#: Public metadata services throttle and hiccup: a bounded retry is worth it.
+#: Services on the operator's own network answer or do not: one retry.
+#: The AI provider is only ever POSTed to, so it is never repeated.
+POLICIES: Dict[str, ProviderPolicy] = {
+    "musicbrainz": ProviderPolicy(3, 1.0),
+    "acoustid": ProviderPolicy(2, 1.0),
+    "discogs": ProviderPolicy(2, 1.0),
+    "spotify": ProviderPolicy(2, 1.0),
+    "artwork": ProviderPolicy(2, 0.5),
+    "reference-url": ProviderPolicy(1),
+    "plex": ProviderPolicy(2, 0.5),
+    "lidarr": ProviderPolicy(2, 0.5),
+    "slskd": ProviderPolicy(2, 0.5),
+    "qbittorrent": ProviderPolicy(2, 0.5),
+    "ytdlp-po": ProviderPolicy(1),
+    "ai": ProviderPolicy(1),
+}
+_SAFE_METHODS = frozenset({"GET", "HEAD"})
+_HEALTH_LOCK = threading.Lock()
+_HEALTH: Dict[str, Dict[str, Any]] = {}
+
+
+def policy_for(provider: str) -> ProviderPolicy:
+    """The provider's policy. ``PROVIDER_MAX_ATTEMPTS`` (an integer) caps
+    every provider's attempts -- 1 turns retries off."""
+    policy = POLICIES.get(provider)
+    if policy is None:
+        raise ValueError(f"unknown provider {provider!r}; add it to provider_boundary.POLICIES")
+    cap = os.environ.get("PROVIDER_MAX_ATTEMPTS", "").strip()
+    if cap.isdigit() and int(cap) >= 1:
+        return ProviderPolicy(min(policy.max_attempts, int(cap)), policy.base_backoff)
+    return policy
+
+
+def _record(provider: str, outcome: ProviderOutcome, *, attempts: int, status_code: Optional[int] = None,
+            message: str = "") -> None:
+    now = time.time()
+    with _HEALTH_LOCK:
+        row = _HEALTH.setdefault(provider, {"provider": provider, "calls": 0, "failures": 0, "retries": 0,
+                                            "last_success_at": None, "last_failure_at": None})
+        row["calls"] += 1
+        row["retries"] += max(0, attempts - 1)
+        row.update(last_outcome=outcome.value, last_status_code=status_code, last_attempts=attempts,
+                   last_message=redact(message))
+        if outcome == ProviderOutcome.CONFIRMED:
+            row["last_success_at"] = now
+        else:
+            row["failures"] += 1
+            row["last_failure_at"] = now
+
+
+def provider_health() -> Dict[str, Dict[str, Any]]:
+    """The last classified outcome per provider since this process started
+    (redacted; no URLs, no keys)."""
+    with _HEALTH_LOCK:
+        known = {name: dict(row) for name, row in _HEALTH.items()}
+    return {name: known.get(name, {"provider": name, "calls": 0, "failures": 0, "retries": 0,
+                                   "last_outcome": None})
+            for name in sorted(set(POLICIES) | set(known))}
+
+
+def reset_provider_health() -> None:
+    with _HEALTH_LOCK:
+        _HEALTH.clear()
+
+
+def _method_of(request: Any) -> str:
+    if isinstance(request, str):
+        return "GET"
+    try:
+        return str(request.get_method()).upper()
+    except Exception:
+        return "GET"
+
+
+@contextmanager
+def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_attempts: Optional[int] = None,
+           sleep: Callable[[float], None] = time.sleep) -> Iterator[Any]:
+    """Open ``request`` at ``provider`` and yield the response (see module doc).
+
+    Raises the original exception after the last attempt. ``max_attempts``
+    overrides the provider's policy (a connectivity test passes 1)."""
+    policy = policy_for(provider)
+    limit = max(1, max_attempts if max_attempts is not None else policy.max_attempts)
+    if _method_of(request) not in _SAFE_METHODS:
+        limit = 1  # a POST is never repeated by the boundary
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            if timeout is None:
+                response = urllib.request.urlopen(request)
+            else:
+                response = urllib.request.urlopen(request, timeout=timeout)
+            break
+        except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
+            err = classify_exception(exc)
+            if err.outcome not in RETRYABLE or attempts >= limit:
+                _record(provider, err.outcome, attempts=attempts, status_code=err.status_code, message=str(err))
+                raise
+            delay = err.retry_after if err.retry_after is not None else policy.base_backoff * (2 ** (attempts - 1))
+            sleep(min(MAX_RETRY_AFTER_SECONDS, delay))
+    _record(provider, ProviderOutcome.CONFIRMED, attempts=attempts,
+            status_code=getattr(response, "status", None))
+    try:
+        if hasattr(response, "__enter__"):
+            with response as entered:
+                yield entered
+        else:
+            yield response
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close) and not hasattr(response, "__enter__"):
+            close()

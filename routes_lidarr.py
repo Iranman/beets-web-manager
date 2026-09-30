@@ -3,6 +3,7 @@
 Registered after app.py initializes. Keeps Lidarr HTTP glue out of the large app
 module while reusing the existing acquisition helpers and outbound URL policy.
 """
+import backend.provider_boundary as provider_boundary
 import json
 import urllib.error
 import urllib.parse
@@ -46,7 +47,7 @@ def _lidarr_request_json(path: str, *, params: Dict[str, Any] | None = None,
         raise RuntimeError(error)
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = _ur.Request(_lidarr_url(path, params), data=data, headers=_lidarr_headers(), method=method)
-    with _ur.urlopen(req, timeout=20) as resp:
+    with provider_boundary.opened("lidarr", req, timeout=20) as resp:
         raw = resp.read()
     return json.loads(raw or b"{}")
 

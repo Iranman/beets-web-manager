@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import json, mimetypes, os, re, threading, time
 import urllib.error
 from backend.security import OutboundPolicyError, validate_outbound_url
@@ -1012,7 +1013,7 @@ def ai_suggest(iid):
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with provider_boundary.opened("ai", req, timeout=30) as resp:
                 data = json.loads(resp.read())
             suggestions = json.loads(data["choices"][0]["message"]["content"])
         except Exception as exc:

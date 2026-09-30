@@ -5,6 +5,7 @@ No new matching policy lives here; final decisions stay in backend.matching.
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import copy, difflib, json, math, os, re, threading, time
 import urllib.error
 from backend.matching import AcoustIDStatus, album_track_score as _canonical_album_track_score, best_album_track_match as _canonical_best_album_track_match, normalize_artist as _canonical_normalize_artist, similarity as _canonical_similarity, track_feature_variants as _canonical_track_feature_variants, track_parenthetical_alias_variants as _canonical_track_parenthetical_alias_variants
@@ -1183,7 +1184,7 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
     from backend.provider_boundary import ProviderOutcome, ProviderResult, call_with_retry
 
     def _once():
-        with _ur.urlopen(req, timeout=30) as resp:
+        with provider_boundary.opened("musicbrainz", req, timeout=30, max_attempts=1) as resp:
             return ProviderResult("musicbrainz", ProviderOutcome.CONFIRMED, data=json.loads(resp.read()))
 
     fetched = call_with_retry("musicbrainz", _once, max_attempts=3, base_backoff=1.5)
@@ -1342,7 +1343,7 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
         )
-        with _ur.urlopen(req, timeout=45) as resp:
+        with provider_boundary.opened("ai", req, timeout=45) as resp:
             data = json.loads(resp.read())
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         if msg.get("refusal"):

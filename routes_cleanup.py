@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import json, os, re, time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -345,7 +346,7 @@ def dedup_ai_review():
                     headers={"Authorization": f"Bearer {api_key}",
                              "Content-Type": "application/json"},
                 )
-                with _ur.urlopen(req, timeout=45) as r:
+                with provider_boundary.opened("ai", req, timeout=45) as r:
                     resp_data = json.loads(r.read())
                 msg = (resp_data.get("choices") or [{}])[0].get("message") or {}
                 if msg.get("refusal"):

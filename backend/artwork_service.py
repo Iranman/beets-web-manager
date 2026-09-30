@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import base64, hashlib, io, json, mimetypes, os, re, threading, time
 import urllib.error
 from backend.security import OutboundPolicyError, validate_outbound_url
@@ -119,7 +120,7 @@ def _cache_artist_image(artist_name: str, url: str) -> str:
     try:
         ARTIST_IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
-        with _ur.urlopen(req, timeout=15) as r:
+        with provider_boundary.opened("artwork", req, timeout=15) as r:
             content_type = r.headers.get("Content-Type", "")
             ext = _artist_image_ext(url, content_type)
             if not ext:
@@ -166,7 +167,7 @@ def _fetch_artist_image(artist_name: str) -> str:
     headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
-        with _ur.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("discogs", req, timeout=10) as r:
             results = json.loads(r.read()).get("results") or []
         if results:
             return results[0].get("cover_image") or results[0].get("thumb") or ""
@@ -820,7 +821,7 @@ def _fetch_album_art(artist: str, album: str) -> str:
                "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
-        with _ur.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("discogs", req, timeout=10) as r:
             results = json.loads(r.read()).get("results") or []
         if results:
             return results[0].get("cover_image") or results[0].get("thumb") or ""
@@ -905,7 +906,7 @@ def _download_album_art_bytes(image_url: str) -> Tuple[bytes, Dict[str, Any]]:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
     req = _ur.Request(image_url, headers={"User-Agent": "BeetsWebControl/1.0"})
     try:
-        with _ur.urlopen(req, timeout=15) as resp:
+        with provider_boundary.opened("artwork", req, timeout=15) as resp:
             data = resp.read(_ALBUM_ART_UPLOAD_MAX_BYTES + 1)
     except OutboundPolicyError as exc:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc

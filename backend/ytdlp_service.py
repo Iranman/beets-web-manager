@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.provider_boundary as provider_boundary
 import copy, importlib, json, os, re, shlex, shutil, subprocess, sys, time
 import logging
 import urllib.error
@@ -1521,7 +1522,7 @@ def _ytdlp_po_provider_status() -> Dict[str, Any]:
         return result
     try:
         req = _ur.Request(url, method="GET")
-        with _ur.urlopen(req, timeout=3) as resp:
+        with provider_boundary.opened("ytdlp-po", req, timeout=3) as resp:
             result.update({"reachable": True, "status": getattr(resp, "status", None)})
     except urllib.error.HTTPError as ex:
         result.update({"reachable": ex.code < 500, "status": ex.code, "error": f"HTTP {ex.code}"})

@@ -3,6 +3,8 @@ import time
 
 from flask import jsonify, request
 
+import backend.provider_boundary as provider_boundary
+
 # Imported after app.py has already defined app and jobs (circular-but-OK pattern)
 from app import app, jobs, _ai_batch_find_state, _ai_batch_reconcile_state, _AI_BATCH_TERMINAL_STATUSES  # noqa: E402
 
@@ -120,3 +122,14 @@ def kill_job(jid):
 def clear_jobs():
     jobs.clear_finished()
     return jsonify({"ok": True})
+
+
+@app.get("/api/providers/health")
+def providers_health():
+    """Read-only: the last classified outcome per external provider since this
+    process started, and each provider's retry policy (ARCH-006). Redacted:
+    no URLs, no keys."""
+    policies = {name: {"max_attempts": provider_boundary.policy_for(name).max_attempts,
+                       "base_backoff": provider_boundary.policy_for(name).base_backoff}
+                for name in sorted(provider_boundary.POLICIES)}
+    return jsonify({"ok": True, "providers": provider_boundary.provider_health(), "policies": policies})

@@ -15,6 +15,7 @@ remain authoritative. This module only adds:
     (in addition to the existing /api/health — these use the unprefixed
     convention most container orchestrators expect by default)
 """
+import backend.provider_boundary as provider_boundary
 import copy
 import importlib.util
 import json
@@ -3009,7 +3010,7 @@ def setup_test_ai():
             f"{base_url.rstrip('/')}/models/{model}" if is_openai_host else f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}"},
         )
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("ai", req, timeout=10, max_attempts=1) as r:
             r.read()
         return jsonify({"ok": True, "status": "ready", "model": model})
     except urllib.error.HTTPError as exc:
@@ -3039,7 +3040,7 @@ def setup_test_musicbrainz():
             "https://musicbrainz.org/ws/2/release/?query=release:test&limit=1&fmt=json",
             headers={"User-Agent": "BeetsWebManager/1.0 (+https://github.com/)"},
         )
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("musicbrainz", req, timeout=10, max_attempts=1) as r:
             json.loads(r.read())
         return jsonify({"ok": True, "status": "ready"})
     except urllib.error.HTTPError as exc:
@@ -3093,7 +3094,7 @@ def setup_test_acoustid():
             "duration": "1", "fingerprint": "AQAAA0mUaEkSRZEeJk-eHtWMh4",
         })
         req = urllib.request.Request(f"https://api.acoustid.org/v2/lookup?{params}")
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("acoustid", req, timeout=10, max_attempts=1) as r:
             data = json.loads(r.read())
         if data.get("status") == "error":
             result.update({"ok": False, "status": "failed", "error": data.get("error", {}).get("message", "AcoustID rejected the request.")})
@@ -3119,7 +3120,7 @@ def setup_test_plex():
                          "error": "PLEX_URL and PLEX_TOKEN are both required to test Plex."}), 200
     try:
         req = urllib.request.Request(f"{plex_url}/library/sections", headers={"X-Plex-Token": plex_token})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with provider_boundary.opened("plex", req, timeout=10, max_attempts=1) as r:
             body = r.read()
         libraries = []
         try:
