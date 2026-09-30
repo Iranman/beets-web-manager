@@ -271,6 +271,7 @@ class ApiContractTests(unittest.TestCase):
             ("/api/library/untracked-inventory", "library_untracked_inventory_run"),
             ("/api/library/album-duplicate-analysis/plan-merge", "library_album_row_merge_plan"),
             ("/api/library/untracked-recovery/candidates", "library_untracked_recovery_candidates"),
+            ("/api/library/untracked-recovery/album-candidates", "library_untracked_recovery_album_candidates"),
             ("/api/library/untracked-recovery/plan", "library_untracked_recovery_plan"),
         }
         self.assertEqual(base - live, set())

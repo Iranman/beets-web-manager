@@ -9,6 +9,17 @@ POST /webmanager/untracked/attach
     (the identity the Web Manager proved). Nothing is written to the file
     and nothing is moved. Rollback removes the row again (file untouched).
 
+POST /webmanager/untracked/attach-album
+    {"release_id", "release_group_id",
+     "files": [{"path", "sha256", "expected": {"mb_trackid", "disc", "track"}}, ...]}
+    Adds untracked files of ONE release that has no album row yet as a new
+    album row, in place: Beets reads each file's own tags, which must carry
+    the release's Release ID and Release Group ID and match ``expected``.
+    Refused if the release already has an album row (use attach), a slot
+    appears twice, or any file is tracked, changed or outside the allowed
+    roots. Nothing is written to a file and nothing is moved. Rollback
+    removes the item rows and the album row again (files untouched).
+
 POST /webmanager/untracked/quarantine
     {"files": [{"path", "sha256"}, ...]}
     Moves untracked files whose content still hashes to the reviewed SHA-256
@@ -206,6 +217,113 @@ def run_untracked_attach():
         return _error("Attach failed; nothing was kept", "ATTACH_FAILED", 500)
 
 
+MAX_ALBUM_FILES = 200
+
+
+@ops.webmanager_bp.route("/untracked/attach-album", methods=["POST"])
+def run_untracked_attach_album():
+    data = request.get_json(force=True, silent=True) or {}
+    lib = g.lib
+    record_id, _recorded, early = _replay("attach_album")
+    if early is not None:
+        return early
+    op_id, _fp, early = ops._idempotency_precheck("untracked_attach_album", data)
+    if early is not None:
+        return early
+
+    def fail(message: str, code: str, status: int = 400):
+        ops.update_operation(op_id, "failed", error=message, error_code=code)
+        return _error(message, code, status)
+
+    release_id = _s(data.get("release_id")).lower()
+    release_group_id = _s(data.get("release_group_id")).lower()
+    if not release_id or not release_group_id:
+        return fail("release_id and release_group_id are required", "IDENTITY_REQUIRED")
+    files = data.get("files")
+    if not isinstance(files, list) or not files or len(files) > MAX_ALBUM_FILES:
+        return fail(f"files must be a non-empty list of at most {MAX_ALBUM_FILES}", "INVALID_FILES")
+    if any(_s(a.mb_albumid).lower() == release_id for a in lib.albums(f"mb_albumid:{release_id}")):
+        return fail("this release already has an album row; attach files to it instead", "ALBUM_ROW_EXISTS", 409)
+
+    items: List[Item] = []
+    plan: List[Dict[str, Any]] = []
+    seen_paths, seen_slots = set(), set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return fail("each file must be an object", "INVALID_FILES")
+        path = _safe_audio_path(entry.get("path"))
+        if path is None:
+            return fail("a path is outside the allowed roots", "PATH_INVALID")
+        if path in seen_paths:
+            return fail("a path is listed twice", "DUPLICATE_PATH")
+        seen_paths.add(path)
+        sha = entry.get("sha256")
+        if not isinstance(sha, str) or not _SHA256.fullmatch(sha):
+            return fail("sha256 required for every file", "INVALID_SHA256")
+        if not os.path.isfile(path):
+            return fail(f"{path} not found", "FILE_NOT_FOUND", 404)
+        if _is_tracked(lib, path):
+            return fail(f"{path} is already tracked", "FILE_IS_TRACKED", 409)
+        if _sha256_file(path) != sha:
+            return fail(f"{path} changed since review", "CONTENT_DRIFT", 409)
+        item = Item.from_path(path)
+        expected = entry.get("expected") or {}
+        found = (_s(item.mb_trackid).lower(), int(item.disc or 1), int(item.track or 0))
+        wanted = (_s(expected.get("mb_trackid")).lower(), int(expected.get("disc") or 1), int(expected.get("track") or 0))
+        if not wanted[0] or not wanted[2] or found != wanted:
+            return fail(f"{path}: tags do not match the approved identity", "IDENTITY_MISMATCH", 409)
+        if _s(item.mb_albumid).lower() != release_id or _s(item.mb_releasegroupid).lower() != release_group_id:
+            return fail(f"{path}: tags name a different release", "EDITION_DIFFERS", 409)
+        if wanted[1:] in seen_slots:
+            return fail(f"slot {wanted[1]}/{wanted[2]} appears twice", "SLOT_OVERLAP", 409)
+        seen_slots.add(wanted[1:])
+        items.append(item)
+        plan.append({"path": path, "sha256": sha, "mb_trackid": wanted[0], "disc": wanted[1], "track": wanted[2]})
+
+    manifest = {"record_id": record_id, "kind": "attach_album", "operation_id": op_id, "status": "applying",
+                "release_id": release_id, "release_group_id": release_group_id, "files": plan}
+    album = None
+    try:
+        with ops.mutation_lock:
+            _save(manifest)
+            album = lib.add_album(items)   # library rows only: no tag write, no move
+            for item, step in zip(items, plan):
+                fresh = lib.get_item(item.id)
+                if fresh is None or fresh.album_id != album.id or _fspath(fresh.path) != step["path"]:
+                    raise RuntimeError("attach-album postcondition failed")
+                step["item_id"] = item.id
+            stored = lib.get_album(album.id)
+            if (_s(stored.mb_albumid).lower() != release_id
+                    or _s(stored.mb_releasegroupid).lower() != release_group_id):
+                raise RuntimeError("attach-album produced a row for another release")
+            result = {"success": True, "record_id": record_id, "album_id": album.id,
+                      "item_ids": [step["item_id"] for step in plan], "paths": [step["path"] for step in plan]}
+            manifest.update(status="applied", album_id=album.id, result=result)
+            _save(manifest)
+        ops.update_operation(op_id, "succeeded", result=result)
+        return jsonify({"operation_id": op_id, **result})
+    except Exception:
+        ops.log.exception("untracked attach-album failed; removing the rows again")
+        try:
+            with ops.mutation_lock:
+                for item in items:
+                    if item.id and lib.get_item(item.id) is not None:
+                        item.remove(delete=False, with_album=False)
+                if album is not None and lib.get_album(album.id) is not None:
+                    lib.get_album(album.id).remove(delete=False, with_items=False)
+                manifest.update(status="compensated")
+                _save(manifest)
+        except Exception:
+            ops.log.exception("untracked attach-album compensation failed")
+            manifest.update(status="recovery_required")
+            try:
+                _save(manifest)
+            except Exception:
+                pass
+        ops.update_operation(op_id, "failed", error="Attach failed", error_code="ATTACH_FAILED")
+        return _error("Attach failed; nothing was kept", "ATTACH_FAILED", 500)
+
+
 @ops.webmanager_bp.route("/untracked/quarantine", methods=["POST"])
 def run_untracked_quarantine():
     data = request.get_json(force=True, silent=True) or {}
@@ -295,6 +413,13 @@ def run_untracked_rollback():
         item = lib.get_item(int(manifest["item_id"]))
         if item is None or _fspath(item.path) != manifest["path"]:
             return _error("the attached item changed or is gone", "ITEM_DRIFT", 409)
+    elif manifest["kind"] == "attach_album":
+        album = lib.get_album(int(manifest["album_id"]))
+        if album is None:
+            return _error("the attached album row is gone", "ALBUM_DRIFT", 409)
+        expected = {int(f["item_id"]): f["path"] for f in manifest["files"]}
+        if {i.id: _fspath(i.path) for i in album.items()} != expected:
+            return _error("the album row no longer holds exactly the attached items", "ALBUM_DRIFT", 409)
     else:
         for rec in manifest["files"]:
             if not os.path.isfile(rec["quarantine_path"]):
@@ -312,6 +437,14 @@ def run_untracked_rollback():
                 lib.get_item(int(manifest["item_id"])).remove(delete=False, with_album=False)
                 result = {"success": True, "record_id": record_id, "removed_item_id": manifest["item_id"],
                           "path": manifest["path"], "file_untouched": os.path.isfile(manifest["path"])}
+            elif manifest["kind"] == "attach_album":
+                album = lib.get_album(int(manifest["album_id"]))
+                for item in list(album.items()):
+                    item.remove(delete=False, with_album=False)
+                album.remove(delete=False, with_items=False)
+                result = {"success": True, "record_id": record_id, "removed_album_id": manifest["album_id"],
+                          "removed_item_ids": [f["item_id"] for f in manifest["files"]],
+                          "files_untouched": all(os.path.isfile(f["path"]) for f in manifest["files"])}
             else:
                 for rec in manifest["files"]:
                     os.makedirs(os.path.dirname(rec["original_path"]), exist_ok=True)
@@ -326,6 +459,9 @@ def run_untracked_rollback():
         ops.log.exception("untracked rollback failed")
         try:
             with ops.mutation_lock:
+                if manifest["kind"] == "attach_album":
+                    # Rows cannot be half-removed silently: a human decides.
+                    raise RuntimeError("attach-album rollback stopped part-way")
                 by_orig = {r["original_path"]: r for r in manifest.get("files") or []}
                 for orig in restored:
                     shutil.move(orig, by_orig[orig]["quarantine_path"])

@@ -38,7 +38,11 @@ from backend.resource_locks import attempt_owner, claim_approved, locks as resou
 from backend.transaction_engine import TransactionStore
 
 ATTACH_FAMILY = "untracked_attach_v1"
+ATTACH_ALBUM_FAMILY = "untracked_attach_album_v1"
 QUARANTINE_FAMILY = "untracked_quarantine_v1"
+#: One album per plan; larger folders are not one release.
+MAX_ALBUM_FILES = 200
+ALBUM_CATEGORY = "canonical_album_file_missing_from_beets"
 
 ACTIONS = {
     "exact_duplicate_of_tracked": ("quarantine", "Byte-identical copy of a tracked file."),
@@ -120,6 +124,32 @@ def candidates(category: Optional[str] = None, *, limit: int = 50, offset: int =
     return {"ok": True, "total": total, "offset": offset, "limit": limit, "rows": rows}
 
 
+def album_candidates(*, limit: int = 50, offset: int = 0, deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Folders of untracked album files (from the persisted inventory only --
+    no disk or tag read), largest first. Whether a folder can be attached to
+    an existing row or becomes a new album row is decided at plan time."""
+    d = deps or _deps()
+    folders: Dict[str, Dict[str, Any]] = {}
+    try:
+        fh = open(Path(d["inventory_dir"]) / "untracked_inventory.jsonl", encoding="utf-8")
+    except OSError:
+        return {"ok": False, "code": "no_inventory", "error": "Run the untracked inventory first.", "rows": []}
+    with fh:
+        for line in fh:
+            rec = json.loads(line)
+            if rec.get("category") != ALBUM_CATEGORY:
+                continue
+            folder = rec["path"].rsplit("/", 1)[0] if "/" in rec["path"] else ""
+            row = folders.setdefault(folder, {"folder": folder, "files": 0, "bytes": 0})
+            row["files"] += 1
+            row["bytes"] += int(rec.get("size") or 0)
+    rows = sorted(folders.values(), key=lambda r: (-r["files"], r["folder"]))
+    page = [{**r, "action": "attach_album", "action_eligibility": "plannable", "requires_review": True,
+             "safety_result": "identity re-proven per file at plan time"} for r in rows[offset:offset + limit]]
+    return {"ok": True, "total": len(rows), "files": sum(r["files"] for r in rows), "offset": offset,
+            "limit": limit, "rows": page}
+
+
 def _fail(code: str, error: str, **extra: Any) -> Dict[str, Any]:
     return {"ok": False, "code": code, "error": error, **extra}
 
@@ -166,6 +196,125 @@ def _prove_identity(path: str, *, want_album: bool, adapter: BeetsAdapter, d: Di
     return {"ok": True, "tags": tags, "album": album, "evidence": evidence}
 
 
+def plan_album_attach(folder: str, *, adapter: Optional[BeetsAdapter] = None,
+                      store: Optional[TransactionStore] = None, deps: Optional[Dict[str, Any]] = None,
+                      progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
+    """Plan step (no mutation): the untracked album files of one folder as a
+    NEW album row of the release their tags name.
+
+    One release per plan, and only a release with no album row yet (a file
+    for an existing row is an ``attach``). A file is included only with
+    deterministic proof: Recording ID, Release ID, Release Group ID and track
+    tags; MusicBrainz lists that recording at that position of that release
+    and gives the same Release Group; AcoustID confirms the audio. A file
+    that fails is excluded with its reason and stays untracked. A provider
+    that cannot be asked fails the whole plan as exactly that."""
+    from backend.item_replacement import tracked_item_id_for_path
+    from backend.untracked_inventory import load_previous
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    d = deps or _deps()
+    rel_folder = _s(folder).replace("\\", "/").strip("/")
+    real = _safe_music_path(d["music_root"], rel_folder) if rel_folder else None
+    if real is None or not os.path.isdir(real):
+        return _fail("folder_missing", "The folder is not under the music root or no longer exists.")
+    records = [r for path, r in sorted(load_previous(Path(d["inventory_dir"])).items())
+               if r.get("category") == ALBUM_CATEGORY and path.rsplit("/", 1)[0] == rel_folder]
+    if not records:
+        return _fail("no_candidates", "The inventory lists no untracked album files directly in that folder.")
+    if len(records) > MAX_ALBUM_FILES:
+        return _fail("too_many_files", f"More than {MAX_ALBUM_FILES} files; that is not one album.")
+
+    excluded: List[Dict[str, Any]] = []
+    tagged: List[Dict[str, Any]] = []
+    for rec in records:
+        path = _safe_music_path(d["music_root"], rec["path"])
+        if path is None or not os.path.isfile(path):
+            excluded.append({"path": rec["path"], "reason": "file_missing"})
+            continue
+        if tracked_item_id_for_path(path, adapter=ad, abs_path=d["abs_path"]):
+            excluded.append({"path": rec["path"], "reason": "already_tracked"})
+            continue
+        try:
+            tags = d["read_tags"](path)
+        except Exception as ex:
+            excluded.append({"path": rec["path"], "reason": f"unreadable ({type(ex).__name__})"})
+            continue
+        if not tags.get("mb_trackid") or not tags.get("mb_albumid") or not tags.get("track"):
+            excluded.append({"path": rec["path"], "reason": "no_recording_release_or_position_tag"})
+            continue
+        if not tags.get("mb_releasegroupid"):
+            excluded.append({"path": rec["path"], "reason": "no_release_group_tag"})
+            continue
+        tagged.append({"rel": rec["path"], "path": path, "tags": tags})
+    releases = sorted({(t["tags"]["mb_albumid"], t["tags"]["mb_releasegroupid"]) for t in tagged})
+    if not releases:
+        return _fail("nothing_tagged", "No file carries Recording, Release, Release Group and track tags.",
+                     excluded=excluded)
+    if len(releases) != 1:
+        return _fail("multiple_releases", "The folder's files name more than one release; plan them separately.",
+                     releases=[{"release_id": a, "release_group_id": b} for a, b in releases], excluded=excluded)
+    release_id, release_group_id = releases[0]
+    if [a for a in (ad.find_all_albums_by_mb_albumid(release_id) or [])
+            if _s(a.get("mb_albumid")).lower() == release_id]:
+        return _fail("album_row_exists", "This release already has an album row; attach the files to it instead.",
+                     release_id=release_id)
+
+    mb = d["mb_tracklist"](release_id)
+    mb_outcome = mb.get("outcome") or ("confirmed" if mb.get("ok") else "unknown")
+    if not mb.get("ok"):
+        return _fail(f"musicbrainz_{mb_outcome}", "MusicBrainz could not confirm the release tracklist.")
+    if _s(mb.get("release_group")).lower() != release_group_id:
+        return _fail("release_group_mismatch", "MusicBrainz places this release in a different Release Group "
+                                               "than the files' tags.", release_id=release_id)
+    by_slot = {(int(t.get("disc") or 1), int(t.get("track") or 0)): _s(t.get("mb_trackid")).lower()
+               for t in mb.get("tracks") or []}
+
+    slots: Dict[Any, List[Dict[str, Any]]] = {}
+    for t in tagged:
+        slot = (t["tags"]["disc"], t["tags"]["track"])
+        if by_slot.get(slot) != t["tags"]["mb_trackid"]:
+            excluded.append({"path": t["rel"], "reason": "slot_recording_mismatch"})
+            continue
+        slots.setdefault(slot, []).append(t)
+    proven: List[Dict[str, Any]] = []
+    for index, (slot, group) in enumerate(sorted(slots.items()), 1):
+        if len(group) > 1:
+            excluded.extend({"path": t["rel"], "reason": "slot_contested"} for t in group)
+            continue
+        t = group[0]
+        heard = d["acoustid"](t["path"])
+        if progress:
+            progress({"processed": index, "total": len(slots)})
+        if not heard.answered:
+            return _fail(f"acoustid_{heard.outcome.value}", "AcoustID could not be asked; nothing was concluded.")
+        if t["tags"]["mb_trackid"] not in [_s(c.get("mb_trackid")).lower() for c in heard.data or []]:
+            excluded.append({"path": t["rel"], "reason": "fingerprint_disagreement"})
+            continue
+        proven.append({"path": t["path"], "sha256": _sha256(t["path"]),
+                       "expected": {"mb_trackid": t["tags"]["mb_trackid"], "disc": slot[0], "track": slot[1]},
+                       "title": t["tags"].get("title", ""), "acoustid_from_cache": heard.from_cache})
+    if not proven:
+        return _fail("nothing_proven", "No file of this release could be proven.", excluded=excluded)
+
+    label = f"{_s(mb.get('release_artist'))} - {_s(mb.get('release_title'))}".strip(" -")
+    tx = st.create(
+        operation_type="Import", status="Preview",
+        summary=f"Track {len(proven)} of {len(by_slot)} track(s) of {label or release_id} as a new album row, in place",
+        changes=[{"path": f["path"], "disc": f["expected"]["disc"], "track": f["expected"]["track"],
+                  "mb_trackid": f["expected"]["mb_trackid"]} for f in proven],
+        rollback_available=True,
+        metadata={"mutation_family": ATTACH_ALBUM_FAMILY, "action": "attach_album", "folder": rel_folder,
+                  "release_id": release_id, "release_group_id": release_group_id, "files": proven,
+                  "excluded": excluded, "release_track_count": len(by_slot),
+                  "evidence": {"musicbrainz": mb_outcome, "release_title": _s(mb.get("release_title")),
+                               "release_artist": _s(mb.get("release_artist"))}})
+    return {"ok": True, "operation_id": tx["id"], "status": "Preview", "requires_approval": True,
+            "action": "attach_album", "folder": rel_folder, "release_id": release_id,
+            "release_group_id": release_group_id, "release": label, "files": len(proven),
+            "release_track_count": len(by_slot), "excluded": excluded}
+
+
 def plan_recovery(action: str, rel_paths: Iterable[str], *, adapter: Optional[BeetsAdapter] = None,
                   store: Optional[TransactionStore] = None, deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     ad = adapter or beets_adapter
@@ -174,6 +323,10 @@ def plan_recovery(action: str, rel_paths: Iterable[str], *, adapter: Optional[Be
     paths = list(rel_paths or [])
     if not paths:
         return _fail("no_paths", "No files were selected.")
+    if action == "attach_album":
+        if len(paths) != 1:
+            return _fail("one_folder_per_plan", "Plan one album folder at a time.")
+        return plan_album_attach(paths[0], adapter=ad, store=st, deps=d)
     if action in ("attach", "track_for_replacement"):
         if len(paths) != 1:
             return _fail("one_file_per_plan", "Plan one recovery per file.")
@@ -241,6 +394,17 @@ def plan_recovery(action: str, rel_paths: Iterable[str], *, adapter: Optional[Be
     return _fail("unknown_action", "Unknown recovery action.")
 
 
+def _lock_keys(meta: Dict[str, Any]) -> List[str]:
+    """Durable locks for one recovery: the inventory, plus the album row an
+    attach fills or the Release Group a new album row belongs to."""
+    keys = ["untracked-inventory"]
+    if meta.get("album_id"):
+        keys.append(f"album:{meta['album_id']}")
+    if meta.get("mutation_family") == ATTACH_ALBUM_FAMILY:
+        keys.append(f"album-merge:{meta['release_group_id']}")
+    return keys
+
+
 def apply_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
                    store: Optional[TransactionStore] = None) -> Dict[str, Any]:
     ad = adapter or beets_adapter
@@ -251,20 +415,28 @@ def apply_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
         return _fail("not_found", "Transaction not found")
     meta = tx.get("metadata") or {}
     family = meta.get("mutation_family")
-    if family not in (ATTACH_FAMILY, QUARANTINE_FAMILY):
+    if family not in (ATTACH_FAMILY, ATTACH_ALBUM_FAMILY, QUARANTINE_FAMILY):
         return _fail("wrong_family", "Not an untracked recovery transaction.")
     if meta.get("engine_result"):
         return _fail("already_applied", "This recovery was already applied.")
     if tx.get("status") != "Approved":
         return _fail("not_approved", "Approve the transaction before applying it.")
-    keys = ["untracked-inventory"] + ([f"album:{meta['album_id']}"] if meta.get("album_id") else [])
+    keys = _lock_keys(meta)
     with resource_locks().hold(keys, attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
             return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
-        items_before = int((ad.get_stats() or {}).get("items") or 0)
-        st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
+        stats = ad.get_stats() or {}
+        items_before = int(stats.get("items") or 0)
+        st.update(operation_id, status="Running",
+                  metadata={"engine_request": {"items_before": items_before,
+                                               "albums_before": int(stats.get("albums") or 0)}})
         try:
-            if family == ATTACH_FAMILY:
+            if family == ATTACH_ALBUM_FAMILY:
+                res = ad.untracked_attach_album(
+                    meta["release_id"], meta["release_group_id"],
+                    [{k: f[k] for k in ("path", "sha256", "expected")} for f in meta["files"]],
+                    idempotency_key=operation_id)
+            elif family == ATTACH_FAMILY:
                 res = ad.untracked_attach(meta["path"], meta["sha256"], meta.get("album_id"), meta["expected"],
                                           idempotency_key=operation_id)
             else:
@@ -288,7 +460,34 @@ def finish_recovery(operation_id: str, res: Dict[str, Any], *, adapter: Optional
     items_before = int(((meta.get("engine_request") or {}).get("items_before")) or 0)
     items_after = int((ad.get_stats() or {}).get("items") or 0)
     next_plan = None
-    if meta["mutation_family"] == ATTACH_FAMILY:
+    if meta["mutation_family"] == ATTACH_ALBUM_FAMILY:
+        album_id = int(engine.get("album_id") or 0)
+        album = ad.get_album(album_id, expand=False) if album_id else None
+        if not album:
+            problems.append("the new album row was not found")
+        else:
+            if _s(album.get("mb_albumid")).lower() != meta["release_id"]:
+                problems.append("the new album row carries a different Release ID")
+            if _s(album.get("mb_releasegroupid")).lower() != meta["release_group_id"]:
+                problems.append("the new album row carries a different Release Group ID")
+            # The engine returns item ids in the order of the request's files.
+            by_path = dict(zip(engine.get("paths") or [], engine.get("item_ids") or []))
+            for f in meta["files"]:
+                row = ad.get_item(int(by_path.get(f["path"]) or 0)) or {}
+                if int(row.get("album_id") or 0) != album_id:
+                    problems.append(f"{f['path']} is not in the new album row")
+                elif _s(row.get("mb_trackid")).lower() != f["expected"]["mb_trackid"]:
+                    problems.append(f"{f['path']} has the wrong Recording ID")
+            held = len(ad.find_all_items_by_album_id(album_id) or [])
+            if held != len(meta["files"]):
+                problems.append(f"the new album row holds {held} item(s), expected {len(meta['files'])}")
+        if items_before and items_after - items_before != len(meta["files"]):
+            problems.append(f"item count changed by {items_after - items_before}, expected +{len(meta['files'])}")
+        albums_before = int(((meta.get("engine_request") or {}).get("albums_before")) or 0)
+        albums_after = int((ad.get_stats() or {}).get("albums") or 0)
+        if albums_before and albums_after - albums_before != 1:
+            problems.append(f"album count changed by {albums_after - albums_before}, expected +1")
+    elif meta["mutation_family"] == ATTACH_FAMILY:
         item = ad.get_item(int(engine.get("item_id") or 0)) or {}
         if not item:
             problems.append("attached item not found")
@@ -317,7 +516,8 @@ def finish_recovery(operation_id: str, res: Dict[str, Any], *, adapter: Optional
               logs=[f"Engine record {engine.get('record_id')}: {meta['mutation_family']} applied"]
               + [f"Verification problem: {p}" for p in problems])
     return {"ok": not problems, "operation_id": operation_id, "status": status, "record_id": engine.get("record_id"),
-            "item_id": engine.get("item_id"), "items_before": items_before, "items_after": items_after,
+            "item_id": engine.get("item_id"), "album_id": engine.get("album_id"),
+            "items_before": items_before, "items_after": items_after,
             "verification_problems": problems, "replacement_plan": next_plan}
 
 
@@ -331,15 +531,22 @@ def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = No
         return _fail("not_found", "Transaction not found")
     meta = tx.get("metadata") or {}
     engine = meta.get("engine_result") or {}
-    if meta.get("mutation_family") not in (ATTACH_FAMILY, QUARANTINE_FAMILY) or not engine.get("record_id"):
+    if (meta.get("mutation_family") not in (ATTACH_FAMILY, ATTACH_ALBUM_FAMILY, QUARANTINE_FAMILY)
+            or not engine.get("record_id")):
         return _fail("not_applied", "No applied untracked recovery to roll back.")
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
-    keys = ["untracked-inventory"] + ([f"album:{meta['album_id']}"] if meta.get("album_id") else [])
+    keys = _lock_keys(meta)
     with resource_locks().hold(keys, attempt_owner(f"{operation_id}:rollback"), timeout=10):
         res = ad.untracked_rollback(engine["record_id"], idempotency_key=f"{operation_id}:rollback")
         problems = []
-        if meta["mutation_family"] == ATTACH_FAMILY:
+        if meta["mutation_family"] == ATTACH_ALBUM_FAMILY:
+            if ad.get_album(int(engine.get("album_id") or 0), expand=False):
+                problems.append("the album row is still in the library")
+            for f in meta["files"]:
+                if not os.path.isfile(f["path"]) or _sha256(f["path"]) != f["sha256"]:
+                    problems.append(f"{f['path']} is missing or changed")
+        elif meta["mutation_family"] == ATTACH_FAMILY:
             if ad.get_item(int(engine.get("item_id") or 0)):
                 problems.append("the attached item is still in the library")
             if not os.path.isfile(meta["path"]):

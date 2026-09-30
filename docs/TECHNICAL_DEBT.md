@@ -97,8 +97,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Of the 17,360 files classified as canonical album files, only 284 have tags naming exactly one album row with a free slot; 16,524 name a Release ID with no album row in Beets.
   - Class A: 0 byte-identical copies exist, so no quarantine was previewed.
   - Class C was not exercised live.
-- Why this stays Open: the 69,828 import artifacts and 16,919 unknown files have no cleanup path, which is deliberate: a naming pattern is not proof. The 16,524 files for releases not in Beets need an import workflow, not attach.
-- Priority: P2. Status: Open (recovery implemented and live verified for attach).
+- v0.1.45 (IMPLEMENTED; CI and live acceptance pending): new album rows for releases Beets does not have.
+  - `action: "attach_album"` plans one folder as a new album row (per-file proof by tags, MusicBrainz tracklist and Release Group, and AcoustID); engine op `/webmanager/untracked/attach-album` (plugin 1.5.0) creates it in place with rollback.
+  - One folder and one release per plan, operator-approved. There is no bulk planner for the roughly 1,400 folders yet; each plan costs one AcoustID lookup per file.
+- Why this stays Open: the 69,828 import artifacts and 16,919 unknown files have no cleanup path, which is deliberate: a naming pattern is not proof. The album folders still need a batch planner (a durable, resumable job that plans folder after folder within the AcoustID rate limit) before the backlog can be worked through.
+- Priority: P2. Status: Open (attach and new-album recovery implemented; batch planning and artifact cleanup remain).
 
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 

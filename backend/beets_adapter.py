@@ -728,6 +728,14 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/album-row-merge/rollback",
                              json_data={"merge_id": str(merge_id or "")}, headers=headers)
 
+    def untracked_attach_album(self, release_id: str, release_group_id: str, files: List[Dict[str, Any]],
+                               idempotency_key: str) -> Dict[str, Any]:
+        """Add untracked files of one release that has no album row yet as a
+        new album row, in place: no tag write, no move (ARCH-021)."""
+        payload = {"release_id": release_id, "release_group_id": release_group_id, "files": files}
+        return self._request("POST", "/webmanager/untracked/attach-album", json_data=payload,
+                             headers={"Idempotency-Key": idempotency_key})
+
     def untracked_attach(self, path: str, sha256: str, album_id: Optional[int], expected: Dict[str, Any],
                          idempotency_key: str) -> Dict[str, Any]:
         """Add an untracked file to the library (album slot or singleton)
