@@ -190,6 +190,118 @@ class QuarantineRemoveItemsTests(unittest.TestCase):
     def test_capability(self):
         self.assertIn("quarantine_remove_items", ops_mod.get_capabilities())
 
+    # -- a duplicate album row holding only the copy (sibling-row retirement) --
+
+    def _sibling_rows(self, *, dup_release="rel-1", dup_rg="rg-1", extra_in_dup=False):
+        """Keeper row: rel-1/rg-1 with slot 1/11 (self.keep). Duplicate row:
+        the same release (by default) holding only the copy of that slot."""
+        self.album.mb_albumid, self.album.mb_releasegroupid, self.album.album = "rel-1", "rg-1", "Top"
+        self.album.store()
+        self.keep.load()
+        self.keep.update({"disc": 1, "track": 11})
+        self.keep.store()
+        os.makedirs(os.path.join(self.music, "dup"))
+        dup_path = os.path.join(self.music, "dup", "11 Top Notch.wav")
+        write_wav(dup_path, 4)
+        dup = Item.from_path(dup_path)
+        dup.update({"title": "Top Notch", "track": 11, "disc": 1, "mb_trackid": "rec-1"})
+        items = [dup]
+        if extra_in_dup:
+            other_path = os.path.join(self.music, "dup", "12 Other.wav")
+            write_wav(other_path, 5)
+            other = Item.from_path(other_path)
+            other.update({"title": "Other", "track": 12, "disc": 1})
+            items.append(other)
+        dup_album = self.lib.add_album(items)
+        dup_album.mb_albumid, dup_album.mb_releasegroupid, dup_album.album = dup_release, dup_rg, "Top"
+        dup_album.store()
+        return dup, dup_path, dup_album
+
+    def _retire(self, dup, dup_path, album_id, keeper_id=None, key=None):
+        return self._post("/webmanager/quarantine-remove-items", {"items": [{
+            "item_id": dup.id, "sha256": sha(dup_path), "retire_album_id": album_id,
+            "sibling_keeper_item_id": keeper_id or self.keep.id}]}, key=key)
+
+    def test_last_item_of_a_row_is_refused_without_an_explicit_retirement(self):
+        dup, dup_path, dup_album = self._sibling_rows()
+        res = self._remove(item_id=dup.id, sha256=sha(dup_path))
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["error_code"], "ALBUM_WOULD_EMPTY")
+        self.assertIsNotNone(self.lib.get_album(dup_album.id))
+        self.assertTrue(os.path.isfile(dup_path))
+
+    def test_sibling_row_is_retired_and_rollback_restores_the_exact_ids(self):
+        dup, dup_path, dup_album = self._sibling_rows()
+        dup_id, album_id = dup.id, dup_album.id
+        res = self._retire(dup, dup_path, album_id)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        data = res.get_json()
+        self.assertEqual(data["retired_album_ids"], [album_id])
+        self.assertIsNone(self.lib.get_item(dup_id))
+        self.assertIsNone(self.lib.get_album(album_id))
+        self.assertFalse(os.path.exists(dup_path))
+        keep = self.lib.get_item(self.keep.id)
+        self.assertEqual((keep.album_id, keep.disc, keep.track), (self.album.id, 1, 11))
+
+        rb = self._post("/webmanager/quarantine-remove-items/rollback", {"quarantine_id": data["quarantine_id"]})
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        [restored] = rb.get_json()["restored"]
+        self.assertEqual((restored["old_item_id"], restored["new_item_id"], restored["album_id"]),
+                         (dup_id, dup_id, album_id))
+        album = self.lib.get_album(album_id)
+        self.assertEqual((album.mb_albumid, album.mb_releasegroupid, album.album), ("rel-1", "rg-1", "Top"))
+        self.assertEqual([i.id for i in self.lib.items(f"album_id:{album_id}")], [dup_id])
+        self.assertTrue(os.path.isfile(dup_path))
+
+    def test_retirement_refused_for_another_release_or_a_row_with_other_items(self):
+        for kwargs, code in (({"dup_release": "rel-2"}, "NO_SIBLING_KEEPER"),
+                             ({"dup_rg": "rg-2"}, "NO_SIBLING_KEEPER"),
+                             ({"extra_in_dup": True}, "RETIRE_NOT_SOLE_ITEM")):
+            with self.subTest(**kwargs):
+                self.tearDown()
+                self.setUp()
+                dup, dup_path, dup_album = self._sibling_rows(**kwargs)
+                res = self._retire(dup, dup_path, dup_album.id)
+                self.assertEqual(res.status_code, 409, res.get_json())
+                self.assertEqual(res.get_json()["error_code"], code)
+                self.assertIsNotNone(self.lib.get_album(dup_album.id))
+                self.assertTrue(os.path.isfile(dup_path))
+
+    def test_retirement_refused_when_the_keeper_is_in_the_same_row_or_its_file_is_gone(self):
+        dup, dup_path, dup_album = self._sibling_rows()
+        res = self._retire(dup, dup_path, dup_album.id, keeper_id=dup.id)
+        self.assertEqual(res.get_json()["error_code"], "NO_SIBLING_KEEPER")
+        os.remove(os.fsdecode(self.keep.path))
+        res = self._retire(dup, dup_path, dup_album.id)
+        self.assertEqual(res.get_json()["error_code"], "NO_SIBLING_KEEPER")
+        self.assertIsNotNone(self.lib.get_album(dup_album.id))
+
+    def test_failure_after_row_retirement_restores_row_item_and_file(self):
+        from beets.library import Album
+        dup, dup_path, dup_album = self._sibling_rows()
+        dup_id, album_id = dup.id, dup_album.id
+        real_remove = Album.remove
+
+        def remove_then_fail(album, *a, **k):
+            real_remove(album, *a, **k)
+            raise OSError("db locked")
+
+        with mock.patch.object(Album, "remove", remove_then_fail):
+            res = self._retire(dup, dup_path, album_id)
+        self.assertEqual(res.status_code, 500)
+        self.assertIsNotNone(self.lib.get_album(album_id))
+        self.assertEqual(self.lib.get_item(dup_id).album_id, album_id)
+        self.assertTrue(os.path.isfile(dup_path))
+
+    def test_rollback_refuses_when_the_album_id_was_taken_again(self):
+        dup, dup_path, dup_album = self._sibling_rows()
+        data = self._retire(dup, dup_path, dup_album.id).get_json()
+        from beetsplug.webmanager.merge_ops import _restore_album_row
+        _restore_album_row(self.lib, dup_album.id, {"album": "someone else"})
+        rb = self._post("/webmanager/quarantine-remove-items/rollback", {"quarantine_id": data["quarantine_id"]})
+        self.assertEqual(rb.status_code, 409)
+        self.assertEqual(rb.get_json()["error_code"], "ALBUM_ID_OCCUPIED")
+
 
 if __name__ == "__main__":
     unittest.main()

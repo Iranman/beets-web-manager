@@ -68,6 +68,28 @@ def _identity(item: Dict[str, Any]) -> Dict[str, Any]:
     return {k: item.get(k) for k in KEEPER_IDENTITY_FIELDS}
 
 
+def sibling_row(adapter: BeetsAdapter, drop: Dict[str, Any], keep: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The duplicate album row ``drop`` would empty, when that is safe to
+    retire: ``drop`` is its ONLY item, and it is a different row of the
+    keeper's own release (same non-empty Release ID and Release Group ID) with
+    the keeper holding the same disc/track. None otherwise. Read-only."""
+    drop_album, keep_album = drop.get("album_id"), keep.get("album_id")
+    if not drop_album or not keep_album or int(drop_album) == int(keep_album):
+        return None
+    if (drop.get("disc"), drop.get("track")) != (keep.get("disc"), keep.get("track")):
+        return None
+    row, keeper_row = adapter.get_album(int(drop_album), expand=False), adapter.get_album(int(keep_album), expand=False)
+    if not row or not keeper_row:
+        return None
+    ident = {k: _s(row.get(k)).lower() for k in ("mb_albumid", "mb_releasegroupid")}
+    if not all(ident.values()) or ident != {k: _s(keeper_row.get(k)).lower() for k in ident}:
+        return None
+    members = [int(i.get("id")) for i in adapter.find_all_items_by_album_id(int(drop_album)) or []]
+    if members != [int(drop.get("id"))]:
+        return None
+    return {"album_id": int(drop_album), **ident, "album": _s(row.get("album")), "keeper_album_id": int(keep_album)}
+
+
 def verify_pair(
     pair: Dict[str, Any],
     *,
@@ -76,8 +98,13 @@ def verify_pair(
     abs_path: AbsPath,
     music_root: Path,
     path_under: Callable[[Path, Path], bool],
+    allow_sibling_row_retire: bool = False,
 ) -> Dict[str, Any]:
     """Re-prove one reviewed pair against live Beets. Read-only.
+
+    ``allow_sibling_row_retire`` (operator-reviewed cleanup only) lets the
+    album-slot gate accept a copy that is the only item of a duplicate row of
+    the keeper's release; that row is then retired with it (see sibling_row).
 
     Returns {"ok": True, ...evidence} or {"ok": False, "reasons": [...]}.
     """
@@ -144,7 +171,10 @@ def verify_pair(
         "fingerprint_mbid": shared, "fingerprint_verified": True,
         "release_relation": relation, "match_type": "reviewed pair", "confidence": "high",
     }
-    decisions = duplicate_identity.plan_unattended_cleanup({"duplicates": [record]}, music_root, path_under)
+    retire_row = sibling_row(adapter, drop, keep) if allow_sibling_row_retire else None
+    decisions = duplicate_identity.plan_unattended_cleanup(
+        {"duplicates": [record]}, music_root, path_under,
+        sibling_row_retire=(lambda _d, _k: True) if retire_row else None)
     if len(decisions) != 1:
         return {**base, "ok": False, "release_relation": relation,
                 "reasons": ["policy_no_longer_selects_this_pair (slot, album-slot gate or proof)"]}
@@ -164,6 +194,7 @@ def verify_pair(
         "keep_reason": decision.get("keep_reason") or "",
         "keep_identity": _identity(keep),
         "delete_identity": _identity(drop),
+        **({"retire_album": retire_row} if decision.get("retire_album_id") else {}),
     }
 
 
@@ -181,8 +212,12 @@ def plan_reviewed_cleanup(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
     deps: Optional[Dict[str, Any]] = None,
+    allow_sibling_row_retire: bool = False,
 ) -> Dict[str, Any]:
-    """Re-verify reviewed pairs and create a Preview transaction. Read-only."""
+    """Re-verify reviewed pairs and create a Preview transaction. Read-only.
+
+    ``allow_sibling_row_retire`` is for the operator-reviewed plan route only;
+    the unattended and bulk paths never pass it (see verify_pair)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     d = deps or _default_deps()
@@ -191,7 +226,7 @@ def plan_reviewed_cleanup(
     removing: set = set()
     keeping: set = set()
     for pair in pairs:
-        result = verify_pair(pair, adapter=ad, **d)
+        result = verify_pair(pair, adapter=ad, allow_sibling_row_retire=allow_sibling_row_retire, **d)
         if result.get("ok") and (result["delete_item_id"] in keeping or result["keep_item_id"] in removing
                                  or result["delete_item_id"] in removing):
             result = {**result, "ok": False, "reasons": ["pair_overlaps_another_pair_in_this_plan"]}
@@ -210,6 +245,7 @@ def plan_reviewed_cleanup(
         "keep_item_id": p["keep_item_id"], "keep_path": p["keep_path"],
         "shared_recording_id": p["shared_recording_id"], "release_relation": p["release_relation"],
         "keep_reason": p["keep_reason"],
+        **({"retire_album_id": p["retire_album"]["album_id"]} if p.get("retire_album") else {}),
     } for p in accepted]
     tx = st.create(
         operation_type="Delete",
@@ -248,17 +284,24 @@ def apply_reviewed_cleanup(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
     pairs = meta.get("pairs") or []
     ids = sorted({int(p["delete_item_id"]) for p in pairs} | {int(p["keep_item_id"]) for p in pairs})
+    rows = sorted({int(p["retire_album"][k]) for p in pairs if p.get("retire_album")
+                   for k in ("album_id", "keeper_album_id")})
     from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
-    with resource_locks().hold([f"item:{i}" for i in ids], attempt_owner(operation_id), timeout=10):
+    with resource_locks().hold([f"album:{a}" for a in rows] + [f"item:{i}" for i in ids],
+                               attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
             return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
-        items_before = int((ad.get_stats() or {}).get("items") or 0)
+        stats = ad.get_stats() or {}
+        items_before, albums_before = int(stats.get("items") or 0), int(stats.get("albums") or 0)
         # Recorded before the engine call: a restart mid-call is finished from
         # engine evidence by backend/transaction_recovery.py, never replayed.
-        st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
+        st.update(operation_id, status="Running",
+                  metadata={"engine_request": {"items_before": items_before, "albums_before": albums_before}})
         try:
             res = ad.quarantine_remove_items(
-                [{"item_id": p["delete_item_id"], "sha256": p["delete_sha256"]} for p in pairs],
+                [{"item_id": p["delete_item_id"], "sha256": p["delete_sha256"],
+                  **({"retire_album_id": p["retire_album"]["album_id"], "sibling_keeper_item_id": p["keep_item_id"]}
+                     if p.get("retire_album") else {})} for p in pairs],
                 idempotency_key=operation_id,
             )
         except Exception:
@@ -306,9 +349,17 @@ def finish_reviewed_cleanup(
                     problems.append(f"album {keep['album_id']} slot lost its keeper")
             row["keep_identity_after"] = _identity(keep)
         verified.append(row)
-    items_after = int((ad.get_stats() or {}).get("items") or 0)
+    retired = [int(p["retire_album"]["album_id"]) for p in pairs if p.get("retire_album")]
+    for album_id in retired:
+        if ad.get_album(album_id, expand=False):
+            problems.append(f"duplicate album row {album_id} was not retired")
+    stats = ad.get_stats() or {}
+    items_after, albums_after = int(stats.get("items") or 0), int(stats.get("albums") or 0)
     if items_before and items_before - items_after != len(pairs):
         problems.append(f"library item count changed by {items_before - items_after}, expected {len(pairs)}")
+    albums_before = int(((meta.get("engine_request") or {}).get("albums_before")) or 0)
+    if albums_before and albums_before - albums_after != len(retired):
+        problems.append(f"album count changed by {albums_before - albums_after}, expected {len(retired)}")
 
     status = "Completed" if not problems else "Recovery Required"
     st.update(
@@ -321,6 +372,7 @@ def finish_reviewed_cleanup(
     )
     return {"ok": not problems, "operation_id": operation_id, "status": status,
             "quarantine_id": engine.get("quarantine_id"), "removed": engine.get("removed") or [],
+            "retired_album_ids": retired,
             "items_before": items_before, "items_after": items_after, "verification_problems": problems}
 
 
@@ -344,10 +396,23 @@ def rollback_reviewed_cleanup(
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else res
-    st.update(operation_id, status="Rolled Back", metadata={**meta, "rollback_result": result},
+    problems: List[str] = []
+    for p in meta.get("pairs") or []:
+        row = p.get("retire_album")
+        if not row:
+            continue
+        album = ad.get_album(int(row["album_id"]), expand=False) or {}
+        if _s(album.get("mb_albumid")).lower() != row["mb_albumid"]:
+            problems.append(f"album row {row['album_id']} was not restored")
+        members = [int(i.get("id")) for i in ad.find_all_items_by_album_id(int(row["album_id"])) or []]
+        if members != [int(p["delete_item_id"])]:
+            problems.append(f"item {p['delete_item_id']} is not back in album row {row['album_id']}")
+    status = "Rolled Back" if not problems else "Recovery Required"
+    st.update(operation_id, status=status, metadata={**meta, "rollback_result": result, "rollback_problems": problems},
               logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
-                    for r in result.get("restored") or []])
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored": result.get("restored") or []}
+                    for r in result.get("restored") or []] + [f"Rollback problem: {x}" for x in problems])
+    return {"ok": not problems, "operation_id": operation_id, "status": status,
+            "restored": result.get("restored") or [], "rollback_problems": problems}
 
 
 def pairs_from_proposal(proposal: Iterable[Dict[str, Any]],

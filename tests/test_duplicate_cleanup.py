@@ -205,6 +205,133 @@ class ReviewedCleanupTests(unittest.TestCase):
         self.assertEqual(dc.pairs_from_proposal(proposal, [(1, 2)]), [])
 
 
+class SiblingAdapter(FakeAdapter):
+    """FakeAdapter with album rows: an engine that retires the named row."""
+
+    def __init__(self, items, albums):
+        super().__init__(items)
+        self.albums = albums
+        self.quarantine_remove_items = mock.MagicMock(side_effect=self._remove_and_retire)
+        self.rollback_quarantine_remove_items = mock.MagicMock(side_effect=self._restore)
+        self._gone = {}
+
+    def get_album(self, album_id, expand=True):
+        return self.albums.get(int(album_id))
+
+    def get_stats(self):
+        return {"items": self.stats_items, "albums": len(self.albums)}
+
+    def _remove_and_retire(self, items, idempotency_key=None):
+        for entry in items:
+            self._gone[int(entry["item_id"])] = self.items[int(entry["item_id"])]
+            if entry.get("retire_album_id"):
+                self._gone[("album", entry["retire_album_id"])] = self.albums.pop(int(entry["retire_album_id"]))
+        return self._remove(items, idempotency_key)
+
+    def _restore(self, quarantine_id, idempotency_key=None):
+        for key, row in list(self._gone.items()):
+            if isinstance(key, tuple):
+                self.albums[key[1]] = row
+            else:
+                self.items[key] = row
+                self.stats_items += 1
+        return {"success": True, "restored": []}
+
+
+class SiblingRowRetirementTests(unittest.TestCase):
+    """A copy that is the ONLY item of a duplicate row of the keeper's own
+    release (Dennis Brown shape): reviewed cleanup may remove it and retire
+    that row; the unattended path never may."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        album_dir = self.root / "Various Artists" / "Revolutionary Sounds"
+        album_dir.mkdir(parents=True)
+        self.keep_path = album_dir / "Dennis Brown - Revolutionary Sounds - 04 - Here I Come.flac"
+        self.drop_path = album_dir / "dennis brown - Revolutionary Sounds - 04 - Here I Come (00).flac"
+        self.keep_path.write_bytes(b"k" * 100)
+        self.drop_path.write_bytes(b"d" * 100)
+        common = {"mb_trackid": REC, "mb_albumid": REL, "mb_releasegroupid": RG, "disc": 1, "track": 4,
+                  "format": "FLAC", "bitrate": 483490}
+        self.items = {24301: {"id": 24301, "album_id": 1976, "path": str(self.keep_path), **common},
+                      25215: {"id": 25215, "album_id": 2140, "path": str(self.drop_path), **common}}
+        self.albums = {1976: {"id": 1976, "mb_albumid": REL, "mb_releasegroupid": RG, "album": "Revolutionary Sounds"},
+                       2140: {"id": 2140, "mb_albumid": REL, "mb_releasegroupid": RG, "album": "Revolutionary Sounds"}}
+        self.adapter = SiblingAdapter(self.items, self.albums)
+        self.store = TransactionStore(str(self.root / "tx"))
+        self.deps = {"fingerprint_match": mock.MagicMock(return_value=(REC, [REC], [REC])), "abs_path": lambda p: p,
+                     "music_root": self.root, "path_under": lambda path, root: str(path).startswith(str(root))}
+        self.pair = {"delete_item_id": 25215, "keep_item_id": 24301}
+
+    def _plan(self, allow=True):
+        return dc.plan_reviewed_cleanup([self.pair], adapter=self.adapter, store=self.store, deps=self.deps,
+                                        allow_sibling_row_retire=allow)
+
+    def test_without_the_opt_in_the_album_slot_gate_still_refuses(self):
+        res = self._plan(allow=False)
+        self.assertFalse(res["ok"])
+        self.assertIn("policy_no_longer_selects", res["skipped"][0]["reasons"][0])
+
+    def test_reviewed_plan_retires_the_sole_item_row(self):
+        res = self._plan()
+        self.assertTrue(res["ok"], res)
+        [pair] = res["pairs"]
+        self.assertEqual(pair["retire_album"]["album_id"], 2140)
+        self.assertEqual(pair["retire_album"]["keeper_album_id"], 1976)
+        change = self.store.get(res["operation_id"])["changes"][0]
+        self.assertEqual(change["retire_album_id"], 2140)
+
+    def test_refused_for_another_release_group_a_shared_row_or_another_slot(self):
+        cases = (("other release", lambda: self.albums[2140].update(mb_albumid="other")),
+                 ("other release group", lambda: self.albums[2140].update(mb_releasegroupid="other")),
+                 ("row not sole", lambda: self.items.update({9: {"id": 9, "album_id": 2140, "path": "x"}})),
+                 ("other slot", lambda: self.items[25215].update(track=5)))
+        for label, mutate in cases:
+            with self.subTest(label):
+                self.setUp()
+                mutate()
+                self.assertFalse(self._plan()["ok"], label)
+
+    def test_apply_retires_the_row_and_verifies_counts_then_rollback_verifies_restoration(self):
+        op = self._plan()["operation_id"]
+        self.store.update(op, status="Approved")
+        res = dc.apply_reviewed_cleanup(op, adapter=self.adapter, store=self.store, abs_path=lambda p: p)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["retired_album_ids"], [2140])
+        [sent] = self.adapter.quarantine_remove_items.call_args.args[0]
+        self.assertEqual((sent["retire_album_id"], sent["sibling_keeper_item_id"]), (2140, 24301))
+        self.assertNotIn(2140, self.albums)
+        rb = dc.rollback_reviewed_cleanup(op, adapter=self.adapter, store=self.store)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(self.store.get(op)["status"], "Rolled Back")
+
+    def test_apply_flags_a_row_that_was_not_retired(self):
+        op = self._plan()["operation_id"]
+        self.store.update(op, status="Approved")
+        self.adapter.quarantine_remove_items.side_effect = self.adapter._remove  # engine leaves the row
+        res = dc.apply_reviewed_cleanup(op, adapter=self.adapter, store=self.store, abs_path=lambda p: p)
+        self.assertEqual(res["status"], "Recovery Required")
+        self.assertIn("duplicate album row 2140 was not retired", res["verification_problems"])
+
+    def test_rollback_that_does_not_restore_the_row_needs_recovery(self):
+        op = self._plan()["operation_id"]
+        self.store.update(op, status="Approved")
+        dc.apply_reviewed_cleanup(op, adapter=self.adapter, store=self.store, abs_path=lambda p: p)
+        self.adapter.rollback_quarantine_remove_items.side_effect = lambda *a, **k: {"success": True, "restored": []}
+        rb = dc.rollback_reviewed_cleanup(op, adapter=self.adapter, store=self.store)
+        self.assertEqual(rb["status"], "Recovery Required")
+
+    def test_only_the_operator_reviewed_route_opts_in(self):
+        import inspect
+        import backend.dedup_service as ds
+        import routes_cleanup
+        self.assertNotIn("allow_sibling_row_retire", inspect.getsource(ds))
+        route = inspect.getsource(routes_cleanup.dedup_reviewed_cleanup_plan)
+        self.assertIn("allow_sibling_row_retire=True", route)
+
+
 class UnattendedAndManualPathTests(unittest.TestCase):
     """Both the unattended step and the manual cleanup route use the same
     reviewed-cleanup authority; nothing else can remove a duplicate."""

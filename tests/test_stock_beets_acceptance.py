@@ -186,7 +186,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.3.0")
+        self.assertEqual(status_data["plugin_version"], "1.3.1")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -425,7 +425,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.3.0")
+                    self.assertEqual(status_res["plugin_version"], "1.3.1")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -703,6 +703,37 @@ webmanager:
             self.assertEqual(call("GET", f"/item/{it['item_id']}")[1]["album_id"], source_id)
         self.assertTrue(call("POST", "/webmanager/album-row-merge/rollback",
                              {"merge_id": merged["merge_id"]})[1].get("replayed"))
+
+        # Reviewed cleanup of a copy that is the only item of a duplicate row
+        # of the same release: never emptied implicitly; retired only when
+        # named with a sibling keeper; rollback restores row and item ids.
+        [dup] = items
+        [keeper] = [it for it in (call("GET", f"/album/{target_id}?expand")[1].get("items") or [])
+                    if it["track"] == 1]
+        status, _ = call("POST", "/webmanager/modify", {"item_ids": [dup["item_id"]], "write": False, "move": False,
+                                                        "fields": {"track": 1}})
+        self.assertEqual(status, 200)
+        dup_sha = csha(container_path(call("GET", f"/item/{dup['item_id']}")[1]["path"]))
+        status, refused = call("POST", "/webmanager/quarantine-remove-items",
+                               {"items": [{"item_id": dup["item_id"], "sha256": dup_sha}]},
+                               key=f"accept-qr-{uuid.uuid4().hex[:8]}")
+        self.assertEqual((status, refused.get("error_code")), (409, "ALBUM_WOULD_EMPTY"), refused)
+        status, retired = call("POST", "/webmanager/quarantine-remove-items",
+                               {"items": [{"item_id": dup["item_id"], "sha256": dup_sha, "retire_album_id": source_id,
+                                           "sibling_keeper_item_id": keeper["id"]}]},
+                               key=f"accept-qr-{uuid.uuid4().hex[:8]}")
+        self.assertEqual(status, 200, retired)
+        self.assertEqual(retired["retired_album_ids"], [source_id])
+        self.assertEqual(call("GET", f"/album/{source_id}")[0], 404)
+        self.assertEqual(call("GET", f"/item/{dup['item_id']}")[0], 404)
+        self.assertEqual(call("GET", f"/item/{keeper['id']}")[1]["album_id"], target_id)
+        status, back = call("POST", "/webmanager/quarantine-remove-items/rollback",
+                            {"quarantine_id": retired["quarantine_id"]}, key=f"accept-qrb-{uuid.uuid4().hex[:8]}")
+        self.assertEqual(status, 200, back)
+        [restored] = back["restored"]
+        self.assertEqual((restored["new_item_id"], restored["album_id"]), (dup["item_id"], source_id))
+        self.assertEqual(call("GET", f"/album/{source_id}")[1].get("mb_albumid"), rel)
+        self.assertEqual(csha(container_path(call("GET", f"/item/{dup['item_id']}")[1]["path"])), dup_sha)
 
         # Untracked: attach a tagged loose file as a singleton, roll back;
         # quarantine it, roll back.
