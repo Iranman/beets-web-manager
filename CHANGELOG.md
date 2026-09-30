@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.47 - 2026-09-30
+
 ### Changed
 - **Import Review action decisions are backend-owned (ARCH-005).**
   - `backend/import_review_decision.py` is the authority for an item's bucket, whether the action is blocked and why, the next step, the action label and the source files an import takes. `POST /api/import-review/decision` serves it.
