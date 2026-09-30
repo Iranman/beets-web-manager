@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.46 - 2026-09-30
+
 ### Added
 - **A shared contract for long-running mutating jobs (ARCH-004).** `backend/job_contract.py` gives a workflow a durable `workflow:<name>` lock for as long as it runs, a heartbeat, a checkpoint in the durable job record, and cancellation while waiting.
   - Adopted by Clean All, playlist download and playlist pipeline actions, AI batch import, Acquire Download All, single album download+import, the music-format replacement retry, and the import slot used by folder import and disk re-import.
