@@ -28,7 +28,7 @@ class AcoustidSubmitJobTests(unittest.TestCase):
 
     def _execute_job(self, route_fn, *args):
         captured = {}
-        def fake_start_python(fn_inner, label=None):
+        def fake_start_python(fn_inner, label=None, **kwargs):
             log = []
             res = fn_inner(log, cancel_event=None)
             captured["log"] = log

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import re
 import threading
 import time
 import uuid
@@ -65,6 +66,16 @@ def slug(text: Any) -> str:
 
 def workflow_key(workflow: str) -> str:
     return f"workflow:{workflow}"
+
+
+def normalize_lock_key(key: str) -> str:
+    key = str(key or "").strip()
+    from backend.resource_locks import _KEY_RE
+    if _KEY_RE.match(key):
+        return key
+    prefix = key.split(":", 1)[0].lower() if ":" in key else "res"
+    safe_prefix = re.sub(r"[^a-z0-9]", "", prefix)[:10] or "res"
+    return f"workflow:{safe_prefix}-{slug(key)}"
 
 
 def make_checkpoint(
@@ -356,7 +367,7 @@ def contract_metadata(workflow: str, metadata: Optional[Dict[str, Any]] = None,
         out.setdefault("mutating", False)
     else:
         out.setdefault("mutating", True)
-    actual_keys = list(resource_keys or keys or [workflow_key(workflow)])
+    actual_keys = [normalize_lock_key(k) for k in (resource_keys or keys or [workflow_key(workflow)])]
     out["workflow_contract"] = {
         "workflow": workflow,
         "lock_keys": actual_keys,
@@ -378,6 +389,7 @@ def _publish(update_state: Optional[Callable[..., None]], checkpoint: Dict[str, 
 @contextmanager
 def held(workflow: str, *, log: Optional[List[str]] = None, cancel_event: Any = None,
          update_state: Optional[Callable[..., None]] = None, keys: Optional[Iterable[str]] = None,
+         resource_keys: Optional[Iterable[str]] = None,
          wait_seconds: float = DEFAULT_WAIT_SECONDS, progress: Optional[Callable[[], Dict[str, Any]]] = None,
          fail_fast_in_process: bool = False,
          classification: str = JOB_CLASSIFICATION_NON_RESUMABLE_SIDE_EFFECT):
@@ -390,7 +402,7 @@ def held(workflow: str, *, log: Optional[List[str]] = None, cancel_event: Any = 
     ``fail_fast_in_process``: a holder in THIS process is a live duplicate,
     not a stale lock -- raise WorkflowBusyError at once instead of waiting
     (for workflows with no in-process guard of their own)."""
-    wanted = list(keys or [workflow_key(workflow)])
+    wanted = [normalize_lock_key(k) for k in (resource_keys or keys or [workflow_key(workflow)])]
     owner = f"job:{workflow}:{uuid.uuid4().hex[:12]}"
     registry = resource_locks()
     base = make_checkpoint(
@@ -494,6 +506,7 @@ def enter(workflow: str, **kwargs: Any) -> Handle:
 
 
 def guarded(fn: Callable[..., Any], *, workflow: str, keys: Optional[Iterable[str]] = None,
+            resource_keys: Optional[Iterable[str]] = None,
             wait_seconds: float = DEFAULT_WAIT_SECONDS,
             progress: Optional[Callable[[], Dict[str, Any]]] = None,
             fail_fast_in_process: bool = False,
@@ -501,9 +514,10 @@ def guarded(fn: Callable[..., Any], *, workflow: str, keys: Optional[Iterable[st
     """Wrap a job function (``fn(log[, cancel_event[, update_state]])``) so it
     runs under the contract. The result is what ``fn`` returns."""
     arity = len(inspect.signature(fn).parameters)
+    wanted_keys = list(resource_keys or keys or [workflow_key(workflow)])
 
     def _contract_job(log, cancel_event=None, update_state=None):
-        with held(workflow, log=log, cancel_event=cancel_event, update_state=update_state, keys=keys,
+        with held(workflow, log=log, cancel_event=cancel_event, update_state=update_state, keys=wanted_keys,
                   wait_seconds=wait_seconds, progress=progress, fail_fast_in_process=fail_fast_in_process,
                   classification=classification):
             if arity >= 3:

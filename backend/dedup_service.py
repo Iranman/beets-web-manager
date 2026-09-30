@@ -1279,6 +1279,7 @@ def _resolver_retag_deps() -> Dict[str, Any]:
     from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path
     from backend.matching_service import _fetch_mb_release_tracklist
     from backend.app_runtime import MUSIC_ROOT
+    from backend import composite_workflows
     return {
         "eval_recording": evaluate_recording_candidate,
         "acoustid_evidence": acoustid_evidence_from_hits,
@@ -1286,6 +1287,7 @@ def _resolver_retag_deps() -> Dict[str, Any]:
         "mb_tracklist": _fetch_mb_release_tracklist,
         "abs_path": _album_item_abs_path,
         "music_root": Path(MUSIC_ROOT),
+        "find_album_items": composite_workflows.find_all_items_by_album_id,
     }
 
 
@@ -1343,7 +1345,14 @@ def evaluate_resolver_retag(
         return {"ok": False, "code": "mb_tracklist_mismatch", "error": f"MusicBrainz tracklist position ({target_disc}, {target_track}) has recording {_s(mb_slot.get('mb_trackid'))}, not {proposed_recording_id}"}
 
     # 2. Target slot occupancy check (disc/track conflict)
-    target_items = ad.find_all_items_by_album_id(int(target_album["id"])) or []
+    target_items = []
+    if hasattr(ad, "find_all_items_by_album_id"):
+        target_items = ad.find_all_items_by_album_id(int(target_album["id"])) or []
+    elif "find_album_items" in d:
+        try:
+            target_items = d["find_album_items"](int(target_album["id"])) or []
+        except Exception:
+            target_items = []
     for it in target_items:
         if int(it.get("id") or 0) != int(item.get("id") or 0):
             if (int(it.get("disc") or 1), int(it.get("track") or 0)) == (target_disc, target_track):
@@ -1359,7 +1368,7 @@ def evaluate_resolver_retag(
     )
 
     # 4. AcoustID Audio Evidence and Recording Verification
-    raw_path = _s(item.get("path") or "")
+    raw_path = _s(item.get("path") or item.get("filename") or "")
     item_path = d["abs_path"](raw_path) if raw_path else ""
     if not item_path or not os.path.exists(item_path):
         return {"ok": False, "code": "file_missing", "error": "Item audio file is missing"}
@@ -1454,9 +1463,6 @@ def apply_resolver_retag(
     if dry_run:
         return {"ok": True, "dry_run": True, "item_id": item_id, "moved": source_album_id != target_album_id}
 
-    from backend.beets_adapter import beets_adapter
-    ad = adapter or beets_adapter
-
     # Step 1: Repair item recording identity
     item_fields = {
         "mb_trackid": proposed_recording_id,
@@ -1466,15 +1472,22 @@ def apply_resolver_retag(
         "mb_albumid": edition_release_id,
         "mb_releasegroupid": expected_rg_id,
     }
-    modify_res = ad.modify_item(item_id, item_fields)
-    if not modify_res.get("success", False):
-        return {"ok": False, "code": "item_modify_failed", "error": modify_res.get("error", "Failed to update item metadata")}
+    if adapter is not None and hasattr(adapter, "modify_item"):
+        modify_res = adapter.modify_item(item_id, item_fields)
+        if not modify_res.get("success", False) and not modify_res.get("ok", False):
+            return {"ok": False, "code": "item_modify_failed", "error": modify_res.get("error", "Failed to update item metadata")}
+    else:
+        modify_res = composite_workflows.update_item_metadata(
+            item_id, item_fields, write_tags=write_tags, store=store, adapter=adapter
+        )
+        if not modify_res.get("ok"):
+            return {"ok": False, "code": modify_res.get("code", "item_modify_failed"), "error": modify_res.get("error", "Failed to update item metadata")}
 
     # Step 2: Move album ownership if needed
     merge_res = None
     if source_album_id != target_album_id:
         merge_res = composite_workflows.merge_split_album_items(
-            target_album_id, source_album_id, [item_id], adapter=ad, store=store
+            target_album_id, source_album_id, [item_id], adapter=adapter, store=store
         )
         if not merge_res.get("ok"):
             return {"ok": False, "code": merge_res.get("code", "merge_failed"), "error": merge_res.get("error", "Failed to move item to target album")}

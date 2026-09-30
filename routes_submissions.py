@@ -1079,10 +1079,7 @@ def _validate_reference_url(raw: str) -> str:
         raise ValueError("Only http:// and https:// URLs are supported.")
     if not parsed.hostname:
         raise ValueError("URL is missing a host.")
-    try:
-        validate_outbound_url(text)
-    except OutboundPolicyError as ex:
-        raise ValueError(f"This URL cannot be fetched: {ex}") from ex
+    validate_outbound_url(text)
     return text
 
 
@@ -1352,7 +1349,7 @@ def submission_reference_url():
     payload = request.get_json(silent=True) or {}
     try:
         url = _validate_reference_url(_s(payload.get("url")))
-    except ValueError as ex:
+    except (ValueError, OutboundPolicyError) as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
 
     album_id = int(payload.get("album_id") or 0)

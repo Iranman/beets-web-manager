@@ -6,6 +6,32 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.49 - 2026-09-30
+
+### Changed
+- **Duplicate Resolver Retag Rebuilt (ARCH-020):**
+  - Proves audio identity explicitly via AcoustID and MusicBrainz release tracklist lookup prior to repair.
+  - Repairs recording identity through canonical item metadata update (`composite_workflows.update_item_metadata`).
+  - Transfers album ownership via canonical album-row merge (`composite_workflows.merge_split_album_items`).
+  - Refuses identity rewrites through merge and eliminates all legacy merge callers attempting identity rewrites or forbidden album_id modifications.
+- **Unified Durable Job Execution & Persistence (ARCH-004):**
+  - Centralized shared durable job contract in `backend/job_contract.py` with 18-field checkpoint schema, bounded exponential backoff retries, and lock key normalization.
+  - Distinct restart recovery evaluation for read-only resumable computation vs. engine-backed mutation vs. non-resumable side-effects.
+  - 100% adoption across all mutating and long-running background jobs.
+- **Untracked File Batch Recovery & Sidecar Quarantine Planning (ARCH-021):**
+  - Fast O(1) item path indexing via `build_item_path_index`.
+  - Resumable batch planner (`plan_untracked_batch`) with rate-limited AcoustID budgeting and per-folder checkpointing.
+  - Sidecar and unverified artifact quarantine batch planner (`plan_untracked_quarantine_batch`).
+  - Exposed endpoints `POST /api/library/untracked-recovery/plan-batch` and `POST /api/library/untracked-recovery/plan-quarantine-batch`.
+- **Frontend & Backend Decision Authority Alignment (ARCH-005):**
+  - Attached authoritative backend decisions directly to all review items in `import_review_queue`.
+  - Extended TypeScript `ReviewItem` interface with the decision contract, preventing frontend drift.
+- **Provider Boundary & Connectivity Hardening (ARCH-006):**
+  - Fixed AcoustID connectivity test probe interpretation in `routes_setup.py`.
+  - Fixed CodeQL alert #1350 in `routes_submissions.py`.
+- **Route Handler Ownership Layering (ARCH-001):**
+  - Updated ownership inventory and route baselines across all modules.
+
 ## v0.1.48 - 2026-09-30
 
 ### Changed

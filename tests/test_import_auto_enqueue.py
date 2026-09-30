@@ -64,7 +64,8 @@ class ImportAutoEnqueueTests(unittest.TestCase):
     def test_backend_ready_enqueue_has_controlled_worker_endpoint(self):
         self.assertIn('@app.post("/api/import-review/auto-enqueue-ready/job")', APP)
         body = section(APP, 'def import_review_auto_enqueue_ready_job', '@app.post("/api/import-review/auto-enqueue")')
-        self.assertIn('jobs.start_python(_do, label="Auto-import ready review items")', body)
+        self.assertIn('jobs.start_python(', body)
+        self.assertIn('label="Auto-import ready review items"', body)
         self.assertIn('_run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)', body)
     def test_backend_ready_enqueue_skips_failed_or_running_statuses(self):
         body = section(APP, 'def _pending_item_is_ready_for_backend_auto_import', '@app.post("/api/import-review/auto-enqueue-ready")')

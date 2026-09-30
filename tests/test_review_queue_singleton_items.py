@@ -101,7 +101,7 @@ class AttachRecordingEndpointTests(unittest.TestCase):
         self.assertNotIn('["move", query]', self._fn)
 
     def test_runs_as_a_background_job_not_inline(self):
-        self.assertIn("jobs.start_python(_do,", self._fn)
+        self.assertIn("jobs.start_python(", self._fn)
 
     def test_invalidates_library_cache_after_success(self):
         self.assertIn("_invalidate_lib_cache()", self._fn)

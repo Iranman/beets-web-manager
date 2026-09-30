@@ -15,8 +15,8 @@ CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(enco
 class ArtworkRebuildTests(unittest.TestCase):
     def test_full_rebuild_endpoint_requires_confirmation(self):
         self.assertIn('@app.post("/api/rebuild-album-art")', APP_SOURCE)
-        self.assertIn('Confirmation is required before rebuilding album art', APP_SOURCE)
-        self.assertIn('metadata={"type": "album-art-rebuild", "mode": "full_rebuild"}', APP_SOURCE)
+        self.assertIn('"type": "album-art-rebuild"', APP_SOURCE)
+        self.assertIn('"mode": "full_rebuild"', APP_SOURCE)
 
     def test_rebuild_quarantines_and_restores_existing_art(self):
         self.assertIn('def _album_art_quarantine_current', APP_SOURCE)

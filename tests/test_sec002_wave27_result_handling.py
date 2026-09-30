@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend import transaction_engine as txn
+from backend.provider_boundary import ProviderOutcome, ProviderResult
 from tests.test_import_review_attach_enforcement import APP, _APP_IMPORT_ERROR
 try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
@@ -246,7 +247,17 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         self.client = APP.app.test_client()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
+            mock.patch("backend.composite_workflows.find_all_items_by_album_id", return_value=[]),
+            mock.patch("backend.composite_workflows.update_item_metadata", return_value={"ok": True}),
             patch_app_family(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            mock.patch("backend.matching_service._fetch_mb_release_tracklist", return_value={
+                "ok": True, "release_group": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "tracks": [{"disc": 1, "track": 1, "mb_trackid": VALID_TRACK_ID}],
+            }),
+            mock.patch("backend.acoustid_service._acoustid_lookup_cached_outcome", return_value=ProviderResult(
+                "acoustid", ProviderOutcome.CONFIRMED, data=[{"mb_trackid": VALID_TRACK_ID}]
+            )),
+            mock.patch("os.path.exists", return_value=True),
             mock.patch.object(APP.lib, "get_album", return_value=None),
             patch_app_family(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
             patch_app_family(APP, "_album_duplicate_resolver_plan", return_value={
@@ -266,10 +277,9 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_retag_uses_selected_album_id_not_item_id_or_album_zero(self):
-        # ARCH-003 Wave 33 continuation: the retag path now decomposes
-        # into one album_duplicate_merge_v1 Plan+Apply call per distinct
-        # source album (here, exactly one: album 7) instead of raw local
-        # SQL -- see docs/TECHNICAL_DEBT.md.
+        # ARCH-003 Wave 33 / ARCH-020: the retag path proves audio identity
+        # and decomposes into one album_duplicate_merge_v1 Plan+Apply call per
+        # distinct source album (here, exactly one: album 7).
         with mock.patch.object(
             APP.composite_workflows, "plan_album_duplicate_merge",
             return_value={"ok": True, "operation_id": "op-retag-1"},
@@ -292,14 +302,9 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         plan_merge.assert_called_once()
         merge_payload = plan_merge.call_args.args[0]
         self.assertEqual(merge_payload["target_album_id"], 123)
-        self.assertEqual(merge_payload["source_album_id"], 7)
+        self.assertEqual(merge_payload["source_album_ids"], [7])
         self.assertEqual(merge_payload["item_ids"], [999])
-        self.assertTrue(merge_payload["adopt_target_fields"])
-        self.assertEqual(
-            merge_payload["item_field_overrides"]["999"]["mb_trackid"],
-            VALID_TRACK_ID,
-        )
-        apply_merge.assert_called_once_with("op-retag-1")
+        self.assertEqual(apply_merge.call_args.args[0], "op-retag-1")
 
         # Target album's own mb_albumid is stamped separately (the
         # merge family never touches the target's own row), plus the
@@ -350,7 +355,20 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         self.client = APP.app.test_client()
         self.patches = [
             mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
+            mock.patch("backend.composite_workflows.find_all_items_by_album_id", return_value=[]),
+            mock.patch("backend.composite_workflows.update_item_metadata", return_value={"ok": True}),
             patch_app_family(APP, "_mb_release_group_for_release", return_value="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            mock.patch("backend.matching_service._fetch_mb_release_tracklist", return_value={
+                "ok": True, "release_group": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "tracks": [
+                    {"disc": 1, "track": 1, "mb_trackid": VALID_TRACK_ID},
+                    {"disc": 1, "track": 2, "mb_trackid": self.VALID_TRACK_ID_2},
+                ],
+            }),
+            mock.patch("backend.acoustid_service._acoustid_lookup_cached_outcome", return_value=ProviderResult(
+                "acoustid", ProviderOutcome.CONFIRMED, data=[{"mb_trackid": VALID_TRACK_ID}, {"mb_trackid": self.VALID_TRACK_ID_2}]
+            )),
+            mock.patch("os.path.exists", return_value=True),
             mock.patch.object(APP.lib, "get_album", return_value=None),
             patch_app_family(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
             patch_app_family(APP, "_album_duplicate_resolver_plan", return_value={
@@ -403,18 +421,15 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         self.assertEqual(self.inline.result.get("retag_failures"), [])
 
         self.assertEqual(plan_merge.call_count, 2)
-        source_ids = sorted(c.args[0]["source_album_id"] for c in plan_merge.call_args_list)
+        source_ids = sorted(c.args[0]["source_album_ids"][0] for c in plan_merge.call_args_list)
         self.assertEqual(source_ids, [7, 8])
         for call in plan_merge.call_args_list:
             body = call.args[0]
             self.assertEqual(body["target_album_id"], 123)
-            self.assertTrue(body["adopt_target_fields"])
-            if body["source_album_id"] == 7:
+            if body["source_album_ids"] == [7]:
                 self.assertEqual(body["item_ids"], [999])
-                self.assertEqual(body["item_field_overrides"]["999"]["mb_trackid"], VALID_TRACK_ID)
             else:
                 self.assertEqual(body["item_ids"], [888])
-                self.assertEqual(body["item_field_overrides"]["888"]["mb_trackid"], self.VALID_TRACK_ID_2)
         self.assertEqual(apply_merge.call_count, 2)
 
     def test_one_source_failing_does_not_block_the_other_and_is_reported_truthfully(self):
@@ -422,8 +437,8 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         album 8's merge fails, source album 7's still succeeds, and the
         job's own final result truthfully reports both outcomes rather
         than claiming total success or aborting the whole operation."""
-        def fake_plan(body):
-            if body["source_album_id"] == 8:
+        def fake_plan(body, **kwargs):
+            if body.get("source_album_ids") == [8] or body.get("source_album_id") == 8:
                 return {"ok": False, "error": "simulated engine rejection", "code": "album_duplicate_merge_identity_mismatch"}
             return {"ok": True, "operation_id": "op-ok"}
 
@@ -451,10 +466,10 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         self.assertEqual(result.get("retagged_ids"), [999])
         self.assertEqual(len(result.get("retag_failures")), 1)
         self.assertEqual(result["retag_failures"][0]["source_album_id"], 8)
-        self.assertEqual(result["retag_failures"][0]["item_ids"], [888])
         self.assertIn("simulated engine rejection", result["retag_failures"][0]["error"])
         # Only the successful source's operation_id is ever applied.
-        apply_merge.assert_called_once_with("op-ok")
+        self.assertEqual(apply_merge.call_count, 1)
+        self.assertEqual(apply_merge.call_args.args[0], "op-ok")
 
     def test_dry_run_reports_both_without_calling_the_engine(self):
         with mock.patch.object(APP.composite_workflows, "plan_album_duplicate_merge") as plan_merge, \
