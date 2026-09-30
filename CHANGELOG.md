@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.44 - 2026-09-30
+
 ### Changed
 - **Album merges from Clean and from import now use the one album-row merge (ARCH-020).** The legacy merge reassigned `album_id` through a field update the engine refuses, and overwrote the Release ID and other album fields on the moved items.
   - Clean's duplicate-album and Release-Group merges, the split-album move and the import's existing-album reconcile now move item ownership only, within one Release Group and Release ID, into free slots.
