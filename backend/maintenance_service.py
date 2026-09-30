@@ -80,7 +80,7 @@ def _do_scan_job() -> str:
             log.append(f"ERROR: Library scan failed: engine unavailable ({ex})")
             raise RuntimeError(f"Library scan failed: {ex}") from ex
 
-    job = jobs.start_python(_scan, label="Library scan")
+    job = jobs.start_python(_scan, label="Library scan", metadata={"type": "library-scan", "mutating": False})
     _SCAN_STATE["last_job_id"] = job.job_id
 
     def _watch():

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.job_contract as job_contract
 import backend.provider_boundary as provider_boundary
 import json, os, re, time
 from collections import Counter, defaultdict
@@ -500,6 +501,7 @@ def dedup_ai_review():
             "type": "dedup-ai-review",
             "path": str(scan_path),
             "source_scan_jid": scan_jid,
+            "mutating": False,
         },
     )
     _dedup_scans[job.job_id] = state
@@ -526,7 +528,11 @@ def clean_no_audio_folders_scan():
         log.append(f"Scanning for folders with no audio files under {root_path}")
         return _scan_no_audio_folder_candidates(root_path, log)
 
-    job = jobs.start_python(_do, label=f"Clean empty folders scan: {root_path.name or root_path}")
+    job = jobs.start_python(
+        _do,
+        label=f"Clean empty folders scan: {root_path.name or root_path}",
+        metadata={"type": "clean-empty-folders-scan", "mutating": False},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -550,7 +556,11 @@ def clean_no_audio_folders_delete():
     def _do(log, cancel_event=None):
         return _delete_no_audio_folders(root, paths, dry_run=False, log=log)
 
-    job = jobs.start_python(_do, label="Clean empty/no-audio folders")
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="clean-empty-folders"),
+        label="Clean empty/no-audio folders",
+        metadata=job_contract.contract_metadata("clean-empty-folders", {"type": "clean-empty-folders"}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -668,7 +678,7 @@ def clean_library_health_scan():
     job = jobs.start_python(
         _do,
         label="Scan library database health",
-        metadata={"type": "library-health-scan"},
+        metadata={"type": "library-health-scan", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -777,10 +787,13 @@ def clean_merge_duplicate_album():
         return {"ok": True, "moved": moved, "target_album_id": target_id, "source_album_id": source_id}
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="merge-duplicate-album",
+                             resource_keys=[f"album:{target_id}", f"album:{source_id}"]),
         label=f"Merge duplicate album {source_id}→{target_id}",
         metadata={"type": "merge-duplicate-album",
-                  "target_album_id": target_id, "source_album_id": source_id},
+                  "target_album_id": target_id, "source_album_id": source_id,
+                  **job_contract.contract_metadata("merge-duplicate-album",
+                                                   resource_keys=[f"album:{target_id}", f"album:{source_id}"])},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -897,10 +910,13 @@ def clean_rgid_group_merge():
         }
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="merge-rgid-duplicate",
+                             resource_keys=[f"album:{target_id}", f"album:{source_id}"]),
         label=f"Merge release-group duplicate {source_id}→{target_id}",
         metadata={"type": "merge-rgid-duplicate", "mb_releasegroupid": rgid,
-                  "target_album_id": target_id, "source_album_id": source_id},
+                  "target_album_id": target_id, "source_album_id": source_id,
+                  **job_contract.contract_metadata("merge-rgid-duplicate",
+                                                   resource_keys=[f"album:{target_id}", f"album:{source_id}"])},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -959,9 +975,12 @@ def clean_rgid_group_assign_release():
         return result
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="rgid-assign-representative-release",
+                             resource_keys=[f"album:{album_id}"]),
         label=f"Assign representative release to album {album_id}",
-        metadata={"type": "rgid-assign-representative-release", "album_id": album_id, "mb_albumid": mb_albumid},
+        metadata={"type": "rgid-assign-representative-release", "album_id": album_id, "mb_albumid": mb_albumid,
+                  **job_contract.contract_metadata("rgid-assign-representative-release",
+                                                   resource_keys=[f"album:{album_id}"])},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1023,9 +1042,12 @@ def clean_rgid_group_relink():
         return {**result, "mb_albumid": target_mbid, "mb_releasegroupid": target_rgid}
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="rgid-relink",
+                             resource_keys=[f"album:{album_id}"]),
         label=f"Relink album {album_id}",
-        metadata={"type": "rgid-relink", "album_id": album_id},
+        metadata={"type": "rgid-relink", "album_id": album_id,
+                  **job_contract.contract_metadata("rgid-relink",
+                                                   resource_keys=[f"album:{album_id}"])},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1078,9 +1100,12 @@ def clean_rgid_group_send_to_repair():
         return {**result, "mb_albumid": mbid}
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="rgid-repair-partial-import",
+                             resource_keys=[f"album:{album_id}"]),
         label=f"Repair partial import album {album_id}",
-        metadata={"type": "rgid-repair-partial-import", "album_id": album_id},
+        metadata={"type": "rgid-repair-partial-import", "album_id": album_id,
+                  **job_contract.contract_metadata("rgid-repair-partial-import",
+                                                   resource_keys=[f"album:{album_id}"])},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1094,11 +1119,18 @@ def clean_remove_orphaned_items():
         return jsonify({"ok": False, "error": "item_ids must be a list"}), 400
     item_ids = [int(i) for i in raw_ids if str(i).isdigit()]
 
-    def _do(log, cancel_event=None):
-        log.append(f"{'Dry run: ' if dry_run else ''}Removing orphaned library item rows")
-        return _clean_remove_orphaned_items(item_ids, dry_run=dry_run, log=log)
-
-    job = jobs.start_python(_do, label="Clean orphaned library items")
+    if not dry_run:
+        job = jobs.start_python(
+            job_contract.guarded(_do, workflow="clean-orphaned-items"),
+            label="Clean orphaned library items",
+            metadata=job_contract.contract_metadata("clean-orphaned-items", {"type": "clean-orphaned-items", "dry_run": False}),
+        )
+    else:
+        job = jobs.start_python(
+            _do,
+            label="Clean orphaned library items (preview)",
+            metadata={"type": "clean-orphaned-items", "dry_run": True, "mutating": False},
+        )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1115,7 +1147,18 @@ def clean_remove_empty_albums():
         log.append(f"{'Dry run: ' if dry_run else ''}Removing empty album rows")
         return _clean_remove_empty_albums(album_ids, dry_run=dry_run, log=log)
 
-    job = jobs.start_python(_do, label="Clean empty album rows")
+    if not dry_run:
+        job = jobs.start_python(
+            job_contract.guarded(_do, workflow="clean-empty-album-rows"),
+            label="Clean empty album rows",
+            metadata=job_contract.contract_metadata("clean-empty-album-rows", {"type": "clean-empty-album-rows", "dry_run": False}),
+        )
+    else:
+        job = jobs.start_python(
+            _do,
+            label="Clean empty album rows (preview)",
+            metadata={"type": "clean-empty-album-rows", "dry_run": True, "mutating": False},
+        )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1184,7 +1227,7 @@ def clean_album_tracks_scan():
         }
 
     label = f"Clean album tracks: album {album_id}" if album_id else "Clean album tracks scan"
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(_do, label=label, metadata={"type": "clean-album-tracks-scan", "mutating": False})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1223,7 +1266,12 @@ def clean_album_tracks_remove():
             log=log,
         )
 
-    job = jobs.start_python(_do, label=f"Remove bad tracks: album {album_id}")
+    wf_key = f"remove-bad-tracks-{album_id}"
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{album_id}")]),
+        label=f"Remove bad tracks: album {album_id}",
+        metadata=job_contract.contract_metadata(wf_key, {"type": "remove-bad-tracks", "album_id": album_id}, keys=[job_contract.workflow_key(f"album-{album_id}")]),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1302,7 +1350,18 @@ def clean_album_tracks_remove_batch():
         )
         return {"ok": True, "dry_run": dry_run, "totals": totals, "albums": summaries}
 
-    job = jobs.start_python(_do, label="Remove bad tracks: batch")
+    if not dry_run:
+        job = jobs.start_python(
+            job_contract.guarded(_do, workflow="remove-bad-tracks-batch"),
+            label="Remove bad tracks: batch",
+            metadata=job_contract.contract_metadata("remove-bad-tracks-batch", {"type": "remove-bad-tracks-batch", "dry_run": False}),
+        )
+    else:
+        job = jobs.start_python(
+            _do,
+            label="Remove bad tracks: batch (preview)",
+            metadata={"type": "remove-bad-tracks-batch", "dry_run": True, "mutating": False},
+        )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1637,9 +1696,10 @@ def apply_safe_folder_placeholder_renames_job():
         }
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="folder-placeholder-apply-safe"),
         label="Apply safe folder placeholder renames",
-        metadata={"type": "folder-placeholder-apply-safe"},
+        metadata={"type": "folder-placeholder-apply-safe",
+                  **job_contract.contract_metadata("folder-placeholder-apply-safe")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1697,7 +1757,7 @@ def clean_album_folders_scan():
     job = jobs.start_python(
         _do,
         label="Scan album folders",
-        metadata={"type": "album-folder-cleanup-scan", "category": "Cleanup"},
+        metadata={"type": "album-folder-cleanup-scan", "category": "Cleanup", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1729,9 +1789,10 @@ def clean_album_folders_apply_safe():
             _ALBUM_FOLDER_CLEANUP_LOCK.release()
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="album-folder-cleanup-apply-safe"),
         label="Apply safe album folder cleanup",
-        metadata={"type": "album-folder-cleanup-apply-safe", "category": "Cleanup"},
+        metadata={"type": "album-folder-cleanup-apply-safe", "category": "Cleanup",
+                  **job_contract.contract_metadata("album-folder-cleanup-apply-safe")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1786,7 +1847,7 @@ def clean_root_folders_scan():
     job = jobs.start_python(
         _do,
         label="Scan root-level folders",
-        metadata={"type": "root-folder-repair-scan", "category": "Cleanup"},
+        metadata={"type": "root-folder-repair-scan", "category": "Cleanup", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1817,9 +1878,10 @@ def clean_root_folders_apply_safe():
             _ROOT_FOLDER_REPAIR_LOCK.release()
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="root-folder-repair-apply-safe"),
         label="Repair root-level folders",
-        metadata={"type": "root-folder-repair-apply-safe", "category": "Cleanup"},
+        metadata={"type": "root-folder-repair-apply-safe", "category": "Cleanup",
+                  **job_contract.contract_metadata("root-folder-repair-apply-safe")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1895,9 +1957,12 @@ def clean_album_folders_apply_issue():
             _ALBUM_FOLDER_CLEANUP_LOCK.release()
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="album-folder-cleanup-apply-issue",
+                             resource_keys=[f"issue:{issue_id}"]),
         label="Apply selected album folder cleanup",
-        metadata={"type": "album-folder-cleanup-apply-issue", "category": "Cleanup", "issue_id": issue_id},
+        metadata={"type": "album-folder-cleanup-apply-issue", "category": "Cleanup", "issue_id": issue_id,
+                  **job_contract.contract_metadata("album-folder-cleanup-apply-issue",
+                                                   resource_keys=[f"issue:{issue_id}"])},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1937,7 +2002,7 @@ def clean_artist_folders_scan():
     job = jobs.start_python(
         _do,
         label=f"Scan artist folders: {root_path.name or root}",
-        metadata={"type": "artist-folder-scan", "path": root},
+        metadata={"type": "artist-folder-scan", "path": root, "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1960,9 +2025,10 @@ def clean_artist_folders_merge():
         _apply_artist_folder_groups(root, keys, False, log)
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="artist-folder-merge"),
         label=f"Clean artist folders: {Path(root).name or root}",
-        metadata={"type": "artist-folder-merge", "path": root},
+        metadata={"type": "artist-folder-merge", "path": root,
+                  **job_contract.contract_metadata("artist-folder-merge")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -2077,9 +2143,10 @@ def clean_artist_folders_stamp_mbid():
         return summary
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="stamp-mbid-folders"),
         label=f"Stamp MB IDs on artist folders: {root_path.name or root_str}",
-        metadata={"type": "stamp-mbid-folders", "path": root_str},
+        metadata={"type": "stamp-mbid-folders", "path": root_str,
+                  **job_contract.contract_metadata("stamp-mbid-folders")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -2279,5 +2346,9 @@ def dedup_maintenance_run():
     def _do(log, cancel_event=None, update_state=None):
         return _maintenance_full_duplicate_scan(log, cancel_event, progress=update_state)
 
-    job = jobs.start_python(_do, label="Duplicate maintenance run", metadata={"type": "maintenance-duplicates"})
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="maintenance-duplicates"),
+        label="Duplicate maintenance run",
+        metadata=job_contract.contract_metadata("maintenance-duplicates", {"type": "maintenance-duplicates"}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})

@@ -4,6 +4,7 @@ Registered after app.py initializes. Keeps submission-only Beets commands out of
 the main app module while reusing the existing JobStore and Beets config helpers.
 """
 import backend.provider_boundary as provider_boundary
+import backend.job_contract as job_contract
 import hashlib
 import importlib.util
 import json
@@ -107,7 +108,11 @@ def _start_acoustid_submit_job(item_ids: List[int], label: str):
         log.append(f"Submitted {submitted} fingerprint(s) to AcoustID.")
         return {"output": f"Submitted {submitted} fingerprint(s).", "item_ids": item_ids}
 
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="acoustid-submit"),
+        label=label,
+        metadata={"type": "acoustid-submit", **job_contract.contract_metadata("acoustid-submit")},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1598,5 +1603,10 @@ def attach_album_mbids(aid: int):
             "verified": True,
         }
 
-    job = jobs.start_python(_do, label=f"Attach MusicBrainz IDs: album {aid}", metadata={"type": "musicbrainz-match", "album_id": aid, "transaction_operation": "MusicBrainz Match"})
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="musicbrainz-match", resource_keys=[f"album:{aid}"]),
+        label=f"Attach MusicBrainz IDs: album {aid}",
+        metadata={"type": "musicbrainz-match", "album_id": aid, "transaction_operation": "MusicBrainz Match",
+                  **job_contract.contract_metadata("musicbrainz-match", resource_keys=[f"album:{aid}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})

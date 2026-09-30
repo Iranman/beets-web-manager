@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.job_contract as job_contract
 import backend.provider_boundary as provider_boundary
 import json, os, re, sqlite3, threading, time, uuid
 from collections import Counter, defaultdict
@@ -2558,7 +2559,11 @@ def start_library_fix_genres(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         label = "Fix missing genres: Last.fm + AI"
     else:
         label = "Fix missing genres: Last.fm"
-    job = jobs.start_python(_do, label=label, metadata={"type": "fix-genres", "force": force, "use_ai": use_ai})
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="fix-genres"),
+        label=label,
+        metadata=job_contract.contract_metadata("fix-genres", {"type": "fix-genres", "force": force, "use_ai": use_ai}),
+    )
     return {"ok": True, "job_id": job.job_id}, 200
 
 
@@ -2783,7 +2788,11 @@ def _run_normalize_artists_if_needed():
                     log.append(f"  relocate warning: {_ex}")
             _invalidate_lib_cache()
             log.append(f"Auto-normalized {len(affected_ids)} album(s) across {len(to_fix)} artist name(s).")
-        jobs.start_python(_do, label="Auto-normalize artist names")
+        jobs.start_python(
+            job_contract.guarded(_do, workflow="normalize-artists"),
+            label="Auto-normalize artist names",
+            metadata=job_contract.contract_metadata("normalize-artists", {"type": "normalize-artists"}),
+        )
     except Exception:
         pass
 
@@ -4318,9 +4327,9 @@ def start_fetch_missing_art(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         )
         return summary
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="artwork-fetch-missing"),
         label="Fetch Missing Album Art",
-        metadata={"type": "fetch-missing-art"},
+        metadata=job_contract.contract_metadata("artwork-fetch-missing", {"type": "fetch-missing-art"}),
     )
     return {"ok": True, "job_id": job.job_id}, 200
 

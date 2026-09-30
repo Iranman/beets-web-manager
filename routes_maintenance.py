@@ -875,9 +875,10 @@ def api_transaction_rollback(transaction_id):
             raise
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="transaction-rollback", resource_keys=[f"tx:{transaction_id}"]),
         label=f"Rollback transaction {transaction_id}",
-        metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
+        metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback",
+                  **job_contract.contract_metadata("transaction-rollback", resource_keys=[f"tx:{transaction_id}"])},
     )
     transactions.update(transaction_id, metadata={"rollback_job_id": job.job_id})
     return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})

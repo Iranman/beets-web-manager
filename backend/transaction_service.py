@@ -10,6 +10,7 @@ from backend.library_service import _require_attach_stage_success
 from backend.transaction_engine import metadata_diff
 from backend.beets_adapter import lib
 import backend.composite_workflows as composite_workflows
+import backend.job_contract as job_contract
 from backend.matching_service import _invalidate_lib_cache
 from backend.app_runtime import jobs, transactions
 from backend.job_service import _call_job_fn
@@ -237,9 +238,10 @@ def _start_metadata_apply_transaction(transaction_id: str):
             raise
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="metadata-update", resource_keys=[f"item:{item_id}"]),
         label=f"Apply metadata transaction {transaction_id}",
-        metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
+        metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id,
+                  **job_contract.contract_metadata("metadata-update", resource_keys=[f"item:{item_id}"])},
     )
     transactions.attach_job(transaction_id, job.job_id)
     return job

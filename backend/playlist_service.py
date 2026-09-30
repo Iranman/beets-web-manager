@@ -4897,6 +4897,7 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "source": parse_source,
             "track_count": len(all_tracks or tracks or []),
             "missing_count": len(tracks or []),
+            **job_contract.contract_metadata("playlist-download", resource_keys=[f"playlist:{name}"]),
         },
     )
     state["jobs_job_id"] = job.job_id
@@ -6234,7 +6235,12 @@ def _playlist_place_quality_candidate_job(item_id: int,
             pass
         return {"ok": True, "backup": "", "result": result}
 
-    job = jobs.start_python(_do, label=f"Playlist manual place: item {item_id}")
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="playlist-manual-place", resource_keys=[f"item:{item_id}"]),
+        label=f"Playlist manual place: item {item_id}",
+        metadata={"type": "playlist-manual-place", "item_id": item_id,
+                  **job_contract.contract_metadata("playlist-manual-place", resource_keys=[f"item:{item_id}"])},
+    )
     return job.job_id
 
 
@@ -8175,9 +8181,10 @@ def _playlist_start_direct_action(name: str, action: str) -> Dict[str, Any]:
         if running_job_id:
             raise RuntimeError(_PLAYLIST_DUPLICATE_JOB_MESSAGE)
         job = jobs.start_python(
-            _do,
+            job_contract.guarded(_do, workflow="playlist-pipeline", resource_keys=[f"playlist:{clean_name}"]),
             label=f"{label}: {clean_name}",
-            metadata={"type": "playlist-pipeline", "action": action, "name": clean_name},
+            metadata={"type": "playlist-pipeline", "action": action, "name": clean_name,
+                      **job_contract.contract_metadata("playlist-pipeline", resource_keys=[f"playlist:{clean_name}"])},
         )
         _playlist_record_pipeline(
             clean_name,

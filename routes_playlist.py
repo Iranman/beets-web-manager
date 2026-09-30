@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from flask import jsonify, request
 from backend.beets_adapter import BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
+import backend.job_contract as job_contract
 from backend.app_runtime import _app_logger, _norm, _redact_security_text, _s, jobs
 from backend.playlist_service import playlist_sync_status_payload, PlaylistQualityCandidatesUnavailableError, PlaylistStateError, _PLAYLIST_STATE_LOCK, _PLAYLIST_SYNC_STATE, _clean_playlist_name, _create_playlist_outputs, _pl_dl_jobs, _playlist_apply_manifest_replacements, _playlist_apply_track_action, _playlist_clean_track_list, _playlist_clean_video_text, _playlist_delete_job_state, _playlist_detail_payload, _playlist_detail_summary_payload, _playlist_download_methods, _playlist_ensure_stable_id, _playlist_ensure_state_dirs, _playlist_int, _playlist_interrupted_saved_job_state, _playlist_job_state_name, _playlist_key, _playlist_library_index, _playlist_load_index, _playlist_load_job_state, _playlist_m3u_summary, _playlist_manifest_path, _playlist_manual_placement_from_payload, _playlist_new_internal_id, _playlist_other_live_pids_with_name, _playlist_place_quality_candidate_job, _playlist_quality_cleanup_candidates, _playlist_read_manifest, _playlist_record_pipeline, _playlist_replace_manifest, _playlist_resolve_stable_id, _playlist_run_quality_cleanup_job, _playlist_save_index, _playlist_save_job_state, _playlist_saved_job_states_for_name, _playlist_saved_playlist_exists, _playlist_saved_playlist_records, _playlist_start_direct_action, _playlist_start_download_action, _playlist_state_error_payload, _playlist_state_error_status, _playlist_suggestions_for_track, _playlist_sync_all_locked, _playlist_valid_internal_id, _playlist_write_manifest, _plex_delete_playlist_by_rating_key, _plex_delete_playlist_by_title_unambiguous, parse_playlist_request, start_playlist_download
 from backend.plex_service import _plex_settings, _plex_status_payload, _trigger_plex_refresh
@@ -37,7 +38,7 @@ def api_plex_refresh():
             raise RuntimeError("Plex refresh failed")
         return status
 
-    job = jobs.start_python(_do, label="Plex library refresh")
+    job = jobs.start_python(_do, label="Plex library refresh", metadata={"type": "plex-refresh", "mutating": False})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -237,13 +238,18 @@ def playlist_quality_cleanup():
         return _playlist_run_quality_cleanup_job(
             action, selected_candidates, summary, log=log, cancel_event=cancel_event)
 
-    job = jobs.start_python(_do, label=label, metadata={
-        "type": "playlist-quality-cleanup",
-        "action": action,
-        "filter": filter_mode,
-        "item_count": len(selected_candidates),
-        "all_matching": all_matching,
-    })
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="playlist-quality-cleanup"),
+        label=label,
+        metadata={
+            "type": "playlist-quality-cleanup",
+            "action": action,
+            "filter": filter_mode,
+            "item_count": len(selected_candidates),
+            "all_matching": all_matching,
+            **job_contract.contract_metadata("playlist-quality-cleanup"),
+        },
+    )
     return jsonify({
         "ok": True,
         "dry_run": False,
@@ -714,7 +720,11 @@ def playlist_sync_start():
         result = _playlist_sync_all_locked(log, names=names or None)
         log.append(json.dumps(result, sort_keys=True))
 
-    job = jobs.start_python(_do, label="Playlist two-way sync")
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="playlist-sync"),
+        label="Playlist two-way sync",
+        metadata={"type": "playlist-sync", **job_contract.contract_metadata("playlist-sync")},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 

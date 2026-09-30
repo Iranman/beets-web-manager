@@ -786,7 +786,7 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     job = jobs.start_python(
         _run,
         label=f"Duplicate scan: {scan_path}",
-        metadata={"type": "dedup-scan", "path": str(scan_path)},
+        metadata={"type": "dedup-scan", "path": str(scan_path), "mutating": False},
     )
     _dedup_scans[job.job_id] = state
     return {"ok": True, "job_id": job.job_id}, 200

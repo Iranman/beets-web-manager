@@ -702,7 +702,12 @@ def import_review_auto_enqueue_ready_job():
     def _do(log, cancel_event=None):
         _run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)
 
-    job = jobs.start_python(_do, label="Auto-import ready review items")
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="import-review-auto-enqueue"),
+        label="Auto-import ready review items",
+        metadata={"type": "import-review-auto-enqueue",
+                  **job_contract.contract_metadata("import-review-auto-enqueue")},
+    )
     return jsonify({"ok": True, "job_id": job.job_id, "limit": max(1, min(limit, 25))})
 
 
@@ -1524,7 +1529,12 @@ def start_import():
         _delete_if_already_in_library(path, combined, log)
         _invalidate_lib_cache()
 
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="import-reimport-source", resource_keys=[f"path:{path}"]),
+        label=label,
+        metadata={"type": "import-reimport-source", "path": path,
+                  **job_contract.contract_metadata("import-reimport-source", resource_keys=[f"path:{path}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1811,7 +1821,8 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         job = jobs.start_python(
             _do,
             label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
-            metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
+            metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path,
+                      **job_contract.contract_metadata("ai-batch-import", resource_keys=[f"path:{scan_path}"])},
         )
         # From this point on, a worker thread exists and is blocked waiting
         # for handoff_ready. Cleanup responsibility transfers to it

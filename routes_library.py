@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import backend.job_contract as job_contract
 import backend.provider_boundary as provider_boundary
 import json, mimetypes, os, re, threading, time
 import urllib.error
@@ -373,7 +374,12 @@ def retag_item(iid):
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
 
-    job = jobs.start_python(_do, label=f"Retag+Move: item {iid}")
+    wf_key = f"item-retag-move-{iid}"
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"item-{iid}")]),
+        label=f"Retag+Move: item {iid}",
+        metadata=job_contract.contract_metadata(wf_key, {"type": "item-retag-move", "item_id": iid}, keys=[job_contract.workflow_key(f"item-{iid}")]),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -392,7 +398,7 @@ def item_mbsubmit(iid: int):
             if line.strip():
                 log.append(line)
         return {"output": output}
-    job = jobs.start_python(_do, label=f"mbsubmit: item {iid}")
+    job = jobs.start_python(_do, label=f"mbsubmit: item {iid}", metadata={"type": "mbsubmit", "item_id": iid, "mutating": False})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -407,7 +413,7 @@ def album_mbsubmit(aid: int):
             if line.strip():
                 log.append(line)
         return {"output": output}
-    job = jobs.start_python(_do, label=f"mbsubmit: album {aid}")
+    job = jobs.start_python(_do, label=f"mbsubmit: album {aid}", metadata={"type": "mbsubmit", "album_id": aid, "mutating": False})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -449,7 +455,12 @@ def album_add_mbids(aid: int):
         _trigger_plex_refresh(log)
         log.append(f"MBIDs applied and album moved to MBID-stamped path.")
 
-    job = jobs.start_python(_do, label=f"Add MBIDs: album {aid}")
+    wf_key = f"album-add-mbids-{aid}"
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
+        label=f"Add MBIDs: album {aid}",
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album-add-mbids", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -826,7 +837,12 @@ def item_attach_recording(iid: int):
                 _release_attach_recording_item(iid)
 
         try:
-            job = jobs.start_python(_do, label=f"Attach recording ID: item {iid}")
+            wf_key = f"item-attach-recording-{iid}"
+            job = jobs.start_python(
+                job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"item-{iid}")]),
+                label=f"Attach recording ID: item {iid}",
+                metadata=job_contract.contract_metadata(wf_key, {"type": "item-attach-recording", "item_id": iid}, keys=[job_contract.workflow_key(f"item-{iid}")]),
+            )
         except Exception:
             transactions.update(audit_id, status="Failed", logs=["ERROR: failed to start attachment job"])
             return jsonify({
@@ -1252,7 +1268,7 @@ def artist_discography():
             result_holder["error"] = str(exc)
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discography: {artist_name}")
+    job = jobs.start_python(_run, label=f"Discography: {artist_name}", metadata={"type": "discography", "artist": artist_name, "mutating": False})
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
                     "artist": artist_name})
 
@@ -1289,7 +1305,7 @@ def artist_discography_discogs():
         except Exception as exc:
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}")
+    job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}", metadata={"type": "discogs-discography", "artist": artist_name, "mutating": False})
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
                     "artist": artist_name, "source": "discogs"})
 
@@ -1545,10 +1561,12 @@ def album_fetch_art(aid):
             log.append(f"  Art saved: {Path(saved_path).name}")
         _invalidate_lib_cache()
         return result
+
+    wf_key = f"album-art-repair-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"FetchArt: album {aid}",
-        metadata={"type": "album_art_repair", "album_id": aid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album_art_repair", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1556,20 +1574,7 @@ def album_fetch_art(aid):
 @app.post("/api/albums/<int:aid>/fetch-embed-artwork")
 def album_fetch_embed_artwork(aid):
     """Fetch and embed cover art for an album through the controlled
-    album_artwork_fetch_v1 engine transaction (Plan -> Apply -> Verify).
-
-    SEC-002 / ARCH-003 Wave 25 Docker acceptance round: distinct from the
-    pre-existing /api/albums/<id>/fetch-art above, which predates the
-    two-service architecture and calls a local `lib.get_album(aid)` /
-    Discogs-fallback pipeline of its own -- migrating that route is
-    real, standalone engineering not attempted in this pass (see
-    docs/TECHNICAL_DEBT.md). This route is the actual, directly reachable
-    production entry point for the new controlled family
-    (composite_workflows.fetch_and_embed_album_art -> POST
-    /albums/artwork/fetch/plan + /apply on the engine), used by
-    reimport_disk's post-import artwork step and independently callable
-    here so it has its own real HTTP surface, not just an internal
-    function call."""
+    album_artwork_fetch_v1 engine transaction (Plan -> Apply -> Verify)."""
     def _do(log, cancel_event=None):
         res = composite_workflows.fetch_and_embed_album_art(aid)
         if not res.get("ok"):
@@ -1577,10 +1582,12 @@ def album_fetch_embed_artwork(aid):
         log.append(f"  Artwork saved: {res.get('artpath')}")
         _invalidate_lib_cache()
         return res
+
+    wf_key = f"album-artwork-fetch-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"FetchEmbedArtwork: album {aid}",
-        metadata={"type": "album_artwork_fetch_v1", "album_id": aid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album_artwork_fetch_v1", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1625,10 +1632,11 @@ def album_replace_art_from_url(aid):
         _invalidate_lib_cache()
         return {"path": saved, "image": result.get("image") or {}}
 
+    wf_key = f"album-art-replace-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"Replace art: album {aid}",
-        metadata={"type": "album-art-replace", "album_id": aid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album-art-replace", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1672,10 +1680,11 @@ def album_upload_art(aid):
         _invalidate_lib_cache()
         return {"path": saved, "image": result.get("image") or {}}
 
+    wf_key = f"album-art-upload-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"Upload art: album {aid}",
-        metadata={"type": "album-art-upload", "album_id": aid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album-art-upload", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1754,10 +1763,11 @@ def album_remove(aid):
 
         _invalidate_lib_cache()
 
+    wf_key = f"album-remove-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"Remove Album: {_s(album_obj.album or f'id={aid}')}",
-        metadata={"album_id": aid, "type": "album_remove", "delete_files": delete_files},
+        metadata=job_contract.contract_metadata(wf_key, {"album_id": aid, "type": "album_remove", "delete_files": delete_files}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1777,7 +1787,12 @@ def album_rename(aid):
             raise RuntimeError(res.get("error") or "Album rename failed")
         log.append(f"Album {aid} renamed and relocated to: {res.get('dest_dir')}")
 
-    job = jobs.start_python(_do, label=label)
+    wf_key = f"album-rename-{aid}"
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
+        label=label,
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album-rename", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -1796,10 +1811,11 @@ def album_move_to_library(aid):
             raise RuntimeError(res.get("error") or "Move to library failed")
         log.append(f"Album {aid} relocated to: {res.get('dest_dir')}")
 
+    wf_key = f"album-move-to-library-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=label,
-        metadata={"type": "album-move-to-library", "album_id": aid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "album-move-to-library", "album_id": aid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -1895,7 +1911,12 @@ def album_fix_metadata(aid):
             raise RuntimeError("; ".join(failures))
 
     label = f"Fix metadata: album_id={aid}"
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="album-fix-metadata", resource_keys=[f"album:{aid}"]),
+        label=label,
+        metadata={"type": "album-fix-metadata", "album_id": aid,
+                  **job_contract.contract_metadata("album-fix-metadata", resource_keys=[f"album:{aid}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -2140,7 +2161,12 @@ def album_deduplicate(aid):
         except Exception as ex:
             log.append(f"Final listing warning: {ex}")
 
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="album-deduplicate", resource_keys=[f"album:{aid}"]),
+        label=label,
+        metadata={"type": "album-deduplicate", "album_id": aid,
+                  **job_contract.contract_metadata("album-deduplicate", resource_keys=[f"album:{aid}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -2301,7 +2327,12 @@ def match_album(aid):
         except Exception:
             pass
 
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="album-match-mbid", resource_keys=[f"album:{aid}"]),
+        label=label,
+        metadata={"type": "album-match-mbid", "album_id": aid,
+                  **job_contract.contract_metadata("album-match-mbid", resource_keys=[f"album:{aid}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -2529,9 +2560,10 @@ def rebuild_album_art():
         return summary
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="album-art-rebuild"),
         label="Rebuild Album Art",
-        metadata={"type": "album-art-rebuild", "mode": "full_rebuild"},
+        metadata={"type": "album-art-rebuild", "mode": "full_rebuild",
+                  **job_contract.contract_metadata("album-art-rebuild")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -2667,7 +2699,7 @@ def batch_ai_suggest():
     job = jobs.start_python(
         _do,
         label=f"AI suggest: up to {limit} unlinked album(s)",
-        metadata={"type": "batch-ai-suggest", "limit": limit},
+        metadata={"type": "batch-ai-suggest", "limit": limit, "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id, "limit": limit})
 
@@ -2901,13 +2933,14 @@ def album_merge_split_album(target_aid):
         }
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="split-album-merge", resource_keys=[f"album:{target_id}", f"album:{source_id}"]),
         label=f"Merge split album {source_id} → {target_id}",
         metadata={
             "type": "split-album-merge",
             "source_album_id": source_id,
             "target_album_id": target_id,
             "item_count": len(item_ids),
+            **job_contract.contract_metadata("split-album-merge", resource_keys=[f"album:{target_id}", f"album:{source_id}"]),
         },
     )
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -3254,9 +3287,10 @@ def library_import_all():
         }
 
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow="library-import-all"),
         label=f"Import All: {len(albums)} album(s)",
-        metadata={"type": "library-import-all", "album_count": len(albums)},
+        metadata={"type": "library-import-all", "album_count": len(albums),
+                  **job_contract.contract_metadata("library-import-all")},
     )
     return jsonify({"ok": True, "job_id": job.job_id, "album_count": len(albums)})
 
@@ -3381,7 +3415,14 @@ def library_merge_artist():
         _invalidate_lib_cache()
         log.append(f"Done — {len(renamed_ids)} album(s) now under '{to_artist}'.")
 
-    job = jobs.start_python(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="library-merge-artist",
+                             resource_keys=[f"artist:{from_artist}", f"artist:{to_artist}"]),
+        label=f"Merge artist: {from_artist!r} → {to_artist!r}",
+        metadata={"type": "library-merge-artist", "from_artist": from_artist, "to_artist": to_artist,
+                  **job_contract.contract_metadata("library-merge-artist",
+                                                   resource_keys=[f"artist:{from_artist}", f"artist:{to_artist}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -3465,10 +3506,16 @@ def library_sync_deleted():
                 },
             })
 
+    job_target = _do if dry_run else job_contract.guarded(_do, workflow="sync-deleted")
     job = jobs.start_python(
-        _do,
+        job_target,
         label="Preview Missing File DB Sync" if dry_run else "Apply Missing File DB Sync",
-        metadata={"type": "sync-deleted", "dry_run": dry_run},
+        metadata={
+            "type": "sync-deleted",
+            "dry_run": dry_run,
+            "mutating": not dry_run,
+            **({} if dry_run else job_contract.contract_metadata("sync-deleted")),
+        },
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -3739,7 +3786,11 @@ def library_move_all():
         _trigger_plex_refresh(log)
         log.append("✓ Done." if rc == 0 else "⚠ Finished with some errors (see above).")
 
-    job = jobs.start_python(_do, label="Move all library files", metadata={"type": "move-all"})
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="move-all"),
+        label="Move all library files",
+        metadata=job_contract.contract_metadata("move-all", {"type": "move-all"}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -3849,7 +3900,11 @@ def library_mbsync_all():
         _invalidate_lib_cache()
         log.append("✓ beet mbsync complete." if rc == 0 else "⚠ mbsync finished with some errors (see above).")
 
-    job = jobs.start_python(_do, label="MBSync all library tracks", metadata={"type": "mbsync-all"})
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="mbsync-all"),
+        label="MBSync all library tracks",
+        metadata=job_contract.contract_metadata("mbsync-all", {"type": "mbsync-all"}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -3912,7 +3967,12 @@ def album_fix_genre(aid):
         _invalidate_lib_cache()
 
     label = f"Fix genre: {album.albumartist or '?'} — {album.album or '?'}"
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="album-fix-genre", resource_keys=[f"album:{aid}"]),
+        label=label,
+        metadata={"type": "album-fix-genre", "album_id": aid,
+                  **job_contract.contract_metadata("album-fix-genre", resource_keys=[f"album:{aid}"])},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -3982,7 +4042,11 @@ def library_normalize_artists():
         _invalidate_lib_cache()
         log.append("Done.")
 
-    job = jobs.start_python(_do, label="Normalize artist names (Unicode→ASCII)")
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow="normalize-artists"),
+        label="Normalize artist names (Unicode→ASCII)",
+        metadata=job_contract.contract_metadata("normalize-artists", {"type": "normalize-artists"}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -4016,7 +4080,12 @@ def library_merge_artist_id():
         _invalidate_lib_cache()
         log.append(f"Done. Updated artist aliases to {canonical!r}.")
 
-    job = jobs.start_python(_do, label=f"Merge artist aliases: {canonical}")
+    wf_key = f"merge-artist-{job_contract.slug(canonical)}"
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow=wf_key),
+        label=f"Merge artist aliases: {canonical}",
+        metadata=job_contract.contract_metadata(wf_key, {"type": "merge-artist-aliases", "canonical": canonical}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -4053,7 +4122,12 @@ def library_confirm_artist_alias():
         _invalidate_lib_cache()
         log.append(f"Done. Updated artist alias {source!r} -> {canonical!r}.")
 
-    job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
+    wf_key = f"confirm-artist-{job_contract.slug(canonical)}"
+    job = jobs.start_python(
+        job_contract.guarded(_do, workflow=wf_key),
+        label=f"Confirm artist alias: {source} -> {canonical}",
+        metadata=job_contract.contract_metadata(wf_key, {"type": "confirm-artist-alias", "canonical": canonical, "source": source}),
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -4285,10 +4359,11 @@ def apply_album_duplicate_resolver(aid):
             "dry_run": dry_run,
         }
 
+    wf_key = f"duplicate-track-resolver-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"Resolve duplicate tracks: album {aid}",
-        metadata={"type": "duplicate-track-resolver", "album_id": aid, "mb_albumid": mbid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "duplicate-track-resolver", "album_id": aid, "mb_albumid": mbid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -4380,10 +4455,11 @@ def repair_album_mb_tracks(aid):
             "operation_id": op_id,
         }
 
+    wf_key = f"repair-mb-tracks-{aid}"
     job = jobs.start_python(
-        _do,
+        job_contract.guarded(_do, workflow=wf_key, keys=[job_contract.workflow_key(f"album-{aid}")]),
         label=f"Repair MB track IDs: {album.albumartist or album.album or aid}",
-        metadata={"type": "repair-mb-tracks", "album_id": aid, "mb_albumid": mbid},
+        metadata=job_contract.contract_metadata(wf_key, {"type": "repair-mb-tracks", "album_id": aid, "mb_albumid": mbid}, keys=[job_contract.workflow_key(f"album-{aid}")]),
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -4445,15 +4521,28 @@ def library_template_token_cleanup():
             _trigger_plex_refresh(log)
         return result
 
-    job = jobs.start_python(
-        _do,
-        label="Library template-token cleanup",
-        metadata={
-            "type": "template-token-cleanup",
-            "dry_run": dry_run,
-            "album_id": album_id,
-        },
-    )
+    if not dry_run:
+        wf_key = f"template-token-cleanup-{album_id}" if album_id else "template-token-cleanup"
+        job = jobs.start_python(
+            job_contract.guarded(_do, workflow=wf_key),
+            label="Library template-token cleanup",
+            metadata=job_contract.contract_metadata(wf_key, {
+                "type": "template-token-cleanup",
+                "dry_run": False,
+                "album_id": album_id,
+            }),
+        )
+    else:
+        job = jobs.start_python(
+            _do,
+            label="Library template-token cleanup (preview)",
+            metadata={
+                "type": "template-token-cleanup",
+                "dry_run": True,
+                "album_id": album_id,
+                "mutating": False,
+            },
+        )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -4506,7 +4595,7 @@ def scan_leaked_db_paths_job():
     job = jobs.start_python(
         _do,
         label="Leaked DB path scan",
-        metadata={"type": "leaked-db-path-scan"},
+        metadata={"type": "leaked-db-path-scan", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -4653,14 +4742,25 @@ def fix_leaked_db_paths():
             "final_summary": final_summary,
         }
 
-    job = jobs.start_python(
-        _do,
-        label=f"Leaked DB path fix ({'dry-run' if dry_run else 'apply'})",
-        metadata={
-            "type": "leaked-db-path-fix",
-            "dry_run": dry_run,
-        },
-    )
+    if not dry_run:
+        job = jobs.start_python(
+            job_contract.guarded(_do, workflow="leaked-db-path-fix"),
+            label="Leaked DB path fix (apply)",
+            metadata=job_contract.contract_metadata("leaked-db-path-fix", {
+                "type": "leaked-db-path-fix",
+                "dry_run": False,
+            }),
+        )
+    else:
+        job = jobs.start_python(
+            _do,
+            label="Leaked DB path fix (dry-run)",
+            metadata={
+                "type": "leaked-db-path-fix",
+                "dry_run": True,
+                "mutating": False,
+            },
+        )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -4719,7 +4819,7 @@ def scan_folder_placeholders_job():
     job = jobs.start_python(
         _do,
         label="Scan folder placeholder names",
-        metadata={"type": "folder-placeholder-scan"},
+        metadata={"type": "folder-placeholder-scan", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
@@ -5054,16 +5154,19 @@ def _start_library_mbid_sticking_repair(
         )
         return summary
 
+    job_target = _do if dry_run else job_contract.guarded(_do, workflow=job_type)
     job = jobs.start_python(
-        _do,
+        job_target,
         label=job_label,
         metadata={
             "type": job_type,
             "dry_run": dry_run,
+            "mutating": not dry_run,
             "repair_tracks": repair_tracks,
             "write_tags": write_tags,
             "trigger_plex": trigger_plex,
             "limit": limit,
+            **({} if dry_run else job_contract.contract_metadata(job_type)),
         },
     )
     return jsonify({"ok": True, "job_id": job.job_id})

@@ -4068,19 +4068,22 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         )
                 raise
 
-    job = jobs.start_python(_do_locked, label=f"Import+Tag: {Path(folder_path).name}",
-                            metadata={"path": folder_path, "mb_albumid": mb_albumid,
-                                      "mb_releasegroupid": selected_releasegroupid,
-                                      "existing_album_id": existing_album_id,
-                                      "missing_track_count": len(wanted_tracks),
-                                      "selected_source_file_count": len(selected_source_files),
-                                      "selected_source_files": [str(p) for p in selected_source_files],
-                                      "partial_subset_import": selected_subset_import,
-                                      "trigger_plex_refresh": trigger_plex_refresh_after,
-                                      "auto_import": auto_import,
-                                      "review_item_id": review_item_id,
-                                      "import_review_auto_idempotency_key": auto_import_idempotency_key,
-                                      "type": "import-folder"})
+    job = jobs.start_python(
+        job_contract.guarded(_do_locked, workflow="import-folder", resource_keys=[f"path:{folder_path}"]),
+        label=f"Import+Tag: {Path(folder_path).name}",
+        metadata={"path": folder_path, "mb_albumid": mb_albumid,
+                  "mb_releasegroupid": selected_releasegroupid,
+                  "existing_album_id": existing_album_id,
+                  "missing_track_count": len(wanted_tracks),
+                  "selected_source_file_count": len(selected_source_files),
+                  "selected_source_files": [str(p) for p in selected_source_files],
+                  "partial_subset_import": selected_subset_import,
+                  "trigger_plex_refresh": trigger_plex_refresh_after,
+                  "auto_import": auto_import,
+                  "review_item_id": review_item_id,
+                  "import_review_auto_idempotency_key": auto_import_idempotency_key,
+                  "type": "import-folder",
+                  **job_contract.contract_metadata("import-folder", resource_keys=[f"path:{folder_path}"])})
     return {"ok": True, "job_id": job.job_id}, 200
 
 

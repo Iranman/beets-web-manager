@@ -157,7 +157,7 @@ def ytdlp_test_youtube():
     job = jobs.start_python(
         _do,
         label="Test YouTube Source",
-        metadata={"type": "ytdlp-youtube-test", "category": "diagnostic"},
+        metadata={"type": "ytdlp-youtube-test", "category": "diagnostic", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id, "status": "queued"})
 
@@ -445,16 +445,20 @@ def qbit_hardlink_missing():
         )
 
     label = "qBittorrent hardlink dry run" if dry_run else "qBittorrent hardlink repair"
+    job_target = _do if dry_run else job_contract.guarded(_do, workflow="qbit-hardlink-repair")
+    contract_meta = {} if dry_run else job_contract.contract_metadata("qbit-hardlink-repair")
     job = jobs.start_python(
-        _do,
+        job_target,
         label=label,
         metadata={
             "type": "qbit-hardlink-repair",
             "dry_run": dry_run,
+            "mutating": not dry_run,
             "category": category,
             "filter": qbit_filter,
             "search": search,
             "hash_count": len(hashes),
+            **contract_meta,
         },
     )
     return jsonify({"ok": True, "job_id": job.job_id, "dry_run": dry_run})
@@ -479,7 +483,7 @@ def start_music_format_library_scan():
     job = jobs.start_python(
         _music_format_scan_library,
         label="Music format preference scan",
-        metadata={"type": "music-format-scan", "category": "cleanup"},
+        metadata={"type": "music-format-scan", "category": "cleanup", "mutating": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
