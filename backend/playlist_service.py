@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64, copy, difflib, hashlib, json, os, re, shutil, socket, sqlite3, subprocess, threading, time, unicodedata, uuid
 import urllib.error
+import backend.job_contract as job_contract
 from backend.matching import evaluate_release_group_candidate
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -4281,7 +4282,7 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         state["updated_at"] = time.time()
         _playlist_save_job_state(state)
 
-    def _run(job_log: Optional[List[str]] = None, cancel_event=None):
+    def _run(job_log: Optional[List[str]] = None, cancel_event=None, update_state=None):
         runtime_lock = _playlist_pipeline_runtime_lock(name)
         if not runtime_lock.acquire(blocking=False):
             state["status"] = "error"
@@ -4289,6 +4290,21 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             state["current"] = _PLAYLIST_DUPLICATE_JOB_MESSAGE
             _playlist_save_job_state(state)
             raise RuntimeError(_PLAYLIST_DUPLICATE_JOB_MESSAGE)
+        try:
+            # One pipeline per playlist across processes and restarts; the
+            # durable job record carries the resumable position.
+            contract = job_contract.enter(
+                "playlist-" + job_contract.slug(_clean_playlist_name(name)), log=job_log, cancel_event=cancel_event,
+                update_state=update_state,
+                progress=lambda: {"playlist_job_id": jid, "phase": state.get("phase"), "status": state.get("status"),
+                                  "done": state.get("done"), "failed": state.get("failed")})
+        except Exception as exc:
+            runtime_lock.release()
+            state["status"] = "error"
+            state["phase"] = "error"
+            state["current"] = str(exc)
+            _playlist_save_job_state(state)
+            raise
         if job_log is not None and state.get("log") is not job_log:
             previous_log = list(state.get("log") or [])
             job_log.extend(previous_log)
@@ -4866,6 +4882,7 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 name, status="failed", action=pipeline_action, error=str(exc))
             raise
         finally:
+            contract.close()
             runtime_lock.release()
 
     job = jobs.start_python(
@@ -4873,6 +4890,7 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         label=f"Playlist Download & Sync: {name}",
         metadata={
             "type": "playlist-download",
+            "mutating": True,
             "playlist_job_id": jid,
             "name": name,
             "source": parse_source,
@@ -8121,7 +8139,10 @@ def _playlist_start_direct_action(name: str, action: str) -> Dict[str, Any]:
         if not runtime_lock.acquire(blocking=False):
             raise RuntimeError(_PLAYLIST_DUPLICATE_JOB_MESSAGE)
         _playlist_record_pipeline(clean_name, action=action, status="running")
+        contract = None
         try:
+            contract = job_contract.enter("playlist-" + job_contract.slug(clean_name), log=log,
+                                          cancel_event=cancel_event)
             if action == "sync_sources":
                 result = _playlist_run_source_sync(clean_name, log)
             elif action == "reconcile_state":
@@ -8138,6 +8159,8 @@ def _playlist_start_direct_action(name: str, action: str) -> Dict[str, Any]:
             _playlist_record_pipeline(clean_name, action=action, status="failed", error=str(ex))
             raise
         finally:
+            if contract is not None:
+                contract.close()
             runtime_lock.release()
 
     label = {

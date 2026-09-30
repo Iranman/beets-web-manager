@@ -27,7 +27,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `JobStore` is durable (`<data>/jobs/*.json`): throttled progress writes, checkpoints persisted immediately, heartbeats, terminal states `success`/`failed`/`cancelled`/`recovery_required`. A job interrupted by a restart is never re-run: read-only jobs become `failed`, anything else `recovery_required`.
   - Durable hierarchical resource locks (`backend/resource_locks.py`, `<data>/locks`): cross-process exclusive, order-enforced, heartbeat-kept, reclaimed only when the owner process is provably gone.
   - Engine-backed transactions (item replacement, reviewed duplicate cleanup, album-row merge, untracked attach/quarantine) record the engine request before calling it; `backend/transaction_recovery.py` finishes a transaction a restart left Running from engine evidence (manifest or operation registry) and never replays it.
-- Remaining (why this is not Closed): playlist download/sync, import review, AI batch, acquisition and the maintenance runner still keep their own ad hoc protections; they neither publish resumable checkpoints nor hold the shared locks. Those jobs are safe after a restart only in the sense that they become `recovery_required` rather than being re-run.
+- v0.1.46 (IMPLEMENTED; CI and live acceptance pending): `backend/job_contract.py` is the shared job contract -- a durable `workflow:<name>` lock held for the job's lifetime (taken after the workflow's own in-process guard), heartbeat, a contract checkpoint in the durable job record, workflow progress republished into it, and cancellation while waiting. Adopted by the maintenance runner, playlist download and pipeline actions, AI batch import, Acquire Download All, album download+import, the music-format replacement retry and the import slot (folder import, disk re-import).
+- Remaining (why this is not Closed):
+  - Resume is still each workflow's own: Clean All and playlist download resume from their own checkpoint files, AI batch from its state store. The contract makes the position visible in the job record; it does not resume a job. A restart still leaves the job `recovery_required` for the operator.
+  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, mbsync-all, move-all, folder and root repairs, Release-Group relinks, resolver jobs). They rely on `recovery_required` alone.
+  - Bounded retries are per workflow, not a contract feature.
 - Priority: P1. Status: Open (narrowed).
 
 ## ARCH-005 Frontend Decision Logic Can Drift From Backend Authority

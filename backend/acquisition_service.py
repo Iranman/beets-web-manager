@@ -7,6 +7,7 @@ import copy, difflib, json, re, time
 import urllib.error
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import backend.job_contract as job_contract
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ROOT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
@@ -691,8 +692,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         return download_result
 
     label = f"{_download_method_job_label(method)} Import: {artist} – {album}"
-    job = jobs.start_python(_do, label=label,
-                            metadata={"type": "download-import", "artist": artist,
+    # One download+import per album at a time, across processes and restarts.
+    workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
+    job = jobs.start_python(job_contract.guarded(_do, workflow=workflow, fail_fast_in_process=True), label=label,
+                            metadata={"type": "download-import", "mutating": True, "artist": artist,
                                       "album": album, "year": year,
                                       "track_count": track_count,
                                       "mb_albumid": mb_albumid, "method": method,

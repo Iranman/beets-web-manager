@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
 from flask import jsonify, request
+import backend.job_contract as job_contract
 from backend.beets_adapter import BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
@@ -1758,10 +1759,14 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
                 batch_job_id, owned_job_id,
                 signaled=signaled, aborted=startup_aborted.is_set(),
             )
-            return _run_ai_batch_import(
-                batch_job_id, scan_path, log, cancel_event, update_state,
-                recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=owned_job_id,
-            )
+            # After the in-process reservation: one worker per batch across
+            # processes and restarts too.
+            with job_contract.held("ai-batch-" + job_contract.slug(batch_job_id), log=log,
+                                   cancel_event=cancel_event, update_state=update_state):
+                return _run_ai_batch_import(
+                    batch_job_id, scan_path, log, cancel_event, update_state,
+                    recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=owned_job_id,
+                )
         finally:
             # Ownership-safe regardless of which startup outcome applies:
             # releases whichever token (the promoted job_id, or the

@@ -6,6 +6,13 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+- **A shared contract for long-running mutating jobs (ARCH-004).** `backend/job_contract.py` gives a workflow a durable `workflow:<name>` lock for as long as it runs, a heartbeat, a checkpoint in the durable job record, and cancellation while waiting.
+  - Adopted by Clean All, playlist download and playlist pipeline actions, AI batch import, Acquire Download All, single album download+import, the music-format replacement retry, and the import slot used by folder import and disk re-import.
+  - One instance of each runs at a time across processes and restarts. A lock left behind by a process that died is reclaimed once its heartbeat expires, so the first run after a crash may wait up to two minutes.
+  - Each workflow's own in-process guard and HTTP behaviour are unchanged; the durable lock is taken after it.
+  - Clean All, playlist download and Acquire Download All also publish their resumable position into the job record.
+
 ## v0.1.45 - 2026-09-30
 
 ### Added

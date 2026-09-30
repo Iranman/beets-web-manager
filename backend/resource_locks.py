@@ -12,6 +12,8 @@ Keys and hierarchy (lower level = coarser):
     level 1  untracked-inventory
              album-merge:<release group id>
              playlist:<id>
+             workflow:<name>           one running instance of a long job
+                                       (backend/job_contract.py)
     level 2  album:<id>
     level 3  item:<id>
 
@@ -44,8 +46,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 _KEY_RE = re.compile(r"^(library-global|untracked-inventory|album-merge:[0-9a-f-]{8,64}|playlist:[A-Za-z0-9_.-]{1,80}"
-                     r"|album:\d{1,12}|item:\d{1,12})$")
-_LEVELS = {"library-global": 0, "untracked-inventory": 1, "album-merge": 1, "playlist": 1, "album": 2, "item": 3}
+                     r"|workflow:[a-z0-9][a-z0-9-]{0,79}|album:\d{1,12}|item:\d{1,12})$")
+_LEVELS = {"library-global": 0, "untracked-inventory": 1, "album-merge": 1, "playlist": 1, "workflow": 1,
+           "album": 2, "item": 3}
 HOST = socket.gethostname()
 PID = os.getpid()
 
