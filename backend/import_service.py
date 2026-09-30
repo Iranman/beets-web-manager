@@ -285,8 +285,14 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                     op_id = plan_res.get("operation_id")
                     apply_res = composite_workflows.apply_existing_album_reconcile(op_id)
                     if apply_res.get("ok"):
-                        log.append(f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
-                                   f"and {len(plan.move_ids)} move(s) to engine reconcile tx {op_id}.")
+                        log.append(f"  [merge] Moved {len(plan.move_ids)} imported item(s) into the existing "
+                                   f"album row (tx {op_id}).")
+                        if dup_item_ids:
+                            cleanup_id = apply_res.get("cleanup_operation_id")
+                            log.append(
+                                f"  [merge] {len(dup_item_ids)} imported duplicate(s) kept; reviewed cleanup "
+                                + (f"tx {cleanup_id} awaits approval." if cleanup_id
+                                   else "was not planned (the copies are not proven identical)."))
                     else:
                         reconcile_ok = False
                         log.append(f"  [merge] WARN existing album reconcile apply failed: {apply_res.get('error')}")

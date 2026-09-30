@@ -67,9 +67,14 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - 311 – *Dammit!*: all 7 tracked rows pointed at missing files; their audio was found in the `{Album MbId}` folder by Recording ID. Each was recovered through track-for-replacement and item-file replacement (identity unchanged), then row 1388 was merged into 1793 (apply, exact rollback, re-apply).
   - Dennis Brown: the audio-identical copy was removed through reviewed cleanup, retiring duplicate row 2140 (plugin 1.3.1); its file is in the engine quarantine and rollback is available.
   - Still review-only: Sevyn Streeter (no FLAC MD5 to prove identity) and Al Campbell (24-bit vs 16-bit masters).
-  - Known gap: the analysis marks a group deterministic without checking the retained row's files exist.
-- Why this stays Open: the legacy `composite_workflows.plan/apply_album_duplicate_merge` (used by import `existing_album_reconcile` and the merge-duplicate-album job) still reassigns `album_id` through `/webmanager/modify`, which the engine refuses; those callers need migrating onto a partial-move variant of the new op.
-- Priority: P2. Status: Open.
+- v0.1.44 (IMPLEMENTED; CI and live acceptance pending): the legacy callers are migrated.
+  - `composite_workflows.plan/apply/rollback_album_duplicate_merge`, `merge_duplicate_albums`, `merge_split_album_items` and `*_existing_album_reconcile` are thin delegations to `backend/album_row_merge.py`; none reassigns `album_id` through `/webmanager/modify` or rewrites album-level fields on moved items.
+  - Plugin 1.4.0: `album-row-merge` takes `"partial": true` to move some of a row's items; the row is retired only when emptied.
+  - Import reconcile moves the imported items that fill free slots; imported copies of filled slots become a reviewed duplicate cleanup (audio proof, quarantine), applied only on a reviewer's decision and otherwise left in Preview.
+  - The Release-Group plan refuses a retained row whose files are missing (`retained_row_file_missing`), the 311 case.
+  - Fixed on the way: `merge_duplicate_albums` and `merge_split_album_items` were called with argument shapes that failed at run time.
+- Why this stays Open: the duplicate resolver's "retag" action asked the merge to rewrite Recording ID and disc/track on the moved items; that payload is now refused (`identity_rewrite_not_supported`) and reported per source. It needs rebuilding on the recording-attach workflow (audio proof per item), then an ownership move.
+- Priority: P2. Status: Open (narrowed to the resolver retag action).
 
 ## ARCH-021 Untracked Files Under The Music Root
 

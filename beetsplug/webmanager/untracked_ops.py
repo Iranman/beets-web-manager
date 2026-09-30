@@ -38,7 +38,7 @@ from beets.library import Item
 from flask import g, jsonify, request
 
 from . import operations as ops
-from .replace_ops import _SHA256, _error, _fspath, _quarantine_root, _sha256_file
+from .engine_common import _SHA256, _error, _fspath, _quarantine_root, _sha256_file
 
 _RECORD_ID = re.compile(r"[0-9a-f]{32}")
 

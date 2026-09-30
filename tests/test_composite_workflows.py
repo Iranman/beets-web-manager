@@ -50,34 +50,24 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.env_patcher.stop()
         self.tmpdir.cleanup()
 
-    def test_merge_album_plan_apply_rollback(self):
-        # Setup mock albums and items
-        self.mock_adapter.get_album.side_effect = lambda aid: {
+    def test_merge_album_refuses_a_different_edition_without_touching_the_library(self):
+        """The retired in-place merge rewrote the source items' Release ID to
+        the target's. An album-row merge is now ownership-only and another
+        edition is refused (full coverage: tests/test_arch020_legacy_merge_callers.py)."""
+        self.mock_adapter.get_album.side_effect = lambda aid, expand=True: {
             1: {"id": 1, "album": "Target Album", "albumartist": "Artist A", "mb_albumid": "mb-1", "mb_releasegroupid": "rg-1"},
             2: {"id": 2, "album": "Source Album", "albumartist": "Artist A", "mb_albumid": "mb-2", "mb_releasegroupid": "rg-1"},
         }.get(aid)
-        self.mock_adapter.find_all_items_by_album_id.side_effect = lambda aid: {
-            1: [{"id": 101, "title": "Track 1", "album_id": 1, "path": "/music/t1.flac"}],
-            2: [{"id": 102, "title": "Track 2", "album_id": 2, "path": "/music/t2.flac"}],
-        }.get(aid, [])
-
         plan_res = plan_album_duplicate_merge(
             {"target_album_id": 1, "source_album_ids": [2]},
             adapter=self.mock_adapter,
             store=self.store,
         )
-        self.assertTrue(plan_res["ok"])
-        op_id = plan_res["operation_id"]
-
-        # Apply merge
-        apply_res = apply_album_duplicate_merge(op_id, adapter=self.mock_adapter, store=self.store)
-        self.assertTrue(apply_res["ok"])
-        self.mock_adapter.modify.assert_called()
-        self.mock_adapter.remove.assert_called_with(album_ids=[2], delete_files=False)
-
-        # Rollback merge
-        rb_res = rollback_album_duplicate_merge(op_id, adapter=self.mock_adapter, store=self.store)
-        self.assertTrue(rb_res["ok"])
+        self.assertFalse(plan_res["ok"])
+        self.assertEqual(plan_res["code"], "edition_differs")
+        self.mock_adapter.modify.assert_not_called()
+        self.mock_adapter.remove.assert_not_called()
+        self.assertTrue(callable(apply_album_duplicate_merge) and callable(rollback_album_duplicate_merge))
 
     def test_artist_folder_reconcile_flow(self):
         self.mock_adapter.get_album.return_value = {

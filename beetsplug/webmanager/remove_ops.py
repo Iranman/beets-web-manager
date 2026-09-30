@@ -36,8 +36,9 @@ from beets.library import Item
 from flask import g, jsonify, request
 
 from . import operations as ops
-from .merge_ops import _album_snapshot, _restore_album_row
-from .replace_ops import (
+from .engine_common import (
+    _album_snapshot,
+    _restore_album_row,
     MANIFEST_NAME,
     _SHA256,
     _error,

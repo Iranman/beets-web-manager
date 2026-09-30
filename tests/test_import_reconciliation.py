@@ -180,8 +180,9 @@ class _FakeEngine:
         self.calls.append(("plan_reconcile", payload))
         return {"ok": True, "operation_id": f"rec{len(self.calls)}"}
 
-    def apply_existing_album_reconcile(self, op):
+    def apply_existing_album_reconcile(self, op, approve_duplicates=False, approved_by=""):
         self.calls.append(("apply_reconcile", op))
+        self.approvals = getattr(self, "approvals", []) + [(approve_duplicates, approved_by)]
         return {"ok": True}
 
     def plan_bulk_import_replacement(self, payload):
@@ -240,6 +241,8 @@ class ResolveReviewTests(unittest.TestCase):
             self.assertEqual(plan["dup_item_ids"], [2])
             self.assertEqual(plan["dup_details"][0]["survivor_item_ids"], [1])
             self.assertEqual(plan["move_item_ids"], [])
+            # The reviewer's decision is the approval for the cleanup.
+            self.assertEqual(engine.approvals, [(True, "reconciliation reviewer")])
 
     def test_keep_imported_uses_the_canonical_replacement_with_reviewer_approval(self):
         """keep_imported puts the imported file into the existing slot through

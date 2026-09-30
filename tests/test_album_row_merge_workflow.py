@@ -137,6 +137,14 @@ class AlbumRowMergeWorkflowTests(unittest.TestCase):
         self.assertEqual(self._snapshot(), before)
         self.assertEqual(self.engine.merge_calls, 0)
 
+    def test_a_stale_retained_row_is_refused_until_it_is_recovered(self):
+        """The 311 - Dammit! shape: the analysis calls the group deterministic,
+        but the retained row's own files are gone."""
+        Path(self.engine.items[2]["path"]).unlink()
+        res = self._plan()
+        self.assertEqual((res["ok"], res["code"], res["item_ids"]), (False, "retained_row_file_missing", [2]))
+        self.assertEqual(self.engine.merge_calls, 0)
+
     def test_non_deterministic_groups_are_review_only(self):
         self.engine.albums[11]["mb_albumid"] = "11111111-2222-3333-4444-555555555555"
         res = self._plan()

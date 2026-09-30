@@ -699,10 +699,13 @@ class BeetsAdapter:
         expected_release_group_id: str,
         expected_release_id: str,
         idempotency_key: str,
+        partial: bool = False,
     ) -> Dict[str, Any]:
         """Move every item of the source album rows into the target row
         (ownership only) through the stock-Beets integration plugin; the
-        engine re-proves identity, content and slots first (ARCH-020)."""
+        engine re-proves identity, content and slots first (ARCH-020).
+        ``partial`` moves only the listed items; a source row is then retired
+        only when all of its items moved."""
         payload = {
             "target_album_id": int(target_album_id),
             "source_album_ids": [int(x) for x in source_album_ids],
@@ -710,6 +713,8 @@ class BeetsAdapter:
             "expected_release_group_id": expected_release_group_id,
             "expected_release_id": expected_release_id,
         }
+        if partial:
+            payload["partial"] = True
         return self._request("POST", "/webmanager/album-row-merge", json_data=payload,
                              headers={"Idempotency-Key": idempotency_key})
 

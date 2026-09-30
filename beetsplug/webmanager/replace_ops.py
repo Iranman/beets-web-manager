@@ -28,20 +28,33 @@ Web Manager decides *whether* to replace (fingerprint proof, a reviewed and
 approved transaction); this module only performs the change inside Beets.
 """
 
-import hashlib
 import json
 import os
-import re
 import shutil
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from beets import config as beets_config
 from beets.dbcore.query import PathQuery
 from beets.library import Item
 from flask import g, jsonify, request
 
 from . import operations as ops
+from .engine_common import (  # noqa: F401  (re-exported: other modules and tests use these names)
+    MANIFEST_NAME,
+    _QUARANTINE_ID,
+    _SHA256,
+    _album_snapshot,
+    _error,
+    _fspath,
+    _inside_allowed,
+    _jsonable,
+    _manifest_dir,
+    _quarantine_root,
+    _restore_album_row,
+    _sha256_file,
+    _snapshot,
+    set_quarantine_root,
+)
 
 # Audio properties that describe the file itself; everything else on the
 # target row is identity/metadata that must survive the replacement.
@@ -50,51 +63,6 @@ AUDIO_PROPERTY_FIELDS = frozenset({
     "format", "samplerate", "bitdepth", "channels",
 })
 _NOT_RESTORED = frozenset({"id", "path", "mtime"}) | AUDIO_PROPERTY_FIELDS
-_QUARANTINE_ID = re.compile(r"[0-9a-f]{32}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-MANIFEST_NAME = "manifest.json"
-
-_QUARANTINE_ROOT_OVERRIDE: Optional[str] = None
-
-
-def set_quarantine_root(root: Optional[str]) -> None:
-    """Override the engine quarantine folder (tests only)."""
-    global _QUARANTINE_ROOT_OVERRIDE
-    _QUARANTINE_ROOT_OVERRIDE = root
-
-
-def _quarantine_root() -> str:
-    if _QUARANTINE_ROOT_OVERRIDE:
-        return os.path.abspath(_QUARANTINE_ROOT_OVERRIDE)
-    return os.path.abspath(os.path.join(beets_config.config_dir(), "webmanager-quarantine"))
-
-
-def _fspath(value: Any) -> str:
-    if isinstance(value, bytes):
-        return os.fsdecode(value)
-    return str(value or "")
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return os.fsdecode(value)
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
-
-
-def _snapshot(item: Item) -> Dict[str, Any]:
-    return {key: _jsonable(item.get(key)) for key in item.keys(computed=False)}
-
-
-def _inside_allowed(path: str) -> bool:
-    return ops.is_strict_descendant(path, ops.get_allowed_roots())
-
-
-def _error(message: str, code: str, status: int = 400):
-    return jsonify({"error": message, "error_code": code}), status
-
-
 def _load_pair(lib, data: Dict[str, Any]) -> Tuple[Optional[Item], Optional[Item], Optional[Tuple[str, str, int]]]:
     try:
         target_id = int(data.get("target_item_id"))
@@ -114,25 +82,6 @@ def _load_pair(lib, data: Dict[str, Any]) -> Tuple[Optional[Item], Optional[Item
     if not _inside_allowed(_fspath(target.path)):
         return None, None, ("target path outside allowed roots", "TARGET_PATH_INVALID", 400)
     return target, source, None
-
-
-def _manifest_dir(quarantine_id: str) -> Optional[str]:
-    """The engine's folder for one replacement, or None for a malformed id."""
-    if not isinstance(quarantine_id, str) or not _QUARANTINE_ID.fullmatch(quarantine_id):
-        return None
-    root = _quarantine_root()
-    folder = os.path.normpath(os.path.join(root, quarantine_id))
-    if not folder.startswith(root + os.sep):
-        return None
-    return folder
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _planned_destination(target: Item, new_file: str) -> str:
