@@ -12,6 +12,7 @@ import backend.job_contract as job_contract
 from backend.beets_adapter import BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
+import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
 from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
 from backend.app_runtime import AUDIO_EXT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _redact_security_text, _s, jobs
@@ -663,6 +664,21 @@ def import_target_preview():
     """Read-only target path preview for Import Review selected matches."""
     payload = request.get_json(silent=True) or {}
     return jsonify(_cached_import_target_preview(payload))
+
+
+@app.post("/api/import-review/decision")
+def import_review_decision():
+    """Read-only: the authoritative Import Review action decision (bucket,
+    blocked/ready, block reason, next action, action label, source files)
+    for each entry ``{"item", "mbid", "selected_match", "target_preview_state"}``
+    (ARCH-005; see backend/import_review_decision.py)."""
+    payload = request.get_json(silent=True) or {}
+    entries = payload.get("entries")
+    if not isinstance(entries, list) or not entries or len(entries) > 200:
+        return jsonify({"ok": False, "error": "entries must be a list of 1-200 decision inputs"}), 400
+    if not all(isinstance(entry, dict) and isinstance(entry.get("item"), dict) for entry in entries):
+        return jsonify({"ok": False, "error": "each entry needs an item object"}), 400
+    return jsonify({"ok": True, "decisions": [_import_review_decision.decide(entry) for entry in entries]})
 
 
 @app.post("/api/import-review/auto-enqueue-ready")

@@ -6,13 +6,20 @@ except ImportError:  # pragma: no cover
     from tests._app_ast_cache import app_family_source  # noqa: E402
 
 
+def _review_page_source(root: Path) -> str:
+    """The Import Review page plus its decision module (ARCH-005 moved the
+    decision rules out of the page, verbatim, into importReviewDecision.ts).
+    The module comes first so rule definitions precede the page that uses them."""
+    feature = root / "frontend" / "src" / "features" / "importReview"
+    return ((feature / "importReviewDecision.ts").read_text(encoding="utf-8")
+            + "\n" + (feature / "ImportReviewPage.tsx").read_text(encoding="utf-8"))
+
+
 
 class ImportReviewQualityFilterTests(unittest.TestCase):
     def test_review_page_exposes_music_matching_buckets(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
         app_source = app_family_source()
 
@@ -65,9 +72,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_visible_candidates_feed_selected_match_state(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
 
         self.assertIn("preflight_status: 'passed' | 'failed' | 'stale' | 'not_run'", review_source)
         self.assertIn("track_mapping: TrackRow[]", review_source)
@@ -93,9 +98,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_selected_match_confidence_controls_auto_fix_eligibility(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
 
         self.assertIn("function normalizedScoreValue(value: number | string | undefined): number | null", review_source)
         self.assertIn("if (score >= 0.90) return 'high'", review_source)
@@ -119,9 +122,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_import_review_target_preview_gates_apply(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 
@@ -158,9 +159,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_import_review_reconcile_job_endpoint_and_status_unknown(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         app_source = app_family_source()
 
@@ -224,9 +223,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_blocked_review_items_offer_guarded_file_cleanup(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
         app_source = app_family_source()
@@ -270,9 +267,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_small_rejected_cleanup_batches_auto_quarantine(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
 
         self.assertIn("const AUTO_QUARANTINE_REJECTED_MAX_FILES = 5", review_source)
         self.assertIn("const autoCleanupKeysRef = useRef<Set<string>>(new Set())", review_source)
@@ -299,9 +294,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_saved_revalidated_track_mapping_hydrates_selected_match(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 
         self.assertIn("track_mapping?: ImportWithIdPayload['track_mapping']", types_source)
@@ -314,9 +307,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("const isImportable = identityValidated && isReleaseGroupUsable && hasRepresentativeRelease && importableTrackCount > 0 && status === 'passed'", review_source)
     def test_background_import_strip_uses_clear_queue(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
 
         self.assertIn("onClearQueue", review_source)
         self.assertIn("Clear queue", review_source)
@@ -342,9 +333,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
 
     def test_frontend_auto_enqueue_failed_bucket_is_failed(self):
         root = Path(__file__).resolve().parents[1]
-        review_source = (
-            root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-        ).read_text(encoding="utf-8")
+        review_source = _review_page_source(root)
         body = review_source[review_source.index('function itemMatchBucket'):review_source.index('function partialFullAlbumMismatch')]
         self.assertIn('const explicitFailed = new Set', body)
         self.assertIn("'auto_enqueue_failed'", body)

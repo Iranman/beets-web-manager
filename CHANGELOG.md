@@ -6,6 +6,13 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+- **Import Review action decisions are backend-owned (ARCH-005).**
+  - `backend/import_review_decision.py` is the authority for an item's bucket, whether the action is blocked and why, the next step, the action label and the source files an import takes. `POST /api/import-review/decision` serves it.
+  - Before an import or repair starts, the page asks the backend for the verdict and stops if it is blocked or the backend cannot be reached.
+  - The page's own decision rules moved, unchanged, out of the 4,700-line page into one pure module (`importReviewDecision.ts`) that mirrors the backend for instant feedback.
+  - Both implementations run against the same 45 cases in CI, so a rule changed on one side only fails the build.
+
 ## v0.1.46 - 2026-09-30
 
 ### Added
