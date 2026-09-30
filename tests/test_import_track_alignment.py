@@ -24,7 +24,10 @@ def _app_source() -> str:
 
 def _frontend_import_review_source() -> str:
     root = Path(__file__).resolve().parents[1]
-    return (root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx").read_text(encoding="utf-8")
+    feature = root / "frontend" / "src" / "features" / "importReview"
+    # ARCH-005: the decision rules live in importReviewDecision.ts (moved verbatim).
+    return ((feature / "importReviewDecision.ts").read_text(encoding="utf-8") + "\n"
+            + (feature / "ImportReviewPage.tsx").read_text(encoding="utf-8"))
 
 def _candidate_tracks_source(src: str) -> str:
     """Extract the shared candidate-track comparison helper used by the route and revalidator."""

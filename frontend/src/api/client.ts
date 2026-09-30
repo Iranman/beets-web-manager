@@ -87,6 +87,7 @@ import type {
   FolderPlaceholderApplyResult,
   FolderStatsResponse,
   ImportTargetPreviewPayload,
+  ImportReviewDecisionResponse,
   ImportTargetPreviewResponse,
   StatsResponse,
   SetupAuthTokenRegenerateResponse,
@@ -1357,6 +1358,11 @@ export function reconcileAutoEnqueueImport(payload: AutoEnqueueImportPayload): P
 
 export function revalidateImportReview(payload: ImportReviewRevalidatePayload): Promise<ImportReviewRevalidateResponse> {
   return apiJson<ImportReviewRevalidateResponse>('/api/import-review/revalidate', jsonRequest('POST', payload));
+}
+
+/** The backend's authoritative Import Review action decisions (ARCH-005). */
+export function decideImportReviewRemote(entries: unknown[]): Promise<ImportReviewDecisionResponse> {
+  return apiJson<ImportReviewDecisionResponse>('/api/import-review/decision', jsonRequest('POST', { entries }));
 }
 
 export function previewImportTarget(payload: ImportTargetPreviewPayload): Promise<ImportTargetPreviewResponse> {

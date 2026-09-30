@@ -42,8 +42,16 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: UI can enable, hide, or label actions differently than backend eligibility; explanations can diverge from backend safety decisions.
 - Desired state: Backend returns authoritative evidence, conflicts, safety result, and action eligibility. Frontend displays those fields and only handles presentation state.
 - Safe migration approach: Extend backend contracts first, then simplify frontend helpers as contract consumers. Add static and UI tests for visible evidence and disabled/destructive actions.
-- v0.1.42: the new Untracked files panel follows the desired state (backend returns `action`, `action_eligibility`, `safety_result`, `conflicts`, `reason`, `requires_review`; the panel only displays/filters/confirms). The documented high-risk area is unchanged: `ImportReviewPage.tsx` still computes blocked buckets and eligibility locally (e.g. `shouldShowBlockedBucket`, the local `blocked` filter).
-- Priority: P1. Status: Open.
+- v0.1.42: the new Untracked files panel follows the desired state (backend returns `action`, `action_eligibility`, `safety_result`, `conflicts`, `reason`, `requires_review`; the panel only displays/filters/confirms).
+- v0.1.47 (IMPLEMENTED; CI and live acceptance pending): the Import Review action decision is backend-owned.
+  - `backend/import_review_decision.py` decides bucket, blocked/ready, block reason, next action, action label and selected source files; `POST /api/import-review/decision` serves it; the apply path asks it for the verdict and fails closed.
+  - The page's decision rules (`shouldShowBlockedBucket`, `applyBlockReason`, `targetPreviewBlockReason` and the rest) moved verbatim into `frontend/src/features/importReview/importReviewDecision.ts`; the page defines none of them.
+  - One shared fixture (`frontend/tests/fixtures/import_review_decision_cases.json`, 45 cases) is checked by both `tests/test_import_review_decision.py` and `frontend/tests/importReviewDecision.test.tsx`.
+- Why this stays Open:
+  - The page still evaluates the mirror locally for filters, counts and button state (contract-tested, but not served by the backend on every render).
+  - The selected-match state those rules read (`confidence_level`, `auto_fix_eligible`, `is_importable`) is still assembled in the page from suggestion and preflight responses.
+  - Other large panels (Clean, Acquire, Playlists) have not been audited the same way.
+- Priority: P1. Status: Open (narrowed).
 
 ## ARCH-006 Provider Boundaries Are Inconsistent
 

@@ -2374,6 +2374,23 @@ export interface ImportTargetPreviewTrack {
   uses_release_id_in_path: boolean;
 }
 
+/** One authoritative Import Review decision (backend/import_review_decision.py). */
+export interface ImportReviewDecisionPayload {
+  match_bucket: string;
+  blocked: boolean;
+  ready: boolean;
+  can_apply: boolean;
+  apply_block_reason: string;
+  block_reason: string;
+  next_action: string;
+  action_label: string;
+  selected_source_files: string[];
+}
+
+export interface ImportReviewDecisionResponse extends ApiOkResponse {
+  decisions: ImportReviewDecisionPayload[];
+}
+
 export interface ImportTargetPreviewResponse extends ApiOkResponse {
   safe: boolean;
   status: 'safe' | 'blocked' | 'existing_folder';

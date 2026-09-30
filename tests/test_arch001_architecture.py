@@ -273,6 +273,7 @@ class ApiContractTests(unittest.TestCase):
             ("/api/library/untracked-recovery/candidates", "library_untracked_recovery_candidates"),
             ("/api/library/untracked-recovery/album-candidates", "library_untracked_recovery_album_candidates"),
             ("/api/library/untracked-recovery/plan", "library_untracked_recovery_plan"),
+            ("/api/import-review/decision", "import_review_decision"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)

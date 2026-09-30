@@ -4,9 +4,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 THEME_SOURCE = (ROOT / "frontend" / "src" / "theme.ts").read_text(encoding="utf-8")
-IMPORT_REVIEW_SOURCE = (
-    ROOT / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
-).read_text(encoding="utf-8")
+# ARCH-005 moved the decision rules (action labels included), verbatim, into
+# importReviewDecision.ts; the source here is that module followed by the page.
+_REVIEW_FEATURE = ROOT / "frontend" / "src" / "features" / "importReview"
+IMPORT_REVIEW_SOURCE = ((_REVIEW_FEATURE / "importReviewDecision.ts").read_text(encoding="utf-8") + "\n"
+                        + (_REVIEW_FEATURE / "ImportReviewPage.tsx").read_text(encoding="utf-8"))
 
 
 

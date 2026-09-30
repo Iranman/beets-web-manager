@@ -30,7 +30,11 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = app_family_source()
-IMPORT_REVIEW_SOURCE = (ROOT / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx").read_text(encoding="utf-8")
+# ARCH-005 moved the decision rules (action labels included), verbatim, into
+# importReviewDecision.ts; the source here is that module followed by the page.
+_REVIEW_FEATURE = ROOT / "frontend" / "src" / "features" / "importReview"
+IMPORT_REVIEW_SOURCE = ((_REVIEW_FEATURE / "importReviewDecision.ts").read_text(encoding="utf-8") + "\n"
+                        + (_REVIEW_FEATURE / "ImportReviewPage.tsx").read_text(encoding="utf-8"))
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 

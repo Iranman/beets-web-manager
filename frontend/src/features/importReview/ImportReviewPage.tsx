@@ -34,6 +34,7 @@ import {
   getReviewQueue,
   importWithId,
   matchAlbum,
+  decideImportReviewRemote,
   previewImportTarget,
   reconcileAutoEnqueueImport,
   revalidateImportReview,
@@ -45,6 +46,23 @@ import {
   validateManualMusicBrainzId,
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
+import {
+  sameMbid,
+  isMusicBrainzUuid,
+  existingAlbumId,
+  hasAudioMismatchEvidence,
+  itemMatchBucket,
+  selectedImportRows,
+  selectedImportSourceFiles,
+  actionLabel,
+  applyBlockReason,
+  storedBlockedReason,
+  storedBlockedNextAction,
+  shouldShowBlockedBucket,
+  shouldShowReadyBucket,
+  blockedActionHint,
+} from './importReviewDecision';
+import type { MatchBucket, MatchConfidenceLevel, TrackRow, TargetPreviewState, SelectedMatch } from './importReviewDecision';
 import type {
   AiSuggestResponse,
   AiSuggestion,
@@ -79,7 +97,6 @@ export type QueueFilter =
 
 type SourceFilter = ReviewOriginType;
 type ReviewBucket = Exclude<ReviewItemType, 'all'>;
-type MatchBucket = 'ready' | 'blocked' | 'audio_mismatch' | 'failed' | 'no_candidate' | 'needs_id';
 
 type ActionState = {
   status: 'idle' | 'running' | 'success' | 'warning' | 'error';
@@ -87,14 +104,6 @@ type ActionState = {
   jobId?: string;
 };
 
-type MatchConfidenceLevel = 'high' | 'medium' | 'low' | 'blocked' | 'not_importable';
-
-type TargetPreviewState = {
-  status: 'idle' | 'loading' | 'ready' | 'error';
-  key: string;
-  preview?: ImportTargetPreviewResponse;
-  error?: string;
-};
 
 type ManualValidationState = {
   status: 'idle' | 'checking' | 'valid' | 'error';
@@ -106,48 +115,6 @@ type ManualValidationState = {
   selectedRecordingCandidate?: ReviewRecordingCandidate;
 };
 
-type SelectedMatch = {
-  release_group_id: string;
-  representative_release_id: string;
-  artist: string;
-  album: string;
-  year: string;
-  track_match_count: number | null;
-  total_tracks: number | null;
-  local_track_count: number | null;
-  track_mapping: TrackRow[];
-  preflight_status: 'passed' | 'failed' | 'stale' | 'not_run';
-  preflight_reason: string;
-  is_release_group_usable: boolean;
-  is_importable: boolean;
-  is_partial_import: boolean;
-  confidence_score: number | null;
-  confidence_level: MatchConfidenceLevel;
-  auto_fix_eligible: boolean;
-  auto_fix_requires_review: boolean;
-  auto_fix_reason: string;
-  missing_track_count: number;
-  match_count: number | null;
-  preflight_ok: boolean | null;
-  identity_validated?: boolean;
-  candidate_identity_error?: string;
-  representative_release_group_id?: string;
-  rejected_representative_release_id?: string;
-  release_group_diagnostics?: Record<string, unknown>;
-  source: 'ai' | 'candidate' | 'manual' | 'musicbrainz_acoustid' | 'musicbrainz' | string;
-  ai_available?: boolean;
-  ai_unavailable_reason?: string;
-  matching_method?: string;
-  warnings?: string[];
-  action_eligibility?: unknown;
-  eligibility_reason?: string;
-  matching_contract?: Record<string, unknown>;
-  acoustid_corroboration?: string;
-  fingerprint_conflicts?: string[];
-  recording_id_conflicts?: string[];
-  title_mismatch_warnings?: string[];
-  required_review?: boolean;
-};
 
 type ConfirmIntent =
   | { kind: 'apply'; item: ReviewItem; mbid: string }
@@ -376,9 +343,6 @@ function reviewItemStateKey(item: ReviewItem): string {
   ].join('::');
 }
 
-function preflightHasAudioMismatch(preflight?: ReviewEvidence['preflight']): boolean {
-  return Boolean(preflight?.acoustid_mismatch);
-}
 
 function audioMismatchPreflightDetail(preflight?: ReviewEvidence['preflight']): string {
   if (!preflight?.acoustid_mismatch) return '';
@@ -388,43 +352,11 @@ function audioMismatchPreflightDetail(preflight?: ReviewEvidence['preflight']): 
   return `AcoustID fingerprint mismatch: selected release ${selected} hit(s), strongest alternate ${top} hit(s).${topRelease}`;
 }
 
-function hasAudioMismatchEvidence(item?: Pick<ReviewItem, 'evidence'>): boolean {
-  return preflightHasAudioMismatch(item?.evidence?.preflight);
-}
 
 function audioMismatchDetail(item?: Pick<ReviewItem, 'evidence'>): string {
   return audioMismatchPreflightDetail(item?.evidence?.preflight);
 }
 
-function itemMatchBucket(item: ReviewItem): MatchBucket {
-  if (hasAudioMismatchEvidence(item)) return 'audio_mismatch';
-  const statusKey = (item.status_key || item.status || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const explicitFailed = new Set([
-    'auto_enqueue_failed',
-    'import_failed',
-    'import_failed_needs_reconcile',
-    'preflight_failed',
-    'failed',
-  ]);
-  if (explicitFailed.has(statusKey)) return 'failed';
-  const explicitBlocked = new Set([
-    'blocked',
-    'not_importable',
-    'target_conflict',
-    'purge_required',
-    'duplicate_only',
-    'duplicate_cleanup',
-    'no_verified_tracks',
-    'format_policy_rejected',
-  ]);
-  if (item.blocked_reason || explicitBlocked.has(statusKey)) return 'blocked';
-  if (item.type === 'library_no_mb') return 'needs_id';
-  if (item.type !== 'pending_ai') return item.mb_valid ? 'ready' : 'no_candidate';
-  if (!item.mb_valid && !item.mb_albumid) return 'no_candidate';
-  const preflight = item.evidence?.preflight;
-  if (preflight && preflight.ok === false) return 'failed';
-  return 'ready';
-}
 
 function partialFullAlbumMismatch(item: ReviewItem): boolean {
   const preflight = item.evidence?.preflight;
@@ -668,13 +600,6 @@ function candidateMeta(candidate: ReviewCandidate): string[] {
   return parts.filter(Boolean);
 }
 
-function sameMbid(left?: string, right?: string): boolean {
-  return Boolean(left && right && left.trim().toLowerCase() === right.trim().toLowerCase());
-}
-
-function isMusicBrainzUuid(value?: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test((value ?? '').trim());
-}
 
 function musicBrainzUrl(mbAlbumId?: string): string {
   return mbAlbumId ? `https://musicbrainz.org/release/${mbAlbumId}` : '';
@@ -1201,9 +1126,6 @@ function selectedReleaseGroupId(item: ReviewItem, mbid: string, response?: AiSug
   return match?.mb_releasegroupid || item.evidence?.preflight?.release_group || '';
 }
 
-function existingAlbumId(item: ReviewItem): number {
-  return Number(item.existing_album_id || item.existing_album_ids?.[0] || 0);
-}
 
 function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): string {
   if (!selectedMatch) return '';
@@ -1225,22 +1147,6 @@ function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): stri
   ].join('::');
 }
 
-function actionLabel(item: ReviewItem, selectedMatch?: SelectedMatch, preview?: ImportTargetPreviewResponse): string {
-  if (item.type === 'library_no_mb') return item.target_kind === 'item' ? 'Attach recording ID' : 'Match album';
-  const selectedCount = selectedMatch ? selectedImportSourceFiles(selectedMatch, preview).length : 0;
-  const previewCount = preview?.tracks_to_import_count ?? selectedCount;
-  if (selectedMatch?.identity_validated === false) return 'Import blocked';
-  if (selectedMatch?.is_partial_import) {
-    const n = Math.max(0, Math.min(selectedCount || previewCount, previewCount));
-    return existingAlbumId(item)
-      ? `Repair ${n} matched track${n === 1 ? '' : 's'}`
-      : `Import ${n} matched track${n === 1 ? '' : 's'}`;
-  }
-  if (selectedMatch?.auto_fix_eligible) {
-    return existingAlbumId(item) ? 'Complete Verified Repair' : 'Complete Verified Import';
-  }
-  return existingAlbumId(item) ? 'Repair with ID' : 'Import with ID';
-}
 
 function currentTargetPreviewState(
   item: ReviewItem,
@@ -1252,153 +1158,6 @@ function currentTargetPreviewState(
   return key && state?.key === key ? state : undefined;
 }
 
-function targetPreviewBlockReason(
-  item: ReviewItem,
-  selectedMatch?: SelectedMatch,
-  targetPreviewState?: TargetPreviewState,
-): string {
-  const importLike = item.type === 'pending_ai' && !existingAlbumId(item);
-  if (!importLike || !selectedMatch) return '';
-  if (!selectedMatch.is_importable) return '';
-  if (!targetPreviewState || targetPreviewState.status === 'idle') {
-    return 'Import blocked until the target path preview is available.';
-  }
-  if (targetPreviewState.status === 'loading') {
-    return 'Import blocked until the target path preview finishes.';
-  }
-  if (targetPreviewState.status === 'error') {
-    return targetPreviewState.error || 'Import blocked because the target path preview failed.';
-  }
-  const preview = targetPreviewState.preview;
-  if (!preview) return 'Import blocked until the target path preview is available.';
-  if (!preview.safe) {
-    if (preview.next_action === 'verify_or_cleanup_unmatched') {
-      return 'Import blocked: no verified tracks selected after automatic verification; purge/quarantine the unmatched source file or choose another match.';
-    }
-    return preview.blocked_reasons?.[0]
-      ? `Import blocked by target path preview: ${preview.blocked_reasons[0]}.`
-      : 'Import blocked because the target path preview is not safe.';
-  }
-  const selectedCount = selectedImportSourceFiles(selectedMatch, preview).length;
-  const previewCount = preview.tracks_to_import_count ?? selectedCount;
-  if (previewCount < 1 || selectedCount < 1) return 'Import blocked: no verified tracks selected for import.';
-  if (previewCount !== selectedCount) return 'Import blocked: selected file count does not match target preview.';
-  return '';
-}
-
-function applyBlockReason(
-  item: ReviewItem,
-  mbid: string,
-  selectedMatch?: SelectedMatch,
-  targetPreviewState?: TargetPreviewState,
-): string {
-  const releaseGroupId = mbid.trim();
-  if (!releaseGroupId) {
-    return item.target_kind === 'item'
-      ? 'Enter or select a MusicBrainz recording ID first.'
-      : 'Enter or select a MusicBrainz Release Group ID first.';
-  }
-  const importLike = item.type === 'pending_ai' && !existingAlbumId(item);
-  if (!importLike) {
-    if (selectedMatch?.preflight_status === 'failed') {
-      return 'Import blocked because this candidate failed tracklist preflight.';
-    }
-    return '';
-  }
-  if (!selectedMatch) {
-    return 'Select the visible MusicBrainz match first so its track comparison controls the import.';
-  }
-  if (!sameMbid(selectedMatch.release_group_id, releaseGroupId)) {
-    return 'Import blocked because the visible match and Release Group ID field are out of sync.';
-  }
-  if (!isMusicBrainzUuid(selectedMatch.release_group_id)) {
-    return 'Import blocked because this candidate does not include a valid MusicBrainz Release Group ID.';
-  }
-  if (!isMusicBrainzUuid(selectedMatch.representative_release_id)) {
-    return 'Import blocked because this candidate does not include a representative release for tracklist comparison.';
-  }
-  if (selectedMatch.identity_validated === false) {
-    return selectedMatch.candidate_identity_error || 'Import blocked: representative release does not belong to selected Release Group.';
-  }
-  if (!selectedMatch.track_mapping.length) {
-    return 'Import blocked until the visible candidate track comparison finishes.';
-  }
-  if (selectedMatch.preflight_status === 'not_run' || selectedMatch.preflight_status === 'stale') {
-    return 'Import blocked until preflight is refreshed for the selected visible candidate.';
-  }
-  if (selectedMatch.preflight_status === 'failed') {
-    return selectedMatch.preflight_reason || 'Import blocked because this candidate failed tracklist preflight.';
-  }
-  if (!selectedMatch.is_importable) {
-    return selectedMatch.preflight_reason || 'Import blocked because the selected match is not importable.';
-  }
-  const previewBlock = targetPreviewBlockReason(item, selectedMatch, targetPreviewState);
-  if (previewBlock) return previewBlock;
-  return '';
-}
-
-function storedBlockedReason(item: ReviewItem): string {
-  if (item.blocked_reason) return item.blocked_reason;
-  const text = [item.status, item.reason].filter(Boolean).join(' ');
-  return /\bblock(?:ed|ing)?\b/i.test(text) ? item.reason || item.status || 'Import blocked.' : '';
-}
-
-function storedBlockedNextAction(item: ReviewItem): string {
-  return item.blocked_next_action || '';
-}
-
-function actionBlockReasonForFilter(
-  item: ReviewItem,
-  mbid: string,
-  selectedMatch?: SelectedMatch,
-  targetPreviewState?: TargetPreviewState,
-): string {
-  const selectedBlock = selectedMatch ? applyBlockReason(item, mbid, selectedMatch, targetPreviewState) : '';
-  return selectedBlock || storedBlockedReason(item);
-}
-
-function shouldShowBlockedBucket(
-  item: ReviewItem,
-  mbid: string,
-  selectedMatch?: SelectedMatch,
-  targetPreviewState?: TargetPreviewState,
-): boolean {
-  if (item.type === 'skipped' || hasAudioMismatchEvidence(item)) return false;
-  return Boolean(actionBlockReasonForFilter(item, mbid, selectedMatch, targetPreviewState));
-}
-
-function shouldShowReadyBucket(
-  item: ReviewItem,
-  mbid: string,
-  selectedMatch?: SelectedMatch,
-  targetPreviewState?: TargetPreviewState,
-): boolean {
-  if (item.type === 'skipped' || hasAudioMismatchEvidence(item)) return false;
-  if (shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState)) return false;
-  if (!selectedMatch) return false;
-  if (!selectedMatch.is_importable) return false;
-  if (!sameMbid(selectedMatch.release_group_id, mbid)) return false;
-  if (!isMusicBrainzUuid(selectedMatch.release_group_id)) return false;
-  if (!isMusicBrainzUuid(selectedMatch.representative_release_id)) return false;
-  if (selectedMatch.preflight_status !== 'passed') return false;
-  const preview = targetPreviewState?.status === 'ready' ? targetPreviewState.preview : undefined;
-  if (!preview || !preview.safe) return false;
-  if ((preview.real_conflict_count ?? 0) > 0) return false;
-  const selectedCount = selectedImportSourceFiles(selectedMatch, preview).length;
-  const previewCount = preview.tracks_to_import_count ?? selectedCount;
-  return selectedCount > 0 && previewCount > 0 && selectedCount === previewCount;
-}
-
-function blockedActionHint(reason: string): string {
-  const value = reason.toLowerCase();
-  if (value.includes('music format preferences') || value.includes('format policy')) return 'Choose another source or update Music Format Preferences before retrying.';
-  if (value.includes('target path')) return 'Fix the target path conflict, then retry this item.';
-  if (value.includes('out of sync') || value.includes('visible musicbrainz match')) return 'Select the visible candidate again so the ID field and comparison agree.';
-  if (value.includes('release group id') || value.includes('valid musicbrainz')) return 'Use Find Match or enter a valid MusicBrainz Release or Release Group ID.';
-  if (value.includes('preflight') || value.includes('tracklist') || value.includes('not importable')) return 'Choose a release that matches the files, or delete the source folder if the audio is wrong.';
-  if (value.includes('no verified tracks') || value.includes('selected file count')) return 'Adjust the selected track mapping before importing.';
-  return 'Resolve this block before importing; uncertain audio stays in review.';
-}
 
 function canDeleteFolder(item: ReviewItem): boolean {
   return Boolean(item.path) && (item.type === 'pending_ai' || item.type === 'library_no_mb');
@@ -1482,51 +1241,6 @@ function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewIt
   );
 }
 
-interface TrackRow {
-  num: number;
-  local_title: string;
-  mb_title: string;
-  mb_trackid: string;
-  status:
-    | 'matched'
-    | 'fuzzy'
-    | 'verified_match'
-    | 'acoustid_verified'
-    | 'different'
-    | 'conflicting'
-    | 'missing'
-    | 'extra'
-    | 'unmatched_extra'
-    | 'ignored_for_this_import';
-  source_path?: string;
-}
-
-const IMPORTABLE_TRACK_STATUSES = new Set<TrackRow['status']>([
-  'matched',
-  'fuzzy',
-  'verified_match',
-  'acoustid_verified',
-]);
-
-function selectedImportRows(rows: TrackRow[] = []): TrackRow[] {
-  return rows.filter((row) => IMPORTABLE_TRACK_STATUSES.has(row.status) && Boolean(row.source_path));
-}
-
-function selectedImportSourceFiles(
-  match?: Pick<SelectedMatch, 'track_mapping' | 'identity_validated'>,
-  preview?: ImportTargetPreviewResponse,
-): string[] {
-  if (match?.identity_validated === false) return [];
-  const conflicted = new Set(
-    (preview?.tracks ?? [])
-      .filter((track) => track.target_conflict && track.source_path)
-      .map((track) => track.source_path),
-  );
-  const files = selectedImportRows(match?.track_mapping ?? [])
-    .map((row) => row.source_path || '')
-    .filter((path) => path && !conflicted.has(path));
-  return [...new Set(files)];
-}
 
 const CLEANUP_TRACK_STATUSES = new Set<TrackRow['status']>([
   'extra',
@@ -4346,6 +4060,30 @@ export function ImportReviewPage({
     if (runningJobItemIdsRef.current.has(item.id)) return;
     setAction(item.id, { status: 'running', message: 'Starting backend job...' });
     const sm = selectedMatches[item.id];
+    // The backend decides (ARCH-005): the page's own check is an instant
+    // mirror; this is the verdict. Unreachable backend = nothing starts.
+    try {
+      const response = await decideImportReviewRemote([{
+        item,
+        mbid,
+        selected_match: sm ?? null,
+        target_preview_state: currentTargetPreviewState(item, sm, targetPreviews) ?? null,
+      }]);
+      const verdict = response.decisions?.[0];
+      if (!verdict || !verdict.can_apply) {
+        setAction(item.id, {
+          status: 'error',
+          message: verdict?.apply_block_reason || 'The backend did not allow this action.',
+        });
+        return;
+      }
+    } catch {
+      setAction(item.id, {
+        status: 'error',
+        message: 'Could not confirm this action with the backend; nothing was started.',
+      });
+      return;
+    }
     const representativeId = sm?.representative_release_id && sm.representative_release_id !== sm.release_group_id
       ? sm.representative_release_id
       : mbid;
