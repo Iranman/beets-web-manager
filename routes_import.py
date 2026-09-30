@@ -553,6 +553,12 @@ def import_review_queue():
                     evidence=row.get("evidence") or {},
                 ),
             )
+        row["decision"] = _import_review_decision.decide({
+            "item": row,
+            "mbid": row.get("mb_releasegroupid") or row.get("mb_albumid") or "",
+            "selected_match": None,
+            "target_preview_state": None,
+        })
 
     rows.sort(key=lambda r: (
         {"pending_ai": 0, "skipped": 1, "library_no_mb": 2}.get(r["type"], 9),

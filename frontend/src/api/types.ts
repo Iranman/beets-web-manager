@@ -301,6 +301,17 @@ export interface ReviewItem {
   source_batch_id?: string;
   source_folder?: string;
   created_by_workflow?: string;
+  decision?: {
+    match_bucket: 'ready' | 'blocked' | 'audio_mismatch' | 'failed' | 'no_candidate' | 'needs_id';
+    blocked: boolean;
+    ready: boolean;
+    can_apply: boolean;
+    apply_block_reason: string;
+    block_reason: string;
+    next_action: string;
+    action_label: string;
+    selected_source_files: string[];
+  };
 }
 
 export interface ReviewQueueResponse {
