@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.43 - 2026-09-29
+
 ### Added
 - **Reviewed cleanup of a duplicate album row's only copy.** When a proven duplicate (shared AcoustID recording or identical bytes) is the only item of a duplicate album row of the keeper's own release, the operator-reviewed cleanup plan may now remove it and retire that emptied row.
   - Required: same Release ID and Release Group, the keeper in a different row at the same disc/track.
