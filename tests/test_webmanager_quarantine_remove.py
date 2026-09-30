@@ -296,7 +296,7 @@ class QuarantineRemoveItemsTests(unittest.TestCase):
     def test_rollback_refuses_when_the_album_id_was_taken_again(self):
         dup, dup_path, dup_album = self._sibling_rows()
         data = self._retire(dup, dup_path, dup_album.id).get_json()
-        from beetsplug.webmanager.merge_ops import _restore_album_row
+        from beetsplug.webmanager.replace_ops import _restore_album_row
         _restore_album_row(self.lib, dup_album.id, {"album": "someone else"})
         rb = self._post("/webmanager/quarantine-remove-items/rollback", {"quarantine_id": data["quarantine_id"]})
         self.assertEqual(rb.status_code, 409)

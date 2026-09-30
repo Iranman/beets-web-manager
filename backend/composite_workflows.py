@@ -183,125 +183,58 @@ def write_staging_tags(path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 
 
+#: Payload keys of the retired in-place merge that rewrote identity on the
+#: moved items (album-level fields, Recording ID, disc/track). Refused: an
+#: album-row merge is an ownership change only.
+_IDENTITY_REWRITE_KEYS = ("adopt_target_fields", "item_field_overrides", "reassign_fields")
+
+
 def plan_album_duplicate_merge(
     payload: Dict[str, Any],
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Plan merging duplicate or split albums into a single canonical album."""
-    ad = adapter or beets_adapter
-    st = _get_store(store)
+    """Plan moving album rows (or some of their items) into a retained row.
 
-    target_aid = int(payload.get("target_album_id") or payload.get("target_id") or 0)
-    source_aids = [int(x) for x in (payload.get("source_album_ids") or payload.get("source_ids") or []) if int(x) != target_aid]
-    if not target_aid or not source_aids:
-        return {"ok": False, "error": "target_album_id and non-empty source_album_ids required"}
-
-    target_album = ad.get_album(target_aid)
-    if not target_album:
-        return {"ok": False, "error": f"Target album {target_aid} not found in library"}
-
-    target_items = ad.find_all_items_by_album_id(target_aid)
-    source_items = []
-    source_albums = []
-    for sid in source_aids:
-        sa = ad.get_album(sid)
-        if sa:
-            source_albums.append(sa)
-            items = ad.find_all_items_by_album_id(sid)
-            source_items.extend(items)
-
-    changes = []
-    reassign_fields = {
-        "album_id": target_aid,
-        "album": target_album.get("album", ""),
-        "albumartist": target_album.get("albumartist", ""),
-        "albumartist_sort": target_album.get("albumartist_sort", ""),
-        "albumartist_credit": target_album.get("albumartist_credit", ""),
-        "mb_albumid": target_album.get("mb_albumid", ""),
-        "mb_releasegroupid": target_album.get("mb_releasegroupid", ""),
-        "mb_albumartistid": target_album.get("mb_albumartistid", ""),
-        "year": target_album.get("year", 0),
-        "genre": target_album.get("genre", ""),
-    }
-
-    before_state = []
-    for it in source_items:
-        iid = it.get("id")
-        before_state.append({
-            "item_id": iid,
-            "album_id": it.get("album_id"),
-            "album": it.get("album"),
-            "albumartist": it.get("albumartist"),
-            "path": _decode_path(it.get("path")),
-        })
-        changes.append({
-            "item_id": iid,
-            "title": it.get("title", ""),
-            "old_album_id": it.get("album_id"),
-            "new_album_id": target_aid,
-            "fields": reassign_fields,
-        })
-
-    tx = st.create(
-        operation_type="Merge Album",
-        status="Preview",
-        summary=f"Merge {len(source_aids)} albums into album {target_aid} ({target_album.get('album')})",
-        changes=changes,
-        rollback_available=True,
-        metadata={
-            "target_album_id": target_aid,
-            "source_album_ids": source_aids,
-            "reassign_fields": reassign_fields,
-            "item_ids": [it.get("id") for it in source_items if it.get("id")],
-            "before_state": before_state,
-        },
-    )
-
-    return {
-        "ok": True,
-        "operation_id": tx["id"],
-        "token": tx["id"],
-        "status": "Preview",
-        "target_album": target_album,
-        "source_albums": source_albums,
-        "item_count": len(source_items),
-        "changes": changes,
-    }
+    Delegates to the one album-row merge authority
+    (backend.album_row_merge.plan_rows_merge): same Release Group and Release
+    ID, free slots, unchanged identity and content; nothing but item
+    ownership changes. Accepts ``source_album_ids`` or ``source_album_id``
+    and an optional ``item_ids`` subset."""
+    import backend.album_row_merge as album_row_merge
+    if any(payload.get(k) for k in _IDENTITY_REWRITE_KEYS):
+        return {"ok": False, "code": "identity_rewrite_not_supported",
+                "error": "An album-row merge never rewrites Recording, Release or track identity on the items it "
+                         "moves. Attach the correct recording to each item first, then merge."}
+    sources = payload.get("source_album_ids") or payload.get("source_ids")
+    if not sources and (payload.get("source_album_id") or payload.get("source_id")):
+        sources = [payload.get("source_album_id") or payload.get("source_id")]
+    if isinstance(sources, (int, str)):
+        sources = [sources]
+    res = album_row_merge.plan_rows_merge(
+        payload.get("target_album_id") or payload.get("target_id") or 0, sources or [], payload.get("item_ids"),
+        reason=_s(payload.get("reason")), adapter=adapter, store=store)
+    if res.get("ok"):
+        res.update(token=res["operation_id"], item_count=len(res["moves"]), changes=res["moves"])
+    return res
 
 
 def apply_album_duplicate_merge(
     operation_id: str,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    approved_by: str = "operator merge request",
 ) -> Dict[str, Any]:
-    """Execute album duplicate merge via BeetsAdapter."""
-    ad = adapter or beets_adapter
-    st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-
-    target_aid = meta.get("target_album_id")
-    source_aids = meta.get("source_album_ids", [])
-    item_ids = meta.get("item_ids", [])
-    fields = meta.get("reassign_fields", {})
-
-    if item_ids and fields:
-        ad.modify(fields=fields, item_ids=[int(x) for x in item_ids], write=True, move=True)
-
-    # Clean up empty source albums
-    if source_aids:
-        ad.remove(album_ids=[int(x) for x in source_aids], delete_files=False)
-
-    st.update(operation_id, status="Completed", logs=[f"Merged {len(item_ids)} tracks into album {target_aid}"])
-    return {
-        "ok": True,
-        "operation_id": operation_id,
-        "status": "Completed",
-        "target_album_id": target_aid,
-        "merged_items_count": len(item_ids),
-        "source_albums_removed": len(source_aids),
-    }
+    """Apply a planned album-row merge for a caller that holds the operator's
+    decision (a merge request or an import the operator started)."""
+    import backend.album_row_merge as album_row_merge
+    res = album_row_merge.approve_and_apply(operation_id, approved_by=approved_by, adapter=adapter, store=store)
+    if res.get("ok"):
+        moved = len(_get_store(store).get(operation_id).get("metadata", {}).get("items") or [])
+        res.update(moved=moved, merged_items_count=moved, source_albums_removed=len(res.get("retired_album_ids") or []))
+    elif not res.get("error"):
+        res["error"] = "; ".join(res.get("verification_problems") or []) or "Album-row merge did not verify."
+    return res
 
 
 def rollback_album_duplicate_merge(
@@ -309,37 +242,21 @@ def rollback_album_duplicate_merge(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Roll back album merge by restoring items to original album IDs."""
-    ad = adapter or beets_adapter
-    st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-    before_state = meta.get("before_state", [])
-
-    for state in before_state:
-        iid = state.get("item_id")
-        orig_aid = state.get("album_id")
-        orig_album = state.get("album")
-        if iid and orig_aid:
-            ad.modify(
-                fields={"album_id": orig_aid, "album": orig_album},
-                item_ids=[int(iid)],
-                write=True,
-                move=True,
-            )
-
-    st.update(operation_id, status="Rolled Back", logs=["Restored original item album assignments"])
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    """Restore the original rows and item ownership through the engine."""
+    import backend.album_row_merge as album_row_merge
+    return album_row_merge.rollback_album_row_merge(operation_id, adapter=adapter, store=store)
 
 
 def merge_duplicate_albums(
     target_album_id: int,
-    source_album_ids: List[int],
+    source_album_ids: Any,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Helper executing complete plan & apply of album duplicate merge."""
-    p_res = plan_album_duplicate_merge({"target_album_id": target_album_id, "source_album_ids": source_album_ids}, adapter=adapter, store=store)
+    """Plan and apply a whole-row merge (one source row id or a list)."""
+    sources = [source_album_ids] if isinstance(source_album_ids, (int, str)) else list(source_album_ids or [])
+    p_res = plan_album_duplicate_merge({"target_album_id": target_album_id, "source_album_ids": sources},
+                                       adapter=adapter, store=store)
     if not p_res.get("ok"):
         return p_res
     return apply_album_duplicate_merge(p_res["operation_id"], adapter=adapter, store=store)
@@ -347,23 +264,23 @@ def merge_duplicate_albums(
 
 def merge_split_album_items(
     target_album_id: int,
+    source_album_id: int,
     item_ids: List[int],
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Reassign specific split items to a target album."""
-    ad = adapter or beets_adapter
-    target = ad.get_album(int(target_album_id))
-    if not target:
-        return {"ok": False, "error": f"Target album {target_album_id} not found"}
-    fields = {
-        "album_id": int(target_album_id),
-        "album": target.get("album", ""),
-        "albumartist": target.get("albumartist", ""),
-        "mb_albumid": target.get("mb_albumid", ""),
-    }
-    ad.modify(fields=fields, item_ids=[int(x) for x in item_ids], write=True, move=True)
-    return {"ok": True, "target_album_id": target_album_id, "items_reassigned": len(item_ids)}
+    """Move the given items of one source row into the target row; the
+    source row is retired only if that empties it."""
+    p_res = plan_album_duplicate_merge(
+        {"target_album_id": target_album_id, "source_album_ids": [source_album_id],
+         "item_ids": [int(x) for x in item_ids or []]}, adapter=adapter, store=store)
+    if not p_res.get("ok"):
+        return p_res
+    res = apply_album_duplicate_merge(p_res["operation_id"], adapter=adapter, store=store)
+    if res.get("ok"):
+        res.update(items_reassigned=res.get("moved", 0),
+                   source_album_deleted=int(source_album_id) in (res.get("retired_album_ids") or []))
+    return res
 
 
 # -----------------------------------------------------------------------------
@@ -481,37 +398,111 @@ def rollback_artist_folder_reconcile(
 # -----------------------------------------------------------------------------
 
 
+def _reconcile_duplicate_pairs(payload: Dict[str, Any]) -> List[Dict[str, int]]:
+    """(imported duplicate -> existing survivor) pairs of a reconcile payload."""
+    pairs = []
+    for detail in payload.get("dup_details") or []:
+        survivors = [int(x) for x in detail.get("survivor_item_ids") or [] if x]
+        if detail.get("dup_item_id") and survivors:
+            pairs.append({"delete_item_id": int(detail["dup_item_id"]), "keep_item_id": survivors[0]})
+    return pairs
+
+
 def plan_existing_album_reconcile(
     payload_or_target_id: Any = None,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Plan reconciling tracks with an existing library album."""
+    """Plan reconciling an imported album row with the existing row of the
+    same release. Nothing changes here.
+
+    * ``move_item_ids`` (imported items filling free slots) become one
+      album-row merge plan (ownership only; see plan_album_duplicate_merge).
+    * ``dup_details`` (imported copies of slots the existing row already
+      holds) are recorded and become a reviewed duplicate cleanup when the
+      plan is applied -- removed only with audio proof and an approval.
+    * With neither, the whole imported row is merged.
+    """
+    import backend.duplicate_cleanup as duplicate_cleanup
     ad = adapter or beets_adapter
     st = _get_store(store)
     payload = payload_or_target_id if isinstance(payload_or_target_id, dict) else kwargs
 
-    target_aid = int(payload.get("target_album_id") or payload.get("album_id") or 0)
+    target_aid = int(payload.get("existing_album_id") or payload.get("target_album_id") or payload.get("album_id") or 0)
     imported_aid = int(payload.get("imported_album_id") or payload.get("source_album_id") or 0)
-
-    target_album = ad.get_album(target_aid)
-    if not target_album:
+    if not target_aid or not imported_aid or target_aid == imported_aid:
+        return {"ok": False, "code": "invalid_ids", "error": "An existing and a different imported album row are required."}
+    if not ad.get_album(target_aid):
         return {"ok": False, "error": f"Target album {target_aid} not found"}
 
-    return plan_album_duplicate_merge(
-        {"target_album_id": target_aid, "source_album_ids": [imported_aid] if imported_aid else []},
-        adapter=adapter,
-        store=store,
-    )
+    pairs = _reconcile_duplicate_pairs(payload)
+    move_ids = [int(x) for x in payload.get("move_item_ids") or []]
+    reason = _s(payload.get("reason")) or "Existing album reconciliation"
+    if move_ids or not pairs:
+        plan = plan_album_duplicate_merge(
+            {"target_album_id": target_aid, "source_album_ids": [imported_aid],
+             "item_ids": move_ids or None, "reason": reason}, adapter=adapter, store=store)
+        if not plan.get("ok"):
+            return plan
+        st.update(plan["operation_id"], metadata={"pending_duplicate_pairs": pairs, "reconcile_reason": reason})
+        return {**plan, "duplicate_pairs": pairs}
+    # Only duplicates: the cleanup itself is the plan (Preview, needs approval).
+    plan = duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=reason, adapter=adapter, store=store,
+                                                   allow_sibling_row_retire=True)
+    if not plan.get("ok"):
+        return {**plan, "error": plan.get("error") or "No duplicate passed re-verification."}
+    return {**plan, "token": plan["operation_id"], "duplicate_pairs": pairs}
 
 
 def apply_existing_album_reconcile(
     operation_id: str,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    approve_duplicates: bool = False,
+    approved_by: str = "import reconciliation",
 ) -> Dict[str, Any]:
-    return apply_album_duplicate_merge(operation_id, adapter=adapter, store=store)
+    """Apply a reconcile plan: the ownership moves now; the duplicate copies
+    through a reviewed cleanup that is applied only when the caller holds a
+    reviewer's decision (``approve_duplicates``) and otherwise stays in
+    Preview for an operator."""
+    import backend.duplicate_cleanup as duplicate_cleanup
+    st = _get_store(store)
+    try:
+        meta = st.get(operation_id).get("metadata") or {}
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+
+    def _apply_cleanup(cleanup_id: str) -> Dict[str, Any]:
+        if not approve_duplicates:
+            return {"ok": True, "operation_id": cleanup_id, "status": "Preview", "awaiting_approval": True}
+        st.update(cleanup_id, status="Approved", metadata={"approved_by": _s(approved_by)})
+        return duplicate_cleanup.apply_reviewed_cleanup(cleanup_id, adapter=adapter, store=store)
+
+    if meta.get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
+        res = _apply_cleanup(operation_id)
+        return {**res, "cleanup_operation_id": operation_id, "cleanup_status": res.get("status")}
+
+    res = apply_album_duplicate_merge(operation_id, adapter=adapter, store=store, approved_by=approved_by)
+    if not res.get("ok"):
+        return res
+    pairs = meta.get("pending_duplicate_pairs") or []
+    res.update(cleanup_operation_id=None, cleanup_status="none", cleanup_skipped=[])
+    if pairs:
+        plan = duplicate_cleanup.plan_reviewed_cleanup(
+            pairs, reason=_s(meta.get("reconcile_reason")), adapter=adapter, store=store,
+            allow_sibling_row_retire=True)
+        res["cleanup_skipped"] = plan.get("skipped") or []
+        if not plan.get("ok"):
+            res["cleanup_status"] = "not_proven"
+            if approve_duplicates:
+                res.update(ok=False, error="The duplicate copy could not be proven; both copies were kept.")
+            return res
+        cleanup = _apply_cleanup(plan["operation_id"])
+        res.update(cleanup_operation_id=plan["operation_id"], cleanup_status=cleanup.get("status"))
+        if not cleanup.get("ok"):
+            res.update(ok=False, error=cleanup.get("error") or "Duplicate cleanup did not verify.")
+    return res
 
 
 def rollback_existing_album_reconcile(
@@ -519,6 +510,10 @@ def rollback_existing_album_reconcile(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    import backend.duplicate_cleanup as duplicate_cleanup
+    family = (_get_store(store).get(operation_id).get("metadata") or {}).get("mutation_family")
+    if family == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
+        return duplicate_cleanup.rollback_reviewed_cleanup(operation_id, adapter=adapter, store=store)
     return rollback_album_duplicate_merge(operation_id, adapter=adapter, store=store)
 
 

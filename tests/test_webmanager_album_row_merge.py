@@ -142,6 +142,71 @@ class AlbumRowMergeTests(unittest.TestCase):
         strip = lambda rows: [r[:1] + r[2:] for r in rows]  # everything but album_id unchanged
         self.assertEqual(strip(after_items), strip(before_items))
 
+    # -- partial move ("partial": true) --------------------------------------
+
+    def _partial(self, tracks, **overrides):
+        items = [e for e in self._items_payload(self.source) if e["track"] in tracks]
+        return self._merge(items=items, partial=True, **overrides)
+
+    def test_subset_without_partial_is_still_refused(self):
+        res = self._merge(items=self._items_payload(self.source)[:1])
+        self.assertEqual(res.get_json()["error_code"], "SOURCE_NOT_FULLY_COVERED")
+
+    def test_partial_move_keeps_the_source_row_with_the_remaining_item(self):
+        before = self._state()
+        source_id = self.source.id
+        res = self._partial({4})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(res.get_json()["retired_album_ids"], [])
+        self.assertIsNotNone(self.lib.get_album(source_id))
+        self.assertEqual(sorted(i.track for i in self.lib.get_album(source_id).items()), [5])
+        self.assertEqual(sorted(i.track for i in self.lib.get_album(self.target.id).items()), [1, 2, 3, 4])
+        self.assertEqual(self._state()[2], before[2])  # no file changed
+        rb = self._post("/webmanager/album-row-merge/rollback", {"merge_id": res.get_json()["merge_id"]})
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        self.assertEqual(self._state(), before)
+
+    def test_partial_move_of_every_item_retires_the_row_and_rollback_restores_it(self):
+        before = self._state()
+        source_id = self.source.id
+        res = self._partial({4, 5})
+        self.assertEqual(res.get_json()["retired_album_ids"], [source_id])
+        self.assertIsNone(self.lib.get_album(source_id))
+        rb = self._post("/webmanager/album-row-merge/rollback", {"merge_id": res.get_json()["merge_id"]})
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        self.assertEqual(self._state(), before)
+
+    def test_partial_move_refuses_an_item_from_another_row_and_keeps_every_gate(self):
+        stranger = self._album("Stranger", [9])
+        items = self._items_payload(self.source)[:1] + self._items_payload(stranger)
+        res = self._merge(items=items, partial=True)
+        self.assertEqual(res.get_json()["error_code"], "ITEM_NOT_IN_SOURCE")
+        other = self._album("OtherEdition", [7], rel=REL_OTHER)
+        res = self._post("/webmanager/album-row-merge", {
+            "target_album_id": self.target.id, "source_album_ids": [other.id], "partial": True,
+            "expected_release_group_id": RG, "expected_release_id": REL, "items": self._items_payload(other)})
+        self.assertEqual(res.get_json()["error_code"], "EDITION_DIFFERS")
+        overlap = self._album("Overlap", [2, 8])
+        res = self._post("/webmanager/album-row-merge", {
+            "target_album_id": self.target.id, "source_album_ids": [overlap.id], "partial": True,
+            "expected_release_group_id": RG, "expected_release_id": REL,
+            "items": [e for e in self._items_payload(overlap) if e["track"] == 2]})
+        self.assertEqual(res.get_json()["error_code"], "SLOT_OVERLAP")
+
+    def test_failure_after_a_row_was_retired_restores_that_row(self):
+        from beets.library import Album
+        before = self._state()
+        real_remove = Album.remove
+
+        def remove_then_fail(album, *a, **k):
+            real_remove(album, *a, **k)
+            raise OSError("db locked")
+
+        with mock.patch.object(Album, "remove", remove_then_fail):
+            res = self._merge()
+        self.assertEqual(res.status_code, 500)
+        self.assertEqual(self._state(), before)
+
     def test_overlapping_slot_is_refused(self):
         overlap = self._album("Overlap", [2])
         res = self._post("/webmanager/album-row-merge", {

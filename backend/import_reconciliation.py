@@ -467,7 +467,8 @@ def resolve_review(review_id: str, choice: str, engine: Any, *, path: Optional[P
     """Apply a reviewer's decision for one open reconciliation review.
 
     ``keep_both`` records the decision and changes nothing. ``keep_existing``
-    retires the imported copy (existing album reconcile) and
+    retires the imported copy (a reviewed duplicate cleanup: only with audio
+    proof, into the engine quarantine) and
     ``keep_imported`` puts the imported file into the existing slot through
     the canonical item-file replacement (backend.item_replacement) -- both
     only through the engine's rollback-capable transactions, never by
@@ -509,7 +510,10 @@ def resolve_review(review_id: str, choice: str, engine: Any, *, path: Optional[P
             })
             if not plan.get("ok"):
                 return {"ok": False, "error": plan.get("error") or "reconcile plan rejected", "code": "engine_plan_failed"}
-            applied = engine.apply_existing_album_reconcile(plan.get("operation_id"))
+            # The reviewer's decision is the approval; the copy still goes
+            # only with audio proof (reviewed duplicate cleanup, quarantined).
+            applied = engine.apply_existing_album_reconcile(
+                plan.get("operation_id"), approve_duplicates=True, approved_by="reconciliation reviewer")
             if not applied.get("ok"):
                 return {"ok": False, "error": applied.get("error") or "reconcile apply failed", "code": "engine_apply_failed"}
             operations.append(_s(plan.get("operation_id")))

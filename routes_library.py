@@ -4199,6 +4199,14 @@ def apply_album_duplicate_resolver(aid):
                     )
                 retagged = len(retags)
             else:
+                # ARCH-020 (v0.1.44): the album-row merge is an ownership
+                # change only and refuses this payload
+                # (identity_rewrite_not_supported) -- it rewrote Recording
+                # ID and disc/track on the moved items without audio proof.
+                # Each source is therefore reported in retag_failures until
+                # retag is rebuilt on the recording-attach workflow (see
+                # docs/TECHNICAL_DEBT.md ARCH-020).
+                #
                 # ARCH-003 Wave 33 continuation: decomposed into N single-
                 # source-album album_duplicate_merge_v1 calls (one per
                 # distinct source album among the selected retag items)

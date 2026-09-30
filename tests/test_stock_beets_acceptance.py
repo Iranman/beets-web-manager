@@ -186,7 +186,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.3.1")
+        self.assertEqual(status_data["plugin_version"], "1.4.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -292,7 +292,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
             os.makedirs(target_plugin_dir, exist_ok=True)
             src_plugin_dir = os.path.join(repo_root, "beetsplug", "webmanager")
-            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py"]:
+            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "engine_common.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py"]:
                 shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
             # 2. Provision 64-hex secret API key file (256-bit entropy)
@@ -425,7 +425,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.3.1")
+                    self.assertEqual(status_res["plugin_version"], "1.4.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -703,6 +703,29 @@ webmanager:
             self.assertEqual(call("GET", f"/item/{it['item_id']}")[1]["album_id"], source_id)
         self.assertTrue(call("POST", "/webmanager/album-row-merge/rollback",
                              {"merge_id": merged["merge_id"]})[1].get("replayed"))
+
+        # Partial move (ARCH-020 legacy callers): one item of the two-item
+        # row moves, that row stays with the other; rollback restores it.
+        _s, target_album = call("GET", f"/album/{target_id}?expand")
+        t_items = target_album["items"]
+        one = t_items[0]
+        partial_body = {"target_album_id": source_id, "source_album_ids": [target_id], "partial": True,
+                        "expected_release_group_id": rg, "expected_release_id": rel,
+                        "items": [{"item_id": one["id"], "source_album_id": target_id,
+                                   "sha256": csha(container_path(one["path"])), "mb_trackid": one["mb_trackid"],
+                                   "disc": one["disc"], "track": one["track"]}]}
+        status, refused = call("POST", "/webmanager/album-row-merge", {**partial_body, "partial": False},
+                               key=f"accept-partial-{uuid.uuid4().hex[:8]}")
+        self.assertEqual((status, refused.get("error_code")), (409, "SOURCE_NOT_FULLY_COVERED"), refused)
+        status, part = call("POST", "/webmanager/album-row-merge", partial_body,
+                            key=f"accept-partial-{uuid.uuid4().hex[:8]}")
+        self.assertEqual(status, 200, part)
+        self.assertEqual(part["retired_album_ids"], [])
+        self.assertEqual(call("GET", f"/item/{one['id']}")[1]["album_id"], source_id)
+        self.assertEqual(call("GET", f"/album/{target_id}")[0], 200)  # still holds its other item
+        status, rolled = call("POST", "/webmanager/album-row-merge/rollback", {"merge_id": part["merge_id"]})
+        self.assertEqual(status, 200, rolled)
+        self.assertEqual(call("GET", f"/item/{one['id']}")[1]["album_id"], target_id)
 
         # Reviewed cleanup of a copy that is the only item of a duplicate row
         # of the same release: never emptied implicitly; retired only when

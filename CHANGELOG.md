@@ -6,6 +6,22 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+- **Album merges from Clean and from import now use the one album-row merge (ARCH-020).** The legacy merge reassigned `album_id` through a field update the engine refuses, and overwrote the Release ID and other album fields on the moved items.
+  - Clean's duplicate-album and Release-Group merges, the split-album move and the import's existing-album reconcile now move item ownership only, within one Release Group and Release ID, into free slots.
+  - Another edition, a release without IDs, or an already-filled slot is refused and stays for review.
+  - Beets plugin 1.4.0: `album-row-merge` accepts `"partial": true` to move some of a row's items; the source row is retired only when emptied.
+- **Import reconcile no longer removes imported duplicates on its own.** Imported copies of slots the existing album already holds become a reviewed duplicate cleanup: audio proof required, file moved to the engine quarantine, applied only on a reviewer's decision.
+- The Release-Group merge plan refuses a retained row whose files are missing, so stale rows are recovered first.
+
+### Fixed
+- `merge-duplicate-album`, the Release-Group merge and the split-album merge failed at run time because of mismatched call arguments.
+- Importing a single plugin module first could fail on a circular import; shared helpers now live in `engine_common.py`.
+- A failed merge now restores a source row even if Beets removed it before raising.
+
+### Known limitation
+- The duplicate resolver's "retag" action is refused (`identity_rewrite_not_supported`): it rewrote Recording ID and track position on moved items without audio proof.
+
 ## v0.1.43 - 2026-09-29
 
 ### Added

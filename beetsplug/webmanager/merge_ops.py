@@ -3,7 +3,8 @@
 POST /webmanager/album-row-merge
     {"target_album_id": T, "source_album_ids": [S, ...],
      "expected_release_group_id": RG, "expected_release_id": REL,
-     "items": [{"item_id", "source_album_id", "sha256", "mb_trackid", "disc", "track"}, ...]}
+     "items": [{"item_id", "source_album_id", "sha256", "mb_trackid", "disc", "track"}, ...],
+     "partial": false}
 
 An album-row merge is a library ownership change only: each listed item's
 ``album_id`` moves from its source row to the target row and nothing else is
@@ -11,9 +12,11 @@ written -- no tags, no file moves, no renames. It is refused unless:
 
 * every album row carries the expected Release Group AND Release ID (one
   canonical album, one edition);
-* ``items`` is exactly the set of items in the source rows, each still in
-  its expected source row with unchanged Recording ID, disc, track and
-  file content (SHA-256);
+* ``items`` is exactly the set of items in the source rows -- or, with
+  ``"partial": true``, a subset of them (a source row is then retired only
+  when every one of its items moved; otherwise it stays with the rest) --
+  each still in its expected source row with unchanged Recording ID, disc,
+  track and file content (SHA-256);
 * no (disc, track) slot would be filled twice and every item has a track.
 
 Postconditions (album_id and every identity field, path unchanged) are
@@ -43,7 +46,8 @@ from beets import config as beets_config
 from flask import g, jsonify, request
 
 from . import operations as ops
-from .replace_ops import _SHA256, _error, _fspath, _inside_allowed, _jsonable, _sha256_file
+from .engine_common import (_SHA256, _album_snapshot, _error, _fspath, _inside_allowed, _jsonable,
+                          _restore_album_row, _sha256_file)
 
 _MERGE_ID = re.compile(r"[0-9a-f]{32}")
 IDENTITY_FIELDS = ("mb_trackid", "mb_albumid", "mb_releasegroupid", "disc", "track", "path")
@@ -96,25 +100,8 @@ def _s(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _album_snapshot(album) -> Dict[str, Any]:
-    return {k: _jsonable(album.get(k)) for k in album.keys(computed=False)}
-
-
 def _identity(item) -> Dict[str, Any]:
     return {k: (_fspath(item.path) if k == "path" else _jsonable(item.get(k))) for k in IDENTITY_FIELDS}
-
-
-def _restore_album_row(lib, album_id: int, snapshot: Dict[str, Any]):
-    """Re-create a retired album row at its ORIGINAL id with its metadata.
-    Beets' Model.add always allocates a new id, so the row is inserted with
-    its id through the library's own transaction, then filled and stored
-    through the normal model API."""
-    with lib.transaction() as tx:
-        tx.mutate("INSERT INTO albums (id) VALUES (?)", (int(album_id),))
-    album = lib.get_album(int(album_id))
-    album.update({k: v for k, v in snapshot.items() if k != "id"})
-    album.store()
-    return album
 
 
 @ops.webmanager_bp.route("/album-row-merge/<string:merge_id>", methods=["GET"])
@@ -177,8 +164,11 @@ def run_album_row_merge():
             by_id[int(entry["item_id"])] = entry
         except (TypeError, ValueError, KeyError):
             return fail("each item needs an integer item_id", "INVALID_ITEMS")
+    partial = data.get("partial") is True
     in_sources = {it.id: it for sid in source_ids for it in albums[sid].items()}
-    if set(by_id) != set(in_sources):
+    if not set(by_id) <= set(in_sources):
+        return fail("every item must belong to one of the source album rows", "ITEM_NOT_IN_SOURCE", 409)
+    if not partial and set(by_id) != set(in_sources):
         return fail("items must be exactly the items of the source album rows", "SOURCE_NOT_FULLY_COVERED", 409)
 
     target_slots = {(int(it.disc or 1), int(it.track or 0)) for it in albums[target_id].items()}
@@ -210,7 +200,7 @@ def run_album_row_merge():
 
     manifest = {
         "merge_id": merge_id, "operation_id": key, "status": "applying",
-        "target_album_id": target_id, "source_album_ids": source_ids,
+        "target_album_id": target_id, "source_album_ids": source_ids, "partial": partial,
         "source_album_snapshots": {str(sid): _album_snapshot(albums[sid]) for sid in source_ids},
         "items": [{"item_id": p["item_id"], "source_album_id": p["source_album_id"], "identity": p["identity"]}
                   for p in plan],
@@ -230,6 +220,8 @@ def run_album_row_merge():
                     raise RuntimeError(f"postcondition failed for item {p['item_id']}")
             for sid in source_ids:
                 if list(albums[sid].items()):
+                    if partial:
+                        continue  # the row keeps the items that were not moved
                     raise RuntimeError(f"source album {sid} still has items")
                 albums[sid].remove(delete=False, with_items=False)
                 manifest["retired_album_ids"].append(sid)
@@ -244,7 +236,9 @@ def run_album_row_merge():
         ops.log.exception("album-row-merge failed; restoring")
         try:
             with ops.mutation_lock:
-                for sid in manifest["retired_album_ids"]:
+                # Every source row, not only the recorded retirements:
+                # Album.remove may commit and then raise.
+                for sid in source_ids:
                     if lib.get_album(sid) is None:
                         _restore_album_row(lib, sid, manifest["source_album_snapshots"][str(sid)])
                 for p in moved:
