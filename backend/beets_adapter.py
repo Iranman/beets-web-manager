@@ -671,9 +671,13 @@ class BeetsAdapter:
     ) -> Dict[str, Any]:
         """Remove tracked items through the engine, moving each file into the
         engine quarantine (never deleted). ``items`` is a list of
-        {"item_id", "sha256"}; the engine refuses the whole request if any
-        file changed since review."""
-        payload = {"items": [{"item_id": int(i["item_id"]), "sha256": str(i["sha256"])} for i in items]}
+        {"item_id", "sha256"} plus, to retire a duplicate album row the item is
+        the only member of, {"retire_album_id", "sibling_keeper_item_id"}; the
+        engine refuses the whole request if any file changed since review."""
+        payload = {"items": [{"item_id": int(i["item_id"]), "sha256": str(i["sha256"]),
+                              **({"retire_album_id": int(i["retire_album_id"]),
+                                  "sibling_keeper_item_id": int(i["sibling_keeper_item_id"])}
+                                 if i.get("retire_album_id") else {})} for i in items]}
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/quarantine-remove-items", json_data=payload, headers=headers)
 

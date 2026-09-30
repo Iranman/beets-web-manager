@@ -2147,7 +2147,10 @@ def dedup_reviewed_cleanup_plan():
     if not pairs:
         return jsonify({"ok": False, "error": "no reviewed pairs to plan"}), 400
     try:
-        res = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=_s(payload.get("reason") or "Reviewed duplicate cleanup"))
+        # Operator-reviewed pairs only: a copy that is the sole item of a
+        # duplicate row of the keeper's release may retire that row with it.
+        res = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=_s(payload.get("reason") or "Reviewed duplicate cleanup"),
+                                                       allow_sibling_row_retire=True)
     except BeetsUnavailableError as exc:
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
     return jsonify(res), (200 if res.get("ok") else 409)

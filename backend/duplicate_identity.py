@@ -256,6 +256,7 @@ def plan_unattended_cleanup(
     path_under: Callable[[Path, Path], bool],
     *,
     same_file: Callable[[Path, Path], bool] = same_file_hash,
+    sibling_row_retire: Optional[Callable[[Dict[str, Any], Dict[str, Any]], bool]] = None,
 ) -> List[Dict[str, Any]]:
     """Deletions a scheduled maintenance run may make without review.
 
@@ -268,7 +269,12 @@ def plan_unattended_cleanup(
     keeper_rank(), and a copy is deleted only with direct proof against that
     keeper. Album-slot gate: a copy attached to an album row is never deleted
     unless the keeper is a tracked item in that same album row, so no album
-    slot is ever left without a retained tracked item.
+    slot is ever left without a retained tracked item. The one exception is
+    opt-in (``sibling_row_retire``, passed only by an operator-reviewed
+    cleanup, never by the unattended path): the copy is the ONLY item of a
+    duplicate row of the keeper's own release (same Release ID and Release
+    Group, same disc/track), so the release slot keeps its tracked item and
+    the emptied duplicate row is retired with it ("retire_album_id").
 
     Replacement review: when the preferred (album-attached) copy is lossy and
     a proven duplicate is lossless, nothing in that group is deleted; every
@@ -344,10 +350,16 @@ def plan_unattended_cleanup(
                 })
                 continue
             drop_album = drop["meta"].get("album_id")
+            retire: Dict[str, Any] = {}
             if drop_album and drop_album != keep["meta"].get("album_id"):
-                continue  # album-slot gate: would leave that album slot without a tracked item
+                # album-slot gate: would leave that album slot without a tracked
+                # item -- unless (reviewed cleanup only) the copy is the sole item
+                # of a duplicate row of the keeper's release, which then retires.
+                if sibling_row_retire is None or not sibling_row_retire(drop, keep):
+                    continue
+                retire = {"retire_album_id": drop_album}
             decisions.append({"action": "delete", "delete": drop, "keep": keep,
-                              "keep_reason": keeper_reason(keep, drop), **pair})
+                              "keep_reason": keeper_reason(keep, drop), **pair, **retire})
     decisions.sort(key=lambda d: d["delete"]["path"])
     return decisions
 

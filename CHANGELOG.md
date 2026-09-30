@@ -6,6 +6,15 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+- **Reviewed cleanup of a duplicate album row's only copy.** When a proven duplicate (shared AcoustID recording or identical bytes) is the only item of a duplicate album row of the keeper's own release, the operator-reviewed cleanup plan may now remove it and retire that emptied row.
+  - Required: same Release ID and Release Group, the keeper in a different row at the same disc/track.
+  - Beets plugin 1.3.1: `quarantine-remove-items` takes `retire_album_id` + `sibling_keeper_item_id`, re-checks those conditions itself, snapshots the row and retires it. Rollback recreates the row at its original id and puts the item back at its original id.
+  - The unattended path and bulk cleanup never opt in; their album-slot gate is unchanged.
+
+### Changed
+- `quarantine-remove-items` never empties an album row implicitly any more (`ALBUM_WOULD_EMPTY`), and its rollback restores removed items at their original ids when those ids are free.
+
 ## v0.1.42 - 2026-09-29
 
 ### Added
