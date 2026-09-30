@@ -2877,17 +2877,9 @@ def album_merge_split_album(target_aid):
                 "source_album_deleted": False,
             }
 
-        # The actual reassignment (item_ids -> target's album_id, moved
-        # items adopt target's album-level fields, source retired only if
-        # the move empties it) and the Release-Group identity check this
-        # migration adds go through album_duplicate_merge_v1's partial/
-        # adopt mode -- see BeetsClient.merge_split_album_items(). The
-        # previous local `shutil.copy2(LIB_PATH, ...)` DB backup is
-        # superseded by that engine transaction's own Plan-captured
-        # rollback data (rollback_album_duplicate_merge); LIB_PATH is not
-        # actually reachable from the web-manager container in the
-        # supported two-service deployment, so that backup step never
-        # really worked there anyway.
+        # An album-row merge (ARCH-020): ownership only, one Release Group
+        # and Release ID, free slots; the source row is retired only if the
+        # move empties it. Rollback: /api/transactions/<operation_id>/rollback.
         merge_res = composite_workflows.merge_split_album_items(target_id, source_id, move_ids)
         if not merge_res.get("ok"):
             raise RuntimeError(merge_res.get("error") or "Engine rejected split-album merge")
@@ -2904,6 +2896,7 @@ def album_merge_split_album(target_aid):
             "target_album_id": target_id,
             "item_count": len(move_ids),
             "source_album_deleted": source_album_deleted,
+            "operation_id": merge_res.get("operation_id"),
         }
 
     job = jobs.start_python(
