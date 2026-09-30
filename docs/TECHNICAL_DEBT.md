@@ -97,7 +97,10 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Of the 17,360 files classified as canonical album files, only 284 have tags naming exactly one album row with a free slot; 16,524 name a Release ID with no album row in Beets.
   - Class A: 0 byte-identical copies exist, so no quarantine was previewed.
   - Class C was not exercised live.
-- v0.1.45 (IMPLEMENTED; CI and live acceptance pending): new album rows for releases Beets does not have.
+- v0.1.45 (IMPLEMENTED, CI VERIFIED, LIVE VERIFIED): new album rows for releases Beets does not have.
+  - Live on Jimmy Cliff – *Struggling Man* (1973): 9 of the release's 10 tracks proven and tracked as new album row 2177 in place (items 3139 → 3148, albums 410 → 411, file bytes and mtimes unchanged, second Apply refused); rollback restored the exact prior state; re-apply verified. Track 01 was excluded (`slot_recording_mismatch`) and stays untracked.
+  - The inventory lists 1,373 candidate folders (17,360 files).
+  - One plan took 43–50 s for 10 files, even with AcoustID answered from cache; the per-file tracked-path check reloads the item list. That cost matters for a batch planner.
   - `action: "attach_album"` plans one folder as a new album row (per-file proof by tags, MusicBrainz tracklist and Release Group, and AcoustID); engine op `/webmanager/untracked/attach-album` (plugin 1.5.0) creates it in place with rollback.
   - One folder and one release per plan, operator-approved. There is no bulk planner for the roughly 1,400 folders yet; each plan costs one AcoustID lookup per file.
 - Why this stays Open: the 69,828 import artifacts and 16,919 unknown files have no cleanup path, which is deliberate: a naming pattern is not proof. The album folders still need a batch planner (a durable, resumable job that plans folder after folder within the AcoustID rate limit) before the backlog can be worked through.
