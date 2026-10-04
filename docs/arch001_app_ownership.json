@@ -5081,8 +5081,8 @@
    "name": "_beets_config_discogs_token",
    "module": "backend/artwork_service.py",
    "lines": [
-    20,
-    40
+    21,
+    41
    ],
    "size": 21,
    "body_lines": 20,
@@ -5099,8 +5099,8 @@
    "name": "_artist_name_key",
    "module": "backend/artwork_service.py",
    "lines": [
-    50,
-    51
+    51,
+    52
    ],
    "size": 2,
    "body_lines": 1,
@@ -5123,8 +5123,8 @@
    "name": "_artist_image_cache_key",
    "module": "backend/artwork_service.py",
    "lines": [
-    66,
-    69
+    67,
+    70
    ],
    "size": 4,
    "body_lines": 3,
@@ -5144,8 +5144,8 @@
    "name": "_artist_image_cache_info",
    "module": "backend/artwork_service.py",
    "lines": [
-    72,
-    91
+    73,
+    92
    ],
    "size": 20,
    "body_lines": 19,
@@ -5167,8 +5167,8 @@
    "name": "_artist_image_cache_url",
    "module": "backend/artwork_service.py",
    "lines": [
-    94,
-    95
+    95,
+    96
    ],
    "size": 2,
    "body_lines": 1,
@@ -5191,8 +5191,8 @@
    "name": "_attach_artist_image_cache_urls",
    "module": "backend/artwork_service.py",
    "lines": [
-    98,
-    105
+    99,
+    106
    ],
    "size": 8,
    "body_lines": 7,
@@ -5214,8 +5214,8 @@
    "name": "_artist_image_ext",
    "module": "backend/artwork_service.py",
    "lines": [
-    108,
-    113
+    109,
+    114
    ],
    "size": 6,
    "body_lines": 5,
@@ -5235,8 +5235,8 @@
    "name": "_cache_artist_image",
    "module": "backend/artwork_service.py",
    "lines": [
-    116,
-    158
+    117,
+    159
    ],
    "size": 43,
    "body_lines": 42,
@@ -5258,8 +5258,8 @@
    "name": "_fetch_artist_image",
    "module": "backend/artwork_service.py",
    "lines": [
-    161,
-    176
+    162,
+    177
    ],
    "size": 16,
    "body_lines": 13,
@@ -5278,8 +5278,8 @@
    "name": "_artist_local_art_url",
    "module": "backend/artwork_service.py",
    "lines": [
-    179,
-    200
+    180,
+    201
    ],
    "size": 22,
    "body_lines": 20,
@@ -5301,8 +5301,8 @@
    "name": "_release_art_cache_info",
    "module": "backend/artwork_service.py",
    "lines": [
-    209,
-    230
+    210,
+    231
    ],
    "size": 22,
    "body_lines": 21,
@@ -5323,8 +5323,8 @@
    "name": "_release_art_save_miss",
    "module": "backend/artwork_service.py",
    "lines": [
-    233,
-    241
+    234,
+    242
    ],
    "size": 9,
    "body_lines": 8,
@@ -5343,8 +5343,8 @@
    "name": "_move_artwork_to_target",
    "module": "backend/artwork_service.py",
    "lines": [
-    258,
-    363
+    259,
+    364
    ],
    "size": 106,
    "body_lines": 96,
@@ -5365,8 +5365,8 @@
    "name": "_album_dir_for_art",
    "module": "backend/artwork_service.py",
    "lines": [
-    366,
-    392
+    367,
+    393
    ],
    "size": 27,
    "body_lines": 25,
@@ -5394,8 +5394,8 @@
    "name": "_album_stored_art_path",
    "module": "backend/artwork_service.py",
    "lines": [
-    395,
-    402
+    396,
+    403
    ],
    "size": 8,
    "body_lines": 7,
@@ -5419,8 +5419,8 @@
    "name": "_album_path_repair_summary",
    "module": "backend/artwork_service.py",
    "lines": [
-    405,
-    441
+    406,
+    442
    ],
    "size": 37,
    "body_lines": 36,
@@ -5443,8 +5443,8 @@
    "name": "_album_art_candidates",
    "module": "backend/artwork_service.py",
    "lines": [
-    444,
-    461
+    445,
+    462
    ],
    "size": 18,
    "body_lines": 17,
@@ -5469,8 +5469,8 @@
    "name": "_usable_album_art_file",
    "module": "backend/artwork_service.py",
    "lines": [
-    464,
-    476
+    465,
+    477
    ],
    "size": 13,
    "body_lines": 12,
@@ -5493,8 +5493,8 @@
    "name": "_album_art_status",
    "module": "backend/artwork_service.py",
    "lines": [
-    479,
-    510
+    480,
+    511
    ],
    "size": 32,
    "body_lines": 31,
@@ -5525,8 +5525,8 @@
    "name": "_album_art_repair_entry",
    "module": "backend/artwork_service.py",
    "lines": [
-    513,
-    569
+    514,
+    570
    ],
    "size": 57,
    "body_lines": 55,
@@ -5552,8 +5552,8 @@
    "name": "_art_repair_load_last",
    "module": "backend/artwork_service.py",
    "lines": [
-    572,
-    577
+    573,
+    578
    ],
    "size": 6,
    "body_lines": 5,
@@ -5572,8 +5572,8 @@
    "name": "_art_repair_save_last",
    "module": "backend/artwork_service.py",
    "lines": [
-    580,
-    587
+    581,
+    588
    ],
    "size": 8,
    "body_lines": 7,
@@ -5593,8 +5593,8 @@
    "name": "_art_repair_build_report",
    "module": "backend/artwork_service.py",
    "lines": [
-    590,
-    619
+    591,
+    620
    ],
    "size": 30,
    "body_lines": 29,
@@ -5620,8 +5620,8 @@
    "name": "_art_repair_attach_last_run",
    "module": "backend/artwork_service.py",
    "lines": [
-    622,
-    650
+    623,
+    651
    ],
    "size": 29,
    "body_lines": 27,
@@ -5644,8 +5644,8 @@
    "name": "_album_art_clear_pointer",
    "module": "backend/artwork_service.py",
    "lines": [
-    653,
-    657
+    654,
+    658
    ],
    "size": 5,
    "body_lines": 4,
@@ -5662,8 +5662,8 @@
    "name": "_album_art_set_pointer",
    "module": "backend/artwork_service.py",
    "lines": [
-    660,
-    664
+    661,
+    665
    ],
    "size": 5,
    "body_lines": 4,
@@ -5682,8 +5682,8 @@
    "name": "_album_art_quarantine_current",
    "module": "backend/artwork_service.py",
    "lines": [
-    667,
-    716
+    668,
+    717
    ],
    "size": 50,
    "body_lines": 49,
@@ -5708,8 +5708,8 @@
    "name": "_album_art_restore_quarantine",
    "module": "backend/artwork_service.py",
    "lines": [
-    719,
-    730
+    720,
+    731
    ],
    "size": 12,
    "body_lines": 11,
@@ -5728,8 +5728,8 @@
    "name": "_repair_album_art",
    "module": "backend/artwork_service.py",
    "lines": [
-    733,
-    799
+    734,
+    800
    ],
    "size": 67,
    "body_lines": 63,
@@ -5760,8 +5760,8 @@
    "name": "_fetch_album_art",
    "module": "backend/artwork_service.py",
    "lines": [
-    809,
-    830
+    810,
+    831
    ],
    "size": 22,
    "body_lines": 19,
@@ -5782,8 +5782,8 @@
    "name": "_album_art_ext_for_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    833,
-    847
+    834,
+    848
    ],
    "size": 15,
    "body_lines": 13,
@@ -5800,11 +5800,11 @@
    "name": "_validate_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    866,
-    896
+    868,
+    907
    ],
-   "size": 31,
-   "body_lines": 30,
+   "size": 40,
+   "body_lines": 39,
    "route": null,
    "mutation_capable": false,
    "domain": "ARTWORK",
@@ -5822,8 +5822,8 @@
    "name": "_download_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    899,
-    916
+    910,
+    927
    ],
    "size": 18,
    "body_lines": 17,
@@ -5844,8 +5844,8 @@
    "name": "_album_art_path_text",
    "module": "backend/artwork_service.py",
    "lines": [
-    919,
-    920
+    930,
+    931
    ],
    "size": 2,
    "body_lines": 1,
@@ -5866,8 +5866,8 @@
    "name": "_album_art_album_id",
    "module": "backend/artwork_service.py",
    "lines": [
-    923,
-    927
+    934,
+    938
    ],
    "size": 5,
    "body_lines": 4,
@@ -5886,8 +5886,8 @@
    "name": "_resolve_album_art_request_album",
    "module": "backend/artwork_service.py",
    "lines": [
-    930,
-    964
+    941,
+    975
    ],
    "size": 35,
    "body_lines": 34,
@@ -5911,8 +5911,8 @@
    "name": "_album_art_expected_release_group",
    "module": "backend/artwork_service.py",
    "lines": [
-    967,
-    968
+    978,
+    979
    ],
    "size": 2,
    "body_lines": 1,
@@ -5936,8 +5936,8 @@
    "name": "_replace_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    971,
-    989
+    982,
+    1000
    ],
    "size": 19,
    "body_lines": 16,
@@ -5960,8 +5960,8 @@
    "name": "_replace_album_art_from_url",
    "module": "backend/artwork_service.py",
    "lines": [
-    992,
-    1002
+    1003,
+    1013
    ],
    "size": 11,
    "body_lines": 8,
@@ -5984,8 +5984,8 @@
    "name": "_save_art_to_disk",
    "module": "backend/artwork_service.py",
    "lines": [
-    1005,
-    1018
+    1016,
+    1029
    ],
    "size": 14,
    "body_lines": 11,
@@ -6008,8 +6008,8 @@
    "name": "_fetch_artwork_after_retag",
    "module": "backend/artwork_service.py",
    "lines": [
-    1021,
-    1076
+    1032,
+    1087
    ],
    "size": 56,
    "body_lines": 40,
@@ -6032,8 +6032,8 @@
    "name": "_get_album_item_dir",
    "module": "backend/artwork_service.py",
    "lines": [
-    1079,
-    1097
+    1090,
+    1108
    ],
    "size": 19,
    "body_lines": 17,
