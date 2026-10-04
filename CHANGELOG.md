@@ -9,6 +9,9 @@ The project uses Semantic Versioning.
 ### Added
 - `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`. This reverses the Sep 16 removal of these files (#119). The governance test now enforces a single source instead: `CLAUDE.md` may only import `AGENTS.md`, which prevents the drift that caused the removal.
 
+### Security
+- Bump `next` 16.3.4 -> 16.3.8 for GHSA-vcvr-r3jv-pc5j (critical, RCE in `next/og` `ImageResponse`). The frontend never imports `next/og`, so this is defensive. It also unblocks the `npm audit --audit-level=high` CI gate.
+
 ## v0.1.48 - 2026-09-30
 
 ### Changed
