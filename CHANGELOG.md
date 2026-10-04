@@ -17,6 +17,13 @@ The project uses Semantic Versioning.
 ### Security
 - Bump `next` 16.3.4 -> 16.3.8 for GHSA-vcvr-r3jv-pc5j (critical, RCE in `next/og` `ImageResponse`). The frontend never imports `next/og`, so this is defensive. It also unblocks the `npm audit --audit-level=high` CI gate.
 
+### Changed
+- Frontend dependencies (these replace Dependabot PRs #121, #123 and #125, which were based on a stale commit and whose lockfiles broke `npm ci`):
+  - `react-router` 8.3.0 -> 8.3.1: a patch release that adds origin validation for action requests and extra URL validation on client-side navigations and redirects. The exact-pin test in `tests/test_import_page_navigation.py` now expects 8.3.1.
+  - `typescript-eslint` ^8.64.0 -> ^8.70.1 (dev).
+  - `@testing-library/react` 16.3.2 -> 16.3.3 (dev).
+- The lockfile was regenerated with npm 10 (the npm in the node 22 CI and Docker images) and keeps the optional `vitest/node_modules/yaml` entry that `npm ci` there requires.
+
 ## v0.1.48 - 2026-09-30
 
 ### Changed

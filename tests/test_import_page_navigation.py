@@ -106,7 +106,7 @@ class RouterDependencyPolicyTests(unittest.TestCase):
         self.assertNotIn('"react-router-dom": "npm:react-router', self.lockfile_text)
 
     def test_react_router_is_pinned_to_the_patched_v8_release(self):
-        self.assertEqual(self.pkg["dependencies"]["react-router"], "8.3.0")
+        self.assertEqual(self.pkg["dependencies"]["react-router"], "8.3.1")
 
     def test_postcss_patched_version_and_override_are_present(self):
         self.assertEqual(self.pkg["dependencies"]["postcss"], "8.5.28")
