@@ -35,6 +35,15 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 
 ---
 
+### 5. Setup says "Music library path ... is not accessible"
+* **Cause**: Web Manager cannot read its library mount. It checks `MUSIC_ROOT` (default `/music`) inside the `beets-web-manager` container.
+* **Fix**:
+  1. Confirm the music volume is mounted into `beets-web-manager` at `/music` (read-only is fine), as in `docker-compose.yml`.
+  2. If you mount it somewhere else, set `MUSIC_ROOT` to that path under the `beets-web-manager` service's `environment:`. It must match Beets' `directory:` in the `beets` container (see `docs/CONFIGURATION.md`).
+  3. Check that the container's `PUID`/`PGID` can read the host directory.
+
+---
+
 ## Operational Diagnostics
 
 ### Check Container Health
