@@ -6,6 +6,11 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- **Setup no longer reports a correctly mounted library as missing (#143).** The setup status still probed a hard-coded `/data/media/music`, and the diagnostics never reported a `music_library` path at all. A stack deployed with the documented `/music` mount was always told "Music library path /data/media/music is not accessible", and the System and setup pages showed it as Missing. The check now tests `MUSIC_ROOT` (default `/music`) inside the Web Manager container. When stock Beets is unreachable, the fallback paths shown are `MUSIC_ROOT` and `/downloads` instead of the legacy `/data/media/music` and `/data/torrents`.
+- **Setup no longer always reports fpcalc missing.** Stock Beets reports fingerprinting support (the chroma plugin loaded) but never a binary path, and setup gated on that always-empty path. So "fpcalc (chromaprint) not found" was always a blocking reason and AcoustID was always shown as a missing dependency. Setup now uses the availability Beets reports.
+- **AcoustID setup test classifies the answer by error code.** `POST /api/setup/test/acoustid` sends a dummy fingerprint, so a valid key usually comes back as error code 3 (invalid fingerprint) over HTTP 400. That was reported as a failure or as "Could not reach AcoustID". The probe now reads the error body of non-2xx answers too, and maps by code: 3/8 mean the key was accepted (ready); 4 means the key was rejected; 5/13 or HTTP 5xx mean the service is unavailable; 14 or HTTP 429 mean rate limited; any other code fails. Only timeouts and network errors report "Could not reach AcoustID". Responses carry a fixed message and a `reason` field, and never echo provider text or the key.
+
 ### Added
 - `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`. This reverses the Sep 16 removal of these files (#119). The governance test now enforces a single source instead: `CLAUDE.md` may only import `AGENTS.md`, which prevents the drift that caused the removal.
 
@@ -15,6 +20,13 @@ The project uses Semantic Versioning.
 - Artwork validation now passes `formats=("JPEG", "PNG", "WEBP")` to `Image.open` (`backend/artwork_service.py`, `backend/transaction_engine.py`). PSD, FITS, GD, McIdas and other non-accepted formats are refused before their Pillow plugin parses the payload. Error responses are unchanged: a recognised but unsupported format is still reported as an unsupported type, and unrecognisable bytes as corrupt.
 - Bump yt-dlp 2024.11.4 -> 2026.8.19 for GHSA-c6mh-fpjc-4pr3, GHSA-vx4q-3cr2-7cg2, GHSA-69qj-pvh9-c5wg, GHSA-6v4j-43gg-vj32, GHSA-g3gw-q23r-pgqm and GHSA-f7j3-774f-rfhj. All YoutubeDL options and APIs the app uses exist in the new release. The bgutil PO-token plugin stays at 1.3.1, matching the `bgutil-ytdlp-pot-provider:1.3.1-deno` server in `docker-compose.full.yml`. YouTube downloads still need a JavaScript runtime (Deno, Node or QuickJS), which the app already requires.
 - Bump Flask 3.1.0 -> 3.1.3 (GHSA-4grg-w6v8-c28g, GHSA-68rp-wp8r-4726), Werkzeug 3.1.3 -> 3.1.6 (GHSA-hgf8-39gv-g3f2, GHSA-87hc-h4r5-73f7, GHSA-29vq-49wr-vm6x; these affect Windows `safe_join` only, so not the Linux image) and requests 2.32.5 -> 2.33.1 (GHSA-gc5v-m9x4-r6x2).
+
+### Changed
+- Frontend dependencies (these replace Dependabot PRs #121, #123 and #125, which were based on a stale commit and whose lockfiles broke `npm ci`):
+  - `react-router` 8.3.0 -> 8.3.1: a patch release that adds origin validation for action requests and extra URL validation on client-side navigations and redirects. The exact-pin test in `tests/test_import_page_navigation.py` now expects 8.3.1.
+  - `typescript-eslint` ^8.64.0 -> ^8.70.1 (dev).
+  - `@testing-library/react` 16.3.2 -> 16.3.3 (dev).
+- The lockfile was regenerated with npm 10 (the npm in the node 22 CI and Docker images) and keeps the optional `vitest/node_modules/yaml` entry that `npm ci` there requires.
 
 ## v0.1.48 - 2026-09-30
 
