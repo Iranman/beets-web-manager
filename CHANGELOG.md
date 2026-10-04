@@ -6,6 +6,9 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+- `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`.
+
 ## v0.1.48 - 2026-09-30
 
 ### Changed

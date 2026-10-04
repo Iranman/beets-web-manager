@@ -100,3 +100,6 @@ config.yaml
 ORIGINAL_REQUEST.md
 PROJECT.md
 TEST_INFRA.md
+
+# Maintainer-local agent context (host details); never commit
+CLAUDE.local.md
