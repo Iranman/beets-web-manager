@@ -127,6 +127,17 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Why this stays Open: the 69,828 import artifacts and 16,919 unknown files have no cleanup path, which is deliberate: a naming pattern is not proof. The album folders still need a batch planner (a durable, resumable job that plans folder after folder within the AcoustID rate limit) before the backlog can be worked through.
 - Priority: P2. Status: Open (attach and new-album recovery implemented; batch planning and artifact cleanup remain).
 
+## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
+
+- Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
+- Finding: CodeQL alert #18 (`py/full-ssrf`) was dismissed on 2026-07-30 as a false positive. The dismissal cited `validate_outbound_url()` and the global `urlopen` patch, under the SEC-002 entry that a later consolidation removed from this file. When ARCH-006 shifted the sink down one line, the same finding reopened as #1350. On review the dismissal was wrong, for three reasons:
+  - Validation and connection resolved DNS separately, so DNS rebinding could reach internal addresses.
+  - User URLs were checked against `BEETS_OUTBOUND_ALLOWLIST`, whose default includes the Beets plugin.
+  - 100.64.0.0/10 was not blocked.
+- Resolution: `backend.security.open_public_url()`/`resolve_public_target()`. Public addresses only, allowlist ignored, socket pinned to the validated address, TLS verified against the original hostname, every redirect hop re-validated. Callers pass it as `provider_boundary.opened(..., opener=...)`. Regression tests: `tests/test_reference_url_ssrf.py`, `tests/test_artwork_url_ssrf.py`.
+- The #18 dismissal is superseded. Future alerts on these sinks must be checked against this policy, not against `validate_outbound_url()`.
+- Status: Closed on the fix branch, pending CodeQL confirmation on the PR.
+
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 
 - Scope: `PLEX_TOKEN`, used only by `beets-web-manager`.

@@ -47,6 +47,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, Optional
 
+from backend.security import OutboundPolicyError
+
 
 class ProviderOutcome(str, enum.Enum):
     CONFIRMED = "confirmed"
@@ -152,6 +154,10 @@ def classify_exception(exc: BaseException) -> ProviderError:
         return ProviderError(ProviderOutcome.UNAVAILABLE, f"unreachable: {exc.reason}")
     if isinstance(exc, (ConnectionError, OSError)):
         return ProviderError(ProviderOutcome.TRANSIENT_ERROR, type(exc).__name__)
+    if isinstance(exc, OutboundPolicyError):
+        # The outbound URL policy refused the target: asking again cannot
+        # help, and a retry would only repeat the DNS lookup and request.
+        return ProviderError(ProviderOutcome.REJECTED, "blocked by outbound URL policy")
     if isinstance(exc, ValueError):
         return ProviderError(ProviderOutcome.TRANSIENT_ERROR, "malformed response")
     return ProviderError(ProviderOutcome.TRANSIENT_ERROR, type(exc).__name__)
@@ -264,11 +270,15 @@ def _method_of(request: Any) -> str:
 
 @contextmanager
 def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_attempts: Optional[int] = None,
-           sleep: Callable[[float], None] = time.sleep) -> Iterator[Any]:
+           sleep: Callable[[float], None] = time.sleep,
+           opener: Optional[Callable[..., Any]] = None) -> Iterator[Any]:
     """Open ``request`` at ``provider`` and yield the response (see module doc).
 
     Raises the original exception after the last attempt. ``max_attempts``
-    overrides the provider's policy (a connectivity test passes 1)."""
+    overrides the provider's policy (a connectivity test passes 1).
+    ``opener`` replaces ``urllib.request.urlopen`` for the connection itself
+    (``backend.security.open_public_url`` for user-supplied URLs); it is
+    called as ``opener(request)`` or ``opener(request, timeout=timeout)``."""
     policy = policy_for(provider)
     limit = max(1, max_attempts if max_attempts is not None else policy.max_attempts)
     if _method_of(request) not in _SAFE_METHODS:
@@ -277,10 +287,11 @@ def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_
     while True:
         attempts += 1
         try:
+            open_fn = opener if opener is not None else urllib.request.urlopen
             if timeout is None:
-                response = urllib.request.urlopen(request)
+                response = open_fn(request)
             else:
-                response = urllib.request.urlopen(request, timeout=timeout)
+                response = open_fn(request, timeout=timeout)
             break
         except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
             err = classify_exception(exc)

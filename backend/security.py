@@ -1,16 +1,19 @@
 """Security helpers for outbound requests and abuse controls."""
 from __future__ import annotations
 
+import http.client
+import io
 import ipaddress
 import logging
 import os
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 LOG = logging.getLogger("beets_web.security")
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -316,6 +319,167 @@ def install_secure_urllib() -> None:
     setattr(urllib.request, _ORIGINAL_URLOPEN_ATTR, urllib.request.urlopen)
     urllib.request.urlopen = secure_urlopen
     setattr(urllib.request, _INSTALLED_ATTR, True)
+
+
+# -- user-supplied URLs: public internet only, connection pinned --------------
+#
+# validate_outbound_url()/secure_urlopen() above protect *operator-configured*
+# endpoints (Plex, Lidarr, Beets ...): they honour BEETS_OUTBOUND_ALLOWLIST and
+# let urllib re-resolve the host at connect time. Neither is safe for a URL an
+# API caller typed in: the allowlist would let it reach the operator's internal
+# services, and the second DNS lookup lets a rebinding resolver answer a public
+# address to the check and an internal one to the connect. open_public_url()
+# therefore resolves once, requires every answer to be globally routable,
+# never consults the allowlist, and connects the socket to the exact address
+# it validated (TLS still verifies the certificate for the original hostname).
+# Every redirect hop is re-resolved, re-validated and re-pinned the same way.
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+@dataclass(frozen=True)
+class PinnedTarget:
+    """A validated public request target. ``address`` is the IP the socket
+    connects to; ``host`` is only used for the Host header, SNI and the TLS
+    certificate check."""
+    scheme: str
+    host: str
+    port: int
+    address: str
+    path: str
+
+    @property
+    def host_header(self) -> str:
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        default = 443 if self.scheme == "https" else 80
+        return host if self.port == default else f"{host}:{self.port}"
+
+
+def _embedded_ipv4(ip: ipaddress._BaseAddress) -> Optional[ipaddress.IPv4Address]:
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if ip.teredo is not None:
+        return ip.teredo[1]
+    if ip in _NAT64_PREFIX:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def address_is_public(ip: ipaddress._BaseAddress) -> bool:
+    """True only for a globally routable unicast address. Stricter than
+    _address_is_prohibited(): also rejects shared/CGNAT space (100.64/10),
+    benchmarking, documentation and any IPv6 form embedding a non-public
+    IPv4 address (IPv4-mapped, 6to4, Teredo, NAT64)."""
+    if ip in _METADATA_IPS or not ip.is_global or ip.is_multicast:
+        return False
+    embedded = _embedded_ipv4(ip)
+    if embedded is not None and (embedded in _METADATA_IPS or not embedded.is_global or embedded.is_multicast):
+        return False
+    return True
+
+
+def resolve_public_target(url: str) -> PinnedTarget:
+    """Validate a user-supplied URL and pin it to one resolved public address.
+
+    Raises OutboundPolicyError for a non-http(s) scheme, embedded credentials,
+    an internal-looking hostname, an unresolvable host, or when *any* DNS
+    answer is not a public address. BEETS_OUTBOUND_ALLOWLIST is deliberately
+    ignored."""
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    raw_scheme = parsed.scheme.lower()
+    if raw_scheme == "https":
+        scheme = "https"
+    elif raw_scheme == "http":
+        scheme = "http"
+    else:
+        raise OutboundPolicyError("outbound URL scheme is not allowed")
+    if parsed.username or parsed.password:
+        raise OutboundPolicyError("outbound URL credentials are not allowed")
+    host = _clean_host(parsed.hostname or "")
+    if not host or any(ord(ch) <= 32 for ch in host):
+        raise OutboundPolicyError("outbound URL host is invalid")
+    try:
+        port = _url_port(parsed)
+    except ValueError as exc:
+        raise OutboundPolicyError("outbound URL port is invalid") from exc
+    if _host_is_local_or_internal(host):
+        LOG.warning("blocked user-supplied URL to internal host: %s", redact_url_for_log(url))
+        raise OutboundPolicyError("outbound host is internal")
+    addresses = _resolve_host(host, port)
+    if not all(address_is_public(addr) for addr in addresses):
+        LOG.warning("blocked user-supplied URL resolving to a non-public address: %s", redact_url_for_log(url))
+        raise OutboundPolicyError("outbound host resolves to a prohibited address")
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    if any(ord(ch) <= 32 or ord(ch) == 127 for ch in path):
+        raise OutboundPolicyError("outbound URL path is invalid")
+    return PinnedTarget(scheme=scheme, host=host, port=port, address=str(addresses[0]), path=path)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS to a pinned IP while verifying the certificate for ``server_hostname``."""
+
+    def __init__(self, address: str, port: int, *, server_hostname: str, timeout: float,
+                 context: ssl.SSLContext):
+        super().__init__(address, port, timeout=timeout, context=context)
+        self._pinned_server_hostname = server_hostname
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._pinned_server_hostname)
+
+
+def _send_pinned(target: PinnedTarget, headers: Mapping[str, str], timeout: float) -> http.client.HTTPResponse:
+    """One GET to the pinned address. No proxy, no automatic redirect."""
+    conn: http.client.HTTPConnection
+    if target.scheme == "https":
+        conn = _PinnedHTTPSConnection(target.address, target.port, server_hostname=target.host,
+                                      timeout=timeout, context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(target.address, target.port, timeout=timeout)
+    send_headers = {k: v for k, v in headers.items() if k.lower() not in {"host", "connection"}}
+    send_headers.update({"Host": target.host_header, "Connection": "close", "Accept-Encoding": "identity"})
+    try:
+        conn.request("GET", target.path, headers=send_headers)
+        return conn.getresponse()
+    except BaseException:
+        conn.close()
+        raise
+
+
+def open_public_url(url: str, *, headers: Optional[Mapping[str, str]] = None, timeout: Optional[float] = None,
+                    max_redirects: Optional[int] = None, max_bytes: Optional[int] = None) -> LimitedHTTPResponse:
+    """GET a user-supplied URL on the public internet (see block comment).
+
+    Returns a size-limited response usable as a context manager; raises
+    OutboundPolicyError on a policy violation and urllib.error.HTTPError for
+    an HTTP error status, so provider_boundary classifies it as usual."""
+    policy = current_outbound_policy()
+    hops = policy.max_redirects if max_redirects is None else max(0, int(max_redirects))
+    effective_timeout = policy.timeout_seconds if timeout is None else float(timeout)
+    current = str(url or "")
+    for _ in range(hops + 1):
+        target = resolve_public_target(current)
+        response = _send_pinned(target, dict(headers or {}), effective_timeout)
+        if response.status in _REDIRECT_STATUSES:
+            location = response.getheader("Location") or ""
+            response.close()
+            if not location:
+                raise urllib.error.HTTPError(redact_url_for_log(current), response.status,
+                                             "redirect without Location", response.headers, io.BytesIO())
+            current = urllib.parse.urljoin(current, location)
+            continue
+        if response.status >= 400:
+            response.close()
+            raise urllib.error.HTTPError(redact_url_for_log(current), response.status, response.reason,
+                                         response.headers, io.BytesIO())
+        response.url = current  # type: ignore[attr-defined]  # urllib-compatible .url
+        return LimitedHTTPResponse(response, policy.max_response_bytes if max_bytes is None else max_bytes)
+    raise OutboundPolicyError("outbound request exceeded the redirect limit")
 
 
 def direct_peer_is_trusted(peer: str, trusted_cidrs: Iterable[str]) -> bool:

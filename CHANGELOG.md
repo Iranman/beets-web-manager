@@ -11,6 +11,9 @@ The project uses Semantic Versioning.
 
 ### Security
 - Bump `next` 16.3.4 -> 16.3.8 for GHSA-vcvr-r3jv-pc5j (critical, RCE in `next/og` `ImageResponse`). The frontend never imports `next/og`, so this is defensive. It also unblocks the `npm audit --audit-level=high` CI gate.
+- Fix server-side request forgery in the reference-URL fetch (`POST /api/submissions/reference-url`, CodeQL #1350, `py/full-ssrf`). Before this fix, the pasted URL was checked against the outbound policy, but urllib looked the host up again when it connected, so a DNS-rebinding domain could reach loopback, LAN or cloud-metadata addresses. The check also honoured `BEETS_OUTBOUND_ALLOWLIST`, so a pasted URL could reach allowlisted internal services (by default the Beets plugin at `beets:8337` / `127.0.0.1:8337`). Shared/CGNAT addresses (100.64.0.0/10) were not blocked. The fetch now uses `backend.security.open_public_url()`. It resolves the host once and requires every address to be globally routable; IPv6 forms that embed a private IPv4 address are rejected. It never consults the allowlist, connects the socket to the exact address it validated (TLS still verifies the original hostname), and repeats all of this for every redirect hop. This supersedes the July false-positive dismissal of the same finding (alert #18).
+- Apply the same public-only, address-pinned fetch to artwork image URLs that come from a user or a provider response: `POST /api/albums/<id>/art/url`, saved Discogs/candidate artwork, the Discogs artist-image cache and the Cover Art Archive/Discogs release-art cache. Operator-configured services (Beets, Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider) keep the allowlist-based policy.
+- `provider_boundary` now classifies an outbound-policy refusal as `rejected` and does not retry it. Previously it was treated as a transient error and retried.
 
 ## v0.1.48 - 2026-09-30
 
