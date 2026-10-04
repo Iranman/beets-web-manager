@@ -6,6 +6,13 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.49 - 2026-10-04
+
+### Upgrade Notes
+- Pasted reference URLs and artwork image URLs (from a user or a provider response) are now fetched directly and no longer use `HTTP_PROXY`/`HTTPS_PROXY`. Operator-configured services are unchanged.
+- Artwork URLs that point at a LAN, private, loopback or CGNAT host are now refused, even if the host is in `BEETS_OUTBOUND_ALLOWLIST`. To use such an image, download it and use the artwork upload (`POST /api/albums/<id>/art/upload`), which still works.
+- The setup "Music library" check now tests `MUSIC_ROOT` (default `/music`) inside the `beets-web-manager` container. `MUSIC_ROOT` must be the same path as Beets' `directory:` in the `beets` container (see `docs/CONFIGURATION.md`).
+
 ### Fixed
 - **Setup no longer reports a correctly mounted library as missing (#143).** The setup status still probed a hard-coded `/data/media/music`, and the diagnostics never reported a `music_library` path at all. A stack deployed with the documented `/music` mount was always told "Music library path /data/media/music is not accessible", and the System and setup pages showed it as Missing. The check now tests `MUSIC_ROOT` (default `/music`) inside the Web Manager container. When stock Beets is unreachable, the fallback paths shown are `MUSIC_ROOT` and `/downloads` instead of the legacy `/data/media/music` and `/data/torrents`.
 - **Setup no longer always reports fpcalc missing.** Stock Beets reports fingerprinting support (the chroma plugin loaded) but never a binary path, and setup gated on that always-empty path. So "fpcalc (chromaprint) not found" was always a blocking reason and AcoustID was always shown as a missing dependency. Setup now uses the availability Beets reports.
