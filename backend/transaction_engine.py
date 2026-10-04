@@ -8014,6 +8014,29 @@ _ARTWORK_MAX_PIXELS = 64_000_000  # ~8000x8000; also Pillow's own decompression-
 _ARTWORK_MAX_DIMENSION = 12000
 _ARTWORK_ALLOWED_FORMATS = frozenset({"JPEG", "PNG", "WEBP"})
 _ARTWORK_FORMAT_EXT = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+_ARTWORK_PILLOW_FORMATS = tuple(sorted(_ARTWORK_ALLOWED_FORMATS))
+
+
+def _sniff_unsupported_image_format(data: bytes, allowed: Any = _ARTWORK_ALLOWED_FORMATS) -> str:
+    """Name a recognised image format outside ``allowed``, or return "".
+
+    Uses only Pillow's prefix ``accept`` checks on the first 16 bytes (what
+    Image.open itself does to pick a plugin), never a plugin's parser, so a
+    payload restricted out by ``formats=`` can still be reported as "wrong
+    type" rather than "corrupt" without being decoded."""
+    from PIL import Image
+    Image.init()
+    prefix = bytes(data[:16])
+    for fmt, entry in Image.OPEN.items():
+        accept = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else None
+        if fmt in allowed or accept is None:
+            continue
+        try:
+            if accept(prefix):
+                return fmt
+        except Exception:
+            continue
+    return ""
 
 
 def _validate_image_bytes(data: bytes) -> Dict[str, Any]:
@@ -8028,13 +8051,24 @@ def _validate_image_bytes(data: bytes) -> Dict[str, Any]:
     if len(data) > _ARTWORK_MAX_ENCODED_BYTES:
         return {"ok": False, "error": "Artwork image exceeds maximum encoded size limit", "code": "album_artwork_image_too_large"}
     try:
-        from PIL import Image
+        from PIL import Image, UnidentifiedImageError
         Image.MAX_IMAGE_PIXELS = _ARTWORK_MAX_PIXELS
-        with Image.open(io.BytesIO(data)) as im:
-            im.verify()  # raises on truncated/corrupt data
+        # formats= restricts Pillow to the decoders for the accepted types, so
+        # an attacker-supplied PSD/FITS/GD/McIdas/... payload never reaches
+        # its (historically memory-unsafe) parser.
+        try:
+            with Image.open(io.BytesIO(data), formats=_ARTWORK_PILLOW_FORMATS) as im:
+                im.verify()  # raises on truncated/corrupt data
+        except UnidentifiedImageError:
+            other = _sniff_unsupported_image_format(data)
+            if other:
+                return {"ok": False, "error": f"Unsupported image format: {other}",
+                        "code": "album_artwork_invalid_image_format"}
+            return {"ok": False, "error": "Corrupt or unparseable image",
+                    "code": "album_artwork_corrupt_image"}
         # verify() invalidates the file handle for further use; reopen to
         # read format/dimensions from a fresh decode.
-        with Image.open(io.BytesIO(data)) as im2:
+        with Image.open(io.BytesIO(data), formats=_ARTWORK_PILLOW_FORMATS) as im2:
             fmt = str(im2.format or "").upper()
             width, height = im2.size
             if fmt not in _ARTWORK_ALLOWED_FORMATS:

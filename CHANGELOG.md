@@ -16,6 +16,10 @@ The project uses Semantic Versioning.
 
 ### Security
 - Bump `next` 16.3.4 -> 16.3.8 for GHSA-vcvr-r3jv-pc5j (critical, RCE in `next/og` `ImageResponse`). The frontend never imports `next/og`, so this is defensive. It also unblocks the `npm audit --audit-level=high` CI gate.
+- Bump Pillow 10.4.0 -> 12.3.0 for GHSA-cfh3-3jmp-rvhc, GHSA-pwv6-vv43-88gr, GHSA-whj4-6x5x-4v2j, GHSA-wjx4-4jcj-g98j, GHSA-r73j-pqj5-w3x7, GHSA-45hq-cxwh-f6vc, GHSA-5x94-69rx-g8h2, GHSA-8v84-f9pq-wr9x, GHSA-phj9-mv4w-65pm, GHSA-4x4j-2g7c-83w6, GHSA-62p4-gmf7-7g93, GHSA-6r8x-57c9-28j4, GHSA-9hw9-ch79-4vh6, GHSA-fj7v-r99m-22gq, GHSA-jjj6-mw9f-p565, GHSA-vjc4-5qp5-m44j and GHSA-xj96-63gp-2gmr (out-of-bounds writes and reads, decompression bombs, DoS). Artwork bytes from users and providers reached these parsers.
+- Artwork validation now passes `formats=("JPEG", "PNG", "WEBP")` to `Image.open` (`backend/artwork_service.py`, `backend/transaction_engine.py`). PSD, FITS, GD, McIdas and other non-accepted formats are refused before their Pillow plugin parses the payload. Error responses are unchanged: a recognised but unsupported format is still reported as an unsupported type, and unrecognisable bytes as corrupt.
+- Bump yt-dlp 2024.11.4 -> 2026.8.19 for GHSA-c6mh-fpjc-4pr3, GHSA-vx4q-3cr2-7cg2, GHSA-69qj-pvh9-c5wg, GHSA-6v4j-43gg-vj32, GHSA-g3gw-q23r-pgqm and GHSA-f7j3-774f-rfhj. All YoutubeDL options and APIs the app uses exist in the new release. The bgutil PO-token plugin stays at 1.3.1, matching the `bgutil-ytdlp-pot-provider:1.3.1-deno` server in `docker-compose.full.yml`. YouTube downloads still need a JavaScript runtime (Deno, Node or QuickJS), which the app already requires.
+- Bump Flask 3.1.0 -> 3.1.3 (GHSA-4grg-w6v8-c28g, GHSA-68rp-wp8r-4726), Werkzeug 3.1.3 -> 3.1.6 (GHSA-hgf8-39gv-g3f2, GHSA-87hc-h4r5-73f7, GHSA-29vq-49wr-vm6x; these affect Windows `safe_join` only, so not the Linux image) and requests 2.32.5 -> 2.33.1 (GHSA-gc5v-m9x4-r6x2).
 
 ### Changed
 - Frontend dependencies (these replace Dependabot PRs #121, #123 and #125, which were based on a stale commit and whose lockfiles broke `npm ci`):
