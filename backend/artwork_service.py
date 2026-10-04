@@ -13,6 +13,7 @@ from backend.app_runtime import _app_logger, ARTIST_IMAGE_CACHE_DIR, ART_REPAIR_
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _redact_security_text
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
+from backend.transaction_engine import _sniff_unsupported_image_format
 
 # ── ARCH-001 extracted code ──
 
@@ -854,6 +855,7 @@ def _album_art_ext_for_bytes(data: bytes, content_type: str = "") -> str:
 
 
 _ALBUM_ART_UPLOAD_MAX_BYTES = 15 * 1024 * 1024
+_ALBUM_ART_PILLOW_FORMATS = ("JPEG", "PNG", "WEBP")
 
 
 _ALBUM_ART_MAX_PIXELS = 50_000_000
@@ -875,12 +877,21 @@ def _validate_album_art_bytes(data: bytes) -> Dict[str, Any]:
     if len(data) > _ALBUM_ART_UPLOAD_MAX_BYTES:
         raise AlbumArtRequestError("Cover image must be 15 MB or smaller", 400)
     try:
-        from PIL import Image
+        from PIL import Image, UnidentifiedImageError
         Image.MAX_IMAGE_PIXELS = _ALBUM_ART_MAX_PIXELS
     except Exception as exc:
         raise AlbumArtRequestError("Image validation is unavailable", 500) from exc
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        # formats= restricts Pillow to the decoders for the accepted types, so
+        # an attacker-supplied PSD/FITS/GD/McIdas/... payload never reaches
+        # its (historically memory-unsafe) parser.
+        try:
+            image_cm = Image.open(io.BytesIO(data), formats=_ALBUM_ART_PILLOW_FORMATS)
+        except UnidentifiedImageError as exc:
+            if _sniff_unsupported_image_format(data, ("JPEG", "PNG", "WEBP")):
+                raise AlbumArtRequestError("Unsupported image type; use JPEG, PNG, or WebP", 400) from exc
+            raise AlbumArtRequestError("Cover image could not be safely decoded", 400) from exc
+        with image_cm as image:
             image_format = (image.format or "").upper()
             width, height = image.size
             frames = int(getattr(image, "n_frames", 1) or 1)
