@@ -13,7 +13,7 @@ from helpers_mb import _fetch_mb_recording_details, _fetch_mb_release_candidate
 from backend.beets_adapter import lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm, _read_file_media_tags
-from backend.artwork_service import DISCOGS_TOKEN, _ARTIST_IMAGE_MAX_BYTES, _RELEASE_ART_MBID_RE, _artist_image_ext, _artist_name_key, _open_image_url, _release_art_cache_info, _release_art_save_miss
+from backend.artwork_service import DISCOGS_TOKEN, _ARTIST_IMAGE_MAX_BYTES, _RELEASE_ART_MBID_RE, _artist_image_ext, _IMAGE_FETCH_HEADERS, _artist_name_key, _release_art_cache_info, _release_art_save_miss
 from backend.slskd_service import _slskd_title_guess_from_name
 from backend.matching_service import _album_key, _album_title_match, _album_track_title_variants, _fetch_mb_release_tracklist, _normalize_album
 
@@ -468,8 +468,8 @@ def _release_art_download(mbid: str, url: str, source: str) -> str:
     try:
         RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # Cover Art Archive / Discogs image URLs come from provider responses:
-        # fetched with the public-only, address-pinned policy (_open_image_url).
-        with provider_boundary.opened("artwork", url, timeout=15, opener=_open_image_url) as r:
+        # fetched with the public-only, address-pinned policy (opened_public).
+        with provider_boundary.opened_public("artwork", url, timeout=15, headers=_IMAGE_FETCH_HEADERS) as r:
             content_type = r.headers.get("Content-Type", "")
             ext = _artist_image_ext(url, content_type)
             if not ext:

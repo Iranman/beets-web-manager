@@ -52,7 +52,7 @@ from backend.beets_adapter import (
     BeetsAdapterConnectionError as BeetsUnavailableError,
     BeetsAdapterAuthError as BeetsAuthError,
 )
-from backend.security import OutboundPolicyError, open_public_url, resolve_public_target
+from backend.security import OutboundPolicyError, resolve_public_target
 from backend.identity_contract import verify_album_identity
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -1317,19 +1317,16 @@ def _fetch_discogs_release(entity_type: str, entity_id: str) -> Dict[str, Any]:
     }
 
 
-def _open_reference_url(url: str, *, timeout: float = _REFERENCE_URL_TIMEOUT):
-    return open_public_url(url, headers={"User-Agent": "beets-web-manager reference-url fetcher"},
-                           timeout=timeout, max_bytes=_REFERENCE_MAX_BYTES)
-
-
 def _fetch_open_graph_metadata(url: str) -> Dict[str, Any]:
-    # open_public_url() is the network sink and validates on its own: every
+    # opened_public() is the network sink and validates on its own: every
     # hop is resolved once, must be a public address (the outbound allowlist
     # is ignored), and the socket is pinned to that address -- so neither DNS
     # rebinding nor a redirect can reach an internal host, whatever the caller
     # checked first.
-    with provider_boundary.opened("reference-url", url, timeout=_REFERENCE_URL_TIMEOUT,
-                                  opener=_open_reference_url) as resp:
+    with provider_boundary.opened_public(
+        "reference-url", url, timeout=_REFERENCE_URL_TIMEOUT, max_bytes=_REFERENCE_MAX_BYTES,
+        headers={"User-Agent": "beets-web-manager reference-url fetcher"},
+    ) as resp:
         raw = resp.read(_REFERENCE_MAX_BYTES)
     html = raw.decode("utf-8", errors="replace")
     og: Dict[str, str] = {}

@@ -22,7 +22,8 @@ Only ``confirmed`` and ``no_result`` are answers. Every other outcome means
 Retry-After (capped). Messages are redacted before they are stored or logged.
 
 ``opened(provider, request, timeout=...)`` is the one way application code
-opens an HTTP connection to a provider. It is a drop-in for
+opens an HTTP connection to a provider (``opened_public(provider, url, ...)``
+when the URL came from a user or a provider response). It is a drop-in for
 ``urllib.request.urlopen`` used as a context manager: the same response
 object, and on final failure the ORIGINAL exception, so a call site's own
 error handling is unchanged. What it adds, uniformly for every provider:
@@ -47,7 +48,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, Optional
 
-from backend.security import OutboundPolicyError
+from backend.security import OutboundPolicyError, open_public_url
 
 
 class ProviderOutcome(str, enum.Enum):
@@ -268,38 +269,29 @@ def _method_of(request: Any) -> str:
         return "GET"
 
 
-@contextmanager
-def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_attempts: Optional[int] = None,
-           sleep: Callable[[float], None] = time.sleep,
-           opener: Optional[Callable[..., Any]] = None) -> Iterator[Any]:
-    """Open ``request`` at ``provider`` and yield the response (see module doc).
-
-    Raises the original exception after the last attempt. ``max_attempts``
-    overrides the provider's policy (a connectivity test passes 1).
-    ``opener`` replaces ``urllib.request.urlopen`` for the connection itself
-    (``backend.security.open_public_url`` for user-supplied URLs); it is
-    called as ``opener(request)`` or ``opener(request, timeout=timeout)``."""
-    policy = policy_for(provider)
+def _attempt_limit(policy: ProviderPolicy, max_attempts: Optional[int], method: str) -> int:
     limit = max(1, max_attempts if max_attempts is not None else policy.max_attempts)
-    if _method_of(request) not in _SAFE_METHODS:
+    if method not in _SAFE_METHODS:
         limit = 1  # a POST is never repeated by the boundary
-    attempts = 0
-    while True:
-        attempts += 1
-        try:
-            open_fn = opener if opener is not None else urllib.request.urlopen
-            if timeout is None:
-                response = open_fn(request)
-            else:
-                response = open_fn(request, timeout=timeout)
-            break
-        except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
-            err = classify_exception(exc)
-            if err.outcome not in RETRYABLE or attempts >= limit:
-                _record(provider, err.outcome, attempts=attempts, status_code=err.status_code, message=str(err))
-                raise
-            delay = err.retry_after if err.retry_after is not None else policy.base_backoff * (2 ** (attempts - 1))
-            sleep(min(MAX_RETRY_AFTER_SECONDS, delay))
+    return limit
+
+
+def _after_failure(provider: str, policy: ProviderPolicy, exc: BaseException, *, attempts: int, limit: int,
+                   sleep: Callable[[float], None]) -> bool:
+    """Classify a failed attempt. Records it and returns False when it is
+    final (the caller re-raises the original exception); otherwise sleeps
+    the backoff and returns True (try again)."""
+    err = classify_exception(exc)
+    if err.outcome not in RETRYABLE or attempts >= limit:
+        _record(provider, err.outcome, attempts=attempts, status_code=err.status_code, message=str(err))
+        return False
+    delay = err.retry_after if err.retry_after is not None else policy.base_backoff * (2 ** (attempts - 1))
+    sleep(min(MAX_RETRY_AFTER_SECONDS, delay))
+    return True
+
+
+@contextmanager
+def _yielding(provider: str, response: Any, attempts: int) -> Iterator[Any]:
     _record(provider, ProviderOutcome.CONFIRMED, attempts=attempts,
             status_code=getattr(response, "status", None))
     try:
@@ -312,3 +304,61 @@ def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_
         close = getattr(response, "close", None)
         if callable(close) and not hasattr(response, "__enter__"):
             close()
+
+
+@contextmanager
+def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_attempts: Optional[int] = None,
+           sleep: Callable[[float], None] = time.sleep) -> Iterator[Any]:
+    """Open ``request`` at ``provider`` and yield the response (see module doc).
+
+    For operator-configured endpoints and fixed provider APIs only: the
+    connection is made by ``urllib.request.urlopen`` (the allowlist-aware
+    ``backend.security.secure_urlopen`` once installed). A URL supplied by a
+    user or by a provider response must use ``opened_public`` instead.
+
+    Raises the original exception after the last attempt. ``max_attempts``
+    overrides the provider's policy (a connectivity test passes 1)."""
+    policy = policy_for(provider)
+    limit = _attempt_limit(policy, max_attempts, _method_of(request))
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            if timeout is None:
+                response = urllib.request.urlopen(request)
+            else:
+                response = urllib.request.urlopen(request, timeout=timeout)
+            break
+        except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
+            if not _after_failure(provider, policy, exc, attempts=attempts, limit=limit, sleep=sleep):
+                raise
+    with _yielding(provider, response, attempts) as entered:
+        yield entered
+
+
+@contextmanager
+def opened_public(provider: str, url: str, *, timeout: Optional[float] = None,
+                  headers: Optional[Dict[str, str]] = None, max_bytes: Optional[int] = None,
+                  max_attempts: Optional[int] = None,
+                  sleep: Callable[[float], None] = time.sleep) -> Iterator[Any]:
+    """GET a URL supplied by a user or by a provider response, at ``provider``.
+
+    Same policy, bounded retries, classification and health record as
+    ``opened``, but the connection is made only by
+    ``backend.security.open_public_url``: public addresses only,
+    BEETS_OUTBOUND_ALLOWLIST ignored, the socket pinned to the validated
+    address and every redirect hop re-validated (CodeQL #1350). There is
+    deliberately no path from here to ``urlopen``."""
+    policy = policy_for(provider)
+    limit = _attempt_limit(policy, max_attempts, "GET")
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            response = open_public_url(url, headers=headers, timeout=timeout, max_bytes=max_bytes)
+            break
+        except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
+            if not _after_failure(provider, policy, exc, attempts=attempts, limit=limit, sleep=sleep):
+                raise
+    with _yielding(provider, response, attempts) as entered:
+        yield entered

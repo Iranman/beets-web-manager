@@ -214,35 +214,85 @@ class ProviderBoundaryOpenerTests(unittest.TestCase):
         pb.reset_provider_health()
         self.addCleanup(pb.reset_provider_health)
 
-    def test_custom_opener_is_used_and_outcome_recorded(self):
+    def test_opened_public_uses_only_open_public_url_and_records_outcome(self):
         calls = []
 
-        def opener(request, timeout=None):
-            calls.append((request, timeout))
+        def fake_open_public_url(url, *, headers=None, timeout=None, max_bytes=None):
+            calls.append((url, headers, timeout, max_bytes))
             return _FakeResponse(200, b"body")
 
-        with mock.patch("urllib.request.urlopen") as urlopen:
-            with pb.opened("reference-url", "https://public.example.test/", timeout=7, opener=opener) as resp:
+        with mock.patch("urllib.request.urlopen") as urlopen,                 mock.patch.object(pb, "open_public_url", side_effect=fake_open_public_url):
+            with pb.opened_public("reference-url", "https://public.example.test/", timeout=7,
+                                  headers={"User-Agent": "ua"}, max_bytes=99) as resp:
                 self.assertEqual(resp.read(), b"body")
         urlopen.assert_not_called()
-        self.assertEqual(calls, [("https://public.example.test/", 7)])
+        self.assertEqual(calls, [("https://public.example.test/", {"User-Agent": "ua"}, 7, 99)])
         self.assertEqual(pb.provider_health()["reference-url"]["last_outcome"], "confirmed")
 
     def test_policy_refusal_is_rejected_and_never_retried(self):
         calls = []
 
-        def opener(request, timeout=None):
-            calls.append(request)
+        def refusing(url, **kwargs):
+            calls.append(url)
             raise OutboundPolicyError("outbound host resolves to a prohibited address")
 
         self.assertGreater(pb.policy_for("artwork").max_attempts, 1)
-        with self.assertRaises(OutboundPolicyError):
-            with pb.opened("artwork", "https://img.example.test/a.png", timeout=5, opener=opener,
-                           sleep=lambda _s: None):
-                pass
+        with mock.patch.object(pb, "open_public_url", side_effect=refusing):
+            with self.assertRaises(OutboundPolicyError):
+                with pb.opened_public("artwork", "https://img.example.test/a.png", timeout=5,
+                                      sleep=lambda _s: None):
+                    pass
         self.assertEqual(len(calls), 1)
         self.assertEqual(pb.provider_health()["artwork"]["last_outcome"], "rejected")
 
+    def test_transient_failure_is_retried_within_policy(self):
+        outcomes = [ConnectionResetError("reset"), _FakeResponse(200, b"ok")]
+
+        def flaky(url, **kwargs):
+            item = outcomes.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        sleeps = []
+        with mock.patch.object(pb, "open_public_url", side_effect=flaky):
+            with pb.opened_public("artwork", "https://img.example.test/a.png", sleep=sleeps.append) as resp:
+                self.assertEqual(resp.read(), b"ok")
+        self.assertEqual(len(sleeps), 1)
+
+    def test_no_path_from_opened_public_to_urlopen(self):
+        # Structural guard for CodeQL #1350/#1351/#1352: the user-URL entry
+        # point must never reach urllib, and opened() must not accept a
+        # pluggable opener (which let a user URL flow into urlopen).
+        import ast
+        import inspect
+
+        source = inspect.getsource(pb.opened_public)
+        tree = ast.parse(source.lstrip())
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} |             {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.assertNotIn("urlopen", names)
+        self.assertNotIn("Request", names)
+        self.assertNotIn("opener", inspect.signature(pb.opened).parameters)
+
+    def test_user_url_call_sites_use_opened_public(self):
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        expected = {
+            ("routes_submissions.py", "_fetch_open_graph_metadata"),
+            ("backend/artwork_service.py", "_download_album_art_bytes"),
+            ("backend/artwork_service.py", "_cache_artist_image"),
+            ("backend/musicbrainz_service.py", "_release_art_download"),
+        }
+        for rel, func_name in expected:
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+            func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == func_name)
+            attrs = [n.func.attr for n in ast.walk(func)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and getattr(n.func.value, "id", "") == "provider_boundary"]
+            with self.subTest(site=f"{rel}:{func_name}"):
+                self.assertEqual(attrs, ["opened_public"])
 
 if __name__ == "__main__":
     unittest.main()

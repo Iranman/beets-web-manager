@@ -141,7 +141,11 @@ Frontend direction:
 - Thick route handlers that still orchestrate workflows inline instead of calling their service (ARCH-001, narrowed after `app.py` was decomposed in v0.1.31).
 - Job idempotency and checkpoint consistency across all long-running workflows (ARCH-004).
 - Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers (ARCH-006).
-- Outbound HTTP goes through `backend/provider_boundary.py` `opened(provider, request, ...)`. By default it opens with `urllib.request.urlopen`, which `backend/security.py` replaces with the allowlist-aware `secure_urlopen`; that path is for operator-configured endpoints. A URL supplied by a user or a provider response must pass `opener=` a wrapper around `backend.security.open_public_url` (for example `routes_submissions._open_reference_url` or `backend.artwork_service._open_image_url`). That function allows public addresses only, ignores the allowlist, pins the connection to the validated address and re-validates every redirect hop. An outbound-policy refusal is classified `rejected` and never retried.
+- Outbound HTTP goes through `backend/provider_boundary.py`, using one of two entry points with the same policy, retries, classification and health record:
+  - `opened(provider, request, ...)` is for operator-configured endpoints and fixed provider APIs. It connects with `urllib.request.urlopen`, which `backend/security.py` replaces with the allowlist-aware `secure_urlopen`.
+  - `opened_public(provider, url, *, timeout, headers, max_bytes)` is for any URL supplied by a user or a provider response: the reference URL, and artwork image URLs. It connects only through `backend.security.open_public_url`, which allows public addresses only, ignores the allowlist, pins the connection to the validated address and re-validates every redirect hop. Its body has no path to `urlopen`.
+  - There is deliberately no pluggable opener. That design let a user URL flow into `urlopen`, which CodeQL flagged as #1351/#1352.
+  - An outbound-policy refusal is classified `rejected` and never retried.
 
 Matching and identity: every production final identity/safety decision goes through `backend/matching/` (enforced by `scripts/audit_arch002_callers.py`). Album identity is the Release Group everywhere (`docs/arch009_identity_fields.md`).
 

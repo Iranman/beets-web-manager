@@ -134,7 +134,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Validation and connection resolved DNS separately, so DNS rebinding could reach internal addresses.
   - User URLs were checked against `BEETS_OUTBOUND_ALLOWLIST`, whose default includes the Beets plugin.
   - 100.64.0.0/10 was not blocked.
-- Resolution: `backend.security.open_public_url()`/`resolve_public_target()`. Public addresses only, allowlist ignored, socket pinned to the validated address, TLS verified against the original hostname, every redirect hop re-validated. Callers pass it as `provider_boundary.opened(..., opener=...)`. Regression tests: `tests/test_reference_url_ssrf.py`, `tests/test_artwork_url_ssrf.py`.
+- Resolution: `backend.security.open_public_url()`/`resolve_public_target()`. Public addresses only, allowlist ignored, socket pinned to the validated address, TLS verified against the original hostname, every redirect hop re-validated. Callers use the dedicated entry point `provider_boundary.opened_public(provider, url, ...)`, which has no path to `urlopen`. A first version passed an `opener=` hook into `opened()`, and CodeQL flagged it as #1351/#1352 because the same parameter could be `urlopen`. Regression tests: `tests/test_reference_url_ssrf.py`, `tests/test_artwork_url_ssrf.py`.
 - The #18 dismissal is superseded. Future alerts on these sinks must be checked against this policy, not against `validate_outbound_url()`.
 - Status: Closed on the fix branch, pending CodeQL confirmation on the PR.
 
