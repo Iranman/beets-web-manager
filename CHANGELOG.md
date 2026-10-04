@@ -7,7 +7,7 @@ The project uses Semantic Versioning.
 ## Unreleased
 
 ### Added
-- `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`.
+- `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`. This reverses the Sep 16 removal of these files (#119). The governance test now enforces a single source instead: `CLAUDE.md` may only import `AGENTS.md`, which prevents the drift that caused the removal.
 
 ## v0.1.48 - 2026-09-30
 
