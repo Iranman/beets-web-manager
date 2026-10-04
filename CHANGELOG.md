@@ -9,6 +9,9 @@ The project uses Semantic Versioning.
 ### Added
 - `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`. This reverses the Sep 16 removal of these files (#119). The governance test now enforces a single source instead: `CLAUDE.md` may only import `AGENTS.md`, which prevents the drift that caused the removal.
 
+### Fixed
+- **AcoustID setup test classifies the answer by error code.** `POST /api/setup/test/acoustid` sends a dummy fingerprint, so a valid key usually comes back as error code 3 (invalid fingerprint) over HTTP 400. That was reported as a failure or as "Could not reach AcoustID". The probe now reads the error body of non-2xx answers too, and maps by code: 3/8 mean the key was accepted (ready); 4 means the key was rejected; 5/13 or HTTP 5xx mean the service is unavailable; 14 or HTTP 429 mean rate limited; any other code fails. Only timeouts and network errors report "Could not reach AcoustID". Responses carry a fixed message and a `reason` field, and never echo provider text or the key.
+
 ### Security
 - Bump `next` 16.3.4 -> 16.3.8 for GHSA-vcvr-r3jv-pc5j (critical, RCE in `next/og` `ImageResponse`). The frontend never imports `next/og`, so this is defensive. It also unblocks the `npm audit --audit-level=high` CI gate.
 

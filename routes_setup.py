@@ -3054,6 +3054,61 @@ def setup_test_musicbrainz():
         return jsonify({"ok": False, "status": "failed", "error": "Could not reach MusicBrainz."}), 200
 
 
+# AcoustID web-service error codes (acoustid-server acoustid/api/errors.py).
+# The lookup handler validates the client key (4) before it decodes the
+# fingerprint (3) or duration (8), so 3/8 prove the key was accepted.
+_ACOUSTID_PROBE_KEY_ACCEPTED_CODES = frozenset({3, 8})   # invalid fingerprint / invalid duration
+_ACOUSTID_PROBE_KEY_REJECTED_CODES = frozenset({4})      # invalid API key
+_ACOUSTID_PROBE_UNAVAILABLE_CODES = frozenset({5, 13})   # internal error / service unavailable
+_ACOUSTID_PROBE_RATE_LIMITED_CODES = frozenset({14})     # too many requests
+
+
+def _acoustid_error_code(data: Any) -> Optional[int]:
+    """The numeric ``error.code`` of an AcoustID JSON body, or None."""
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(code, bool):
+        return None
+    if isinstance(code, int):
+        return code
+    if isinstance(code, str) and code.strip().isdigit():
+        return int(code.strip())
+    return None
+
+
+def _classify_acoustid_probe(http_status: Optional[int], data: Any) -> Dict[str, Any]:
+    """Classify an AcoustID lookup answer by error code, then HTTP status.
+
+    Never echoes provider text: every message is a fixed string here."""
+    if isinstance(data, dict) and data.get("status") == "ok":
+        return {"ok": True, "status": "ready"}
+    code = _acoustid_error_code(data)
+    if code in _ACOUSTID_PROBE_KEY_ACCEPTED_CODES:
+        return {"ok": True, "status": "ready"}
+    if code in _ACOUSTID_PROBE_KEY_REJECTED_CODES:
+        return {"ok": False, "status": "failed", "reason": "auth_failed",
+                "error": "AcoustID API key was rejected."}
+    if code in _ACOUSTID_PROBE_UNAVAILABLE_CODES:
+        return {"ok": False, "status": "failed", "reason": "unavailable",
+                "error": "AcoustID service unavailable. Try again later."}
+    if code in _ACOUSTID_PROBE_RATE_LIMITED_CODES:
+        return {"ok": False, "status": "failed", "reason": "rate_limited",
+                "error": "AcoustID rate limited the request. Try again later."}
+    if code is None and http_status == 429:
+        return {"ok": False, "status": "failed", "reason": "rate_limited",
+                "error": "AcoustID rate limited the request. Try again later."}
+    if code is None and http_status is not None and http_status >= 500:
+        return {"ok": False, "status": "failed", "reason": "unavailable",
+                "error": "AcoustID service unavailable. Try again later."}
+    if code is not None:
+        return {"ok": False, "status": "failed", "reason": "provider_error",
+                "error": f"AcoustID returned an unexpected error (code {code})."}
+    return {"ok": False, "status": "failed", "reason": "bad_response",
+            "error": "AcoustID returned an unexpected response."}
+
+
 @app.post("/api/setup/test/acoustid")
 def setup_test_acoustid():
     """Distinguish Beets-engine fingerprint readiness from API-key validity."""
@@ -3094,15 +3149,31 @@ def setup_test_acoustid():
             "duration": "1", "fingerprint": "AQAAA0mUaEkSRZEeJk-eHtWMh4",
         })
         req = urllib.request.Request(f"https://api.acoustid.org/v2/lookup?{params}")
-        with provider_boundary.opened("acoustid", req, timeout=10, max_attempts=1) as r:
-            data = json.loads(r.read())
-        if data.get("status") == "error":
-            result.update({"ok": False, "status": "failed", "error": data.get("error", {}).get("message", "AcoustID rejected the request.")})
-        else:
-            result.update({"ok": True, "status": "ready"})
+        http_status: Optional[int] = 200
+        try:
+            with provider_boundary.opened("acoustid", req, timeout=10, max_attempts=1) as r:
+                raw = r.read()
+        except urllib.error.HTTPError as http_err:
+            # provider_boundary re-raises the original HTTPError; AcoustID puts
+            # its error code in the body of 400/429/5xx answers.
+            http_status = http_err.code
+            try:
+                raw = http_err.read() or b""
+            except Exception:
+                raw = b""
+        try:
+            data: Any = json.loads(raw) if raw else None
+        except ValueError:
+            data = None
+        outcome = _classify_acoustid_probe(http_status, data)
+        if not outcome["ok"]:
+            app.logger.warning("AcoustID connectivity test failed: http=%s code=%s reason=%s",
+                               http_status, _acoustid_error_code(data), outcome.get("reason"))
+        result.update(outcome)
     except Exception as ex:
         app.logger.warning("AcoustID connectivity test failed: %s", type(ex).__name__)
-        result.update({"ok": False, "status": "failed", "error": "Could not reach AcoustID."})
+        result.update({"ok": False, "status": "failed", "reason": "unreachable",
+                       "error": "Could not reach AcoustID."})
     return jsonify(result), 200
 
 
