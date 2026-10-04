@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- **Setup no longer reports a correctly mounted library as missing (#143).** The setup status still probed a hard-coded `/data/media/music`, and the diagnostics never reported a `music_library` path at all. A stack deployed with the documented `/music` mount was always told "Music library path /data/media/music is not accessible", and the System and setup pages showed it as Missing. The check now tests `MUSIC_ROOT` (default `/music`) inside the Web Manager container. When stock Beets is unreachable, the fallback paths shown are `MUSIC_ROOT` and `/downloads` instead of the legacy `/data/media/music` and `/data/torrents`.
+- **Setup no longer always reports fpcalc missing.** Stock Beets reports fingerprinting support (the chroma plugin loaded) but never a binary path, and setup gated on that always-empty path. So "fpcalc (chromaprint) not found" was always a blocking reason and AcoustID was always shown as a missing dependency. Setup now uses the availability Beets reports.
+
 ### Added
 - `AGENTS.md` agent guide (imported by `CLAUDE.md`): project goal, scope and autonomy, live-library safety rules, git workflow, definition of done, release/deploy steps, and communication expectations. Host-specific details go in a gitignored `CLAUDE.local.md`. This reverses the Sep 16 removal of these files (#119). The governance test now enforces a single source instead: `CLAUDE.md` may only import `AGENTS.md`, which prevents the drift that caused the removal.
 
