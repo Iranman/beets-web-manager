@@ -6,7 +6,7 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 import json, mimetypes, os, re, threading, time
 import urllib.error
-from backend.security import OutboundPolicyError, validate_outbound_url
+from backend.security import OutboundPolicyError, resolve_public_target
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1597,7 +1597,9 @@ def album_replace_art_from_url(aid):
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return jsonify({"ok": False, "error": "Valid http(s) image URL required"}), 400
     try:
-        validate_outbound_url(image_url)
+        # Pasted URL: public internet only, never the operator allowlist. The
+        # download itself re-validates and pins (_download_album_art_bytes).
+        resolve_public_target(image_url)
     except OutboundPolicyError:
         return jsonify({"ok": False, "error": "Image URL is not allowed"}), 400
     expected_rgid = _album_art_expected_release_group(album)

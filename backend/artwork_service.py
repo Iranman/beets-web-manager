@@ -6,7 +6,7 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 import base64, hashlib, io, json, mimetypes, os, re, threading, time
 import urllib.error
-from backend.security import OutboundPolicyError, validate_outbound_url
+from backend.security import OutboundPolicyError, resolve_public_target
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, ARTIST_IMAGE_CACHE_DIR, ART_REPAIR_LAST_FILE, METADATA_CACHE_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, _s, _up, _ur
@@ -114,14 +114,20 @@ def _artist_image_ext(url: str, content_type: str) -> str:
     return ext if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ""
 
 
+# Image URLs come from users or provider responses, so they are fetched with
+# provider_boundary.opened_public(): public internet only, the outbound
+# allowlist ignored, the socket pinned to the validated address, and every
+# redirect hop re-validated (CodeQL #1350).
+_IMAGE_FETCH_HEADERS = {"User-Agent": "BeetsWebControl/1.0"}
+
+
 def _cache_artist_image(artist_name: str, url: str) -> str:
     parsed = _up.urlparse(url or "")
     if parsed.scheme not in {"http", "https"}:
         return ""
     try:
         ARTIST_IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
-        with provider_boundary.opened("artwork", req, timeout=15) as r:
+        with provider_boundary.opened_public("artwork", url, timeout=15, headers=_IMAGE_FETCH_HEADERS) as r:
             content_type = r.headers.get("Content-Type", "")
             ext = _artist_image_ext(url, content_type)
             if not ext:
@@ -912,12 +918,11 @@ def _download_album_art_bytes(image_url: str) -> Tuple[bytes, Dict[str, Any]]:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise AlbumArtRequestError("Valid http(s) image URL required", 400)
     try:
-        validate_outbound_url(image_url)
+        resolve_public_target(image_url)
     except OutboundPolicyError as exc:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
-    req = _ur.Request(image_url, headers={"User-Agent": "BeetsWebControl/1.0"})
     try:
-        with provider_boundary.opened("artwork", req, timeout=15) as resp:
+        with provider_boundary.opened_public("artwork", image_url, timeout=15, headers=_IMAGE_FETCH_HEADERS) as resp:
             data = resp.read(_ALBUM_ART_UPLOAD_MAX_BYTES + 1)
     except OutboundPolicyError as exc:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc

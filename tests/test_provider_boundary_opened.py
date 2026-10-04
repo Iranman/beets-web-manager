@@ -176,7 +176,8 @@ class NoRawProviderCallsTests(unittest.TestCase):
         for path in self._modules():
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "opened"
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("opened", "opened_public")
                         and getattr(node.func.value, "id", "") == "provider_boundary"):
                     first = node.args[0]
                     self.assertIsInstance(first, ast.Constant, f"{path.name}:{node.lineno} provider must be a literal")

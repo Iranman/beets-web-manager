@@ -52,7 +52,7 @@ from backend.beets_adapter import (
     BeetsAdapterConnectionError as BeetsUnavailableError,
     BeetsAdapterAuthError as BeetsAuthError,
 )
-from backend.security import OutboundPolicyError, validate_outbound_url
+from backend.security import OutboundPolicyError, resolve_public_target
 from backend.identity_contract import verify_album_identity
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -1075,7 +1075,9 @@ def _validate_reference_url(raw: str) -> str:
     if not parsed.hostname:
         raise ValueError("URL is missing a host.")
     try:
-        validate_outbound_url(text)
+        # Strict public-internet policy: a pasted URL must never reach the
+        # operator's allowlisted internal services (BEETS_OUTBOUND_ALLOWLIST).
+        resolve_public_target(text)
     except OutboundPolicyError as ex:
         raise ValueError(f"This URL cannot be fetched: {ex}") from ex
     return text
@@ -1316,12 +1318,15 @@ def _fetch_discogs_release(entity_type: str, entity_id: str) -> Dict[str, Any]:
 
 
 def _fetch_open_graph_metadata(url: str) -> Dict[str, Any]:
-    # Re-validated here, not just by the route's _validate_reference_url()
-    # call before this is reached -- this is the actual network sink, so it
-    # must not depend on every future caller remembering to check first.
-    validate_outbound_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "beets-web-manager reference-url fetcher"})
-    with provider_boundary.opened("reference-url", req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
+    # opened_public() is the network sink and validates on its own: every
+    # hop is resolved once, must be a public address (the outbound allowlist
+    # is ignored), and the socket is pinned to that address -- so neither DNS
+    # rebinding nor a redirect can reach an internal host, whatever the caller
+    # checked first.
+    with provider_boundary.opened_public(
+        "reference-url", url, timeout=_REFERENCE_URL_TIMEOUT, max_bytes=_REFERENCE_MAX_BYTES,
+        headers={"User-Agent": "beets-web-manager reference-url fetcher"},
+    ) as resp:
         raw = resp.read(_REFERENCE_MAX_BYTES)
     html = raw.decode("utf-8", errors="replace")
     og: Dict[str, str] = {}

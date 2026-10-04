@@ -57,7 +57,7 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 | `BEETS_WEB_AUTH_TOKEN` | web | optional | Owner API/script bearer token. The app auto-generates a secure token if none is set. |
 | `BEETS_WEB_PASSWORD` | web | optional | Administrator browser login password. Prefer setting this via the first-run browser setup wizard. |
 | `BEETS_WEB_USERNAME` | web | optional | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. |
+| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Applies only to operator-configured services (Beets, Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider). It never applies to URLs a user pastes or a provider response supplies (reference URLs, artwork image URLs): those are fetched from public internet addresses only, with the connection pinned to the validated address, and they do not use `HTTP_PROXY`/`HTTPS_PROXY`. |
 | `BEETS_TRUSTED_PROXIES` | web | optional | Proxy CIDRs whose forwarded client IP headers may be trusted. |
 
 ## Optional integrations
