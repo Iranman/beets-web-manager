@@ -1926,6 +1926,19 @@ def _local_path_report(path: Path, *, require_writable: bool = False) -> Dict[st
     }
 
 
+def _web_manager_music_root() -> Path:
+    """Where the Beets library is mounted inside THIS (Web Manager) container.
+
+    Same rule as backend.app_runtime.MUSIC_ROOT (env MUSIC_ROOT, default
+    /music, the path every shipped compose file mounts), read at call time
+    so the setup check never carries its own hard-coded library path
+    (#143). It is a Web Manager-local check: Web Manager reads library
+    files itself (duplicate scan, fingerprints, artwork), so its own mount
+    is what has to be readable. Beets' own `directory` lives in the other
+    container and is not a path this process can test."""
+    return Path(os.environ.get("MUSIC_ROOT", "").strip() or "/music")
+
+
 def _parse_replaygain_settings(config_text: str) -> Tuple[str, str]:
     """Best-effort local parse of config.yaml's replaygain: backend/command.
 
@@ -2071,6 +2084,7 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "remote_error": "",
         "paths": {
             "config": _local_path_report(config_dir, require_writable=True),
+            "music_library": _local_path_report(_web_manager_music_root()),
             "downloads": _local_path_report(downloads_root, require_writable=True),
             "beets_config": _local_path_report(config_path),
         },
@@ -2266,7 +2280,7 @@ def _loader_failed_status(diagnostics: Dict[str, Any], *, required: bool = False
     )
 
 
-def _acoustid_integration_status(diagnostics: Dict[str, Any], fpcalc_path: str | None) -> Dict[str, Any]:
+def _acoustid_integration_status(diagnostics: Dict[str, Any], fpcalc_available: bool) -> Dict[str, Any]:
     plugin_failures = list(diagnostics.get("plugin_failures") or [])
     chroma_failure = _plugin_failure_for(plugin_failures, "chroma")
     if chroma_failure:
@@ -2278,7 +2292,7 @@ def _acoustid_integration_status(diagnostics: Dict[str, Any], fpcalc_path: str |
         )
     if not diagnostics.get("plugin_loader_ok"):
         return _loader_failed_status(diagnostics)
-    if not fpcalc_path:
+    if not fpcalc_available:
         return _integration_status(
             configured=False,
             state="dependency_plugin_missing",
@@ -2532,13 +2546,17 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         }
 
     config_check = _remote_path("config", "/config", require_writable=True)
-    music_check = _remote_path("music_library", "/data/media/music")
-    downloads_check = _remote_path("downloads", "/data/torrents", require_writable=True)
+    music_check = _remote_path("music_library", str(_web_manager_music_root()))
+    downloads_check = _remote_path("downloads", "/downloads", require_writable=True)
     remote_config_file = remote_paths.get("beets_config") if isinstance(remote_paths.get("beets_config"), dict) else {}
     beets_config_exists = bool(remote_config_file.get("exists"))
     beets_config_report_path = str(remote_config_file.get("path") or beets_config_path)
 
-    fpcalc_path = diagnostics.get("fpcalc_path") if diagnostics.get("fpcalc_available") else ""
+    # Stock Beets reports fpcalc availability (chroma/mbsubmit loaded) but
+    # never a binary path -- the binary lives in the other container. Gate
+    # on availability, not on a path that is always empty.
+    fpcalc_available = bool(diagnostics.get("fpcalc_available"))
+    fpcalc_path = str(diagnostics.get("fpcalc_path") or "") if fpcalc_available else ""
     ffmpeg_path = diagnostics.get("ffmpeg_path") if diagnostics.get("ffmpeg_available") else ""
 
     integrations = {
@@ -2560,7 +2578,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             ) else "Optional provider configured.",
         ),
         "musicbrainz": _musicbrainz_integration_status(diagnostics),
-        "acoustid": _acoustid_integration_status(diagnostics, fpcalc_path),
+        "acoustid": _acoustid_integration_status(diagnostics, fpcalc_available),
         "discogs": _plugin_integration_status(
             "discogs",
             diagnostics,
@@ -2630,14 +2648,17 @@ def _build_setup_status_payload() -> Dict[str, Any]:
     if not config_check["writable"]:
         blocking.append(f"Cannot write to config directory {config_check['path']}")
     if not music_check["readable"]:
-        blocking.append(f"Music library path {music_check['path']} is not accessible")
+        blocking.append(
+            f"Music library path {music_check['path']} is not accessible - mount the library there "
+            "or set MUSIC_ROOT to where it is mounted in the Web Manager container"
+        )
     if not downloads_check["writable"]:
         blocking.append(f"Cannot write to downloads/staging path {downloads_check['path']}")
     if not beets_config_exists:
         blocking.append(
             f"Beets config not found at {beets_config_report_path} - copy config.yaml.example to config.yaml"
         )
-    if not fpcalc_path:
+    if not fpcalc_available:
         blocking.append("fpcalc (chromaprint) not found on PATH — AcoustID fingerprinting will not work")
     if beets_config_exists and not diagnostics.get("plugin_loader_ok"):
         blocking.append(
@@ -2726,7 +2747,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             "downloads": downloads_check,
             "beets_config": {"path": beets_config_report_path, "exists": beets_config_exists},
         },
-        "fpcalc": {"available": bool(fpcalc_path), "path": fpcalc_path or ""},
+        "fpcalc": {"available": fpcalc_available, "path": fpcalc_path},
         "beets": diagnostics,
         "plugins": redacted_plugins_report,
         "plugins_ready": bool(plugins_report.get("all_required_healthy", False)),
@@ -3054,6 +3075,61 @@ def setup_test_musicbrainz():
         return jsonify({"ok": False, "status": "failed", "error": "Could not reach MusicBrainz."}), 200
 
 
+# AcoustID web-service error codes (acoustid-server acoustid/api/errors.py).
+# The lookup handler validates the client key (4) before it decodes the
+# fingerprint (3) or duration (8), so 3/8 prove the key was accepted.
+_ACOUSTID_PROBE_KEY_ACCEPTED_CODES = frozenset({3, 8})   # invalid fingerprint / invalid duration
+_ACOUSTID_PROBE_KEY_REJECTED_CODES = frozenset({4})      # invalid API key
+_ACOUSTID_PROBE_UNAVAILABLE_CODES = frozenset({5, 13})   # internal error / service unavailable
+_ACOUSTID_PROBE_RATE_LIMITED_CODES = frozenset({14})     # too many requests
+
+
+def _acoustid_error_code(data: Any) -> Optional[int]:
+    """The numeric ``error.code`` of an AcoustID JSON body, or None."""
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(code, bool):
+        return None
+    if isinstance(code, int):
+        return code
+    if isinstance(code, str) and code.strip().isdigit():
+        return int(code.strip())
+    return None
+
+
+def _classify_acoustid_probe(http_status: Optional[int], data: Any) -> Dict[str, Any]:
+    """Classify an AcoustID lookup answer by error code, then HTTP status.
+
+    Never echoes provider text: every message is a fixed string here."""
+    if isinstance(data, dict) and data.get("status") == "ok":
+        return {"ok": True, "status": "ready"}
+    code = _acoustid_error_code(data)
+    if code in _ACOUSTID_PROBE_KEY_ACCEPTED_CODES:
+        return {"ok": True, "status": "ready"}
+    if code in _ACOUSTID_PROBE_KEY_REJECTED_CODES:
+        return {"ok": False, "status": "failed", "reason": "auth_failed",
+                "error": "AcoustID API key was rejected."}
+    if code in _ACOUSTID_PROBE_UNAVAILABLE_CODES:
+        return {"ok": False, "status": "failed", "reason": "unavailable",
+                "error": "AcoustID service unavailable. Try again later."}
+    if code in _ACOUSTID_PROBE_RATE_LIMITED_CODES:
+        return {"ok": False, "status": "failed", "reason": "rate_limited",
+                "error": "AcoustID rate limited the request. Try again later."}
+    if code is None and http_status == 429:
+        return {"ok": False, "status": "failed", "reason": "rate_limited",
+                "error": "AcoustID rate limited the request. Try again later."}
+    if code is None and http_status is not None and http_status >= 500:
+        return {"ok": False, "status": "failed", "reason": "unavailable",
+                "error": "AcoustID service unavailable. Try again later."}
+    if code is not None:
+        return {"ok": False, "status": "failed", "reason": "provider_error",
+                "error": f"AcoustID returned an unexpected error (code {code})."}
+    return {"ok": False, "status": "failed", "reason": "bad_response",
+            "error": "AcoustID returned an unexpected response."}
+
+
 @app.post("/api/setup/test/acoustid")
 def setup_test_acoustid():
     """Distinguish Beets-engine fingerprint readiness from API-key validity."""
@@ -3094,15 +3170,31 @@ def setup_test_acoustid():
             "duration": "1", "fingerprint": "AQAAA0mUaEkSRZEeJk-eHtWMh4",
         })
         req = urllib.request.Request(f"https://api.acoustid.org/v2/lookup?{params}")
-        with provider_boundary.opened("acoustid", req, timeout=10, max_attempts=1) as r:
-            data = json.loads(r.read())
-        if data.get("status") == "error":
-            result.update({"ok": False, "status": "failed", "error": data.get("error", {}).get("message", "AcoustID rejected the request.")})
-        else:
-            result.update({"ok": True, "status": "ready"})
+        http_status: Optional[int] = 200
+        try:
+            with provider_boundary.opened("acoustid", req, timeout=10, max_attempts=1) as r:
+                raw = r.read()
+        except urllib.error.HTTPError as http_err:
+            # provider_boundary re-raises the original HTTPError; AcoustID puts
+            # its error code in the body of 400/429/5xx answers.
+            http_status = http_err.code
+            try:
+                raw = http_err.read() or b""
+            except Exception:
+                raw = b""
+        try:
+            data: Any = json.loads(raw) if raw else None
+        except ValueError:
+            data = None
+        outcome = _classify_acoustid_probe(http_status, data)
+        if not outcome["ok"]:
+            app.logger.warning("AcoustID connectivity test failed: http=%s code=%s reason=%s",
+                               http_status, _acoustid_error_code(data), outcome.get("reason"))
+        result.update(outcome)
     except Exception as ex:
         app.logger.warning("AcoustID connectivity test failed: %s", type(ex).__name__)
-        result.update({"ok": False, "status": "failed", "error": "Could not reach AcoustID."})
+        result.update({"ok": False, "status": "failed", "reason": "unreachable",
+                       "error": "Could not reach AcoustID."})
     return jsonify(result), 200
 
 

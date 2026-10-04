@@ -520,7 +520,7 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'{"status":"error","error":{"message":"invalid API key"}}'
+                return b'{"status":"error","error":{"code":4,"message":"invalid API key"}}'
 
         diagnostics = {
             "remote_reachable": True,
@@ -541,7 +541,7 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
         body = r.get_json()
         self.assertFalse(body["ok"])
         self.assertEqual(body["status"], "failed")
-        self.assertIn("invalid API key", body["error"])
+        self.assertIn("API key was rejected", body["error"])
         self.assertNotIn("invalid-acoustid-key", repr(body))
 
     def test_plex_test_without_credentials_reports_not_configured(self):

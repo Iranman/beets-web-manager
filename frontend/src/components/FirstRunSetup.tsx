@@ -561,7 +561,7 @@ export default function FirstRunSetup() {
                 {[
                   { name: 'Beets Configuration', key: 'beets_config', path: setupStatus?.paths?.beets_config?.path || '/config/config.yaml', exists: setupStatus?.paths?.beets_config?.exists },
                   { name: 'Music Library', key: 'music_library', path: setupStatus?.paths?.music_library?.path || '/music', readable: setupStatus?.paths?.music_library?.readable, writable: setupStatus?.paths?.music_library?.writable },
-                  { name: 'Import / Staging Directory', key: 'downloads', path: setupStatus?.paths?.downloads?.path || '/data/torrents', readable: setupStatus?.paths?.downloads?.readable, writable: setupStatus?.paths?.downloads?.writable },
+                  { name: 'Import / Staging Directory', key: 'downloads', path: setupStatus?.paths?.downloads?.path || '/downloads', readable: setupStatus?.paths?.downloads?.readable, writable: setupStatus?.paths?.downloads?.writable },
                 ].map((item) => (
                   <div key={item.key} className="rounded-xl border border-zinc-800 bg-graphite-950 p-3.5 flex items-center justify-between text-xs">
                     <div>
