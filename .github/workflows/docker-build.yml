@@ -231,6 +231,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          # gh uses GH_TOKEN from env; keep the write token out of .git/config.
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"

@@ -113,6 +113,11 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("contents: write", job)
         self.assertIn("--verify-tag", job)
         self.assertIn("scripts/release_metadata.py notes", job)
+        # The write-scoped token must not be left in .git/config for later steps.
+        self.assertRegex(
+            job,
+            r"uses: actions/checkout@\S+\n\s+with:\n(?:\s+#.*\n)*\s+persist-credentials: false",
+        )
         # The tag name reaches the shell only through an env var, never by
         # direct ${{ }} interpolation inside `run:` (script injection).
         for run in re.findall(r"run: \|\n((?:\s{10,}.*\n)+)", job):
