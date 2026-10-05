@@ -19,6 +19,11 @@ The project uses Semantic Versioning.
 
 ### Security
 - Rollout backups no longer keep plain-text copies of every service's environment: the `docker inspect` and `docker compose config` copies keep key names but redact values except for a short allowlist of non-secret keys (RD-20). New opt-in `--prune-backups-older-than DAYS` deletes old rollout backups (never automatically; keeps the newest and any backup holding an archived stale database).
+- `restore.sh` refuses archives with symbolic links, hard links or special files (checked before and after extraction), extracts without the archive's owners and permissions, and sets `config.yaml` and `.webmanager_api_key` to mode 600 after restoring them.
+- The rollout script (which runs as root) never follows symbolic links when it backs up or restores state: a linked source file or folder is skipped and reported, a linked destination file is replaced rather than written through, a linked destination folder is refused, folders are copied without following links, and a linked auth token path stops the deploy.
+- Redacted diagnostic copies also scrub `key=`/`token=`/`secret=`/`password=` values from container commands, entrypoints, labels and health checks and from Compose `command`, `entrypoint`, `healthcheck`, `labels`, `build.args` and `x-*` extensions, and remove credentials embedded in allowlisted URLs (`BEETS_WEB_URL`, `BEETS_OUTBOUND_ALLOWLIST`).
+- `backup.sh` no longer builds a `sqlite3 .backup` command from a path containing `'`: it uses the Python online backup for such paths, or stops with an error when `python3` is unavailable.
+- The `github-release` CI job checks out with `persist-credentials: false`, so its write-scoped token is not left in `.git/config`.
 
 ### Added
 - GitHub Releases are created by CI (RD-11): on a `v*` tag, after the image is published, the `github-release` job creates the release with the tag's CHANGELOG section as its body (`scripts/release_metadata.py notes`). An existing release is left untouched.
