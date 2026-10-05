@@ -204,10 +204,12 @@ def cmd_compose(args, state):
     rest = args[i + 1:]
 
     if sub == "ps":
-        # rest == ["-q", svc]
+        # rest == ["-q", svc] or ["-a", "-q", svc]. Like the real CLI,
+        # without -a a stopped container is not listed.
         svc = rest[-1]
         cid = state["service_containers"].get(svc, "")
-        if cid:
+        status = ((state["containers"].get(cid) or {}).get("State") or {}).get("Status", "running") if cid else ""
+        if cid and ("-a" in rest or status == "running"):
             print(cid)
         return 0
 

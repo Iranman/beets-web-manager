@@ -1391,6 +1391,17 @@ class RollbackProofTests(VersionedStackFixture):
         self.assertIn("expected the previous image sha256:oldimageid", res.stderr)
         self.assertNotIn("Rollback complete", res.stderr)
 
+    def test_rollback_works_when_the_web_manager_is_stopped(self):
+        """A failed deploy or an earlier failed rollback can leave the
+        service stopped; `docker compose ps -q` does not list it then."""
+        self.deploy()
+        st = self.load_state()
+        st["containers"][st["service_containers"]["beets-web-manager"]]["State"] = {"Status": "exited"}
+        self.save_state(st)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+
     def test_rollback_without_previous_image_record_refuses(self):
         self.deploy()
         os.remove(os.path.join(self.backup_dir(), "previous-image.txt"))

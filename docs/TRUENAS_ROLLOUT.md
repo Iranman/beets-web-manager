@@ -222,7 +222,9 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    value in `.env.bak` (or, if that had none, to the tag of the previous
    image). No other line changes.
 5. Recreates `beets-web-manager` on the previous image reference through a
-   temporary Compose override file. A failure here is fatal and printed.
+   temporary Compose override file (`.rollback-override.*`, written next to
+   the Compose file and removed afterwards). A stopped service is still
+   resolved. A failure here is fatal and printed.
 6. **Proves the result**, failing loudly on any mismatch:
    - the container's running image ID equals the recorded previous image ID,
      and its configured image is the previous reference;

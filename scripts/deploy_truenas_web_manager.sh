@@ -416,8 +416,9 @@ print(svc.get('image', ''))
 
 resolve_container_id() {
   local svc="$1" cid
-  cid="$(_compose ps -q "$svc" 2>/dev/null || true)"
-  [[ -n "$cid" ]] || die "could not resolve a container for compose service '${svc}' via 'docker compose ps -q' -- refusing to guess a container name"
+  # -a: a stopped container (e.g. after a failed deploy) must still resolve.
+  cid="$(_compose ps -a -q "$svc" 2>/dev/null || true)"
+  [[ -n "$cid" ]] || die "could not resolve a container for compose service '${svc}' via 'docker compose ps -a -q' -- refusing to guess a container name"
   echo "$cid"
 }
 
@@ -1682,7 +1683,10 @@ print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previo
   unset BEETS_WEB_MANAGER_VERSION
 
   local override
-  override="$(mktemp)"
+  # Next to the Compose file (removed again below): the docker CLI must be
+  # able to open it by that path, which is not true for every temp dir
+  # (e.g. a Windows docker.exe driven from Git Bash).
+  override="$(mktemp "$(dirname "$COMPOSE_FILE")/.rollback-override.XXXXXX")"
   printf 'services:\n  %s:\n    image: "%s"\n' "$SERVICE" "$previous_image_ref" > "$override"
   log "Recreating ${SERVICE} on previous image reference: ${previous_image_ref}"
   if ! docker compose -f "$COMPOSE_FILE" -f "$override" up -d --no-deps --force-recreate "$SERVICE" >&2; then
