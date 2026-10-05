@@ -3018,12 +3018,20 @@ def setup_test_ai():
         return csrf_failure
 
     payload = request.get_json(silent=True) or {}
-    api_key = payload.get("api_key") or os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
-    base_url = payload.get("base_url") or os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
+    from backend.auth_service import probe_may_use_stored_secret
+    configured_base_url = os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
+    supplied_base_url = str(payload.get("base_url") or "").strip()
+    base_url = supplied_base_url or configured_base_url
     model = payload.get("model") or os.environ.get("AI_MODEL") or "gpt-4o-mini"
+    api_key = str(payload.get("api_key") or "").strip()
+    if not api_key and probe_may_use_stored_secret(supplied_base_url, configured_base_url):
+        # SEC-1: a stored key is only ever sent to the operator-configured
+        # endpoint, and only for an authenticated caller -- never to a
+        # caller-supplied base_url, never during anonymous first-run setup.
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY") or ""
     if not api_key:
         return jsonify({"ok": False, "status": "not_configured",
-                         "error": "No AI API key configured. Set OPENAI_API_KEY (or your provider's key) and retry."}), 200
+                         "error": "No AI API key to test. Enter the API key for this base URL, or set OPENAI_API_KEY (or your provider's key) and retry."}), 200
     base_host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
     is_openai_host = base_host == "api.openai.com" or base_host.endswith(".api.openai.com")
     try:
@@ -3205,11 +3213,18 @@ def setup_test_plex():
         return csrf_failure
 
     payload = request.get_json(silent=True) or {}
-    plex_url = (payload.get("url") or os.environ.get("PLEX_URL") or "").rstrip("/")
-    plex_token = payload.get("token") or os.environ.get("PLEX_TOKEN")
+    from backend.auth_service import probe_may_use_stored_secret
+    configured_plex_url = (os.environ.get("PLEX_URL") or "").strip()
+    supplied_plex_url = str(payload.get("url") or "").strip()
+    plex_url = (supplied_plex_url or configured_plex_url).rstrip("/")
+    plex_token = str(payload.get("token") or "").strip()
+    if not plex_token and configured_plex_url and probe_may_use_stored_secret(supplied_plex_url, configured_plex_url):
+        # SEC-1: the stored PLEX_TOKEN only ever goes to the configured
+        # PLEX_URL, and only for an authenticated caller.
+        plex_token = os.environ.get("PLEX_TOKEN") or ""
     if not plex_url or not plex_token:
         return jsonify({"ok": False, "status": "not_configured",
-                         "error": "PLEX_URL and PLEX_TOKEN are both required to test Plex."}), 200
+                         "error": "A Plex URL and token are both required to test Plex. Enter the token for this URL, or set PLEX_URL and PLEX_TOKEN."}), 200
     try:
         req = urllib.request.Request(f"{plex_url}/library/sections", headers={"X-Plex-Token": plex_token})
         with provider_boundary.opened("plex", req, timeout=10, max_attempts=1) as r:

@@ -30,6 +30,10 @@ _METADATA_IPS = {
     ipaddress.ip_address("100.100.100.200"),
     ipaddress.ip_address("fd00:ec2::254"),
 }
+# Request headers that carry a credential and must never follow a redirect to
+# a different origin. Includes every provider auth header this app sends
+# (Plex X-Plex-Token, Lidarr/slskd X-Api-Key, qBittorrent cookie, Discogs/AI
+# Authorization) -- SEC-1.
 _SENSITIVE_REDIRECT_HEADERS = {
     "authorization",
     "cookie",
@@ -37,6 +41,10 @@ _SENSITIVE_REDIRECT_HEADERS = {
     "x-auth-token",
     "x-forwarded-authorization",
     "proxy-authorization",
+    "x-plex-token",
+    "x-emby-token",
+    "x-mediabrowser-token",
+    "x-listenbrainz-token",
 }
 _DEFAULT_TIMEOUT = float(os.environ.get("BEETS_OUTBOUND_TIMEOUT_SECONDS", "20") or "20")
 _DEFAULT_MAX_BYTES = int(os.environ.get("BEETS_OUTBOUND_MAX_RESPONSE_BYTES", str(20 * 1024 * 1024)) or str(20 * 1024 * 1024))
@@ -127,6 +135,27 @@ def _url_port(parsed: urllib.parse.SplitResult) -> int:
 def _origin(value: str) -> Tuple[str, str, int]:
     parsed = urllib.parse.urlsplit(value)
     return (parsed.scheme.lower(), _clean_host(parsed.hostname or ""), _url_port(parsed))
+
+
+def same_endpoint_url(supplied: str, configured: str) -> bool:
+    """True when two service base URLs name the same endpoint: same scheme,
+    host (case-insensitive), effective port and path (ignoring a trailing
+    slash). Credentials, query and fragment never make two URLs equal."""
+    try:
+        a = urllib.parse.urlsplit(str(supplied or "").strip())
+        b = urllib.parse.urlsplit(str(configured or "").strip())
+        if not a.scheme or not b.scheme or not a.hostname or not b.hostname:
+            return False
+        if a.username or a.password or a.query or a.fragment:
+            return False
+        return (
+            a.scheme.lower() == b.scheme.lower()
+            and _clean_host(a.hostname) == _clean_host(b.hostname)
+            and _url_port(a) == _url_port(b)
+            and (a.path or "/").rstrip("/") == (b.path or "/").rstrip("/")
+        )
+    except ValueError:
+        return False
 
 
 def redact_url_for_log(url: str) -> str:

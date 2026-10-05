@@ -367,6 +367,27 @@ def _request_authorized() -> bool:
     return _bearer_authorized(header) or _basic_authorized(header) or _session_authorized()
 
 
+def probe_may_use_stored_secret(supplied_url: str, configured_url: str) -> bool:
+    """SEC-1: may a connectivity probe fall back to a *stored* credential?
+
+    Only for an authenticated caller (never during anonymous first-run
+    setup), and only when the probe targets the operator-configured endpoint
+    -- either no URL was supplied or the supplied URL is that same endpoint.
+    A caller-supplied URL must always come with a caller-supplied key, so a
+    stored secret can never be sent to a host the caller chose."""
+    if not _security_auth_disabled():
+        try:
+            if not _request_authorized():
+                return False
+        except RuntimeError:
+            return False
+    supplied = (supplied_url or "").strip()
+    if not supplied:
+        return True
+    from backend.security import same_endpoint_url
+    return same_endpoint_url(supplied, configured_url)
+
+
 def _trusted_proxy_cidrs() -> List[str]:
     raw = os.environ.get("BEETS_TRUSTED_PROXIES", "")
     return [part.strip() for part in raw.split(",") if part.strip()]
