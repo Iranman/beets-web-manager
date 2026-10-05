@@ -490,6 +490,11 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "STAGING_ONLY", "", "reviewed-composite-workflows-playlist-staging"
         if file == "backend/web_manager_config_store.py":
             return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
+        if file == "backend/config_layers.py":
+            # One-time migration of web-manager-data/.env (the app's own saved
+            # settings): backup, atomic rewrite, names-only report. Never
+            # Beets config, DB or media.
+            return "APP_STATE", "", "saved-settings-migration-state"
         if file == "backend/dedup_authorization.py":
             # Atomic write of web-manager-data/duplicate_cleanup_authorization.json
             # (the operator's unattended-deletion switch); never library media.

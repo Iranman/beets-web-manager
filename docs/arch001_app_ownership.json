@@ -531,14 +531,34 @@
    "dependencies": []
   },
   {
-   "name": "_load_persisted_setup_env_at_boot",
+   "name": "_setup_env_file_path",
    "module": "backend/app_runtime.py",
    "lines": [
     79,
-    102
+    80
    ],
-   "size": 24,
-   "body_lines": 22,
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "SETUP",
+   "desired_owner": "backend/setup_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_load_persisted_setup_env_at_boot"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_load_persisted_setup_env_at_boot",
+   "module": "backend/app_runtime.py",
+   "lines": [
+    83,
+    100
+   ],
+   "size": 18,
+   "body_lines": 9,
    "route": null,
    "mutation_capable": false,
    "domain": "SETUP",
@@ -547,15 +567,16 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_decode_boot_env_value"
+    "_decode_boot_env_value",
+    "_setup_env_file_path"
    ]
   },
   {
    "name": "_config_file_first_line",
    "module": "backend/app_runtime.py",
    "lines": [
-    142,
-    148
+    140,
+    146
    ],
    "size": 7,
    "body_lines": 6,
@@ -572,8 +593,8 @@
    "name": "_env_flag",
    "module": "backend/app_runtime.py",
    "lines": [
-    151,
-    155
+    149,
+    153
    ],
    "size": 5,
    "body_lines": 4,
@@ -590,8 +611,8 @@
    "name": "_env_int",
    "module": "backend/app_runtime.py",
    "lines": [
-    158,
-    167
+    156,
+    165
    ],
    "size": 10,
    "body_lines": 9,
@@ -611,8 +632,8 @@
    "name": "_env_float",
    "module": "backend/app_runtime.py",
    "lines": [
-    170,
-    179
+    168,
+    177
    ],
    "size": 10,
    "body_lines": 9,
@@ -629,8 +650,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    476,
-    477
+    480,
+    481
    ],
    "size": 2,
    "body_lines": 1,
@@ -653,8 +674,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    570,
-    577
+    574,
+    581
    ],
    "size": 8,
    "body_lines": 6,
@@ -683,8 +704,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    586,
-    606
+    590,
+    610
    ],
    "size": 21,
    "body_lines": 19,
@@ -703,8 +724,8 @@
    "name": "_sqlite_timeout_seconds",
    "module": "backend/app_runtime.py",
    "lines": [
-    621,
-    625
+    625,
+    629
    ],
    "size": 5,
    "body_lines": 4,
@@ -721,8 +742,8 @@
    "name": "_sqlite_is_locked_error",
    "module": "backend/app_runtime.py",
    "lines": [
-    634,
-    638
+    638,
+    642
    ],
    "size": 5,
    "body_lines": 4,
@@ -741,8 +762,8 @@
    "name": "_sqlite_write_retry",
    "module": "backend/app_runtime.py",
    "lines": [
-    641,
-    651
+    645,
+    655
    ],
    "size": 11,
    "body_lines": 10,
@@ -761,8 +782,8 @@
    "name": "_is_musl_linux",
    "module": "backend/app_runtime.py",
    "lines": [
-    675,
-    687
+    679,
+    691
    ],
    "size": 13,
    "body_lines": 12,
@@ -779,8 +800,8 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    702,
-    705
+    706,
+    709
    ],
    "size": 4,
    "body_lines": 3,
@@ -799,8 +820,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    722,
-    726
+    726,
+    730
    ],
    "size": 5,
    "body_lines": 4,
@@ -835,8 +856,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    729,
-    739
+    733,
+    743
    ],
    "size": 11,
    "body_lines": 10,
@@ -858,8 +879,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    742,
-    747
+    746,
+    751
    ],
    "size": 6,
    "body_lines": 5,
@@ -902,8 +923,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    750,
-    761
+    754,
+    765
    ],
    "size": 12,
    "body_lines": 10,
@@ -930,8 +951,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    764,
-    781
+    768,
+    785
    ],
    "size": 18,
    "body_lines": 11,
@@ -953,8 +974,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    784,
-    791
+    788,
+    795
    ],
    "size": 8,
    "body_lines": 7,
@@ -977,8 +998,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    794,
-    808
+    798,
+    812
    ],
    "size": 15,
    "body_lines": 14,
@@ -1006,8 +1027,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    838,
-    841
+    842,
+    845
    ],
    "size": 4,
    "body_lines": 3,
@@ -1031,8 +1052,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    844,
-    854
+    848,
+    858
    ],
    "size": 11,
    "body_lines": 10,
@@ -1067,8 +1088,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    857,
-    871
+    861,
+    875
    ],
    "size": 15,
    "body_lines": 14,
@@ -1093,8 +1114,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    874,
-    878
+    878,
+    882
    ],
    "size": 5,
    "body_lines": 4,
@@ -1115,8 +1136,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    881,
-    900
+    885,
+    904
    ],
    "size": 20,
    "body_lines": 11,
@@ -1137,8 +1158,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    903,
-    912
+    907,
+    916
    ],
    "size": 10,
    "body_lines": 7,
@@ -1161,8 +1182,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    915,
-    924
+    919,
+    928
    ],
    "size": 10,
    "body_lines": 7,
@@ -1183,8 +1204,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    927,
-    937
+    931,
+    941
    ],
    "size": 11,
    "body_lines": 7,
@@ -1205,8 +1226,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    942,
-    943
+    946,
+    947
    ],
    "size": 2,
    "body_lines": 1,
@@ -1249,8 +1270,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    948,
-    956
+    952,
+    960
    ],
    "size": 9,
    "body_lines": 2,
@@ -1267,8 +1288,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    972,
-    977
+    976,
+    981
    ],
    "size": 6,
    "body_lines": 3,
@@ -1285,8 +1306,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    990,
-    992
+    994,
+    996
    ],
    "size": 3,
    "body_lines": 2,
@@ -1303,8 +1324,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    995,
-    998
+    999,
+    1002
    ],
    "size": 4,
    "body_lines": 3,

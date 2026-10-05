@@ -51,6 +51,10 @@ services:
       - TZ=Etc/UTC
       - BEETS_WEB_URL=http://beets:8337
       - BEETS_OUTBOUND_ALLOWLIST=beets:8337
+      # Container paths: must match the mount targets below.
+      - MUSIC_ROOT=/music
+      - DOWNLOADS_ROOT=/downloads
+      - BEETS_CONFIG=/config/config.yaml
     volumes:
       - ./beets:/config
       - /path/to/music:/music:ro
@@ -68,6 +72,7 @@ services:
 > - Update `/path/to/music` to point to your music library on the host.
 > - Update `/path/to/downloads` to point to your downloads or staging directory.
 > - `./beets` and `./web-manager` will be created automatically in your current directory for persistent configuration and application state.
+> - Change only the **left** side of each volume (the host folder). The right side (`/music`, `/downloads`, `/config`) is the path inside the containers. Web Manager's `MUSIC_ROOT`/`DOWNLOADS_ROOT`/`BEETS_CONFIG` and Beets' own `directory:` refer to it. If you change a right side, change it in both services and set the matching variable (see `docs/CONFIGURATION.md`, "Configuration layers").
 
 ### Step 3: Start the stack
 
@@ -120,6 +125,7 @@ If you run Beets on a separate host (e.g. TrueNAS, Unraid, or another server) an
 1. Use [examples/docker-compose.external-beets.yml](../examples/docker-compose.external-beets.yml).
 2. Configure `BEETS_WEB_URL` (e.g. `http://192.168.1.50:8337`) and `BEETS_OUTBOUND_ALLOWLIST`.
 3. The remote Beets instance must already have its `web`/`webmanager` plugins enabled and provisioned — Web Manager cannot provision a plugin into a filesystem it does not mount.
+4. Without the shared `/config` mount Web Manager cannot read the integration key file. Copy the 64-hex key from the Beets host's `/config/.webmanager_api_key` into `BEETS_WEBMANAGER_API_KEY` (System page, or the Compose environment).
 
 ---
 

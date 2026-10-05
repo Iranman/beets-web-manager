@@ -47,18 +47,68 @@ Despite the filename, this file has nothing to do with `docker compose --env-fil
 
 If this ambiguity trips you up, that's expected -- treat "Deployment setting" (Compose/host, needs recreation) and "Web Manager setting" (`.env`, applies live) as the two questions to ask before changing a value, and prefer the System page's UI, which labels each field with which one it is.
 
-## Core variables
+## Configuration layers
 
-| Variable | Service | Required | Meaning |
-|---|---|---:|---|
-| `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.18`, or `edge`. |
-| `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`. |
-| `BEETS_WEB_URL` | web | optional | Stock Beets container's `web`/`webmanager` plugin URL. Defaults to `http://beets:8337` (the standard Compose service name/port). For an externally-managed Beets instance, set to its URL (e.g. `http://192.168.1.50:8337`). |
-| `BEETS_WEB_AUTH_TOKEN` | web | optional | Owner API/script bearer token. The app auto-generates a secure token if none is set. |
-| `BEETS_WEB_PASSWORD` | web | optional | Administrator browser login password. Prefer setting this via the first-run browser setup wizard. |
-| `BEETS_WEB_USERNAME` | web | optional | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Applies only to operator-configured services (Beets, Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider). It never applies to URLs a user pastes or a provider response supplies (reference URLs, artwork image URLs): those are fetched from public internet addresses only, with the connection pinned to the validated address, and they do not use `HTTP_PROXY`/`HTTPS_PROXY`. |
-| `BEETS_TRUSTED_PROXIES` | web | optional | Proxy CIDRs whose forwarded client IP headers may be trusted. |
+Every variable belongs to exactly one layer (`backend/config_layers.py`). The layer decides where you set it, whether Web Manager may read it, and whether the System page may save it. The System page shows each variable's layer and how a change applies: `live`, `restart` (restart Web Manager) or `deploy` (edit Compose and recreate the container).
+
+### 1. Host (Compose interpolation only)
+
+Values on the Docker host, used only to build the volume list in `docker-compose.yml`. They mean nothing inside a container and Web Manager never reads them (a test enforces this). The System page shows them read-only.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BEETS_CONFIG_PATH` | `./beets` | Host folder mounted at `/config` in both containers. |
+| `MUSIC_PATH` | `./music` | Host library folder mounted at `/music` (read-only in Web Manager). The older name `MUSIC_LIBRARY_PATH` is accepted as a fallback. |
+| `DOWNLOADS_PATH` | `./downloads` | Host downloads/staging folder mounted at `/downloads`. The older name `DOWNLOAD_PATH` is accepted as a fallback. |
+| `WEB_MANAGER_DATA_PATH` | `./web-manager` | Host folder mounted at `/web-manager-data`. The older name `BEETS_WEB_MANAGER_DATA_PATH` is accepted as a fallback. |
+| `BEETS_WEB_MANAGER_VERSION`, `BEETS_WEB_BIND_ADDRESS` | | Image tag and published bind address (`docker-compose.full.yml`). |
+
+`docker-compose.yml` and `docker-compose.dev.yml` accept the older names through nested defaults, for example `${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}`.
+
+### 2. Deployment (Compose `environment:`, pinned)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PUID`, `PGID` | `1000` | User and group the container runs as. |
+| `TZ` | `UTC` | Time zone. |
+| `WEBCONTROL_PORT` | `8337` | In `ports:` it is the published host port. Inside the container the app always listens on 8337, which the shipped healthcheck expects. |
+
+Every shipped Compose file sets these, so a value saved from the System page could never take effect. They are read-only in the app.
+
+### 3. Container paths (Compose `environment:`)
+
+Absolute paths inside the Web Manager container. They must match the mount targets, and `MUSIC_ROOT` must equal Beets' own `directory:` in the `beets` container (both `/music` by default). Change one only together with the matching volume target, then recreate the container. A relative value is ignored with a warning.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MUSIC_ROOT` | `/music` | Library mount inside Web Manager. Deprecated aliases: `MUSIC_LIBRARY_PATH`, `BEETS_MUSIC_DIR`. |
+| `DOWNLOADS_ROOT` | `/downloads` | Downloads/staging mount inside Web Manager. The setup "downloads" check tests this path. Deprecated alias: `DOWNLOAD_PATH`. |
+| `BEETS_CONFIG` | `/config/config.yaml` | Beets `config.yaml` inside the container. The config editor reads and writes only this file. It refuses a relative path or a file outside the Beets config directory (`BEETSDIR`, default `/config`). |
+| `WEB_MANAGER_DATA_DIR` | `/web-manager-data` | Web Manager's own durable state. |
+| `BEETS_TRANSACTION_DIR` | `/web-manager-data/transactions` | Transaction and audit records. |
+| `BEETS_LIBRARY` | | Deprecated. Web Manager does not open the Beets database. This variable will be removed. |
+
+### 4. Application settings and secrets (System page, `/web-manager-data/.env`)
+
+Only these keys may be saved from the System page, and only these keys are loaded from `/web-manager-data/.env` at startup. A non-blank Docker value always wins.
+
+| Variable | Applies | Meaning |
+|---|---|---|
+| `BEETS_WEB_URL` | restart | Stock Beets `web`/`webmanager` URL. The default is `http://beets:8337` everywhere. `docker-compose.yml` forwards `${BEETS_WEB_URL:-http://beets:8337}`, so set it in the Compose `.env` for an external Beets. Keep `BEETS_OUTBOUND_ALLOWLIST` in step: it must contain the URL's host:port. |
+| `BEETS_WEBMANAGER_API_KEY` | restart | Integration plugin bearer key. Normally read from `/config/.webmanager_api_key`. Set it only when Web Manager does not mount the Beets `/config` (external Beets). |
+| `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
+| `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |
+| `BEETS_WEB_USERNAME` | live | Browser login username, default `admin`. |
+| `BEETS_OUTBOUND_ALLOWLIST` | live | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Applies only to operator-configured services (Beets, Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider). It never applies to URLs a user pastes or a provider response supplies (reference URLs, artwork image URLs): those are fetched from public internet addresses only, with the connection pinned to the validated address, and they do not use `HTTP_PROXY`/`HTTPS_PROXY`. |
+| `BEETS_TRUSTED_PROXIES` | restart | Proxy CIDRs whose forwarded client IP headers may be trusted. |
+
+The provider settings in the next section are application settings too.
+
+### Saved-settings migration (upgrading from v0.1.49 or earlier)
+
+Earlier releases copied the whole `.env.example` template into `/web-manager-data/.env` on the first Settings save. That included host-side values such as `DOWNLOADS_PATH=./downloads` and `BEETS_CONFIG_PATH=./beets`, which Web Manager then exported into its own environment. The result was a false "Cannot write to downloads/staging path downloads" warning, and a Beets config editor that showed an empty file and saved to the wrong place.
+
+On startup Web Manager now removes host, deployment, container and retired keys from `/web-manager-data/.env`. It does this once, after saving a `.env.bak-migration-<timestamp>` backup next to the file (mode 0600). Only key names are logged. The System page and `/api/setup/status` (`settings_migration`) report how many keys were removed. Nothing else changes, and later starts do nothing.
 
 ## Optional integrations
 
@@ -79,8 +129,7 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 
 The authoritative Beets config is `/config/config.yaml`, owned by the stock `beets` container. Web Manager also mounts `/config` (read/write) — not to run Beets itself, but to provision the bundled `webmanager` integration plugin's files into `/config/beetsplug` and to safely merge required `plugins:`/`pluginpath:` entries into `config.yaml` at startup (additive only: it backs up the file first and never removes an operator's existing settings).
 
-> [!NOTE]
-> The Settings page's config text editor (`GET/POST /api/config`) still calls the retired `backend/beets_client.py` control-agent client and is currently non-functional — see `docs/TECHNICAL_DEBT.md` (ARCH-010). Edit `/config/config.yaml` directly on the host, or via `docker compose exec beets sh`, until that route is migrated onto `backend/beets_adapter.py`.
+The Settings page's config text editor (`GET/POST /api/config`, `POST /api/config/revert`) edits the file named by `BEETS_CONFIG` through `backend/config_manager.py`. Every save checks the revision, validates the YAML, makes a backup and writes atomically. The editor fails closed rather than showing an empty config: it returns an error when the file is missing or the path is outside the Beets config directory. Restart the `beets` container so Beets reads a change.
 
 Beets Web Manager provisions the bundled `discpath` plugin (and the `webmanager` plugin itself) into `/config/beetsplug`; further user plugins can be dropped into the same directory. `pluginpath` must include `/config/beetsplug` for any of them to load — the provisioning step ensures this automatically.
 
@@ -123,5 +172,5 @@ Beets Web Manager builds and publishes exactly one image, `ghcr.io/iranman/beets
 
 ## Library location and unattended duplicate deletion
 
-- `MUSIC_ROOT` — where the Beets library is mounted inside the Web Manager container (default `/music`, the path every shipped compose file mounts). It is the only setting for the library location; nothing else in the backend hard-codes a library path. The setup and System page "Music Library" check tests this path inside the Web Manager container and blocks setup only when it is missing or unreadable (a read-only mount is fine). Web Manager uses the absolute item paths Beets reports, so `MUSIC_ROOT` must be the same path as Beets' `directory:` in the `beets` container (both `/music` in the shipped compose files). `MUSIC_ROOT` is a container-side variable: the shipped compose files do not forward it from `.env`, so set it under the `beets-web-manager` service's `environment:` only if you mount the library somewhere other than `/music`.
+- `MUSIC_ROOT` — where the Beets library is mounted inside the Web Manager container (default `/music`). Every shipped compose file mounts this path and now also sets the variable explicitly. It is the only setting for the library location. The setup and System page "Music Library" check tests this path inside the Web Manager container. It blocks setup only when the path is missing or unreadable; a read-only mount is fine. Web Manager uses the absolute item paths Beets reports, so `MUSIC_ROOT` must be the same path as Beets' `directory:` in the `beets` container. It is a container-side variable (layer 3 above): change it under the `beets-web-manager` service's `environment:` together with the volume target.
 - Unattended (scheduled) duplicate deletion is a separate, explicit authorization, **off by default**. It is stored in `web-manager-data/duplicate_cleanup_authorization.json` and changed only through `POST /api/dedup/unattended-cleanup` (enabling requires the confirmation phrase `ENABLE UNATTENDED DUPLICATE DELETION`) or the Duplicate Files panel. Changing `MUSIC_ROOT` or any other setting never enables it. While it is off, the maintenance duplicate step still scans, fingerprint-verifies and records a review proposal (both paths, sizes, Recording IDs, fingerprint evidence, release slot, which copy is kept) but deletes nothing. `POST /api/dedup/maintenance-run` runs that step on its own.

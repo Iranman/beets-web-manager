@@ -6,6 +6,27 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+- On first start, Web Manager removes host-side Compose values (`MUSIC_PATH`, `DOWNLOADS_PATH`, `BEETS_CONFIG_PATH`, `WEB_MANAGER_DATA_PATH`), Compose-pinned values (`PUID`, `PGID`, `TZ`, `WEBCONTROL_PORT`), container paths and retired keys (`PLAYLIST_DIR`, `BEETS_SQLITE_TIMEOUT`, `WEB_MANAGER_PATH`) from the saved settings file `/web-manager-data/.env`. A backup `.env.bak-migration-<timestamp>` is written next to it first. The System page and `/api/setup/status` (`settings_migration`) report how many keys were removed. Only key names are logged.
+- The System page can no longer save `PUID`, `PGID`, `TZ`, `WEBCONTROL_PORT`, container paths (`BEETS_CONFIG`, `BEETS_LOG`, `MUSIC_ROOT`, `DOWNLOADS_ROOT`) or host paths. Every shipped Compose file sets these, so a saved value never took effect. Set them in Compose and recreate the container.
+- If you saved edits from the Config page on v0.1.49 or earlier, those edits never reached `/config/config.yaml` (see Fixed). Apply them again.
+- `docker-compose.yml` now forwards `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` from the Compose `.env` (defaults unchanged). It also sets `MUSIC_ROOT`, `DOWNLOADS_ROOT` and `BEETS_CONFIG` explicitly, and accepts the older host-path names `MUSIC_LIBRARY_PATH`, `DOWNLOAD_PATH` and `BEETS_WEB_MANAGER_DATA_PATH` as fallbacks.
+
+### Fixed
+- **The Beets config editor showed an empty file and saved to the wrong place.** The first Settings save copied the whole `.env.example` template into `/web-manager-data/.env`, including the host-side `BEETS_CONFIG_PATH=./beets`. The editor read that variable as the container path of `config.yaml`, so after a restart `GET /api/config` returned an empty config. `POST /api/config` then reported success while writing `/app/beets` inside the container instead of `/config/config.yaml`.
+  - Settings saves now write only the keys that were saved, and startup loads only application settings from that file.
+  - The editor uses `BEETS_CONFIG` (default `/config/config.yaml`), never `BEETS_CONFIG_PATH`. It refuses a relative path or a file outside the Beets config directory, and it reports a missing file as an error instead of an empty config.
+- **False "Cannot write to downloads/staging path downloads" warning.** Setup checked the host-side `DOWNLOADS_PATH` as if it were a container path. It now checks `DOWNLOADS_ROOT` (default `/downloads`).
+- **A Beets outage no longer produces a list of false local failures.** While stock Beets was unreachable, setup status and `/health/ready` also reported that the config directory, music library, downloads and `config.yaml` were inaccessible, and that fpcalc was missing. Local mounts are now checked locally whether or not Beets answers. "Stock Beets is unavailable" is the single primary reason, and fpcalc is reported as `unknown`.
+- The Beets `config.yaml` path report no longer shows `ok: false` for a healthy file. It used a directory check on a file.
+- The Beets adapter's default URL is `http://beets:8337` everywhere. The adapter used to fall back to `http://127.0.0.1:8337`, which is Web Manager itself.
+
+### Changed
+- Configuration layers (`backend/config_layers.py`, `docs/CONFIGURATION.md`): every variable is classified as host, deployment, container, application or secret. `GET /api/setup/env` reports each variable's `layer` and `apply` (`live`, `restart` or `deploy`), and only application keys are editable. A test forbids application code from reading host-side Compose variables.
+- `PLAYLIST_DIR`, `BEETS_SQLITE_TIMEOUT` and `WEB_MANAGER_PATH` are removed from the settings catalog; nothing used them. `BEETS_LIBRARY` is marked deprecated and read-only.
+- The built-in fallback settings template no longer lists unrelated variables (`DIGARR_INITIAL_PASSWORD`, `POSTGRES_PASSWORD`, `BEETS_UID`, `BEETS_GID`).
+- Docs: `ARCHITECTURE.md`, `DEVELOPMENT.md` and `CONFIGURATION.md` no longer describe the deleted `backend/beets_client.py` as present or ARCH-010 as open.
+
 ## v0.1.49 - 2026-10-04
 
 ### Upgrade Notes

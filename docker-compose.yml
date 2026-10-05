@@ -18,8 +18,8 @@ services:
       - TZ=${TZ:-UTC}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-./music}:/music
-      - ${DOWNLOADS_PATH:-./downloads}:/downloads
+      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music
+      - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
     expose:
       - "8337"
     # Web Manager provisions the webmanager plugin's files and config.yaml
@@ -49,8 +49,16 @@ services:
       # Stock Beets's web/webmanager plugins listen on :8337 inside the
       # Docker network only -- Web Manager is the sole service that
       # publishes a port to the host.
-      BEETS_WEB_URL: http://beets:8337
-      BEETS_OUTBOUND_ALLOWLIST: beets:8337
+      BEETS_WEB_URL: ${BEETS_WEB_URL:-http://beets:8337}
+      # Must include the host:port of BEETS_WEB_URL when you change it.
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337}
+
+      # Container-side paths. They must match the mount targets below and
+      # Beets' own `directory:` (see docs/CONFIGURATION.md). Change them only
+      # together with the matching volume target.
+      MUSIC_ROOT: /music
+      DOWNLOADS_ROOT: /downloads
+      BEETS_CONFIG: /config/config.yaml
 
       # Single canonical root for all of Web Manager's own durable state
       # (job history, transaction/rollback audit logs, submission drafts).
@@ -91,9 +99,9 @@ services:
       DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-./music}:/music:ro
-      - ${DOWNLOADS_PATH:-./downloads}:/downloads
-      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/web-manager-data
+      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music:ro
+      - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
+      - ${WEB_MANAGER_DATA_PATH:-${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager}}:/web-manager-data
     healthcheck:
       test:
         - CMD

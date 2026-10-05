@@ -30,7 +30,7 @@ These are standing product/architecture invariants, not aspirations. Each is bac
 - `helpers_mb.py`: MusicBrainz and AcoustID helper functions. It has no `app.py` dependency and is the strongest current provider boundary.
 - `backend/beets_adapter.py`: the only supported transport to stock Beets — a narrow `BeetsAdapter` client for the `web` plugin's reads and the `webmanager` plugin's authenticated mutation operations (`modify`, `move`, `remove`, `mbsync`, `fetch_art`, `embed_art`, `lastgenre`, `mbsubmit`).
 - `beetsplug/webmanager/`: the integration plugin itself, provisioned by Web Manager into stock Beets' `/config/beetsplug` and loaded by stock Beets like any other Beets plugin. Exposes `/webmanager/status` (handshake: protocol/plugin/Beets versions, loaded plugins, capabilities) and the operation endpoints `BeetsAdapter` calls.
-- `backend/`: helper package. `beets_adapter.py` and `beets_plugins.py` (plugin provisioning/health) are the stock-Beets integration surface; `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`, and `transaction_engine.py` are Web-Manager-local domain/orchestration logic. `beets_client.py` (the retired control-agent HTTP client) is **not yet deleted** — see `docs/TECHNICAL_DEBT.md` (ARCH-010): a large set of composite mutation workflows in `app.py` still call it and are currently non-functional pending migration onto `beets_adapter.py`.
+- `backend/`: helper package. `beets_adapter.py` and `beets_plugins.py` (plugin provisioning/health) are the stock-Beets integration surface; `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`, and `transaction_engine.py` are Web-Manager-local domain/orchestration logic. The retired control-agent client `beets_client.py` has been deleted (ARCH-010, closed in v0.1.25); the composite workflows live in `backend/composite_workflows.py` on top of `beets_adapter.py`. `config_layers.py` defines the configuration layers (host, deployment, container, application) described in `docs/CONFIGURATION.md`.
 - `frontend/src/`: React/Next/TypeScript frontend. `frontend/src/api/client.ts` centralizes API calls, `frontend/src/api/types.ts` centralizes response shapes, and views/features are split under `views/` and `features/`.
 - `.github/workflows/`: CI covers Python syntax/unit tests, frontend typecheck/build, lint, Docker build, dependency audit, compose/security checks, stock-Beets acceptance (a real `lscr.io/linuxserver/beets` container), and production Docker acceptance.
 
@@ -118,7 +118,7 @@ Intended direction (the target shape for every production mutation path):
 6. Verify final state (via `BeetsAdapter` reads).
 7. Record completed steps and recovery information.
 
-Current migration status: `job_engine.py`, `routes_setup.py`, and `routes_submissions.py` are fully migrated onto `backend/beets_adapter.py`, with zero remaining references to the retired `backend/beets_client.py` control-agent client. **This is not yet true of `app.py`'s composite Plan/Apply/Rollback workflows** — merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, artwork, genre repair, mbsync-all, and move-all still call `backend/beets_client.py` and are currently non-functional against the real stock-Beets stack. This is tracked as the top-priority open item — see `docs/TECHNICAL_DEBT.md` (ARCH-010) — not as a closed migration.
+Current migration status: every Beets read and mutation path, including the composite Plan/Apply/Rollback workflows (merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, artwork, genre repair, mbsync-all, move-all), runs through `backend/composite_workflows.py` and `backend/beets_adapter.py`. The retired `backend/beets_client.py` control-agent client is deleted (ARCH-010, closed in v0.1.25). `backend/transaction_engine.py` still contains engine-side functions that open the Beets SQLite library directly; they have no production caller and are tracked for removal.
 
 ## Frontend Architecture
 
@@ -137,7 +137,6 @@ Frontend direction:
 
 ## Areas Still Being Migrated
 
-- `backend/beets_client.py` and the composite mutation workflows in `app.py` that still call it instead of `backend/beets_adapter.py` (ARCH-010) — the largest and highest-priority open item.
 - Thick route handlers that still orchestrate workflows inline instead of calling their service (ARCH-001, narrowed after `app.py` was decomposed in v0.1.31).
 - Job idempotency and checkpoint consistency across all long-running workflows (ARCH-004).
 - Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers (ARCH-006).
