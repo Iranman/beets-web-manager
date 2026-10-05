@@ -38,7 +38,7 @@ def _audio_duration_seconds(path_value: str) -> float:
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
-                path_value,
+                "file:" + str(path_value),  # SEC-13: local file only (see audio_preferences.ffmpeg_file_input)
             ],
             timeout=15,
             capture_output=True,
