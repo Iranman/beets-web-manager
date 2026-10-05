@@ -68,7 +68,7 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` | Optional AI-assisted candidate ranking. Matching still uses MusicBrainz and AcoustID evidence without AI. |
-| `ACOUSTID_API_KEY`, `ACOUSTID_KEY` | Optional higher-volume AcoustID lookups and submission readiness. Fingerprinting still requires Chroma/fpcalc in the Beets engine. |
+| `ACOUSTID_API_KEY`, `ACOUSTID_KEY` | Your AcoustID **application** key (register one at https://acoustid.org/new-application); `ACOUSTID_KEY` is a legacy alias read only when `ACOUSTID_API_KEY` is empty. Required for fingerprint lookups: there is no built-in fallback key. Without it, lookups report `not_configured` (fingerprint evidence unavailable, never "no match", never cached) and the setup status says "AcoustID not configured". Fingerprinting also requires Chroma/fpcalc in the Beets engine. |
 | `DISCOGS_TOKEN`, `DISCOGS_USER_TOKEN` | Optional Discogs metadata. |
 | `LISTENBRAINZ_TOKEN` | Optional ListenBrainz integration. |
 | `PLEX_URL`, `PLEX_TOKEN` | Optional Plex sync and refresh. Use deployment-specific URLs, not committed private LAN defaults. |

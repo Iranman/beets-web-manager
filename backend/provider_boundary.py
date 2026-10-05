@@ -62,6 +62,10 @@ class ProviderOutcome(str, enum.Enum):
     AUTHENTICATION_ERROR = "authentication_error"
     TRANSIENT_ERROR = "transient_error"
     REJECTED = "rejected"
+    #: The provider needs a credential the operator has not configured. Like
+    #: UNAVAILABLE it means "could not ask" -- never an answer, never cached,
+    #: never "no match" -- but retrying cannot help until it is configured.
+    NOT_CONFIGURED = "not_configured"
 
 
 ANSWERS = frozenset({ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT,

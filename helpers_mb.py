@@ -715,15 +715,38 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+ACOUSTID_NOT_CONFIGURED_MESSAGE = (
+    "AcoustID not configured: set ACOUSTID_API_KEY to an application key from "
+    "https://acoustid.org/new-application"
+)
+
+
+def acoustid_api_key() -> str:
+    """The AcoustID application (lookup) key: ACOUSTID_API_KEY, then the
+    legacy ACOUSTID_KEY alias. There is deliberately no built-in fallback
+    key (IA-12): without a configured key, lookups report not_configured."""
+    for name in ("ACOUSTID_API_KEY", "ACOUSTID_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def acoustid_lookup_outcome(file_path: str):
     """fpcalc + AcoustID lookup as a typed ProviderResult (ARCH-006).
 
-    confirmed/no_result are answers; a missing fpcalc, a rejected key, a
-    throttle, an outage or a timeout is reported as such and is never
-    presented -- or cached by callers -- as "no match"."""
+    confirmed/no_result are answers; a missing key (not_configured), a
+    missing fpcalc, a rejected key, a throttle, an outage or a timeout is
+    reported as such and is never presented -- or cached by callers -- as
+    "no match"."""
     from backend.provider_boundary import (
         ProviderError, ProviderOutcome, ProviderResult, call_with_retry, classify_http,
     )
+
+    aid_key = acoustid_api_key()
+    if not aid_key:
+        return ProviderResult("acoustid", ProviderOutcome.NOT_CONFIGURED, data=[],
+                              message=ACOUSTID_NOT_CONFIGURED_MESSAGE)
 
     fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
     if not Path(fpcalc).exists():
@@ -742,7 +765,6 @@ def acoustid_lookup_outcome(file_path: str):
         # exact file, not a provider failure.
         return ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[],
                               message="audio could not be fingerprinted", evidence={"fingerprintable": False})
-    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"  # env var or test fallback
     params = _up.urlencode({
         "client":      aid_key,
         "meta":        "recordings releases releasegroups",

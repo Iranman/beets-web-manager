@@ -2318,6 +2318,14 @@ def _acoustid_integration_status(diagnostics: Dict[str, Any], fpcalc_available: 
             state="dependency_plugin_missing",
             note="pyacoustid is missing in the Beets engine.",
         )
+    from helpers_mb import acoustid_api_key
+    if not acoustid_api_key():
+        # IA-12: no built-in fallback key -- lookups need the operator's key.
+        return _integration_status(
+            configured=False,
+            state="not_configured",
+            note="AcoustID not configured: set ACOUSTID_API_KEY (an application key from acoustid.org/new-application).",
+        )
     return _integration_status(
         configured=True,
         state="configured",
@@ -3146,7 +3154,8 @@ def setup_test_acoustid():
         return csrf_failure
 
     payload = request.get_json(silent=True) or {}
-    api_key = payload.get("api_key") or os.environ.get("ACOUSTID_API_KEY") or os.environ.get("ACOUSTID_KEY")
+    from helpers_mb import ACOUSTID_NOT_CONFIGURED_MESSAGE, acoustid_api_key
+    api_key = str(payload.get("api_key") or "").strip() or acoustid_api_key()
     diagnostics = _beets_plugin_diagnostics(Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")))
     capabilities = diagnostics.get("capabilities") if isinstance(diagnostics.get("capabilities"), dict) else {}
     acoustid_cap = capabilities.get("acoustid_lookup") if isinstance(capabilities.get("acoustid_lookup"), dict) else {}
@@ -3170,7 +3179,10 @@ def setup_test_acoustid():
         result.update({"ok": False, "status": "missing_dependency", "error": "pyacoustid is not available in the Beets engine."})
         return jsonify(result), 200
     if not api_key:
-        result.update({"ok": False, "status": "not_configured", "error": "No AcoustID API key configured."})
+        # IA-12: there is no built-in fallback key; lookups need the
+        # operator's own application key.
+        result.update({"ok": False, "status": "not_configured", "reason": "not_configured",
+                       "error": ACOUSTID_NOT_CONFIGURED_MESSAGE})
         return jsonify(result), 200
     try:
         params = urllib.parse.urlencode({
@@ -3190,11 +3202,19 @@ def setup_test_acoustid():
                 raw = http_err.read() or b""
             except Exception:
                 raw = b""
+            finally:
+                http_err.close()
         try:
             data: Any = json.loads(raw) if raw else None
         except ValueError:
             data = None
         outcome = _classify_acoustid_probe(http_status, data)
+        probe_code = _acoustid_error_code(data)
+        if not outcome["ok"] and (probe_code == 6 or (probe_code is None and http_status in (401, 403))):
+            # IA-11: code 6 (invalid user key) and a bare 401/403 are key
+            # rejections, not "unexpected" provider errors.
+            outcome = {"ok": False, "status": "failed", "reason": "auth_failed",
+                       "error": "AcoustID API key was rejected."}
         if not outcome["ok"]:
             app.logger.warning("AcoustID connectivity test failed: http=%s code=%s reason=%s",
                                http_status, _acoustid_error_code(data), outcome.get("reason"))
