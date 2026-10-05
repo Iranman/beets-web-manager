@@ -48,8 +48,8 @@ jobs:
       LIDARR_API_KEY: changeme
       AI_API_KEY: changeme
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: python scripts/validate_compose_security.py
@@ -99,8 +99,8 @@ jobs:
     name: stock-beets-acceptance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
@@ -123,10 +123,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout at exact PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
@@ -143,14 +143,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -158,7 +158,7 @@ jobs:
 
       - name: Extract Docker metadata for Web Manager
         id: meta_webmanager
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/iranman/beets-web-manager
           # Wave 24 round 4 (CodeQL/provenance closure): metadata-action's
@@ -184,7 +184,7 @@ jobs:
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Beets Web Manager image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
