@@ -18,7 +18,8 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached, _normalize_albumartist
+from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached, _normalize_albumartist, same_recording_proof
+import backend.duplicate_cleanup as _duplicate_cleanup
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
 from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet
@@ -1721,47 +1722,21 @@ def album_remove(aid):
         if i is not None and str(i).isdigit()
     ]
 
-    def _do(log, cancel_event=None):
-        log.append(f"Removing album '{_s(album_obj.album)}' (id={aid}) via engine controlled transaction…")
-
-        try:
-            plan_res = composite_workflows.plan_album_maintenance({
-                "mode": "remove_tracks",
-                "album_id": aid,
-                "item_ids": item_ids,
-                "delete_files": delete_files,
-                "clean_empty_folders": True,
-            })
-        except (BeetsUnavailableError, BeetsError) as ex:
-            raise RuntimeError(f"engine unreachable: {ex}")
-
-        if not plan_res.get("ok"):
-            raise RuntimeError(plan_res.get("error") or "Album removal plan rejected")
-
-        op_id = plan_res.get("operation_id")
-        if not op_id:
-            log.append("  No action required for album removal.")
-            return
-
-        try:
-            apply_res = composite_workflows.apply_album_maintenance(op_id)
-        except (BeetsUnavailableError, BeetsError) as ex:
-            raise RuntimeError(f"engine unreachable: {ex}")
-
-        if not apply_res.get("ok"):
-            raise RuntimeError(apply_res.get("error") or "Album removal apply failed")
-
-        log.append(f"✓ Removed album from library ({len(item_ids)} tracks)." +
-                   (" Files quarantined/deleted from disk." if delete_files else " Files kept on disk."))
-
-        _invalidate_lib_cache()
-
-    job = jobs.start_python(
-        _do,
-        label=f"Remove Album: {_s(album_obj.album or f'id={aid}')}",
-        metadata={"album_id": aid, "type": "album_remove", "delete_files": delete_files},
-    )
-    return jsonify({"ok": True, "job_id": job.job_id})
+    # LT-3/LT-4: this route used to plan "remove_tracks" through album
+    # maintenance, which never removed anything while reporting success. It now
+    # only PLANS an album cleanup (row-only unless the files are explicitly
+    # confirmed); apply it through /api/albums/cleanup/apply.
+    if delete_files and (request.json or {}).get("confirm_delete_files") !=             composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION:
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "Deleting the album's files needs confirm_delete_files="
+                                 f"\"{composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION}\"."}), 400
+    try:
+        plan = composite_workflows.plan_album_cleanup(aid, delete_files=delete_files, reason="album remove request")
+    except (BeetsUnavailableError, BeetsError) as ex:
+        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+    status_code = 200 if plan.get("ok") else 400
+    return jsonify({**plan, "item_count": len(item_ids),
+                    "next_step": "POST /api/albums/cleanup/apply with this operation_id"}), status_code
 
 
 @app.post("/api/albums/<int:aid>/rename")
@@ -1905,12 +1880,9 @@ def album_fix_metadata(aid):
 def album_deduplicate(aid):
     """Deduplicate an album's tracks against its MusicBrainz release.
 
-    SEC-002 / ARCH-003 Wave 24 final review (re-verified against the
-    actual current source, not inferred from an earlier docstring):
-    duplicate-file DELETION (Step 4 below) genuinely runs through the
-    engine transaction boundary -- `composite_workflows.plan_album_maintenance` /
-    `apply_album_maintenance` with `mode: "deduplicate"`, not local
-    filesystem mutation. What remains local is track MATCHING/renumbering
+    Duplicate removal (Step 4 below) runs through the reviewed duplicate
+    cleanup (backend.duplicate_cleanup: re-verified pair, engine
+    quarantine, rollback). What remains local is track MATCHING/renumbering
     (Step 1, `_match_tracks_from_mb` -> `_match_tracks_from_mb_shared`),
     which still issues `UPDATE items SET mb_trackid=..., track=...`
     directly against `_db()`. That function is shared by several other
@@ -1921,16 +1893,22 @@ def album_deduplicate(aid):
     ARCH003_BLOCKER (domain "other"), not hidden inside the album-lifecycle
     domains this wave closes.
 
-    For every track number that has more than one file (collision duplicates like
-    "Song.1.flac", "Song.2.flac"), keep the primary file and delete the extras.
-    Tracks with track=0 (never matched to MB) are re-matched first; any that still
-    can't be matched are deleted unless keep_extras=true.
+    For every (disc, track) slot with more than one file, a copy is treated
+    as a duplicate only with positive same-recording proof: both files
+    fingerprint (AcoustID) as CONFIRMED for one recording (MI-3). Proven
+    copies go to a reviewed duplicate cleanup (engine quarantine, rollback);
+    it is applied in this job only with confirm=true, otherwise left in
+    Preview. Unproven copies and unmatched (track 0) items are kept and
+    reported. Nothing is ever deleted outright.
 
-    Body (optional): { mb_albumid: "uuid", keep_extras: false }
+    Body (optional): { mb_albumid: "uuid", keep_extras: true, confirm: false }
     """
     payload = request.get_json(silent=True) or {}
     mb_override = payload.get("mb_albumid", "").strip()
-    keep_extras = bool(payload.get("keep_extras", False))
+    keep_extras = payload.get("keep_extras", True) is not False
+    # Duplicates are only ever quarantined through a reviewed cleanup; it is
+    # applied in this job only with an explicit confirm, else left in Preview.
+    confirm_apply = payload.get("confirm") is True
 
     album = lib.get_album(aid)
     if not album:
@@ -2025,93 +2003,83 @@ def album_deduplicate(aid):
                 "disc":  int(it.get("disc") or 1),
                 "title": _pstr(it.get("title")),
                 "path":  _pstr(it.get("path")),
+                "mb_trackid": _pstr(it.get("mb_trackid")).strip().lower(),
             })
 
         log.append(f"Items in DB: {len(all_items)}")
 
-        by_track = defaultdict(list)
+        # MI-3: a slot is (disc, track) -- track 3 of disc 1 and of disc 2
+        # are different songs.
+        by_slot = defaultdict(list)
         for it in all_items:
-            by_track[it["track"]].append(it)
+            by_slot[(it["disc"], it["track"])].append(it)
 
-        # ── Step 3: Decide what to keep and what to delete ────────────────────
-        to_delete = []   # list of item dicts
-        summary   = []
-
-        for trk, group in sorted(by_track.items()):
+        # ── Step 3: Decide what to remove -- only with positive proof ─────────
+        # A copy is a duplicate only when BOTH files fingerprint (AcoustID) as
+        # CONFIRMED for one recording. Unknown/unavailable/conflicting
+        # evidence spares the copy and reports it; unmatched (track 0) items
+        # are never removed here (keep_extras is ignored for removal).
+        pairs = []
+        spared = []
+        summary = []
+        for (disc, trk), group in sorted(by_slot.items()):
             if trk == 0:
-                if keep_extras:
-                    summary.append(f"  [00] Keeping {len(group)} unmatched extra(s)")
-                else:
-                    for it in group:
-                        to_delete.append(it)
-                    summary.append(f"  [00] Deleting {len(group)} unmatched extra(s)")
+                summary.append(f"  [00] Kept {len(group)} unmatched item(s) for review")
+                spared.extend({"item_id": it["id"], "reason": "unmatched_track_number"} for it in group)
                 continue
-
             if len(group) == 1:
-                summary.append(f"  [{trk:02d}] OK — {Path(group[0]['path']).name[:60]}")
+                summary.append(f"  [{disc}-{trk:02d}] OK — {Path(group[0]['path']).name[:60]}")
                 continue
-
-            # Multiple files for the same track: keep lowest collision rank
-            group.sort(key=lambda x: _collision_rank(x["path"]))
-            kept  = group[0]
-            dupes = group[1:]
-
-            # Collision rank alone doesn't prove two files are the same
-            # recording — a bad MB re-match can put different songs in the
-            # same track slot. Fingerprint-verify before deleting; if a
-            # candidate's audio actively disagrees with the kept file, spare
-            # it instead of silently destroying a different song.
-            confirmed_dupes = []
-            spared = []
+            group.sort(key=lambda x: (_collision_rank(x["path"]), x["id"]))
+            kept = group[0]
             kept_abs = _abs(kept["path"])
-            for d in dupes:
-                shared_id, src_ids, kept_ids = _acoustid_fingerprint_match(_abs(d["path"]), kept_abs)
-                if src_ids and kept_ids and not shared_id:
-                    spared.append(d)
+            for d in group[1:]:
+                proof = same_recording_proof(_abs(d["path"]), kept_abs, kept.get("mb_trackid") or "")
+                if proof["proven"]:
+                    pairs.append({"delete_item_id": d["id"], "keep_item_id": kept["id"]})
+                    summary.append(f"  [{disc}-{trk:02d}] Duplicate proven ({proof['recording_id']}): "
+                                   f"{Path(d['path']).name[:40]} (keep {Path(kept['path']).name[:40]})")
                 else:
-                    confirmed_dupes.append(d)
-
-            summary.append(
-                f"  [{trk:02d}] Keep: {Path(kept['path']).name[:50]}"
-                f"  | Delete {len(confirmed_dupes)}: "
-                + ", ".join(Path(d["path"]).name[:25] for d in confirmed_dupes))
-            if spared:
-                summary.append(
-                    f"  [{trk:02d}] SPARED (fingerprint mismatch, kept despite collision suffix): "
-                    + ", ".join(Path(d["path"]).name[:40] for d in spared))
-            to_delete.extend(confirmed_dupes)
+                    spared.append({"item_id": d["id"], "reason": proof["reason"],
+                                   "drop_status": proof["drop_status"], "keep_status": proof["keep_status"]})
+                    summary.append(f"  [{disc}-{trk:02d}] SPARED (no same-recording proof: {proof['reason']}): "
+                                   f"{Path(d['path']).name[:40]}")
 
         for line in summary:
             log.append(line)
 
-        if not to_delete:
-            log.append("Nothing to delete — album is already clean.")
+        # ── Step 4: Reviewed duplicate cleanup (quarantine, rollbackable) ─────
+        dedup_result = {"proven_pairs": len(pairs), "spared": spared, "operation_id": None,
+                        "applied": False, "quarantined": 0}
+        if not pairs:
+            log.append("Nothing proven duplicate — nothing removed.")
         else:
-            log.append(f"Deleting {len(to_delete)} item(s)…")
-
-        # ── Step 4: Execute deduplication via Beets engine boundary ─────────
-        if to_delete:
-            to_delete_payload = [
-                {"id": int(it["id"]), "path": _abs(it["path"])}
-                for it in to_delete
-            ]
-            dedup_payload = {
-                "mode": "deduplicate",
-                "album_id": aid,
-                "to_delete": to_delete_payload,
-            }
             try:
-                plan_res = composite_workflows.plan_album_maintenance(dedup_payload)
-                if plan_res.get("ok"):
-                    apply_res = composite_workflows.apply_album_maintenance(plan_res["operation_id"])
-                    if apply_res.get("ok"):
-                        log.append(f"  Removed {apply_res.get('deleted_items', len(to_delete))} duplicate item(s) via engine boundary")
-                    else:
-                        log.append(f"  WARN engine deduplicate apply failed: {apply_res.get('error')}")
+                plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=f"Album {aid} deduplicate")
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  Engine unavailable planning duplicate cleanup: {ex}")
+                raise RuntimeError(f"Duplicate cleanup planning failed: {ex}")
+            for skipped in plan.get("skipped") or []:
+                log.append(f"  Kept item {skipped.get('delete_item_id')}: "
+                           f"{', '.join(skipped.get('reasons') or [])}")
+            if plan.get("ok"):
+                dedup_result["operation_id"] = plan["operation_id"]
+                if confirm_apply:
+                    store = composite_workflows.get_default_store()
+                    store.transition(plan["operation_id"], "Preview", "Approved",
+                                     metadata={"approved_by": "operator confirmed album deduplicate"})
+                    applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
+                    dedup_result.update(applied=bool(applied.get("ok")),
+                                        quarantined=len(applied.get("removed") or []))
+                    log.append(f"  Quarantined {dedup_result['quarantined']} proven duplicate(s) "
+                               f"({applied.get('status')}); rollback via transaction {plan['operation_id']}.")
                 else:
-                    log.append(f"  WARN engine deduplicate plan failed: {plan_res.get('error')}")
-            except Exception as ex:
-                log.append(f"  WARN engine deduplicate request failed: {ex}")
+                    log.append(f"  Preview transaction {plan['operation_id']} created; approve and apply it "
+                               "to quarantine the proven duplicates (nothing removed yet).")
+            else:
+                log.append("  No pair passed duplicate re-verification; nothing removed.")
+        if spared:
+            log.append(f"  {len(spared)} item(s) kept for review (no positive same-recording proof).")
 
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
         _strip_year_from_album_name(aid, log)
@@ -2141,6 +2109,7 @@ def album_deduplicate(aid):
                 log.append(f"  [{trk:02d}] {fname[:70]}")
         except Exception as ex:
             log.append(f"Final listing warning: {ex}")
+        return dedup_result
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -2195,8 +2164,11 @@ def match_album(aid):
         if not mb_albumid:
             raise RuntimeError("Could not extract a MusicBrainz UUID from the input")
 
-        # 1 ── validate before touching tags/paths. A wrong manual MB match must
-        # remove the bad library items, not stamp them with the selected release.
+        # 1 ── validate before touching tags/paths. MI-8: a track that does not
+        # match the selected release is NOT deleted (a wrong manual match, an
+        # incomplete tracklist or a bad fingerprint lookup must never cost the
+        # user a file). The match stops before any write and the nonmatching
+        # tracks are reported for review; nothing is stamped with the release.
         log.append("[1/6] Validating current album against selected MusicBrainz release ...")
         plan = _album_mb_match_plan(aid, mb_albumid, log)
         matched_count = int(plan.get("matched_count") or 0)
@@ -2210,37 +2182,20 @@ def match_album(aid):
             f"against {expected_count} MusicBrainz track(s)."
         )
         unmatched_items = list(plan.get("unmatched_items") or [])
-        if unmatched_items:
+        if unmatched_items or matched_count <= 0:
             log.append(
-                f"  Removing {len(unmatched_items)} nonmatching track(s) before MB tagging."
+                f"  {len(unmatched_items)} track(s) do not match the selected release; "
+                "nothing was changed and no file was removed. Review them (or pick another "
+                "release) before matching."
             )
-            for item in unmatched_items[:8]:
-                log.append(
-                    f"    remove: {item.get('filename') or item.get('title')}"
-                )
-            summary = _remove_album_track_items(
-                aid,
-                [int(item.get("id") or 0) for item in unmatched_items],
-                dry_run=False,
-                delete_files=True,
-                clean_empty_folders=False,
-                log=log,
+            for item in unmatched_items[:50]:
+                log.append(f"    needs review: {item.get('filename') or item.get('title')} (item {item.get('id')})")
+            # Raised (not returned) so the job reads as not-done, never as a
+            # successful match.
+            raise RuntimeError(
+                f"requires_review: {len(unmatched_items)} track(s) do not match the selected release "
+                f"({matched_count}/{actual_count} matched); nothing was changed."
             )
-            log.append(
-                "  Removed nonmatching items: "
-                f"{summary.get('deleted_files', 0)} file(s), "
-                f"{summary.get('removed_db', 0)} DB row(s)."
-            )
-            if summary.get("album_deleted"):
-                log.append(
-                    "  No matching tracks remain. The bad album was removed from "
-                    "Beets and its audio files were deleted; folders were left in place."
-                )
-                _invalidate_lib_cache()
-                return
-            if matched_count <= 0:
-                _invalidate_lib_cache()
-                return
 
         # 2 ── set mb_albumid on both items AND the album record
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
@@ -2315,8 +2270,16 @@ def plan_album_cleanup_route(album_id: int = 0):
     if not target_album_id:
         return jsonify({"ok": False, "error": "album_id required"}), 400
 
+    # LT-4: row-only by default. Deleting the audio files too needs the
+    # explicit confirmation phrase on the PLAN; Apply never widens it.
+    delete_files = payload.get("delete_files") is True
+    if delete_files and payload.get("confirm_delete_files") != composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION:
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "Deleting the album's files needs confirm_delete_files="
+                                 f"\"{composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION}\"."}), 400
     try:
-        res = composite_workflows.plan_album_cleanup(target_album_id)
+        res = composite_workflows.plan_album_cleanup(target_album_id, delete_files=delete_files,
+                                                     reason=_s(payload.get("reason")))
         status_code = 200 if res.get("ok") else 400
         return jsonify(res), status_code
     except BeetsUnavailableError as ex:
@@ -2334,6 +2297,22 @@ def apply_album_cleanup_route():
     op_id = _s(payload.get("operation_id")).strip()
     if not op_id:
         return jsonify({"ok": False, "error": "operation_id required"}), 400
+
+    # LT-4: Apply needs an Approved plan. The operator's Apply request on a
+    # reviewed ROW-ONLY Preview plan is that approval; a plan that deletes
+    # files must be approved explicitly (transactions approve route, or
+    # confirm_delete_files here) -- never implied.
+    store = composite_workflows.get_default_store()
+    try:
+        tx = store.get(op_id)
+    except KeyError:
+        tx = {}  # unknown/malformed id: apply_album_cleanup reports it below
+    meta = tx.get("metadata") or {}
+    if tx.get("status") == "Preview" and meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
+        if meta.get("delete_files") and                 payload.get("confirm_delete_files") != composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION:
+            return jsonify({"ok": False, "code": "confirmation_required", "error_kind": "other", "mutated": False,
+                            "error": "This plan deletes files; confirm_delete_files is required."}), 400
+        store.transition(op_id, "Preview", "Approved", metadata={"approved_by": "operator apply (album cleanup)"})
 
     try:
         res = composite_workflows.apply_album_cleanup(op_id)
@@ -3395,6 +3374,15 @@ def library_sync_deleted():
     dry_run = payload.get("dry_run", True) is not False
     if not dry_run and payload.get("confirmed") is not True:
         return jsonify({"ok": False, "error": "Confirmation is required before syncing deleted files"}), 400
+    raw_ids = payload.get("item_ids") or []
+    if not isinstance(raw_ids, list):
+        return jsonify({"ok": False, "error": "item_ids must be a list"}), 400
+    planned_ids = [int(i) for i in raw_ids if str(i).isdigit() and int(i) > 0]
+    if not dry_run and not planned_ids:
+        # LT-2: apply removes only the rows a preview listed (missing_item_ids),
+        # each re-verified as still missing.
+        return jsonify({"ok": False, "code": "planned_ids_required",
+                        "error": "Apply needs item_ids from a preview (missing_item_ids); nothing was removed."}), 400
 
     def _do(log, cancel_event=None, update_state=None):
         mode = "Previewing" if dry_run else "Applying"
@@ -3404,10 +3392,16 @@ def library_sync_deleted():
             return
 
         try:
-            sync_res = composite_workflows.sync_deleted_files(dry_run=dry_run, limit=50000)
+            sync_res = composite_workflows.sync_deleted_files(dry_run=dry_run, limit=50000,
+                                                              item_ids=planned_ids or None)
         except (BeetsUnavailableError, BeetsError) as ex:
             log.append(f"ERROR: Sync deleted failed: {ex}")
             raise RuntimeError(f"Sync deleted failed: {ex}") from ex
+        if sync_res.get("ok") is False:
+            log.append(f"ERROR: {sync_res.get('error')}")
+            raise RuntimeError(sync_res.get("error") or "Sync deleted was refused; nothing was removed.")
+        if dry_run and sync_res.get("missing_item_ids"):
+            log.append("missing_item_ids: " + ",".join(str(i) for i in sync_res["missing_item_ids"][:5000]))
 
         scanned = int(sync_res.get("scanned_items", 0))
         missing_count = int(sync_res.get("missing_count", 0))
@@ -3449,7 +3443,8 @@ def library_sync_deleted():
                         "Mode": "Preview only",
                     },
                 })
-            return
+            return {"ok": True, "dry_run": True, "missing_count": missing_count,
+                    "missing_item_ids": sync_res.get("missing_item_ids") or []}
 
         _invalidate_lib_cache()
         log.append(f"Done - removed {removed_albums} album(s), "
@@ -4095,10 +4090,16 @@ def apply_album_duplicate_resolver(aid):
     mbid = _s(payload.get("mb_albumid") or "").strip()
     actions = payload.get("actions") or []
     dry_run = bool(payload.get("dry_run", False))
-    delete_files = payload.get("delete_files", True) is not False
+    # Resolver deletes are track quarantines (files kept, restorable); never
+    # a permanent delete.
+    delete_files = False
     write_tags = payload.get("write_tags", True) is not False
     if not isinstance(actions, list) or not actions:
         return jsonify({"ok": False, "error": "actions required"}), 400
+    has_delete = any(isinstance(a, dict) and _s(a.get("action")).strip().lower() == "delete" for a in actions)
+    if has_delete and not dry_run and payload.get("confirm") is not True:
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "Delete actions need explicit confirmation (confirm: true) after a dry run."}), 400
     if mbid:
         # ARCH-009: an override release is stamped onto the album only if it
         # belongs to the album's Release Group (verified, fail closed).
@@ -4172,6 +4173,7 @@ def apply_album_duplicate_resolver(aid):
                 delete_files=delete_files,
                 clean_empty_folders=False,
                 log=log,
+                approved_by="" if dry_run else "operator confirmed duplicate resolver delete",
             )
             deleted += int(summary.get("removed_db") or 0)
             delete_summaries.append({"album_id": item_album_id, **summary})

@@ -56,16 +56,18 @@ def _do_scan_job() -> str:
 
             log.append("phase:check-missing")
             _check_cancelled()
-            sync_res = composite_workflows.sync_deleted_files(dry_run=False, limit=50000)
+            # LT-2: the background scan only REPORTS missing rows. Removing
+            # rows is an operator action (preview + confirmed apply of the
+            # previewed ids through /api/library/sync-deleted).
+            sync_res = composite_workflows.sync_deleted_files(dry_run=True, limit=50000)
             missing_count = int(sync_res.get("missing_count", 0))
-            removed_items = int(sync_res.get("removed_from_db", 0))
-
-            empty_res = composite_workflows.clean_empty_albums(dry_run=False)
-            removed_empty = int(empty_res.get("removed_count", 0))
-            removed_count = removed_items + removed_empty
-
-            if removed_count:
-                log.append(f"cleaned:{removed_count} stale DB entr{'y' if removed_count==1 else 'ies'} removed")
+            removed_items = 0
+            removed_empty = 0
+            removed_count = 0
+            if not sync_res.get("ok"):
+                log.append(f"missing-check skipped: {sync_res.get('error')}")
+            elif missing_count:
+                log.append(f"reported:{missing_count} DB row(s) whose files are missing (not removed)")
 
             elapsed = int(time.time() - started)
             status = "ok"

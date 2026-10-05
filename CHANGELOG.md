@@ -6,6 +6,35 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+- Library cleanup no longer deletes audio files except through an album cleanup the operator explicitly confirms (see Security). Several endpoints now need an explicit confirmation or a preview's ids; requests without them are refused with a `code` (`confirmation_required`, `planned_ids_required`, `empty_selection`, `not_preview`, `requires_review`, `music_root_not_allowed`). Frontend flows that called these endpoints without those fields will show the refusal until they are updated.
+
+### Security
+- **Orphan cleanup no longer deletes media (LT-1).** `POST /api/clean/remove-orphaned-items` and Clean All's Missing Files step called `remove` with `delete_files=True` for any id they were given, without checking that the id was an orphan. An empty id list widened to every singleton in the library. Each id is now re-checked against live Beets and the disk (still tracked, file absent now). Only the Beets row is removed, never a file, with an audit record. An empty list is refused, and nothing is removed when the music root is missing or empty, or when half or more of the rows look missing.
+- **A failed import validation no longer deletes library files (LT-17).** When an in-library import failed validation, its rollback removed the album with `delete_files=True` while logging that the files were kept. The same was true of the copy-import cleanup and `_delete_album_ids_from_db`. All three now remove only the Beets rows. A confirmed import now honours copy mode; it used to always move.
+- **Album cleanup needs an approved plan and never deletes files by default (LT-4).** `apply_album_cleanup` ran straight from a preview, deleted files, and a second call repeated the delete. It now:
+  - requires an Approved transaction, claimed under a durable `album:` lock, and refuses a second apply;
+  - refuses a plan whose album changed after planning;
+  - removes rows only, unless the plan was created with `delete_files` and `confirm_delete_files="DELETE ALBUM FILES"`.
+  `POST /api/albums/cleanup/apply` treats the operator's Apply on a row-only preview as the approval. `POST /api/albums/<id>/remove` now only creates that plan.
+- **Removing selected tracks quarantines them instead of deleting (album-tracks, duplicate resolver).** `POST /api/clean/album-tracks/remove`, `/remove-batch` and the duplicate resolver's delete action defaulted to `delete_files=True` and ran without approval. They now need `confirm: true` for a live run (dry run is the default). They use a new `track_quarantine_v1` family: the file's SHA-256 is pinned, the engine moves the file to its quarantine, the transaction is recorded, and rollback restores the tracks. Emptying an album this way is refused.
+- **Missing-file DB sync applies only the previewed rows (LT-2).** `POST /api/library/sync-deleted` recomputed "missing" at apply time and could drop every row if the music mount was absent. Apply now needs the `item_ids` its preview returned (`missing_item_ids`), re-checks each one, and refuses when the music root is unusable or half or more of the rows look missing. Removals are recorded. The opt-in legacy auto-scan (`BEETS_ENABLE_LEGACY_LOCAL_SCAN`) now only reports missing rows; it no longer removes rows or album records.
+- **Album deduplicate requires proof (MI-3).** `POST /api/albums/<id>/deduplicate` grouped by track number only, so disc 1 track 3 and disc 2 track 3 counted as duplicates. It deleted a copy unless AcoustID positively disagreed, and it deleted unmatched (track 0) items by default.
+  - Slots are now (disc, track).
+  - A copy counts as a duplicate only when both files fingerprint as CONFIRMED for one recording; unknown evidence spares the copy and reports it.
+  - Unmatched items are always kept, and `keep_extras` defaults to true.
+  - Proven copies go to the reviewed duplicate cleanup (quarantine, rollback). It is applied only with `confirm: true`; otherwise the plan is left in Preview.
+- **Matching an album no longer deletes nonmatching tracks (MI-8).** `POST /api/albums/<id>/match` deleted every local track that did not match the selected release. The job now stops before any change, reports those tracks for review, and fails with `requires_review`.
+- **Track integrity scan only proposes removal on strong audio evidence (MI-4).** An AI "remove" suggestion, a title similarity below 0.62, a fingerprint conflict scoring below 80, the low-album-match promotion, and "two files mapped to the same MusicBrainz track" now all produce `review`. Only an AcoustID conflict at a score of 80 or more may propose `remove`.
+- **No-audio folder deletion is limited to staging roots (QA-1).** `POST /api/clean/no-audio-folders/delete` could `rmtree` folders inside the music library and reported success even when a delete failed. It now refuses any folder under `MUSIC_ROOT`. It deletes only inside the staging/download roots, with no symlink in the path, after re-checking that the folder has no audio and no symlink. A live run needs `confirm: true`, and failures are reported.
+- **`composite_workflows.delete_file` / `move_file` are confined to staging roots (LT-13).** They accepted any path, and `delete_file` ignored errors. They now refuse `MUSIC_ROOT`, a staging root itself, symlinked paths and existing move targets, and they raise on failure.
+- **Approving a transaction only works from Preview (LT-16).** `POST /api/transactions/<id>/approve` re-opened Completed, Failed, Rolled Back, Cancelled or Recovery Required transactions. It is now a compare-and-set from Preview to Approved; any other status returns 409 `not_preview`.
+- **AI-only duplicate suggestions can never become a cleanup pair (O-1).** Manual duplicate cleanup now ignores AI duplicate entries without fingerprint proof. The reviewed cleanup's own AcoustID re-verification was already required.
+
+### Fixed
+- **The library health report works again (LT-18).** `get_library_health()` was called with keyword arguments it did not accept. `GET /api/clean/library-health` and Clean All's first step failed with a TypeError. It now builds the report from live Beets reads. Missing files are reported only when the music root is usable.
+- **Album maintenance no longer reports work it did not do (LT-3).** Every mode (remove tracks, deduplicate, filename cleanup) used to fall through to a relocation (`move`) and record Completed. Only removing an empty album row is implemented. Other modes are refused with `not_supported` and the transaction is marked Failed. `delete_album` removes only empty album rows.
+
 ## v0.1.49 - 2026-10-04
 
 ### Upgrade Notes

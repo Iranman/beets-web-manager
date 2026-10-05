@@ -1362,6 +1362,11 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
         return {"status": "error", "error": str(ex)}
 
 
+#: MI-4: the only evidence that may propose removing a track from an album is a
+#: canonical AcoustID CONFLICT whose top hit scores at least this (0-100).
+_INTEGRITY_REMOVE_MIN_FINGERPRINT_SCORE = 80.0
+
+
 def _scan_album_track_integrity(album_row: Dict[str, Any], *,
                                 use_ai: bool,
                                 use_fingerprint: bool,
@@ -1433,9 +1438,10 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
         fp: Dict[str, Any] = {"status": "skipped"}
         decision = "keep"
         reason = "Matched MusicBrainz track list"
+        # MI-4: title similarity alone never proposes removal.
         if score < 0.62:
-            decision = "remove"
-            reason = "No MusicBrainz track title is close enough"
+            decision = "review"
+            reason = "No MusicBrainz track title is close enough (review; titles alone never remove a track)"
         elif score < 0.90:
             decision = "review"
             reason = "Fuzzy MusicBrainz match needs review"
@@ -1443,10 +1449,20 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
         if do_fingerprint:
             fp = _album_track_fingerprint_check(item, mb_tracks)
             if fp.get("status") == AcoustIDStatus.CONFLICT:
-                decision = "remove"
                 cand = fp.get("candidate") or {}
-                reason = ("Audio fingerprint points to "
-                          f"{cand.get('artist','')} - {cand.get('title','')}".strip(" -"))
+                cand_score = float(cand.get("score") or 0)
+                if cand_score <= 1.0:
+                    cand_score *= 100.0
+                points_to = ("Audio fingerprint points to "
+                             f"{cand.get('artist','')} - {cand.get('title','')}".strip(" -"))
+                # MI-4: only a canonical fingerprint CONFLICT at score >= 80
+                # may propose removal; a weaker conflict goes to review.
+                if cand_score >= _INTEGRITY_REMOVE_MIN_FINGERPRINT_SCORE:
+                    decision = "remove"
+                    reason = points_to
+                else:
+                    decision = "review"
+                    reason = f"{points_to} (fingerprint score {cand_score:.0f} below "                             f"{_INTEGRITY_REMOVE_MIN_FINGERPRINT_SCORE:.0f}; review)"
             elif fp.get("status") == AcoustIDStatus.AMBIGUOUS and decision == "keep" and score < 0.96:
                 decision = "review"
                 reason = "Fingerprint did not confirm the MusicBrainz recording"
@@ -1487,8 +1503,10 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
             int(r.get("id") or 0),
         ))
         for extra in group[1:]:
-            extra["decision"] = "remove"
-            extra["reason"] = "Duplicate file mapped to the same MusicBrainz track"
+            # Mapping to the same MB track is not same-recording proof:
+            # duplicates leave only through the reviewed duplicate cleanup.
+            extra["decision"] = "review"
+            extra["reason"] = "Possible duplicate of the same MusicBrainz track (review; use duplicate cleanup)"
 
     review_records = [r for r in records if r["decision"] == "review"]
     ai_status: Dict[str, Any] = {"status": "skipped", "error": ""}
@@ -1510,8 +1528,9 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
             action = _s(d.get("action", "")).lower()
             conf = _s(d.get("confidence", "")).lower()
             if action == "remove" and conf in {"high", "medium"}:
-                rec["decision"] = "remove"
-                rec["reason"] = "AI review: " + _s(d.get("reason", "")).strip()
+                # MI-4: AI is untrusted; it can only annotate a review.
+                rec["decision"] = "review"
+                rec["reason"] = "AI suggests removal (review): " + _s(d.get("reason", "")).strip()
             elif action == "keep" and conf == "high":
                 rec["decision"] = "keep"
                 rec["reason"] = "AI review kept: " + _s(d.get("reason", "")).strip()
@@ -1525,14 +1544,12 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
     if low_album_match:
         log.append(
             f"  Low album-level MB match: {len(keep_records)}/{actual_count} "
-            "local track(s) confidently match; promoting uncertain tracks to removal."
+            "local track(s) confidently match; uncertain tracks stay in review (never auto-removed)."
         )
         for rec in records:
             if rec["decision"] == "review":
-                rec["decision"] = "remove"
                 rec["reason"] = (
-                    "Album-level MusicBrainz match is too low; local file does not "
-                    "belong to this selected release"
+                    rec["reason"] + "; album-level MusicBrainz match is also low -- check the selected release"
                 )
 
     remove_candidates = [r for r in records if r["decision"] == "remove"]
@@ -1747,65 +1764,50 @@ def _album_mb_completeness(album_id: int, mb_override: str = "",
 
 def _remove_album_track_items(album_id: int, item_ids: List[int], *,
                               dry_run: bool,
-                              delete_files: bool,
-                              clean_empty_folders: bool = True,
-                              log: List[str]) -> Dict[str, Any]:
+                              delete_files: bool = False,
+                              clean_empty_folders: bool = False,
+                              log: List[str],
+                              approved_by: str = "") -> Dict[str, Any]:
+    """Take operator-selected tracks out of one album through the engine
+    quarantine (track_quarantine_v1): the rows leave the library, the files
+    are KEPT in the engine quarantine and a rollback restores both.
+
+    Files are never deleted here, whatever ``delete_files`` says (the flag is
+    accepted for API compatibility and reported as quarantine). A live run
+    needs ``approved_by`` -- the caller's statement of the operator's explicit
+    confirmation -- and is otherwise refused; the dry run only validates."""
     if not item_ids:
-        return {"removed_db": 0, "deleted_files": 0, "folders_removed": 0,
-                "dry_run": dry_run}
-    clean_ids: set = set()
-    for raw_id in item_ids:
-        try:
-            val = int(raw_id)
-        except Exception:
-            continue
-        if val > 0:
-            clean_ids.add(val)
-    safe_ids = sorted(clean_ids)
-    if not safe_ids:
-        return {"removed_db": 0, "deleted_files": 0, "folders_removed": 0,
-                "dry_run": dry_run}
-
-    payload = {
-        "mode": "remove_tracks",
-        "album_id": album_id,
-        "item_ids": safe_ids,
-        "delete_files": delete_files,
-        "clean_empty_folders": clean_empty_folders,
-    }
-
-    try:
-        plan_res = composite_workflows.plan_album_maintenance(payload)
-        if not plan_res.get("ok"):
-            raise RuntimeError(plan_res.get("error") or "Plan creation failed")
-        op_id = plan_res["operation_id"]
-        if dry_run:
-            return {
-                "removed_db": plan_res.get("item_deletes_count", len(safe_ids)),
-                "deleted_files": plan_res.get("quarantine_count", len(safe_ids) if delete_files else 0),
-                "folders_removed": 0,
-                "dry_run": True,
-                "album_deleted": bool(plan_res.get("album_deletes_count")),
-                "operation_id": op_id,
-            }
-
-        apply_res = composite_workflows.apply_album_maintenance(op_id)
-        if not apply_res.get("ok"):
-            raise RuntimeError(apply_res.get("error") or "Apply failed")
-
-        _invalidate_lib_cache()
-        _trigger_plex_refresh(log)
-        return {
-            "removed_db": apply_res.get("deleted_items", len(safe_ids)),
-            "deleted_files": apply_res.get("deleted_items", len(safe_ids)),
-            "folders_removed": 0,
-            "dry_run": False,
-            "album_deleted": bool(apply_res.get("deleted_albums")),
-            "operation_id": op_id,
-        }
-    except Exception as ex:
-        log.append(f"Engine track removal failed: {ex}")
-        raise RuntimeError(f"Engine track removal failed: {ex}")
+        return {"removed_db": 0, "deleted_files": 0, "quarantined_files": 0, "folders_removed": 0,
+                "dry_run": dry_run, "file_action": "quarantine"}
+    if not dry_run and not _s(approved_by).strip():
+        raise RuntimeError("Track removal needs the operator's explicit confirmation; nothing was removed.")
+    plan = composite_workflows.plan_track_quarantine(int(album_id), list(item_ids), create=not dry_run,
+                                                     reason=_s(approved_by))
+    if not plan.get("ok"):
+        log.append(f"Track removal refused: {plan.get('error')}")
+        for problem in plan.get("problems") or []:
+            log.append(f"  item {problem.get('item_id')}: {problem.get('reason')}")
+        raise RuntimeError(f"Track removal refused ({plan.get('code')}): {plan.get('error')}")
+    entries = plan.get("items") or []
+    if dry_run:
+        for e in entries:
+            log.append(f"  Would quarantine item {e['item_id']}: {Path(e['path']).name}")
+        return {"removed_db": len(entries), "deleted_files": 0, "quarantined_files": len(entries),
+                "folders_removed": 0, "dry_run": True, "album_deleted": False, "file_action": "quarantine"}
+    store = composite_workflows.get_default_store()
+    if store.transition(plan["operation_id"], "Preview", "Approved", metadata={"approved_by": _s(approved_by)}) is None:
+        raise RuntimeError("Could not approve the track quarantine plan; nothing was removed.")
+    applied = composite_workflows.apply_track_quarantine(plan["operation_id"])
+    if not applied.get("ok"):
+        raise RuntimeError(applied.get("error") or "; ".join(applied.get("verification_problems") or [])
+                           or "Track quarantine did not verify.")
+    _invalidate_lib_cache()
+    _trigger_plex_refresh(log)
+    log.append(f"Quarantined {len(entries)} track(s) of album {album_id} (files kept; rollback "
+               f"available on transaction {plan['operation_id']}).")
+    return {"removed_db": len(entries), "deleted_files": 0, "quarantined_files": len(entries),
+            "folders_removed": 0, "dry_run": False, "album_deleted": False, "file_action": "quarantine",
+            "operation_id": plan["operation_id"], "quarantine_id": applied.get("quarantine_id")}
 
 
 _STAMP_UUID_IN_NAME_RE = re.compile(

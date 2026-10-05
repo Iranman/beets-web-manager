@@ -1222,9 +1222,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                f"(album_ids: {sorted(orphan_album_ids)})")
                 # Remove album rows that now have zero items
                 for aid0 in orphan_album_ids:
-                    p_ac = composite_workflows.plan_album_cleanup(aid0)
-                    if p_ac.get("ok") and p_ac.get("operation_id"):
-                        composite_workflows.apply_album_cleanup(p_ac["operation_id"])
+                    # Row-only removal of an album row left empty (never files).
+                    composite_workflows.delete_album(int(aid0), delete_files=False)
             except Exception as ex:
                 log.append(f"  DB cleanup warning: {ex}")
 
@@ -3105,14 +3104,14 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     log.append(
                         "  Failed import cleanup skipped: album rows were not created by this job")
                     return
-                p_res = composite_workflows.plan_album_cleanup(album_db_id)
-                if not p_res.get("ok") or not p_res.get("operation_id"):
-                    raise RuntimeError(p_res.get("error") or f"Engine plan_album_cleanup failed for album {album_db_id}")
-                app_res = composite_workflows.apply_album_cleanup(p_res["operation_id"])
+                # LT-17: row-only. The imported files are never deleted here;
+                # they stay where Beets put them (untracked) for review.
+                app_res = composite_workflows.remove_album_rows_after_failed_import(
+                    album_db_id, reason="failed import validation (copied import)")
                 if not app_res.get("ok"):
-                    raise RuntimeError(app_res.get("error") or f"Engine apply_album_cleanup failed for album {album_db_id}")
-                deleted_files = len(app_res.get("deleted") or [])
-                log.append(f"  Removed failed copied import: album_id {album_db_id}, {deleted_files} file(s)")
+                    raise RuntimeError(app_res.get("error") or f"Row removal failed for album {album_db_id}")
+                log.append(f"  Removed failed import's Beets rows: album_id {album_db_id}; "
+                           "its files were kept on disk (untracked) for review")
             except Exception as ex:
                 log.append(f"  Failed import cleanup warning: {ex}")
 
@@ -3148,12 +3147,12 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             f"item path is outside source folder ({fpath})"
                         )
                         return False
-                p_res = composite_workflows.plan_album_cleanup(album_db_id)
-                if not p_res.get("ok") or not p_res.get("operation_id"):
-                    raise RuntimeError(f"Engine plan_album_cleanup failed for album {album_db_id}")
-                app_res = composite_workflows.apply_album_cleanup(p_res["operation_id"])
+                # LT-17: these are the operator's own library files -- remove
+                # the rows this failed validation created, never the files.
+                app_res = composite_workflows.remove_album_rows_after_failed_import(
+                    album_db_id, reason="failed library-source import validation")
                 if not app_res.get("ok"):
-                    raise RuntimeError(f"Engine apply_album_cleanup failed for album {album_db_id}")
+                    raise RuntimeError(f"Row removal failed for album {album_db_id}: {app_res.get('error')}")
                 log.append(
                     "  Rolled back failed library-source import DB rows for "
                     f"album_id {album_db_id}; source files were kept on disk"

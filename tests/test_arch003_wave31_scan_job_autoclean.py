@@ -33,28 +33,30 @@ class ScanJobAutoCleanTests(unittest.TestCase):
             app_module._do_scan_job()
         return captured.get("log", [])
 
-    def test_scan_job_cleans_stale_and_empty_via_engine(self):
+    def test_scan_job_only_reports_missing_rows(self):
+        """LT-2 (Wave 0): the background scan previews missing rows and never
+        removes rows or album records; removal is an operator action."""
         with mock.patch.object(
             app_module.composite_workflows, "get_library_stats",
             return_value={"tracks": 100, "albums": 10},
         ) as mock_stats, mock.patch.object(
             app_module.composite_workflows, "sync_deleted_files",
-            return_value={"missing_count": 2, "removed_from_db": 2},
+            return_value={"ok": True, "missing_count": 2, "removed_from_db": 0},
         ) as mock_sync, mock.patch.object(
             app_module.composite_workflows, "clean_empty_albums",
-            return_value={"removed_count": 1},
         ) as mock_empty:
             log = self._run_scan()
 
         mock_stats.assert_called_once()
-        mock_sync.assert_called_once_with(dry_run=False, limit=50000)
-        mock_empty.assert_called_once_with(dry_run=False)
+        mock_sync.assert_called_once_with(dry_run=True, limit=50000)
+        mock_empty.assert_not_called()
         self.assertTrue(any("phase:read-db rows:100" in line for line in log))
-        self.assertTrue(any("cleaned:3 stale DB entries removed" in line for line in log))
-        self.assertTrue(any("tracks:98" in line for line in log))
-        self.assertTrue(any("albums:9" in line for line in log))
+        self.assertFalse(any("cleaned:" in line for line in log))
+        self.assertTrue(any("not removed" in line for line in log))
+        self.assertTrue(any("tracks:100" in line for line in log))
+        self.assertTrue(any("albums:10" in line for line in log))
         self.assertTrue(any("missing:2" in line for line in log))
-        self.assertTrue(any("removed:3" in line for line in log))
+        self.assertTrue(any("removed:0" in line for line in log))
 
     def test_scan_job_no_stale_entries(self):
         with mock.patch.object(

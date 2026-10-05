@@ -181,8 +181,9 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         end_idx = self.app_source.index("def _rollback_failed_library_source_import")
         body = self.app_source[idx:end_idx]
         self.assertNotIn("composite_workflows.delete_file(", body)
-        self.assertIn("composite_workflows.plan_album_cleanup(", body)
-        self.assertIn("composite_workflows.apply_album_cleanup(", body)
+        # Wave 0 (LT-17): the rollback is row-only -- it never deletes files.
+        self.assertIn("composite_workflows.remove_album_rows_after_failed_import(", body)
+        self.assertNotIn("delete_files=True", body)
 
     # ── Inventory classification truthfulness (reimport_source) ────────────
 

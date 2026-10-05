@@ -671,9 +671,37 @@ def _scan_no_audio_folder_candidates(root: Path, log: Optional[List[str]] = None
     return {"ok": True, "root": str(root), "folders": candidates, "summary": summary}
 
 
+def _no_audio_tree_still_safe(folder: Path) -> Optional[str]:
+    """Re-check a folder right before deleting it: no audio file and no
+    symlink anywhere below it. Returns the refusal reason, or None."""
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        for name in dirnames + filenames:
+            entry = Path(dirpath) / name
+            if entry.is_symlink():
+                return f"contains a symlink: {entry}"
+            if entry.suffix.lower() in FOLDER_CLEAN_AUDIO_EXTS:
+                return f"contains audio now: {entry.name}"
+    return None
+
+
 def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
                              log: List[str]) -> Dict[str, Any]:
+    """Delete selected no-audio folder trees in STAGING roots only (QA-1).
+
+    Folders inside the music library are refused (they must leave the
+    library through engine quarantine); every folder must be inside a
+    staging/download root with no symlink component, and is re-checked for
+    audio and symlinks immediately before deletion. Failures are reported
+    (ok=false), never hidden."""
     root_path = _folder_clean_root(root)
+    music_res = _resolved_path(MUSIC_ROOT)
+    if root_path == music_res or _path_under(root_path, music_res):
+        log.append(f"  Refused: {root_path} is inside the music library; nothing was deleted.")
+        return {"ok": False, "code": "music_root_not_allowed", "root": str(root_path),
+                "error": "Folders inside the music library cannot be deleted here; nothing was deleted.",
+                "summary": {"folders_removed": 0, "files_removed": 0, "bytes_removed": 0, "dry_run": dry_run,
+                            "selected": len(paths or []), "skipped": len(paths or [])},
+                "results": [], "log": log}
     scan = _scan_no_audio_folder_candidates(root_path, log)
     allowed = {str(_resolved_path(Path(f["path"]))): f for f in scan.get("folders", [])}
     selected: List[Dict[str, Any]] = []
@@ -699,26 +727,40 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
     removed = 0
     files_removed = 0
     bytes_removed = 0
+    failures = 0
     results = []
     for rec in sorted(filtered, key=lambda r: len(Path(r["path"]).parts), reverse=True):
         folder = Path(rec["path"])
         results.append({**rec, "removed": False, "dry_run": dry_run})
-        files_removed += int(rec.get("files") or 0)
-        bytes_removed += int(rec.get("bytes") or 0)
+        refusal = None
+        if _path_under(_resolved_path(folder), music_res) or not composite_workflows._is_safe_staging_path(folder):
+            refusal = "outside the staging roots, inside the music library, or behind a symlink"
+        else:
+            refusal = _no_audio_tree_still_safe(folder)
+        if refusal:
+            failures += 1
+            results[-1]["error"] = f"Refused: {refusal}"
+            log.append(f"  Refused {folder}: {refusal}")
+            continue
         if dry_run:
             removed += 1
+            files_removed += int(rec.get("files") or 0)
+            bytes_removed += int(rec.get("bytes") or 0)
             results[-1]["removed"] = True
             log.append(f"  Would delete folder tree: {folder}")
             continue
         try:
             shutil.rmtree(folder)
             removed += 1
+            files_removed += int(rec.get("files") or 0)
+            bytes_removed += int(rec.get("bytes") or 0)
             results[-1]["removed"] = True
             log.append(f"  Deleted folder tree: {folder}")
         except Exception as ex:
+            failures += 1
             _app_logger.warning("Could not delete folder tree %r: %s", str(folder), type(ex).__name__)
             results[-1]["error"] = "Could not delete this folder."
-            log.append(f"  WARN deleting {folder}: {ex}")
+            log.append(f"  ERROR deleting {folder}: {ex}")
 
     summary = {
         "folders_removed": removed,
@@ -727,9 +769,11 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
         "dry_run": dry_run,
         "selected": len(paths or []),
         "skipped": max(0, len(paths or []) - len(filtered)),
+        "failed": failures,
     }
-    return {"ok": True, "root": str(root_path), "summary": summary,
-            "results": results, "log": log}
+    return {"ok": failures == 0, "root": str(root_path), "summary": summary,
+            "results": results, "log": log,
+            **({"error": f"{failures} folder(s) were refused or could not be deleted."} if failures else {})}
 
 
 def _load_rgid_resolutions() -> Dict[str, Any]:
@@ -789,10 +833,14 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
                                  dry_run: bool,
                                  log: List[str],
                                  trigger_plex: bool = True) -> Dict[str, Any]:
-    """Remove orphaned item rows by delegating to Beets engine Control Agent."""
+    """Remove the Beets ROWS of the given items whose files are missing.
+
+    Each id is re-verified live (still tracked, file absent now); files are
+    never deleted (LT-1). An empty selection is a no-op, never a widening."""
     ids = sorted({int(i) for i in item_ids if str(i).isdigit() and int(i) > 0})
     if not ids:
-        return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "skipped": 0}
+        return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "removed_count": 0,
+                "skipped": 0, "empty_albums_removed": 0, "orphaned_items": []}
 
     try:
         res = composite_workflows.clean_orphaned_items(item_ids=ids, dry_run=dry_run)
@@ -800,29 +848,38 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
         log.append(f"  Engine unavailable/error for orphaned-item cleanup: {ex}")
         raise
 
+    if not res.get("ok"):
+        log.append(f"  Orphaned-item cleanup refused: {res.get('error')}")
     selected = int(res.get("selected") or 0)
-    removed = int(res.get("removed_count") if not dry_run else selected)
-    skipped = max(0, len(ids) - selected)
+    removed = selected if dry_run else int(res.get("removed_count") or 0)
+    skipped_rows = res.get("skipped") or []
     for item in res.get("orphaned_items") or []:
         iid = item.get("id")
         label = f"{_s(item.get('artist'))} - {_s(item.get('title'))}".strip(" -")
-        log.append(f"  {'Would remove' if dry_run else 'Removing'} orphaned item id={iid}: {label}")
+        log.append(f"  {'Would remove' if dry_run else 'Removed'} row of missing file id={iid}: {label}")
+    for row in skipped_rows:
+        log.append(f"  Kept item id={row.get('id')}: {row.get('reason')}")
 
     if not dry_run and removed > 0:
         _invalidate_lib_cache()
         if trigger_plex:
             _trigger_plex_refresh(log)
 
-    log.append(f"Done: {'would remove' if dry_run else 'removed'} {removed} orphaned item row(s).")
+    log.append(f"Done: {'would remove' if dry_run else 'removed'} {removed} DB row(s) of missing files; "
+               "no audio file was deleted.")
     return {
-        "ok": bool(res.get("ok", True)),
+        "ok": bool(res.get("ok")),
+        "error": res.get("error"),
+        "code": res.get("code"),
         "dry_run": dry_run,
         "selected": len(ids),
         "removed": removed,
         "removed_count": removed,
         "empty_albums_removed": 0,
-        "skipped": skipped,
+        "skipped": len(ids) - selected,
+        "skipped_items": skipped_rows,
         "orphaned_items": res.get("orphaned_items", []),
+        "operation_id": res.get("operation_id"),
     }
 
 

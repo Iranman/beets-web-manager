@@ -711,9 +711,13 @@ def _delete_album_ids_from_db(album_ids: list, log: list, *,
         return 0
     removed_files = 0
     removed_albums = 0
+    if delete_files:
+        log.append("  Failed-import cleanup removes Beets rows only; audio files are kept on disk.")
     for aid in ids:
         try:
-            res = composite_workflows.delete_album(aid, delete_files=delete_files)
+            # LT-17: row-only, whatever delete_files says.
+            res = composite_workflows.remove_album_rows_after_failed_import(
+                int(aid), reason="failed import cleanup")
         except BeetsUnavailableError as ex:
             log.append(f"  Engine unavailable during failed-import cleanup for album_id {aid}: {ex}")
             continue
@@ -728,16 +732,9 @@ def _delete_album_ids_from_db(album_ids: list, log: list, *,
             log.append(f"  Engine cleanup rejected album_id {aid}: {res.get('error') or 'unknown error'}")
             continue
         removed_albums += 1
-        removed_files += int(res.get("files_deleted") or 0)
-        log.append(
-            f"  Removed failed import album_id {aid} through engine transaction"
-            + (f" ({int(res.get('files_deleted') or 0)} file(s))" if delete_files else "")
-        )
+        log.append(f"  Removed failed import album_id {aid} rows through an engine transaction (files kept)")
     if removed_albums:
-        log.append(
-            f"  Removed failed import DB rows for {removed_albums} album(s)"
-            + (f" and {removed_files} file(s)" if delete_files else "")
-        )
+        log.append(f"  Removed failed import DB rows for {removed_albums} album(s); no file was deleted")
     return removed_files
 
 

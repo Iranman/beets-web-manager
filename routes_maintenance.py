@@ -678,8 +678,17 @@ def api_transaction_detail(transaction_id):
 
 @app.post("/api/transactions/<transaction_id>/approve")
 def api_transaction_approve(transaction_id):
+    """Approve a Preview transaction (compare-and-set, LT-16). Any other
+    status -- Completed, Failed, Rolled Back, Cancelled, Running, Recovery
+    Required, or already Approved -- is refused, so a finished or failed
+    mutation can never be re-opened and applied again."""
     try:
-        tx = transactions.update(transaction_id, status="Approved")
+        tx = transactions.transition(transaction_id, "Preview", "Approved",
+                                     metadata={"approved_by": "operator (transactions approve route)"})
+        if tx is None:
+            current = transactions.get(transaction_id).get("status")
+            return jsonify({"ok": False, "code": "not_preview",
+                            "error": f"Only a Preview transaction can be approved (this one is {current})."}), 409
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
     return jsonify({"ok": True, "transaction": tx})
@@ -714,6 +723,8 @@ def _item_file_replacement_response(fn, transaction_id):
 _ENGINE_FAMILIES = {
     composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY: (composite_workflows.apply_track_replacement,
                                                        composite_workflows.rollback_track_replacement),
+    composite_workflows.TRACK_QUARANTINE_FAMILY: (composite_workflows.apply_track_quarantine,
+                                                  composite_workflows.rollback_track_quarantine),
     duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: (duplicate_cleanup.apply_reviewed_cleanup,
                                                 duplicate_cleanup.rollback_reviewed_cleanup),
     album_row_merge.ALBUM_ROW_MERGE_FAMILY: (album_row_merge.apply_album_row_merge,
