@@ -1,45 +1,129 @@
 #!/usr/bin/env bash
-# Restore configuration and the beets database from a backup.tar.gz made by
-# backup.sh. Stop the app before running this.
+# Restore a backup made by backup.sh: the Beets library database, Beets
+# config.yaml and plugin files, and Web Manager's state directory.
+#
+# Stop BOTH containers first (docker compose stop), run this on the Docker
+# host, then start them again (docker compose up -d).
+#
+#   ./restore.sh backups/beets-backup-<timestamp>.tar.gz
+#   ./restore.sh --beets-config /srv/beets --web-manager-data /srv/web-manager --yes <file>
+#
+# Options (or the environment variable in brackets):
+#   --beets-config DIR       host folder mounted at /config     [BEETS_CONFIG_DIR, default ./beets]
+#   --web-manager-data DIR   host folder mounted at /web-manager-data
+#                                                               [WEB_MANAGER_DATA_DIR, default ./web-manager]
+#   --yes                    do not ask for confirmation
+#
+# Nothing is deleted: every file the restore replaces is first moved to
+# <folder>/.pre-restore-<timestamp>/ inside the same folder.
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 <backup-file.tar.gz>" >&2
-  exit 1
+BEETS_CONFIG_DIR="${BEETS_CONFIG_DIR:-./beets}"
+WEB_MANAGER_DATA_DIR="${WEB_MANAGER_DATA_DIR:-./web-manager}"
+ASSUME_YES=0
+BACKUP_FILE=""
+
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --beets-config) BEETS_CONFIG_DIR="${2:?--beets-config needs a directory}"; shift 2 ;;
+    --web-manager-data) WEB_MANAGER_DATA_DIR="${2:?--web-manager-data needs a directory}"; shift 2 ;;
+    --yes|-y) ASSUME_YES=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) fail "unknown option: $1 (see --help)" ;;
+    *) [ -z "${BACKUP_FILE}" ] || fail "only one backup file may be given"; BACKUP_FILE="$1"; shift ;;
+  esac
+done
+
+[ -n "${BACKUP_FILE}" ] || { usage >&2; exit 1; }
+[ -f "${BACKUP_FILE}" ] || fail "backup file not found: ${BACKUP_FILE}"
+
+# Refuse archives with absolute paths or '..' components before extracting.
+if tar -tzf "${BACKUP_FILE}" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+  fail "the archive contains absolute or '..' paths -- refusing to extract it"
 fi
 
-BACKUP_FILE="$1"
-CONFIG_DIR="${BEETS_CONFIG_DIR:-/config}"
-
-if [ ! -f "${BACKUP_FILE}" ]; then
-  echo "Backup file not found: ${BACKUP_FILE}" >&2
-  exit 1
-fi
-
-echo "This will overwrite files in ${CONFIG_DIR}. Make sure the app is stopped."
-read -r -p "Continue? [y/N] " confirm
-if [ "${confirm}" != "y" ] && [ "${confirm}" != "Y" ]; then
-  echo "Aborted."
-  exit 1
-fi
-
+umask 077
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
-
 tar -xzf "${BACKUP_FILE}" -C "${TMP_DIR}"
 EXTRACTED="$(find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+[ -n "${EXTRACTED}" ] || fail "could not find backup contents inside ${BACKUP_FILE}"
 
-if [ -z "${EXTRACTED}" ]; then
-  echo "Could not find backup contents inside ${BACKUP_FILE}" >&2
-  exit 1
+# Layout written by backup.sh since it began including Web Manager state;
+# older archives had the Beets files at the top level.
+if [ -d "${EXTRACTED}/beets" ]; then
+  SRC_BEETS="${EXTRACTED}/beets"
+  SRC_WM="${EXTRACTED}/web-manager-data"
+else
+  SRC_BEETS="${EXTRACTED}"
+  SRC_WM=""
+  echo "Note: this is an older backup without Web Manager state; only Beets files will be restored." >&2
 fi
 
-mkdir -p "${CONFIG_DIR}"
-for f in musiclibrary.blb musiclibrary.blb-shm musiclibrary.blb-wal config.yaml; do
-  [ -f "${EXTRACTED}/${f}" ] && cp "${EXTRACTED}/${f}" "${CONFIG_DIR}/"
+if [ -s "${BEETS_CONFIG_DIR}/musiclibrary.blb-wal" ]; then
+  fail "${BEETS_CONFIG_DIR}/musiclibrary.blb-wal is not empty -- Beets looks like it is still running.
+  Stop both containers first (docker compose stop)."
+fi
+
+echo "This restores ${BACKUP_FILE} into:"
+echo "  Beets config:      ${BEETS_CONFIG_DIR}"
+[ -n "${SRC_WM}" ] && echo "  Web Manager data:  ${WEB_MANAGER_DATA_DIR}"
+echo "Replaced files are kept under .pre-restore-<timestamp>/ in each folder."
+echo "Both containers must be stopped (docker compose stop)."
+if [ "${ASSUME_YES}" -ne 1 ]; then
+  read -r -p "Continue? [y/N] " confirm
+  case "${confirm}" in y|Y) : ;; *) echo "Aborted."; exit 1 ;; esac
+fi
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+
+# move_aside <dir> <relative path>: keep the current file/dir before replacing it.
+move_aside() {
+  local dir="$1" rel="$2" keep="$1/.pre-restore-${STAMP}"
+  if [ -e "${dir}/${rel}" ]; then
+    mkdir -p "$(dirname "${keep}/${rel}")"
+    mv "${dir}/${rel}" "${keep}/${rel}"
+  fi
+}
+
+mkdir -p "${BEETS_CONFIG_DIR}"
+if [ -f "${SRC_BEETS}/musiclibrary.blb" ]; then
+  # The -wal/-shm of the current database belong to it, not to the restored copy.
+  for f in musiclibrary.blb musiclibrary.blb-wal musiclibrary.blb-shm; do move_aside "${BEETS_CONFIG_DIR}" "$f"; done
+  cp -p "${SRC_BEETS}/musiclibrary.blb" "${BEETS_CONFIG_DIR}/musiclibrary.blb"
+  # Older backups also carried -wal/-shm copies.
+  for f in musiclibrary.blb-wal musiclibrary.blb-shm; do
+    if [ -f "${SRC_BEETS}/$f" ]; then cp -p "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}/$f"; fi
+  done
+fi
+for f in config.yaml .webmanager_api_key; do
+  if [ -f "${SRC_BEETS}/$f" ]; then move_aside "${BEETS_CONFIG_DIR}" "$f"; cp -p "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}/$f"; fi
 done
-if [ -d "${EXTRACTED}/state" ]; then
-  cp "${EXTRACTED}/state/"*.json "${CONFIG_DIR}/" 2>/dev/null || true
+if [ -d "${SRC_BEETS}/beetsplug" ]; then
+  move_aside "${BEETS_CONFIG_DIR}" beetsplug
+  cp -Rp "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}/beetsplug"
+fi
+if [ -d "${SRC_BEETS}/state" ]; then
+  for f in "${SRC_BEETS}/state/"*.json; do
+    [ -f "$f" ] || continue
+    move_aside "${BEETS_CONFIG_DIR}" "$(basename "$f")"
+    cp -p "$f" "${BEETS_CONFIG_DIR}/"
+  done
 fi
 
-echo "Restore complete. Start the app and confirm the library loads correctly."
+if [ -n "${SRC_WM}" ] && [ -d "${SRC_WM}" ]; then
+  mkdir -p "${WEB_MANAGER_DATA_DIR}"
+  for entry in "${SRC_WM}"/* "${SRC_WM}"/.[!.]*; do
+    [ -e "${entry}" ] || continue
+    name="$(basename "${entry}")"
+    move_aside "${WEB_MANAGER_DATA_DIR}" "${name}"
+    cp -Rp "${entry}" "${WEB_MANAGER_DATA_DIR}/${name}"
+  done
+fi
+
+echo "Restore complete. Start the stack (docker compose up -d), then check:"
+echo "  docker compose exec beets beet stats"
+echo "  curl -s http://127.0.0.1:8337/api/health"

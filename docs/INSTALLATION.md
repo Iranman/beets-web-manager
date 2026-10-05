@@ -135,12 +135,15 @@ docker compose -f docker-compose.dev.yml up -d --build
 
 ## Upgrades
 
-To upgrade to the latest stable release:
+To upgrade to the latest stable release, back up first (see [Backups](../README.md#backups)), then:
 
 ```bash
 docker compose pull
 docker compose up -d
+docker compose restart beets   # load a new webmanager plugin version, if the release ships one
 ```
+
+Read the release's Upgrade Notes in [`CHANGELOG.md`](../CHANGELOG.md) before upgrading. The full upgrade, verification and rollback steps are in the README's [Upgrades](../README.md#upgrades) section.
 
 ---
 
