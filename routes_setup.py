@@ -280,13 +280,14 @@ def _setup_csrf_failure():
         return _json_security_error(403, "CSRF check failed")
     return None
 
+_SECRET_MASK = "********"
+
+
 def _mask(value: str) -> str:
-    value = str(value or "")
-    if not value:
-        return ""
-    if len(value) <= 4:
-        return "*" * len(value)
-    return value[:2] + "*" * (len(value) - 4) + value[-2:]
+    """A fixed placeholder for any configured secret (FE-16). It reveals
+    neither characters nor length; the plaintext is only available through
+    the re-authenticated reveal endpoint."""
+    return _SECRET_MASK if str(value or "") else ""
 
 
 def _is_secret_env(name: str) -> bool:

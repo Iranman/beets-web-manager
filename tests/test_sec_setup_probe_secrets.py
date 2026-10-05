@@ -178,6 +178,21 @@ class ClaimedAuthenticatedProbeTests(_ProbeHarness):
         self.assertEqual(self.sent[0][2].get("x-plex-token"), _STORED_PLEX)
 
 
+class SetupEnvMaskTests(_ProbeHarness):
+    """FE-16: GET /api/setup/env used to show the first and last two
+    characters of every secret."""
+    claimed = True
+
+    def test_env_listing_shows_no_secret_characters(self):
+        resp = self.client.get("/api/setup/env", headers={"Authorization": f"Bearer {_BEARER}"})
+        self.assertEqual(resp.status_code, 200)
+        text = resp.get_data(as_text=True)
+        for secret in (_STORED_AI, _STORED_PLEX):
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret[:2] + "*", text)
+            self.assertNotIn("*" + secret[-2:], text)
+
+
 class SameEndpointAndRedirectHeaderTests(unittest.TestCase):
     def test_same_endpoint_url(self):
         self.assertTrue(same_endpoint_url("https://api.openai.com/v1/", "https://api.openai.com/v1"))
