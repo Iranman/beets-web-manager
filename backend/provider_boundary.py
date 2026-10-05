@@ -40,6 +40,7 @@ import enum
 import os
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -142,10 +143,28 @@ def classify_http(code: int, headers: Any = None) -> ProviderOutcome:
     return ProviderOutcome.TRANSIENT_ERROR
 
 
+def _certificate_failure(exc: BaseException) -> bool:
+    current: Optional[BaseException] = exc
+    for _ in range(5):
+        if current is None:
+            return False
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(getattr(current, "reason", None), ssl.SSLCertVerificationError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def classify_exception(exc: BaseException) -> ProviderError:
     """Map a network exception onto a ProviderError (never "no result")."""
     if isinstance(exc, ProviderError):
         return exc
+    if _certificate_failure(exc):
+        # SEC-7: a certificate that does not verify will not verify on the
+        # next attempt either; retrying only repeats the handshake (and, for
+        # an interception attempt, the exposure). Final, never retried.
+        return ProviderError(ProviderOutcome.REJECTED, "TLS certificate verification failed")
     if isinstance(exc, urllib.error.HTTPError):
         return ProviderError(classify_http(exc.code, exc.headers), f"HTTP {exc.code}", status_code=exc.code,
                              retry_after=_retry_after(exc.headers))

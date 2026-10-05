@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 LOG = logging.getLogger("beets_web.security")
@@ -50,6 +50,12 @@ _SENSITIVE_REDIRECT_HEADERS = {
 _DEFAULT_TIMEOUT = float(os.environ.get("BEETS_OUTBOUND_TIMEOUT_SECONDS", "20") or "20")
 _DEFAULT_MAX_BYTES = int(os.environ.get("BEETS_OUTBOUND_MAX_RESPONSE_BYTES", str(20 * 1024 * 1024)) or str(20 * 1024 * 1024))
 _DEFAULT_MAX_REDIRECTS = int(os.environ.get("BEETS_OUTBOUND_MAX_REDIRECTS", "5") or "5")
+# Wall-clock budget for one user-supplied-URL fetch (every DNS answer tried,
+# every redirect hop, and the whole body read). The per-operation timeout
+# above only bounds a single socket wait, so a server dripping one byte per
+# few seconds could otherwise hold a worker for hours (SEC-7).
+_DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS", "60") or "60")
+_READ_CHUNK = 64 * 1024
 _ORIGINAL_URLOPEN_ATTR = "_beets_original_urlopen"
 _INSTALLED_ATTR = "_beets_secure_urlopen_installed"
 
@@ -329,20 +335,60 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
+class OutboundDeadlineExceeded(TimeoutError):
+    """A user-supplied-URL fetch ran past its total wall-clock budget."""
+
+
 class LimitedHTTPResponse:
-    def __init__(self, response: Any, max_bytes: int):
+    def __init__(self, response: Any, max_bytes: int, *, deadline: Optional[float] = None,
+                 op_timeout: Optional[float] = None):
         self._response = response
         self._max_bytes = max(1, int(max_bytes or _DEFAULT_MAX_BYTES))
         self._read = 0
+        self._deadline = deadline
+        self._op_timeout = op_timeout
+
+    def _remaining_time(self) -> float:
+        remaining = self._deadline - time.monotonic()  # type: ignore[operator]
+        if remaining <= 0:
+            raise OutboundDeadlineExceeded("outbound request exceeded its total time limit")
+        return remaining
+
+    def _read_raw(self, want: int) -> bytes:
+        if self._deadline is None:
+            return self._response.read(want)
+        # Read in bounded chunks, re-checking the deadline and shrinking the
+        # socket timeout to what is left, so no single wait can overrun it.
+        sock = getattr(self._response, "_bwm_sock", None)
+        parts: List[bytes] = []
+        got = 0
+        while got < want:
+            remaining = self._remaining_time()
+            if sock is not None:
+                limit = remaining if self._op_timeout is None else min(remaining, self._op_timeout)
+                try:
+                    sock.settimeout(max(0.05, limit))
+                except OSError:
+                    pass
+            # read1() returns after at most one socket read, so a dripping
+            # server cannot keep one call alive past the deadline.
+            reader = getattr(self._response, "read1", None) or self._response.read
+            chunk = reader(min(_READ_CHUNK, want - got))
+            if not chunk:
+                break
+            parts.append(chunk)
+            got += len(chunk)
+        self._remaining_time()
+        return b"".join(parts)
 
     def read(self, amt: Optional[int] = None) -> bytes:
         remaining = self._max_bytes - self._read
         if remaining < 0:
             raise OutboundPolicyError("outbound response exceeded size limit")
         if amt is None or amt < 0:
-            data = self._response.read(remaining + 1)
+            data = self._read_raw(remaining + 1)
         else:
-            data = self._response.read(min(int(amt), remaining + 1))
+            data = self._read_raw(min(int(amt), remaining + 1))
         self._read += len(data or b"")
         if self._read > self._max_bytes:
             raise OutboundPolicyError("outbound response exceeded size limit")
@@ -416,12 +462,15 @@ _NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
 class PinnedTarget:
     """A validated public request target. ``address`` is the IP the socket
     connects to; ``host`` is only used for the Host header, SNI and the TLS
-    certificate check."""
+    certificate check. ``addresses`` holds every validated DNS answer, in
+    resolver order, so a dead first answer can fall back to the next one --
+    each of them already passed the public-address check."""
     scheme: str
     host: str
     port: int
     address: str
     path: str
+    addresses: Tuple[str, ...] = ()
 
     @property
     def host_header(self) -> str:
@@ -491,7 +540,8 @@ def resolve_public_target(url: str) -> PinnedTarget:
     path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     if any(ord(ch) <= 32 or ord(ch) == 127 for ch in path):
         raise OutboundPolicyError("outbound URL path is invalid")
-    return PinnedTarget(scheme=scheme, host=host, port=port, address=str(addresses[0]), path=path)
+    validated = tuple(str(addr) for addr in addresses)
+    return PinnedTarget(scheme=scheme, host=host, port=port, address=validated[0], path=path, addresses=validated)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -519,26 +569,74 @@ def _send_pinned(target: PinnedTarget, headers: Mapping[str, str], timeout: floa
     send_headers.update({"Host": target.host_header, "Connection": "close", "Accept-Encoding": "identity"})
     try:
         conn.request("GET", target.path, headers=send_headers)
-        return conn.getresponse()
+        response = conn.getresponse()
+        response._bwm_sock = conn.sock  # type: ignore[attr-defined]  # lets reads shrink the timeout
+        return response
     except BaseException:
         conn.close()
         raise
 
 
+def _is_certificate_error(exc: BaseException) -> bool:
+    seen = 0
+    current: Optional[BaseException] = exc
+    while current is not None and seen < 5:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return True
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return False
+
+
+def _send_pinned_any(target: PinnedTarget, headers: Mapping[str, str], timeout: float,
+                     deadline: float) -> http.client.HTTPResponse:
+    """Try each validated address in turn (SEC-7/IA-09). Only a connection
+    failure moves on to the next address; a TLS certificate failure is
+    final (another address of the same name will not fix it) and an HTTP
+    response of any status is returned as-is."""
+    candidates = target.addresses or (target.address,)
+    last_exc: Optional[BaseException] = None
+    for address in candidates:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise OutboundDeadlineExceeded("outbound request exceeded its total time limit")
+        attempt = target if address == target.address else replace(target, address=address)
+        try:
+            return _send_pinned(attempt, headers, min(timeout, remaining))
+        except (ssl.SSLCertVerificationError, OutboundPolicyError):
+            raise
+        except OSError as exc:
+            if _is_certificate_error(exc):
+                raise
+            last_exc = exc
+            continue
+    assert last_exc is not None
+    raise last_exc
+
+
 def open_public_url(url: str, *, headers: Optional[Mapping[str, str]] = None, timeout: Optional[float] = None,
-                    max_redirects: Optional[int] = None, max_bytes: Optional[int] = None) -> LimitedHTTPResponse:
+                    max_redirects: Optional[int] = None, max_bytes: Optional[int] = None,
+                    total_timeout: Optional[float] = None) -> LimitedHTTPResponse:
     """GET a user-supplied URL on the public internet (see block comment).
 
     Returns a size-limited response usable as a context manager; raises
     OutboundPolicyError on a policy violation and urllib.error.HTTPError for
-    an HTTP error status, so provider_boundary classifies it as usual."""
+    an HTTP error status, so provider_boundary classifies it as usual.
+    ``timeout`` bounds each socket wait; ``total_timeout`` (default
+    BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS) bounds the whole fetch including
+    the body read, raising OutboundDeadlineExceeded (a TimeoutError)."""
     policy = current_outbound_policy()
     hops = policy.max_redirects if max_redirects is None else max(0, int(max_redirects))
     effective_timeout = policy.timeout_seconds if timeout is None else float(timeout)
+    budget = _DEFAULT_TOTAL_TIMEOUT if total_timeout is None else float(total_timeout)
+    deadline = time.monotonic() + max(0.1, budget)
     current = str(url or "")
     for _ in range(hops + 1):
         target = resolve_public_target(current)
-        response = _send_pinned(target, dict(headers or {}), effective_timeout)
+        response = _send_pinned_any(target, dict(headers or {}), effective_timeout, deadline)
         if response.status in _REDIRECT_STATUSES:
             location = response.getheader("Location") or ""
             response.close()
@@ -552,7 +650,8 @@ def open_public_url(url: str, *, headers: Optional[Mapping[str, str]] = None, ti
             raise urllib.error.HTTPError(redact_url_for_log(current), response.status, response.reason,
                                          response.headers, io.BytesIO())
         response.url = current  # type: ignore[attr-defined]  # urllib-compatible .url
-        return LimitedHTTPResponse(response, policy.max_response_bytes if max_bytes is None else max_bytes)
+        return LimitedHTTPResponse(response, policy.max_response_bytes if max_bytes is None else max_bytes,
+                                   deadline=deadline, op_timeout=effective_timeout)
     raise OutboundPolicyError("outbound request exceeded the redirect limit")
 
 
