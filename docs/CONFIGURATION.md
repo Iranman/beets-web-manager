@@ -58,7 +58,9 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 | `BEETS_WEB_PASSWORD` | web | optional | Administrator browser login password. Prefer setting this via the first-run browser setup wizard. |
 | `BEETS_WEB_USERNAME` | web | optional | Browser login username, default `admin`. |
 | `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Applies only to operator-configured services (Beets, Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider). It never applies to URLs a user pastes or a provider response supplies (reference URLs, artwork image URLs): those are fetched from public internet addresses only, with the connection pinned to the validated address, and they do not use `HTTP_PROXY`/`HTTPS_PROXY`. |
-| `BEETS_TRUSTED_PROXIES` | web | optional | Proxy CIDRs whose forwarded client IP headers may be trusted. |
+| `BEETS_TRUSTED_PROXIES` | web | optional | Comma-separated proxy CIDRs whose forwarded client IP headers may be trusted. `X-Forwarded-For` is read right to left: entries added by trusted proxies are skipped and the first untrusted address is the client, so a client cannot spoof its address by sending its own `X-Forwarded-For`. Leave empty when the app is not behind a reverse proxy. |
+| `BEETS_AUTH_RATE_LIMIT` / `BEETS_AUTH_RATE_WINDOW` | web | optional | Failed sign-in attempts allowed per client IP per window (default 30 per 60 s). While a client is over the limit every attempt, including one with the correct password, gets HTTP 429 without the password being checked. |
+| `BEETS_AUTH_ACCOUNT_RATE_LIMIT` / `BEETS_AUTH_ACCOUNT_RATE_WINDOW` | web | optional | Failed password attempts allowed across all client IPs per window (default 100 per 300 s), so rotating IPs does not bypass the per-IP limit. Existing signed-in sessions and bearer-token clients are not affected while it is exhausted. |
 
 ## Optional integrations
 
