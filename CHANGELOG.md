@@ -6,6 +6,28 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+- `scripts/backup.sh` and `scripts/restore.sh` changed. They now default to the stack folders `./beets` and `./web-manager` (or `--beets-config`/`--web-manager-data`/`--out`) instead of the container path `/config`, and the archive layout has `beets/` and `web-manager-data/` folders. `restore.sh` still reads archives from the old script.
+- The TrueNAS rollout script (`scripts/deploy_truenas_web_manager.sh`) now restarts the `beets` service when a release changes the webmanager plugin version, and fails a deploy that adds a new setup blocking reason. Its backups now hold Web Manager state and the Beets config; their diagnostic copies of the container environment are redacted.
+
+### Fixed
+- **Rollout `--rollback` now actually rolls back (RD-5).** It used to report "Rollback complete" while the new version kept running: the image override was a process substitution whose errors were discarded, the fallback recreated from the `.env` that the deploy had already moved to the new version, and nothing checked the result. Rollback now restores the `BEETS_WEB_MANAGER_VERSION` line in the stack `.env`, recreates through a temporary override file, and fails unless the running image ID is the recorded previous one, `docker compose config` resolves to it (so a later `docker compose up -d` keeps it) and `/health/live` reports the previous version.
+- **Deploys fail on a new setup blocking reason (RD-6).** `/api/setup/status` is recorded before the deploy and compared after; a new blocking reason fails the rollout with the rollback command, before the version is written to `.env`. Previously a deploy passed as long as every endpoint answered 200.
+- **Rollout backups include the state a new version can change (RD-7).** Web Manager's Settings `.env`, browser login files, Flask session key, setup markers and `transactions/`, plus Beets `config.yaml` and `beetsplug/`, are backed up (mode 600) after the web manager stops, and restored on rollback. Replaced files are kept under `pre-rollback-*/`, and audit records written after the deploy are never removed. The library database is never copied.
+- **A changed webmanager plugin is loaded (RD-8).** Beets keeps the plugin it imported at start-up, and the rollout only recreated the web manager, so a new plugin version stayed inactive until someone restarted Beets. The rollout now compares the provisioned plugin version with the one the engine reports and, when they differ, restarts only `beets` (same container) with library snapshots before and after.
+- **`backup.sh` backs up Web Manager state and works on a Compose host (QA-9, RD-14).** It used to fail with its default `/config` path, and it never included `/web-manager-data`. It now copies the database with SQLite's online backup API (`sqlite3` or `python3`, read-only), so writes still in the WAL are included while Beets runs; without either tool it requires `--beets-stopped`. `restore.sh` refuses unsafe archives and a running Beets, and moves replaced files aside instead of overwriting them.
+
+### Security
+- Rollout backups no longer keep plain-text copies of every service's environment: the `docker inspect` and `docker compose config` copies keep key names but redact values except for a short allowlist of non-secret keys (RD-20). New opt-in `--prune-backups-older-than DAYS` deletes old rollout backups (never automatically; keeps the newest and any backup holding an archived stale database).
+
+### Added
+- GitHub Releases are created by CI (RD-11): on a `v*` tag, after the image is published, the `github-release` job creates the release with the tag's CHANGELOG section as its body (`scripts/release_metadata.py notes`). An existing release is left untouched.
+- A `release-metadata` CI job (required before publishing) fails when `VERSION` and the newest CHANGELOG release heading disagree, or when a tag is not `v` + `VERSION`.
+- A versioning policy for `0.x` (when a release is minor rather than patch) in `CONTRIBUTING.md` and `AGENTS.md` (RD-17).
+
+### Changed
+- `docs/TRUENAS_ROLLOUT.md` describes what the script actually does: it edits the stack `.env` (deploy and rollback rewrite `BEETS_WEB_MANAGER_VERSION`), what a dry run pulls and writes, the full backup contents and the rollback proof. `docs/DEVELOPMENT.md` no longer references the missing `scripts/verify_security_config.py` and describes the image/tag/rollout release flow instead of copying files. README backup, upgrade and rollback sections match the scripts.
+
 ## v0.1.49 - 2026-10-04
 
 ### Upgrade Notes
