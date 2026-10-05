@@ -6,6 +6,7 @@ import io
 import ipaddress
 import logging
 import os
+import re
 import socket
 import ssl
 import time
@@ -78,18 +79,43 @@ def _clean_host(value: str) -> str:
     return (value or "").strip().rstrip(".").lower()
 
 
+_ALLOWLIST_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?)*$")
+
+
 def _parse_host_port(raw: str) -> Tuple[str, int]:
+    """Split one allowlist entry into (host, port).
+
+    Accepted forms: ``host:port``, ``IPv4:port``, ``IPv4-CIDR:port``,
+    ``[IPv6]:port`` and ``[IPv6-CIDR]:port``. The port is always the text
+    after the last colon outside brackets, so a CIDR's ``/prefix`` is never
+    mistaken for a URL path (F6). Every malformed entry raises
+    OutboundPolicyError."""
     value = (raw or "").strip()
     if not value or "*" in value:
         raise OutboundPolicyError("outbound allowlist entries must be exact host/IP/CIDR plus port")
-    parsed = urllib.parse.urlsplit("//" + value)
-    host = parsed.hostname or ""
-    port = parsed.port
-    if not host or port is None:
-        raise OutboundPolicyError("outbound allowlist entries must include an explicit port")
+    if value.startswith("["):
+        close = value.find("]")
+        if close < 0:
+            raise OutboundPolicyError("outbound allowlist IPv6 entry is missing ']'")
+        host, rest = value[1:close], value[close + 1:]
+        if not rest.startswith(":"):
+            raise OutboundPolicyError("outbound allowlist entries must include an explicit port")
+        port_text = rest[1:]
+    else:
+        host, sep, port_text = value.rpartition(":")
+        if not sep or not host:
+            raise OutboundPolicyError("outbound allowlist entries must include an explicit port")
+        if ":" in host:
+            raise OutboundPolicyError("outbound allowlist IPv6 entries must be bracketed, e.g. [fd00::1]:8080")
+    if not port_text.isdigit():
+        raise OutboundPolicyError("outbound allowlist port must be a number")
+    port = int(port_text)
     if port < 1 or port > 65535:
         raise OutboundPolicyError("outbound allowlist port is out of range")
-    return _clean_host(host), int(port)
+    host = _clean_host(host)
+    if not host:
+        raise OutboundPolicyError("outbound allowlist entries must include a host")
+    return host, port
 
 
 def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRule, ...]:
@@ -107,19 +133,32 @@ def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRu
         if not item:
             continue
         host, port = _parse_host_port(item)
+        if "/" in host:
+            try:
+                network = ipaddress.ip_network(host, strict=False)
+            except ValueError as exc:
+                raise OutboundPolicyError("invalid outbound allowlist CIDR") from exc
+            rules.append(OutboundAllowRule(kind="network", port=port, network=network))
+            continue
         try:
-            if "/" in host:
-                rules.append(OutboundAllowRule(kind="network", port=port, network=ipaddress.ip_network(host, strict=False)))
-            else:
-                rules.append(OutboundAllowRule(kind="ip", port=port, ip=ipaddress.ip_address(host)))
+            rules.append(OutboundAllowRule(kind="ip", port=port, ip=ipaddress.ip_address(host)))
             continue
         except ValueError:
-            if "/" in host:
-                raise OutboundPolicyError("invalid outbound allowlist CIDR")
-        if any(ch.isspace() for ch in host) or any(ord(ch) < 32 for ch in host):
+            pass
+        if not _ALLOWLIST_HOSTNAME_RE.match(host):
             raise OutboundPolicyError("invalid outbound allowlist host")
         rules.append(OutboundAllowRule(kind="host", port=port, host=host))
     return tuple(rules)
+
+
+def outbound_allowlist_problem(raw: Optional[str] = None) -> Optional[str]:
+    """A human-readable description of what is wrong with
+    BEETS_OUTBOUND_ALLOWLIST, or None when it parses. Never raises."""
+    try:
+        parse_outbound_allowlist(raw)
+        return None
+    except OutboundPolicyError as exc:
+        return str(exc)
 
 
 def current_outbound_policy() -> OutboundPolicy:
@@ -202,17 +241,11 @@ def _resolve_host(host: str, port: int) -> Tuple[ipaddress._BaseAddress, ...]:
 
 
 def _address_is_prohibited(ip: ipaddress._BaseAddress) -> bool:
-    check_ip = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped else ip
-    if check_ip in _METADATA_IPS:
-        return True
-    return any((
-        check_ip.is_loopback,
-        check_ip.is_private,
-        check_ip.is_link_local,
-        check_ip.is_multicast,
-        check_ip.is_unspecified,
-        check_ip.is_reserved,
-    ))
+    """Operator-path policy (BA-4/SEC-6): anything that is not a globally
+    routable unicast address -- private, loopback, link-local, CGNAT/shared
+    (100.64/10, e.g. Tailscale), benchmarking, documentation, reserved, and
+    IPv6 forms embedding such an IPv4 -- needs an explicit allowlist entry."""
+    return not address_is_public(ip)
 
 
 def _allow_rule_matches(rule: OutboundAllowRule, host: str, port: int, addresses: Tuple[ipaddress._BaseAddress, ...]) -> bool:
@@ -345,6 +378,18 @@ def secure_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *, ca
 def install_secure_urllib() -> None:
     if getattr(urllib.request, _INSTALLED_ATTR, False):
         return
+    problem = outbound_allowlist_problem()
+    if problem:
+        # Validated once at startup so a typo is reported clearly instead of
+        # surfacing later as unrelated provider failures. Not fatal: every
+        # outbound request still fails closed (OutboundPolicyError) until it
+        # is fixed, and the Settings page must stay reachable to fix it.
+        LOG.error(
+            "BEETS_OUTBOUND_ALLOWLIST is invalid (%s); all outbound requests to "
+            "operator-configured services will be refused until it is fixed. "
+            "Use comma-separated host:port, IP:port, CIDR:port or [IPv6]:port entries.",
+            problem,
+        )
     setattr(urllib.request, _ORIGINAL_URLOPEN_ATTR, urllib.request.urlopen)
     urllib.request.urlopen = secure_urlopen
     setattr(urllib.request, _INSTALLED_ATTR, True)
