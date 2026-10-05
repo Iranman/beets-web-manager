@@ -3146,6 +3146,10 @@ def _playlist_url_host_is(host: str, domain: str) -> bool:
     return bool(host) and (host == domain or host.endswith("." + domain))
 
 
+def _playlist_url_host_is_any(host: str, domains) -> bool:
+    return any(_playlist_url_host_is(host, domain) for domain in domains)
+
+
 # Service behind POST /api/playlist/parse (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
 def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
@@ -3217,7 +3221,15 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except _SpotifyFetchError as ex:
                 return {"ok": False, "error": str(ex)}, 200
         else:
-            # yt-dlp handles YouTube Music, YouTube, SoundCloud, Apple Music, Tidal, etc.
+            # yt-dlp handles the supported media hosts (YouTube/YouTube Music,
+            # SoundCloud, Bandcamp, Mixcloud, Vimeo, Deezer). SEC-2: anything
+            # else -- and any host resolving to a non-public address -- is
+            # refused before yt-dlp runs; yt-dlp's own HTTP stack bypasses the
+            # application's outbound URL policy, and its generic extractor
+            # would otherwise fetch internal URLs.
+            from backend.ytdlp_guard import YTDLP_ALLOWED_HOSTS, ytdlp_guarded_options, ytdlp_target_allowed
+            if not ytdlp_target_allowed(content) or not _playlist_url_host_is_any(_content_host, YTDLP_ALLOWED_HOSTS):
+                return {"ok": False, "error": "Unsupported playlist URL. Use a YouTube, YouTube Music, SoundCloud, Bandcamp, Mixcloud, Vimeo, Deezer or Spotify playlist link."}, 200
             if not _ytdlp_ready.wait(timeout=30):
                 return {"ok": False, "error": "yt-dlp is still installing, try again in 30 seconds"}, 200
             try:
@@ -3257,7 +3269,7 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             elif _playlist_url_host_is(_content_host, "soundcloud.com"):
                 _apply_ytdlp_netrc(ydl_opts)
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [content])) as ydl:
                     info = ydl.extract_info(content, download=False)
             except Exception as exc:
                 _app_logger.warning("yt-dlp playlist import failed: %s", type(exc).__name__)
