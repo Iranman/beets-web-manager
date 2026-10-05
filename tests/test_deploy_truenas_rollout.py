@@ -1464,6 +1464,114 @@ class BackupContentTests(VersionedStackFixture):
         self.assertEqual(compose["services"]["lidarr"]["environment"]["API_KEY"], "<redacted>")
 
 
+    def test_backup_scrubs_secrets_from_commands_labels_and_extensions(self):
+        webmgr = self.state["containers"]["cid-webmgr"]
+        webmgr["Config"]["Env"].append("BEETS_WEB_URL=http://admin:url-pass-secret-xyz@beets:8337")
+        webmgr["Config"]["Cmd"] = ["serve", "--api-token=cmd-secret-value-xyz", "--port=8000"]
+        webmgr["Config"]["Entrypoint"] = ["/init", "PASSWORD=entry-secret-value-xyz"]
+        webmgr["Config"]["Labels"] = {"plain": "ok", "app.api_key": "label-secret-value-xyz",
+                                      "note": "SECRET=label-inline-secret-xyz"}
+        webmgr["Config"]["Healthcheck"] = {"Test": ["CMD", "curl", "-H", "token=hc-secret-value-xyz"]}
+        self.state["compose_service_extra"] = {"beets-web-manager": {
+            "command": "serve --token=compose-cmd-secret-xyz ok=1",
+            "entrypoint": ["/init", "pass=compose-entry-secret-xyz"],
+            "healthcheck": {"test": ["CMD-SHELL", "curl -u x KEY=compose-hc-secret-xyz"]},
+            "labels": {"traefik.password": "compose-label-secret-xyz", "plain": "ok"},
+            "build": {"context": ".", "args": {"NPM_TOKEN": "compose-build-secret-xyz", "V": "1"}},
+            "x-notes": {"db_password": "compose-xsvc-secret-xyz"},
+        }}
+        self.state["compose_environment"]["beets-web-manager"]["BEETS_OUTBOUND_ALLOWLIST"] = (
+            "https://user:allow-pass-secret-xyz@h.example")
+        self.state["compose_top_extra"] = {"x-shared": {"command": "run SECRET_KEY=compose-xtop-secret-xyz"}}
+        self._save_state()
+        self.deploy()
+        bdir = self.backup_dir()
+        inspect_text = Path(bdir, "container-inspect-before.json").read_text(encoding="utf-8")
+        compose_text = Path(bdir, "resolved-compose-config.json").read_text(encoding="utf-8")
+        for secret in ("url-pass-secret-xyz", "cmd-secret-value-xyz", "entry-secret-value-xyz",
+                       "label-secret-value-xyz", "label-inline-secret-xyz", "hc-secret-value-xyz"):
+            self.assertNotIn(secret, inspect_text)
+        for secret in ("compose-cmd-secret-xyz", "compose-entry-secret-xyz", "compose-hc-secret-xyz",
+                       "compose-label-secret-xyz", "compose-build-secret-xyz", "compose-xsvc-secret-xyz",
+                       "allow-pass-secret-xyz", "compose-xtop-secret-xyz"):
+            self.assertNotIn(secret, compose_text)
+        inspect = json.loads(inspect_text)[0]
+        self.assertIn("BEETS_WEB_URL=http://<redacted>@beets:8337", inspect["Config"]["Env"])
+        self.assertIn("--port=8000", inspect["Config"]["Cmd"])
+        self.assertEqual(inspect["Config"]["Labels"]["plain"], "ok")
+        svc = json.loads(compose_text)["services"]["beets-web-manager"]
+        self.assertEqual(svc["environment"]["BEETS_OUTBOUND_ALLOWLIST"], "https://<redacted>@h.example")
+        self.assertIn("ok=1", svc["command"])
+        self.assertEqual(svc["build"]["args"]["V"], "1")
+        self.assertEqual(svc["labels"]["plain"], "ok")
+
+
+@unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
+class SymlinkSafetyTests(VersionedStackFixture):
+    """The script runs as root: a link planted in a container-writable data
+    folder must never redirect a backup or restore copy to another path."""
+
+    def outside(self, name, text):
+        path = os.path.join(self.tmp, name)
+        Path(path).write_text(text, encoding="utf-8")
+        return path
+
+    def test_symlinked_state_file_is_skipped_by_the_backup(self):
+        target = self.outside("host-secret.txt", "host-only-content")
+        os.remove(os.path.join(self.webmgr_dir, ".flask_secret_key"))
+        os.symlink(target, os.path.join(self.webmgr_dir, ".flask_secret_key"))
+        res = self.deploy()
+        bdir = self.backup_dir()
+        self.assertFalse(os.path.lexists(os.path.join(bdir, "web-manager-data", ".flask_secret_key")))
+        self.assertIn("web-manager-data/.flask_secret_key skipped (symbolic link)",
+                      Path(bdir, "state-manifest.txt").read_text(encoding="utf-8"))
+        self.assertIn("symbolic link", res.stderr)
+
+    def test_backup_drops_links_inside_copied_folders(self):
+        target = self.outside("host-file.txt", "host-only-content")
+        os.symlink(target, os.path.join(self.webmgr_dir, "transactions", "evil.json"))
+        self.deploy()
+        tx = os.path.join(self.backup_dir(), "web-manager-data", "transactions")
+        self.assertTrue(os.path.isfile(os.path.join(tx, "t1.json")))
+        self.assertFalse(os.path.lexists(os.path.join(tx, "evil.json")))
+
+    def test_rollback_replaces_a_symlinked_destination_without_writing_through_it(self):
+        self.deploy()
+        target = self.outside("host-file.txt", "host-only-content")
+        dst = os.path.join(self.webmgr_dir, ".flask_secret_key")
+        os.remove(dst)
+        os.symlink(target, dst)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(Path(target).read_text(encoding="utf-8"), "host-only-content")
+        self.assertFalse(os.path.islink(dst))
+        self.assertEqual(Path(dst).read_text(encoding="utf-8"), "flask-key-before")
+
+    def test_rollback_refuses_a_symlinked_transactions_folder(self):
+        self.deploy()
+        outside_dir = os.path.join(self.tmp, "host-dir")
+        os.makedirs(outside_dir)
+        tx = os.path.join(self.webmgr_dir, "transactions")
+        for name in os.listdir(tx):
+            os.remove(os.path.join(tx, name))
+        os.rmdir(tx)
+        os.symlink(outside_dir, tx)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(os.listdir(outside_dir), [], "nothing may be written through the link")
+        self.assertIn("transactions/ is or contains a symbolic link", res.stderr)
+
+    def test_symlinked_token_path_stops_the_deploy(self):
+        target = self.outside("host-token.txt", "host-only-content")
+        token = os.path.join(self.webmgr_dir, ".auth_token")
+        os.remove(token)
+        os.symlink(target, token)
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("is a symbolic link", res.stderr)
+        self.assertEqual(Path(target).read_text(encoding="utf-8"), "host-only-content")
+        self.assertEqual(self.webmgr_container()["Config"]["Image"], self.OLD_IMAGE)
+
+
 class SetupStatusGateTests(VersionedStackFixture):
     def test_new_blocking_reason_fails_the_deploy_with_rollback_guidance(self):
         reason = "Cannot write to downloads/staging path downloads"

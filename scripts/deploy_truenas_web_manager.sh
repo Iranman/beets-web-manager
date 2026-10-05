@@ -632,6 +632,7 @@ inspect_auth_token() {
   STAGE="token-inspection"
   log "Token env vars present (names only, values never read here): $(env | awk -F= '/^BEETS_(API|WEB_AUTH)_TOKEN/{print $1}' | paste -sd, -)"
 
+  [[ ! -L "$TOKEN_PATH" ]] || die "the auth token path (${TOKEN_PATH}) is a symbolic link -- refusing to continue; replace it with a regular file first"
   if [[ -f "$TOKEN_PATH" ]]; then
     TOKEN_SIZE="$(file_size "$TOKEN_PATH")"
     if [[ "$TOKEN_SIZE" -gt 0 ]]; then
@@ -932,32 +933,118 @@ WEBMGR_STATE_DIRS=("transactions")
 
 # redact_json <kind> < in > out   (kind: inspect | compose)
 redact_json() {
+  # Values are redacted unless their variable name is allowlisted. Even an
+  # allowlisted URL loses any user:password@ part. Free-form strings (command,
+  # entrypoint, healthcheck, labels, build args, x-* extensions) keep their
+  # shape but every NAME=value whose NAME looks like a credential is scrubbed.
   _py -c '
-import json, sys
+import json, re, sys
 kind, allow = sys.argv[1], set(sys.argv[2].split())
 data = json.load(sys.stdin)
+SECRET_ASSIGN = re.compile(r"(?i)((?:token|key|secret|pass(?:word)?)[^=\s]*=)\S+")
+URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]*@")
+def strip_userinfo(v):
+    return URL_USERINFO.sub(r"\1<redacted>@", v) if isinstance(v, str) else v
+def scrub(v):
+    if isinstance(v, str):
+        return strip_userinfo(SECRET_ASSIGN.sub(r"\1<redacted>", v))
+    if isinstance(v, list):
+        return [scrub(x) for x in v]
+    if isinstance(v, dict):
+        # mappings (labels, build args, x-* blocks): a credential-like name
+        # loses its scalar value outright
+        return {k: ("<redacted>" if secretish(k) and not isinstance(x, (dict, list)) else scrub(x))
+                for k, x in v.items()}
+    return v
+def secretish(name):
+    return re.search(r"(?i)token|key|secret|pass(word)?", str(name)) is not None
+scrub_map = scrub
 def red_list(env):
     out = []
     for entry in env or []:
-        key, sep, _ = str(entry).partition("=")
-        out.append(entry if key in allow else (key + "=<redacted>" if sep else key))
+        key, sep, val = str(entry).partition("=")
+        if key in allow:
+            out.append(key + sep + strip_userinfo(val))
+        else:
+            out.append(key + "=<redacted>" if sep else key)
     return out
 def red_map(env):
-    return {k: (v if k in allow else "<redacted>") for k, v in (env or {}).items()}
+    return {k: (strip_userinfo(v) if k in allow else "<redacted>") for k, v in (env or {}).items()}
 if kind == "inspect":
     for obj in data if isinstance(data, list) else [data]:
         cfg = obj.get("Config") or {}
         if "Env" in cfg:
             cfg["Env"] = red_list(cfg.get("Env"))
+        for field in ("Cmd", "Entrypoint"):
+            if cfg.get(field) is not None:
+                cfg[field] = scrub(cfg[field])
+        if cfg.get("Labels") is not None:
+            cfg["Labels"] = scrub_map(cfg["Labels"])
+        hc = cfg.get("Healthcheck")
+        if isinstance(hc, dict) and hc.get("Test") is not None:
+            hc["Test"] = scrub(hc["Test"])
+        for field in ("Path", "Args"):
+            if obj.get(field) is not None:
+                obj[field] = scrub(obj[field])
 else:
+    for key in list(data):
+        if str(key).startswith("x-"):
+            data[key] = scrub(data[key])
     for svc in (data.get("services") or {}).values():
+        if not isinstance(svc, dict):
+            continue
         env = svc.get("environment")
         if isinstance(env, dict):
             svc["environment"] = red_map(env)
         elif isinstance(env, list):
             svc["environment"] = red_list(env)
+        for field in ("command", "entrypoint"):
+            if svc.get(field) is not None:
+                svc[field] = scrub(svc[field])
+        hc = svc.get("healthcheck")
+        if isinstance(hc, dict) and hc.get("test") is not None:
+            hc["test"] = scrub(hc["test"])
+        if svc.get("labels") is not None:
+            svc["labels"] = scrub_map(svc["labels"])
+        build = svc.get("build")
+        if isinstance(build, dict) and build.get("args") is not None:
+            build["args"] = scrub_map(build["args"])
+        for key in list(svc):
+            if str(key).startswith("x-"):
+                svc[key] = scrub(svc[key])
 json.dump(data, sys.stdout, indent=1)
 ' "$1" "$REDACTION_ALLOWLIST"
+}
+
+# This script runs as root and copies files between the stack's data
+# folders (writable by the containers) and the backup folder. A symbolic link
+# planted in either place must never redirect a root-owned copy to or from
+# an arbitrary host path, so every copy below goes through these helpers.
+
+# copy_regular_file <src> <dst>: copies a regular, non-link file. Refuses a
+# symlinked source or a symlinked destination folder; a destination that is
+# itself a symlink is removed (the link only, never its target) first.
+copy_regular_file() {
+  local src="$1" dst="$2"
+  if [[ -L "$src" || ! -f "$src" ]]; then
+    warn "not copying ${src}: it is a symbolic link or not a regular file"
+    return 1
+  fi
+  if [[ -L "$(dirname -- "$dst")" ]]; then
+    warn "not copying to ${dst}: its folder is a symbolic link"
+    return 1
+  fi
+  if [[ -L "$dst" ]]; then
+    rm -f -- "$dst"
+  fi
+  cp -p -- "$src" "$dst"
+}
+
+# tree_has_symlink <dir>: true if <dir> is a symlink or contains one.
+tree_has_symlink() {
+  [[ -L "$1" ]] && return 0
+  [[ -d "$1" ]] || return 1
+  [[ -n "$(find "$1" -type l -print -quit)" ]]
 }
 
 backup_state_files() {
@@ -968,27 +1055,42 @@ backup_state_files() {
   local f d manifest="$BACKUP_DIR/state-manifest.txt"
   : > "$manifest"
   for f in "${WEBMGR_STATE_FILES[@]}"; do
-    if [[ -f "${data_src}/${f}" ]]; then
-      cp -p "${data_src}/${f}" "$BACKUP_DIR/web-manager-data/${f}"
+    if [[ -L "${data_src}/${f}" ]]; then
+      warn "web-manager-data/${f} is a symbolic link -- not backed up"
+      echo "web-manager-data/${f} skipped (symbolic link)" >> "$manifest"
+    elif [[ -f "${data_src}/${f}" ]]; then
+      cp -p -- "${data_src}/${f}" "$BACKUP_DIR/web-manager-data/${f}"
       echo "web-manager-data/${f} sha256=$(sha256_file "${data_src}/${f}")" >> "$manifest"
     else
       echo "web-manager-data/${f} absent" >> "$manifest"
     fi
   done
   for d in "${WEBMGR_STATE_DIRS[@]}"; do
-    if [[ -d "${data_src}/${d}" ]]; then
-      cp -Rp "${data_src}/${d}" "$BACKUP_DIR/web-manager-data/${d}"
+    if [[ -L "${data_src}/${d}" ]]; then
+      warn "web-manager-data/${d}/ is a symbolic link -- not backed up"
+      echo "web-manager-data/${d}/ skipped (symbolic link)" >> "$manifest"
+    elif [[ -d "${data_src}/${d}" ]]; then
+      # -P: copy links as links (never follow them), then drop them.
+      cp -RPp -- "${data_src}/${d}" "$BACKUP_DIR/web-manager-data/${d}"
+      find "$BACKUP_DIR/web-manager-data/${d}" -type l -delete
       echo "web-manager-data/${d}/ files=$(find "${data_src}/${d}" -type f | wc -l | tr -d ' ')" >> "$manifest"
     fi
   done
   # Beets config only -- NEVER the library database (musiclibrary.blb and
   # its -wal/-shm are deliberately not in this list).
-  if [[ -f "${engine_src}/config.yaml" ]]; then
-    cp -p "${engine_src}/config.yaml" "$BACKUP_DIR/beets-config/config.yaml"
+  if [[ -L "${engine_src}/config.yaml" ]]; then
+    warn "Beets config.yaml is a symbolic link -- not backed up"
+    echo "beets-config/config.yaml skipped (symbolic link)" >> "$manifest"
+  elif [[ -f "${engine_src}/config.yaml" ]]; then
+    cp -p -- "${engine_src}/config.yaml" "$BACKUP_DIR/beets-config/config.yaml"
     echo "beets-config/config.yaml sha256=$(sha256_file "${engine_src}/config.yaml")" >> "$manifest"
   fi
-  if [[ -d "${engine_src}/beetsplug" ]]; then
-    cp -Rp "${engine_src}/beetsplug" "$BACKUP_DIR/beets-config/beetsplug"
+  if [[ -L "${engine_src}/beetsplug" ]]; then
+    warn "Beets beetsplug/ is a symbolic link -- not backed up"
+    echo "beets-config/beetsplug/ skipped (symbolic link)" >> "$manifest"
+  elif [[ -d "${engine_src}/beetsplug" ]]; then
+    cp -RPp -- "${engine_src}/beetsplug" "$BACKUP_DIR/beets-config/beetsplug"
+    find "$BACKUP_DIR/beets-config/beetsplug" -type l -delete
     echo "beets-config/beetsplug/ files=$(find "${engine_src}/beetsplug" -type f | wc -l | tr -d ' ')" >> "$manifest"
   fi
   # Owner-only, whatever umask/ACLs the host applies.
@@ -1011,38 +1113,54 @@ restore_state_files() {
   local f
   for f in "${WEBMGR_STATE_FILES[@]}"; do
     if [[ -f "$ROLLBACK_DIR/web-manager-data/${f}" ]]; then
-      [[ -f "${data_src}/${f}" ]] && cp -p "${data_src}/${f}" "$pre/web-manager-data/${f}"
-      cp -p "$ROLLBACK_DIR/web-manager-data/${f}" "${data_src}/${f}"
-      log "Restored web-manager-data/${f}"
+      if [[ -f "${data_src}/${f}" && ! -L "${data_src}/${f}" ]]; then
+        cp -p -- "${data_src}/${f}" "$pre/web-manager-data/${f}"
+      fi
+      if copy_regular_file "$ROLLBACK_DIR/web-manager-data/${f}" "${data_src}/${f}"; then
+        log "Restored web-manager-data/${f}"
+      else
+        warn "web-manager-data/${f} was NOT restored"
+      fi
     elif [[ -f "${data_src}/${f}" ]] && grep -q "^web-manager-data/${f} absent$" "$ROLLBACK_DIR/state-manifest.txt" 2>/dev/null; then
       # Did not exist before the deploy: move it aside (never delete).
       mv "${data_src}/${f}" "$pre/web-manager-data/${f}"
       log "Moved web-manager-data/${f} (created after the deploy) aside to ${pre}/web-manager-data/"
     fi
   done
-  if [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]]; then
+  if [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]] && tree_has_symlink "${data_src}/transactions"; then
+    warn "web-manager-data/transactions/ is or contains a symbolic link -- missing transaction records were NOT restored; copy them from ${ROLLBACK_DIR}/web-manager-data/transactions/ by hand after checking the folder"
+  elif [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]]; then
     mkdir -p "${data_src}/transactions"
     # Audit trail: add back missing records only; never overwrite or delete.
     local added=0 src rel
     while IFS= read -r -d '' src; do
       rel="${src#"$ROLLBACK_DIR/web-manager-data/transactions/"}"
-      if [[ ! -e "${data_src}/transactions/${rel}" ]]; then
+      if [[ ! -e "${data_src}/transactions/${rel}" && ! -L "${data_src}/transactions/${rel}" ]]; then
         mkdir -p "$(dirname "${data_src}/transactions/${rel}")"
-        cp -p "$src" "${data_src}/transactions/${rel}"
+        cp -p -- "$src" "${data_src}/transactions/${rel}"
         added=$((added + 1))
       fi
     done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -type f -print0)
     log "transactions/: ${added} missing record(s) restored; records written after the deploy were kept."
   fi
   if [[ -f "$ROLLBACK_DIR/beets-config/config.yaml" ]]; then
-    [[ -f "${engine_src}/config.yaml" ]] && cp -p "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
-    cp -p "$ROLLBACK_DIR/beets-config/config.yaml" "${engine_src}/config.yaml"
-    log "Restored Beets config.yaml (takes effect at the engine's next start)."
+    if [[ -f "${engine_src}/config.yaml" && ! -L "${engine_src}/config.yaml" ]]; then
+      cp -p -- "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
+    fi
+    if copy_regular_file "$ROLLBACK_DIR/beets-config/config.yaml" "${engine_src}/config.yaml"; then
+      log "Restored Beets config.yaml (takes effect at the engine's next start)."
+    else
+      warn "Beets config.yaml was NOT restored"
+    fi
   fi
   if [[ -d "$ROLLBACK_DIR/beets-config/beetsplug" ]]; then
-    [[ -d "${engine_src}/beetsplug" ]] && cp -Rp "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
-    cp -Rp "$ROLLBACK_DIR/beets-config/beetsplug/." "${engine_src}/beetsplug/"
-    log "Restored Beets beetsplug/ files."
+    if tree_has_symlink "${engine_src}/beetsplug" || tree_has_symlink "$ROLLBACK_DIR/beets-config/beetsplug"; then
+      warn "Beets beetsplug/ (or its backup) is or contains a symbolic link -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
+    else
+      [[ -d "${engine_src}/beetsplug" ]] && cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
+      cp -RPp -- "$ROLLBACK_DIR/beets-config/beetsplug/." "${engine_src}/beetsplug/"
+      log "Restored Beets beetsplug/ files."
+    fi
   fi
   chmod -R go-rwx "$pre"
 }
@@ -1207,6 +1325,7 @@ create_backup_dir() {
   } > "$BACKUP_DIR/authoritative-db-metadata.txt"
 
   local persistent_existed=0 legacy_existed=0 persistent_sha="" legacy_sha=""
+  [[ ! -L "$TOKEN_PATH" ]] || die "the auth token path (${TOKEN_PATH}) is a symbolic link -- refusing to back it up; replace it with a regular file first"
   if [[ -f "$TOKEN_PATH" ]]; then
     persistent_existed=1
     persistent_sha="$(sha256_file "$TOKEN_PATH")"
@@ -1592,7 +1711,9 @@ run_rollback() {
   log "Restoring Compose file from backup..."
   cp "$ROLLBACK_DIR/docker-compose.yml.bak" "$COMPOSE_FILE"
 
-  if [[ -f "$ROLLBACK_DIR/token-metadata.txt" ]]; then
+  if [[ -L "$TOKEN_PATH" ]]; then
+    warn "the auth token path (${TOKEN_PATH}) is a symbolic link -- token left untouched; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking it"
+  elif [[ -f "$ROLLBACK_DIR/token-metadata.txt" ]]; then
     local p_existed l_existed migration_performed p_sha m_sha meta_p_path
     p_existed="$(grep '^persistent_token_existed_before=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
     l_existed="$(grep '^legacy_token_existed_before=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
@@ -1642,7 +1763,9 @@ run_rollback() {
   if [[ "$RESTORE_STALE_DB" -eq 1 && -d "$ROLLBACK_DIR/stale-database" ]]; then
     log "RESTORE_STALE_DB=1 -- restoring archived stale database files..."
     for f in "$DB_FILENAME" "$WAL_FILENAME" "$SHM_FILENAME"; do
-      [[ -f "$ROLLBACK_DIR/stale-database/$f" ]] && cp "$ROLLBACK_DIR/stale-database/$f" "$(canon_path "$WEBMGR_DATA_SRC")/$f"
+      if [[ -f "$ROLLBACK_DIR/stale-database/$f" ]]; then
+        copy_regular_file "$ROLLBACK_DIR/stale-database/$f" "$(canon_path "$WEBMGR_DATA_SRC")/$f" || warn "stale database file ${f} was NOT restored"
+      fi
     done
   else
     log "Stale database files left archived (set RESTORE_STALE_DB=1 to restore them -- current architecture never reads them)."

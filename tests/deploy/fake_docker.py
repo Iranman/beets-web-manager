@@ -188,6 +188,11 @@ def _resolved_services(state, files):
     for svc, env in (state.get("compose_environment") or {}).items():
         if svc in services:
             services[svc]["environment"] = dict(env)
+    # Extra per-service keys (command, labels, healthcheck, build, x-*) that a
+    # test wants to see in "compose config" output.
+    for svc, extra in (state.get("compose_service_extra") or {}).items():
+        if svc in services:
+            services[svc].update(json.loads(json.dumps(extra)))
     return services
 
 
@@ -215,7 +220,9 @@ def cmd_compose(args, state):
 
     if sub == "config":
         services = _resolved_services(state, files)
-        print(json.dumps({"services": services}))
+        top = dict(state.get("compose_top_extra") or {})
+        top["services"] = services
+        print(json.dumps(top))
         return 0
 
     if sub == "pull":
