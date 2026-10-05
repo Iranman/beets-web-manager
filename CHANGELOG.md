@@ -34,6 +34,14 @@ The project uses Semantic Versioning.
 ### Fixed
 - **The library health report works again (LT-18).** `get_library_health()` was called with keyword arguments it did not accept. `GET /api/clean/library-health` and Clean All's first step failed with a TypeError. It now builds the report from live Beets reads. Missing files are reported only when the music root is usable.
 - **Album maintenance no longer reports work it did not do (LT-3).** Every mode (remove tracks, deduplicate, filename cleanup) used to fall through to a relocation (`move`) and record Completed. Only removing an empty album row is implemented. Other modes are refused with `not_supported` and the transaction is marked Failed. `delete_album` removes only empty album rows.
+- **Helpers that crashed or faked success now fail honestly (LT-18, LT-12).**
+  - `run_command("mbsubmit")` reported "completed" without contacting Beets. The item/album "mbsubmit" jobs now fail with `not_supported`.
+  - `get_job()` returned success for any id; it now reads the engine's operation registry. `cancel_job()` no longer claims a cancellation the engine cannot do.
+  - `POST /api/library/move-all` and `POST /api/library/mbsync-all` called helpers with arguments they did not accept. They now fail with `not_supported` before changing anything; a library-wide move or MusicBrainz rewrite has no plan or rollback yet.
+  - `replace_album_art()` (used by artwork upload/URL replace) wrote into the album folder with no audit and was called with unsupported arguments. It now returns `not_supported`, and the artwork routes report "Could not update album artwork" as before.
+  - `POST /api/albums/<id>/move-to-library` now relocates through the album relocation family.
+  - `create_hardlink()` (torrent re-seed linking) accepts the expected size and links only into staging roots.
+  - A new test checks that every `composite_workflows` call site binds to the real signature. Eleven pre-existing unbound call sites (matching, playlist and import flows) are listed in the test as a shrink-only baseline for a later wave.
 
 ## v0.1.49 - 2026-10-04
 

@@ -1539,30 +1539,19 @@ def delete_album_art(
 
 def replace_album_art(
     album_id: int,
-    image_bytes: bytes,
+    image_data: Any = b"",
     ext: str = "jpg",
     adapter: Optional[BeetsAdapter] = None,
+    **_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Save custom image bytes to album directory and embed into tracks."""
-    ad = adapter or beets_adapter
-    aid = int(album_id)
-    album = ad.get_album(aid)
-    if not album:
-        return {"ok": False, "error": f"Album {aid} not found"}
+    """Replacing album art is refused (LT-18).
 
-    items = ad.find_all_items_by_album_id(aid)
-    if not items:
-        return {"ok": False, "error": f"No tracks found for album {aid}"}
-
-    first_item_path = _decode_path(items[0].get("path"))
-    album_dir = Path(first_item_path).parent
-    target_art = album_dir / f"cover.{ext}"
-    target_art.write_bytes(image_bytes)
-
-    ad.modify(fields={"artpath": str(target_art)}, album_ids=[aid])
-    ad.embed_art(album_ids=[aid])
-
-    return {"ok": True, "album_id": aid, "artpath": str(target_art)}
+    It wrote the image straight into the album folder from this container
+    (the music mount is read-only here) and set artpath with a bare modify,
+    with no audit or rollback; its caller also passed arguments it did not
+    accept. A correct version needs an engine artwork-write operation."""
+    return {"ok": False, "code": "not_supported", "album_id": int(album_id),
+            "error": "Replacing album artwork is not supported yet; nothing was changed."}
 
 
 def plan_album_artwork(
@@ -2066,14 +2055,15 @@ def relocate_album(
     }
 
 
-def move_library(adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
-    """Move all albums in the library to conform to current path templates."""
-    ad = adapter or beets_adapter
-    all_albums = ad.get_albums()
-    aids = [int(a["id"]) for a in all_albums if a.get("id")]
-    if aids:
-        ad.move(album_ids=aids)
-    return {"ok": True, "albums_moved": len(aids)}
+def move_library(*_args: Any, adapter: Optional[BeetsAdapter] = None, **_kwargs: Any) -> Dict[str, Any]:
+    """Whole-library move (LT-18): refused.
+
+    It used to move every album in one unaudited call with no plan or
+    rollback, and its only caller passed arguments it did not accept. A
+    library-wide move needs a planned, per-album relocation family first."""
+    return {"ok": False, "code": "not_supported",
+            "error": "Moving the whole library at once is not supported; nothing was moved. "
+                     "Relocate albums individually."}
 
 
 # -----------------------------------------------------------------------------
@@ -2632,14 +2622,28 @@ def find_files_for_hardlink(
     return matches
 
 
-def create_hardlink(src_path: str, dst_path: str) -> Dict[str, Any]:
+def create_hardlink(src_path: str, dst_path: str, expected_size: Optional[int] = None) -> Dict[str, Any]:
+    """Hardlink a file into a staging/download root (LT-18).
+
+    The target must be inside a staging root (never MUSIC_ROOT, no symlink
+    component); the source must be a regular file of ``expected_size`` when
+    given. An existing target is accepted only when it already IS the source
+    (``already_present``); anything else is refused, never overwritten."""
     p_src = Path(src_path)
     p_dst = Path(dst_path)
-    if not p_src.exists():
+    if not p_src.is_file() or p_src.is_symlink():
         raise FileNotFoundError(f"Source file not found: {src_path}")
+    if expected_size is not None and p_src.stat().st_size != int(expected_size):
+        raise ValueError("Source file size changed; nothing was linked.")
+    if not _is_safe_staging_path(p_dst.parent if not p_dst.exists() else p_dst):
+        raise ValueError("Refusing to link outside staging roots")
+    if p_dst.exists():
+        if os.path.samefile(p_src, p_dst):
+            return {"ok": True, "already_present": True, "source": str(p_src), "destination": str(p_dst)}
+        raise ValueError(f"Refusing to overwrite an existing file: {dst_path}")
     p_dst.parent.mkdir(parents=True, exist_ok=True)
     os.link(str(p_src), str(p_dst))
-    return {"ok": True, "source": str(p_src), "destination": str(p_dst)}
+    return {"ok": True, "already_present": False, "source": str(p_src), "destination": str(p_dst)}
 
 
 def repoint_item_db_path(
@@ -2655,11 +2659,25 @@ def repoint_item_db_path(
 
 
 def cancel_job(job_id: str) -> Dict[str, Any]:
-    return {"ok": True, "job_id": job_id, "cancelled": True}
+    """The engine has no cancel endpoint (LT-12): report that honestly
+    instead of claiming a cancellation."""
+    return {"ok": False, "job_id": job_id, "cancelled": False, "code": "not_supported",
+            "error": "The Beets engine cannot cancel a running operation."}
 
 
-def get_job(job_id: str) -> Dict[str, Any]:
-    return {"id": job_id, "status": "success", "returncode": 0, "stdout": [], "stderr": []}
+def get_job(job_id: str, adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
+    """Status of an engine operation from its registry (LT-12). It used to
+    return a constant success for any id."""
+    ad = adapter or beets_adapter
+    try:
+        op = ad.get_operation(str(job_id)) or {}
+    except BeetsNotFoundError:
+        return {"id": job_id, "status": "failed", "returncode": 1, "stdout": [], "stderr": [],
+                "error": "The engine has no record of this operation."}
+    raw = _s(op.get("status")).lower()
+    status = {"running": "running", "succeeded": "success", "failed": "failed"}.get(raw, "failed")
+    return {"id": job_id, "status": status, "returncode": 0 if status == "success" else (None if status == "running" else 1),
+            "stdout": [], "stderr": [_s(op.get("error"))] if op.get("error") else [], "result": op.get("result")}
 
 
 def clear_album_artpath(
@@ -2783,11 +2801,12 @@ def list_transactions(
 
 
 def move_album_to_library(
-    album_id: int, adapter: Optional[BeetsAdapter] = None
+    album_id: int, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    ad = adapter or beets_adapter
-    res = ad.move(f"id:{album_id}", album=True)
-    return {"ok": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr}
+    """Move an album to its Beets path-template location through the album
+    relocation family (LT-18: it called adapter.move() with arguments that
+    do not exist and read a missing returncode)."""
+    return relocate_album(int(album_id), mode="move", adapter=adapter, store=store)
 
 
 _ALLOWED_COMMANDS = frozenset({"mbsubmit"})
@@ -2799,38 +2818,25 @@ def run_command(
     timeout: float = 60.0,
     adapter: Optional[BeetsAdapter] = None,
 ) -> Dict[str, Any]:
-    """Execute a strictly bounded, allowlisted Beets command.
+    """Arbitrary/legacy Beets commands are not supported (LT-12).
 
-    Security Gate:
-    - Prohibits arbitrary command names. Only strictly allowlisted commands ('mbsubmit') are permitted.
-    - Prohibits arbitrary shell commands, subprocess execution in Web Manager, Docker execution, SQL,
-      and filesystem commands.
-    - Validates argument strings against command injection patterns.
-    """
+    This used to return a fabricated "mbsubmit ... completed" without
+    contacting the engine. The stock-Beets engine has no command runner;
+    AcoustID submission goes through beets_adapter.mbsubmit() (the
+    submissions workflow). Nothing is executed here."""
     if command not in _ALLOWED_COMMANDS:
         raise ValueError(
             f"Prohibited command '{command}'. Arbitrary command execution is not permitted; "
             f"only allowlisted operations {_ALLOWED_COMMANDS} are allowed."
         )
-
-    safe_args = []
-    if args:
-        for arg in args:
-            if not isinstance(arg, str):
-                raise ValueError(f"Invalid argument type: {type(arg)}")
-            if any(char in arg for char in (";", "|", "&", "$", "`", "\n", "\r")):
-                raise ValueError(f"Illegal character in command argument: {arg!r}")
-            safe_args.append(arg)
-
-    ad = adapter or beets_adapter
-    query = safe_args[0] if safe_args else ""
-    return {
-        "ok": True,
-        "returncode": 0,
-        "stdout": f"mbsubmit {query} completed",
-        "stderr": "",
-        "output": f"mbsubmit {query} completed",
-    }
+    for arg in args or []:
+        if not isinstance(arg, str):
+            raise ValueError(f"Invalid argument type: {type(arg)}")
+        if any(char in arg for char in (";", "|", "&", "$", "`", "\n", "\r")):
+            raise ValueError(f"Illegal character in command argument: {arg!r}")
+    return {"ok": False, "code": "not_supported", "returncode": 1, "stdout": "", "stderr": "",
+            "error": "Generating a MusicBrainz submission through the Beets engine is not supported; "
+                     "nothing was run. Use the submissions workflow."}
 
 
 def write_tags(file_path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
@@ -2901,7 +2907,10 @@ def get_album_cleanup_index() -> List[Dict[str, Any]]:
 def mbsync(
     query: str = "", *, async_job: bool = False, timeout: float = 300.0
 ) -> Dict[str, Any]:
-    return beets_adapter.mbsync(query=query)
+    """Library-wide/query mbsync is refused (LT-18).
 
-
-
+    It forwarded ``query`` to beets_adapter.mbsync(), which has no such
+    parameter (TypeError), and a library-wide MusicBrainz rewrite has no
+    snapshot or rollback. Per-album repairs use plan/apply_album_mb_track_repair."""
+    return {"ok": False, "code": "not_supported",
+            "error": "Syncing the whole library from MusicBrainz at once is not supported; nothing was changed."}

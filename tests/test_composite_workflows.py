@@ -308,10 +308,12 @@ class TestCompositeWorkflows(unittest.TestCase):
 
     def test_run_command_security_gates(self):
         from backend.composite_workflows import run_command
-        # Allowed command succeeds
+        # Allowed command passes validation but is not executed: the helper
+        # must report not_supported instead of fabricating stdout (Wave 0 LT-12).
         res = run_command("mbsubmit", ["album_id:123"])
-        self.assertTrue(res["ok"])
-        self.assertIn("mbsubmit album_id:123", res["stdout"])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res.get("code"), "not_supported")
+        self.assertNotIn("mbsubmit album_id:123", res.get("stdout", ""))
 
         # Prohibited commands raise ValueError
         for bad_cmd in ["sh", "bash", "rm", "python", "import", "eval", "docker", "drop table"]:

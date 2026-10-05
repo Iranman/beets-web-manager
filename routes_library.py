@@ -3625,6 +3625,9 @@ def library_move_all():
             move_res = composite_workflows.move_library(query="", rescan_first=True, async_job=True, timeout=5400.0)
         except Exception as ex:
             raise RuntimeError(f"Failed to execute move_library on engine: {ex}") from ex
+        if isinstance(move_res, dict) and move_res.get("ok") is False:
+            # LT-18: refused (not_supported) -- fail the job, change nothing.
+            raise RuntimeError(move_res.get("error") or "Moving the whole library was refused; nothing was moved.")
 
         remote_job_id = move_res.get("job_id") if isinstance(move_res, dict) else None
         rc = 0
@@ -3744,6 +3747,15 @@ def library_move_all():
 def library_mbsync_all():
     """Sync all library tracks against MusicBrainz metadata (beet mbsync)."""
     def _do(log, cancel_event=None):
+        # LT-18: ask the engine first; when the library-wide sync is refused
+        # (not_supported today) nothing else -- not even the orphan-row prune --
+        # runs, and the job fails instead of reporting success.
+        try:
+            mbsync_res = composite_workflows.mbsync(query="", async_job=True)
+        except Exception as ex:
+            raise RuntimeError(f"Failed to start beet mbsync on engine: {ex}") from ex
+        if isinstance(mbsync_res, dict) and mbsync_res.get("ok") is False:
+            raise RuntimeError(mbsync_res.get("error") or "Library-wide mbsync was refused; nothing was changed.")
         try:
             orphan_rows = composite_workflows.find_all_orphan_albums()
             orphan_ids = [int(r["id"]) for r in orphan_rows]
@@ -3768,10 +3780,6 @@ def library_mbsync_all():
 
         log.append("Running beet mbsync on full library via engine IPC — this may take several minutes…")
         deadline = time.time() + 7200.0  # 2-hour hard cap
-        try:
-            mbsync_res = composite_workflows.mbsync(query="", async_job=True)
-        except Exception as ex:
-            raise RuntimeError(f"Failed to start beet mbsync on engine: {ex}") from ex
 
         remote_job_id = mbsync_res.get("job_id") if isinstance(mbsync_res, dict) else None
         rc = 0
