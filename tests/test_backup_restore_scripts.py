@@ -190,6 +190,83 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
         self.assertIn("refusing to extract", res.stderr)
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.tmp), "escaped")))
 
+    def _assert_link_archive_refused(self, add_member):
+        """Build an archive in backup.sh's layout plus one link member, run
+        restore, and assert it is refused before anything is copied."""
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        outside = os.path.join(self.tmp, "outside-secret")
+        Path(outside).write_text("host secret", encoding="utf-8")
+        evil = os.path.join(self.tmp, "links.tar.gz")
+        stage = os.path.join(self.tmp, "stage", "beets-backup-x")
+        os.makedirs(os.path.join(stage, "beets"))
+        os.makedirs(os.path.join(stage, "web-manager-data"))
+        Path(stage, "web-manager-data", ".env").write_text("AI_MODEL=from-archive", encoding="utf-8")
+        with tarfile.open(evil, "w:gz") as tf:
+            tf.add(stage, arcname="beets-backup-x")
+            add_member(tf, outside)
+        beets_before, wm_before = _tree(self.beets), _tree(self.wm)
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", evil, check=False)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("links or special files", res.stderr)
+        self.assertEqual(_tree(self.beets), beets_before, "nothing may be copied into the Beets config")
+        self.assertEqual(_tree(self.wm), wm_before, "nothing may be copied into the Web Manager data")
+        for d in (self.beets, self.wm):
+            self.assertFalse([n for n in os.listdir(d) if n.startswith(".pre-restore-")])
+            for dirpath, dirnames, filenames in os.walk(d):
+                for n in dirnames + filenames:
+                    self.assertFalse(os.path.islink(os.path.join(dirpath, n)), n)
+        self.assertEqual(Path(outside).read_text(encoding="utf-8"), "host secret")
+
+    def test_restore_refuses_symlink_members(self):
+        def add(tf, outside):
+            for name, target in (("beets-backup-x/beets/config.yaml", outside),
+                                 ("beets-backup-x/web-manager-data/etclink", "/etc")):
+                info = tarfile.TarInfo(name)
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                tf.addfile(info)
+        self._assert_link_archive_refused(add)
+
+    def test_restore_refuses_hardlink_members(self):
+        def add(tf, outside):
+            info = tarfile.TarInfo("beets-backup-x/beets/.webmanager_api_key")
+            info.type = tarfile.LNKTYPE
+            info.linkname = "beets-backup-x/web-manager-data/.env"
+            tf.addfile(info)
+        self._assert_link_archive_refused(add)
+
+    def test_restored_credential_files_are_owner_only(self):
+        archive = self.backup("python")
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        for f in ("config.yaml", ".webmanager_api_key"):
+            os.chmod(os.path.join(self.beets, f), 0o644)
+        self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm, "--yes", archive)
+        for f in ("config.yaml", ".webmanager_api_key"):
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.beets, f)).st_mode), 0o600, f)
+
+    def _backup_into_quoted_folder(self, method):
+        out = os.path.join(self.tmp, "it's backups")
+        self.run_script(BACKUP, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                        "--out", out, method=method)
+        archives = [n for n in os.listdir(out) if n.endswith(".tar.gz")]
+        self.assertEqual(len(archives), 1, archives)
+        with tarfile.open(os.path.join(out, archives[0])) as tf:
+            member = next(m for m in tf.getmembers() if m.name.endswith("beets/musiclibrary.blb"))
+            data = tf.extractfile(member).read()
+        self.assertTrue(data.startswith(b"SQLite format 3"))
+        # Nothing was written next to the backup folder by a broken .backup target.
+        self.assertEqual(sorted(os.listdir(self.tmp)), sorted(["beets", "web-manager", "it's backups"]))
+
+    def test_backup_into_a_folder_with_a_quote_python(self):
+        self._backup_into_quoted_folder("python")
+
+    @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 command not installed")
+    def test_backup_into_a_folder_with_a_quote_uses_python_instead_of_sqlite3(self):
+        self._backup_into_quoted_folder("sqlite3")
+
 
 if __name__ == "__main__":
     unittest.main()

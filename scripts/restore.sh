@@ -44,11 +44,21 @@ done
 if tar -tzf "${BACKUP_FILE}" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
   fail "the archive contains absolute or '..' paths -- refusing to extract it"
 fi
+# backup.sh writes only regular files and folders. A symbolic link, hard link
+# or device entry could point a later copy at a file outside the restore
+# target, so such archives are refused before anything is extracted.
+if tar -tvzf "${BACKUP_FILE}" | cut -c1 | grep -qv '^[-d]$'; then
+  fail "the archive contains links or special files -- refusing to extract it"
+fi
 
 umask 077
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
-tar -xzf "${BACKUP_FILE}" -C "${TMP_DIR}"
+tar --no-same-owner --no-same-permissions -xzf "${BACKUP_FILE}" -C "${TMP_DIR}"
+# Belt and braces: whatever tar produced, only regular files and folders may be copied.
+if [ -n "$(find "${TMP_DIR}" ! -type f ! -type d -print -quit)" ]; then
+  fail "the extracted archive contains links or special files -- refusing to restore it"
+fi
 EXTRACTED="$(find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
 [ -n "${EXTRACTED}" ] || fail "could not find backup contents inside ${BACKUP_FILE}"
 
@@ -100,11 +110,15 @@ if [ -f "${SRC_BEETS}/musiclibrary.blb" ]; then
   done
 fi
 for f in config.yaml .webmanager_api_key; do
-  if [ -f "${SRC_BEETS}/$f" ]; then move_aside "${BEETS_CONFIG_DIR}" "$f"; cp -p "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}/$f"; fi
+  if [ -f "${SRC_BEETS}/$f" ]; then
+    move_aside "${BEETS_CONFIG_DIR}" "$f"
+    cp -p "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}/$f"
+    chmod 600 "${BEETS_CONFIG_DIR}/$f"  # config.yaml and the plugin key hold credentials
+  fi
 done
 if [ -d "${SRC_BEETS}/beetsplug" ]; then
   move_aside "${BEETS_CONFIG_DIR}" beetsplug
-  cp -Rp "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}/beetsplug"
+  cp -RPp "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}/beetsplug"
 fi
 if [ -d "${SRC_BEETS}/state" ]; then
   for f in "${SRC_BEETS}/state/"*.json; do
@@ -120,7 +134,7 @@ if [ -n "${SRC_WM}" ] && [ -d "${SRC_WM}" ]; then
     [ -e "${entry}" ] || continue
     name="$(basename "${entry}")"
     move_aside "${WEB_MANAGER_DATA_DIR}" "${name}"
-    cp -Rp "${entry}" "${WEB_MANAGER_DATA_DIR}/${name}"
+    cp -RPp "${entry}" "${WEB_MANAGER_DATA_DIR}/${name}"
   done
 fi
 

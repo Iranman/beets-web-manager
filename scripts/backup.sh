@@ -80,6 +80,21 @@ pick_method() {
 METHOD="none"
 if [ -f "${DB}" ]; then
   METHOD="$(pick_method)"
+  # sqlite3's dot-commands take a single-quoted argument with no escaping, so
+  # a ' in the destination path would break (or redirect) the .backup target.
+  # Use the Python online backup for such paths, which passes them as data.
+  case "${STAGE}" in
+    *"'"*)
+      if [ "${METHOD}" = sqlite3 ]; then
+        if command -v python3 >/dev/null 2>&1 && python3 -c 'import sqlite3' 2>/dev/null; then
+          METHOD=python
+        else
+          fail "the backup folder path contains a single quote ('), which the sqlite3 command cannot handle safely.
+  Choose a backup folder without ' (--out <dir>), or install python3."
+        fi
+      fi
+      ;;
+  esac
   case "${METHOD}" in
     sqlite3)
       sqlite3 -readonly "${DB}" ".backup '${STAGE}/beets/musiclibrary.blb'"
