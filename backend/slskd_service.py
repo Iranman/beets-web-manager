@@ -99,9 +99,10 @@ def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:
 
 
 def _slskd_title_norm(value: str) -> str:
-    text = _strip_track_filename_id_suffix(value).casefold().replace("&", " and ")
+    # SEC-5 (ReDoS): cap free text (1024 chars) before the regexes below.
+    text = _strip_track_filename_id_suffix(_s(value)[:1024]).casefold().replace("&", " and ")
     text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*[\(\[]\s*(?:feat\.?|ft\.?|with|prod\.?|produced\s+by|remix|edit|version|bonus|clean|explicit).*?[\)\]]\s*", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:(?<!\s)\s+)?[\(\[]\s*(?:feat\.?|ft\.?|with|prod\.?|produced\s+by|remix|edit|version|bonus|clean|explicit).*?[\)\]]\s*", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())
 
@@ -164,7 +165,7 @@ def _slskd_title_guess_from_name(name: str) -> str:
     # the scene artist prefix is removed below.
     stem = re.sub(r"^\s*\d{1,2}[\s._-]+\d{2,3}(?=[\s.-])[\s._-]+", "", stem)
     stem = re.sub(r"^\s*\d{1,3}\s*[\s._-]+\s*", "", stem)
-    parts = [p.strip() for p in re.split(r"\s+-\s+", stem) if p.strip()]
+    parts = [p.strip() for p in re.split(r"(?<!\s)\s+-\s+", stem) if p.strip()]
     if len(parts) >= 2:
         stem = parts[-1]
     else:

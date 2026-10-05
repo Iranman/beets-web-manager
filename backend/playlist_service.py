@@ -460,15 +460,16 @@ def _playlist_title_modifier_is_noise(value):
 
 
 def _playlist_clean_variant_title(value):
-    text = _playlist_strip_video_title_suffix(value)
+    # SEC-5 (ReDoS): cap free text (1024 chars) before the regexes below.
+    text = _playlist_strip_video_title_suffix(_s(value)[:1024])
     changed = False
     while True:
-        match = re.search(r"\s*[\(\[]([^()\[\]]+)[\)\]]\s*$", text)
+        match = re.search(r"(?:(?<!\s)\s+)?[\(\[]([^()\[\]]+)[\)\]]\s*$", text)
         if not match or not _playlist_title_modifier_is_noise(match.group(1)):
             break
         text = text[:match.start()].strip()
         changed = True
-    match = re.search(r"\s+[-–—]\s+(.+)$", text)
+    match = re.search(r"(?<!\s)\s+[-–—]\s+(.+)$", text)
     if match and _playlist_title_modifier_is_noise(match.group(1)):
         text = text[:match.start()].strip()
         changed = True

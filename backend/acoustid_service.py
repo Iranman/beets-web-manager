@@ -382,7 +382,7 @@ def _acoustid_multi_file(
 
 # Patterns that should never appear in albumartist
 _FEAT_RE = re.compile(
-    r'\s*[\(\[]?(?:feat(?:uring)?\.?|ft\.?|with)\b.*',
+    r'(?:(?<!\s)\s+)?[\(\[]?(?:feat(?:uring)?\.?|ft\.?|with)\b.*',
     re.IGNORECASE
 )
 
@@ -396,7 +396,8 @@ def _normalize_albumartist(s: str) -> str:
        but keep legitimate band names like 'Earth, Wind & Fire',
        'Bob Marley & The Wailers', 'Pete Rock & C.L. Smooth'.
     """
-    s = _normalize_name(s)
+    # SEC-5 (ReDoS): cap free text before the regexes; real names are far shorter.
+    s = _normalize_name(s)[:1024]
     # Strip feat./ft./featuring suffix
     s = _FEAT_RE.sub('', s).strip().rstrip(',').strip()
     # Strip comma-listed collaborators (only when no '&' present — avoids
@@ -632,8 +633,8 @@ def _playlist_artist_name_variants(value):
     add(_playlist_strip_artist_channel_noise(raw))
     add(_playlist_strip_artist_channel_noise(cleaned))
     for part in re.split(
-        r"\s*(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+",
-        cleaned,
+        r"(?:(?<!\s)\s+)?(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+",
+        cleaned[:1024],
         flags=re.IGNORECASE,
     ):
         add(part)
