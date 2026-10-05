@@ -103,10 +103,23 @@ class SetupMusicRootTests(unittest.TestCase):
     def test_fpcalc_reported_available_when_beets_reports_chroma(self):
         music = self.root / "music"
         music.mkdir()
-        body = self._status({"MUSIC_ROOT": str(music)})
+        # IA-12: there is no built-in AcoustID key; "configured" requires a
+        # user-supplied one (fake, non-secret value).
+        body = self._status({
+            "MUSIC_ROOT": str(music),
+            "ACOUSTID_API_KEY": "fake-test-acoustid-key",
+            "ACOUSTID_KEY": "",
+        })
         self.assertTrue(body["fpcalc"]["available"])
         self.assertNotIn("fpcalc", self._reasons(body))
         self.assertEqual(body["integrations"]["acoustid"]["state"], "configured")
+
+    def test_acoustid_not_configured_without_user_key_even_with_chroma(self):
+        music = self.root / "music"
+        music.mkdir()
+        body = self._status({"MUSIC_ROOT": str(music), "ACOUSTID_API_KEY": "", "ACOUSTID_KEY": ""})
+        self.assertTrue(body["fpcalc"]["available"])
+        self.assertEqual(body["integrations"]["acoustid"]["state"], "not_configured")
 
     def test_fpcalc_still_blocks_when_beets_lacks_chroma(self):
         status = _plugin_status(
