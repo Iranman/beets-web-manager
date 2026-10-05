@@ -6,6 +6,47 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+- **AcoustID needs your own key.** The built-in fallback client key is gone. Set `ACOUSTID_API_KEY` (or the legacy `ACOUSTID_KEY`) to your own application key from https://acoustid.org/new-application. Without it, fingerprint lookups report `not_configured`: the evidence is unavailable, which is not the same as "no match", so ambiguous identities go to review. Setup shows "AcoustID not configured".
+- **Outbound allowlist entries are now required for LAN, Tailscale and other non-public addresses.** An operator-configured service (Beets, Plex, Lidarr, slskd, qBittorrent, the PO provider, the AI provider) whose host resolves to a private, loopback, CGNAT/Tailscale (100.64.0.0/10), benchmarking or documentation address must be covered by a `BEETS_OUTBOUND_ALLOWLIST` entry. The documented `CIDR:port` form (for example `192.168.1.0/24:32400`) and `[IPv6]:port` / `[IPv6-CIDR]:port` entries now actually parse. A malformed entry is logged at startup and fails closed.
+- **Sign-in rate limits now apply before the password is checked.** While a client IP, or the new account-wide bucket, is limited, even a correct password gets HTTP 429 until the window passes. The account bucket is set with `BEETS_AUTH_ACCOUNT_RATE_LIMIT` / `BEETS_AUTH_ACCOUNT_RATE_WINDOW` (default 100 failed attempts per 300 s across all IPs). Signed-in sessions and bearer-token clients are not affected.
+- **`X-Forwarded-For` is read right to left** from a trusted proxy, skipping trusted hops. A reverse proxy that appends the client address (nginx `$proxy_add_x_forwarded_for`, Traefik, Caddy) works unchanged. A proxy that overwrites the header with a client-supplied value is no longer trusted for the leftmost entry.
+- **Setup probes no longer reuse stored keys for a URL you type in.** `/api/setup/test/ai` and `/api/setup/test/plex` use the stored `OPENAI_API_KEY` / `PLEX_TOKEN` only for a signed-in caller testing the configured endpoint. To test a different URL, send the key with it, as the setup wizard already does.
+- **Playlist URL import accepts only supported media hosts.** `POST /api/playlist/parse` with `source=url` now rejects URLs that are not on yt-dlp's allowlisted public media hosts (YouTube, SoundCloud and the other listed hosts), with a clear message. `ytsearch:` / `scsearch:` queries are unchanged.
+- **Public URL fetches have a total deadline.** `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` (default 60) bounds a whole reference-URL or artwork fetch, including redirects and the body read. A TLS certificate failure is now final and is no longer retried.
+- **The setup env API shows a fixed `********` for configured secrets** instead of the first and last characters and the length. Use the password-confirmed reveal to see the value.
+- **No-audio folder cleanup no longer scans `/tmp`, `/data/downloads` or `/download`.** It covers the music root, `DOWNLOADS_ROOT` and the `DOWNLOAD_PATH` mount.
+- **Container image:**
+  - `PUID` or `PGID` set to `0`, or to a non-numeric value, is refused at start with exit code 64.
+  - The image no longer contains `git`, `pip` or `tests/`. `docker exec ... pip install` no longer works; build a derived image if you need extra packages.
+  - In the hardened compose files (`docker-compose.full.yml` and the external-Beets example), `cap_drop: [ALL]` now adds back `CHOWN`, `SETUID` and `SETGID`. Without these, both files crash-looped at start. After the user switch, the app runs non-root with no effective capabilities, and `no-new-privileges` stays on.
+  - On the read-only root filesystem, a custom `PUID`/`PGID` runs as that numeric uid:gid instead of remapping the built-in user. `/config` is chowned only when it is a mount, so the external-Beets example now starts.
+
+### Security
+- **Stored provider secrets could be sent to any host (SEC-1).** During first-run setup, `/api/setup/test/ai` and `/api/setup/test/plex` are public. When the body had no key, they fell back to the stored `OPENAI_API_KEY` / `PLEX_TOKEN` but still honoured a body-supplied URL, so an anonymous caller could make the server send those secrets to a host of its choosing. A stored credential is now used only by an authenticated caller probing the configured endpoint (same scheme, host, port and path). Plex and provider auth headers are also stripped on cross-origin redirects.
+- **SSRF through yt-dlp (SEC-2).** yt-dlp opens its own connections, so the outbound URL policy never applied to it, and its generic extractor fetched any URL passed to playlist import, including loopback, cloud-metadata and internal service URLs. Every `YoutubeDL` now takes its options from `backend.ytdlp_guard.ytdlp_guarded_options()`. That function turns off the generic extractor and accepts only search queries or http(s) URLs on allowlisted media hosts whose DNS answers are all public. A structural test requires the guard at every call site.
+- **Sign-in limiter did not slow brute force (SEC-3, SEC-4, SEC-11).**
+  - SEC-3: the limiter was consulted only after a failed password check, and a correct password was accepted while limited. It now refuses before the scrypt verify for login, Basic auth and reveal re-authentication, and an account-wide bucket stops IP rotation.
+  - SEC-11: Basic auth always runs the password check, even for a wrong username.
+  - SEC-4: `X-Forwarded-For` is walked right to left, so a client-supplied leftmost entry can no longer claim a LAN address or rotate past the limiter.
+- **Outbound allowlist parsing (SEC-6, F6, BA-4).** `CIDR:port` entries were always rejected, because `urlsplit` read `/24:8080` as a path. Entries are now split on the last colon outside brackets, and a malformed entry raises `OutboundPolicyError`. Operator-configured fetches to non-global addresses, including CGNAT/Tailscale and IPv6 forms that embed them, now need an explicit entry, matching the public-URL policy.
+- **Public URL fetch robustness (SEC-7, IA-09).**
+  - `open_public_url()` now falls back to the next validated DNS answer when the first is unreachable.
+  - A certificate verification failure is classified `rejected` and is never retried or tried on another address.
+  - A monotonic total deadline means a server that sends data very slowly can no longer hold a worker open.
+- **Quadratic regex backtracking (SEC-5).** CodeQL #1291, #1292, #1294, #1295, #1298, #1299 and #1301 had been dismissed as linear. In fact each pattern took 3-12 s on a 20k-character whitespace run, which a hostile tag, filename or provider string can carry. A leading `\s*` / `\s+` is now anchored to the start of a whitespace run with `(?<!\s)`, which gives the same matches in linear time. The affected normalizers also cap input at 1024 characters.
+- **AcoustID (IA-12, IA-11).** The shared built-in client key is removed (user decision: require a user key). The key is resolved in one place, `helpers_mb.acoustid_api_key()`. The setup probe maps AcoustID error code 6 and a bare HTTP 401/403 to `auth_failed`.
+- **Secret mask (FE-16).** `GET /api/setup/env` no longer reveals the first and last two characters, or the length, of configured secrets.
+- **ffmpeg input and cleanup roots (SEC-13).**
+  - ffmpeg and ffprobe now receive `file:<path>`, so a crafted path cannot be interpreted as a network URL, another libavformat protocol or an option.
+  - `/tmp` and the hard-coded download paths are no longer folder-cleanup roots.
+- **Container image (SEC-9).**
+  - The node and python base images are pinned by digest, and Dependabot now tracks the `docker` and `pip` ecosystems.
+  - Debian security updates are applied at build time. `git` (unused, and its perl dependency carried most CRITICAL findings), `pip` (its vendored packages had fixable HIGH advisories) and `tests/` are removed.
+  - The entrypoint refuses UID/GID 0.
+  - Trivy, same database: CRITICAL 20 -> 11, HIGH 265 -> 243, fixable findings 7 -> 0, image size 1.17 GB -> 1.05 GB. The remaining CRITICAL findings have no fixed Debian package yet.
+- **Hardened compose (BI-8).** See Upgrade Notes. The fix was verified with real `docker compose up` runs of both hardened files, with PUID 1000 and 1001.
+
 ## v0.1.49 - 2026-10-04
 
 ### Upgrade Notes
