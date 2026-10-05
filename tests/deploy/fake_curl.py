@@ -2,13 +2,31 @@
 """Fake `curl` for endpoint-verification tests: serves canned JSON responses
 for the fixed set of paths the rollout script probes, honoring `-o FILE`,
 `-w FORMAT`, and reading FAKE_CURL_STATE (a JSON file: {"item_count": N,
-"fail_paths": [...]}) so tests can control counts and simulate failures
-without a real HTTP server.
+"fail_paths": [...], "blocking_reasons_by_image": {image_ref: [...]}}) so
+tests can control counts and simulate failures without a real HTTP server.
+
+/health/live and /api/setup/status answer for whatever image the fake
+`docker` world (FAKE_DOCKER_STATE) says the beets-web-manager service is
+running, so a deploy/rollback is observable through the endpoints exactly
+as on a real host.
 """
 import json
 import os
 import re
 import sys
+
+
+def _running_webmgr():
+    """(image_ref, version_label) of the fake beets-web-manager container."""
+    path = os.environ.get("FAKE_DOCKER_STATE")
+    if not path or not os.path.exists(path):
+        return "", ""
+    with open(path, encoding="utf-8") as f:
+        docker = json.load(f)
+    cid = (docker.get("service_containers") or {}).get("beets-web-manager", "")
+    ref = (((docker.get("containers") or {}).get(cid) or {}).get("Config") or {}).get("Image", "")
+    labels = (((docker.get("images") or {}).get(ref) or {}).get("Config") or {}).get("Labels") or {}
+    return ref, labels.get("org.opencontainers.image.version", "")
 
 
 def main():
@@ -53,8 +71,14 @@ def main():
         status = "200"
         if path.startswith("/api/health"):
             body = json.dumps({"status": "ok"})
+        elif path.startswith("/health/live"):
+            _ref, version = _running_webmgr()
+            body = json.dumps({"status": "alive", "version": version})
         elif path.startswith("/api/setup/status"):
-            body = json.dumps({"ok": True, "status": "ready"})
+            ref, _version = _running_webmgr()
+            reasons = (state.get("blocking_reasons_by_image") or {}).get(ref, [])
+            body = json.dumps({"ok": True, "status": "warning" if reasons else "ready",
+                               "blocking_reasons": reasons})
         elif path.startswith("/api/library"):
             qs = url.split("?", 1)[1] if "?" in url else ""
             limit = 50

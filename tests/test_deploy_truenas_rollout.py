@@ -639,6 +639,8 @@ _compose() {{ return 0; }}
 docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
+# Token handling only: the recreate + proof step has its own end-to-end tests.
+rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
 TOKEN_PATH="{dest}"
@@ -682,6 +684,8 @@ _compose() {{ return 0; }}
 docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
+# Token handling only: the recreate + proof step has its own end-to-end tests.
+rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
 TOKEN_PATH="{dest}"
@@ -717,6 +721,8 @@ _compose() {{ return 0; }}
 docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
+# Token handling only: the recreate + proof step has its own end-to-end tests.
+rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
 TOKEN_PATH="{dest}"
@@ -1000,6 +1006,7 @@ class EndToEndFixture(unittest.TestCase):
         curl_state = {
             "item_count": overrides.pop("curl_item_count", 3144),
             "fail_paths": overrides.pop("curl_fail_paths", []),
+            "blocking_reasons_by_image": overrides.pop("curl_blocking_reasons_by_image", {}),
         }
         curl_state_path = os.path.join(self.tmp, "curl_state.json")
         with open(curl_state_path, "w", encoding="utf-8") as f:
@@ -1253,6 +1260,279 @@ class RollbackTests(EndToEndFixture):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("Rollback complete", res.stderr)
         self.assertNotIn("set VERSION", res.stderr)
+
+
+class VersionedStackFixture(EndToEndFixture):
+    """A stack whose Compose file pins the web manager through
+    ${BEETS_WEB_MANAGER_VERSION} in .env (the documented TrueNAS layout),
+    currently running OLD_IMAGE, with real Web Manager state files and a
+    provisioned plugin on disk. VERSION=0.1.3 deploys GOOD_IMAGE."""
+
+    OLD_IMAGE = "ghcr.io/iranman/beets-web-manager:0.1.2"
+    OLD_REVISION = "1111111111111111111111111111111111111111"
+
+    def setUp(self):
+        super().setUp()
+        Path(self.compose_file).write_text(
+            "services:\n  beets:\n    image: beets-engine:local\n"
+            "  beets-web-manager:\n    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}\n"
+            "  lidarr:\n    image: lidarr:local\n",
+            encoding="utf-8",
+        )
+        self.stack_env = os.path.join(self.stack_dir, ".env")
+        Path(self.stack_env).write_text("OTHER_SETTING=keep-me\nBEETS_WEB_MANAGER_VERSION=0.1.2\n", encoding="utf-8")
+        self.state["images"][self.OLD_IMAGE] = {
+            "Id": "sha256:oldimageid",
+            "Config": {"Labels": {
+                "org.opencontainers.image.version": "0.1.2",
+                "org.opencontainers.image.revision": self.OLD_REVISION,
+            }},
+        }
+        webmgr = self.state["containers"]["cid-webmgr"]
+        webmgr["Config"]["Image"] = self.OLD_IMAGE
+        webmgr["Image"] = "sha256:oldimageid"
+        webmgr["Config"]["Env"] = ["TZ=UTC", "PLEX_TOKEN=plex-secret-value-xyz",
+                                   "ACOUSTID_API_KEY=acoustid-secret-value-xyz"]
+        self.state["compose_environment"] = {
+            "beets-web-manager": {"TZ": "UTC", "LIDARR_API_KEY": "lidarr-secret-value-xyz"},
+            "lidarr": {"API_KEY": "lidarr-own-secret-xyz"},
+        }
+        self._save_state()
+
+        Path(self.webmgr_dir, ".auth_token").write_text("tok-not-printed", encoding="utf-8")
+        Path(self.webmgr_dir, ".env").write_text("AI_MODEL=before-deploy\n", encoding="utf-8")
+        Path(self.webmgr_dir, ".browser_username").write_text("admin", encoding="utf-8")
+        Path(self.webmgr_dir, ".browser_password").write_text("pbkdf2:hash-before", encoding="utf-8")
+        Path(self.webmgr_dir, ".flask_secret_key").write_text("flask-key-before", encoding="utf-8")
+        Path(self.webmgr_dir, ".setup_complete").write_text("1", encoding="utf-8")
+        os.makedirs(os.path.join(self.webmgr_dir, "transactions"))
+        Path(self.webmgr_dir, "transactions", "t1.json").write_text('{"id": 1}', encoding="utf-8")
+
+        Path(self.engine_dir, "config.yaml").write_text("directory: /music\n", encoding="utf-8")
+        self.plugin_dir = os.path.join(self.engine_dir, "beetsplug", "webmanager")
+        os.makedirs(self.plugin_dir)
+        self.set_provisioned_plugin("1.2.0")
+
+    def set_provisioned_plugin(self, version):
+        Path(self.plugin_dir, "version.py").write_text(
+            f'PLUGIN_VERSION = "{version}"\nPROTOCOL_VERSION = "1.0"\n', encoding="utf-8")
+
+    def load_state(self):
+        with open(self.state_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_state(self, st):
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+
+    def webmgr_container(self):
+        st = self.load_state()
+        return st["containers"][st["service_containers"]["beets-web-manager"]]
+
+    def backup_dir(self):
+        root = os.path.join(self.stack_dir, "_backups")
+        names = [n for n in os.listdir(root) if n.startswith("web-manager-rollout-")]
+        self.assertEqual(len(names), 1, names)
+        return os.path.join(root, names[0])
+
+    def deploy(self, **env):
+        res = self.run_script(env=self.env(**env))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.webmgr_container()["Config"]["Image"], self.GOOD_IMAGE)
+        return res
+
+
+class RollbackProofTests(VersionedStackFixture):
+    def test_deploy_then_rollback_lands_on_previous_image_and_pins_env(self):
+        self.deploy()
+        self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.3", Path(self.stack_env).read_text(encoding="utf-8"))
+
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cont = self.webmgr_container()
+        self.assertEqual(cont["Config"]["Image"], self.OLD_IMAGE)
+        self.assertEqual(cont["Image"], "sha256:oldimageid")
+        env_text = Path(self.stack_env).read_text(encoding="utf-8")
+        self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.2", env_text)
+        self.assertNotIn("BEETS_WEB_MANAGER_VERSION=0.1.3", env_text)
+        self.assertIn("OTHER_SETTING=keep-me", env_text, "rollback rewrites only the version line")
+        self.assertIn("rollback is durable", res.stderr)
+        self.assertIn("/health/live reports version 0.1.2", res.stderr)
+
+        # What the operator (or a host reboot / stack-wide refresh) does next:
+        # a plain `docker compose up -d` with nothing exported must stay put.
+        env = self.env()
+        env.pop("BEETS_WEB_MANAGER_VERSION", None)
+        up = subprocess.run(
+            [BASH, os.path.join(self.fakebin, "docker"), "compose", "-f", self.compose_file,
+             "up", "-d", "beets-web-manager"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertEqual(self.webmgr_container()["Config"]["Image"], self.OLD_IMAGE)
+
+    def test_rollback_fails_loudly_when_the_recreate_fails(self):
+        self.deploy()
+        st = self.load_state()
+        st["up_should_fail"] = True
+        self.save_state(st)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("recreating beets-web-manager on ghcr.io/iranman/beets-web-manager:0.1.2 failed", res.stderr)
+        self.assertNotIn("Rollback complete", res.stderr)
+
+    def test_rollback_fails_loudly_when_the_previous_image_is_not_what_runs(self):
+        self.deploy()
+        st = self.load_state()
+        del st["images"][self.OLD_IMAGE]  # the recreate lands on some other image ID
+        self.save_state(st)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("expected the previous image sha256:oldimageid", res.stderr)
+        self.assertNotIn("Rollback complete", res.stderr)
+
+    def test_rollback_without_previous_image_record_refuses(self):
+        self.deploy()
+        os.remove(os.path.join(self.backup_dir(), "previous-image.txt"))
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("cannot prove a rollback", res.stderr)
+
+    def test_rollback_restores_web_manager_state_and_keeps_new_audit_records(self):
+        self.deploy()
+        # What a new version might do while it runs:
+        Path(self.webmgr_dir, ".env").write_text("AI_MODEL=after-deploy\nDOWNLOADS_PATH=./downloads\n", encoding="utf-8")
+        Path(self.webmgr_dir, ".flask_secret_key").write_text("flask-key-after", encoding="utf-8")
+        Path(self.webmgr_dir, "transactions", "t2.json").write_text('{"id": 2}', encoding="utf-8")
+        Path(self.engine_dir, "config.yaml").write_text("directory: /music\npluginpath: changed\n", encoding="utf-8")
+
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(Path(self.webmgr_dir, ".env").read_text(encoding="utf-8"), "AI_MODEL=before-deploy\n")
+        self.assertEqual(Path(self.webmgr_dir, ".flask_secret_key").read_text(encoding="utf-8"), "flask-key-before")
+        self.assertEqual(Path(self.engine_dir, "config.yaml").read_text(encoding="utf-8"), "directory: /music\n")
+        self.assertTrue(Path(self.webmgr_dir, "transactions", "t2.json").exists(),
+                        "audit records written after the deploy are never removed")
+        pre = [n for n in os.listdir(self.backup_dir()) if n.startswith("pre-rollback-")]
+        self.assertEqual(len(pre), 1)
+        self.assertIn("after-deploy",
+                      Path(self.backup_dir(), pre[0], "web-manager-data", ".env").read_text(encoding="utf-8"))
+
+
+class BackupContentTests(VersionedStackFixture):
+    def test_backup_holds_state_and_beets_config_but_never_the_library_db(self):
+        self.deploy()
+        bdir = self.backup_dir()
+        for rel in ("web-manager-data/.env", "web-manager-data/.browser_username",
+                    "web-manager-data/.browser_password", "web-manager-data/.flask_secret_key",
+                    "web-manager-data/.setup_complete", "web-manager-data/transactions/t1.json",
+                    "beets-config/config.yaml", "beets-config/beetsplug/webmanager/version.py",
+                    "state-manifest.txt", ".env.bak"):
+            self.assertTrue(os.path.isfile(os.path.join(bdir, rel)), rel)
+        for root, _dirs, files in os.walk(bdir):
+            for name in files:
+                self.assertNotIn("musiclibrary.blb", name, os.path.join(root, name))
+                if os.name != "nt":
+                    mode = stat.S_IMODE(os.stat(os.path.join(root, name)).st_mode)
+                    self.assertEqual(mode & 0o077, 0, f"{name} is group/world accessible: {oct(mode)}")
+
+    def test_backup_redacts_environment_values_but_keeps_key_names(self):
+        self.deploy()
+        bdir = self.backup_dir()
+        inspect_text = Path(bdir, "container-inspect-before.json").read_text(encoding="utf-8")
+        compose_text = Path(bdir, "resolved-compose-config.json").read_text(encoding="utf-8")
+        for secret in ("plex-secret-value-xyz", "acoustid-secret-value-xyz",
+                       "lidarr-secret-value-xyz", "lidarr-own-secret-xyz"):
+            self.assertNotIn(secret, inspect_text)
+            self.assertNotIn(secret, compose_text)
+        self.assertIn("PLEX_TOKEN=<redacted>", inspect_text)
+        self.assertIn("TZ=UTC", inspect_text)
+        compose = json.loads(compose_text)
+        self.assertEqual(compose["services"]["beets-web-manager"]["environment"]["LIDARR_API_KEY"], "<redacted>")
+        self.assertEqual(compose["services"]["beets-web-manager"]["environment"]["TZ"], "UTC")
+        self.assertEqual(compose["services"]["lidarr"]["environment"]["API_KEY"], "<redacted>")
+
+
+class SetupStatusGateTests(VersionedStackFixture):
+    def test_new_blocking_reason_fails_the_deploy_with_rollback_guidance(self):
+        reason = "Cannot write to downloads/staging path downloads"
+        res = self.run_script(env=self.env(curl_blocking_reasons_by_image={self.GOOD_IMAGE: [reason]}))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(f"NEW setup blocking reason after deploy: {reason}", res.stderr)
+        self.assertIn("--rollback", res.stderr)
+        self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.2", Path(self.stack_env).read_text(encoding="utf-8"),
+                      "an unverified version must not be persisted to .env")
+
+    def test_blocking_reason_that_already_existed_does_not_fail_the_deploy(self):
+        reason = "Music library path /music is not accessible"
+        self.deploy(curl_blocking_reasons_by_image={self.OLD_IMAGE: [reason], self.GOOD_IMAGE: [reason]})
+
+
+class EnginePluginRefreshTests(VersionedStackFixture):
+    def test_stale_running_plugin_restarts_only_the_engine(self):
+        self.set_provisioned_plugin("1.3.0")
+        self.state["plugin_version_after_restart"] = "1.3.0"
+        self._save_state()
+        beets_cid = self.state["service_containers"]["beets"]
+        res = self.deploy()
+        st = self.load_state()
+        self.assertIn("beets", st.get("restarted", []))
+        self.assertEqual(st["service_containers"]["beets"], beets_cid, "engine is restarted, never recreated")
+        self.assertIn("restarting beets only", res.stderr)
+        self.assertIn("plugin_after=1.3.0", Path(self.backup_dir(), "engine-plugin.txt").read_text(encoding="utf-8"))
+
+    def test_matching_plugin_does_not_restart_the_engine(self):
+        res = self.deploy()
+        self.assertNotIn("beets", self.load_state().get("restarted", []))
+        self.assertIn("no engine restart needed", res.stderr)
+
+    def test_library_change_across_engine_restart_fails(self):
+        self.set_provisioned_plugin("1.3.0")
+        self.state["plugin_version_after_restart"] = "1.3.0"
+        self.state["digest_after_restart"] = "b" * 64
+        self._save_state()
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("digest changed across the engine restart", res.stderr)
+
+
+class BackupRetentionTests(VersionedStackFixture):
+    def _make_backup(self, name, stale=False):
+        d = os.path.join(self.stack_dir, "_backups", name)
+        os.makedirs(d)
+        Path(d, "docker-compose.yml.bak").write_text("x", encoding="utf-8")
+        if stale:
+            os.makedirs(os.path.join(d, "stale-database"))
+        return d
+
+    def test_prune_is_opt_in_keeps_newest_and_archived_stale_databases(self):
+        old = self._make_backup("web-manager-rollout-20200101-000000")
+        old_stale = self._make_backup("web-manager-rollout-20200102-000000", stale=True)
+        unrelated = self._make_backup("my-own-notes-20200101")
+        newest = self._make_backup("web-manager-rollout-20200103-000000")
+
+        dry = self.run_script("--prune-backups-older-than", "30", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("would delete", dry.stderr)
+        self.assertTrue(os.path.isdir(old), "--dry-run deletes nothing")
+
+        res = self.run_script("--prune-backups-older-than", "30")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.isdir(old_stale), "a backup holding an archived stale DB is never pruned automatically")
+        self.assertTrue(os.path.isdir(unrelated), "only this script's own backup directories are candidates")
+        self.assertTrue(os.path.isdir(newest), "the newest backup is always kept")
+
+    def test_prune_requires_a_positive_day_count(self):
+        for bad in ("0", "-1", "abc", ""):
+            res = self.run_script("--prune-backups-older-than", bad)
+            self.assertNotEqual(res.returncode, 0, bad)
+            self.assertIn("whole number of days", res.stderr)
+
+    def test_a_normal_deploy_never_prunes(self):
+        old = self._make_backup("web-manager-rollout-20200101-000000")
+        self.deploy()
+        self.assertTrue(os.path.isdir(old))
 
 
 @unittest.skipUnless(BASH, _NO_BASH_REASON)
