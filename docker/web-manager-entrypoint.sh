@@ -34,6 +34,16 @@ set -e
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 
+# SEC-9: the application must never run as root. usermod -o would happily
+# give the `beets` user UID 0, so refuse that (and non-numeric ids) here.
+case "$PUID" in ''|*[!0-9]*) echo "ERROR: PUID must be a numeric user id (got '$PUID')" >&2; exit 64 ;; esac
+case "$PGID" in ''|*[!0-9]*) echo "ERROR: PGID must be a numeric group id (got '$PGID')" >&2; exit 64 ;; esac
+if [ "$PUID" -eq 0 ] || [ "$PGID" -eq 0 ]; then
+    echo "ERROR: PUID/PGID 0 (root) is not allowed; set PUID/PGID to the owner of your media folders (e.g. 1000)." >&2
+    exit 64
+fi
+
+
 CURRENT_UID="$(id -u beets)"
 CURRENT_GID="$(id -g beets)"
 
