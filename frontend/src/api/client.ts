@@ -1557,6 +1557,8 @@ export interface AlbumCleanupApplyResponse extends ApiOkResponse {
   operation_id?: string;
   status?: string;
   deleted?: string[];
+  /** Beets item ids whose library rows were removed (row-only cleanup keeps files). */
+  removed_item_ids?: number[];
   moved?: string[];
   skipped?: Array<{ file: string; reason: string }>;
   log?: string[];

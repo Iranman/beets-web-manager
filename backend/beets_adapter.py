@@ -25,6 +25,8 @@ except ImportError:
 
 log = logging.getLogger("beets.adapter")
 
+DEFAULT_BEETS_WEB_URL = "http://beets:8337"
+
 
 class BeetsAdapterError(Exception):
     """Base exception for Beets adapter errors.
@@ -93,6 +95,29 @@ class BeetsAdapterBadRequestError(BeetsAdapterError):
         super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
 
 
+class BeetsAdapterPathsUnavailableError(BeetsAdapterError):
+    """Raised when Beets returns items but none of them carries a ``path``.
+
+    Stock Beets only serialises item paths when ``web.include_paths: true``
+    is set in its config.yaml. Returning an empty path list in that case
+    would be indistinguishable from an empty library and could be misread
+    by callers (for example as "every file on disk is untracked"), so path
+    reads fail loudly with this typed error instead.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "Beets returned items without paths. Set web.include_paths: true in the "
+            "Beets config.yaml (Setup offers a one-click fix) and restart the Beets container."
+        ),
+        status_code: int = 503,
+        response_data: Optional[Any] = None,
+        error_code: str = "BEETS_PATHS_UNAVAILABLE",
+    ):
+        super().__init__(message, status_code=status_code, response_data=response_data, error_code=error_code)
+
+
 # Exception aliases for backward compatibility
 BeetsError = BeetsAdapterError
 BeetsAuthError = BeetsAdapterAuthError
@@ -101,6 +126,7 @@ BeetsBadRequestError = BeetsAdapterBadRequestError
 BeetsUnavailableError = BeetsAdapterConnectionError
 BeetsCommandError = BeetsAdapterError
 BeetsClientError = BeetsAdapterError
+BeetsPathsUnavailableError = BeetsAdapterPathsUnavailableError
 
 
 class _ParsedQuery:
@@ -184,10 +210,12 @@ class BeetsAdapter:
         api_key_file: Optional[str] = None,
         timeout: float = 30.0,
     ):
+        # One default everywhere: the stock Beets Compose service. The old
+        # fallback (http://127.0.0.1:8337) pointed at Web Manager itself.
         raw_url = (
             base_url
-            or os.environ.get("BEETS_WEB_URL")
-            or "http://127.0.0.1:8337"
+            or (os.environ.get("BEETS_WEB_URL") or "").strip()
+            or DEFAULT_BEETS_WEB_URL
         )
         self.base_url = raw_url.rstrip("/")
         self._api_key = api_key or os.environ.get("BEETS_WEBMANAGER_API_KEY")
@@ -971,9 +999,16 @@ class BeetsAdapter:
                 result.append(name)
         return sorted(result)
 
+    @staticmethod
+    def _require_item_paths(items: List[Dict[str, Any]]) -> None:
+        """Raise BeetsAdapterPathsUnavailableError when items exist but carry no path."""
+        if items and not any(it.get("path") for it in items if isinstance(it, dict)):
+            raise BeetsAdapterPathsUnavailableError()
+
     def list_distinct_item_paths(self) -> List[str]:
         """Compatibility helper returning all distinct item paths."""
         items = self.get_items()
+        self._require_item_paths(items)
         paths = []
         for i in items:
             p = i.get("path")
@@ -996,8 +1031,13 @@ class BeetsAdapter:
         details=False returns a list of distinct path strings; details=True
         returns one {"id", "album_id", "path"} record per item (not
         deduplicated by path).
+
+        Raises BeetsAdapterPathsUnavailableError when Beets returns items
+        without paths (``web.include_paths`` disabled) instead of returning
+        an empty list that looks like an empty library.
         """
         items = self.get_items()
+        self._require_item_paths(items)
         if details:
             records: List[Dict[str, Any]] = []
             for it in items:

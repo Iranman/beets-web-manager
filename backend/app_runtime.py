@@ -76,30 +76,28 @@ def _decode_boot_env_value(raw: str) -> str:
     return value
 
 
+def _setup_env_file_path() -> Path:
+    return Path(os.environ.get("SETUP_ENV_FILE", os.path.join(os.environ["WEB_MANAGER_DATA_DIR"], ".env")))
+
+
 def _load_persisted_setup_env_at_boot() -> None:
-    """Load setup-managed persisted environment before clients read os.environ."""
-    env_file = Path(os.environ.get("SETUP_ENV_FILE", os.path.join(os.environ["WEB_MANAGER_DATA_DIR"], ".env")))
-    try:
-        text = env_file.read_text(encoding="utf-8")
-    except Exception:
-        return
-    for raw_line in text.splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        candidate = stripped[7:].strip() if stripped.startswith("export ") else stripped
-        if "=" not in candidate:
-            continue
-        key, raw_value = candidate.split("=", 1)
-        key = key.strip()
-        if key in _BOOT_ENV_BLOCKED_NAMES or not _BOOT_ENV_NAME_RE.match(key):
-            continue
-        if os.environ.get(key, "").strip():
-            continue
-        value = _decode_boot_env_value(raw_value)
-        if "\n" in value or "\r" in value or len(value) > 4096:
-            continue
-        os.environ[key] = value
+    """Load saved application settings before clients read os.environ.
+
+    First runs the one-time migration that removes host/deployment/container
+    and dead keys earlier releases copied into the file from .env.example
+    (e.g. DOWNLOADS_PATH=./downloads, BEETS_CONFIG_PATH=./beets), then loads
+    only application-layer keys (backend.config_layers). A non-blank value
+    already in the process environment (Docker) always wins.
+    """
+    from backend import config_layers
+
+    env_file = _setup_env_file_path()
+    config_layers.migrate_saved_env_file(env_file)
+    config_layers.load_saved_env_into_environ(
+        env_file,
+        decode=_decode_boot_env_value,
+        blocked=_BOOT_ENV_BLOCKED_NAMES,
+    )
 
 
 _load_persisted_setup_env_at_boot()
@@ -258,7 +256,13 @@ PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
 PLAYLIST_INDEX_PATH = PLAYLIST_STATE_ROOT / "index.json"
 
 
-_MUSIC_ROOT_SETTING = Path(os.environ.get("MUSIC_ROOT", "").strip() or "/music")
+from backend import config_layers as _config_layers  # noqa: E402  (leaf module, no backend imports)
+
+# Container-side roots (backend.config_layers): absolute paths inside this
+# container that must match the Compose mount targets. Never derived from the
+# host-side Compose variables (MUSIC_PATH/DOWNLOADS_PATH/...).
+_MUSIC_ROOT_SETTING = Path(_config_layers.music_root())
+DOWNLOADS_CONTAINER_ROOT = Path(_config_layers.downloads_root())
 PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "").strip() or str(_MUSIC_ROOT_SETTING / "playlists"))
 
 

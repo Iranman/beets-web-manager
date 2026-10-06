@@ -4771,6 +4771,61 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_provider_boundary.py"
       ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_beets_config_include_paths",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "purpose": "Opt-in fix action: set web.include_paths: yes in the Beets config.yaml (timestamped backup first, atomic write, no other key changed); reports restart_required.",
+      "destructive_or_high_impact": false,
+      "existing_security_tests": [
+        "tests/test_beets_config_opt_in_edits.py",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "setup_plugins_recommended_preview",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "purpose": "Read-only unified-diff preview of enabling the recommended Beets plugins in config.yaml; writes nothing.",
+      "destructive_or_high_impact": false,
+      "existing_security_tests": [
+        "tests/test_beets_config_opt_in_edits.py",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_plugins_recommended_apply",
+      "security_classification": "ADMIN_ONLY",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "purpose": "Explicit opt-in: add user-selected recommended plugins (allowlisted names only) to the Beets config.yaml plugins list with a timestamped backup and atomic write; reports restart_required.",
+      "destructive_or_high_impact": false,
+      "existing_security_tests": [
+        "tests/test_beets_config_opt_in_edits.py",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
     }
   ]
 }

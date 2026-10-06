@@ -31,6 +31,16 @@ Use concise conventional prefixes:
 - `ci:` GitHub Actions or automation
 - `chore:` maintenance with no behavior change
 
+## Versioning and releases
+
+The project uses Semantic Versioning. While the version is `0.x`:
+
+- **Minor release (`0.Y.0`)** when the change needs operator attention: a CHANGELOG **Upgrade Notes** item that asks the operator to act, something that used to work is now refused, a migration of persisted state or user files, a webmanager plugin minor/major or protocol change (Beets must be restarted), a renamed or removed Compose/environment/mount setting, or a new user-facing feature.
+- **Patch release (`0.y.Z`)** for fixes and dependency or security bumps that need no operator action and no migration.
+- When in doubt, take the higher level.
+
+Every change adds an entry under `## Unreleased` in `CHANGELOG.md`, with an **Upgrade Notes** subsection whenever operators must do something. A release PR retitles `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD` and bumps `VERSION` together; CI (`release-metadata` in `docker-build.yml`) fails if they disagree, and on a tag it also requires the tag to be `v` + `VERSION`. Pushing the tag publishes the image and creates the GitHub Release from that CHANGELOG section. The maintainer's full steps are in `AGENTS.md` ("Release and deploy").
+
 ## Security
 
 Do not include real credentials, tokens, cookies, private logs, private music-library data, or screenshots containing secrets in issues, pull requests, tests, or fixtures. Report vulnerabilities privately using `SECURITY.md`.
