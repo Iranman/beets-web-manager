@@ -100,6 +100,13 @@ def get_config_path() -> Path:
             "BEETS_CONFIG must point to a file directly inside the Beets config directory "
             f"({config_dir}); refusing to read or write another file."
         )
+    # Lexical containment is not enough: a symlinked config.yaml (or config
+    # dir) could still resolve elsewhere. Compare resolved real paths too.
+    if os.path.dirname(os.path.realpath(target)) != os.path.realpath(config_dir):
+        raise ConfigPathError(
+            "BEETS_CONFIG resolves outside the Beets config directory "
+            f"({config_dir}); refusing to read or write another file."
+        )
     return Path(target)
 
 

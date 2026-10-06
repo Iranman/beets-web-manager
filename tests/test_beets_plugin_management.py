@@ -38,15 +38,18 @@ from tests.test_routes_setup import _load_routes_setup_against_stub_app
 
 class BeetsPluginManifestTests(unittest.TestCase):
     def test_manifest_contains_all_required_plugins(self):
-        self.assertEqual(len(REQUIRED_PLUGIN_NAMES), 15)
-        for req in (
+        # BI-5: only the plugins Web Manager cannot run without are
+        # REQUIRED (auto-added). Everything else is RECOMMENDED and opt-in.
+        self.assertEqual(set(REQUIRED_PLUGIN_NAMES), {"web", "webmanager"})
+        for req in ("web", "webmanager"):
+            self.assertEqual(BEETS_PLUGIN_MANIFEST[req].category, PluginCategory.REQUIRED)
+        for rec in (
             "musicbrainz", "chroma", "fetchart", "embedart", "scrub",
             "zero", "ftintitle", "fromfilename", "mbsync", "mbsubmit",
-            "replaygain", "lastgenre", "discpath", "web", "webmanager",
+            "replaygain", "lastgenre", "discpath",
         ):
-            self.assertIn(req, REQUIRED_PLUGIN_NAMES)
-            pdef = BEETS_PLUGIN_MANIFEST[req]
-            self.assertEqual(pdef.category, PluginCategory.REQUIRED)
+            self.assertIn(rec, BEETS_PLUGIN_MANIFEST)
+            self.assertEqual(BEETS_PLUGIN_MANIFEST[rec].category, PluginCategory.RECOMMENDED)
 
     def test_bundled_discpath_definition(self):
         discpath = BEETS_PLUGIN_MANIFEST["discpath"]
@@ -156,8 +159,11 @@ class BeetsConfigYamlManagementTests(unittest.TestCase):
         self.assertTrue(self.config_path.exists())
         content = self.config_path.read_text(encoding="utf-8")
         plugins = parse_configured_plugins(content)
-        for req in ("fetchart", "chroma", "discpath", "scrub"):
+        for req in ("web", "webmanager"):
             self.assertIn(req, plugins)
+        # A brand-new config is seeded from the documented example (fresh
+        # install, no existing library to disturb); BI-5 opt-in applies to
+        # pre-existing configs (see the preserve test below).
         pluginpath = parse_configured_pluginpath(content)
         self.assertIn("/config/beetsplug", pluginpath)
 
@@ -183,8 +189,10 @@ class BeetsConfigYamlManagementTests(unittest.TestCase):
 
         # All required plugins now present
         plugins = parse_configured_plugins(content)
-        for req in ("chroma", "discpath", "scrub", "mbsync"):
+        for req in ("web", "webmanager", "fetchart", "embedart"):
             self.assertIn(req, plugins)
+        for rec in ("chroma", "discpath", "scrub", "mbsync"):
+            self.assertNotIn(rec, plugins)
         self.assertIn("my_awesome_custom_plugin", plugins)
 
     def test_update_config_creates_backup(self):
@@ -227,8 +235,15 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertTrue(status.loaded)
         self.assertEqual(status.note, "Ready")
 
-    def test_verify_plugin_unhealthy_when_not_enabled(self):
+    def test_recommended_plugin_not_enabled_is_healthy(self):
         pdef = BEETS_PLUGIN_MANIFEST["fetchart"]
+        status = verify_plugin(pdef, set(), set(), self.config_dir)
+        self.assertTrue(status.healthy)
+        self.assertFalse(status.enabled)
+        self.assertEqual(status.errors, [])
+
+    def test_verify_plugin_unhealthy_when_not_enabled(self):
+        pdef = BEETS_PLUGIN_MANIFEST["webmanager"]
         configured = set()  # not in config
         loaded = set()
         status = verify_plugin(pdef, configured, loaded, self.config_dir)
@@ -247,7 +262,8 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertIn("required", report["categories"])
         self.assertIn("optional", report["categories"])
         self.assertIn("integration", report["categories"])
-        self.assertEqual(report["required_count"], 15)
+        self.assertIn("recommended", report["categories"])
+        self.assertEqual(report["required_count"], 2)
 
     def test_unconfigured_integration_does_not_block_health(self):
         pdef = BEETS_PLUGIN_MANIFEST["discogs"]

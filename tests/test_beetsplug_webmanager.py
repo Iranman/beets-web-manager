@@ -174,9 +174,12 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.5.0")
+        self.assertEqual(data["plugin_version"], "1.6.0")
         self.assertTrue(data["plugin_mutations_enabled"])
-        self.assertNotIn("allowed_roots", data)
+        # 1.6.0: path diagnostics are exposed only behind the bearer token
+        for key in ("allowed_roots", "import_roots", "library_directory", "fpcalc_available", "ffmpeg_available"):
+            self.assertIn(key, data)
+        self.assertIsInstance(data["allowed_roots"], list)
 
     def test_version_consistency(self):
         """Plugin version must be identical in __init__.__version__, version.py, and status endpoint."""
@@ -184,7 +187,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.5.0")
+        self.assertEqual(PLUGIN_VERSION, "1.6.0")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(

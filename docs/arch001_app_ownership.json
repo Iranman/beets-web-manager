@@ -2552,10 +2552,10 @@
    "module": "backend/config_service.py",
    "lines": [
     30,
-    127
+    92
    ],
-   "size": 98,
-   "body_lines": 72,
+   "size": 63,
+   "body_lines": 37,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2569,8 +2569,8 @@
    "name": "_bootstrap_beets_plugins",
    "module": "backend/config_service.py",
    "lines": [
-    130,
-    155
+    95,
+    120
    ],
    "size": 26,
    "body_lines": 11,
@@ -2587,8 +2587,8 @@
    "name": "_redact_config_line",
    "module": "backend/config_service.py",
    "lines": [
-    187,
-    202
+    152,
+    167
    ],
    "size": 16,
    "body_lines": 8,
@@ -2607,8 +2607,8 @@
    "name": "_redact_config_content",
    "module": "backend/config_service.py",
    "lines": [
-    205,
-    208
+    170,
+    173
    ],
    "size": 4,
    "body_lines": 3,
@@ -2629,8 +2629,8 @@
    "name": "_contains_redacted_config_secret",
    "module": "backend/config_service.py",
    "lines": [
-    211,
-    224
+    176,
+    189
    ],
    "size": 14,
    "body_lines": 8,
@@ -2649,8 +2649,8 @@
    "name": "_plugin_installed_map",
    "module": "backend/config_service.py",
    "lines": [
-    237,
-    242
+    202,
+    207
    ],
    "size": 6,
    "body_lines": 5,
@@ -2669,8 +2669,8 @@
    "name": "_plugin_status_payload",
    "module": "backend/config_service.py",
    "lines": [
-    245,
-    265
+    210,
+    230
    ],
    "size": 21,
    "body_lines": 20,

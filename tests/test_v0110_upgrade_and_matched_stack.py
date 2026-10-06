@@ -93,7 +93,7 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
     def _sample_plugin_status(self, **kwargs):
         base = {
             "protocol_version": "1.0",
-            "plugin_version": "1.0.0",
+            "plugin_version": routes_setup._bundled_plugin_version() or "1.0.0",
             "beets_version": "2.13.1",
             "capabilities": ["import", "modify", "remove", "move", "operations", "status", "mbsubmit"],
             "loaded_plugins": ["musicbrainz", "chroma", "fetchart", "replaygain"],
@@ -189,6 +189,25 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
         compat = diag.get("engine_compatibility", {})
         self.assertTrue(compat.get("compatible"))
         self.assertEqual(compat.get("state"), "compatible")
+        self.assertFalse(compat.get("restart_required"))
+
+    def test_stale_running_plugin_reports_restart_required_but_stays_compatible(self):
+        """BI-4: same protocol but an older running plugin than the provisioned one."""
+        diag = self._diagnostics(plugin_status=self._sample_plugin_status(protocol_version="1.0", plugin_version="1.0.0"))
+        compat = diag.get("engine_compatibility", {})
+        self.assertTrue(compat.get("compatible"))
+        self.assertTrue(compat.get("restart_required"))
+        self.assertEqual(compat.get("state"), "restart_required")
+        self.assertIn("Restart the Beets container", compat.get("message", ""))
+
+    def test_bundled_plugin_version_resolves_without_beets_installed(self):
+        """The Web Manager image has no ``beets`` package; the bundled version must
+        still resolve (importing the plugin package would fail and yield "")."""
+        with mock.patch.dict(sys.modules, {"beets": None, "beets.plugins": None}):
+            for name in [m for m in sys.modules if m.startswith("beetsplug")]:
+                sys.modules.pop(name)
+            version = routes_setup._bundled_plugin_version()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
     def test_version_compatibility_mismatch_detected(self):
         """A mismatched integration-plugin protocol version reports compatible=False with a diagnostic message."""
