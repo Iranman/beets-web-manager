@@ -499,13 +499,14 @@ def _cleanup_artist_alias_source_dirs(source_names: List[str], canonical: str,
 FOLDER_CLEAN_AUDIO_EXTS = set(AUDIO_EXTS) | set(AUDIO_EXT) | {".mp3", ".flac"}
 
 
+# SEC-13: only the configured library and download roots. /tmp and the
+# hardcoded /data/downloads and /download paths were removed: a no-audio
+# folder sweep must never range over the container's temp space or a path
+# no setting controls. DOWNLOAD_PATH is the documented downloads mount.
 FOLDER_CLEAN_ROOTS = [
     MUSIC_ROOT,
     DOWNLOADS_ROOT,
-    Path("/data/downloads"),
-    Path("/downloads"),
-    Path("/download"),
-    Path("/tmp"),
+    Path(os.environ.get("DOWNLOAD_PATH", "").strip() or "/downloads"),
 ]
 
 

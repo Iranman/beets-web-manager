@@ -34,20 +34,44 @@ set -e
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 
-CURRENT_UID="$(id -u beets)"
-CURRENT_GID="$(id -g beets)"
-
-if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
-    if [ "$PUID" != "$CURRENT_UID" ]; then
-        usermod -o -u "$PUID" beets
-    fi
-    if [ "$PGID" != "$CURRENT_GID" ]; then
-        groupmod -o -g "$PGID" beets
-    fi
-    chown -R beets:beets /app
+# SEC-9: the application must never run as root. usermod -o would happily
+# give the `beets` user UID 0, so refuse that (and non-numeric ids) here.
+case "$PUID" in ''|*[!0-9]*) echo "ERROR: PUID must be a numeric user id (got '$PUID')" >&2; exit 64 ;; esac
+case "$PGID" in ''|*[!0-9]*) echo "ERROR: PGID must be a numeric group id (got '$PGID')" >&2; exit 64 ;; esac
+if [ "$PUID" -eq 0 ] || [ "$PGID" -eq 0 ]; then
+    echo "ERROR: PUID/PGID 0 (root) is not allowed; set PUID/PGID to the owner of your media folders (e.g. 1000)." >&2
+    exit 64
 fi
 
-chown -R beets:beets /web-manager-data /config
-chown beets:beets /music /downloads 2>/dev/null || true
+CURRENT_UID="$(id -u beets)"
+CURRENT_GID="$(id -g beets)"
+RUN_AS="beets:beets"
 
-exec gosu beets "$@"
+if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
+    if [ -w /etc/passwd ] && [ -w /etc/group ]; then
+        if [ "$PUID" != "$CURRENT_UID" ]; then
+            usermod -o -u "$PUID" beets
+        fi
+        if [ "$PGID" != "$CURRENT_GID" ]; then
+            groupmod -o -g "$PGID" beets
+        fi
+        chown -R beets:beets /app
+    else
+        # BI-8: hardened variants run with a read-only root filesystem, so
+        # /etc/passwd cannot be edited. Run as the numeric PUID:PGID
+        # instead; /app stays world-readable and needs no chown.
+        RUN_AS="$PUID:$PGID"
+        echo "read-only root filesystem: running as numeric uid:gid $RUN_AS" >&2
+    fi
+fi
+
+chown -R "$RUN_AS" /web-manager-data
+# /config is only mounted in the bundled-Beets layout. In the external-Beets
+# layout it is the image's own directory on a read-only root filesystem, and
+# an unconditional chown aborted startup there (EROFS under `set -e`).
+if awk '$5 == "/config" { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+    chown -R "$RUN_AS" /config
+fi
+chown "$RUN_AS" /music /downloads 2>/dev/null || true
+
+exec gosu "$RUN_AS" "$@"

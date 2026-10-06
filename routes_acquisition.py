@@ -15,6 +15,7 @@ from backend.matching_service import _invalidate_lib_cache
 from backend.replacement_service import _music_format_replace_rows, _music_format_scan_library
 from backend.serializers import json_route_result
 from backend.slskd_service import _normalise_download_method
+from backend.ytdlp_guard import ytdlp_guarded_options
 from backend.ytdlp_service import _configured_ytdlp_cookie_auths, _ffmpeg_status, _package_version, _redacted_ytdlp_auth_label, _redacted_ytdlp_candidate_labels, _redacted_ytdlp_rejection, _require_ytdlp_js_runtime, _spotiflac_status, _usable_ytdlp_cookie_auths, _usable_ytdlp_cookie_auths_with_smoke, _yt_dlp_install_status, _ytdlp_apply_source_network_options, _ytdlp_client_profiles_for_source, _ytdlp_cookie_auth_rejection_key, _ytdlp_cookie_candidates, _ytdlp_cookie_rejection_state, _ytdlp_js_runtime_names, _ytdlp_js_runtime_options, _ytdlp_js_runtime_status, _ytdlp_netrc_status, _ytdlp_remote_components, _ytdlp_source_extractor_args, _ytdlp_youtube_status
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 
@@ -135,7 +136,7 @@ def ytdlp_test_youtube():
                 probe_opts["extractor_args"] = merged_args
             log.append(f"Inspecting with YouTube client {client_label}")
             try:
-                with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                with yt_dlp.YoutubeDL(ytdlp_guarded_options(probe_opts, [test_url])) as ydl:
                     extracted = ydl.extract_info(test_url, download=False)
                 if isinstance(extracted, dict):
                     info = extracted

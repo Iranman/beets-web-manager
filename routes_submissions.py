@@ -1138,6 +1138,11 @@ def _extract_ytdlp_info(url: str) -> Dict[str, Any]:
     if not _ytdlp_ready.wait(timeout=30):
         raise RuntimeError("yt-dlp is still installing; try again in about 30 seconds.")
     import yt_dlp
+    from backend.ytdlp_guard import ytdlp_guarded_options, ytdlp_target_allowed
+    if not ytdlp_target_allowed(url):
+        # SEC-2: not a supported media host (or not public) -- the caller
+        # falls back to the pinned public-only Open Graph scrape.
+        raise _YtdlpUnsupportedUrlError("Unsupported URL for yt-dlp metadata extraction.")
     ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -1153,7 +1158,7 @@ def _extract_ytdlp_info(url: str) -> Dict[str, Any]:
 
     def _run():
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [url])) as ydl:
                 # process=False skips format-selection entirely (we only want
                 # metadata, never a downloadable stream), so a site requiring a
                 # JS/PO-token challenge for format resolution doesn't block
@@ -1172,7 +1177,7 @@ def _extract_ytdlp_info(url: str) -> Dict[str, Any]:
         raise TimeoutError("Metadata extraction timed out.")
     if errors.get("error"):
         message = errors["error"]
-        if "unsupported url" in message.lower():
+        if "unsupported url" in message.lower() or "no suitable extractor" in message.lower():
             raise _YtdlpUnsupportedUrlError(message)
         raise RuntimeError(message)
     info = result.get("info")

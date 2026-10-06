@@ -26,6 +26,7 @@ def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lo
         "_strip_track_filename_id_suffix",
         "_track_filename_has_source_id_suffix",
         "_slskd_title_guess_from_name",
+        "_DASH_SEP_CORE_RE",
         "_album_track_norm",
         "_album_track_feature_variants",
         "_album_track_parenthetical_alias_variants",

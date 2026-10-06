@@ -80,8 +80,16 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    # BI-8: drop everything, then add back only what the entrypoint's brief
+    # root phase needs -- CHOWN to fix bind-mount ownership, SETUID/SETGID
+    # for gosu to drop to PUID:PGID. After gosu the app runs as a non-root
+    # user and holds no capabilities (no-new-privileges stops regaining them).
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
 
     read_only: true
 
