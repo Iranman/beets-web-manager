@@ -671,7 +671,7 @@ def _find_top_level_block(text: str, key: str) -> Optional["re.Match[str]"]:
     including blank and comment lines inside it.
     """
     return re.search(
-        rf"(?m)^({re.escape(key)}:[ \t]*(?:#.*)?)$((?:\n(?:[ \t]+.*|[ \t]*))*?)(?=\n\S|\Z)",
+        rf"(?m)^({re.escape(key)}:[ \t]*(?:#.*)?)$((?:\n(?:[ \t][^\n]*)?)*?)(?=\n\S|\Z)",
         text,
     )
 
@@ -825,21 +825,37 @@ def _write_config_text(
                 raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
             backup_path = None
 
-    tmp_path = path.with_suffix(".tmp.yaml")
     try:
-        tmp_path.write_text(text, encoding="utf-8")
-        try:
-            os.chmod(tmp_path, 0o644)
-        except Exception:
-            pass
-        tmp_path.replace(path)
+        _atomic_write_text(path, text)
     except Exception as exc:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
         raise BeetsConfigEditError(f"Failed to write updated config.yaml: {type(exc).__name__}") from exc
     return str(backup_path) if backup_path else None
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text``, keeping its permission bits.
+
+    A unique temp file in the same directory (mkstemp, created 0600) avoids
+    clobbering/symlink games on a fixed name; the existing file's mode is
+    restored so a 0600 config.yaml never becomes world-readable. A new file
+    gets 0644.
+    """
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def update_config_yaml_plugins(
@@ -887,9 +903,7 @@ def update_config_yaml_plugins(
                 "    move: no\n"
             )
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp." + path.suffix)
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+        _atomic_write_text(path, content)
         return True, "Created default config.yaml with required plugins"
 
     try:

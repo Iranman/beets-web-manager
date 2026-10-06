@@ -15,7 +15,9 @@ Every edit here is to a temporary config.yaml; nothing touches a real Beets
 config or library.
 """
 import os
+import stat
 import tempfile
+import time
 import unittest
 import unittest.mock as mock
 from pathlib import Path
@@ -93,6 +95,57 @@ class ReadWebIncludePathsTests(unittest.TestCase):
         self.assertTrue(read_web_include_paths("web:\n  include_paths: true\n"))
         self.assertFalse(read_web_include_paths("web:\n  include_paths: no\n"))
         self.assertFalse(read_web_include_paths("web:\n  include_paths: false\n"))
+
+
+class TopLevelBlockReDoSTests(unittest.TestCase):
+    """S-1: _find_top_level_block must stay linear on whitespace-only lines."""
+
+    def test_blank_indented_lines_then_crlf_is_fast(self):
+        from backend.beets_plugins import _find_top_level_block
+        text = "web:\n  host: 0.0.0.0\n" + "  \n" * 5000 + "\r\n  port: 1\n"
+        start = time.perf_counter()
+        match = _find_top_level_block(text, "web")
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 1.0)
+        # A bare "\r" line is neither indented nor a new top-level key, so the
+        # old regex found no block here either -- it just took exponential time.
+        self.assertIsNone(match)
+
+    def test_block_boundaries_unchanged(self):
+        from backend.beets_plugins import _find_top_level_block
+        match = _find_top_level_block(_BASE_CONFIG, "web")
+        self.assertEqual(match.group(1), "web:")
+        self.assertEqual(match.group(2), "\n  host: 0.0.0.0\n  port: 8337")
+        match = _find_top_level_block(_BASE_CONFIG, "replaygain")
+        self.assertEqual(match.group(2), "\n  # user's choice, must not be rewritten\n  backend: gstreamer\n")
+        text = "web: # c\n  host: x\n\n  \t\n  port: 1\nother: 2\n"
+        match = _find_top_level_block(text, "web")
+        self.assertEqual(match.group(1), "web: # c")
+        self.assertEqual(match.group(2), "\n  host: x\n\n  \t\n  port: 1")
+        self.assertIsNone(_find_top_level_block("web: {a: 1}\n", "web"))
+
+
+@unittest.skipIf(os.name == "nt", "POSIX permission bits")
+class ConfigWriteModeTests(_TempConfigMixin, unittest.TestCase):
+    """S-2: rewriting config.yaml keeps its mode and leaves no temp file."""
+
+    def test_0600_config_stays_0600(self):
+        from backend.beets_plugins import apply_recommended_plugins, ensure_web_include_paths
+        path = self._make_config()
+        os.chmod(path, 0o600)
+        ensure_web_include_paths(path)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        apply_recommended_plugins(path, ["fetchart"])
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        leftovers = [p.name for p in self.config_dir.iterdir() if "tmp" in p.name]
+        self.assertEqual(leftovers, [])
+
+    def test_fresh_install_config_is_0644(self):
+        from backend.beets_plugins import update_config_yaml_plugins
+        path = self._make_config(text=None)
+        update_config_yaml_plugins(path)
+        self.assertTrue(path.exists())
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
 
 
 class EnsureWebIncludePathsTests(_TempConfigMixin, unittest.TestCase):
@@ -205,9 +258,48 @@ class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
         self._make_config()
-        env = mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.config_path)}, clear=False)
+        if not str(self.config_path).startswith("/"):
+            self.skipTest("get_config_path requires POSIX container paths")
+        env = mock.patch.dict(
+            os.environ,
+            {"BEETS_CONFIG": str(self.config_path), "BEETSDIR": str(self.config_dir)},
+            clear=False,
+        )
         env.start()
         self.addCleanup(env.stop)
+
+    def _assert_all_routes_refuse(self):
+        outside_before = self.outside.read_text(encoding="utf-8")
+        responses = (
+            self.client.post("/api/setup/beets-config/include-paths"),
+            self.client.get("/api/setup/plugins/recommended"),
+            self.client.post("/api/setup/plugins/recommended/apply", json={"plugins": ["fetchart"]}),
+        )
+        for response in responses:
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("Beets config directory", response.get_json()["error"])
+        self.assertEqual(self.outside.read_text(encoding="utf-8"), outside_before)
+        self.assertEqual(list(self.outside.parent.glob("*.bak-*")), [])
+
+    def _make_outside(self):
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        self.outside = Path(other.name) / "config.yaml"
+        self.outside.write_text(_BASE_CONFIG, encoding="utf-8")
+
+    def test_routes_refuse_beets_config_outside_config_dir(self):
+        """S-3: BEETS_CONFIG pointing outside BEETSDIR is refused, not edited."""
+        self._make_outside()
+        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.outside)}):
+            self._assert_all_routes_refuse()
+
+    def test_routes_refuse_symlink_escaping_config_dir(self):
+        """S-3: a config.yaml symlink inside BEETSDIR resolving elsewhere is refused."""
+        self._make_outside()
+        link = self.config_dir / "linked.yaml"
+        os.symlink(self.outside, link)
+        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(link)}):
+            self._assert_all_routes_refuse()
 
     def test_include_paths_route_enables_and_reports_restart(self):
         from backend.beets_plugins import read_web_include_paths

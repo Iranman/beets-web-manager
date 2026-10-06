@@ -3996,6 +3996,10 @@ def plugins_verify():
 
 def _beets_config_edit_error(exc: Exception, operation: str):
     from backend.beets_plugins import BeetsConfigEditError
+    from backend.config_manager import ConfigError
+    if isinstance(exc, ConfigError):
+        # Path-policy refusal (BEETS_CONFIG outside BEETSDIR); our own message.
+        return jsonify({"ok": False, "error": str(exc)}), exc.status_code
     if isinstance(exc, ValueError):
         return jsonify({"ok": False, "error": "Unsupported plugin selection."}), 400
     if isinstance(exc, BeetsConfigEditError):
@@ -4013,9 +4017,10 @@ def setup_beets_config_include_paths():
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
-    beets_config_path = Path(config_layers.beets_config_file())
     try:
         from backend.beets_plugins import ensure_web_include_paths
+        from backend.config_manager import get_config_path
+        beets_config_path = get_config_path()
         result = ensure_web_include_paths(beets_config_path)
     except Exception as exc:
         return _beets_config_edit_error(exc, "setup_beets_config_include_paths")
@@ -4026,9 +4031,10 @@ def setup_beets_config_include_paths():
 @app.get("/api/setup/plugins/recommended")
 def setup_plugins_recommended_preview():
     """Read-only preview (unified diff) of enabling the recommended plugins."""
-    beets_config_path = Path(config_layers.beets_config_file())
     try:
         from backend.beets_plugins import preview_recommended_plugins
+        from backend.config_manager import get_config_path
+        beets_config_path = get_config_path()
         result = preview_recommended_plugins(beets_config_path)
     except Exception as exc:
         return _beets_config_edit_error(exc, "setup_plugins_recommended_preview")
@@ -4049,9 +4055,10 @@ def setup_plugins_recommended_apply():
     plugins = body.get("plugins") if isinstance(body, dict) else None
     if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
         return jsonify({"ok": False, "error": "Body must be {\"plugins\": [names]}."}), 400
-    beets_config_path = Path(config_layers.beets_config_file())
     try:
         from backend.beets_plugins import apply_recommended_plugins
+        from backend.config_manager import get_config_path
+        beets_config_path = get_config_path()
         result = apply_recommended_plugins(beets_config_path, plugins)
     except Exception as exc:
         return _beets_config_edit_error(exc, "setup_plugins_recommended_apply")
