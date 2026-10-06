@@ -845,7 +845,7 @@ function AlbumCard({
               color="warning"
               onClick={() => onCleanAlbum?.(row)}
             >
-              Delete Album…
+              Remove from Library…
             </Button>
           ) : null}
           {action ? (
@@ -1081,7 +1081,7 @@ function AlbumDetailsDialog({
                           if (row) onCleanAlbum?.(row);
                         }}
                       >
-                        Delete Album…
+                        Remove from Library…
                       </Button>
                     ) : null}
                     <Button size="small" variant="outlined" onClick={onClose}>Close</Button>

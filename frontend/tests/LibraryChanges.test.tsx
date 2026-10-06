@@ -88,6 +88,17 @@ describe('LibraryChanges approve', () => {
     await waitFor(() => expect(dialog.isConnected).toBe(false));
   });
 
+  it('announces the consequence text as the dialog description', async () => {
+    await renderWith(tx(deleting));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    const dialog = await screen.findByRole('dialog');
+    const ids = (dialog.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean);
+    expect(ids.length).toBeGreaterThan(0);
+    const description = ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+    expect(description).toMatch(/permanently deletes the album's audio files from disk/);
+    expect(description).toMatch(/cannot be rolled back/);
+  });
+
   it('closes on Escape without approving', async () => {
     await renderWith(tx(deleting));
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
