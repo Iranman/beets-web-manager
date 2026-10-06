@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AlbumCleanupModal } from '../src/components/AlbumCleanupModal';
 import { planAlbumCleanup, applyAlbumCleanup, rollbackAlbumCleanup } from '../src/api/client';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 vi.mock('../src/api/client', () => ({
   planAlbumCleanup: vi.fn(),
@@ -87,8 +90,31 @@ describe('AlbumCleanupModal', () => {
     // Multiple elements legitimately say "Irreversible" (the banner, the
     // steps-list chip, and each per-step badge) -- assert on the specific
     // warning banner text, not just presence of the word anywhere.
-    await waitFor(() => expect(screen.getByText(/permanently delete every catalogued track file/i)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/remove the\s+album and its track records from the Beets library/i)).toBeTruthy());
     expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy();
+  });
+
+  // #184: planAlbumCleanup sends no delete_files, so the plan is row-only.
+  // Nothing in this flow may claim that files are deleted.
+  it('says the cleanup removes library rows only and keeps files, never that it deletes files', async () => {
+    mockPlan.mockResolvedValue(makePlanResponse());
+    mockApply.mockResolvedValue({
+      ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Completed',
+      deleted: [], removed_item_ids: [1, 2], log: [],
+    });
+    renderModal();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy());
+    const dialog = screen.getByRole('dialog');
+    const deletesFiles = /delet\w* (every |the )?(catalogued )?(track |audio )?files?|files? deleted/i;
+    expect(dialog.textContent).not.toMatch(deletesFiles);
+    expect(dialog.textContent).toMatch(/files stay on disk/i);
+    expect(screen.getByRole('heading', { name: 'Remove Album from Library' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Apply Cleanup/i }));
+    await waitFor(() => expect(screen.getByText(/Album Cleanup Completed/i)).toBeTruthy());
+    expect(screen.getByRole('dialog').textContent).not.toMatch(deletesFiles);
+    expect(screen.getByText(/Track row\(s\) removed from the library: 2/)).toBeTruthy();
+    expect(screen.getByText(/Audio files kept on disk$/)).toBeTruthy();
   });
 
   it('does not call Apply until the user clicks Apply Cleanup', async () => {
