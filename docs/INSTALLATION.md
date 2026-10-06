@@ -40,7 +40,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:latest
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -72,7 +72,7 @@ services:
 > - Update `/path/to/music` to point to your music library on the host.
 > - Update `/path/to/downloads` to point to your downloads or staging directory.
 > - `./beets` and `./web-manager` will be created automatically in your current directory for persistent configuration and application state.
-> - The Web Manager image tag comes from `BEETS_WEB_MANAGER_VERSION` (default `stable`). Set it in a `.env` file next to `docker-compose.yml` to pin an exact release such as `0.1.49`; see [Configuration](CONFIGURATION.md#1-host-compose-interpolation-only).
+> - The Web Manager image is `ghcr.io/iranman/beets-web-manager:latest`; `docker compose pull` updates it. To pin or roll back, replace `latest` in the `image:` line with an exact version such as `0.1.49`.
 > - Change only the **left** side of each volume (the host folder). The right side (`/music`, `/downloads`, `/config`) is the path inside the containers. Web Manager's `MUSIC_ROOT`/`DOWNLOADS_ROOT`/`BEETS_CONFIG` and Beets' own `directory:` refer to it. If you change a right side, change it in both services and set the matching variable (see `docs/CONFIGURATION.md`, "Configuration layers").
 
 ### Step 3: Start the stack

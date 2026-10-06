@@ -61,7 +61,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:latest
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -252,7 +252,7 @@ To restrict access to the local machine only, set `WEBCONTROL_PORT=127.0.0.1:833
 ## Troubleshooting
 
 **`pull access denied for beets-web-manager`**
-Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
+Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:latest` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
 
 **`failed to read dockerfile`**
 A development Compose file or `build: .` block is being run outside the repository root directory. Production Compose files use published images and do not require a local Dockerfile. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for existing stack snippets.
@@ -352,7 +352,7 @@ curl -s http://127.0.0.1:8337/api/setup/status  # "blocking_reasons" should be e
 
 ### Rollback
 
-Put the previous version back in the `image:` line of `beets-web-manager` (for example `ghcr.io/iranman/beets-web-manager:0.1.48` instead of `:stable`), restore the backup you made before upgrading, and start again:
+Put the previous version back in the `image:` line of `beets-web-manager` (for example `ghcr.io/iranman/beets-web-manager:0.1.48` instead of `:latest`), restore the backup you made before upgrading, and start again:
 
 ```bash
 docker compose stop

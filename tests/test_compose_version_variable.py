@@ -1,14 +1,18 @@
-"""The published Compose files, .env.example and the install docs agree on
-how the Web Manager image tag is chosen: BEETS_WEB_MANAGER_VERSION, default
-`stable`. The rollout script and rollback rewrite that variable in the stack
-.env, so a Compose file with a hard-coded tag would silently ignore them."""
+"""The shipped Compose files and the install docs deploy the Web Manager
+image by the literal moving tag `ghcr.io/iranman/beets-web-manager:latest`
+(a product decision: users update with `docker compose pull`, and pin by
+editing the tag themselves). No shipped Compose file may pick the tag through
+`${BEETS_WEB_MANAGER_VERSION}`; the rollout script supports the literal tag
+without editing the Compose file or .env."""
 import os
 import re
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXPECTED_IMAGE = "ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}"
+EXPECTED_IMAGE = "ghcr.io/iranman/beets-web-manager:latest"
 IMAGE_LINE = re.compile(r"^\s*image:\s*(ghcr\.io/iranman/beets-web-manager\S*)\s*$", re.M)
+SHIPPED_COMPOSE = ("docker-compose.yml", "docker-compose.full.yml", "examples/docker-compose.external-beets.yml")
+DOCS = ("README.md", "docs/INSTALLATION.md", "docs/EXAMPLES.md", "docs/TROUBLESHOOTING.md", "docs/TRUENAS_ROLLOUT.md")
 
 
 def _read(rel):
@@ -16,12 +20,16 @@ def _read(rel):
         return f.read()
 
 
-class ComposeVersionVariableTests(unittest.TestCase):
-    def test_compose_files_select_the_image_with_the_version_variable(self):
-        for rel in ("docker-compose.yml", "docker-compose.full.yml", "examples/docker-compose.external-beets.yml"):
+class ComposeLatestImageTests(unittest.TestCase):
+    def test_shipped_compose_files_use_the_literal_latest_image(self):
+        for rel in SHIPPED_COMPOSE:
             with self.subTest(file=rel):
-                images = IMAGE_LINE.findall(_read(rel))
-                self.assertEqual(images, [EXPECTED_IMAGE])
+                self.assertEqual(IMAGE_LINE.findall(_read(rel)), [EXPECTED_IMAGE])
+
+    def test_no_shipped_compose_file_uses_the_version_variable(self):
+        for rel in SHIPPED_COMPOSE:
+            with self.subTest(file=rel):
+                self.assertNotIn("${BEETS_WEB_MANAGER_VERSION", _read(rel))
 
     def test_documented_compose_samples_match(self):
         for rel in ("README.md", "docs/INSTALLATION.md", "docs/EXAMPLES.md"):
@@ -30,14 +38,13 @@ class ComposeVersionVariableTests(unittest.TestCase):
                 self.assertTrue(images, f"{rel} has no Web Manager compose sample")
                 self.assertEqual(set(images), {EXPECTED_IMAGE})
 
-    def test_env_example_and_configuration_document_the_variable(self):
-        self.assertRegex(_read(".env.example"), r"(?m)^BEETS_WEB_MANAGER_VERSION=stable$")
-        self.assertIn("`BEETS_WEB_MANAGER_VERSION`", _read("docs/CONFIGURATION.md"))
-
-    def test_no_doc_hard_codes_the_stable_tag(self):
-        for rel in ("README.md", "docs/INSTALLATION.md", "docs/EXAMPLES.md", "docs/TROUBLESHOOTING.md", ".env.example"):
+    def test_no_doc_or_env_example_selects_the_image_through_the_variable(self):
+        for rel in DOCS + (".env.example",):
             with self.subTest(file=rel):
-                self.assertNotIn("beets-web-manager:stable", _read(rel))
+                text = _read(rel)
+                self.assertNotIn("beets-web-manager:${BEETS_WEB_MANAGER_VERSION", text)
+                self.assertNotIn("beets-web-manager:stable", text)
+        self.assertNotRegex(_read(".env.example"), r"(?m)^BEETS_WEB_MANAGER_VERSION=")
 
 
 if __name__ == "__main__":

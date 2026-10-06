@@ -21,7 +21,7 @@
 
 services:
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:latest
     container_name: beets-web-manager
     restart: unless-stopped
 
