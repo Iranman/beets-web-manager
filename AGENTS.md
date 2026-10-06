@@ -74,12 +74,28 @@ A change is finished only when **all** of these hold:
 
 ## Release and deploy
 
-1. In `CHANGELOG.md`, retitle `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD`, bump `VERSION`, and merge to `main`.
-2. Run `git tag -a vX.Y.Z -m "…"` and `git push origin vX.Y.Z`. That triggers `.github/workflows/docker-build.yml`, which publishes `ghcr.io/iranman/beets-web-manager:X.Y.Z`. Wait for it to finish green, then confirm the image's `org.opencontainers.image.{version,revision}` labels match the tag.
-3. Deploy with `scripts/deploy_truenas_web_manager.sh` as described in `docs/TRUENAS_ROLLOUT.md`. Always do a `--dry-run` first, then the real run. For rollback, use the same script with `--rollback <backup dir>`. Read the doc rather than guessing the steps.
-4. Recreate only the service you changed. Don't restart unrelated services in the shared compose stack.
+1. Pick the version with the policy in **Versioning** below. In `CHANGELOG.md`, retitle `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD`, bump `VERSION` to `X.Y.Z` in the same PR, and merge to `main`. CI's `release-metadata` job fails if `VERSION` and the newest CHANGELOG heading disagree.
+2. Run `git tag -a vX.Y.Z -m "…"` and `git push origin vX.Y.Z`. That triggers `.github/workflows/docker-build.yml`: `release-metadata` checks the tag equals `v` + `VERSION`, `publish-ghcr` publishes `ghcr.io/iranman/beets-web-manager:X.Y.Z`, and `github-release` then creates the GitHub Release with the `## vX.Y.Z` CHANGELOG section as its body. Wait for the whole workflow to finish green, confirm the image's `org.opencontainers.image.{version,revision}` labels match the tag, and confirm the release exists (`gh release view vX.Y.Z`). If `github-release` failed, create it by hand: `python scripts/release_metadata.py notes --tag vX.Y.Z --output notes.md && gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file notes.md`.
+3. Deploy with `scripts/deploy_truenas_web_manager.sh` as described in `docs/TRUENAS_ROLLOUT.md`. Always do a `--dry-run` first, then the real run. For rollback, use the same script with `--rollback <backup dir>`; it fails loudly unless the previous image is proven to be running. Read the doc rather than guessing the steps.
+4. Recreate only the service you changed. Don't restart unrelated services in the shared compose stack. (The rollout script restarts `beets` itself, only when the webmanager plugin version changed.)
 
 Host-specific details (SSH alias, stack path, live library baseline) are in `CLAUDE.local.md`, which is not committed. If it's missing, ask the maintainer.
+
+### Versioning
+
+The project uses Semantic Versioning. While the version is `0.x`, the MINOR number is the one that signals change an operator must care about:
+
+- **MINOR (`0.Y.0`)** when any of these is true:
+  - the CHANGELOG entry has an **Upgrade Notes** section that asks the operator to do something, or something that used to work is now refused (security tightening included);
+  - a migration rewrites persisted state or user files (`/web-manager-data`, Beets `config.yaml`, `beetsplug/`);
+  - the webmanager plugin's `PLUGIN_VERSION` minor/major or its `PROTOCOL_VERSION` changes (Beets must be restarted);
+  - a Compose, environment-variable or mount contract is renamed or removed;
+  - a new user-facing feature or endpoint family is added.
+- **PATCH (`0.y.Z`)** for bug fixes and dependency or security bumps that need no operator action and no state migration, including plugin patch versions.
+- **1.0.0** once fresh-install and upgrade acceptance pass on the public install path and the upgrade-path guarantee is written down.
+- Docs-only and CI-only changes need no release; say so in the PR.
+
+When in doubt between two levels, take the higher one.
 
 ## Secrets and checks
 

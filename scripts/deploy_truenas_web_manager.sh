@@ -21,10 +21,14 @@
 #   - Perform ZERO mutating action until every safety check has passed.
 #   - Archive (never delete) the stale, pre-#64 web-manager-created database
 #     using exact filenames -- no wildcards, no `rm`.
-#   - Recreate only the `beets-web-manager` service; the Beets engine, Plex,
-#     Lidarr, and every other Arrs service are left untouched.
-#   - Support --dry-run (inspect-only, writes nothing outside a temp dir)
-#     and --rollback DIR (undo this script's own change set).
+#   - Recreate only the `beets-web-manager` service. Plex, Lidarr and every
+#     other service are left untouched. The Beets engine is never recreated;
+#     it is RESTARTED (same container) only when the webmanager plugin files
+#     Web Manager provisioned differ from the plugin version the running
+#     engine reports, with an online semantic snapshot before and after.
+#   - Support --dry-run (inspect-only; see docs/TRUENAS_ROLLOUT.md for the
+#     exact list of what it pulls and writes) and --rollback DIR (undo this
+#     script's own change set, then prove the previous image is running).
 #
 # Usage:
 #   /bin/bash scripts/deploy_truenas_web_manager.sh              # real rollout
@@ -33,13 +37,17 @@
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --offline-db-identity
 #       (stops the Beets engine briefly, hashes the settled database file,
 #        restarts it and re-verifies; BASELINE_DB_SHA256=<hex> to compare)
+#   /bin/bash scripts/deploy_truenas_web_manager.sh --prune-backups-older-than DAYS [--dry-run]
+#       (opt-in retention: deletes this script's own rollout backup
+#        directories older than DAYS, always keeping the newest one; with
+#        --dry-run it only lists what it would delete)
 #
 # Configuration (env vars):
-#   STACK_DIR (required for --dry-run/deploy/--rollback; not for --help),
+#   STACK_DIR (required for every mode except --help),
 #   VERSION (required and validated for --dry-run/deploy only -- --rollback
 #   and --help do not need it), EXPECTED_REVISION (strongly recommended),
 #   SERVICE, ENGINE_SERVICE, COMPOSE_FILE, MIN_ITEM_COUNT, STALE_DB_MAX_ITEMS,
-#   ENDPOINT_BASE_URL, RESTORE_STALE_DB (rollback only)
+#   ENDPOINT_BASE_URL, RESTORE_STALE_DB (rollback only), BACKUP_ROOT
 #
 # Exit codes: 0 success/dry-run-clean, 1 any safety check or stage failure
 # (see the printed "ROLLOUT FAILED" block for stage/backup-dir/rollback cmd).
@@ -90,6 +98,16 @@ RESTORE_STALE_DB="${RESTORE_STALE_DB:-0}"
 MODE="deploy"
 ROLLBACK_DIR=""
 DRY_RUN=0
+PRUNE_DAYS=""
+
+# Environment keys whose VALUES may be kept in the redacted copies of
+# `docker inspect` / `docker compose config` stored in a rollout backup.
+# Everything else keeps its key name only (value replaced by <redacted>):
+# the stack's Compose file and container env carry API keys and tokens for
+# every service (Plex, Lidarr, slskd, AI providers, ...), and backups are
+# kept on disk. The real .env is still copied verbatim (mode 600) because
+# rollback needs it -- see docs/TRUENAS_ROLLOUT.md.
+REDACTION_ALLOWLIST="PUID PGID TZ UMASK WEBCONTROL_PORT BEETS_WEB_URL BEETS_OUTBOUND_ALLOWLIST WEB_MANAGER_DATA_DIR BEETS_TRANSACTION_DIR MUSIC_ROOT BEETSDIR MUSIC_LIBRARY_PATH DOWNLOAD_PATH DEMO_MODE BEETS_WEB_AUTH_DISABLED BEETS_WEB_MANAGER_VERSION PATH LANG HOME PYTHONUNBUFFERED PYTHON_VERSION"
 
 # ---------------------------------------------------------------------------
 # Arg parsing
@@ -98,8 +116,16 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN=1
-      MODE="dry-run"
+      # --dry-run combined with --prune-backups-older-than stays in prune
+      # mode (list only); on its own it is the rollout dry-run.
+      [[ "$MODE" == "prune-backups" ]] || MODE="dry-run"
       shift
+      ;;
+    --prune-backups-older-than)
+      MODE="prune-backups"
+      PRUNE_DAYS="${2:-}"
+      [[ "$PRUNE_DAYS" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: --prune-backups-older-than requires a whole number of days >= 1" >&2; exit 1; }
+      shift 2
       ;;
     --offline-db-identity)
       MODE="offline-db-identity"
@@ -112,7 +138,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,35p' "${BASH_SOURCE[0]}"
+      # Print the leading comment block (everything up to `set -Eeuo`).
+      awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -389,8 +416,9 @@ print(svc.get('image', ''))
 
 resolve_container_id() {
   local svc="$1" cid
-  cid="$(_compose ps -q "$svc" 2>/dev/null || true)"
-  [[ -n "$cid" ]] || die "could not resolve a container for compose service '${svc}' via 'docker compose ps -q' -- refusing to guess a container name"
+  # -a: a stopped container (e.g. after a failed deploy) must still resolve.
+  cid="$(_compose ps -a -q "$svc" 2>/dev/null || true)"
+  [[ -n "$cid" ]] || die "could not resolve a container for compose service '${svc}' via 'docker compose ps -a -q' -- refusing to guess a container name"
   echo "$cid"
 }
 
@@ -441,17 +469,14 @@ discover_and_verify_mounts() {
   ENGINE_CONFIG_SRC="$(mount_source_for_dest "$ENGINE_CID" /config)"
   [[ -n "$ENGINE_CONFIG_SRC" ]] || die "could not determine the Beets engine's /config host source from 'docker inspect ${ENGINE_SERVICE}'"
 
-  # The image declares both /data and /web-manager-data as VOLUME (Dockerfile),
-  # but app.py's own WEB_MANAGER_DATA_DIR resolution (os.environ.setdefault at
-  # module import, near the top of app.py) picks /data whenever it exists and
-  # only falls back to /web-manager-data otherwise -- so /data is where the
-  # app's real persisted state (.auth_token, .flask_secret_key, settings .env,
-  # etc.) actually lives in every deployment that mounts it, which includes
-  # this repo's own docker-compose.yml template. Checking /web-manager-data
-  # here unconditionally (as this script used to) resolves to a *different*,
-  # non-durable anonymous volume that the running app never reads from or
-  # writes to, so persistence verification below would silently check the
-  # wrong directory.
+  # Where the running app keeps its state: every shipped Compose file mounts
+  # /web-manager-data and sets WEB_MANAGER_DATA_DIR=/web-manager-data. When
+  # WEB_MANAGER_DATA_DIR is NOT set, backend/app_runtime.py falls back to
+  # /data whenever /data exists in the container (a legacy single-mount
+  # layout), and to /web-manager-data otherwise. /data is checked first so a
+  # legacy deployment that still mounts it is verified against the directory
+  # the app actually uses. Only an exact /data mount matches here; media
+  # mounted below it (/data/music) does not.
   WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /data)"
   if [[ -z "$WEBMGR_DATA_SRC" ]]; then
     WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /web-manager-data)"
@@ -607,6 +632,7 @@ inspect_auth_token() {
   STAGE="token-inspection"
   log "Token env vars present (names only, values never read here): $(env | awk -F= '/^BEETS_(API|WEB_AUTH)_TOKEN/{print $1}' | paste -sd, -)"
 
+  [[ ! -L "$TOKEN_PATH" ]] || die "the auth token path (${TOKEN_PATH}) is a symbolic link -- refusing to continue; replace it with a regular file first"
   if [[ -f "$TOKEN_PATH" ]]; then
     TOKEN_SIZE="$(file_size "$TOKEN_PATH")"
     if [[ "$TOKEN_SIZE" -gt 0 ]]; then
@@ -687,13 +713,14 @@ probe_endpoint() {
     tok_arg=(-H "Authorization: Bearer ${tok}")
     unset tok
   fi
-  local start end status size out
+  local start end status size out body
+  body="$(mktemp)"
   start="$(_py -c 'import time; print(time.monotonic())')"
-  out="$(curl -sS -o /tmp/.rollout_probe_body.$$ -w '%{http_code}' --max-time 10 "${tok_arg[@]}" "${ENDPOINT_BASE_URL}${path}" 2>/dev/null || echo "000")"
+  out="$(curl -sS -o "$body" -w '%{http_code}' --max-time 10 "${tok_arg[@]}" "${ENDPOINT_BASE_URL}${path}" 2>/dev/null || echo "000")"
   end="$(_py -c 'import time; print(time.monotonic())')"
   status="$out"
-  size="$(file_size /tmp/.rollout_probe_body.$$ 2>/dev/null || echo 0)"
-  rm -f /tmp/.rollout_probe_body.$$ 2>/dev/null || true
+  size="$(file_size "$body" 2>/dev/null || echo 0)"
+  rm -f "$body" 2>/dev/null || true
   local elapsed_ms
   elapsed_ms="$(_py -c "print(int((${end}-${start})*1000))")"
   echo "${status}|${elapsed_ms}|${size}"
@@ -768,6 +795,463 @@ except Exception:
 }
 
 # ---------------------------------------------------------------------------
+# Setup readiness (RD-6): /api/setup/status before vs after
+# ---------------------------------------------------------------------------
+# A deploy whose endpoints all answer 200 can still leave the app unusable
+# (e.g. a new "Cannot write to downloads/staging path" blocking reason).
+# The status and blocking_reasons are recorded before anything changes and
+# compared after the recreate; a NEW blocking reason fails the deploy.
+SETUP_STATUS_BEFORE=""
+
+# Prints {"http": "<code>", "status": "...", "blocking_reasons": [...]}.
+fetch_setup_status() {
+  local tok_arg=() body http
+  if [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
+    local tok
+    tok="$(cat "$ACTIVE_AUTH_TOKEN_PATH")"
+    tok_arg=(-H "Authorization: Bearer ${tok}")
+    unset tok
+  fi
+  body="$(mktemp)"
+  http="$(curl -sS -o "$body" -w '%{http_code}' --max-time 15 "${tok_arg[@]}" "${ENDPOINT_BASE_URL}/api/setup/status" 2>/dev/null || echo "000")"
+  _py - "$body" "$http" <<'PYEOF'
+import json, sys
+path, http = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    data = {}
+reasons = data.get("blocking_reasons") if isinstance(data, dict) else None
+print(json.dumps({
+    "http": http,
+    "status": str(data.get("status", "")) if isinstance(data, dict) else "",
+    "blocking_reasons": [str(r) for r in reasons] if isinstance(reasons, list) else [],
+}))
+PYEOF
+  rm -f "$body"
+}
+
+record_setup_status_before() {
+  STAGE="setup-status-before"
+  SETUP_STATUS_BEFORE="$(fetch_setup_status)"
+  log "Setup status before: $(snapshot_field "$SETUP_STATUS_BEFORE" status) http=$(snapshot_field "$SETUP_STATUS_BEFORE" http) blocking_reasons=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["blocking_reasons"]))' "$SETUP_STATUS_BEFORE")"
+  if [[ "$(snapshot_field "$SETUP_STATUS_BEFORE" http)" != "200" ]]; then
+    warn "could not read /api/setup/status before the deploy -- after the deploy ANY blocking reason will fail it"
+  fi
+}
+
+# Dies when the post-deploy status has a blocking reason that was not there
+# before (or any blocking reason, if "before" could not be read).
+assert_no_new_setup_blocking_reasons() {
+  STAGE="setup-status-after"
+  local after new before_json="${SETUP_STATUS_BEFORE}"
+  [[ -n "$before_json" ]] || before_json='{}'
+  after="$(fetch_setup_status)"
+  [[ "$(snapshot_field "$after" http)" == "200" ]] || die "/api/setup/status did not answer 200 after the deploy (http=$(snapshot_field "$after" http)). Roll back with: $0 --rollback ${BACKUP_DIR}"
+  new="$(_py - "$before_json" "$after" <<'PYEOF'
+import json, sys
+before = json.loads(sys.argv[1] or "{}")
+after = json.loads(sys.argv[2])
+known = set(before.get("blocking_reasons") or []) if before.get("http") == "200" else set()
+for reason in after.get("blocking_reasons") or []:
+    if reason not in known:
+        print(reason)
+PYEOF
+)"
+  log "Setup status after: $(snapshot_field "$after" status)"
+  if [[ -n "$new" ]]; then
+    local r
+    while IFS= read -r r; do
+      [[ -n "$r" ]] && warn "NEW setup blocking reason after deploy: ${r}"
+    done <<< "$new"
+    die "the deploy introduced new setup blocking reason(s) (listed above). The new version is running but not ready; fix the cause, or roll back with: $0 --rollback ${BACKUP_DIR}"
+  fi
+  log "No new setup blocking reasons."
+}
+
+# ---------------------------------------------------------------------------
+# Plugin refresh (RD-8): restart Beets only when its loaded plugin is stale
+# ---------------------------------------------------------------------------
+# Web Manager copies its bundled webmanager plugin into the engine's
+# /config/beetsplug at its own startup, but the running Beets process keeps
+# the plugin code it imported at ITS startup. When the provisioned files
+# carry a different PLUGIN_VERSION than the engine reports through
+# /webmanager/status, the engine (and only the engine) is restarted -- same
+# container, never recreated -- with the online semantic snapshot (counts +
+# identity digest) taken before and compared after.
+ENGINE_RESTARTED_FOR_PLUGIN=0
+
+provisioned_plugin_version() {
+  local f="${ENGINE_CONFIG_SRC%/}/beetsplug/webmanager/version.py"
+  [[ -f "$f" ]] || { echo ""; return 0; }
+  _py - "$f" <<'PYEOF'
+import re, sys
+m = re.search(r'^PLUGIN_VERSION\s*=\s*["\']([^"\']+)["\']', open(sys.argv[1], encoding="utf-8").read(), re.M)
+print(m.group(1) if m else "")
+PYEOF
+}
+
+refresh_engine_plugin_if_stale() {
+  STAGE="engine-plugin-refresh"
+  local provisioned before running after
+  provisioned="$(provisioned_plugin_version)"
+  before="$(checked_semantic_snapshot "before plugin check")"
+  running="$(snapshot_field "$before" plugin_version)"
+  if [[ -z "$provisioned" ]]; then
+    warn "could not read the provisioned plugin version (${ENGINE_CONFIG_SRC%/}/beetsplug/webmanager/version.py) -- not restarting ${ENGINE_SERVICE}; running plugin is ${running}"
+    return 0
+  fi
+  if [[ "$provisioned" == "$running" ]]; then
+    log "Beets engine already runs the provisioned webmanager plugin ${running} -- no engine restart needed."
+    return 0
+  fi
+  log "Provisioned webmanager plugin is ${provisioned} but the running engine reports ${running}: restarting ${ENGINE_SERVICE} only (same container)."
+  ENGINE_STOPPED_BY_US=1
+  _compose restart "$ENGINE_SERVICE" >&2
+  ENGINE_STOPPED_BY_US=0
+  after="$(wait_for_engine_semantics)" || die "${ENGINE_SERVICE} did not come back with a healthy webmanager plugin within ${HEALTH_TIMEOUT_SECONDS}s after the plugin restart"
+  [[ "$(snapshot_field "$before" items)" == "$(snapshot_field "$after" items)" ]] || die "item count changed across the engine restart: $(snapshot_field "$before" items) -> $(snapshot_field "$after" items)"
+  [[ "$(snapshot_field "$before" albums)" == "$(snapshot_field "$after" albums)" ]] || die "album count changed across the engine restart: $(snapshot_field "$before" albums) -> $(snapshot_field "$after" albums)"
+  [[ "$(snapshot_field "$before" digest)" == "$(snapshot_field "$after" digest)" ]] || die "library identity digest changed across the engine restart"
+  [[ "$(snapshot_field "$after" plugin_version)" == "$provisioned" ]] || die "after restarting ${ENGINE_SERVICE} the engine reports plugin $(snapshot_field "$after" plugin_version), expected ${provisioned}"
+  ENGINE_RESTARTED_FOR_PLUGIN=1
+  log "Engine restarted: plugin ${running} -> ${provisioned}; items/albums/digest unchanged."
+  if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+    printf 'engine_restarted_for_plugin=1\nplugin_before=%s\nplugin_after=%s\n' "$running" "$provisioned" >> "$BACKUP_DIR/engine-plugin.txt"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Backup helpers (RD-7 / RD-20)
+# ---------------------------------------------------------------------------
+# Web Manager's own durable state that a new version may rewrite. Restored
+# on rollback. transactions/ is the mutation audit trail: it is backed up,
+# but rollback only ADDS back files that are missing and never deletes or
+# overwrites records written after the deploy.
+WEBMGR_STATE_FILES=(".env" ".browser_username" ".browser_password" ".flask_secret_key" ".setup_complete" ".browser_setup_state")
+WEBMGR_STATE_DIRS=("transactions")
+
+# redact_json <kind> < in > out   (kind: inspect | compose)
+redact_json() {
+  # Values are redacted unless their variable name is allowlisted. Even an
+  # allowlisted URL loses any user:password@ part. Free-form strings (command,
+  # entrypoint, healthcheck, labels, build args, x-* extensions) keep their
+  # shape but every NAME=value whose NAME looks like a credential is scrubbed.
+  _py -c '
+import json, re, sys
+kind, allow = sys.argv[1], set(sys.argv[2].split())
+data = json.load(sys.stdin)
+SECRET_ASSIGN = re.compile(r"(?i)((?:token|key|secret|pass(?:word)?)[^=\s]*=)\S+")
+URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]*@")
+def strip_userinfo(v):
+    return URL_USERINFO.sub(r"\1<redacted>@", v) if isinstance(v, str) else v
+def scrub(v):
+    if isinstance(v, str):
+        return strip_userinfo(SECRET_ASSIGN.sub(r"\1<redacted>", v))
+    if isinstance(v, list):
+        return [scrub(x) for x in v]
+    if isinstance(v, dict):
+        # mappings (labels, build args, x-* blocks): a credential-like name
+        # loses its scalar value outright
+        return {k: ("<redacted>" if secretish(k) and not isinstance(x, (dict, list)) else scrub(x))
+                for k, x in v.items()}
+    return v
+def secretish(name):
+    return re.search(r"(?i)token|key|secret|pass(word)?", str(name)) is not None
+scrub_map = scrub
+def red_list(env):
+    out = []
+    for entry in env or []:
+        key, sep, val = str(entry).partition("=")
+        if key in allow:
+            out.append(key + sep + strip_userinfo(val))
+        else:
+            out.append(key + "=<redacted>" if sep else key)
+    return out
+def red_map(env):
+    return {k: (strip_userinfo(v) if k in allow else "<redacted>") for k, v in (env or {}).items()}
+if kind == "inspect":
+    for obj in data if isinstance(data, list) else [data]:
+        cfg = obj.get("Config") or {}
+        if "Env" in cfg:
+            cfg["Env"] = red_list(cfg.get("Env"))
+        for field in ("Cmd", "Entrypoint"):
+            if cfg.get(field) is not None:
+                cfg[field] = scrub(cfg[field])
+        if cfg.get("Labels") is not None:
+            cfg["Labels"] = scrub_map(cfg["Labels"])
+        hc = cfg.get("Healthcheck")
+        if isinstance(hc, dict) and hc.get("Test") is not None:
+            hc["Test"] = scrub(hc["Test"])
+        for field in ("Path", "Args"):
+            if obj.get(field) is not None:
+                obj[field] = scrub(obj[field])
+else:
+    for key in list(data):
+        if str(key).startswith("x-"):
+            data[key] = scrub(data[key])
+    for svc in (data.get("services") or {}).values():
+        if not isinstance(svc, dict):
+            continue
+        env = svc.get("environment")
+        if isinstance(env, dict):
+            svc["environment"] = red_map(env)
+        elif isinstance(env, list):
+            svc["environment"] = red_list(env)
+        for field in ("command", "entrypoint"):
+            if svc.get(field) is not None:
+                svc[field] = scrub(svc[field])
+        hc = svc.get("healthcheck")
+        if isinstance(hc, dict) and hc.get("test") is not None:
+            hc["test"] = scrub(hc["test"])
+        if svc.get("labels") is not None:
+            svc["labels"] = scrub_map(svc["labels"])
+        build = svc.get("build")
+        if isinstance(build, dict) and build.get("args") is not None:
+            build["args"] = scrub_map(build["args"])
+        for key in list(svc):
+            if str(key).startswith("x-"):
+                svc[key] = scrub(svc[key])
+json.dump(data, sys.stdout, indent=1)
+' "$1" "$REDACTION_ALLOWLIST"
+}
+
+# This script runs as root and copies files between the stack's data
+# folders (writable by the containers) and the backup folder. A symbolic link
+# planted in either place must never redirect a root-owned copy to or from
+# an arbitrary host path, so every copy below goes through these helpers.
+
+# copy_regular_file <src> <dst>: copies a regular, non-link file. Refuses a
+# symlinked source or a symlinked destination folder; a destination that is
+# itself a symlink is removed (the link only, never its target) first.
+copy_regular_file() {
+  local src="$1" dst="$2"
+  if [[ -L "$src" || ! -f "$src" ]]; then
+    warn "not copying ${src}: it is a symbolic link or not a regular file"
+    return 1
+  fi
+  if [[ -L "$(dirname -- "$dst")" ]]; then
+    warn "not copying to ${dst}: its folder is a symbolic link"
+    return 1
+  fi
+  if [[ -L "$dst" ]]; then
+    rm -f -- "$dst"
+  fi
+  cp -p -- "$src" "$dst"
+}
+
+# tree_has_symlink <dir>: true if <dir> is a symlink or contains one.
+tree_has_symlink() {
+  [[ -L "$1" ]] && return 0
+  [[ -d "$1" ]] || return 1
+  [[ -n "$(find "$1" -type l -print -quit)" ]]
+}
+
+backup_state_files() {
+  local data_src engine_src
+  data_src="$(canon_path "$WEBMGR_DATA_SRC")"
+  engine_src="$(canon_path "$ENGINE_CONFIG_SRC")"
+  mkdir -p "$BACKUP_DIR/web-manager-data" "$BACKUP_DIR/beets-config"
+  local f d manifest="$BACKUP_DIR/state-manifest.txt"
+  : > "$manifest"
+  for f in "${WEBMGR_STATE_FILES[@]}"; do
+    if [[ -L "${data_src}/${f}" ]]; then
+      warn "web-manager-data/${f} is a symbolic link -- not backed up"
+      echo "web-manager-data/${f} skipped (symbolic link)" >> "$manifest"
+    elif [[ -f "${data_src}/${f}" ]]; then
+      cp -p -- "${data_src}/${f}" "$BACKUP_DIR/web-manager-data/${f}"
+      echo "web-manager-data/${f} sha256=$(sha256_file "${data_src}/${f}")" >> "$manifest"
+    else
+      echo "web-manager-data/${f} absent" >> "$manifest"
+    fi
+  done
+  for d in "${WEBMGR_STATE_DIRS[@]}"; do
+    if [[ -L "${data_src}/${d}" ]]; then
+      warn "web-manager-data/${d}/ is a symbolic link -- not backed up"
+      echo "web-manager-data/${d}/ skipped (symbolic link)" >> "$manifest"
+    elif [[ -d "${data_src}/${d}" ]]; then
+      # -P: copy links as links (never follow them), then drop them.
+      cp -RPp -- "${data_src}/${d}" "$BACKUP_DIR/web-manager-data/${d}"
+      find "$BACKUP_DIR/web-manager-data/${d}" -type l -delete
+      echo "web-manager-data/${d}/ files=$(find "${data_src}/${d}" -type f | wc -l | tr -d ' ')" >> "$manifest"
+    fi
+  done
+  # Beets config only -- NEVER the library database (musiclibrary.blb and
+  # its -wal/-shm are deliberately not in this list).
+  if [[ -L "${engine_src}/config.yaml" ]]; then
+    warn "Beets config.yaml is a symbolic link -- not backed up"
+    echo "beets-config/config.yaml skipped (symbolic link)" >> "$manifest"
+  elif [[ -f "${engine_src}/config.yaml" ]]; then
+    cp -p -- "${engine_src}/config.yaml" "$BACKUP_DIR/beets-config/config.yaml"
+    echo "beets-config/config.yaml sha256=$(sha256_file "${engine_src}/config.yaml")" >> "$manifest"
+  fi
+  if [[ -L "${engine_src}/beetsplug" ]]; then
+    warn "Beets beetsplug/ is a symbolic link -- not backed up"
+    echo "beets-config/beetsplug/ skipped (symbolic link)" >> "$manifest"
+  elif [[ -d "${engine_src}/beetsplug" ]]; then
+    cp -RPp -- "${engine_src}/beetsplug" "$BACKUP_DIR/beets-config/beetsplug"
+    find "$BACKUP_DIR/beets-config/beetsplug" -type l -delete
+    echo "beets-config/beetsplug/ files=$(find "${engine_src}/beetsplug" -type f | wc -l | tr -d ' ')" >> "$manifest"
+  fi
+  # Owner-only, whatever umask/ACLs the host applies.
+  chmod -R go-rwx "$BACKUP_DIR"
+  find "$BACKUP_DIR" -type f -exec chmod 600 {} +
+  find "$BACKUP_DIR" -type d -exec chmod 700 {} +
+}
+
+# Restores what backup_state_files saved. Every file it replaces is first
+# kept as <backup>/pre-rollback/<path> so the rollback itself is reversible.
+restore_state_files() {
+  local data_src engine_src pre="$ROLLBACK_DIR/pre-rollback-$(date -u +%Y%m%d-%H%M%S)"
+  data_src="$(canon_path "$WEBMGR_DATA_SRC")"
+  engine_src="$(canon_path "$ENGINE_CONFIG_SRC")"
+  if [[ ! -d "$ROLLBACK_DIR/web-manager-data" && ! -d "$ROLLBACK_DIR/beets-config" ]]; then
+    warn "backup has no web-manager-data/ or beets-config/ (made by an older version of this script) -- Web Manager settings and Beets config are left as they are"
+    return 0
+  fi
+  ( umask 077; mkdir -p "$pre/web-manager-data" "$pre/beets-config" )
+  local f
+  for f in "${WEBMGR_STATE_FILES[@]}"; do
+    if [[ -f "$ROLLBACK_DIR/web-manager-data/${f}" ]]; then
+      if [[ -f "${data_src}/${f}" && ! -L "${data_src}/${f}" ]]; then
+        cp -p -- "${data_src}/${f}" "$pre/web-manager-data/${f}"
+      fi
+      if copy_regular_file "$ROLLBACK_DIR/web-manager-data/${f}" "${data_src}/${f}"; then
+        log "Restored web-manager-data/${f}"
+      else
+        warn "web-manager-data/${f} was NOT restored"
+      fi
+    elif [[ -f "${data_src}/${f}" ]] && grep -q "^web-manager-data/${f} absent$" "$ROLLBACK_DIR/state-manifest.txt" 2>/dev/null; then
+      # Did not exist before the deploy: move it aside (never delete).
+      mv "${data_src}/${f}" "$pre/web-manager-data/${f}"
+      log "Moved web-manager-data/${f} (created after the deploy) aside to ${pre}/web-manager-data/"
+    fi
+  done
+  if [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]] && tree_has_symlink "${data_src}/transactions"; then
+    warn "web-manager-data/transactions/ is or contains a symbolic link -- missing transaction records were NOT restored; copy them from ${ROLLBACK_DIR}/web-manager-data/transactions/ by hand after checking the folder"
+  elif [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]]; then
+    mkdir -p "${data_src}/transactions"
+    # Audit trail: add back missing records only; never overwrite or delete.
+    local added=0 src rel
+    while IFS= read -r -d '' src; do
+      rel="${src#"$ROLLBACK_DIR/web-manager-data/transactions/"}"
+      if [[ ! -e "${data_src}/transactions/${rel}" && ! -L "${data_src}/transactions/${rel}" ]]; then
+        mkdir -p "$(dirname "${data_src}/transactions/${rel}")"
+        cp -p -- "$src" "${data_src}/transactions/${rel}"
+        added=$((added + 1))
+      fi
+    done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -type f -print0)
+    log "transactions/: ${added} missing record(s) restored; records written after the deploy were kept."
+  fi
+  if [[ -f "$ROLLBACK_DIR/beets-config/config.yaml" ]]; then
+    if [[ -f "${engine_src}/config.yaml" && ! -L "${engine_src}/config.yaml" ]]; then
+      cp -p -- "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
+    fi
+    if copy_regular_file "$ROLLBACK_DIR/beets-config/config.yaml" "${engine_src}/config.yaml"; then
+      log "Restored Beets config.yaml (takes effect at the engine's next start)."
+    else
+      warn "Beets config.yaml was NOT restored"
+    fi
+  fi
+  if [[ -d "$ROLLBACK_DIR/beets-config/beetsplug" ]]; then
+    if tree_has_symlink "${engine_src}/beetsplug" || tree_has_symlink "$ROLLBACK_DIR/beets-config/beetsplug"; then
+      warn "Beets beetsplug/ (or its backup) is or contains a symbolic link -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
+    else
+      # Exact restore: files the new version added must not survive the
+      # rollback (a stale module can shadow or break the old plugin). The
+      # current contents are kept under pre-rollback/ first, then cleared.
+      # Neither tree contains a link (checked above) and find -delete never
+      # follows links, so nothing outside beetsplug/ can be touched.
+      if [[ -d "${engine_src}/beetsplug" ]]; then
+        cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
+        [[ -n "$engine_src" && -d "$engine_src/beetsplug" && ! -L "$engine_src/beetsplug" ]] \
+          || die "Beets beetsplug/ is not a plain folder any more (became a symbolic link?) -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
+        find "${engine_src}/beetsplug" -mindepth 1 -delete
+      else
+        mkdir -p "${engine_src}/beetsplug"
+      fi
+      cp -RPp -- "$ROLLBACK_DIR/beets-config/beetsplug/." "${engine_src}/beetsplug/"
+      log "Restored Beets beetsplug/ exactly as backed up (current contents kept in ${pre}/beets-config/beetsplug/)."
+    fi
+  fi
+  chmod -R go-rwx "$pre"
+}
+
+# Restores only the BEETS_WEB_MANAGER_VERSION line of the stack .env to the
+# value it had before the deploy (persist_deployed_version rewrote it).
+# Other lines are left alone: the operator may have edited them since.
+restore_env_version_line() {
+  local env_file prev_line="" prev_ver="" previous_image_ref="$1"
+  env_file="$(dirname "$COMPOSE_FILE")/.env"
+  if [[ -f "$ROLLBACK_DIR/.env.bak" ]]; then
+    prev_line="$(grep '^BEETS_WEB_MANAGER_VERSION=' "$ROLLBACK_DIR/.env.bak" | tail -n 1 || true)"
+  fi
+  if [[ -n "$prev_line" ]]; then
+    prev_ver="${prev_line#BEETS_WEB_MANAGER_VERSION=}"
+  elif [[ "$previous_image_ref" == ghcr.io/iranman/beets-web-manager:* ]]; then
+    prev_ver="${previous_image_ref##*:}"
+  fi
+  if [[ ! -f "$env_file" ]]; then
+    [[ -z "$prev_line" ]] || warn "backup .env had BEETS_WEB_MANAGER_VERSION but ${env_file} no longer exists -- not recreating it"
+    return 0
+  fi
+  if ! [[ "$prev_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?$ ]]; then
+    warn "could not determine a numbered previous version for ${env_file} (got '${prev_ver}') -- BEETS_WEB_MANAGER_VERSION left as is; the post-rollback check below decides whether that is safe"
+    return 0
+  fi
+  local tmp="${env_file}.tmp.$$"
+  if grep -q '^BEETS_WEB_MANAGER_VERSION=' "$env_file"; then
+    sed "s/^BEETS_WEB_MANAGER_VERSION=.*/BEETS_WEB_MANAGER_VERSION=${prev_ver}/" "$env_file" > "$tmp"
+  else
+    cp "$env_file" "$tmp"
+    printf '\nBEETS_WEB_MANAGER_VERSION=%s\n' "$prev_ver" >> "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$env_file"
+  log "Restored BEETS_WEB_MANAGER_VERSION=${prev_ver} in ${env_file}"
+}
+
+# ---------------------------------------------------------------------------
+# Backup retention (opt-in only)
+# ---------------------------------------------------------------------------
+run_prune_backups() {
+  STAGE="prune-backups"
+  [[ -d "$BACKUP_ROOT" ]] || { log "No backup directory at ${BACKUP_ROOT} -- nothing to prune."; return 0; }
+  local cutoff newest="" d name stamp
+  cutoff="$(_py -c 'import sys,datetime; print((datetime.datetime.utcnow()-datetime.timedelta(days=int(sys.argv[1]))).strftime("%Y%m%d-%H%M%S"))' "$PRUNE_DAYS")"
+  # Only directories this script created, by exact name pattern; the
+  # timestamp in the NAME decides age (mtime can be touched by copies).
+  local candidates=()
+  for d in "$BACKUP_ROOT"/web-manager-rollout-*; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    [[ "$name" =~ ^web-manager-rollout-([0-9]{8}-[0-9]{6})$ ]] || continue
+    candidates+=("$name")
+  done
+  [[ ${#candidates[@]} -gt 0 ]] || { log "No rollout backups under ${BACKUP_ROOT}."; return 0; }
+  newest="$(printf '%s\n' "${candidates[@]}" | sort | tail -n 1)"
+  local pruned=0 kept=0
+  for name in "${candidates[@]}"; do
+    stamp="${name#web-manager-rollout-}"
+    if [[ "$name" == "$newest" || ! "$stamp" < "$cutoff" ]]; then
+      kept=$((kept + 1)); continue
+    fi
+    if [[ -d "$BACKUP_ROOT/$name/stale-database" ]]; then
+      warn "keeping ${name}: it holds an archived stale database (stale-database/) -- review and remove it by hand"
+      kept=$((kept + 1)); continue
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "would delete ${BACKUP_ROOT}/${name}"
+    else
+      rm -rf -- "${BACKUP_ROOT:?}/${name:?}"
+      log "deleted ${BACKUP_ROOT}/${name}"
+    fi
+    pruned=$((pruned + 1))
+  done
+  log "Retention (${PRUNE_DAYS} days): $([[ "$DRY_RUN" -eq 1 ]] && echo 'would delete' || echo 'deleted') ${pruned}, kept ${kept} (the newest backup is always kept)."
+}
+
+# ---------------------------------------------------------------------------
 # Phase B -- Dry-run entry point
 # ---------------------------------------------------------------------------
 run_dry_run() {
@@ -784,12 +1268,14 @@ run_dry_run() {
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
   _compose pull "$SERVICE" >&2 || warn "image pull failed in dry-run (network/registry issue) -- label verification skipped"
   verify_image_labels_if_present || true
-  if docker inspect --format '{{.State.Status}}' "$SERVICE" >/dev/null 2>&1; then
+  if docker inspect --format '{{.State.Status}}' "$WEBMGR_CID" >/dev/null 2>&1; then
     verify_endpoints "dry-run" || warn "endpoint verification reported issues (see above) -- not fatal in dry-run"
+    record_setup_status_before
   else
     log "Service '${SERVICE}' is not currently running -- skipping live endpoint checks."
   fi
-  log "=== DRY RUN COMPLETE: all checks passed, nothing was changed ==="
+  log "Running engine plugin: $(snapshot_field "$AUTH_SEMANTIC" plugin_version). The real run compares it with the plugin the new image provisions and restarts ${ENGINE_SERVICE} only if they differ."
+  log "=== DRY RUN COMPLETE: all checks passed. Nothing in the stack was changed (the image may have been pulled into the local image store; probe bodies went to temp files). ==="
 }
 
 verify_image_labels_if_present() {
@@ -812,20 +1298,23 @@ verify_image_labels_if_present() {
 # ---------------------------------------------------------------------------
 create_backup_dir() {
   STAGE="backup-creation"
-  mkdir -p "$BACKUP_DIR"
+  ( umask 077; mkdir -p "$BACKUP_DIR" )
   chmod 700 "$BACKUP_DIR"
 
   cp "$COMPOSE_FILE" "$BACKUP_DIR/docker-compose.yml.bak"
   local env_file
   env_file="$(dirname "$COMPOSE_FILE")/.env"
   if [[ -f "$env_file" ]]; then
+    # Verbatim: rollback restores BEETS_WEB_MANAGER_VERSION from it.
     cp "$env_file" "$BACKUP_DIR/.env.bak"
     chmod 600 "$BACKUP_DIR/.env.bak"
   fi
-  compose_config_json > "$BACKUP_DIR/resolved-compose-config.json" 2>/dev/null || true
-  chmod 600 "$BACKUP_DIR/resolved-compose-config.json" 2>/dev/null || true
-
-  docker inspect "$WEBMGR_CID" > "$BACKUP_DIR/container-inspect-before.json" 2>/dev/null || true
+  # Diagnostic copies only (rollback never reads them): environment VALUES
+  # are redacted except for REDACTION_ALLOWLIST; key names are kept.
+  compose_config_json 2>/dev/null | redact_json compose > "$BACKUP_DIR/resolved-compose-config.json" 2>/dev/null \
+    || { rm -f "$BACKUP_DIR/resolved-compose-config.json"; warn "could not save a redacted resolved Compose config"; }
+  docker inspect "$WEBMGR_CID" 2>/dev/null | redact_json inspect > "$BACKUP_DIR/container-inspect-before.json" 2>/dev/null \
+    || { rm -f "$BACKUP_DIR/container-inspect-before.json"; warn "could not save a redacted container inspect"; }
 
   PREVIOUS_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID" 2>/dev/null || echo "")"
   local previous_image_ref
@@ -848,6 +1337,7 @@ create_backup_dir() {
   } > "$BACKUP_DIR/authoritative-db-metadata.txt"
 
   local persistent_existed=0 legacy_existed=0 persistent_sha="" legacy_sha=""
+  [[ ! -L "$TOKEN_PATH" ]] || die "the auth token path (${TOKEN_PATH}) is a symbolic link -- refusing to back it up; replace it with a regular file first"
   if [[ -f "$TOKEN_PATH" ]]; then
     persistent_existed=1
     persistent_sha="$(sha256_file "$TOKEN_PATH")"
@@ -869,7 +1359,17 @@ create_backup_dir() {
   } > "$BACKUP_DIR/token-metadata.txt"
   chmod 600 "$BACKUP_DIR/token-metadata.txt"
 
+  [[ -n "$SETUP_STATUS_BEFORE" ]] && printf '%s\n' "$SETUP_STATUS_BEFORE" > "$BACKUP_DIR/setup-status-before.json"
+  find "$BACKUP_DIR" -type f -exec chmod 600 {} +
+
   log "Backup created at ${BACKUP_DIR}"
+}
+
+# Runs after the web manager is stopped, so its state files are quiescent.
+backup_web_manager_and_beets_config() {
+  STAGE="backup-state"
+  backup_state_files
+  log "Backed up Web Manager state ($(printf '%s ' "${WEBMGR_STATE_FILES[@]}")transactions/) and Beets config.yaml + beetsplug/ (never the library database) -- see ${BACKUP_DIR}/state-manifest.txt"
 }
 
 stop_web_manager() {
@@ -1006,9 +1506,12 @@ verify_post_deploy() {
 
   assert_authoritative_db_unchanged
 
+  refresh_engine_plugin_if_stale
+  STAGE="post-deploy-verification"
+
   local engine_status
   engine_status="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}(no healthcheck){{end}}' "$ENGINE_CID")"
-  log "Beets engine container unchanged and reports: ${engine_status}"
+  log "Beets engine container (same container ID) reports: ${engine_status}"
 
   local first_sha
   first_sha="$(sha256_file "$TOKEN_PATH")"
@@ -1024,6 +1527,8 @@ verify_post_deploy() {
   assert_no_local_db_recreated
 
   verify_endpoints "post-deploy"
+
+  assert_no_new_setup_blocking_reasons
 }
 
 # Durably persist the deployed VERSION into .env's own BEETS_WEB_MANAGER_VERSION
@@ -1185,11 +1690,13 @@ run_deploy() {
   verify_authoritative_database
   inspect_stale_database
   inspect_auth_token
+  record_setup_status_before
   plan_backup_dir
   log "=== All pre-flight safety checks passed. Beginning mutating actions. ==="
 
   create_backup_dir
   stop_web_manager
+  backup_web_manager_and_beets_config
   archive_stale_database
   migrate_token_if_needed
   deploy_image
@@ -1211,12 +1718,23 @@ run_rollback() {
   discover_and_verify_mounts
 
   log "Stopping ${SERVICE} for rollback..."
-  _compose stop "$SERVICE" || true
+  # A failed stop is not fatal on its own: the recreate below uses
+  # --force-recreate (which replaces a running container) and the rollback is
+  # only declared complete after the running image ID, the configured image,
+  # the Compose resolution and /health/live version are all PROVEN to be the
+  # previous release. It is reported, never hidden.
+  local stop_rc=0
+  _compose stop "$SERVICE" || stop_rc=$?
+  if [[ "$stop_rc" -ne 0 ]]; then
+    warn "'docker compose stop ${SERVICE}' failed (exit ${stop_rc}) -- continuing the rollback; the forced recreate and the image/version proof below decide whether it succeeded"
+  fi
 
   log "Restoring Compose file from backup..."
   cp "$ROLLBACK_DIR/docker-compose.yml.bak" "$COMPOSE_FILE"
 
-  if [[ -f "$ROLLBACK_DIR/token-metadata.txt" ]]; then
+  if [[ -L "$TOKEN_PATH" ]]; then
+    warn "the auth token path (${TOKEN_PATH}) is a symbolic link -- token left untouched; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking it"
+  elif [[ -f "$ROLLBACK_DIR/token-metadata.txt" ]]; then
     local p_existed l_existed migration_performed p_sha m_sha meta_p_path
     p_existed="$(grep '^persistent_token_existed_before=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
     l_existed="$(grep '^legacy_token_existed_before=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
@@ -1266,29 +1784,92 @@ run_rollback() {
   if [[ "$RESTORE_STALE_DB" -eq 1 && -d "$ROLLBACK_DIR/stale-database" ]]; then
     log "RESTORE_STALE_DB=1 -- restoring archived stale database files..."
     for f in "$DB_FILENAME" "$WAL_FILENAME" "$SHM_FILENAME"; do
-      [[ -f "$ROLLBACK_DIR/stale-database/$f" ]] && cp "$ROLLBACK_DIR/stale-database/$f" "$(canon_path "$WEBMGR_DATA_SRC")/$f"
+      if [[ -f "$ROLLBACK_DIR/stale-database/$f" ]]; then
+        copy_regular_file "$ROLLBACK_DIR/stale-database/$f" "$(canon_path "$WEBMGR_DATA_SRC")/$f" || warn "stale database file ${f} was NOT restored"
+      fi
     done
   else
     log "Stale database files left archived (set RESTORE_STALE_DB=1 to restore them -- current architecture never reads them)."
   fi
 
-  local previous_image_ref=""
+  restore_state_files
+
+  rollback_recreate_and_verify
+
+  log "=== Rollback complete: ${SERVICE} runs the previous image and a plain 'docker compose up -d' resolves to it. The Beets library database was never touched. ==="
+}
+
+# Reads previous-image.txt / previous-image-labels.json from ROLLBACK_DIR,
+# restores the .env version pin, recreates SERVICE on the previous image and
+# PROVES the result. Any mismatch is fatal: a rollback that silently leaves
+# the new version running is worse than one that fails loudly.
+rollback_recreate_and_verify() {
+  STAGE="rollback-recreate"
+  local previous_image_ref="" previous_image_id="" previous_version=""
   if [[ -f "$ROLLBACK_DIR/previous-image.txt" ]]; then
-    previous_image_ref="$(grep '^previous_image_ref=' "$ROLLBACK_DIR/previous-image.txt" | cut -d= -f2-)"
+    previous_image_ref="$(grep '^previous_image_ref=' "$ROLLBACK_DIR/previous-image.txt" | cut -d= -f2- || true)"
+    previous_image_id="$(grep '^previous_image_id=' "$ROLLBACK_DIR/previous-image.txt" | cut -d= -f2- || true)"
   fi
-  if [[ -n "$previous_image_ref" ]]; then
-    log "Recreating ${SERVICE} on previous image reference: ${previous_image_ref}"
-    docker compose -f "$COMPOSE_FILE" -f <(echo "services: {${SERVICE}: {image: ${previous_image_ref}}}") up -d --no-deps --force-recreate "$SERVICE" 2>/dev/null \
-      || { warn "compose-level image override failed; recreating via 'docker compose up' with the restored Compose file as-is"; _compose up -d --no-deps --force-recreate "$SERVICE"; }
-  else
-    warn "no previous image reference recorded in backup -- recreating with the restored Compose file's current image"
-    _compose up -d --no-deps --force-recreate "$SERVICE"
+  [[ -n "$previous_image_ref" && -n "$previous_image_id" ]] || die "backup has no previous image reference/ID (previous-image.txt) -- cannot prove a rollback; restore by hand"
+  if [[ -f "$ROLLBACK_DIR/previous-image-labels.json" ]]; then
+    previous_version="$(_py -c '
+import json, sys
+try:
+    labels = json.load(open(sys.argv[1], encoding="utf-8")) or {}
+except Exception:
+    labels = {}
+print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previous-image-labels.json")"
   fi
 
+  # The on-disk .env decides what any later `docker compose up -d` deploys.
+  restore_env_version_line "$previous_image_ref"
+  # Resolve from the files on disk only, never from this shell's environment.
+  unset BEETS_WEB_MANAGER_VERSION
+
+  local override
+  # Next to the Compose file (removed again below): the docker CLI must be
+  # able to open it by that path, which is not true for every temp dir
+  # (e.g. a Windows docker.exe driven from Git Bash).
+  override="$(mktemp "$(dirname "$COMPOSE_FILE")/.rollback-override.XXXXXX")"
+  printf 'services:\n  %s:\n    image: "%s"\n' "$SERVICE" "$previous_image_ref" > "$override"
+  log "Recreating ${SERVICE} on previous image reference: ${previous_image_ref}"
+  if ! docker compose -f "$COMPOSE_FILE" -f "$override" up -d --no-deps --force-recreate "$SERVICE" >&2; then
+    rm -f "$override"
+    die "recreating ${SERVICE} on ${previous_image_ref} failed (output above)"
+  fi
+  rm -f "$override"
+
+  STAGE="rollback-verification"
   WEBMGR_CID="$(resolve_container_id "$SERVICE")"
   wait_for_health "$WEBMGR_CID" "$HEALTH_TIMEOUT_SECONDS" || die "container did not become healthy after rollback"
 
-  log "=== Rollback complete. Beets engine and its database were never touched. ==="
+  local running_id configured resolved
+  running_id="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID")"
+  configured="$(docker inspect --format '{{.Config.Image}}' "$WEBMGR_CID")"
+  [[ "$running_id" == "$previous_image_id" ]] || die "after rollback ${SERVICE} runs image ${running_id}, expected the previous image ${previous_image_id} (${previous_image_ref})"
+  [[ "$configured" == "$previous_image_ref" ]] || die "after rollback ${SERVICE} is configured with '${configured}', expected '${previous_image_ref}'"
+  log "Running image verified: ${configured} (${running_id})"
+
+  resolved="$(compose_service_image "$SERVICE")"
+  [[ "$resolved" == "$previous_image_ref" ]] || die "the restored Compose file and .env resolve ${SERVICE} to '${resolved}', not '${previous_image_ref}' -- the next plain 'docker compose up -d' would leave the rolled-back version. Fix BEETS_WEB_MANAGER_VERSION / the image line in $(dirname "$COMPOSE_FILE")"
+  log "A plain 'docker compose up -d' resolves ${SERVICE} to ${resolved} (rollback is durable)."
+
+  if [[ -n "$previous_version" ]]; then
+    local live_version="" i
+    for i in 1 2 3 4 5; do
+      live_version="$(curl -sS --max-time 10 "${ENDPOINT_BASE_URL}/health/live" 2>/dev/null | _py -c 'import json,sys
+try: print(json.load(sys.stdin).get("version",""))
+except Exception: print("")' || true)"
+      [[ "$live_version" == "$previous_version" ]] && break
+      sleep 2
+    done
+    [[ "$live_version" == "$previous_version" ]] || die "/health/live reports version '${live_version}', expected the previous version '${previous_version}'"
+    log "/health/live reports version ${live_version}"
+  else
+    warn "previous image had no version label recorded -- /health/live version not compared"
+  fi
+
+  refresh_engine_plugin_if_stale
 }
 
 # ---------------------------------------------------------------------------
@@ -1300,6 +1881,7 @@ main() {
     rollback) run_rollback ;;
     offline-db-identity) run_offline_db_identity ;;
     deploy)   run_deploy ;;
+    prune-backups) run_prune_backups ;;
     *) die "unknown mode: $MODE" ;;
   esac
 }
