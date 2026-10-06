@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LibraryChanges from '../src/views/LibraryChanges';
-import { approveTransaction, getTransaction, getTransactions } from '../src/api/client';
+import { applyTransaction, approveTransaction, cancelTransaction, getTransaction, getTransactions } from '../src/api/client';
 import type { TransactionDetail } from '../src/api/types';
 
 vi.mock('../src/api/client', async (importActual) => ({
@@ -124,5 +124,64 @@ describe('LibraryChanges approve', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await screen.findByText(/no longer in Preview/);
     expect(screen.queryByText('Transaction approved.')).toBeNull();
+  });
+});
+
+describe('LibraryChanges cancel/apply refusals', () => {
+  const mockCancel = vi.mocked(cancelTransaction);
+  const mockApply = vi.mocked(applyTransaction);
+  const onUnhandled = vi.fn();
+
+  beforeEach(() => {
+    mockCancel.mockReset();
+    mockApply.mockReset();
+    onUnhandled.mockReset();
+    process.on('unhandledRejection', onUnhandled);
+  });
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled);
+    cleanup();
+  });
+
+  it('shows a 409 not_cancellable refusal and reloads the transaction', async () => {
+    await renderWith(tx({}, 'Approved'));
+    vi.mocked(getTransaction).mockClear();
+    vi.mocked(getTransactions).mockClear();
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: tx({}, 'Running') });
+    mockCancel.mockRejectedValue(Object.assign(new Error('Transaction is Running and cannot be cancelled.'), {
+      body: { code: 'not_cancellable', error: 'Transaction is Running and cannot be cancelled.' },
+      httpStatus: 409,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await screen.findByText(/Cancel refused: Transaction is Running and cannot be cancelled\./);
+    expect(screen.queryByText('Transaction cancelled.')).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    expect(getTransactions).toHaveBeenCalled();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true));
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it('shows a failed apply and reloads the transaction', async () => {
+    await renderWith(tx({}, 'Approved'));
+    vi.mocked(getTransaction).mockClear();
+    mockApply.mockRejectedValue(apiError('not_approved', 409));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await screen.findByText(/Apply refused: not_approved\./);
+    expect(screen.queryByText(/Apply job started|Transaction applied/)).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it.each(['Running', 'Completed', 'Failed', 'Cancelled', 'Rolled Back', 'Partially Rolled Back', 'Recovery Required'])(
+    'disables Cancel for %s',
+    async (status) => {
+      await renderWith(tx({}, status));
+      expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+    },
+  );
+
+  it.each(['Pending', 'Preview', 'Approved'])('enables Cancel for %s', async (status) => {
+    await renderWith(tx({}, status));
+    expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
