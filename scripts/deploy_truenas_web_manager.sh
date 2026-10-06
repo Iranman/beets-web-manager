@@ -1157,9 +1157,19 @@ restore_state_files() {
     if tree_has_symlink "${engine_src}/beetsplug" || tree_has_symlink "$ROLLBACK_DIR/beets-config/beetsplug"; then
       warn "Beets beetsplug/ (or its backup) is or contains a symbolic link -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
     else
-      [[ -d "${engine_src}/beetsplug" ]] && cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
+      # Exact restore: files the new version added must not survive the
+      # rollback (a stale module can shadow or break the old plugin). The
+      # current contents are kept under pre-rollback/ first, then cleared.
+      # Neither tree contains a link (checked above) and find -delete never
+      # follows links, so nothing outside beetsplug/ can be touched.
+      if [[ -d "${engine_src}/beetsplug" ]]; then
+        cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
+        find "${engine_src}/beetsplug" -mindepth 1 -delete
+      else
+        mkdir -p "${engine_src}/beetsplug"
+      fi
       cp -RPp -- "$ROLLBACK_DIR/beets-config/beetsplug/." "${engine_src}/beetsplug/"
-      log "Restored Beets beetsplug/ files."
+      log "Restored Beets beetsplug/ exactly as backed up (current contents kept in ${pre}/beets-config/beetsplug/)."
     fi
   fi
   chmod -R go-rwx "$pre"
@@ -1706,7 +1716,16 @@ run_rollback() {
   discover_and_verify_mounts
 
   log "Stopping ${SERVICE} for rollback..."
-  _compose stop "$SERVICE" || true
+  # A failed stop is not fatal on its own: the recreate below uses
+  # --force-recreate (which replaces a running container) and the rollback is
+  # only declared complete after the running image ID, the configured image,
+  # the Compose resolution and /health/live version are all PROVEN to be the
+  # previous release. It is reported, never hidden.
+  local stop_rc=0
+  _compose stop "$SERVICE" || stop_rc=$?
+  if [[ "$stop_rc" -ne 0 ]]; then
+    warn "'docker compose stop ${SERVICE}' failed (exit ${stop_rc}) -- continuing the rollback; the forced recreate and the image/version proof below decide whether it succeeded"
+  fi
 
   log "Restoring Compose file from backup..."
   cp "$ROLLBACK_DIR/docker-compose.yml.bak" "$COMPOSE_FILE"

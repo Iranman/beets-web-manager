@@ -2,7 +2,8 @@
 """Fake `curl` for endpoint-verification tests: serves canned JSON responses
 for the fixed set of paths the rollout script probes, honoring `-o FILE`,
 `-w FORMAT`, and reading FAKE_CURL_STATE (a JSON file: {"item_count": N,
-"fail_paths": [...], "blocking_reasons_by_image": {image_ref: [...]}}) so
+"fail_paths": [...], "blocking_reasons_by_image": {image_ref: [...]},
+"setup_status_http_by_image": {image_ref: "503"}}) so
 tests can control counts and simulate failures without a real HTTP server.
 
 /health/live and /api/setup/status answer for whatever image the fake
@@ -64,9 +65,13 @@ def main():
     fail_paths = state.get("fail_paths", [])
     item_count = state.get("item_count", 5)
 
-    if any(path.startswith(p) for p in fail_paths):
+    setup_http = ""
+    if path.startswith("/api/setup/status"):
+        ref, _version = _running_webmgr()
+        setup_http = str((state.get("setup_status_http_by_image") or {}).get(ref, ""))
+    if any(path.startswith(p) for p in fail_paths) or setup_http not in ("", "200"):
         body = json.dumps({"error": "simulated failure"})
-        status = "500"
+        status = setup_http if setup_http not in ("", "200") else "500"
     else:
         status = "200"
         if path.startswith("/api/health"):

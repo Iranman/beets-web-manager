@@ -259,6 +259,9 @@ def cmd_compose(args, state):
         return 0
 
     if sub == "stop":
+        if state.get("stop_should_fail"):
+            sys.stderr.write("Error response from daemon: simulated stop failure\n")
+            return 1
         svc = rest[-1]
         cid = state["service_containers"].get(svc)
         if cid:

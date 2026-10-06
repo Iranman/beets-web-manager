@@ -1007,6 +1007,7 @@ class EndToEndFixture(unittest.TestCase):
             "item_count": overrides.pop("curl_item_count", 3144),
             "fail_paths": overrides.pop("curl_fail_paths", []),
             "blocking_reasons_by_image": overrides.pop("curl_blocking_reasons_by_image", {}),
+            "setup_status_http_by_image": overrides.pop("curl_setup_status_http_by_image", {}),
         }
         curl_state_path = os.path.join(self.tmp, "curl_state.json")
         with open(curl_state_path, "w", encoding="utf-8") as f:
@@ -1429,6 +1430,53 @@ class RollbackProofTests(VersionedStackFixture):
         self.assertIn("after-deploy",
                       Path(self.backup_dir(), pre[0], "web-manager-data", ".env").read_text(encoding="utf-8"))
 
+    def test_rollback_restores_beetsplug_exactly_and_removes_files_the_new_version_added(self):
+        self.deploy()
+        # What a newer plugin might leave behind: a changed module and a new one.
+        self.set_provisioned_plugin("9.9.9")
+        Path(self.plugin_dir, "added_by_new_version.py").write_text("x = 1\n", encoding="utf-8")
+        os.makedirs(os.path.join(self.plugin_dir, "newpkg"))
+        Path(self.plugin_dir, "newpkg", "__init__.py").write_text("", encoding="utf-8")
+        outside = os.path.join(self.tmp, "outside-beetsplug.txt")
+        Path(outside).write_text("untouched", encoding="utf-8")
+
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(sorted(os.listdir(self.plugin_dir)), ["version.py"],
+                         "files the new version added must not survive the rollback")
+        self.assertIn('PLUGIN_VERSION = "1.2.0"',
+                      Path(self.plugin_dir, "version.py").read_text(encoding="utf-8"))
+        self.assertEqual(Path(outside).read_text(encoding="utf-8"), "untouched")
+        self.assertIn("Restored Beets beetsplug/ exactly as backed up", res.stderr)
+        pre = [n for n in os.listdir(self.backup_dir()) if n.startswith("pre-rollback-")]
+        self.assertEqual(len(pre), 1)
+        kept = os.path.join(self.backup_dir(), pre[0], "beets-config", "beetsplug", "webmanager")
+        self.assertTrue(os.path.isfile(os.path.join(kept, "added_by_new_version.py")),
+                        "the replaced plugin files are kept for inspection, not destroyed")
+
+    def test_rollback_continues_and_proves_the_outcome_when_stop_fails(self):
+        self.deploy()
+        st = self.load_state()
+        st["stop_should_fail"] = True
+        self.save_state(st)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("'docker compose stop beets-web-manager' failed (exit 1)", res.stderr)
+        self.assertIn("continuing the rollback", res.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+        self.assertIn("/health/live reports version 0.1.2", res.stderr)
+
+    def test_rollback_with_failed_stop_still_fails_when_the_proof_fails(self):
+        self.deploy()
+        st = self.load_state()
+        st["stop_should_fail"] = True
+        st["up_should_fail"] = True
+        self.save_state(st)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("'docker compose stop beets-web-manager' failed", res.stderr)
+        self.assertNotIn("Rollback complete", res.stderr)
+
 
 class BackupContentTests(VersionedStackFixture):
     def test_backup_holds_state_and_beets_config_but_never_the_library_db(self):
@@ -1585,6 +1633,34 @@ class SetupStatusGateTests(VersionedStackFixture):
     def test_blocking_reason_that_already_existed_does_not_fail_the_deploy(self):
         reason = "Music library path /music is not accessible"
         self.deploy(curl_blocking_reasons_by_image={self.OLD_IMAGE: [reason], self.GOOD_IMAGE: [reason]})
+
+    def test_unreadable_status_before_makes_any_blocking_reason_fail_the_deploy(self):
+        reason = "Music library path /music is not accessible"
+        res = self.run_script(env=self.env(
+            curl_setup_status_http_by_image={self.OLD_IMAGE: "503"},
+            curl_blocking_reasons_by_image={self.OLD_IMAGE: [reason], self.GOOD_IMAGE: [reason]}))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("could not read /api/setup/status before the deploy", res.stderr)
+        self.assertIn(f"NEW setup blocking reason after deploy: {reason}", res.stderr)
+        self.assertIn("--rollback", res.stderr)
+
+    def test_unreadable_status_before_with_clean_status_after_succeeds(self):
+        res = self.deploy(curl_setup_status_http_by_image={self.OLD_IMAGE: "503"})
+        self.assertIn("could not read /api/setup/status before the deploy", res.stderr)
+        self.assertIn("No new setup blocking reasons.", res.stderr)
+
+    def test_status_not_200_after_the_deploy_fails_with_rollback_guidance(self):
+        res = self.run_script(env=self.env(curl_setup_status_http_by_image={self.GOOD_IMAGE: "503"}))
+        self.assertNotEqual(res.returncode, 0)
+        # Endpoint verification (which probes /api/setup/status and expects
+        # 200) runs before the blocking-reason gate, so it is the stage that
+        # fails; either way the deploy must stop with rollback guidance.
+        self.assertIn("/api/setup/status attempt 1: HTTP 503 (expected 200)", res.stderr)
+        self.assertIn("Failed stage:          endpoint-verification", res.stderr)
+        self.assertNotIn("No new setup blocking reasons.", res.stderr)
+        self.assertIn("--rollback", res.stderr)
+        self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.2", Path(self.stack_env).read_text(encoding="utf-8"),
+                      "an unverified version must not be persisted to .env")
 
 
 class EnginePluginRefreshTests(VersionedStackFixture):
