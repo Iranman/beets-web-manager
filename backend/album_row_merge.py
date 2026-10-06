@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import backend.album_duplicate_analysis as album_duplicate_analysis
 from backend.beets_adapter import BeetsAdapter, beets_adapter
 from backend.composite_workflows import _decode_path, _get_store, _s
-from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+from backend.resource_locks import approve_preview, attempt_owner, claim_approved, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
 ALBUM_ROW_MERGE_FAMILY = "album_row_merge_v1"
@@ -216,7 +216,8 @@ def approve_and_apply(operation_id: str, *, approved_by: str, adapter: Optional[
     merge request, an import the operator started)."""
     st = _get_store(store)
     try:
-        st.update(operation_id, status="Approved", metadata={"approved_by": _s(approved_by)})
+        if approve_preview(st, operation_id, _s(approved_by)) is None:
+            return _fail("not_preview", "Only a Preview transaction can be approved; it was cancelled or already finished.")
     except KeyError:
         return _fail("not_found", "Transaction not found")
     return apply_album_row_merge(operation_id, adapter=adapter, store=store)

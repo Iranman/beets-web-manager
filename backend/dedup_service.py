@@ -37,6 +37,7 @@ from backend.maintenance_service import _library_health_payload, _maintenance_ex
 
 import backend.dedup_authorization as _dedup_authorization
 import backend.duplicate_cleanup as _duplicate_cleanup
+from backend.resource_locks import approve_preview
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
 
 # ── ARCH-001 extracted code ──
@@ -863,10 +864,11 @@ def run_dedup_cleanup(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason="Manual duplicate cleanup") if pairs else             {"ok": False, "skipped": []}
         applied: Dict[str, Any] = {}
         if plan.get("ok"):
-            composite_workflows.get_default_store().update(
-                plan["operation_id"], status="Approved",
-                metadata={"approved_by": "manual duplicate cleanup request (confirmed after preview)"})
-            applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
+            # A plan cancelled before approval is never resurrected (#206 F4):
+            # nothing is applied and every path reports "left in place".
+            if approve_preview(composite_workflows.get_default_store(), plan["operation_id"],
+                               "manual duplicate cleanup request (confirmed after preview)") is not None:
+                applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
     except BeetsUnavailableError as ex:
         return {"ok": False, "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
                 "code": getattr(ex, "error_code", "") or "beets_unavailable", "dry_run": False}, 503
@@ -1405,8 +1407,11 @@ def _unattended_reviewed_cleanup(proposal: List[Dict[str, Any]], log: List[str])
     if not plan.get("ok"):
         return {"ok": True, "deleted": 0, "skipped": len(pairs), "folders_removed": 0, "results": []}
     op_id = plan["operation_id"]
-    composite_workflows.get_default_store().update(
-        op_id, status="Approved", metadata={"approved_by": "unattended duplicate deletion authorization"})
+    if approve_preview(composite_workflows.get_default_store(), op_id,
+                       "unattended duplicate deletion authorization") is None:
+        log.append(f"[duplicates] Reviewed cleanup {op_id} is no longer a Preview (cancelled?); nothing applied.")
+        return {"ok": False, "deleted": 0, "skipped": len(pairs), "folders_removed": 0, "operation_id": op_id,
+                "results": []}
     applied = _duplicate_cleanup.apply_reviewed_cleanup(op_id)
     removed = applied.get("removed") or []
     log.append(f"[duplicates] Reviewed cleanup {op_id}: {len(removed)} file(s) quarantined "

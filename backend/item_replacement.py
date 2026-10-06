@@ -167,5 +167,11 @@ def approve_and_apply(operation_id: str, *, approved_by: str,
     Only for callers that already hold a human decision for this exact
     replacement (e.g. a reviewer resolving a reconciliation review)."""
     st = composite_workflows._get_store(store)
-    st.update(operation_id, status="Approved", metadata={"approved_by": _s(approved_by)})
+    from backend.resource_locks import approve_preview
+    try:
+        approved = approve_preview(st, operation_id, _s(approved_by))
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    if approved is None:
+        return {"ok": False, "code": "not_preview", "error": "Only a Preview transaction can be approved; it was cancelled or already finished."}
     return composite_workflows.apply_track_replacement(operation_id, adapter=adapter, store=store)

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, ALBUM_FOLDER_CLEANUP_LAST_FILE, AUDIO_EXT, DOWNLOADS_ROOT, METADATA_CACHE_ROOT, MUSIC_ROOT, RGID_RESOLUTION_STATE_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _s
 from backend.app_runtime import _normalize_name, _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _path_under, _safe_path_component, _same_resolved_path
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
+from backend.resource_locks import ResourceLockConflictError
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import AUDIO_EXTS
 from backend.artwork_service import _ART_EXTS
@@ -475,6 +476,45 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
     if any(signal in lowered for signal in stale_signals):
         return "stale_plan", "The album changed after this cleanup plan was created. Nothing was changed. Generate a new plan to continue."
     return "other", raw_error
+
+
+def album_cleanup_apply_response(operation_id: str) -> Tuple[Dict[str, Any], int]:
+    """Apply an Approved album cleanup and map the outcome to (JSON body,
+    HTTP status) for both apply routes (/api/albums/cleanup/apply and the
+    generic /api/transactions/<id>/apply, PR #204 QA F-B).
+
+    A failure result carries the classified ``error_kind``/message. A raised
+    exception never echoes its text (it can carry paths or raw engine
+    bodies); ``mutated: False`` is reported only when the transaction is
+    provably untouched (still Approved, so the apply never claimed it)."""
+    try:
+        res = composite_workflows.apply_album_cleanup(operation_id)
+    except Exception as ex:
+        try:
+            untouched = composite_workflows.get_default_store().get(operation_id).get("status") == "Approved"
+        except Exception:
+            untouched = False
+        body: Dict[str, Any] = {"ok": False, "error_kind": "other", **({"mutated": False} if untouched else {})}
+        if isinstance(ex, BeetsUnavailableError):
+            return {**body, "code": getattr(ex, "error_code", "") or "beets_unavailable",
+                    "error": "Beets engine is unavailable."}, 503
+        if isinstance(ex, BeetsError):
+            return {**body, "code": getattr(ex, "error_code", "") or "beets_error",
+                    "error": "The engine refused the album cleanup."}, 400
+        if isinstance(ex, (ResourceLockConflictError, TimeoutError)) and untouched:
+            return {**body, "code": "resource_busy",
+                    "error": "Another operation is using this album; nothing was changed. Try again shortly."}, 409
+        _app_logger.exception("album cleanup apply failed (%s)", type(ex).__name__)
+        return {**body, "code": "apply_failed", "error": "Album cleanup apply failed."}, 500
+    if res.get("ok"):
+        return res, 200
+    kind, message = _classify_album_cleanup_apply_failure(res)
+    # error_kind is the authoritative UI signal; "stale_plan" (the only kind
+    # ever shown as "nothing was changed") comes only from the engine's own
+    # "mutated" flag (see _classify_album_cleanup_apply_failure).
+    status = 409 if res.get("code") in ("not_approved", "already_applied") else 400
+    return {"ok": False, "code": res.get("code"), "error": message, "error_kind": kind,
+            "mutated": bool(res.get("mutated")), "log": res.get("log", [])}, status
 
 
 def _artist_alias_key(value: str) -> str:

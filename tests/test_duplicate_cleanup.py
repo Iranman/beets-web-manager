@@ -348,8 +348,9 @@ class UnattendedAndManualPathTests(unittest.TestCase):
             out = ds._unattended_reviewed_cleanup(
                 [{"action": "delete", "delete": {"item_id": 2, "path": "/music/a.flac"}, "keep": {"item_id": 1}}], [])
         plan.assert_called_once()
-        store.update.assert_called_once_with("tx1", status="Approved",
-                                             metadata={"approved_by": "unattended duplicate deletion authorization"})
+        store.transition.assert_called_once_with(
+            "tx1", "Preview", "Approved", metadata={"approved_by": "unattended duplicate deletion authorization"})
+        store.update.assert_not_called()
         apply_.assert_called_once_with("tx1")
         self.assertEqual(out["deleted"], 1)
 

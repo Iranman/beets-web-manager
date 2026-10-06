@@ -218,13 +218,18 @@ def _start_metadata_apply_transaction(transaction_id: str):
         raise ValueError("Metadata transaction is missing item id.")
     fields = _metadata_transaction_pending_fields(tx)
     if not fields:
-        transactions.update(transaction_id, status="Completed", dry_run=False, counts={"items": 0, "changes": 0})
+        if transactions.transition(transaction_id, "Approved", "Completed", dry_run=False,
+                                   counts={"items": 0, "changes": 0}) is None:
+            raise ValueError("The transaction is no longer Approved; nothing was applied.")
         return None
     changed_fields = [str(v) for v in (metadata.get("changed_fields") or list(fields.keys()))]
     parts = [f"{k}={v}" for k, v in fields.items()]
 
     def _do(log, cancel_event=None):
-        transactions.update(transaction_id, status="Running", dry_run=False)
+        # Compare-and-set (#206 F3): a cancel that landed after the route's
+        # status check wins; the job then applies nothing.
+        if transactions.transition(transaction_id, "Approved", "Running", dry_run=False) is None:
+            raise RuntimeError("The transaction is no longer Approved (cancelled?); nothing was applied.")
         try:
             result = composite_workflows.update_item_metadata(item_id, fields)
             _require_attach_stage_success(result, "metadata update")

@@ -594,7 +594,13 @@ def apply_existing_album_reconcile(
     def _apply_cleanup(cleanup_id: str) -> Dict[str, Any]:
         if not approve_duplicates:
             return {"ok": True, "operation_id": cleanup_id, "status": "Preview", "awaiting_approval": True}
-        st.update(cleanup_id, status="Approved", metadata={"approved_by": _s(approved_by)})
+        from backend.resource_locks import approve_preview
+        try:
+            approved = approve_preview(st, cleanup_id, _s(approved_by))
+        except KeyError:
+            return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+        if approved is None:
+            return {"ok": False, "code": "not_preview", "error": "Only a Preview transaction can be approved; it was cancelled or already finished."}
         return duplicate_cleanup.apply_reviewed_cleanup(cleanup_id, adapter=adapter, store=store)
 
     if meta.get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
