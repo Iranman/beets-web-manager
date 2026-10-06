@@ -253,9 +253,12 @@ def _maintenance_safe_folder_renames(rows: List[Dict[str, Any]], log: List[str],
                 skipped += 1
                 log.append(f"  [folder-safe-rename] skipped existing target: {target}")
                 continue
-            res = composite_workflows.move_file(str(source), str(target))
+            # Library folders are renamed only through the folder_cleanup_v1
+            # engine (audited, rollback-capable); move_file is staging-only.
+            res = composite_workflows.safe_rename_library_folder(
+                str(source), str(target), approved_by="Clean All folder safe rename")
             if not res.get("ok"):
-                raise RuntimeError(res.get("error") or "move failed")
+                raise RuntimeError(f"{res.get('code')}: {res.get('error') or 'rename failed'}")
             renamed += 1
             if len(examples) < 20:
                 examples.append({"source": str(source), "target": str(target)})

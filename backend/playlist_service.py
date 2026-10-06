@@ -6480,15 +6480,21 @@ def _playlist_run_quality_cleanup_job(action: str,
                     f"{result.get('reason') or 'unknown reason'}",
                 )
     elif action == "delete_preview":
+        # S1: rows-only. The operator's delete_preview action authorises the
+        # removal of these library rows; media files are kept on disk.
         try:
-            plan_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": candidate_ids})
-            if plan_res.get("ok"):
-                op_id = plan_res["operation_id"]
-                apply_res = composite_workflows.apply_playlist_media_cleanup(op_id)
-                if apply_res.get("ok"):
-                    files_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
-                    rows_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
-                    _playlist_log(log, f"[playlist] Quality cleanup transaction applied: {op_id}")
+            apply_res = composite_workflows.remove_item_rows_keep_files(
+                candidate_ids, reason="playlist quality cleanup",
+                approved_by="operator playlist delete_preview")
+            rows_deleted = len(apply_res.get("deleted_items") or [])
+            files_deleted = 0
+            if apply_res.get("ok"):
+                _playlist_log(log, f"[playlist] Quality cleanup transaction applied: "
+                                   f"{apply_res.get('operation_id')} ({rows_deleted} row(s) removed, files kept)")
+            else:
+                _playlist_log(log, f"[playlist] Quality cleanup transaction incomplete: "
+                                   f"{apply_res.get('error') or apply_res.get('status')} "
+                                   f"({rows_deleted} of {len(candidate_ids)} row(s) removed)")
         except Exception as ex:
             _playlist_log(log, f"[playlist] Quality cleanup transaction failed: {ex}")
 

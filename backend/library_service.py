@@ -622,7 +622,6 @@ def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) ->
 
     Returns True if anything was deleted.
     """
-    import shutil as _shutil
 
     output_lower = beet_output.lower()
     _already_phrases = ("already in the library", "already in library",
@@ -636,7 +635,7 @@ def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) ->
         resolved = str(src.resolve())
     except Exception:
         resolved = str(src)
-    if resolved.startswith(_MUSIC_LIBRARY_ROOT):
+    if _path_is_under(Path(resolved), MUSIC_ROOT):
         return False
     if _preserve_torrent_source_path(src):
         log.append(
@@ -644,7 +643,7 @@ def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) ->
             f"(qBittorrent-safe): {src}"
         )
         return False
-    is_safe = any(resolved.startswith(r) for r in _DOWNLOADS_ROOTS)
+    is_safe = any(_path_is_under(Path(resolved), Path(r)) for r in _DOWNLOADS_ROOTS)
     if not is_safe:
         log.append(f"  [cleanup] Skipped (path not under downloads root): {src}")
         return False
@@ -673,17 +672,29 @@ def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) ->
                 sub_resolved = str(sub.resolve())
             except Exception:
                 sub_resolved = str(sub)
-            if (sub_resolved.startswith(tuple(_DOWNLOADS_ROOTS))
-                    and not sub_resolved.startswith(_MUSIC_LIBRARY_ROOT)):
+            if (any(_path_is_under(Path(sub_resolved), Path(r)) for r in _DOWNLOADS_ROOTS)
+                    and not _path_is_under(Path(sub_resolved), MUSIC_ROOT)):
                 folders_to_delete.add(str(sub))
 
-    for folder in folders_to_delete:
+    def _delete_staging_folder(folder) -> bool:
+        # Resolve once against the staging roots (never the library, a
+        # staging root itself, protected data, or a symlink), then re-check
+        # with lstat right before deleting (S1/F3). Failures are reported,
+        # never swallowed.
         try:
-            _shutil.rmtree(folder, ignore_errors=True)
+            target = composite_workflows._validated_staging_target(folder, "delete")
+            if _path_is_under(target, MUSIC_ROOT):
+                raise ValueError(f"Refusing to delete inside the music library: {folder}")
+            composite_workflows._remove_resolved(target)
+            return True
+        except (OSError, ValueError) as ex:
+            log.append(f"  [cleanup] Not deleted {Path(str(folder)).name}: {ex}")
+            return False
+
+    for folder in folders_to_delete:
+        if _delete_staging_folder(folder):
             log.append(f"  [cleanup] Deleted (already in library): {Path(folder).name}")
             deleted_any = True
-        except Exception as ex:
-            log.append(f"  [cleanup] Warning deleting {folder}: {ex}")
 
     # Strategy 2: if no specific folders were found and src DIRECTLY contains
     # audio files (i.e. it IS a leaf album folder), delete it.
@@ -693,8 +704,7 @@ def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) ->
         try:
             direct_audio = [f for f in src.iterdir()
                             if f.is_file() and f.suffix.lower() in audio_exts]
-            if direct_audio:
-                _shutil.rmtree(str(src), ignore_errors=True)
+            if direct_audio and _delete_staging_folder(src):
                 log.append(f"  [cleanup] Deleted source (already in library): {src.name}")
                 deleted_any = True
         except Exception as ex:
@@ -739,23 +749,14 @@ def _delete_album_ids_from_db(album_ids: list, log: list, *,
 
 
 def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list) -> int:
-    """Delete DB items for one album whose files are still under a staging folder.
+    """Remove the DB rows of one album's items whose files are still under a
+    failed staging folder.
 
-    Wave 25 round (independent review): this previously (1) deleted each
-    item's media file via the generic, DB-unaware composite_workflows.delete_file()
-    -- which /files/delete will happily perform on a real library-root
-    path, with no Plan/Apply/Verify/rollback -- and then (2) called
-    plan_folder_cleanup(action="delete_stale_items", item_ids=...), a
-    payload shape folder_cleanup_v1's Plan never actually reads (it only
-    recognizes remove_empty/safe_rename/merge_source_files and silently
-    no-ops on anything else). The Apply therefore always "succeeded" while
-    never deleting a single DB row -- these items' files were removed but
-    their `items` rows stayed behind, pointing at now-missing paths
-    (silent DB/filesystem divergence), while the log falsely reported them
-    removed. playlist_media_cleanup_v1 already exists specifically for
-    "quarantine these items' files and retire their DB rows (and any
-    album row left with zero items) as one transaction" -- use it instead
-    of hand-rolling file deletion + a no-op transaction."""
+    Rows only: the files are NOT deleted or quarantined here (S1). The
+    removal is a ``playlist_media_cleanup_v1`` rows-only transaction that is
+    approved on behalf of the failed-import cleanup that called this, then
+    claimed, locked and verified like every other apply. Returns the number
+    of rows actually removed."""
     if not album_id or not folder_path:
         return 0
     folder = Path(folder_path).resolve(strict=False)
@@ -786,17 +787,20 @@ def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list)
     if not delete_ids:
         return 0
     try:
-        p_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": delete_ids})
-        if not p_res.get("ok") or not p_res.get("operation_id"):
-            raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for staged items")
-        app_res = composite_workflows.apply_playlist_media_cleanup(p_res["operation_id"])
-        if not app_res.get("ok"):
-            raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for staged items")
+        app_res = composite_workflows.remove_item_rows_keep_files(
+            delete_ids, reason=f"failed staged import rows (album {int(album_id)})",
+            approved_by="failed-import cleanup")
     except Exception as ex:
         log.append(f"  Staged-file DB cleanup warning: {ex}")
         return 0
-    log.append(f"  Removed {len(delete_ids)} failed staged DB item(s)")
-    return len(delete_ids)
+    removed = list(app_res.get("deleted_items") or [])
+    if not app_res.get("ok"):
+        log.append(
+            f"  Staged-file DB cleanup incomplete: removed {len(removed)} of {len(delete_ids)} row(s): "
+            f"{app_res.get('error') or app_res.get('status')}")
+        return len(removed)
+    log.append(f"  Removed {len(removed)} failed staged DB item(s) (files kept)")
+    return len(removed)
 
 
 def _strip_year_from_album_name(aid: int, log: list) -> str:
@@ -1461,12 +1465,16 @@ def _delete_review_source_folder(src_path: str, log: list,
         raise ValueError(plan_res.get("error", "Failed to create folder deletion plan."))
 
     op_id = plan_res.get("operation_id")
-    apply_res = composite_workflows.apply_import_review_cleanup(op_id)
-    if not apply_res.get("ok"):
-        raise ValueError(apply_res.get("error", "Failed to apply folder deletion plan."))
-
+    if plan_res.get("library_paths_quarantined"):
+        log.append("  Folder is inside the music library: its files are quarantined, not deleted.")
+    apply_res = composite_workflows.apply_import_review_cleanup(
+        op_id, approved_by="operator request (review source folder delete)")
     for l in apply_res.get("log", []):
         log.append(f"  {l}")
+    if not apply_res.get("ok"):
+        raise ValueError(
+            f"{apply_res.get('error', 'Failed to apply folder deletion plan.')} "
+            f"(status {apply_res.get('status')}, operation {op_id})")
 
     try:
         _remove_pending_review_for_path(src_path, log)
@@ -1474,11 +1482,13 @@ def _delete_review_source_folder(src_path: str, log: list,
         log.append(f"  Pending Review cleanup warning: {ex}")
 
     deleted_files = apply_res.get("deleted", [])
+    moved_files = apply_res.get("moved", [])
     return {
         "operation_id": op_id,
         "deleted": deleted_files,
-        "files_removed": len(deleted_files),
-        "status": "Completed",
+        "quarantined": moved_files,
+        "files_removed": len(deleted_files) + len(moved_files),
+        "status": apply_res.get("status") or "Completed",
     }
 
 

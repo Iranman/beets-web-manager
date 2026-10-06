@@ -91,8 +91,10 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn("composite_workflows.apply_folder_cleanup(", src)
 
     def test_app_delegates_playlist_media_cleanup_to_beets_client(self):
-        self.assertIn("composite_workflows.plan_playlist_media_cleanup(", self.app_source)
-        self.assertIn("composite_workflows.apply_playlist_media_cleanup(", self.app_source)
+        # S1: callers use the rows-only wrapper, which plans, approves and
+        # applies playlist_media_cleanup_v1 through the engine (files kept).
+        self.assertIn("composite_workflows.remove_item_rows_keep_files(", self.app_source)
+        self.assertNotIn("composite_workflows.apply_playlist_media_cleanup(", self.app_source)
 
     def test_app_delegates_album_maintenance_to_beets_client(self):
         self.assertIn("composite_workflows.plan_album_maintenance(", self.app_source)

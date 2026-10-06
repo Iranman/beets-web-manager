@@ -1,8 +1,7 @@
 """QA regressions for PR #174 (Wave 0 S1 containment).
 
-Tests marked expectedFailure document open Wave 0 defects found during
-independent QA; they must flip to passing (remove the decorator) once the
-owning fix lands. The other tests pin contracts PR #174 introduced.
+These tests pin defects found during independent QA of Wave 0 and the
+contracts PR #174 introduced. All of them must pass; none is expected to fail.
 """
 
 import os
@@ -42,7 +41,6 @@ class _Env(unittest.TestCase):
 
 
 class PlaylistMediaCleanupTests(_Env):
-    @unittest.expectedFailure  # QA-174-F1: unapproved apply deletes media files
     def test_unapproved_preview_never_deletes_media_files(self):
         ad = RecordingAdapter()
         plan = cw.plan_playlist_media_cleanup({"item_ids": [1, 2]}, adapter=ad, store=self.store)
@@ -54,7 +52,6 @@ class PlaylistMediaCleanupTests(_Env):
         self.assertFalse(any(c["delete_files"] for c in ad.remove_calls),
                          "Preview-only playlist media cleanup must not delete files")
 
-    @unittest.expectedFailure  # QA-174-F1: second apply repeats the removal
     def test_apply_is_not_repeatable(self):
         ad = RecordingAdapter()
         plan = cw.plan_playlist_media_cleanup({"item_ids": [3]}, adapter=ad, store=self.store)
@@ -68,7 +65,6 @@ class PlaylistMediaCleanupTests(_Env):
 
 
 class ImportReviewCleanupTests(_Env):
-    @unittest.expectedFailure  # QA-174-F4 / LT-12: reports Completed when nothing was removed
     def test_failed_cleanup_is_not_reported_completed(self):
         folder = self.dl / "Album"
         folder.mkdir()

@@ -2066,9 +2066,15 @@ def album_deduplicate(aid):
                 dedup_result["operation_id"] = plan["operation_id"]
                 if confirm_apply:
                     store = composite_workflows.get_default_store()
-                    store.transition(plan["operation_id"], "Preview", "Approved",
-                                     metadata={"approved_by": "operator confirmed album deduplicate"})
+                    if store.transition(plan["operation_id"], "Preview", "Approved",
+                                        metadata={"approved_by": "operator confirmed album deduplicate"}) is None:
+                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} changed state before it "
+                                           "could be approved; nothing was quarantined.")
                     applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
+                    if not applied.get("ok"):
+                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} did not apply "
+                                           f"({applied.get('status') or applied.get('code')}): "
+                                           f"{applied.get('error') or 'see transaction log'}")
                     dedup_result.update(applied=bool(applied.get("ok")),
                                         quarantined=len(applied.get("removed") or []))
                     log.append(f"  Quarantined {dedup_result['quarantined']} proven duplicate(s) "
@@ -2312,7 +2318,11 @@ def apply_album_cleanup_route():
         if meta.get("delete_files") and                 payload.get("confirm_delete_files") != composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION:
             return jsonify({"ok": False, "code": "confirmation_required", "error_kind": "other", "mutated": False,
                             "error": "This plan deletes files; confirm_delete_files is required."}), 400
-        store.transition(op_id, "Preview", "Approved", metadata={"approved_by": "operator apply (album cleanup)"})
+        if store.transition(op_id, "Preview", "Approved",
+                            metadata={"approved_by": "operator apply (album cleanup)"}) is None:
+            return jsonify({"ok": False, "code": "not_preview", "error_kind": "other", "mutated": False,
+                            "error": "The cleanup plan changed state before it could be approved; "
+                                     "nothing was changed."}), 409
 
     try:
         res = composite_workflows.apply_album_cleanup(op_id)
@@ -3768,7 +3778,8 @@ def library_mbsync_all():
             if cancel_event and cancel_event.is_set():
                 log.append("[cancelled]"); return
             try:
-                res = composite_workflows.delete_album(oid, delete_files=True)
+                # Empty orphan rows only; delete_album never deletes files.
+                res = composite_workflows.delete_album(oid, delete_files=False)
                 if res.get("ok"):
                     pruned += 1
                 else:

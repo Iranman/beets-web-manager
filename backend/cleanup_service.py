@@ -730,12 +730,19 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
     failures = 0
     results = []
     for rec in sorted(filtered, key=lambda r: len(Path(r["path"]).parts), reverse=True):
-        folder = Path(rec["path"])
+        raw_folder = Path(rec["path"])
         results.append({**rec, "removed": False, "dry_run": dry_run})
         refusal = None
-        if _path_under(_resolved_path(folder), music_res) or not composite_workflows._is_safe_staging_path(folder):
-            refusal = "outside the staging roots, inside the music library, or behind a symlink"
-        else:
+        folder = raw_folder
+        # Resolve ONCE (S1/F3); every later check and the delete itself use
+        # this resolved path, and the delete re-checks it with lstat.
+        try:
+            folder = composite_workflows._validated_staging_target(raw_folder, "delete")
+        except (ValueError, OSError):
+            refusal = "outside the staging roots, a staging root itself, protected data, or behind a symlink"
+        if refusal is None and (folder == music_res or _path_under(folder, music_res)):
+            refusal = "inside the music library"
+        if refusal is None:
             refusal = _no_audio_tree_still_safe(folder)
         if refusal:
             failures += 1
@@ -750,7 +757,7 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
             log.append(f"  Would delete folder tree: {folder}")
             continue
         try:
-            shutil.rmtree(folder)
+            composite_workflows._remove_resolved(folder)
             removed += 1
             files_removed += int(rec.get("files") or 0)
             bytes_removed += int(rec.get("bytes") or 0)
@@ -856,7 +863,8 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
     for item in res.get("orphaned_items") or []:
         iid = item.get("id")
         label = f"{_s(item.get('artist'))} - {_s(item.get('title'))}".strip(" -")
-        log.append(f"  {'Would remove' if dry_run else 'Removed'} row of missing file id={iid}: {label}")
+        verb = "Would remove" if dry_run else ("Removed" if res.get("ok") else "Did not remove")
+        log.append(f"  {verb} row of missing file id={iid}: {label}")
     for row in skipped_rows:
         log.append(f"  Kept item id={row.get('id')}: {row.get('reason')}")
 

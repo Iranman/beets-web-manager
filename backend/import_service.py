@@ -16,7 +16,7 @@ from backend.pending_review_store import _library_album_ids_for_folder, _queue_f
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
-from backend.cleanup_service import _clean_template_token_stem, _cleanup_template_tokens_for_album
+from backend.cleanup_service import _cleanup_template_tokens_for_album
 from backend.app_runtime import _path_is_under, _safe_path_component
 from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing, missing_wanted_tracks_block_retag as _guard_missing_wanted_tracks_block_retag
@@ -162,19 +162,23 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
             )
         if not delete_ids:
             return 0
-        p_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": delete_ids})
-        if not p_res.get("ok") or not p_res.get("operation_id"):
-            raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for stale wanted rows")
-        app_res = composite_workflows.apply_playlist_media_cleanup(p_res["operation_id"])
+        # Rows whose files are already missing: rows-only removal, files are
+        # never touched (S1). Authorised by the operator's import request.
+        app_res = composite_workflows.remove_item_rows_keep_files(
+            delete_ids, reason="stale wanted rows before re-import",
+            approved_by="operator import request (stale missing rows)")
+        removed = list(app_res.get("deleted_items") or [])
         if not app_res.get("ok"):
-            raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for stale wanted rows")
+            raise RuntimeError(
+                (app_res.get("error") or "stale wanted-row removal did not complete")
+                + f" (removed {len(removed)} of {len(delete_ids)}; operation {app_res.get('operation_id')})")
         label_text = ", ".join(labels[:5])
         log.append(
             "  [import] Removed "
-            f"{len(delete_ids)} stale missing DB row(s) before duplicate check"
+            f"{len(removed)} stale missing DB row(s) before duplicate check (files untouched)"
             + (f": {label_text}" if label_text else "")
         )
-        return len(delete_ids)
+        return len(removed)
     except Exception as ex:
         log.append(f"  [import] WARN stale wanted-row cleanup skipped: {ex}")
         return 0
@@ -1154,41 +1158,33 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         "refusing full library folder re-import."
                     )
 
-        # ── Step 0a: Pre-rename files with beets template tokens in their names ──
-        # Files like "Artist - Album - %02i{$track} - Title.flac" are a sign of
-        # a previous failed rename. Strip the template token so beet import can
-        # process them cleanly.  (beet import matches by audio fingerprint / tags,
-        # not by filename, so renaming here doesn't break anything.)
-        renamed_count = 0
+        # ── Step 0a: Template-token file names (report only) ──────────────────
+        # Files like "Artist - Album - %02i{$track} - Title.flac" are left over
+        # from a previous failed rename. This step used to rename them in place
+        # with a raw filesystem move; since S1 (LT-13) raw moves are refused
+        # inside the music library and no engine family renames files ahead of
+        # an import, so the rename is NOT performed. beet import matches by
+        # tags/fingerprint, not by file name, and the import's own move/rename
+        # gives the files their final template names.
         try:
-            for f in sorted(Path(aldir).iterdir()):
-                if not f.is_file(): continue
-                if f.suffix.lower() not in AUDIO_EXT: continue
-                if _UNRESOLVED_TEMPLATE_TOKEN_RE.search(f.stem):
-                    new_stem = _clean_template_token_stem(f.stem)
-                    if not new_stem:
-                        continue
-                    new_name = new_stem + f.suffix
-                    new_path = f.parent / new_name
-                    if new_path != f:
-                        # Avoid collision: if target exists, append a suffix
-                        base_new, ext_new = new_path.stem, new_path.suffix
-                        n = 1
-                        while new_path.exists():
-                            new_path = f.parent / f"{base_new}.{n}{ext_new}"
-                            n += 1
-                        composite_workflows.move_file(str(f), str(new_path))
-                        log.append(f"  Pre-rename: {f.name!r} → {new_path.name!r}")
-                        renamed_count += 1
+            token_files = [
+                f.name for f in sorted(Path(aldir).iterdir())
+                if f.is_file() and f.suffix.lower() in AUDIO_EXT
+                and _UNRESOLVED_TEMPLATE_TOKEN_RE.search(f.stem)
+            ]
         except Exception as ex:
-            log.append(f"  Pre-rename warning: {ex}")
-        if renamed_count:
-            log.append(f"  → {renamed_count} file(s) pre-renamed to remove template tokens")
+            token_files = []
+            log.append(f"  Template-token scan warning: {ex}")
+        if token_files:
+            log.append(
+                f"  Pre-rename skipped (not_supported): {len(token_files)} file(s) carry unresolved "
+                "template tokens; raw renames are disabled for library safety -- beet import will "
+                "rename them to the configured template.")
 
-        # ── Step 0b: Remove ALL beets entries pointing into this folder ─────────
-        # Only do this for new/unowned folders.  Existing albums are preserved
-        # until after the selected MB release has passed preflight; deleting the
-        # current rows first can lose a valid library album when the MBID is wrong.
+        # ── Step 0b: Existing DB rows for this folder ─────────────────────────
+        # Existing albums are preserved until after the selected MB release has
+        # passed preflight; deleting the current rows first can lose a valid
+        # library album when the MBID is wrong.
         if existing_album_id:
             log.append(
                 f"  Existing album repair: preserving current DB rows for album_id {existing_album_id}"
@@ -1197,35 +1193,13 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 _prune_stale_wanted_rows_before_import(
                     existing_album_id, mb_albumid, wanted_tracks, log)
         else:
-            try:
-                res0 = composite_workflows.resolve_folder_to_albums(aldir)
-                orphan_ids: list = [int(x) for x in res0.get("item_ids", [])]
-                orphan_album_ids: set = {int(x) for x in res0.get("album_ids", [])}
-                if orphan_ids:
-                    # Wave 25 round (independent review): plan_folder_cleanup's
-                    # Plan never reads action="delete_stale_items" or
-                    # item_ids at all (folder_cleanup_v1 only recognizes
-                    # remove_empty/safe_rename/merge_source_files) -- this
-                    # always produced a no-op transaction that reported
-                    # success without deleting a single orphan DB row.
-                    # playlist_media_cleanup_v1 is the real family for
-                    # "quarantine these items' files (if still present) and
-                    # retire their DB rows -- and any album row left empty
-                    # -- as one transaction."
-                    p_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": orphan_ids})
-                    if not p_res.get("ok") or not p_res.get("operation_id"):
-                        raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for orphan items")
-                    app_res = composite_workflows.apply_playlist_media_cleanup(p_res["operation_id"])
-                    if not app_res.get("ok"):
-                        raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for orphan items")
-                    log.append(f"  Cleared {len(orphan_ids)} existing DB item(s) for this folder "
-                               f"(album_ids: {sorted(orphan_album_ids)})")
-                # Remove album rows that now have zero items
-                for aid0 in orphan_album_ids:
-                    # Row-only removal of an album row left empty (never files).
-                    composite_workflows.delete_album(int(aid0), delete_files=False)
-            except Exception as ex:
-                log.append(f"  DB cleanup warning: {ex}")
+            # S1: the former "clear every orphan row in this folder" block
+            # never worked (resolve_folder_to_albums returns a list of album
+            # ids, so it always raised and logged a warning) and its comment
+            # wrongly claimed it quarantined files. It is not performed;
+            # rows are only ever removed through an approved rows-only
+            # transaction.
+            log.append("  Orphan DB-row pre-cleanup for unowned folders: not performed (not_supported)")
 
         # Uses the engine-supplied evidence captured at request time (see
         # import_source_evidence above), not a local scan -- this route's

@@ -681,7 +681,22 @@ def api_transaction_approve(transaction_id):
     """Approve a Preview transaction (compare-and-set, LT-16). Any other
     status -- Completed, Failed, Rolled Back, Cancelled, Running, Recovery
     Required, or already Approved -- is refused, so a finished or failed
-    mutation can never be re-opened and applied again."""
+    mutation can never be re-opened and applied again.
+
+    An album cleanup plan that deletes the album's files additionally needs
+    the explicit phrase in the body (confirm_delete_files="DELETE ALBUM
+    FILES"); approving it here is otherwise refused, never implied (F5)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        current_tx = transactions.get(transaction_id)
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    meta = current_tx.get("metadata") or {}
+    if (meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY and meta.get("delete_files")
+            and payload.get("confirm_delete_files") != composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION):
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "This album cleanup deletes files; approving it needs confirm_delete_files="
+                                 f"\"{composite_workflows.DELETE_ALBUM_FILES_CONFIRMATION}\"."}), 400
     try:
         tx = transactions.transition(transaction_id, "Preview", "Approved",
                                      metadata={"approved_by": "operator (transactions approve route)"})
