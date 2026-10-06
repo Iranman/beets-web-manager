@@ -1581,6 +1581,7 @@ class RestoreBeetsplugGuardTests(RolloutScriptTestBase):
                          "nothing may be deleted or written through the link")
 
 
+@unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
 class SymlinkSafetyTests(VersionedStackFixture):
     """The script runs as root: a link planted in a container-writable data
     folder must never redirect a backup or restore copy to another path."""
