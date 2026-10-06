@@ -60,6 +60,11 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ### 8. Setup says "Stock Beets is unavailable"
 * **Cause**: Web Manager cannot reach the `webmanager` plugin at `BEETS_WEB_URL` (default `http://beets:8337`). While Beets is down, plugin and fpcalc checks show as unknown. Only real local mount problems are listed in addition.
 * **Fix**: `docker compose ps beets`, `docker compose logs beets`. For an external Beets, check that `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` agree.
+* **Outside Compose, always set `BEETS_WEB_URL`.** The default `http://beets:8337` only means "the `beets` service" on a Compose network. Under `docker run`, Kubernetes, or a host whose DNS search domain resolves `beets` to some other machine, Web Manager would send its `webmanager` bearer key to whatever `beets` resolves to. Set `BEETS_WEB_URL` to your Beets address explicitly and keep `BEETS_OUTBOUND_ALLOWLIST` limited to that host and port.
+
+### 8a. Startup did not add the webmanager plugin to `config.yaml`
+* **Cause**: Startup auto-provisioning backs up `config.yaml` before every edit, and a failed backup aborts the edit. If the Beets config directory is mounted read-only into Web Manager (or is not writable by its `PUID`/`PGID`), the backup cannot be written, so startup skips the `config.yaml` edit and logs `Auto plugin provisioning on startup skipped/failed`. Nothing is changed. The same happens when `BEETS_CONFIG` is not a file directly inside `BEETSDIR` (default `/config`).
+* **Fix**: Mount the Beets config directory read-write into Web Manager (as the shipped Compose files do) and restart it, or add `web` and `webmanager` to `plugins:` and `/config/beetsplug` to `pluginpath:` yourself. Then restart the `beets` container.
 
 ### 9. Setup warns about include_paths, root mismatches or a required restart
 * **`beets_web_include_paths_disabled`**: your Beets `config.yaml` has `web: include_paths: no`, so Beets returns items without file paths. Path-based operations then fail with `BEETS_PATHS_UNAVAILABLE` (HTTP 503). Use the setup action "Enable web.include_paths" (`POST /api/setup/beets-config/include-paths`), which backs up `config.yaml` first. Then restart the `beets` container.

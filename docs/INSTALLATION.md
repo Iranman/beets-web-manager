@@ -128,7 +128,7 @@ Read-only commands (`beet ls`, `beet version`) are always safe, any time. Prefer
 If you run Beets on a separate host (e.g. TrueNAS, Unraid, or another server) and want Beets Web Manager to connect over the network instead of starting its own `beets` service:
 
 1. Use [examples/docker-compose.external-beets.yml](../examples/docker-compose.external-beets.yml).
-2. Configure `BEETS_WEB_URL` (e.g. `http://192.168.1.50:8337`) and `BEETS_OUTBOUND_ALLOWLIST`.
+2. Configure `BEETS_WEB_URL` (e.g. `http://192.168.1.50:8337`) and `BEETS_OUTBOUND_ALLOWLIST`. Always set `BEETS_WEB_URL` when Web Manager does not run on the same Compose network as a service named `beets`: the default `http://beets:8337` is resolved by normal DNS there, and Web Manager sends its `webmanager` bearer key to whatever host answers to `beets`.
 3. The remote Beets instance must already have its `web`/`webmanager` plugins enabled and provisioned — Web Manager cannot provision a plugin into a filesystem it does not mount.
 4. Without the shared `/config` mount Web Manager cannot read the integration key file. Copy the 64-hex key from the Beets host's `/config/.webmanager_api_key` into `BEETS_WEBMANAGER_API_KEY` (System page, or the Compose environment).
 
