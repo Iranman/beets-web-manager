@@ -58,6 +58,7 @@ def _load_evidence_namespace():
             else str(value or "")
         ),
         "_restore_time_colon_title": lambda value: str(value or ""),
+        "strip_in_mono_suffix": __import__("backend.title_normalize", fromlist=["x"]).strip_in_mono_suffix,
     }
     for node in tree.body:
         node_name = ""

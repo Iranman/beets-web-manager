@@ -13,6 +13,7 @@ from backend.matching import verify_audio_against_request
 from helpers_mb import acoustid_lookup_outcome
 from backend.provider_boundary import ProviderOutcome, ProviderResult
 import backend.recording_review as recording_review
+from backend.title_normalize import split_ws_led
 
 # ── ARCH-001 extracted code ──
 
@@ -381,9 +382,13 @@ def _acoustid_multi_file(
 
 
 # Patterns that should never appear in albumartist
-_FEAT_RE = re.compile(
-    r'(?:(?<!\s)\s+)?[\(\[]?(?:feat(?:uring)?\.?|ft\.?|with)\b.*',
-    re.IGNORECASE
+# SEC-5 (ReDoS): only the whitespace-free core is a regex; the leading
+# whitespace run and the trailing ``.*`` of the original
+# ``\s*CORE.*`` pattern are applied by split_ws_led in linear time.
+_FEAT_RE = re.compile(r'[\(\[]?(?:feat(?:uring)?\.?|ft\.?|with)\b', re.IGNORECASE)
+_ARTIST_SPLIT_CORE_RE = re.compile(
+    r'(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+',
+    re.IGNORECASE,
 )
 
 
@@ -399,7 +404,7 @@ def _normalize_albumartist(s: str) -> str:
     # SEC-5 (ReDoS): cap free text before the regexes; real names are far shorter.
     s = _normalize_name(s)[:1024]
     # Strip feat./ft./featuring suffix
-    s = _FEAT_RE.sub('', s).strip().rstrip(',').strip()
+    s = ''.join(split_ws_led(s, _FEAT_RE, to_eol=True)).strip().rstrip(',').strip()
     # Strip comma-listed collaborators (only when no '&' present — avoids
     # breaking "Earth, Wind & Fire" or "Crosby, Stills, Nash & Young")
     if ',' in s and '&' not in s:
@@ -632,11 +637,7 @@ def _playlist_artist_name_variants(value):
     add(cleaned)
     add(_playlist_strip_artist_channel_noise(raw))
     add(_playlist_strip_artist_channel_noise(cleaned))
-    for part in re.split(
-        r"(?:(?<!\s)\s+)?(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+",
-        cleaned[:1024],
-        flags=re.IGNORECASE,
-    ):
+    for part in split_ws_led(cleaned[:1024], _ARTIST_SPLIT_CORE_RE):
         add(part)
         add(_playlist_strip_artist_channel_noise(part))
     return variants

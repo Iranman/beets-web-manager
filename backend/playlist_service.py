@@ -17,6 +17,7 @@ from backend.audio_preferences import load_music_format_preferences as _load_mus
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
+from backend.title_normalize import dash_suffix_group, trailing_bracket_group
 from backend.library_cache import library_cache
 from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
 from backend.slskd_service import SLSKD_API_KEY, _download_method_list, _find_slskd_downloaded_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
@@ -464,14 +465,14 @@ def _playlist_clean_variant_title(value):
     text = _playlist_strip_video_title_suffix(_s(value)[:1024])
     changed = False
     while True:
-        match = re.search(r"(?:(?<!\s)\s+)?[\(\[]([^()\[\]]+)[\)\]]\s*$", text)
-        if not match or not _playlist_title_modifier_is_noise(match.group(1)):
+        found = trailing_bracket_group(text)
+        if not found or not _playlist_title_modifier_is_noise(found[1]):
             break
-        text = text[:match.start()].strip()
+        text = found[0].strip()
         changed = True
-    match = re.search(r"(?<!\s)\s+[-–—]\s+(.+)$", text)
-    if match and _playlist_title_modifier_is_noise(match.group(1)):
-        text = text[:match.start()].strip()
+    found = dash_suffix_group(text)
+    if found and _playlist_title_modifier_is_noise(found[1]):
+        text = found[0].strip()
         changed = True
     return _playlist_clean_video_text(text), changed
 

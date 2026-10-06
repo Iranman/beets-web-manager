@@ -185,6 +185,14 @@ def app_unit_source(name: str) -> str:
     raise KeyError(name)
 
 
+def _title_normalize_helpers() -> Dict[str, Any]:
+    """SEC-5 linear normalizers that extracted modules import (imports are not
+    part of the family source, so exec'd units need them supplied)."""
+    import backend.title_normalize as _tn
+    return {n: getattr(_tn, n) for n in ("split_ws_led", "strip_in_mono_suffix", "trailing_bracket_group",
+                                          "dash_suffix_group", "strip_bracket_credits")}
+
+
 def load_app_closure(roots: Iterable[str], namespace: Dict[str, Any]) -> Dict[str, Any]:
     """Exec `roots` plus every top-level unit they transitively reference.
 
@@ -199,6 +207,8 @@ def load_app_closure(roots: Iterable[str], namespace: Dict[str, Any]) -> Dict[st
     for alias in ("Any", "Callable", "Dict", "Iterable", "List", "Optional", "Set", "Tuple", "Union"):
         namespace.setdefault(alias, getattr(typing, alias))
     namespace.setdefault("Path", Path)
+    for name, value in _title_normalize_helpers().items():
+        namespace.setdefault(name, value)
     tree = get_app_ast()
     lines = app_family_source().splitlines(keepends=True)
     defs: Dict[str, ast.stmt] = {}
@@ -358,6 +368,8 @@ def load_app_symbols(
         base_ns["_canonical_track_title_variants_for_matching"] = _bm.track_title_variants_for_matching
     except Exception:
         pass
+
+    base_ns.update(_title_normalize_helpers())
 
     if namespace is not None:
         base_ns.update(namespace)
