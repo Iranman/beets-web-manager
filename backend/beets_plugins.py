@@ -803,33 +803,49 @@ def _plan_config_yaml_plugins(
     return text, missing_plugins, changed
 
 
-def _write_config_text(
-    path: Path,
-    text: str,
-    *,
-    backup_name: Optional[str],
-    require_backup: bool,
-) -> Optional[str]:
-    """Back up ``path`` (when ``backup_name``) and atomically replace it."""
-    backup_path: Optional[Path] = None
-    if backup_name:
-        backup_path = path.parent / backup_name
+def _create_backup(path: Path, prefix: str) -> Path:
+    """Copy ``path`` to a new, never-reused ``<prefix><n>`` file (mode 0600).
+
+    O_EXCL guarantees two writes in the same second never share or overwrite
+    a backup: on a name collision a ``-1``, ``-2``... suffix is tried.
+    """
+    for attempt in range(100):
+        candidate = path.parent / (prefix if attempt == 0 else f"{prefix}-{attempt}")
         try:
-            shutil.copy2(str(path), str(backup_path))
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as dst, open(path, "rb") as src:
+                shutil.copyfileobj(src, dst)
+        except BaseException:
             try:
-                os.chmod(backup_path, 0o600)
-            except Exception:
+                os.unlink(candidate)
+            except OSError:
                 pass
+            raise
+        return candidate
+    raise FileExistsError(f"no free backup name for {prefix}")
+
+
+def _write_config_text(path: Path, text: str, *, backup_prefix: Optional[str]) -> Optional[str]:
+    """Back up ``path`` (when ``backup_prefix``) and atomically replace it.
+
+    Fails closed: if the backup cannot be made, config.yaml is not touched.
+    Returns the backup's file name only (never a host/container path).
+    """
+    backup_path: Optional[Path] = None
+    if backup_prefix:
+        try:
+            backup_path = _create_backup(path, backup_prefix)
         except Exception as exc:
-            if require_backup:
-                raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
-            backup_path = None
+            raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
 
     try:
         _atomic_write_text(path, text)
     except Exception as exc:
         raise BeetsConfigEditError(f"Failed to write updated config.yaml: {type(exc).__name__}") from exc
-    return str(backup_path) if backup_path else None
+    return backup_path.name if backup_path else None
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -916,12 +932,12 @@ def update_config_yaml_plugins(
     if not changed:
         return False, "All required plugins and pluginpath already configured"
 
-    backup_name = None
+    backup_prefix = None
     if backup:
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{_PLUGIN_MIGRATION_BACKUP_PREFIX}{ts}"
+        backup_prefix = f"{_PLUGIN_MIGRATION_BACKUP_PREFIX}{ts}"
     try:
-        _write_config_text(path, text, backup_name=backup_name, require_backup=False)
+        _write_config_text(path, text, backup_prefix=backup_prefix)
     except BeetsConfigEditError as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -939,7 +955,7 @@ def _read_config_text(path: Path) -> str:
         raise BeetsConfigEditError(f"Could not read {path.name}: {type(exc).__name__}") from exc
 
 
-def _timestamped_backup_name(path: Path) -> str:
+def _timestamped_backup_prefix(path: Path) -> str:
     return f"{path.name}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
@@ -990,7 +1006,7 @@ def apply_recommended_plugins(config_path: Path | str, plugins: Iterable[str]) -
     )
     if not changed:
         return {"ok": True, "changed": False, "added": [], "backup": None, "restart_required": False}
-    backup = _write_config_text(path, new_text, backup_name=_timestamped_backup_name(path), require_backup=True)
+    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path))
     return {"ok": True, "changed": True, "added": added, "backup": backup, "restart_required": True}
 
 
@@ -1006,7 +1022,7 @@ def ensure_web_include_paths(config_path: Path | str) -> Dict[str, Any]:
     new_text, changed = _set_web_include_paths(text, overwrite_false=True)
     if not changed:
         return {"ok": True, "changed": False, "backup": None, "restart_required": False}
-    backup = _write_config_text(path, new_text, backup_name=_timestamped_backup_name(path), require_backup=True)
+    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path))
     return {"ok": True, "changed": True, "backup": backup, "restart_required": True}
 
 

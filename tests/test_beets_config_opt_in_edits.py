@@ -148,6 +148,48 @@ class ConfigWriteModeTests(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
 
 
+class ConfigBackupTests(_TempConfigMixin, unittest.TestCase):
+    """N5/N6/N7: backup name exposure, uniqueness, and fail-closed writes."""
+
+    def test_backup_in_response_is_a_basename(self):
+        from backend.beets_plugins import apply_recommended_plugins, ensure_web_include_paths
+        path = self._make_config()
+        for result in (ensure_web_include_paths(path), apply_recommended_plugins(path, ["fetchart"])):
+            self.assertEqual(result["backup"], Path(result["backup"]).name)
+            self.assertNotIn("/", result["backup"])
+            self.assertTrue((self.config_dir / result["backup"]).is_file())
+
+    def test_same_second_writes_get_distinct_backups(self):
+        from backend.beets_plugins import apply_recommended_plugins, ensure_web_include_paths
+        path = self._make_config()
+        original = path.read_text(encoding="utf-8")
+        with mock.patch("backend.beets_plugins._timestamped_backup_prefix",
+                        return_value="config.yaml.bak-20260101-000000"):
+            first = ensure_web_include_paths(path)["backup"]
+            after_first = path.read_text(encoding="utf-8")
+            second = apply_recommended_plugins(path, ["fetchart"])["backup"]
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(self._backups()), 2)
+        self.assertEqual((self.config_dir / first).read_text(encoding="utf-8"), original)
+        self.assertEqual((self.config_dir / second).read_text(encoding="utf-8"), after_first)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_backup_is_created_0600(self):
+        from backend.beets_plugins import ensure_web_include_paths
+        path = self._make_config()
+        backup = ensure_web_include_paths(path)["backup"]
+        self.assertEqual(stat.S_IMODE(os.stat(self.config_dir / backup).st_mode), 0o600)
+
+    def test_plugin_update_fails_closed_when_backup_fails(self):
+        from backend.beets_plugins import update_config_yaml_plugins
+        path = self._make_config("plugins: fetchart\n")
+        with mock.patch("backend.beets_plugins._create_backup", side_effect=PermissionError("denied")):
+            with self.assertRaises(RuntimeError):
+                update_config_yaml_plugins(path, backup=True)
+        self.assertEqual(path.read_text(encoding="utf-8"), "plugins: fetchart\n")
+        self.assertEqual([p.name for p in self.config_dir.iterdir()], ["config.yaml"])
+
+
 class EnsureWebIncludePathsTests(_TempConfigMixin, unittest.TestCase):
     def test_absent_key_is_added_with_backup_and_restart_flag(self):
         from backend.beets_plugins import ensure_web_include_paths, read_web_include_paths
