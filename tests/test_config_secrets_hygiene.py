@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover
     from tests.test_routes_setup import _load_routes_setup_against_stub_app  # noqa: E402
 
 POSIX = os.name == "posix"
+NL = chr(10)
 
 
 def _mode(path: Path) -> int:
@@ -51,7 +52,7 @@ class EnvMigrationModeTests(_PrivateFileCase):
     def test_backup_env_and_report_are_0600_even_when_chmod_fails(self):
         env_file = self.root / ".env"
         env_file.write_text("PUID=1000\nOPENAI_API_KEY=sk-not-real\n", encoding="utf-8")
-        with mock.patch("os.chmod", _failing_chmod), \
+        with mock.patch("os.chmod", _failing_chmod), mock.patch("os.fchmod", _failing_chmod, create=True), \
                 self.assertLogs("beets.config_layers", "WARNING") as logs:
             report = cl.migrate_saved_env_file(env_file)
         self.assertEqual(report["removed"], ["PUID"])
@@ -116,6 +117,10 @@ class SetupStatusRedactionTests(unittest.TestCase):
     def test_redact_url_userinfo(self):
         self.assertEqual(cl.redact_url_userinfo("https://u:p@h:1/x?token=t#f"), "https://h:1/x")
         self.assertEqual(cl.redact_url_userinfo("http://[::1]:8337"), "http://[::1]:8337")
+        # Userinfo the parser does not see must fail closed (#205 F1).
+        for url in ("http://u:pa/ss@beets:8337", "http://u:pa?ss@beets:8337", "http://u:pa#ss@beets:8337",
+                    "user:pass@beets:8337", "http:/u:p@beets", "//u:p@beets:8337"):
+            self.assertEqual(cl.redact_url_userinfo(url), "<redacted-url>", url)
 
 
 class ContainerPathLogTests(unittest.TestCase):
@@ -140,6 +145,32 @@ class LegacyConfigBackupModeTests(_PrivateFileCase):
         self.assertIn("plexsync", backup.read_text(encoding="utf-8"))
         self.assertEqual(_mode(backup), 0o600)
         self.assertNotIn("plexsync", cfg.read_text(encoding="utf-8"))
+
+
+    def _legacy_cfg(self):
+        cfg = self.root / "config.yaml"
+        cfg.write_text("plugins: plexsync fetchart" + NL, encoding="utf-8")
+        return cfg, self.root / "config.yaml.bak-legacy-plugin-migration"
+
+    def test_existing_legacy_backup_is_tightened_to_0600(self):
+        from backend import config_service
+        cfg, backup = self._legacy_cfg()
+        backup.write_text("old backup", encoding="utf-8")
+        os.chmod(backup, 0o644)
+        config_service._repair_legacy_beets_config(str(cfg))
+        self.assertEqual(_mode(backup), 0o600)
+        self.assertEqual(backup.read_text(encoding="utf-8"), "old backup")
+
+    def test_symlinked_legacy_backup_is_not_followed(self):
+        from backend import config_service
+        cfg, backup = self._legacy_cfg()
+        victim = self.root / "victim"
+        victim.write_text("x", encoding="utf-8")
+        os.chmod(victim, 0o644)
+        backup.symlink_to(victim)
+        config_service._repair_legacy_beets_config(str(cfg))
+        self.assertEqual(_mode(victim), 0o644)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "x")
 
 
 class RuntimeDeadKeyTests(unittest.TestCase):

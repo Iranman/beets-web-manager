@@ -325,6 +325,10 @@ def redact_url_userinfo(url: str) -> str:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return "<invalid-url>"
+    if "@" in url and ("@" not in parts.netloc or not parts.scheme or not parts.netloc):
+        # Unencoded / ? # in a password, no scheme, or "http:/u:p@h": the
+        # parser did not see the userinfo, so fail closed.
+        return "<redacted-url>"
     netloc = parts.netloc.rpartition("@")[2]
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
@@ -348,6 +352,11 @@ def create_private_file(path: Path, data: str, *, unique: bool = False) -> Path:
                 continue
             raise
         try:
+            if hasattr(os, "fchmod"):  # via the fd: never follows a swapped path
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError as ex:
+                    log.warning("Could not set mode 0600 on %s (%s)", candidate.name, type(ex).__name__)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data.encode("utf-8"))
         except BaseException:
@@ -364,9 +373,8 @@ def replace_private_file(path: Path, data: str) -> None:
     """Atomically replace ``path`` with ``data`` via a fresh 0600 temp file."""
     tmp = path.with_name(f"{path.name}.tmp")
     tmp.unlink(missing_ok=True)  # stale temp from a crash; never reuse its mode
-    create_private_file(tmp, data)
+    create_private_file(tmp, data)  # mode set via the fd before the rename
     tmp.replace(path)
-    ensure_private_mode(path)
 
 
 def ensure_private_mode(path: Path) -> None:

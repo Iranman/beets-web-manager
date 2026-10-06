@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import os, re
+import os, re, stat
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -81,7 +81,10 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
         try:  # 0600 via O_EXCL: config.yaml can hold tokens. Kept once.
             config_layers.create_private_file(backup, path.read_text(encoding="utf-8"))
         except FileExistsError:
-            pass
+            # Left by an older version (copy2, often 0644): tighten it, but
+            # never chmod through a symlink.
+            if stat.S_ISREG(os.lstat(backup).st_mode):
+                config_layers.ensure_private_mode(backup)
         if not text.endswith("\n"):
             text += "\n"
         text += f"{_LEGACY_BEETS_CONFIG_MIGRATION_MARKER}\n"
