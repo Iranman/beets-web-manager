@@ -34,7 +34,7 @@ env:
   # compatibility lane). Kept in sync with requirements-dev.txt's own
   # `beets==` pin so local `python -m unittest` and CI see the same
   # fixture behavior.
-  BEETS_TEST_FIXTURE_VERSION: "2.13.1"
+  BEETS_TEST_FIXTURE_VERSION: "2.14.1"
 
 jobs:
   release-metadata:
