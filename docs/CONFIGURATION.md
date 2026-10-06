@@ -127,11 +127,48 @@ On startup Web Manager now removes host, deployment, container and retired keys 
 
 ## Beets config
 
-The authoritative Beets config is `/config/config.yaml`, owned by the stock `beets` container. Web Manager also mounts `/config` (read/write) — not to run Beets itself, but to provision the bundled `webmanager` integration plugin's files into `/config/beetsplug` and to safely merge required `plugins:`/`pluginpath:` entries into `config.yaml` at startup (additive only: it backs up the file first and never removes an operator's existing settings).
+The authoritative Beets config is `/config/config.yaml`, owned by the stock `beets` container. Web Manager also mounts `/config` (read/write) — not to run Beets itself, but to provision the bundled `webmanager` integration plugin's files into `/config/beetsplug` and to safely merge the required `plugins:`/`pluginpath:`/`web.include_paths` entries into `config.yaml` at startup (additive only: it backs up the file first and never removes an operator's existing settings; see below).
 
 The Settings page's config text editor (`GET/POST /api/config`, `POST /api/config/revert`) edits the file named by `BEETS_CONFIG` through `backend/config_manager.py`. Every save checks the revision, validates the YAML, makes a backup and writes atomically. The editor fails closed rather than showing an empty config: it returns an error when the file is missing or the path is outside the Beets config directory. Restart the `beets` container so Beets reads a change.
 
 Beets Web Manager provisions the bundled `discpath` plugin (and the `webmanager` plugin itself) into `/config/beetsplug`; further user plugins can be dropped into the same directory. `pluginpath` must include `/config/beetsplug` for any of them to load — the provisioning step ensures this automatically.
+
+### What Web Manager changes in `config.yaml`, and what it only offers
+
+At startup Web Manager adds only what its own transport needs:
+
+- `web` and `webmanager` in `plugins:`;
+- `/config/beetsplug` in `pluginpath:`;
+- `include_paths: yes` in the `web:` block, when the key is not set at all.
+
+It never removes a plugin, never adds feature plugins to an existing config, never rewrites an existing settings block (for example your `replaygain:` backend), never flips an explicit `include_paths: no`, and never adds `/app/beetsplug`. A fresh install with no `config.yaml` is created from `config.yaml.example`.
+
+Two further edits are available only as explicit actions. When they change the file, each takes a timestamped `config.yaml.bak-<YYYYmmdd-HHMMSS>` backup (mode 600) next to it, writes atomically, keeps your comments, and responds with `restart_required: true`. Restart the `beets` container afterwards. Both POST routes require the CSRF token.
+
+- **Enable `web.include_paths`.** `POST /api/setup/beets-config/include-paths`. Use this when setup warns `beets_web_include_paths_disabled` (your config has `include_paths: no`). Without paths, path-based operations fail with `BEETS_PATHS_UNAVAILABLE` (HTTP 503) instead of treating the library as empty. A flow-style `web: {...}` mapping is refused with HTTP 409; edit that file by hand.
+- **Recommended plugins.** `GET /api/setup/plugins/recommended` writes nothing. It returns the recommended set (`fetchart`, `embedart`, `scrub`, `zero`, `ftintitle`, `fromfilename`, `mbsync`, `mbsubmit`, `chroma`, `replaygain`, `lastgenre`, `discpath`), which of them are `configured` and `missing`, and a unified `diff` of the change. `POST /api/setup/plugins/recommended/apply` with `{"plugins": ["fetchart", ...]}` adds only the named plugins. An unknown name or an empty list is rejected with HTTP 400 and nothing is written; a missing `config.yaml` returns HTTP 409. A newly added `replaygain` gets `auto: no` and `backend: ffmpeg`; an existing `replaygain:` block is left as it is.
+
+### `webmanager` plugin roots and what the plugin reports
+
+From plugin 1.6.0, `/webmanager/status` reports Beets' own view of the library:
+
+- `library_directory` (Beets' `directory:`) and `library_path` (Beets' `library:`);
+- the effective `allowed_roots` and `import_roots`;
+- `web_include_paths`;
+- whether `fpcalc` and `ffmpeg` are on the Beets container's `PATH` (`fpcalc_available`, `ffmpeg_available`).
+
+The roots are configured in `config.yaml`:
+
+- `webmanager.import_roots` (default `[/downloads]`): directories the plugin accepts imports from.
+- `webmanager.allowed_roots`: directories the plugin may move or remove files in. When unset or empty, it is derived from Beets: the library `directory:` plus `import_roots`. Set it only if you need something different. The `BEETS_ALLOWED_ROOTS` environment variable on the `beets` container (comma-separated) overrides it.
+
+Setup compares these with Web Manager's own mounts. It changes nothing, but it warns when:
+
+- `music_root_mismatch`: Beets' `directory:` is not Web Manager's `MUSIC_ROOT`. Both containers must see the library at the same container path.
+- `downloads_root_not_import_root`: `DOWNLOADS_ROOT` is not inside any `webmanager.import_roots`, so the plugin would reject imports from it.
+- `beets_restart_required`: Beets is running an older `webmanager` plugin than the one Web Manager provisioned. Setup status also sets `restart_required`.
+
+With a plugin older than 1.6.0 these fields are reported as `unknown` and the checks are skipped. Restart Beets to load the provisioned plugin.
 
 `/api/health` is a Web-Manager liveness check. `/health/ready` and `/api/setup/status` call `BeetsAdapter.get_plugin_status()`/`get_stats()` (the `webmanager` plugin's live HTTP handshake) and fail closed when stock Beets is unreachable or rejects authentication.
 

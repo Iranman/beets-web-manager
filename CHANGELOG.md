@@ -9,6 +9,8 @@ The project uses Semantic Versioning.
 ### Upgrade Notes
 - On first start, Web Manager removes host-side Compose values (`MUSIC_PATH`, `DOWNLOADS_PATH`, `BEETS_CONFIG_PATH`, `WEB_MANAGER_DATA_PATH`), Compose-pinned values (`PUID`, `PGID`, `TZ`, `WEBCONTROL_PORT`), container paths and retired keys (`PLAYLIST_DIR`, `BEETS_SQLITE_TIMEOUT`, `WEB_MANAGER_PATH`) from the saved settings file `/web-manager-data/.env`. A backup `.env.bak-migration-<timestamp>` is written next to it first. The System page and `/api/setup/status` (`settings_migration`) report how many keys were removed. Only key names are logged.
 - The System page can no longer save `PUID`, `PGID`, `TZ`, `WEBCONTROL_PORT`, container paths (`BEETS_CONFIG`, `BEETS_LOG`, `MUSIC_ROOT`, `DOWNLOADS_ROOT`) or host paths. Every shipped Compose file sets these, so a saved value never took effect. Set them in Compose and recreate the container.
+- Startup now adds `include_paths: yes` to the Beets `web:` block when the key is missing, so Beets returns file paths. An explicit `include_paths: no` is left alone and reported by setup (see Added). Restart the `beets` container once after upgrading so it loads the `webmanager` plugin 1.6.0.
+- Startup no longer adds the recommended feature plugins to an existing `config.yaml`. Plugins added by earlier versions stay. To add the rest, use the recommended-plugins preview (see Added).
 - If you saved edits from the Config page on v0.1.49 or earlier, those edits never reached `/config/config.yaml` (see Fixed). Apply them again.
 - `docker-compose.yml` now forwards `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` from the Compose `.env` (defaults unchanged). It also sets `MUSIC_ROOT`, `DOWNLOADS_ROOT` and `BEETS_CONFIG` explicitly, and accepts the older host-path names `MUSIC_LIBRARY_PATH`, `DOWNLOAD_PATH` and `BEETS_WEB_MANAGER_DATA_PATH` as fallbacks.
 
@@ -20,6 +22,15 @@ The project uses Semantic Versioning.
 - **A Beets outage no longer produces a list of false local failures.** While stock Beets was unreachable, setup status and `/health/ready` also reported that the config directory, music library, downloads and `config.yaml` were inaccessible, and that fpcalc was missing. Local mounts are now checked locally whether or not Beets answers. "Stock Beets is unavailable" is the single primary reason, and fpcalc is reported as `unknown`.
 - The Beets `config.yaml` path report no longer shows `ok: false` for a healthy file. It used a directory check on a file.
 - The Beets adapter's default URL is `http://beets:8337` everywhere. The adapter used to fall back to `http://127.0.0.1:8337`, which is Web Manager itself.
+
+- **Startup no longer adds feature plugins or rewrites settings in an existing Beets `config.yaml`.** Provisioning used to append the whole recommended plugin set and could rewrite an existing `replaygain` backend. It now ensures only `web`, `webmanager`, `pluginpath: /config/beetsplug` and a missing `web.include_paths`. The legacy-config repair now drops only `plexsync`.
+- **Setup no longer reports fpcalc available when it is not installed in Beets.** With plugin 1.6.0 the `chroma` capability is combined with a real `fpcalc` probe in the Beets container. A missing `chroma` on an older plugin still blocks fingerprinting.
+- **Path-less Beets responses no longer look like an empty library.** When Beets returns items without paths (`web.include_paths` off), the adapter raises `BeetsAdapterPathsUnavailableError` (`BEETS_PATHS_UNAVAILABLE`, HTTP 503) instead of returning an empty path list.
+
+### Added
+- `webmanager` Beets plugin 1.6.0 (protocol 1.0, additive fields): `/webmanager/status` reports `library_directory`, `library_path`, `allowed_roots`, `import_roots`, `web_include_paths`, `fpcalc_available` and `ffmpeg_available`. When `webmanager.allowed_roots` is not set, it is derived from Beets' `directory:` plus `import_roots`.
+- Setup status `warnings` and `actions`: `beets_restart_required`, `beets_web_include_paths_disabled` (with the action `enable_web_include_paths`), `music_root_mismatch` and `downloads_root_not_import_root`. Setup status also reports `restart_required` when Beets runs an older plugin than the bundled one. For plugins older than 1.6.0 the new fields are `unknown`, and no warning is raised from them.
+- `POST /api/setup/beets-config/include-paths`, `GET /api/setup/plugins/recommended` (preview with a diff) and `POST /api/setup/plugins/recommended/apply`. The writes require CSRF, take a timestamped backup and report `restart_required`.
 
 ### Changed
 - Configuration layers (`backend/config_layers.py`, `docs/CONFIGURATION.md`): every variable is classified as host, deployment, container, application or secret. `GET /api/setup/env` reports each variable's `layer` and `apply` (`live`, `restart` or `deploy`), and only application keys are editable. A test forbids application code from reading host-side Compose variables.

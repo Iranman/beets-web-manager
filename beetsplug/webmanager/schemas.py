@@ -4,7 +4,12 @@ import os
 from typing import List, Set, Optional
 
 DEFAULT_API_KEY_FILE = "/config/.webmanager_api_key"
-DEFAULT_ALLOWED_ROOTS = ["/music", "/downloads", "/web-manager-data"]
+# Last-resort fallback only. Since plugin 1.6.0 the effective default is
+# derived from Beets itself -- [config "directory"] + import_roots -- so a
+# library mounted somewhere other than /music works without extra config
+# (see operations.get_allowed_roots). /web-manager-data is not mounted in
+# the Beets container and is no longer part of the derived default.
+DEFAULT_ALLOWED_ROOTS = ["/music", "/downloads"]
 
 # Import sources are intentionally a *separate, narrower* concept from
 # allowed_roots: allowed_roots also covers /music (a Beets-managed

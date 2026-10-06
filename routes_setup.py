@@ -20,6 +20,7 @@ import copy
 import importlib.util
 import json
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -2113,6 +2114,20 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
     # Web Manager has no local binary of its own to check.
     mbsubmit_available = "mbsubmit" in capabilities
 
+    # Fingerprinting needs the chroma plugin loaded (#143: no chroma ->
+    # blocking, unchanged). Plugin >= 1.6.0 additionally probes fpcalc on
+    # PATH inside the Beets container (BI-14), so a loaded chroma with no
+    # binary is now also reported as missing. Older plugins cannot probe,
+    # so for them the capability inference alone decides, as before.
+    binaries_reported = "fpcalc_available" in plugin_status
+    fpcalc_available = mbsubmit_available
+    if binaries_reported:
+        fpcalc_available = mbsubmit_available and bool(plugin_status.get("fpcalc_available"))
+    fpcalc_state = "available" if fpcalc_available else "missing"
+    if "ffmpeg_available" in plugin_status:
+        ffmpeg_available: Any = bool(plugin_status.get("ffmpeg_available"))
+    else:
+        ffmpeg_available = bool(replaygain_backend == "ffmpeg")
 
     return {
         "available": True,
@@ -2134,14 +2149,16 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "replaygain_command": replaygain_command,
         "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
         "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
-        "fpcalc_available": mbsubmit_available,
+        "fpcalc_available": fpcalc_available,
         "fpcalc_path": "",
-        "ffmpeg_available": bool(replaygain_backend == "ffmpeg"),
+        "ffmpeg_available": ffmpeg_available,
         "ffmpeg_path": "",
         "pyacoustid_available": mbsubmit_available,
+        "binaries_reported_by_plugin": binaries_reported,
+        "beets_library": _plugin_library_report(plugin_status),
         "capabilities": {
             "acoustid_lookup": {
-                "fpcalc_available": mbsubmit_available,
+                "fpcalc_available": fpcalc_available,
                 "chroma_loaded": mbsubmit_available,
                 "pyacoustid_available": mbsubmit_available,
             },
@@ -2149,12 +2166,54 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "remote_reachable": True,
         "remote_error": "",
         "paths": _local_paths_report(config_path),
-        "fpcalc_state": "available" if mbsubmit_available else "missing",
+        "fpcalc_state": fpcalc_state,
         "engine_compatibility": _check_integration_plugin_compatibility(plugin_status),
     }
 
 
 _EXPECTED_PROTOCOL_VERSION = "1.0"
+
+_UNKNOWN = "unknown"
+
+
+def _plugin_library_report(plugin_status: Dict[str, Any]) -> Dict[str, Any]:
+    """Beets' own view of its library and roots, as reported by the
+    webmanager plugin (>= 1.6.0). Beets stays authoritative: Web Manager
+    reports and compares these, never rewrites them. Fields an older
+    plugin does not send are the string "unknown"."""
+
+    def _field(name: str) -> Any:
+        if name not in plugin_status:
+            return _UNKNOWN
+        return plugin_status.get(name)
+
+    return {
+        "library_directory": _field("library_directory"),
+        "library_path": _field("library_path"),
+        "allowed_roots": _field("allowed_roots"),
+        "import_roots": _field("import_roots"),
+        "web_include_paths": _field("web_include_paths"),
+    }
+
+
+def _bundled_plugin_version() -> str:
+    """Version of the webmanager plugin shipped in THIS Web Manager image
+    (what provisioning copies into /config/beetsplug).
+
+    Loaded by file path: importing ``beetsplug.webmanager.version`` would run
+    the package ``__init__``, which needs ``beets`` -- not installed in the
+    Web Manager image."""
+    try:
+        from backend.beets_plugins import SOURCE_BEETSPLUG_DIR
+        spec = importlib.util.spec_from_file_location(
+            "_bwm_bundled_webmanager_version",
+            SOURCE_BEETSPLUG_DIR / "webmanager" / "version.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return str(module.PLUGIN_VERSION)
+    except Exception:
+        return ""
 
 
 def _check_integration_plugin_compatibility(plugin_status: Dict[str, Any]) -> Dict[str, Any]:
@@ -2182,11 +2241,29 @@ def _check_integration_plugin_compatibility(plugin_status: Dict[str, Any]) -> Di
     else:
         state = "compatible"
 
+    # BI-4: same protocol, but Beets is still running an older/newer copy of
+    # the plugin than the one this image provisioned (provisioning updates
+    # /config/beetsplug, Beets only loads plugins at start-up). Still
+    # compatible -- never blocking -- but the new diagnostics fields stay
+    # "unknown" until stock Beets is restarted.
+    bundled_version = _bundled_plugin_version()
+    restart_required = bool(
+        compatible and bundled_version and plugin_version and plugin_version != bundled_version
+    )
+    if restart_required:
+        state = "restart_required"
+        message = (
+            f"Stock Beets is running webmanager plugin {plugin_version}, but this Web Manager "
+            f"provisioned {bundled_version}. Restart the Beets container to load it."
+        )
+
     return {
         "compatible": compatible,
         "installed": installed,
         "state": state,
         "plugin_version": plugin_version,
+        "bundled_plugin_version": bundled_version,
+        "restart_required": restart_required,
         "protocol_version": protocol_version,
         "expected_protocol_version": _EXPECTED_PROTOCOL_VERSION,
         "message": message,
@@ -2580,6 +2657,100 @@ def _invalidate_setup_status_cache() -> None:
         _STATUS_CACHE_TS = 0.0
 
 
+_INCLUDE_PATHS_ACTION_ENDPOINT = "/api/setup/beets-config/include-paths"
+
+
+def _norm_container_path(value: str) -> str:
+    """Normalise a POSIX container path for comparison (no filesystem access)."""
+    value = str(value or "").strip().replace("\\", "/")
+    if not value:
+        return ""
+    return posixpath.normpath(value)
+
+
+def _path_is_within(child: str, parent: str) -> bool:
+    child_n = _norm_container_path(child)
+    parent_n = _norm_container_path(parent)
+    if not child_n or not parent_n:
+        return False
+    if parent_n == "/":
+        return True
+    return child_n == parent_n or child_n.startswith(parent_n.rstrip("/") + "/")
+
+
+def _beets_setup_warnings(
+    diagnostics: Dict[str, Any],
+    music_path: str,
+    downloads_path: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Non-blocking Beets configuration warnings plus their fix actions.
+
+    Every check is skipped when the running plugin cannot report the field
+    ("unknown" from plugins older than 1.6.0), so an old plugin never
+    produces a false warning.
+    """
+    warnings: List[Dict[str, Any]] = []
+    actions: List[Dict[str, Any]] = []
+
+    compat = diagnostics.get("engine_compatibility") if isinstance(diagnostics.get("engine_compatibility"), dict) else {}
+    if compat.get("restart_required"):
+        warnings.append({
+            "id": "beets_restart_required",
+            "severity": "warning",
+            "message": str(compat.get("message") or "Restart the Beets container to load the provisioned webmanager plugin."),
+        })
+
+    library = diagnostics.get("beets_library") if isinstance(diagnostics.get("beets_library"), dict) else {}
+
+    if library.get("web_include_paths") is False:
+        warnings.append({
+            "id": "beets_web_include_paths_disabled",
+            "severity": "warning",
+            "message": (
+                "Beets web.include_paths is disabled, so Beets does not return file paths. "
+                "Path-based features (untracked-folder scan, sync of deleted files, move cleanup) "
+                "will refuse to run until it is enabled and the Beets container is restarted."
+            ),
+            "action": "enable_web_include_paths",
+        })
+        actions.append({
+            "id": "enable_web_include_paths",
+            "label": "Enable web.include_paths in the Beets config",
+            "method": "POST",
+            "endpoint": _INCLUDE_PATHS_ACTION_ENDPOINT,
+            "restart_required": True,
+        })
+
+    library_directory = library.get("library_directory")
+    if isinstance(library_directory, str) and library_directory and library_directory != _UNKNOWN and music_path:
+        if _norm_container_path(library_directory) != _norm_container_path(music_path):
+            warnings.append({
+                "id": "music_root_mismatch",
+                "severity": "warning",
+                "message": (
+                    f"Beets reports its library directory as {library_directory}, but Web Manager's "
+                    f"MUSIC_ROOT is {music_path}. Both containers must see the library at the same "
+                    "container path; set MUSIC_ROOT or the Beets 'directory' so they match."
+                ),
+            })
+
+    import_roots = library.get("import_roots")
+    if isinstance(import_roots, list) and import_roots and downloads_path:
+        if not any(_path_is_within(downloads_path, str(root)) for root in import_roots):
+            warnings.append({
+                "id": "downloads_root_not_import_root",
+                "severity": "warning",
+                "message": (
+                    f"Web Manager's DOWNLOADS_ROOT {downloads_path} is not under any Beets import root "
+                    f"({', '.join(str(r) for r in import_roots)}). Imports from it will be rejected by "
+                    "the webmanager plugin; mount downloads at the same path in both containers or add "
+                    "it to webmanager.import_roots."
+                ),
+            })
+
+    return warnings, actions
+
+
 def _build_setup_status_payload() -> Dict[str, Any]:
     settings = _load_settings()
 
@@ -2718,7 +2889,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             f"Beets config not found at {beets_config_report_path} - copy config.yaml.example to config.yaml"
         )
     if beets_reachable:
-        if not fpcalc_available:
+        # Only a "missing" state blocks; "unknown" (Beets unreachable) never does.
+        if fpcalc_state == "missing":
             blocking.append("fpcalc (chromaprint) not found on PATH — AcoustID fingerprinting will not work")
         if beets_config_exists and not diagnostics.get("plugin_loader_ok"):
             blocking.append(
@@ -2728,6 +2900,12 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         if engine_compat and not engine_compat.get("compatible", True):
             compat_msg = engine_compat.get("message") or "Beets engine compatibility mismatch."
             blocking.append(f"Beets engine compatibility mismatch: {compat_msg}")
+
+    warnings, actions = (
+        _beets_setup_warnings(diagnostics, str(music_check.get("path") or ""), str(downloads_check.get("path") or ""))
+        if beets_reachable
+        else ([], [])
+    )
 
     ready = not blocking
     demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -2800,6 +2978,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             "required": first_run_req,
         },
         "blocking_reasons": blocking,
+        "warnings": warnings,
+        "actions": actions,
         "paths": {
             "config": config_check,
             "music_library": music_check,
@@ -3744,7 +3924,7 @@ def health_root():
 @app.get("/api/setup/plugins")
 def plugins_status():
     """Return comprehensive Beets plugin verification report across categories."""
-    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    beets_config_path = Path(config_layers.beets_config_file())
     try:
         from backend.beets_plugins import verify_all_plugins
         report = verify_all_plugins(beets_config_path.parent)
@@ -3756,7 +3936,8 @@ def plugins_status():
             "required_count": 0,
             "required_healthy_count": 0,
             "plugins": [],
-            "categories": {"required": [], "optional": [], "integration": []},
+            "recommended_missing": [],
+            "categories": {"required": [], "recommended": [], "optional": [], "integration": []},
             "summary": {"total": 0, "healthy": 0, "errors": ["Beets plugin verification failed."]},
         }
     return jsonify(report)
@@ -3769,7 +3950,7 @@ def plugins_provision():
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
-    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    beets_config_path = Path(config_layers.beets_config_file())
     try:
         from backend.beets_plugins import provision_and_verify
         result = provision_and_verify(beets_config_path.parent)
@@ -3791,7 +3972,7 @@ def plugins_verify():
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
-    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    beets_config_path = Path(config_layers.beets_config_file())
     try:
         from backend.beets_plugins import verify_all_plugins
         result = verify_all_plugins(beets_config_path.parent)
@@ -3802,5 +3983,78 @@ def plugins_verify():
             "all_required_healthy": False,
             "error": "Beets plugin verification failed.",
         }), 500
+    return jsonify(result)
+
+
+# ── Opt-in Beets config edits (BI-5 / BI-6) ──────────────────────────────────
+# These are the ONLY setup routes that edit an existing Beets config.yaml.
+# Each one is an explicit user action (POST + CSRF), writes a timestamped
+# backup before touching the file, writes atomically, never changes a key it
+# was not asked to change, and reports restart_required because stock Beets
+# reads config.yaml only at startup.
+
+
+def _beets_config_edit_error(exc: Exception, operation: str):
+    from backend.beets_plugins import BeetsConfigEditError
+    if isinstance(exc, ValueError):
+        return jsonify({"ok": False, "error": "Unsupported plugin selection."}), 400
+    if isinstance(exc, BeetsConfigEditError):
+        # The message is generated by us (no file contents or paths).
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    app.logger.error("%s failed: %s", operation, exc, exc_info=True)
+    return jsonify({"ok": False, "error": "Beets config update failed."}), 500
+
+
+# Literal path (not the constant) so the AST endpoint inventory sees it.
+@app.post("/api/setup/beets-config/include-paths")
+def setup_beets_config_include_paths():
+    """Fix action for the beets_web_include_paths_disabled warning: set
+    web.include_paths to yes in the Beets config (backup first)."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+    beets_config_path = Path(config_layers.beets_config_file())
+    try:
+        from backend.beets_plugins import ensure_web_include_paths
+        result = ensure_web_include_paths(beets_config_path)
+    except Exception as exc:
+        return _beets_config_edit_error(exc, "setup_beets_config_include_paths")
+    _invalidate_setup_status_cache()
+    return jsonify(result)
+
+
+@app.get("/api/setup/plugins/recommended")
+def setup_plugins_recommended_preview():
+    """Read-only preview (unified diff) of enabling the recommended plugins."""
+    beets_config_path = Path(config_layers.beets_config_file())
+    try:
+        from backend.beets_plugins import preview_recommended_plugins
+        result = preview_recommended_plugins(beets_config_path)
+    except Exception as exc:
+        return _beets_config_edit_error(exc, "setup_plugins_recommended_preview")
+    return jsonify(result)
+
+
+@app.post("/api/setup/plugins/recommended/apply")
+def setup_plugins_recommended_apply():
+    """Explicit opt-in: add the selected recommended plugins to config.yaml.
+
+    Body: {"plugins": ["fetchart", ...]} -- every name must come from the
+    recommended list returned by the preview route.
+    """
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+    body = request.get_json(silent=True)
+    plugins = body.get("plugins") if isinstance(body, dict) else None
+    if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
+        return jsonify({"ok": False, "error": "Body must be {\"plugins\": [names]}."}), 400
+    beets_config_path = Path(config_layers.beets_config_file())
+    try:
+        from backend.beets_plugins import apply_recommended_plugins
+        result = apply_recommended_plugins(beets_config_path, plugins)
+    except Exception as exc:
+        return _beets_config_edit_error(exc, "setup_plugins_recommended_apply")
+    _invalidate_setup_status_cache()
     return jsonify(result)
 
