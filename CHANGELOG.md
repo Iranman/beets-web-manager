@@ -6,6 +6,9 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Security
+- Bump `sharp` override 0.35.4 -> 0.35.5 (GHSA-wq5f-xc86-pv6w, librsvg CVE-2026-96889) and `source-map-js` 1.2.1 -> 1.2.2 (GHSA-68fv-2mgg-jv7q, event-loop DoS) in the frontend lockfile. This clears the `npm audit --audit-level=high` CI gate; `next` stays at 16.3.8.
+
 ## v0.1.49 - 2026-10-04
 
 ### Upgrade Notes
