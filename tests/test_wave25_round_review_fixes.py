@@ -152,14 +152,15 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         self.assertNotIn('composite_workflows.plan_folder_cleanup({"path":', self.app_source)
 
     def test_staged_item_and_orphan_cleanup_use_playlist_media_cleanup(self):
-        """Both real DB-row-deletion call sites (_delete_album_items_under_folder's
-        failed-staged-import cleanup, and import_folder_with_id's pre-import
-        orphan-row cleanup) must route through playlist_media_cleanup_v1 --
-        the family that actually reads item_ids and deletes both the file
-        (quarantined) and the DB row (with any now-empty album) as one
-        transaction -- not the no-op folder_cleanup_v1 shape."""
-        self.assertIn('composite_workflows.plan_playlist_media_cleanup({"item_ids": delete_ids})', self.app_source)
-        self.assertIn('composite_workflows.plan_playlist_media_cleanup({"item_ids": orphan_ids})', self.app_source)
+        """Both real DB-row-deletion call sites (the failed-staged-import
+        cleanup and the pre-import stale-row cleanup) must route through
+        playlist_media_cleanup_v1 via the rows-only engine wrapper (S1: the
+        family removes Beets rows and keeps files; it is approved, claimed and
+        locked inside the transaction layer)."""
+        self.assertEqual(self.app_source.count("composite_workflows.remove_item_rows_keep_files("), 3)
+        self.assertIn('reason=f"failed staged import rows', self.app_source)
+        self.assertIn('reason="stale wanted rows before re-import"', self.app_source)
+        self.assertNotIn("composite_workflows.plan_playlist_media_cleanup(", self.app_source)
 
     # ── Dead code: _delete_row_file (raw delete_file on library media, ─────
     # ── never actually called) ──────────────────────────────────────────────
@@ -181,8 +182,9 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         end_idx = self.app_source.index("def _rollback_failed_library_source_import")
         body = self.app_source[idx:end_idx]
         self.assertNotIn("composite_workflows.delete_file(", body)
-        self.assertIn("composite_workflows.plan_album_cleanup(", body)
-        self.assertIn("composite_workflows.apply_album_cleanup(", body)
+        # Wave 0 (LT-17): the rollback is row-only -- it never deletes files.
+        self.assertIn("composite_workflows.remove_album_rows_after_failed_import(", body)
+        self.assertNotIn("delete_files=True", body)
 
     # ── Inventory classification truthfulness (reimport_source) ────────────
 

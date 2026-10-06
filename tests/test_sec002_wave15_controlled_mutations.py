@@ -254,7 +254,13 @@ class BeetsClientIntegrationTests(unittest.TestCase):
                 )
                 self.assertTrue(plan_res.get("ok"))
                 op_id = plan_res.get("operation_id")
-                apply_res = composite_workflows.apply_import_review_cleanup(op_id, store=store)
+                # S1: an unapproved Preview is refused; the operator's
+                # approval is recorded through a CAS before apply.
+                refused = composite_workflows.apply_import_review_cleanup(op_id, store=store)
+                self.assertEqual(refused.get("code"), "not_approved")
+                self.assertTrue(f.exists())
+                apply_res = composite_workflows.apply_import_review_cleanup(
+                    op_id, store=store, approved_by="test operator")
                 self.assertTrue(apply_res.get("ok"))
 
     def test_beets_client_album_cleanup_flow(self):

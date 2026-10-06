@@ -234,34 +234,53 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.mock_adapter.find_all_items_by_album_id.return_value = []
         p_alb = plan_album_cleanup(30, adapter=self.mock_adapter, store=self.store)
         self.assertTrue(p_alb["ok"])
+        # LT-4 (Wave 0): a Preview plan cannot be applied ...
+        refused = apply_album_cleanup(p_alb["operation_id"], adapter=self.mock_adapter, store=self.store)
+        self.assertEqual(refused["code"], "not_approved")
+        self.mock_adapter.remove.assert_not_called()
+        # ... and an Approved one removes rows only (files kept) by default.
+        self.store.transition(p_alb["operation_id"], "Preview", "Approved")
+        self.mock_adapter.get_album.side_effect = [{"id": 30, "album": "Delete Me"}, None]
         a_alb = apply_album_cleanup(p_alb["operation_id"], adapter=self.mock_adapter, store=self.store)
-        self.assertTrue(a_alb["ok"])
-        self.mock_adapter.remove.assert_called_with(album_ids=[30], delete_files=True)
+        self.assertTrue(a_alb["ok"], a_alb)
+        self.mock_adapter.remove.assert_called_with(album_ids=[30], delete_files=False,
+                                                    idempotency_key=p_alb["operation_id"])
 
     def test_clean_all_helpers(self):
-        # Test sync_deleted_files
-        self.mock_adapter.list_item_paths.return_value = [
-            {"id": 1, "path": "/nonexistent/path/song.mp3"},
-        ]
-        res = sync_deleted_files(dry_run=False, adapter=self.mock_adapter)
-        self.assertTrue(res["ok"])
-        self.assertEqual(res["missing_count"], 1)
-        self.mock_adapter.remove.assert_called_with(item_ids=[1], delete_files=False)
+        """Wave 0 (LT-1/LT-2): row-only removal of re-verified missing files;
+        never file deletion, never a widening of an empty selection."""
+        music = Path(self.tmpdir.name) / "music"
+        music.mkdir()
+        present = music / "present.mp3"
+        present.write_bytes(b"x")
+        with patch.dict("os.environ", {"MUSIC_ROOT": str(music)}):
+            self.mock_adapter.list_item_paths.return_value = [
+                {"id": 1, "path": str(music / "missing.mp3")},
+                {"id": 2, "path": str(present)}, {"id": 3, "path": str(present)},
+            ]
+            res = sync_deleted_files(dry_run=False, adapter=self.mock_adapter, item_ids=[1], store=self.store)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["missing_count"], 1)
+            self.mock_adapter.remove.assert_called_with(item_ids=[1], delete_files=False)
 
-        # Test clean_orphaned_items
-        self.mock_adapter.get_albums.return_value = [{"id": 1}]
-        self.mock_adapter.get_items.return_value = [
-            {"id": 10, "album_id": 999},  # orphan
-        ]
-        res_orph = clean_orphaned_items(dry_run=False, adapter=self.mock_adapter)
-        self.assertTrue(res_orph["ok"])
-        self.mock_adapter.remove.assert_called_with(item_ids=[10], delete_files=True)
+            self.mock_adapter.remove.reset_mock()
+            self.mock_adapter.get_item.side_effect = lambda iid: {
+                10: {"id": 10, "album_id": 999, "path": str(music / "gone.mp3")},
+                11: {"id": 11, "album_id": 1, "path": str(present)},
+            }.get(iid)
+            self.mock_adapter.get_stats.return_value = {"items": 10}
+            res_orph = clean_orphaned_items(item_ids=[10, 11], dry_run=False, adapter=self.mock_adapter,
+                                            store=self.store)
+            self.assertTrue(res_orph["ok"])
+            self.mock_adapter.remove.assert_called_once_with(item_ids=[10], delete_files=False)
+            self.assertFalse(clean_orphaned_items(dry_run=False, adapter=self.mock_adapter)["ok"])
 
-        # Test clean_empty_albums
-        self.mock_adapter.find_all_orphan_albums.return_value = [{"id": 99}]
-        res_empty = clean_empty_albums(dry_run=False, adapter=self.mock_adapter)
+        self.mock_adapter.get_album.side_effect = lambda aid, expand=True: {"id": aid}
+        self.mock_adapter.find_all_items_by_album_id.return_value = []
+        res_empty = clean_empty_albums(album_ids=[99], dry_run=False, adapter=self.mock_adapter)
         self.assertTrue(res_empty["ok"])
         self.mock_adapter.remove.assert_called_with(album_ids=[99], delete_files=False)
+        self.assertFalse(clean_empty_albums(dry_run=False, adapter=self.mock_adapter)["ok"])
 
     def test_playlist_m3u_operations(self):
         items = [
@@ -289,10 +308,12 @@ class TestCompositeWorkflows(unittest.TestCase):
 
     def test_run_command_security_gates(self):
         from backend.composite_workflows import run_command
-        # Allowed command succeeds
+        # Allowed command passes validation but is not executed: the helper
+        # must report not_supported instead of fabricating stdout (Wave 0 LT-12).
         res = run_command("mbsubmit", ["album_id:123"])
-        self.assertTrue(res["ok"])
-        self.assertIn("mbsubmit album_id:123", res["stdout"])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res.get("code"), "not_supported")
+        self.assertNotIn("mbsubmit album_id:123", res.get("stdout", ""))
 
         # Prohibited commands raise ValueError
         for bad_cmd in ["sh", "bash", "rm", "python", "import", "eval", "docker", "drop table"]:
