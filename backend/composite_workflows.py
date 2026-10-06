@@ -2427,7 +2427,7 @@ def apply_import_review_cleanup(
                 return _apply_engine_import_review_cleanup(st, operation_id)
             return _apply_legacy_folder_cleanup(st, operation_id, meta)
         except Exception as exc:
-            log.exception("Import Review cleanup %s failed", operation_id)
+            log.exception("Import Review cleanup apply failed; the transaction is marked Failed")
             reason = f"Cleanup failed ({type(exc).__name__}); see server logs."
             st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": reason}},
                       logs=[reason])
