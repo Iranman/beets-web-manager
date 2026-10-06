@@ -146,6 +146,7 @@ The project uses Semantic Versioning.
 - `POST /api/setup/beets-config/include-paths`, `GET /api/setup/plugins/recommended` (preview with a diff) and `POST /api/setup/plugins/recommended/apply`. The writes require CSRF, take a timestamped backup and report `restart_required`.
 
 ### Changed
+- `test_real_stock_docker_container_acceptance` retries `docker pull` and `docker run` (3 attempts each, with backoff and a fresh loopback port per run) and puts the last `docker` stderr in the failure message. CI failed twice with `docker run` exit 125 from a registry flake. A failure that persists after the retries still fails the test.
 - Dependabot groups `react`, `react-dom`, `@types/react` and `@types/react-dom` into one PR, and ignores odd (non-LTS) `node` image majors.
 - Test and CI Beets pins move from `beets==2.13.1` to `beets==2.14.1` (`requirements-dev.txt`, `unit-tests.yml`, `security.yml`, `BEETS_TEST_FIXTURE_VERSION` in `docker-build.yml`), matching `lscr.io/linuxserver/beets:latest` (2.14.1-ls355). Supersedes Dependabot #195, which bumped only `requirements-dev.txt`.
 - The Dockerfile frontend build stage uses `node:24-bookworm-slim` (Active LTS, pinned by digest), the same Node major as CI. Its npm 11 accepts lockfiles written by npm 11; npm 10 in the old `node:22` stage failed `npm ci` with `Missing: yaml@2.9.1 from lock file`, which broke the Docker build of Dependabot npm PRs while CI passed. `docs/DEVELOPMENT.md` names Node.js 24.
