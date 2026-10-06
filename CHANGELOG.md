@@ -15,6 +15,10 @@ The project uses Semantic Versioning.
 - **Deploys fail on a new setup blocking reason (RD-6).** `/api/setup/status` is recorded before the deploy and compared after; a new blocking reason fails the rollout with the rollback command, before the version is written to `.env`. Previously a deploy passed as long as every endpoint answered 200.
 - **Rollout backups include the state a new version can change (RD-7).** Web Manager's Settings `.env`, browser login files, Flask session key, setup markers and `transactions/`, plus Beets `config.yaml` and `beetsplug/`, are backed up (mode 600) after the web manager stops, and restored on rollback. Replaced files are kept under `pre-rollback-*/`, and audit records written after the deploy are never removed. The library database is never copied.
 - **A changed webmanager plugin is loaded (RD-8).** Beets keeps the plugin it imported at start-up, and the rollout only recreated the web manager, so a new plugin version stayed inactive until someone restarted Beets. The rollout now compares the provisioned plugin version with the one the engine reports and, when they differ, restarts only `beets` (same container) with library snapshots before and after.
+- **`docker-compose.yml` follows `BEETS_WEB_MANAGER_VERSION`.** It hard-coded `ghcr.io/iranman/beets-web-manager:stable`, so the version the rollout script and `--rollback` write to the stack `.env` was ignored by a plain `docker compose up -d`. The image is now `ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`, like the other Compose files; `.env.example`, the README, `INSTALLATION.md`, `EXAMPLES.md` and `TROUBLESHOOTING.md` match, and a test keeps them in step.
+- **Rollback restores `beetsplug/` exactly.** Files that the new version added to the Beets plugin folder used to stay behind after `--rollback`; the folder is now emptied (after its current contents are kept under `pre-rollback-*/`) and refilled from the backup, without following symbolic links.
+- **A failed `docker compose stop` during rollback is reported.** It was ignored silently; it is now logged and the rollback continues, with the running image ID and version proof deciding whether it succeeded.
+- **Backup names and restore stamps are in UTC.** `backup.sh` archive names, the `created=` line in `MANIFEST.txt` and the `.pre-restore-<timestamp>` folders now use UTC (marked `(UTC)` in the manifest) instead of the host's local time.
 - **`backup.sh` backs up Web Manager state and works on a Compose host (QA-9, RD-14).** It used to fail with its default `/config` path, and it never included `/web-manager-data`. It now copies the database with SQLite's online backup API (`sqlite3` or `python3`, read-only), so writes still in the WAL are included while Beets runs; without either tool it requires `--beets-stopped`. `restore.sh` refuses unsafe archives and a running Beets, and moves replaced files aside instead of overwriting them.
 
 ### Security
@@ -24,6 +28,7 @@ The project uses Semantic Versioning.
 - Redacted diagnostic copies also scrub `key=`/`token=`/`secret=`/`password=` values from container commands, entrypoints, labels and health checks and from Compose `command`, `entrypoint`, `healthcheck`, `labels`, `build.args` and `x-*` extensions, and remove credentials embedded in allowlisted URLs (`BEETS_WEB_URL`, `BEETS_OUTBOUND_ALLOWLIST`).
 - `backup.sh` no longer builds a `sqlite3 .backup` command from a path containing `'`: it uses the Python online backup for such paths, or stops with an error when `python3` is unavailable.
 - The `github-release` CI job checks out with `persist-credentials: false`, so its write-scoped token is not left in `.git/config`.
+- `restore.sh` checks every file against the sha256 list in the backup's `MANIFEST.txt` before restoring anything, and refuses a backup with a mismatched or unlisted file, or a current-layout backup without a manifest; nothing is touched when it refuses.
 
 ### Added
 - GitHub Releases are created by CI (RD-11): on a `v*` tag, after the image is published, the `github-release` job creates the release with the tag's CHANGELOG section as its body (`scripts/release_metadata.py notes`). An existing release is left untouched.
@@ -32,6 +37,8 @@ The project uses Semantic Versioning.
 
 ### Changed
 - `docs/TRUENAS_ROLLOUT.md` describes what the script actually does: it edits the stack `.env` (deploy and rollback rewrite `BEETS_WEB_MANAGER_VERSION`), what a dry run pulls and writes, the full backup contents and the rollback proof. `docs/DEVELOPMENT.md` no longer references the missing `scripts/verify_security_config.py` and describes the image/tag/rollout release flow instead of copying files. README backup, upgrade and rollback sections match the scripts.
+- `docs/TRUENAS_ROLLOUT.md` documents a known limitation of the setup-readiness check: blocking reasons have no codes and are compared as exact strings, so a reason whose wording changed between versions counts as new and fails the rollout; it says how to tell that false positive from a real regression.
+- The `gh release create` step in the `github-release` CI job has consistent whitespace (no behaviour change).
 
 ## v0.1.49 - 2026-10-04
 
