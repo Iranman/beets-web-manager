@@ -711,11 +711,19 @@ def api_transaction_approve(transaction_id):
 
 @app.post("/api/transactions/<transaction_id>/cancel")
 def api_transaction_cancel(transaction_id):
+    # Compare-and-set (#187 F-6): only a not-yet-started transaction can be
+    # cancelled, so a cancel racing an apply never overwrites its outcome.
     try:
-        tx = transactions.update(transaction_id, status="Cancelled")
+        for expected in ("Pending", "Preview", "Approved"):
+            tx = transactions.transition(transaction_id, expected, "Cancelled")
+            if tx is not None:
+                return jsonify({"ok": True, "transaction": tx})
+        current = transactions.get(transaction_id).get("status")
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
-    return jsonify({"ok": True, "transaction": tx})
+    return jsonify({"ok": False, "code": "not_cancellable",
+                    "error": f"Only a Pending, Preview or Approved transaction can be cancelled "
+                             f"(this one is {current})."}), 409
 
 
 def _item_file_replacement_response(fn, transaction_id):
@@ -747,6 +755,8 @@ _ENGINE_FAMILIES = {
     untracked_recovery.ATTACH_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
     untracked_recovery.QUARANTINE_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
     untracked_recovery.ATTACH_ALBUM_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
+    composite_workflows.ALBUM_CLEANUP_FAMILY: (composite_workflows.apply_album_cleanup,
+                                               composite_workflows.rollback_album_cleanup),
 }
 
 

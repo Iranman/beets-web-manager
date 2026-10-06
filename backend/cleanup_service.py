@@ -434,9 +434,12 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
         False) and the failure looks like a precondition/staleness refusal.
         Safe to tell the user nothing happened and offer "generate a new
         plan."
-      - "partial_mutation": the engine's "mutated" flag is True -- at least
-        one file was already irreversibly deleted in this Apply call before
-        the failure. Must never be described as "nothing changed."
+      - "partial_mutation": the engine's "mutated" flag is True -- this
+        Apply call already changed something before the failure. For a plan
+        that deletes files (``delete_files`` true or absent) that may be
+        irreversibly deleted files; for a row-only plan (``delete_files``
+        false) only library rows changed and no file was deleted. Must never
+        be described as "nothing changed."
       - "other": mutated is False but the failure isn't a staleness signal
         (e.g. a missing/unreachable database) -- a genuine operational
         error, not evidence the album changed.
@@ -450,6 +453,13 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
     DB-membership-drift check inside the delete_db_record step).
     """
     raw_error = res.get("error") or "Precondition revalidation failed."
+    if res.get("mutated") and res.get("delete_files", True) is False:
+        return "partial_mutation", (
+            "The cleanup plan could not finish: library rows were partly "
+            "changed, but no audio files were removed from disk (this cleanup "
+            "keeps files). Check the album's current state carefully before "
+            f"retrying. Details: {raw_error}"
+        )
     if res.get("mutated"):
         return "partial_mutation", (
             "The cleanup plan could not finish: some file(s) were already "
