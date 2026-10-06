@@ -29,7 +29,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:stable
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -62,7 +62,7 @@ When connecting Beets Web Manager to an existing, separately-managed stock Beets
 ```yaml
 services:
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:stable
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
     restart: unless-stopped
     ports:

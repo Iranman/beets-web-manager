@@ -22,11 +22,13 @@ See `docs/ARCHITECTURE.md` for current system shape and intended dependency dire
 Run from the repository root before opening a change:
 
 ```bash
-python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/verify_security_config.py
+python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/release_metadata.py
 python -m unittest discover -s tests -p "test_*.py"
 python scripts/security_secret_scan.py
 python scripts/validate_compose_security.py
 python scripts/generate_endpoint_inventory.py --check
+python scripts/release_metadata.py check
+/bin/bash -n scripts/deploy_truenas_web_manager.sh scripts/backup.sh scripts/restore.sh
 ```
 
 `generate_endpoint_inventory.py --check` fails if `security/endpoint_inventory.json` is stale relative to the route decorators in `app.py`/`routes_jobs.py`/`routes_lidarr.py`/`routes_setup.py`/`routes_submissions.py`. Run it without `--check` to regenerate after adding/removing a route, then fill in any new `"NEEDS_REVIEW"` field by hand before committing.
@@ -42,12 +44,6 @@ npm run build
 npm audit --audit-level=high
 ```
 
-Deployment configuration validation, only against a configured deployment environment (it will fail on a bare checkout where required environment values are unset — that is expected, not a bug; never add real credentials to make it pass locally):
-
-```bash
-python scripts/verify_security_config.py
-```
-
 For a targeted Python test: `python -m unittest tests.test_name`.
 
 ## Frontend Runtime Shape
@@ -60,17 +56,15 @@ Repository deployment files (`docker-compose.yml`, `docker-compose.full.yml`, `d
 
 For the guarded TrueNAS rollout of a specific tagged release (image pin, mount verification, database/token safety checks, backup, rollback), see `docs/TRUENAS_ROLLOUT.md` and `scripts/deploy_truenas_web_manager.sh`.
 
-## Deployment Procedure
+## Release and Deployment
 
-When deploying an already-validated build:
+Releases are container images, never file copies onto a host:
 
-1. Validate the exact source state locally (commands above).
-2. Build frontend artifacts when frontend files changed.
-3. Back up existing live files before replacing them.
-4. Copy only the intended backend files or built frontend artifacts.
-5. Restart or reload only through the approved app mechanism.
-6. Verify health endpoints and the affected served route after restart.
-7. Report file-copy, restart/reload, and live-verification results as separate facts — do not infer a successful deploy from a successful build.
+1. Merge the change to `main` with CI green (including CodeQL).
+2. A release PR retitles `## Unreleased` in `CHANGELOG.md` to `## vX.Y.Z - YYYY-MM-DD` and bumps `VERSION` (CI's `release-metadata` job checks they agree). The versioning policy (minor vs patch) is in `CONTRIBUTING.md`.
+3. Pushing the annotated tag `vX.Y.Z` makes `.github/workflows/docker-build.yml` publish `ghcr.io/iranman/beets-web-manager:X.Y.Z` (labels `org.opencontainers.image.version`/`revision`) and then create the GitHub Release from the CHANGELOG section.
+4. Deploy a numbered tag, never `latest`/`stable`/`edge`. For the maintainer's TrueNAS stack that is `scripts/deploy_truenas_web_manager.sh` (dry run, then the real run; `--rollback <backup dir>` to undo), described in `docs/TRUENAS_ROLLOUT.md`. For a plain Compose install it is the README's Upgrades section.
+5. Verify out of band and report each fact separately: the image labels, `/health/live` version, `/api/setup/status` blocking reasons, library counts. A successful build or a healthy container is not proof that the right version is serving.
 
 Never copy raw local backup files, private config, generated caches, or unrelated dirty work into a deployment target.
 

@@ -40,7 +40,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:stable
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -72,6 +72,7 @@ services:
 > - Update `/path/to/music` to point to your music library on the host.
 > - Update `/path/to/downloads` to point to your downloads or staging directory.
 > - `./beets` and `./web-manager` will be created automatically in your current directory for persistent configuration and application state.
+> - The Web Manager image tag comes from `BEETS_WEB_MANAGER_VERSION` (default `stable`). Set it in a `.env` file next to `docker-compose.yml` to pin an exact release such as `0.1.49`; see [Configuration](CONFIGURATION.md#1-host-compose-interpolation-only).
 > - Change only the **left** side of each volume (the host folder). The right side (`/music`, `/downloads`, `/config`) is the path inside the containers. Web Manager's `MUSIC_ROOT`/`DOWNLOADS_ROOT`/`BEETS_CONFIG` and Beets' own `directory:` refer to it. If you change a right side, change it in both services and set the matching variable (see `docs/CONFIGURATION.md`, "Configuration layers").
 
 ### Step 3: Start the stack
@@ -145,12 +146,15 @@ docker compose -f docker-compose.dev.yml up -d --build
 
 ## Upgrades
 
-To upgrade to the latest stable release:
+To upgrade to the latest stable release, back up first (see [Backups](../README.md#backups)), then:
 
 ```bash
 docker compose pull
 docker compose up -d
+docker compose restart beets   # load a new webmanager plugin version, if the release ships one
 ```
+
+Read the release's Upgrade Notes in [`CHANGELOG.md`](../CHANGELOG.md) before upgrading. The full upgrade, verification and rollback steps are in the README's [Upgrades](../README.md#upgrades) section.
 
 ---
 
