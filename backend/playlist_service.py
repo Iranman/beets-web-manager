@@ -17,6 +17,7 @@ from backend.audio_preferences import load_music_format_preferences as _load_mus
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
+from backend.title_normalize import dash_suffix_group, trailing_bracket_group
 from backend.library_cache import library_cache
 from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
 from backend.slskd_service import SLSKD_API_KEY, _download_method_list, _find_slskd_downloaded_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
@@ -38,7 +39,7 @@ def _audio_duration_seconds(path_value: str) -> float:
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
-                path_value,
+                "file:" + str(path_value),  # SEC-13: local file only (see audio_preferences.ffmpeg_file_input)
             ],
             timeout=15,
             capture_output=True,
@@ -460,17 +461,18 @@ def _playlist_title_modifier_is_noise(value):
 
 
 def _playlist_clean_variant_title(value):
-    text = _playlist_strip_video_title_suffix(value)
+    # SEC-5 (ReDoS): cap free text (1024 chars) before the regexes below.
+    text = _playlist_strip_video_title_suffix(_s(value)[:1024])
     changed = False
     while True:
-        match = re.search(r"\s*[\(\[]([^()\[\]]+)[\)\]]\s*$", text)
-        if not match or not _playlist_title_modifier_is_noise(match.group(1)):
+        found = trailing_bracket_group(text)
+        if not found or not _playlist_title_modifier_is_noise(found[1]):
             break
-        text = text[:match.start()].strip()
+        text = found[0].strip()
         changed = True
-    match = re.search(r"\s+[-–—]\s+(.+)$", text)
-    if match and _playlist_title_modifier_is_noise(match.group(1)):
-        text = text[:match.start()].strip()
+    found = dash_suffix_group(text)
+    if found and _playlist_title_modifier_is_noise(found[1]):
+        text = found[0].strip()
         changed = True
     return _playlist_clean_video_text(text), changed
 
@@ -3146,6 +3148,10 @@ def _playlist_url_host_is(host: str, domain: str) -> bool:
     return bool(host) and (host == domain or host.endswith("." + domain))
 
 
+def _playlist_url_host_is_any(host: str, domains) -> bool:
+    return any(_playlist_url_host_is(host, domain) for domain in domains)
+
+
 # Service behind POST /api/playlist/parse (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
 def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
@@ -3217,7 +3223,15 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except _SpotifyFetchError as ex:
                 return {"ok": False, "error": str(ex)}, 200
         else:
-            # yt-dlp handles YouTube Music, YouTube, SoundCloud, Apple Music, Tidal, etc.
+            # yt-dlp handles the supported media hosts (YouTube/YouTube Music,
+            # SoundCloud, Bandcamp, Mixcloud, Vimeo, Deezer). SEC-2: anything
+            # else -- and any host resolving to a non-public address -- is
+            # refused before yt-dlp runs; yt-dlp's own HTTP stack bypasses the
+            # application's outbound URL policy, and its generic extractor
+            # would otherwise fetch internal URLs.
+            from backend.ytdlp_guard import YTDLP_ALLOWED_HOSTS, ytdlp_guarded_options, ytdlp_target_allowed
+            if not ytdlp_target_allowed(content) or not _playlist_url_host_is_any(_content_host, YTDLP_ALLOWED_HOSTS):
+                return {"ok": False, "error": "Unsupported playlist URL. Use a YouTube, YouTube Music, SoundCloud, Bandcamp, Mixcloud, Vimeo, Deezer or Spotify playlist link."}, 200
             if not _ytdlp_ready.wait(timeout=30):
                 return {"ok": False, "error": "yt-dlp is still installing, try again in 30 seconds"}, 200
             try:
@@ -3257,7 +3271,7 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             elif _playlist_url_host_is(_content_host, "soundcloud.com"):
                 _apply_ytdlp_netrc(ydl_opts)
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [content])) as ydl:
                     info = ydl.extract_info(content, download=False)
             except Exception as exc:
                 _app_logger.warning("yt-dlp playlist import failed: %s", type(exc).__name__)
@@ -6480,15 +6494,21 @@ def _playlist_run_quality_cleanup_job(action: str,
                     f"{result.get('reason') or 'unknown reason'}",
                 )
     elif action == "delete_preview":
+        # S1: rows-only. The operator's delete_preview action authorises the
+        # removal of these library rows; media files are kept on disk.
         try:
-            plan_res = composite_workflows.plan_playlist_media_cleanup({"item_ids": candidate_ids})
-            if plan_res.get("ok"):
-                op_id = plan_res["operation_id"]
-                apply_res = composite_workflows.apply_playlist_media_cleanup(op_id)
-                if apply_res.get("ok"):
-                    files_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
-                    rows_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
-                    _playlist_log(log, f"[playlist] Quality cleanup transaction applied: {op_id}")
+            apply_res = composite_workflows.remove_item_rows_keep_files(
+                candidate_ids, reason="playlist quality cleanup",
+                approved_by="operator playlist delete_preview")
+            rows_deleted = len(apply_res.get("deleted_items") or [])
+            files_deleted = 0
+            if apply_res.get("ok"):
+                _playlist_log(log, f"[playlist] Quality cleanup transaction applied: "
+                                   f"{apply_res.get('operation_id')} ({rows_deleted} row(s) removed, files kept)")
+            else:
+                _playlist_log(log, f"[playlist] Quality cleanup transaction incomplete: "
+                                   f"{apply_res.get('error') or apply_res.get('status')} "
+                                   f"({rows_deleted} of {len(candidate_ids)} row(s) removed)")
         except Exception as ex:
             _playlist_log(log, f"[playlist] Quality cleanup transaction failed: {ex}")
 

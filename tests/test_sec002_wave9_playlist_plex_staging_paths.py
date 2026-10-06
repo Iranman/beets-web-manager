@@ -531,11 +531,22 @@ class Wave9StableIdentityAndEngineOwnershipTests(unittest.TestCase):
         client = app_module.composite_workflows
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp, "BEETS_IMPORT_ROOTS": tmp}):
-                f = Path(tmp) / "01.mp3"
+                # S1/F1: real staged tracks live under <data>/playlist_staging;
+                # the data-dir root itself (tokens, databases) is protected.
+                stg = Path(tmp) / "playlist_staging" / "test--key123"
+                stg.mkdir(parents=True)
+                f = stg / "01.mp3"
                 f.write_text("audio")
                 res = client.delete_playlist_staged_track("test--key123", "track-456", str(f))
                 self.assertTrue(res.get("ok"))
+                self.assertTrue(res.get("deleted"))
                 self.assertFalse(f.exists())
+
+                protected = Path(tmp) / "02.mp3"
+                protected.write_text("audio")
+                refused = client.delete_playlist_staged_track("test--key123", "track-789", str(protected))
+                self.assertFalse(refused.get("ok"), "a refused delete must not report success")
+                self.assertTrue(protected.exists())
 
     def test_beets_client_engine_export_m3u_ipc(self):
         client = app_module.composite_workflows

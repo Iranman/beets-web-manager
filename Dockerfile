@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # ---- Frontend build stage --------------------------------------------------
-FROM node:22-bookworm-slim AS frontend
+# Base images are pinned by digest (SEC-9); Dependabot (docker ecosystem)
+# proposes digest bumps. The tag is kept for readability.
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS frontend
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci
@@ -9,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- Runtime stage ----------------------------------------------------------
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS runtime
 
 # Immutable image provenance. Required, not optional: a blank/missing
 # VCS_REF fails the build rather than silently producing an unlabeled image.
@@ -24,8 +26,11 @@ LABEL org.opencontainers.image.title="Beets Web Manager" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
+# SEC-9: `apt-get upgrade` picks up Debian security fixes newer than the
+# pinned base; `git` is not installed (nothing at runtime uses it, and it
+# pulls in perl, the source of most CRITICAL OS findings).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     tini \
     gosu \
     ffmpeg \
@@ -41,12 +46,15 @@ RUN groupadd -g 1000 beets \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# SEC-9: install dependencies, then remove pip itself. Nothing installs
+# packages at runtime (backend/ytdlp_service.py blocks runtime installs), and
+# pip's vendored copies of urllib3/msgpack/setuptools (pkg_resources) carry
+# their own advisories that would otherwise ship in every image.
+RUN pip install --no-cache-dir -r requirements.txt     && pip uninstall -y pip
 
 COPY app.py helpers_mb.py job_engine.py routes_*.py ./
 COPY backend/ ./backend/
 COPY beetsplug/ ./beetsplug/
-COPY tests/ ./tests/
 COPY config.yaml.example .env.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, WEB_MANAGER_DATA_DIR, _env_int, _s
 from backend.app_runtime import _redact_security_text
-from flask import jsonify, request
+from flask import g, has_request_context, jsonify, request
 
 # ── ARCH-001 extracted code ──
 
@@ -318,6 +318,24 @@ def _constant_time_equal(left: str, right: str) -> bool:
 
 
 def _verify_password(supplied: str) -> bool:
+    """Check the browser password. Inside a request, the attempt is
+    rate-limited *before* the password is evaluated (SEC-3): while the
+    client IP's auth bucket or the account-wide bucket is exhausted, every
+    attempt -- including a correct one -- is refused without running the
+    hash check, and callers' _auth_failure_rate_limit_response() turns that
+    into a 429. Every rejected attempt is recorded in the account bucket."""
+    in_request = has_request_context()
+    if in_request:
+        g._bwm_password_attempted = True
+        if _password_attempts_limited():
+            return False
+    result = _check_password_value(supplied)
+    if in_request and not result:
+        _record_account_auth_failure()
+    return result
+
+
+def _check_password_value(supplied: str) -> bool:
     expected = _security_auth_password()
     if not _browser_password_is_usable(expected) or not supplied:
         return False
@@ -328,6 +346,36 @@ def _verify_password(supplied: str) -> bool:
         except Exception:
             return False
     return _constant_time_equal(supplied, expected)
+
+
+def _auth_ip_limit() -> Tuple[int, int]:
+    return (
+        _env_int("BEETS_AUTH_RATE_LIMIT", 30, minimum=5, maximum=1000),
+        _env_int("BEETS_AUTH_RATE_WINDOW", 60, minimum=10, maximum=3600),
+    )
+
+
+def _auth_account_limit() -> Tuple[int, int]:
+    return (
+        _env_int("BEETS_AUTH_ACCOUNT_RATE_LIMIT", 100, minimum=10, maximum=10000),
+        _env_int("BEETS_AUTH_ACCOUNT_RATE_WINDOW", 300, minimum=10, maximum=86400),
+    )
+
+
+_ACCOUNT_RATE_SUBJECT = "browser-account"
+
+
+def _password_attempts_limited() -> bool:
+    ip_limit, ip_window = _auth_ip_limit()
+    acct_limit, acct_window = _auth_account_limit()
+    ip_limited, _ = _rate_limit_peek("auth", _rate_limit_subject(include_auth=False), ip_limit, ip_window)
+    acct_limited, _ = _rate_limit_peek("auth-account", _ACCOUNT_RATE_SUBJECT, acct_limit, acct_window)
+    return ip_limited or acct_limited
+
+
+def _record_account_auth_failure() -> None:
+    acct_limit, acct_window = _auth_account_limit()
+    _rate_limited("auth-account", _ACCOUNT_RATE_SUBJECT, acct_limit, acct_window)
 
 
 def _bearer_authorized(header: str) -> bool:
@@ -348,10 +396,11 @@ def _basic_authorized(header: str) -> bool:
     username, sep, supplied_password = raw.partition(":")
     if not sep:
         return False
-    return (
-        _constant_time_equal(username, _security_auth_username())
-        and _verify_password(supplied_password)
-    )
+    # SEC-11: evaluate both, so a wrong username costs the same as a wrong
+    # password (no username timing oracle).
+    user_ok = _constant_time_equal(username, _security_auth_username())
+    password_ok = _verify_password(supplied_password)
+    return user_ok and password_ok
 
 
 def _session_authorized() -> bool:
@@ -365,6 +414,27 @@ def _session_authorized() -> bool:
 def _request_authorized() -> bool:
     header = request.headers.get("Authorization", "")
     return _bearer_authorized(header) or _basic_authorized(header) or _session_authorized()
+
+
+def probe_may_use_stored_secret(supplied_url: str, configured_url: str) -> bool:
+    """SEC-1: may a connectivity probe fall back to a *stored* credential?
+
+    Only for an authenticated caller (never during anonymous first-run
+    setup), and only when the probe targets the operator-configured endpoint
+    -- either no URL was supplied or the supplied URL is that same endpoint.
+    A caller-supplied URL must always come with a caller-supplied key, so a
+    stored secret can never be sent to a host the caller chose."""
+    if not _security_auth_disabled():
+        try:
+            if not _request_authorized():
+                return False
+        except RuntimeError:
+            return False
+    supplied = (supplied_url or "").strip()
+    if not supplied:
+        return True
+    from backend.security import same_endpoint_url
+    return same_endpoint_url(supplied, configured_url)
 
 
 def _trusted_proxy_cidrs() -> List[str]:
@@ -382,15 +452,32 @@ def _valid_client_ip(value: str) -> bool:
 
 
 def _request_client_identity() -> str:
+    """The client IP used for rate limiting and the LAN exemption.
+
+    SEC-4: forwarded headers are honoured only from a trusted proxy, and
+    X-Forwarded-For is walked right to left -- each proxy *appends* the
+    address it received from, so only the entries added by trusted proxies
+    are reliable; the first untrusted hop from the right is the client.
+    The leftmost entry is whatever the client chose to send and is never
+    trusted on its own."""
     peer = (request.remote_addr or "").strip()
-    if direct_peer_is_trusted(peer, _trusted_proxy_cidrs()):
-        candidates = [
-            request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip(),
-            request.headers.get("X-Real-IP", "").strip(),
-        ]
-        for candidate in candidates:
-            if _valid_client_ip(candidate):
-                return candidate
+    trusted = _trusted_proxy_cidrs()
+    if not direct_peer_is_trusted(peer, trusted):
+        return peer or "unknown"
+    raw_xff = ",".join(request.headers.getlist("X-Forwarded-For"))
+    hops = [hop.strip() for hop in raw_xff.split(",") if hop.strip()]
+    if hops:
+        for hop in reversed(hops):
+            if not _valid_client_ip(hop):
+                # A malformed entry beyond the trusted chain: stop at the
+                # last address a trusted proxy vouched for.
+                return peer or "unknown"
+            if not direct_peer_is_trusted(hop, trusted):
+                return hop
+        return hops[0]
+    real_ip = request.headers.get("X-Real-IP", "").strip()
+    if _valid_client_ip(real_ip):
+        return real_ip
     return peer or "unknown"
 
 
@@ -427,6 +514,18 @@ def _rate_limit_profile_for_request() -> Tuple[str, int, int]:
     if method not in {"GET", "HEAD", "OPTIONS"}:
         return "write", 120, 60
     return "read", 600, 60
+
+
+def _rate_limit_peek(bucket: str, subject: str, limit: int, window_seconds: int) -> Tuple[bool, int]:
+    """Like _rate_limited() but never records an event."""
+    now = time.time()
+    key = f"{bucket}:{hashlib.sha256(subject.encode('utf-8', errors='ignore')).hexdigest()[:32]}"
+    with _AUTH_RATE_LIMIT_LOCK:
+        entry = _AUTH_RATE_LIMITS.get(key) or {}
+        events = [float(ts) for ts in entry.get("events", []) if now - float(ts) < window_seconds]
+        if len(events) >= limit:
+            return True, max(1, int(window_seconds - (now - min(events))))
+        return False, 0
 
 
 def _rate_limited(bucket: str, subject: str, limit: int, window_seconds: int) -> Tuple[bool, int]:
@@ -537,14 +636,23 @@ def _is_public_endpoint() -> bool:
 
 
 def _auth_failure_rate_limit_response():
+    ip_limit, ip_window = _auth_ip_limit()
     auth_limited, auth_retry = _rate_limited(
         "auth",
         _rate_limit_subject(include_auth=False),
-        _env_int("BEETS_AUTH_RATE_LIMIT", 30, minimum=5, maximum=1000),
-        _env_int("BEETS_AUTH_RATE_WINDOW", 60, minimum=10, maximum=3600),
+        ip_limit,
+        ip_window,
     )
     if auth_limited:
         return _rate_limit_response(auth_retry)
+    # The account-wide bucket only answers requests that actually tried a
+    # password, so credential-less anonymous requests are not turned into
+    # 429s for everyone once an attacker has exhausted it.
+    if getattr(g, "_bwm_password_attempted", False):
+        acct_limit, acct_window = _auth_account_limit()
+        acct_limited, acct_retry = _rate_limit_peek("auth-account", _ACCOUNT_RATE_SUBJECT, acct_limit, acct_window)
+        if acct_limited:
+            return _rate_limit_response(acct_retry)
     return None
 
 

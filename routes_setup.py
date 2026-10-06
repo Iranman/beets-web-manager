@@ -272,13 +272,14 @@ def _setup_csrf_failure():
         return _json_security_error(403, "CSRF check failed")
     return None
 
+_SECRET_MASK = "********"
+
+
 def _mask(value: str) -> str:
-    value = str(value or "")
-    if not value:
-        return ""
-    if len(value) <= 4:
-        return "*" * len(value)
-    return value[:2] + "*" * (len(value) - 4) + value[-2:]
+    """A fixed placeholder for any configured secret (FE-16). It reveals
+    neither characters nor length; the plaintext is only available through
+    the re-authenticated reveal endpoint."""
+    return _SECRET_MASK if str(value or "") else ""
 
 
 def _is_secret_env(name: str) -> bool:
@@ -2457,6 +2458,14 @@ def _acoustid_integration_status(diagnostics: Dict[str, Any], fpcalc_available: 
             state="dependency_plugin_missing",
             note="pyacoustid is missing in the Beets engine.",
         )
+    from helpers_mb import acoustid_api_key
+    if not acoustid_api_key():
+        # IA-12: no built-in fallback key -- lookups need the operator's key.
+        return _integration_status(
+            configured=False,
+            state="not_configured",
+            note="AcoustID not configured: set ACOUSTID_API_KEY (an application key from acoustid.org/new-application).",
+        )
     return _integration_status(
         configured=True,
         state="configured",
@@ -3258,12 +3267,20 @@ def setup_test_ai():
         return csrf_failure
 
     payload = request.get_json(silent=True) or {}
-    api_key = payload.get("api_key") or os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
-    base_url = payload.get("base_url") or os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
+    from backend.auth_service import probe_may_use_stored_secret
+    configured_base_url = os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
+    supplied_base_url = str(payload.get("base_url") or "").strip()
+    base_url = supplied_base_url or configured_base_url
     model = payload.get("model") or os.environ.get("AI_MODEL") or "gpt-4o-mini"
+    api_key = str(payload.get("api_key") or "").strip()
+    if not api_key and probe_may_use_stored_secret(supplied_base_url, configured_base_url):
+        # SEC-1: a stored key is only ever sent to the operator-configured
+        # endpoint, and only for an authenticated caller -- never to a
+        # caller-supplied base_url, never during anonymous first-run setup.
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY") or ""
     if not api_key:
         return jsonify({"ok": False, "status": "not_configured",
-                         "error": "No AI API key configured. Set OPENAI_API_KEY (or your provider's key) and retry."}), 200
+                         "error": "No AI API key to test. Enter the API key for this base URL, or set OPENAI_API_KEY (or your provider's key) and retry."}), 200
     base_host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
     is_openai_host = base_host == "api.openai.com" or base_host.endswith(".api.openai.com")
     try:
@@ -3378,7 +3395,8 @@ def setup_test_acoustid():
         return csrf_failure
 
     payload = request.get_json(silent=True) or {}
-    api_key = payload.get("api_key") or os.environ.get("ACOUSTID_API_KEY") or os.environ.get("ACOUSTID_KEY")
+    from helpers_mb import ACOUSTID_NOT_CONFIGURED_MESSAGE, acoustid_api_key
+    api_key = str(payload.get("api_key") or "").strip() or acoustid_api_key()
     diagnostics = _beets_plugin_diagnostics(Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")))
     capabilities = diagnostics.get("capabilities") if isinstance(diagnostics.get("capabilities"), dict) else {}
     acoustid_cap = capabilities.get("acoustid_lookup") if isinstance(capabilities.get("acoustid_lookup"), dict) else {}
@@ -3402,7 +3420,10 @@ def setup_test_acoustid():
         result.update({"ok": False, "status": "missing_dependency", "error": "pyacoustid is not available in the Beets engine."})
         return jsonify(result), 200
     if not api_key:
-        result.update({"ok": False, "status": "not_configured", "error": "No AcoustID API key configured."})
+        # IA-12: there is no built-in fallback key; lookups need the
+        # operator's own application key.
+        result.update({"ok": False, "status": "not_configured", "reason": "not_configured",
+                       "error": ACOUSTID_NOT_CONFIGURED_MESSAGE})
         return jsonify(result), 200
     try:
         params = urllib.parse.urlencode({
@@ -3422,11 +3443,19 @@ def setup_test_acoustid():
                 raw = http_err.read() or b""
             except Exception:
                 raw = b""
+            finally:
+                http_err.close()
         try:
             data: Any = json.loads(raw) if raw else None
         except ValueError:
             data = None
         outcome = _classify_acoustid_probe(http_status, data)
+        probe_code = _acoustid_error_code(data)
+        if not outcome["ok"] and (probe_code == 6 or (probe_code is None and http_status in (401, 403))):
+            # IA-11: code 6 (invalid user key) and a bare 401/403 are key
+            # rejections, not "unexpected" provider errors.
+            outcome = {"ok": False, "status": "failed", "reason": "auth_failed",
+                       "error": "AcoustID API key was rejected."}
         if not outcome["ok"]:
             app.logger.warning("AcoustID connectivity test failed: http=%s code=%s reason=%s",
                                http_status, _acoustid_error_code(data), outcome.get("reason"))
@@ -3445,11 +3474,18 @@ def setup_test_plex():
         return csrf_failure
 
     payload = request.get_json(silent=True) or {}
-    plex_url = (payload.get("url") or os.environ.get("PLEX_URL") or "").rstrip("/")
-    plex_token = payload.get("token") or os.environ.get("PLEX_TOKEN")
+    from backend.auth_service import probe_may_use_stored_secret
+    configured_plex_url = (os.environ.get("PLEX_URL") or "").strip()
+    supplied_plex_url = str(payload.get("url") or "").strip()
+    plex_url = (supplied_plex_url or configured_plex_url).rstrip("/")
+    plex_token = str(payload.get("token") or "").strip()
+    if not plex_token and configured_plex_url and probe_may_use_stored_secret(supplied_plex_url, configured_plex_url):
+        # SEC-1: the stored PLEX_TOKEN only ever goes to the configured
+        # PLEX_URL, and only for an authenticated caller.
+        plex_token = os.environ.get("PLEX_TOKEN") or ""
     if not plex_url or not plex_token:
         return jsonify({"ok": False, "status": "not_configured",
-                         "error": "PLEX_URL and PLEX_TOKEN are both required to test Plex."}), 200
+                         "error": "A Plex URL and token are both required to test Plex. Enter the token for this URL, or set PLEX_URL and PLEX_TOKEN."}), 200
     try:
         req = urllib.request.Request(f"{plex_url}/library/sections", headers={"X-Plex-Token": plex_token})
         with provider_boundary.opened("plex", req, timeout=10, max_attempts=1) as r:

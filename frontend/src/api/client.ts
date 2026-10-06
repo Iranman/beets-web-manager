@@ -297,8 +297,13 @@ export function getTransaction(transactionId: string, params: { offset?: number;
   return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}${suffix ? `?${suffix}` : ''}`);
 }
 
-export function approveTransaction(transactionId: string): Promise<TransactionDetailResponse> {
-  return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}/approve`, jsonRequest('POST'));
+/** `confirmDeleteFiles` is the phrase the user typed; the backend requires it
+ * (and checks it) for album-cleanup plans that delete files. */
+export function approveTransaction(transactionId: string, confirmDeleteFiles?: string): Promise<TransactionDetailResponse> {
+  return apiJson<TransactionDetailResponse>(
+    `/api/transactions/${encodeURIComponent(transactionId)}/approve`,
+    jsonRequest('POST', confirmDeleteFiles === undefined ? undefined : { confirm_delete_files: confirmDeleteFiles }),
+  );
 }
 
 export function cancelTransaction(transactionId: string): Promise<TransactionDetailResponse> {

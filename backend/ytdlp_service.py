@@ -8,6 +8,7 @@ import copy, importlib, json, os, re, shlex, shutil, subprocess, sys, time
 import logging
 import urllib.error
 from backend.security import OutboundPolicyError, validate_outbound_url
+from backend.ytdlp_guard import ytdlp_guarded_options
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, YTDLP_ALLOW_BROWSER_COOKIES, YTDLP_COOKIES_FROM_BROWSER, YTDLP_COOKIES_FROM_BROWSER_FALLBACK, YTDLP_COOKIE_FALLBACKS, YTDLP_COOKIE_FILE, YTDLP_NETRC_FILE, YTDLP_PO_PROVIDER_URL, YTDLP_REQUIRE_YOUTUBE_AUTH, _YTDLP_AUTH_SMOKE_TTL, _YTDLP_BGUTIL_PIP_PACKAGE, _YTDLP_COOKIE_REJECTED_FILE, _YTDLP_PIP_FALLBACK_PACKAGE, _YTDLP_PIP_PACKAGE, _YTDLP_RUNTIME_BIN_DIR, _plugin_install_log, _s, _ur, _ytdlp_auth_smoke_cache, _ytdlp_auth_smoke_lock, _ytdlp_ready
@@ -754,7 +755,7 @@ def _ytdlp_find_first_url(source: str, queries: List[str], log: list) -> str:
                     opts["extractor_args"] = merged_extractor_args
                 log.append(f"  [yt-dlp] Resolving source URL: {query!r} (client {client_label})")
                 try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
+                    with yt_dlp.YoutubeDL(ytdlp_guarded_options(opts, [query])) as ydl:
                         info = ydl.extract_info(query, download=False)
                 except Exception as ex:
                     log.append(f"  [yt-dlp] URL resolve error: {ex}")
@@ -991,7 +992,7 @@ def _ytdlp_album_download(artist: str, album: str, year: str,
                 if merged_extractor_args:
                     opts["extractor_args"] = merged_extractor_args
                 try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
+                    with yt_dlp.YoutubeDL(ytdlp_guarded_options(opts, [query])) as ydl:
                         ydl.download([query])
                     if cookie_auth and bot_check_seen["count"]:
                         last_auth_error = _mark_ytdlp_auth_rejected(cookie_auth)
@@ -1154,7 +1155,7 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
                     if merged_extractor_args:
                         ydl_opts["extractor_args"] = merged_extractor_args
                     try:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [query])) as ydl:
                             ydl.download([query])
                         if cookie_auth and bot_check_seen["count"]:
                             last_auth_error = _mark_ytdlp_auth_rejected(cookie_auth)
@@ -1353,7 +1354,7 @@ def _ytdlp_auth_smoke_check(auth: Dict[str, Any], *, force: bool = False) -> Dic
             smoke_url = ""
         _apply_ytdlp_cookie_auth(ydl_opts, auth)
         _apply_ytdlp_netrc(ydl_opts)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [])) as ydl:
             cookiejar = getattr(ydl, "cookiejar", None)
             cookie_count = len(cookiejar) if cookiejar is not None else 0
             if cookie_count <= 0:
@@ -1365,7 +1366,7 @@ def _ytdlp_auth_smoke_check(auth: Dict[str, Any], *, force: bool = False) -> Dic
                     if extractor_args:
                         probe_opts["extractor_args"] = extractor_args
                     try:
-                        with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
+                        with yt_dlp.YoutubeDL(ytdlp_guarded_options(probe_opts, [smoke_url])) as probe_ydl:
                             info = probe_ydl.extract_info(smoke_url, download=False)
                         if isinstance(info, dict):
                             result["smoke_title"] = _s(info.get("title") or "")[:120]

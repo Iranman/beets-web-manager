@@ -24,6 +24,8 @@ class AcoustidServiceErrorTests(unittest.TestCase):
             mock.patch("shutil.which", return_value="fpcalc"),
             mock.patch("pathlib.Path.exists", return_value=True),
             mock.patch("subprocess.run", return_value=_fpcalc_ok()),
+            # IA-12: there is no built-in fallback key any more.
+            mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "test-app-key"}),
         ]
         for p in self.patches:
             p.start()

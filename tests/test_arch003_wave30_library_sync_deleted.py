@@ -24,7 +24,10 @@ class LibrarySyncDeletedTests(unittest.TestCase):
         self._invalidate_patch.stop()
 
     def _run(self, dry_run, confirmed=True):
+        # LT-2 (Wave 0): an apply removes only the item ids a preview listed.
         payload = {"dry_run": dry_run, "confirmed": confirmed}
+        if not dry_run:
+            payload["item_ids"] = [1]
         with app_module.app.test_request_context(
             "/api/library/sync-deleted", method="POST",
             data=json.dumps(payload), content_type="application/json",
@@ -47,7 +50,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
             return_value={"scanned_items": 10, "missing_count": 2, "missing_albums_count": 1},
         ) as mock_sync:
             log = self._run(dry_run=True)
-        mock_sync.assert_called_once_with(dry_run=True, limit=50000)
+        mock_sync.assert_called_once_with(dry_run=True, limit=50000, item_ids=None)
         self.assertTrue(any("Preview only" in line for line in log))
 
     def test_all_items_missing_removes_whole_album_via_engine(self):
@@ -56,7 +59,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
             return_value={"scanned_items": 10, "missing_count": 1, "removed_from_db": 1, "missing_albums_count": 1},
         ) as mock_sync:
             log = self._run(dry_run=False)
-        mock_sync.assert_called_once_with(dry_run=False, limit=50000)
+        mock_sync.assert_called_once_with(dry_run=False, limit=50000, item_ids=[1])
         self.assertTrue(any("removed 1 album(s), 1 track(s)" in line for line in log))
 
     def test_partial_missing_keeps_album_removes_only_missing_items(self):
@@ -65,7 +68,7 @@ class LibrarySyncDeletedTests(unittest.TestCase):
             return_value={"scanned_items": 10, "missing_count": 1, "removed_from_db": 1, "missing_albums_count": 0},
         ) as mock_sync:
             log = self._run(dry_run=False)
-        mock_sync.assert_called_once_with(dry_run=False, limit=50000)
+        mock_sync.assert_called_once_with(dry_run=False, limit=50000, item_ids=[1])
         self.assertTrue(any("removed 0 album(s), 1 track(s)" in line for line in log))
 
     def test_orphan_item_with_no_album_is_skipped_not_crashed(self):
@@ -74,8 +77,20 @@ class LibrarySyncDeletedTests(unittest.TestCase):
             return_value={"scanned_items": 10, "missing_count": 0, "removed_from_db": 0, "missing_albums_count": 0},
         ) as mock_sync:
             log = self._run(dry_run=False)
-        mock_sync.assert_called_once_with(dry_run=False, limit=50000)
+        mock_sync.assert_called_once_with(dry_run=False, limit=50000, item_ids=[1])
         self.assertTrue(any("Nothing to clean up" in line for line in log))
+
+    def test_apply_without_preview_ids_is_refused_before_any_job(self):
+        payload = {"dry_run": False, "confirmed": True}
+        with app_module.app.test_request_context(
+            "/api/library/sync-deleted", method="POST",
+            data=json.dumps(payload), content_type="application/json",
+        ), mock.patch.object(app_module.composite_workflows, "sync_deleted_files") as mock_sync,                 mock.patch.object(app_module.jobs, "start_python") as start:
+            resp, status = app_module.library_sync_deleted()
+        self.assertEqual(status, 400)
+        self.assertEqual(resp.get_json()["code"], "planned_ids_required")
+        mock_sync.assert_not_called()
+        start.assert_not_called()
 
     def test_engine_rejection_is_logged_not_raised(self):
         with mock.patch.object(
