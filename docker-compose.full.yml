@@ -39,7 +39,7 @@ services:
   # -- it is not conditionally enabled. If you don't use the ytdlp
   # acquisition method, remove this service and blank YTDLP_PO_PROVIDER_URL.
   bgutil-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.1-deno
     container_name: bgutil-provider
     restart: unless-stopped
     expose:

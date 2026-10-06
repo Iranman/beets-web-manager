@@ -116,7 +116,7 @@ _YTDLP_PIP_PACKAGE = os.environ.get("YTDLP_PIP_PACKAGE", "yt-dlp[default,curl-cf
 _YTDLP_PIP_FALLBACK_PACKAGE = os.environ.get("YTDLP_PIP_FALLBACK_PACKAGE", "yt-dlp[default]").strip() or "yt-dlp[default]"
 
 
-_YTDLP_BGUTIL_PIP_PACKAGE = os.environ.get("YTDLP_BGUTIL_PIP_PACKAGE", "bgutil-ytdlp-pot-provider==1.3.1").strip()
+_YTDLP_BGUTIL_PIP_PACKAGE = os.environ.get("YTDLP_BGUTIL_PIP_PACKAGE", "bgutil-ytdlp-pot-provider==2.0.1").strip()
 
 
 _YTDLP_RUNTIME_BIN_DIR = Path(os.environ.get("YTDLP_RUNTIME_BIN_DIR", "/config/yt-dlp/bin"))
