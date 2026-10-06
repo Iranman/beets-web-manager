@@ -128,6 +128,14 @@ the first half passes:
      version is left running; the failure block prints the `--rollback`
      command). If the "before" status could not be read, any blocking
      reason fails it.
+     *Known limitation:* `/api/setup/status` returns blocking reasons as
+     human-readable sentences with no stable codes, so the before/after
+     comparison is an exact string match. A release that only rewords an
+     existing reason (or embeds a changed path or number in it) reports it
+     as a NEW reason and fails the rollout. Compare
+     `setup-status-before.json` with the printed "after" reasons: if the
+     condition is the same and only the wording changed, the failure is a
+     false positive and the new version can stay; otherwise roll back.
 9. **Persist the version:** only after every check above passed, the
    script **edits the stack `.env`**: it rewrites the
    `BEETS_WEB_MANAGER_VERSION=` line to the deployed version (or appends
