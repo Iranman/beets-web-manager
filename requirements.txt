@@ -10,7 +10,7 @@ deezer-python==2.1.0
 pylistenbrainz==0.5.1
 Pillow==12.3.0
 beautifulsoup4==4.12.3
-requests==2.33.1
+requests==2.34.2
 
 # yt-dlp download pipeline
 yt-dlp[default,curl-cffi]==2026.8.19
