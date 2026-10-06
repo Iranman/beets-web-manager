@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import shutil
 import tempfile
 import time
@@ -55,9 +56,58 @@ def compute_revision(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+DEFAULT_CONFIG_DIR = "/config"
+
+
+class ConfigPathError(ConfigError):
+    """The configured Beets config location is unusable (relative, or outside
+    the Beets config directory). Fails closed instead of reading or writing
+    some other file and reporting success."""
+
+    def __init__(self, message: str):
+        super().__init__(message, error_code="CONFIG_PATH_INVALID", status_code=500)
+
+
+class ConfigNotFoundError(ConfigError):
+    def __init__(self, message: str = "Beets config.yaml was not found at the configured path."):
+        super().__init__(message, error_code="CONFIG_NOT_FOUND", status_code=404)
+
+
+def _config_dir() -> str:
+    raw = (os.environ.get("BEETSDIR") or "").strip()
+    return raw if raw.startswith("/") else DEFAULT_CONFIG_DIR
+
+
 def get_config_path() -> Path:
-    """Resolve the active Beets configuration file path."""
-    return Path(os.environ.get("BEETS_CONFIG_PATH", DEFAULT_CONFIG_PATH)).resolve()
+    """Resolve the active Beets configuration file path.
+
+    The source is ``BEETS_CONFIG`` -- the container path of config.yaml
+    (default ``/config/config.yaml``). ``BEETS_CONFIG_PATH`` is the HOST-side
+    Compose bind-mount source and is deliberately never read here: earlier
+    releases did, so a saved ``BEETS_CONFIG_PATH=./beets`` made the config
+    editor read an empty file and "save" into the container's /app directory.
+
+    Raises ConfigPathError for a relative path or one outside the Beets
+    config directory (``BEETSDIR``, default ``/config``).
+    """
+    raw = (os.environ.get("BEETS_CONFIG") or "").strip() or DEFAULT_CONFIG_PATH
+    if not raw.startswith("/"):
+        raise ConfigPathError("BEETS_CONFIG must be an absolute container path (e.g. /config/config.yaml).")
+    config_dir = posixpath.normpath(_config_dir())
+    target = posixpath.normpath(raw)
+    if posixpath.dirname(target) != config_dir:
+        raise ConfigPathError(
+            "BEETS_CONFIG must point to a file directly inside the Beets config directory "
+            f"({config_dir}); refusing to read or write another file."
+        )
+    # Lexical containment is not enough: a symlinked config.yaml (or config
+    # dir) could still resolve elsewhere. Compare resolved real paths too.
+    if os.path.dirname(os.path.realpath(target)) != os.path.realpath(config_dir):
+        raise ConfigPathError(
+            "BEETS_CONFIG resolves outside the Beets config directory "
+            f"({config_dir}); refusing to read or write another file."
+        )
+    return Path(target)
 
 
 def get_config_backup_path(config_path: Optional[Path] = None) -> Path:
@@ -81,7 +131,10 @@ def validate_config_yaml(content: str) -> Tuple[bool, str]:
 
 def get_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """Read the current configuration, its revision hash, and backup state."""
+    explicit = config_path is not None
     cfg = config_path or get_config_path()
+    if not explicit and not (cfg.exists() and cfg.is_file()):
+        raise ConfigNotFoundError()
     content = ""
     if cfg.exists() and cfg.is_file():
         try:
@@ -114,7 +167,12 @@ def save_config(
     config_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Save new configuration with CAS validation, atomic replace, and backup."""
+    explicit = config_path is not None
     cfg = config_path or get_config_path()
+    if not explicit and not (cfg.exists() and cfg.is_file()):
+        # Never create a config file the editor could not read first: Beets
+        # owns config.yaml, and Web Manager provisions it at startup.
+        raise ConfigNotFoundError()
     valid, err_msg = validate_config_yaml(content)
     if not valid:
         raise ConfigValidationError(err_msg)

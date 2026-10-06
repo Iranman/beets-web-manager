@@ -1,4 +1,4 @@
-import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
+import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -97,7 +97,9 @@ function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
             }}
           >
             <Alert severity="error">
-              Applying this plan permanently deletes the album&apos;s audio files from disk. Album cleanup cannot be rolled back.
+              <Description as="span">
+                Applying this plan permanently deletes the album&apos;s audio files from disk. Album cleanup cannot be rolled back.
+              </Description>
             </Alert>
             <label htmlFor="confirm-delete-album-files" className="block text-sm text-zinc-300">
               Type <span className="font-mono font-semibold text-white">{DELETE_ALBUM_FILES_PHRASE}</span> to approve

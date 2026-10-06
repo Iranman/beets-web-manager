@@ -26,6 +26,7 @@ Provides:
 from __future__ import annotations
 
 import datetime
+import difflib
 import importlib.util
 import json
 import logging
@@ -50,7 +51,16 @@ SOURCE_BEETSPLUG_DIR = ROOT / "beetsplug"
 
 
 class PluginCategory:
+    # REQUIRED: the integration transport itself (`web` + `webmanager`).
+    # Web Manager cannot operate without these, so they are the only
+    # plugins it ever adds to an existing config.yaml automatically.
     REQUIRED = "REQUIRED"
+    # RECOMMENDED: plugins that power specific Web Manager features
+    # (artwork, fingerprints, ReplayGain, ...). They are shipped enabled
+    # in config.yaml.example for fresh installs, but on an existing
+    # library they are only *reported*; enabling them is an explicit
+    # opt-in via preview_recommended_plugins()/apply_recommended_plugins().
+    RECOMMENDED = "RECOMMENDED"
     OPTIONAL = "OPTIONAL"
     INTEGRATION = "INTEGRATION"
 
@@ -65,7 +75,7 @@ class PluginType:
 class PluginDefinition:
     name: str
     display_name: str
-    category: str  # REQUIRED, OPTIONAL, INTEGRATION
+    category: str  # REQUIRED, RECOMMENDED, OPTIONAL, INTEGRATION
     plugin_type: str  # builtin, bundled, third_party
     description: str
     python_packages: List[str] = field(default_factory=list)
@@ -82,11 +92,11 @@ class PluginDefinition:
 # ─────────────────────────────────────────────────────────────────────────────
 
 BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
-    # ── Core & Required Plugins (Concrete Web Manager Features) ──────────────
+    # ── Recommended Plugins (feature plugins; opt-in on existing libraries) ──
     "fetchart": PluginDefinition(
         name="fetchart",
         display_name="Fetch Artwork",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="High-resolution cover art discovery, retrieval, and caching.",
         commands=["fetchart"],
@@ -94,7 +104,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "embedart": PluginDefinition(
         name="embedart",
         display_name="Embed Artwork",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Embeds cover images directly into media file tags across formats.",
         commands=["embedart"],
@@ -102,7 +112,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "scrub": PluginDefinition(
         name="scrub",
         display_name="Tag Scrubber",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Cleans extraneous and corrupt metadata tags from audio files.",
         commands=["scrub"],
@@ -110,28 +120,28 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "zero": PluginDefinition(
         name="zero",
         display_name="Field Zeroing",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Nulls out unwanted metadata fields on import according to rules.",
     ),
     "ftintitle": PluginDefinition(
         name="ftintitle",
         display_name="Featured Artist Formatter",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Standard featuring artist formatting (moves feat. from artist to title).",
     ),
     "fromfilename": PluginDefinition(
         name="fromfilename",
         display_name="From Filename Guesser",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Infers artist/title metadata from file paths for un-tagged audio.",
     ),
     "mbsync": PluginDefinition(
         name="mbsync",
         display_name="MusicBrainz Resync",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Synchronizes existing library metadata with updated MusicBrainz database.",
         commands=["mbsync"],
@@ -139,7 +149,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "mbsubmit": PluginDefinition(
         name="mbsubmit",
         display_name="MusicBrainz Submit",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Generates submission URLs and tracklists for unmatched releases.",
         commands=["mbsubmit"],
@@ -147,7 +157,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "chroma": PluginDefinition(
         name="chroma",
         display_name="Chroma / AcoustID",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="AcoustID audio fingerprinting, automated matching, and deduplication.",
         # pyacoustid/fpcalc run inside the stock Beets container, never
@@ -160,7 +170,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "replaygain": PluginDefinition(
         name="replaygain",
         display_name="ReplayGain Normalization",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Calculates volume normalization peak and gain tags using ffmpeg.",
         binary_dependencies=["ffmpeg"],
@@ -169,7 +179,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "lastgenre": PluginDefinition(
         name="lastgenre",
         display_name="Canonical Genre Tagging",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Canonical genre resolution, normalization, and repair.",
         commands=["lastgenre"],
@@ -177,7 +187,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "discpath": PluginDefinition(
         name="discpath",
         display_name="Multi-Disc Subfolders (discpath)",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUNDLED,
         description="Web Manager multi-disc album directory formatting (disc_subfolder).",
         bundled_file="discpath.py",
@@ -186,7 +196,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "musicbrainz": PluginDefinition(
         name="musicbrainz",
         display_name="MusicBrainz Autotagger (Core)",
-        category=PluginCategory.REQUIRED,
+        category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="Core MusicBrainz album matching, release queries, and track identification.",
         commands=[],
@@ -352,6 +362,17 @@ REQUIRED_PLUGIN_NAMES: List[str] = [
 REQUIRED_CONFIG_PLUGINS: List[str] = [
     name for name, p in BEETS_PLUGIN_MANIFEST.items()
     if p.category == PluginCategory.REQUIRED and name != "musicbrainz"
+]
+
+# Feature plugins Web Manager recommends but never adds to an existing
+# config.yaml on its own (BI-5). Fresh installs still get them from
+# config.yaml.example.
+RECOMMENDED_PLUGIN_NAMES: List[str] = [
+    name for name, p in BEETS_PLUGIN_MANIFEST.items() if p.category == PluginCategory.RECOMMENDED
+]
+
+RECOMMENDED_CONFIG_PLUGINS: List[str] = [
+    name for name in RECOMMENDED_PLUGIN_NAMES if name != "musicbrainz"
 ]
 
 OPTIONAL_PLUGIN_NAMES: List[str] = [
@@ -607,56 +628,120 @@ def parse_configured_pluginpath(config_text: str) -> List[str]:
     return paths
 
 
-def update_config_yaml_plugins(
-    config_path: Path | str,
-    ensure_plugins: Optional[List[str]] = None,
-    ensure_pluginpath: Optional[List[str]] = None,
-    backup: bool = True,
-) -> Tuple[bool, str]:
-    """Safely update config.yaml with required plugins and pluginpath.
+_TRUTHY_YAML = {"yes", "true", "on", "y", "1"}
+_FALSY_YAML = {"no", "false", "off", "n", "0"}
 
-    - Preserves all existing plugins and their custom configuration.
-    - Adds only missing required plugins.
-    - Ensures `/config/beetsplug` is in `pluginpath:`.
-    - Removes obsolete `/opt/beets-web-manager-agent/beetsplug` path.
-    - Creates a timestamped backup before modification.
-    - Writes atomically via temporary file and replace.
+# Settings blocks added together with a plugin name when that plugin is newly
+# added and its block is completely absent. Adding just the plugin NAME
+# without these is worse than not adding it at all: stock Beets' own `beet
+# web` default service crash-loops ("unknown command 'web'") without a
+# loadable `web` plugin, and `replaygain` raises a hard, plugin-load-aborting
+# FatalReplayGainError without an explicit `backend:`. `replaygain` is only
+# ever added through the explicit recommended-plugin opt-in (BI-5); it is
+# never added, and an existing replaygain block is never rewritten, on
+# startup.
+_PLUGIN_SETTINGS_BLOCKS: Tuple[Tuple[str, List[str]], ...] = (
+    ("web", [
+        "web:",
+        "    host: 0.0.0.0",
+        "    port: 8337",
+        "    readonly: yes",
+        "    include_paths: yes",
+    ]),
+    ("webmanager", [
+        "webmanager:",
+        "    api_key_file: /config/.webmanager_api_key",
+    ]),
+    ("replaygain", [
+        "replaygain:",
+        "    auto: no",
+        "    backend: ffmpeg",
+    ]),
+)
 
-    Returns (changed: bool, message: str).
+
+class BeetsConfigEditError(RuntimeError):
+    """config.yaml cannot be edited safely (unsupported layout, I/O error)."""
+
+
+def _find_top_level_block(text: str, key: str) -> Optional["re.Match[str]"]:
+    """Locate a block-style top-level mapping `key:` and its indented body.
+
+    Group 1 is the header line, group 2 the (possibly empty) indented body,
+    including blank and comment lines inside it.
     """
-    path = Path(config_path)
-    plugins_to_ensure = ensure_plugins if ensure_plugins is not None else REQUIRED_CONFIG_PLUGINS
-    pluginpath_to_ensure = ensure_pluginpath if ensure_pluginpath is not None else ["/config/beetsplug"]
+    return re.search(
+        rf"(?m)^({re.escape(key)}:[ \t]*(?:#.*)?)$((?:\n(?:[ \t][^\n]*)?)*?)(?=\n\S|\Z)",
+        text,
+    )
 
-    if not path.exists():
-        # Create default config.yaml with canonical settings
-        example_path = ROOT / "config.yaml.example"
-        if example_path.exists():
-            content = example_path.read_text(encoding="utf-8")
-        else:
-            plugin_str = " ".join(plugins_to_ensure)
-            content = (
-                f"plugins: {plugin_str}\n"
-                "pluginpath:\n"
-                "  - /config/beetsplug\n"
-                "directory: /music\n"
-                "library: /config/musiclibrary.blb\n"
-                "import:\n"
-                "    write: yes\n"
-                "    copy: yes\n"
-                "    move: no\n"
-            )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp." + path.suffix)
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
-        return True, "Created default config.yaml with required plugins"
 
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception as exc:
-        raise RuntimeError(f"Could not read {path}: {exc}") from exc
+def read_web_include_paths(config_text: str) -> Optional[bool]:
+    """Return the configured `web.include_paths` (None when not set)."""
+    block = _find_top_level_block(config_text, "web")
+    if not block:
+        return None
+    m = re.search(r"(?m)^[ \t]+include_paths:[ \t]*([^#\s]*)", block.group(2) or "")
+    if not m:
+        return None
+    raw = m.group(1).strip().strip("'\"").lower()
+    if raw in _TRUTHY_YAML:
+        return True
+    if raw in _FALSY_YAML:
+        return False
+    return None
 
+
+def _set_web_include_paths(text: str, *, overwrite_false: bool) -> Tuple[str, bool]:
+    """Return (new_text, changed) with `web.include_paths: yes` ensured.
+
+    Text-level edit so comments and formatting elsewhere are preserved. An
+    explicit `include_paths: no` is only rewritten when ``overwrite_false``
+    (an explicit, user-initiated fix action); startup provisioning never
+    flips a value the user set.
+    """
+    if re.search(r"(?m)^web:[ \t]*[^\s#]", text):
+        raise BeetsConfigEditError(
+            "config.yaml uses an inline (flow-style) `web:` mapping; add "
+            "`include_paths: yes` under `web:` manually"
+        )
+    block = _find_top_level_block(text, "web")
+    if not block:
+        return text.rstrip("\n") + "\n\nweb:\n    include_paths: yes\n", True
+    body = block.group(2) or ""
+    existing = re.search(r"(?m)^([ \t]+)include_paths:[ \t]*+([^#\n]*)(#.*)?$", body)
+    if existing:
+        current = existing.group(2).strip().strip("'\"").lower()
+        if current in _TRUTHY_YAML:
+            return text, False
+        if not overwrite_false:
+            return text, False
+        comment = f"  {existing.group(3)}" if existing.group(3) else ""
+        new_body = (
+            body[:existing.start()]
+            + f"{existing.group(1)}include_paths: yes{comment}"
+            + body[existing.end():]
+        )
+    else:
+        indent_m = re.search(r"(?m)^([ \t]+)\S", body)
+        indent = indent_m.group(1) if indent_m else "    "
+        # Insert right after the last non-blank line of the block body so a
+        # trailing blank line / comment separator stays where it was.
+        stripped_body = body.rstrip()
+        new_body = stripped_body + f"\n{indent}include_paths: yes" + body[len(stripped_body):]
+    start, end = block.span(2)
+    return text[:start] + new_body + text[end:], True
+
+
+def _plan_config_yaml_plugins(
+    text: str,
+    plugins_to_ensure: List[str],
+    pluginpath_to_ensure: List[str],
+) -> Tuple[str, List[str], bool]:
+    """Pure planner shared by provisioning, preview and opt-in apply.
+
+    Returns (new_text, missing_plugins_added, changed).
+    """
     changed = False
     current_plugins = parse_configured_plugins(text)
     current_pluginpath = parse_configured_pluginpath(text)
@@ -696,72 +781,249 @@ def update_config_yaml_plugins(
             else:
                 text = pluginpath_block + text
 
-    # 3. When `web`/`webmanager`/`replaygain` are newly added (an
-    # existing user migrating onto this architecture, not a fresh
-    # install that already gets these blocks from config.yaml.example),
-    # also add their required settings blocks -- adding just the plugin
-    # NAME without these is worse than not adding it at all: stock
-    # Beets' own `beet web` default service crash-loops ("unknown
-    # command 'web'") without a loadable `web` plugin, and `replaygain`
-    # raises a hard, plugin-load-aborting FatalReplayGainError without
-    # an explicit `backend:` (its own default `command` backend needs a
-    # binary name that is never set otherwise). Never touches an
-    # EXISTING block -- only adds one when it is completely absent, so a
-    # user's own customization is never overwritten.
-    for newly_added, block_name, block_lines in (
-        ("web", "web", [
-            "web:",
-            "    host: 0.0.0.0",
-            "    port: 8337",
-            "    readonly: yes",
-            "    include_paths: yes",
-        ]),
-        ("webmanager", "webmanager", [
-            "webmanager:",
-            "    api_key_file: /config/.webmanager_api_key",
-        ]),
-        ("replaygain", "replaygain", [
-            "replaygain:",
-            "    auto: no",
-            "    backend: ffmpeg",
-        ]),
-    ):
-        if newly_added not in missing_plugins:
+    # 3. Settings blocks for newly added plugins (never touches an EXISTING
+    # block -- only adds one when it is completely absent).
+    for block_name, block_lines in _PLUGIN_SETTINGS_BLOCKS:
+        if block_name not in missing_plugins:
             continue
-        if re.search(rf"(?m)^{block_name}:[ \t]*$", text):
+        if re.search(rf"(?m)^{block_name}:", text):
             continue  # user already has this block -- never overwrite it
         changed = True
         text = text.rstrip("\n") + "\n\n" + "\n".join(block_lines) + "\n"
 
+    # 4. `web.include_paths` is part of the required transport contract
+    # (BI-6): file-path reads return nothing without it. Add the key when it
+    # is ABSENT from an existing block-style `web:` mapping; an explicit
+    # `no` is left alone and surfaced as a setup warning with a fix action.
+    if "web" in plugins_to_ensure and re.search(r"(?m)^web:[ \t]*(?:#.*)?$", text):
+        if read_web_include_paths(text) is None:
+            text, added = _set_web_include_paths(text, overwrite_false=False)
+            changed = changed or added
+
+    return text, missing_plugins, changed
+
+
+def _create_backup(path: Path, prefix: str) -> Path:
+    """Copy ``path`` to a new, never-reused ``<prefix><n>`` file (mode 0600).
+
+    O_EXCL guarantees two writes in the same second never share or overwrite
+    a backup: on a name collision a ``-1``, ``-2``... suffix is tried.
+    """
+    for attempt in range(100):
+        candidate = path.parent / (prefix if attempt == 0 else f"{prefix}-{attempt}")
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as dst, open(path, "rb") as src:
+                shutil.copyfileobj(src, dst)
+        except BaseException:
+            try:
+                os.unlink(candidate)
+            except OSError:
+                pass
+            raise
+        return candidate
+    raise FileExistsError(f"no free backup name for {prefix}")
+
+
+def _write_config_text(path: Path, text: str, *, backup_prefix: Optional[str]) -> Optional[str]:
+    """Back up ``path`` (when ``backup_prefix``) and atomically replace it.
+
+    Fails closed: if the backup cannot be made, config.yaml is not touched.
+    Returns the backup's file name only (never a host/container path).
+    """
+    backup_path: Optional[Path] = None
+    if backup_prefix:
+        try:
+            backup_path = _create_backup(path, backup_prefix)
+        except Exception as exc:
+            raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
+
+    try:
+        _atomic_write_text(path, text)
+    except Exception as exc:
+        raise BeetsConfigEditError(f"Failed to write updated config.yaml: {type(exc).__name__}") from exc
+    return backup_path.name if backup_path else None
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text``, keeping its permission bits.
+
+    A unique temp file in the same directory (mkstemp, created 0600) avoids
+    clobbering/symlink games on a fixed name; the existing file's mode is
+    restored so a 0600 config.yaml never becomes world-readable. A new file
+    gets 0644.
+    """
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def update_config_yaml_plugins(
+    config_path: Path | str,
+    ensure_plugins: Optional[List[str]] = None,
+    ensure_pluginpath: Optional[List[str]] = None,
+    backup: bool = True,
+) -> Tuple[bool, str]:
+    """Safely update config.yaml with the integration transport plugins.
+
+    - By default ensures only ``web`` + ``webmanager`` (REQUIRED); feature
+      plugins (RECOMMENDED) are never added to an existing config here --
+      see preview_recommended_plugins()/apply_recommended_plugins() (BI-5).
+    - Preserves all existing plugins and their custom configuration.
+    - Ensures `/config/beetsplug` is in `pluginpath:`.
+    - Removes obsolete `/opt/beets-web-manager-agent/beetsplug` path.
+    - Adds `include_paths: yes` to an existing `web:` block that lacks it.
+    - Creates a timestamped backup before modification.
+    - Writes atomically via temporary file and replace.
+    - A missing config.yaml (fresh install) is created from
+      config.yaml.example, which still enables the recommended set.
+
+    Returns (changed: bool, message: str).
+    """
+    path = Path(config_path)
+    plugins_to_ensure = ensure_plugins if ensure_plugins is not None else list(REQUIRED_CONFIG_PLUGINS)
+    pluginpath_to_ensure = ensure_pluginpath if ensure_pluginpath is not None else ["/config/beetsplug"]
+
+    if not path.exists():
+        # Create default config.yaml with canonical settings
+        example_path = ROOT / "config.yaml.example"
+        if example_path.exists():
+            content = example_path.read_text(encoding="utf-8")
+        else:
+            plugin_str = " ".join(plugins_to_ensure)
+            content = (
+                f"plugins: {plugin_str}\n"
+                "pluginpath:\n"
+                "  - /config/beetsplug\n"
+                "directory: /music\n"
+                "library: /config/musiclibrary.blb\n"
+                "import:\n"
+                "    write: yes\n"
+                "    copy: yes\n"
+                "    move: no\n"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(path, content)
+        return True, "Created default config.yaml with required plugins"
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError(f"Could not read {path}: {exc}") from exc
+
+    text, missing_plugins, changed = _plan_config_yaml_plugins(text, plugins_to_ensure, pluginpath_to_ensure)
+
     if not changed:
         return False, "All required plugins and pluginpath already configured"
 
-    # Backup original before writing
+    backup_prefix = None
     if backup:
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_path = path.parent / f"{_PLUGIN_MIGRATION_BACKUP_PREFIX}{ts}"
-        try:
-            shutil.copy2(str(path), str(backup_path))
-        except Exception:
-            pass
-
-    # Atomic write
-    tmp_path = path.with_suffix(".tmp.yaml")
+        backup_prefix = f"{_PLUGIN_MIGRATION_BACKUP_PREFIX}{ts}"
     try:
-        tmp_path.write_text(text, encoding="utf-8")
-        try:
-            os.chmod(tmp_path, 0o644)
-        except Exception:
-            pass
-        tmp_path.replace(path)
-    except Exception as exc:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise RuntimeError(f"Failed to write updated config.yaml: {exc}") from exc
+        _write_config_text(path, text, backup_prefix=backup_prefix)
+    except BeetsConfigEditError as exc:
+        raise RuntimeError(str(exc)) from exc
 
-    return True, f"Configured {len(missing_plugins)} missing plugins ({', '.join(missing_plugins)}) in config.yaml"
+    if missing_plugins:
+        return True, f"Configured {len(missing_plugins)} missing plugins ({', '.join(missing_plugins)}) in config.yaml"
+    return True, "Updated pluginpath / web settings in config.yaml"
+
+
+def _read_config_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise BeetsConfigEditError(f"{path.name} does not exist") from exc
+    except Exception as exc:
+        raise BeetsConfigEditError(f"Could not read {path.name}: {type(exc).__name__}") from exc
+
+
+def _timestamped_backup_prefix(path: Path) -> str:
+    return f"{path.name}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+
+def preview_recommended_plugins(config_path: Path | str) -> Dict[str, Any]:
+    """Read-only preview of enabling the missing RECOMMENDED plugins (BI-5)."""
+    path = Path(config_path)
+    text = _read_config_text(path)
+    configured = parse_configured_plugins(text)
+    missing = [p for p in RECOMMENDED_CONFIG_PLUGINS if p not in configured]
+    new_text, _added, _changed = _plan_config_yaml_plugins(
+        text, missing, parse_configured_pluginpath(text) or ["/config/beetsplug"]
+    )
+    diff = "".join(
+        difflib.unified_diff(
+            text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile="config.yaml",
+            tofile="config.yaml (proposed)",
+        )
+    )
+    return {
+        "recommended": list(RECOMMENDED_CONFIG_PLUGINS),
+        "configured": [p for p in RECOMMENDED_CONFIG_PLUGINS if p in configured],
+        "missing": missing,
+        "would_change": new_text != text,
+        "diff": diff,
+    }
+
+
+def apply_recommended_plugins(config_path: Path | str, plugins: Iterable[str]) -> Dict[str, Any]:
+    """Explicit opt-in: add the selected RECOMMENDED plugins to config.yaml.
+
+    Only names from RECOMMENDED_CONFIG_PLUGINS are accepted (ValueError
+    otherwise). Existing plugin settings blocks are never rewritten. Takes a
+    timestamped backup (a failed backup aborts the write) and writes
+    atomically. Beets must be restarted to load newly enabled plugins.
+    """
+    requested = [str(p).strip() for p in plugins]
+    unknown = sorted({p for p in requested if p not in RECOMMENDED_CONFIG_PLUGINS})
+    if unknown or not requested:
+        raise ValueError("unsupported plugin selection")
+    ordered = [p for p in RECOMMENDED_CONFIG_PLUGINS if p in requested]
+
+    path = Path(config_path)
+    text = _read_config_text(path)
+    new_text, added, changed = _plan_config_yaml_plugins(
+        text, ordered, parse_configured_pluginpath(text) or ["/config/beetsplug"]
+    )
+    if not changed:
+        return {"ok": True, "changed": False, "added": [], "backup": None, "restart_required": False}
+    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path))
+    return {"ok": True, "changed": True, "added": added, "backup": backup, "restart_required": True}
+
+
+def ensure_web_include_paths(config_path: Path | str) -> Dict[str, Any]:
+    """Explicit fix action: set `web.include_paths: yes` in config.yaml (BI-6).
+
+    Additive text edit that preserves comments; flips an explicit `no` (the
+    user asked for the fix). Idempotent. Timestamped backup (a failed backup
+    aborts the write) and atomic replace. Beets must be restarted.
+    """
+    path = Path(config_path)
+    text = _read_config_text(path)
+    new_text, changed = _set_web_include_paths(text, overwrite_false=True)
+    if not changed:
+        return {"ok": True, "changed": False, "backup": None, "restart_required": False}
+    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path))
+    return {"ok": True, "changed": True, "backup": backup, "restart_required": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -873,16 +1135,18 @@ def verify_plugin(
             healthy = (len(errors) == 0) and loaded
         else:
             healthy = True  # Not enabled, optional integration
-    else:  # OPTIONAL
+    else:  # RECOMMENDED / OPTIONAL
         if enabled:
             healthy = (len(errors) == 0) and loaded
         else:
-            healthy = True  # Optional and disabled
+            healthy = True  # Not required; disabled is a valid choice
 
     # Note generation
     if not enabled:
         if plugin_def.category == PluginCategory.INTEGRATION:
             note = "Optional integration (disabled / not configured)"
+        elif plugin_def.category == PluginCategory.RECOMMENDED:
+            note = "Recommended (not enabled in config.yaml; opt in via preview)"
         elif plugin_def.category == PluginCategory.OPTIONAL:
             note = "Optional (disabled in config.yaml)"
         else:
@@ -973,6 +1237,7 @@ def verify_all_plugins(
         results.append(st)
 
     required_statuses = [r for r in results if r.category == PluginCategory.REQUIRED]
+    recommended_statuses = [r for r in results if r.category == PluginCategory.RECOMMENDED]
     optional_statuses = [r for r in results if r.category == PluginCategory.OPTIONAL]
     integration_statuses = [r for r in results if r.category == PluginCategory.INTEGRATION]
 
@@ -985,9 +1250,15 @@ def verify_all_plugins(
         "required_count": len(required_statuses),
         "required_healthy_count": required_healthy_count,
         "plugins": [r.to_dict() for r in results],
+        "recommended_missing": [r.name for r in recommended_statuses if not r.enabled],
         "categories": {
             "required": [r.to_dict() for r in required_statuses],
-            "optional": [r.to_dict() for r in optional_statuses],
+            "recommended": [r.to_dict() for r in recommended_statuses],
+            # Back-compat: UIs predating the RECOMMENDED tier (BI-5) render
+            # only required/optional/integration; recommended plugins were
+            # formerly "required" and are still listed here so they stay
+            # visible there.
+            "optional": [r.to_dict() for r in recommended_statuses + optional_statuses],
             "integration": [r.to_dict() for r in integration_statuses],
         },
         "summary": {
@@ -1002,7 +1273,8 @@ def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, A
     """Execute complete plugin provisioning workflow:
 
     1. Copy bundled plugins to `/config/beetsplug`.
-    2. Safely update `config.yaml` with missing required plugins.
+    2. Safely update `config.yaml` with missing REQUIRED transport plugins
+       (web, webmanager) only; recommended plugins are opt-in.
     3. Re-run verification against stock Beets (BeetsAdapter.get_plugin_status()
        is a live HTTP call, not cached, so no forced-refresh step is needed
        after writing config -- unlike the deleted embedded control agent's
