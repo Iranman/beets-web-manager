@@ -28,7 +28,7 @@ The project uses Semantic Versioning.
 - Redacted diagnostic copies also scrub `key=`/`token=`/`secret=`/`password=` values from container commands, entrypoints, labels and health checks and from Compose `command`, `entrypoint`, `healthcheck`, `labels`, `build.args` and `x-*` extensions, and remove credentials embedded in allowlisted URLs (`BEETS_WEB_URL`, `BEETS_OUTBOUND_ALLOWLIST`).
 - `backup.sh` no longer builds a `sqlite3 .backup` command from a path containing `'`: it uses the Python online backup for such paths, or stops with an error when `python3` is unavailable.
 - The `github-release` CI job checks out with `persist-credentials: false`, so its write-scoped token is not left in `.git/config`.
-- `restore.sh` checks every file against the sha256 list in the backup's `MANIFEST.txt` before restoring anything, and refuses a backup with a mismatched or unlisted file, or a current-layout backup without a manifest; nothing is touched when it refuses.
+- `restore.sh` checks every file against the sha256 list in the backup's `MANIFEST.txt` before restoring anything, and refuses a backup with a mismatched or unlisted file, a manifest path outside the backup, or a current-layout backup without a manifest; nothing is touched when it refuses.
 
 ### Added
 - GitHub Releases are created by CI (RD-11): on a `v*` tag, after the image is published, the `github-release` job creates the release with the tag's CHANGELOG section as its body (`scripts/release_metadata.py notes`). An existing release is left untouched.

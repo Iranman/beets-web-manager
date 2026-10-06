@@ -159,7 +159,7 @@ find "${BEETS_CONFIG_DIR}" -maxdepth 1 -name "*.json" -exec cp -p {} "${STAGE}/b
   echo "database_check=${CHECK:-n/a}"
   echo "beets_config_dir=${BEETS_CONFIG_DIR}"
   echo "web_manager_data_dir=${WEB_MANAGER_DATA_DIR}"
-  ( cd "${STAGE}" && find . -type f ! -name MANIFEST.txt -print | LC_ALL=C sort | while IFS= read -r f; do
+  ( cd "${STAGE}" && find . -type f ! -path ./MANIFEST.txt -print | LC_ALL=C sort | while IFS= read -r f; do
       if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
     done )
 } > "${STAGE}/MANIFEST.txt"

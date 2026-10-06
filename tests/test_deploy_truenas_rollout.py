@@ -1555,6 +1555,32 @@ class BackupContentTests(VersionedStackFixture):
 
 
 @unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
+class RestoreBeetsplugGuardTests(RolloutScriptTestBase):
+    """restore_state_files clears beetsplug/ before copying the backup in.
+    If beetsplug/ is a link at that moment (swapped after the symlink
+    check), the rollback must stop rather than write through it."""
+
+    def test_rollback_refuses_to_clear_a_beetsplug_that_is_a_link(self):
+        engine = os.path.join(self.tmp, "engine")
+        data = os.path.join(self.tmp, "data")
+        rb = os.path.join(self.tmp, "rollback")
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        for d in (engine, data, elsewhere, os.path.join(rb, "beets-config", "beetsplug", "webmanager")):
+            os.makedirs(d, exist_ok=True)
+        Path(rb, "beets-config", "beetsplug", "webmanager", "version.py").write_text("v = 1\n", encoding="utf-8")
+        Path(elsewhere, "keep.txt").write_text("untouched", encoding="utf-8")
+        os.symlink(elsewhere, os.path.join(engine, "beetsplug"))
+        res = self.run_snippet(
+            f'ENGINE_CONFIG_SRC="{engine}"; WEBMGR_DATA_SRC="{data}"; ROLLBACK_DIR="{rb}"\n'
+            "tree_has_symlink() { return 1; }  # simulate the link appearing after the check\n"
+            "restore_state_files"
+        )
+        self.assertNotEqual(res.returncode, 0, res.stderr)
+        self.assertIn("beetsplug", res.stderr)
+        self.assertEqual(sorted(os.listdir(elsewhere)), ["keep.txt"],
+                         "nothing may be deleted or written through the link")
+
+
 class SymlinkSafetyTests(VersionedStackFixture):
     """The script runs as root: a link planted in a container-writable data
     folder must never redirect a backup or restore copy to another path."""

@@ -83,6 +83,11 @@ if [ -f "${MANIFEST}" ]; then
   SUMS="${TMP_DIR}/manifest.sha256"
   grep -E '^[0-9a-f]{64}  ' "${MANIFEST}" > "${SUMS}" || true
   [ -s "${SUMS}" ] || fail "MANIFEST.txt lists no checksums -- refusing to restore a backup that cannot be verified"
+  # Every listed path must stay inside the extracted backup: relative
+  # ("./..."), with no ".." component. Checked before sha256sum reads them.
+  if awk '{ p = substr($0, 67) } p !~ /^\.\// || p ~ /(^|\/)\.\.(\/|$)/ { bad = 1 } END { exit !bad }' "${SUMS}"; then
+    fail "MANIFEST.txt lists a path outside the backup -- nothing was restored"
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
     ( cd "${EXTRACTED}" && sha256sum --quiet -c "${SUMS}" ) >&2 \
       || fail "checksum mismatch against MANIFEST.txt -- the backup is damaged or was modified; nothing was restored"

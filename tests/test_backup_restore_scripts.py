@@ -297,6 +297,34 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
             os.remove(os.path.join(top, "MANIFEST.txt"))
         self._assert_restore_refused_untouched(self._rewrite_archive(archive, drop), "no MANIFEST.txt")
 
+    def test_backup_with_a_nested_manifest_file_restores(self):
+        nested = Path(self.beets, "beetsplug", "webmanager", "MANIFEST.txt")
+        nested.write_text("plugin notes\n", encoding="utf-8")
+        archive = self.backup("python")
+        nested.unlink()
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm, "--yes", archive)
+        self.assertEqual(nested.read_text(encoding="utf-8"), "plugin notes\n")
+
+    def _assert_manifest_path_refused(self, bad_path):
+        archive = self.backup("python")
+
+        def add(top):
+            with open(os.path.join(top, "MANIFEST.txt"), "a", encoding="utf-8", newline="\n") as f:
+                f.write("0" * 64 + "  " + bad_path + "\n")
+        self._assert_restore_refused_untouched(self._rewrite_archive(archive, add),
+                                               "MANIFEST.txt lists a path outside the backup")
+
+    def test_restore_refuses_a_manifest_path_starting_with_dotdot(self):
+        self._assert_manifest_path_refused("../x")
+
+    def test_restore_refuses_a_manifest_path_with_an_inner_dotdot(self):
+        self._assert_manifest_path_refused("./beets/../../x")
+
+    def test_restore_refuses_an_absolute_manifest_path(self):
+        self._assert_manifest_path_refused("/etc/hostname")
+
     def test_restore_reports_verified_checksums(self):
         archive = self.backup("python")
         self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")

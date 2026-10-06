@@ -1164,6 +1164,8 @@ restore_state_files() {
       # follows links, so nothing outside beetsplug/ can be touched.
       if [[ -d "${engine_src}/beetsplug" ]]; then
         cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
+        [[ -n "$engine_src" && -d "$engine_src/beetsplug" && ! -L "$engine_src/beetsplug" ]] \
+          || die "Beets beetsplug/ is not a plain folder any more (became a symbolic link?) -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
         find "${engine_src}/beetsplug" -mindepth 1 -delete
       else
         mkdir -p "${engine_src}/beetsplug"
