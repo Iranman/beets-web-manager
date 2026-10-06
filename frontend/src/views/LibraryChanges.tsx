@@ -1,3 +1,4 @@
+import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -6,6 +7,7 @@ import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  apiErrorBody,
   approveTransaction,
   applyTransaction,
   cancelTransaction,
@@ -47,6 +49,78 @@ const OPERATION_OPTIONS = [
 ];
 
 const pageSize = 50;
+
+// The phrase the backend requires (and verifies) before approving an
+// album-cleanup plan that deletes audio files. The UI only detects the plan
+// type to ask for it; the server stays the authority.
+const DELETE_ALBUM_FILES_PHRASE = 'DELETE ALBUM FILES';
+
+function deletesAlbumFiles(tx: TransactionSummary) {
+  const meta = tx.metadata || {};
+  return meta.mutation_family === 'album_cleanup_v1' && Boolean(meta.delete_files);
+}
+
+function approveErrorMessage(ex: unknown) {
+  const code = apiErrorBody(ex)?.code;
+  if (code === 'confirmation_required') {
+    return `Approval refused: this album cleanup deletes audio files and the server did not accept the confirmation. Nothing was approved. Click Approve again and type ${DELETE_ALBUM_FILES_PHRASE} exactly.`;
+  }
+  if (code === 'not_preview') {
+    return 'Approval refused: this transaction is no longer in Preview (it changed state, for example in another tab or job). Nothing was approved by this request. Review its current status below before acting.';
+  }
+  const detail = ex instanceof Error ? ex.message : String(ex);
+  return `Approval failed: ${detail}. Review the transaction status below before retrying.`;
+}
+
+function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
+  open: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (phrase: string) => void;
+}) {
+  const [typed, setTyped] = useState('');
+  useEffect(() => {
+    if (open) setTyped('');
+  }, [open]);
+  const matches = typed === DELETE_ALBUM_FILES_PHRASE;
+  return (
+    <Dialog className="relative z-50" open={open} onClose={() => { if (!busy) onCancel(); }}>
+      <DialogBackdrop className="fixed inset-0 bg-black/70" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="w-full max-w-lg rounded-md border border-graphite-700 bg-graphite-950 p-5 shadow-2xl">
+          <DialogTitle className="text-lg font-semibold text-zinc-100">Approve album cleanup that deletes files</DialogTitle>
+          <form
+            className="mt-3 space-y-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (matches && !busy) onConfirm(typed);
+            }}
+          >
+            <Alert severity="error">
+              Applying this plan permanently deletes the album&apos;s audio files from disk. Album cleanup cannot be rolled back.
+            </Alert>
+            <label htmlFor="confirm-delete-album-files" className="block text-sm text-zinc-300">
+              Type <span className="font-mono font-semibold text-white">{DELETE_ALBUM_FILES_PHRASE}</span> to approve
+            </label>
+            <input
+              id="confirm-delete-album-files"
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded border border-graphite-700 bg-graphite-900 px-2 py-1 font-mono text-sm text-white"
+              value={typed}
+              onChange={(event) => setTyped(event.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button size="small" variant="outlined" disabled={busy} onClick={onCancel}>Cancel</Button>
+              <Button size="small" color="error" variant="contained" type="submit" disabled={!matches || busy}>Approve deletion</Button>
+            </div>
+          </form>
+        </DialogPanel>
+      </div>
+    </Dialog>
+  );
+}
 
 function formatDate(value?: number) {
   if (!value) return '-';
@@ -202,12 +276,29 @@ export default function LibraryChanges() {
     setSettings(response.settings);
   };
 
-  const doApprove = async () => {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [approving, setApproving] = useState(false);
+
+  const doApprove = async (confirmDeleteFiles?: string) => {
     if (!detail) return;
-    const response = await approveTransaction(detail.id);
-    setDetail(response.transaction);
-    setMessage('Transaction approved.');
+    setApproving(true);
+    setError('');
+    setMessage('');
+    let failure = '';
+    try {
+      const response = await approveTransaction(detail.id, confirmDeleteFiles);
+      setDetail(response.transaction);
+      setMessage('Transaction approved.');
+    } catch (ex) {
+      failure = approveErrorMessage(ex);
+      await loadDetail(detail.id);
+    } finally {
+      setApproving(false);
+      setConfirmOpen(false);
+    }
     await loadRows();
+    // loadRows clears the error banner, so surface the refusal after it.
+    if (failure) setError(failure);
   };
 
   const doCancel = async () => {
@@ -258,6 +349,12 @@ export default function LibraryChanges() {
 
       {loading && <LinearProgress />}
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
+      <DeleteFilesApproveDialog
+        open={confirmOpen}
+        busy={approving}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={(phrase) => void doApprove(phrase)}
+      />
       {message && <Alert severity="success" onClose={() => setMessage('')}>{message}</Alert>}
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.35fr)]">
@@ -332,7 +429,7 @@ export default function LibraryChanges() {
                   </Alert>
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button size="small" variant="contained" disabled={detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => void doApprove()}>Approve</Button>
+                  <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
                   <Button size="small" color="warning" variant="outlined" disabled={detail.status === 'Completed' || detail.status === 'Running'} onClick={() => void doCancel()}>Cancel</Button>
                   <Button size="small" color="error" variant="outlined" disabled={!detail.rollback?.available || detail.status === 'Running'} onClick={() => void doRollback()}>Rollback</Button>

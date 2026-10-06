@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from backend.app_runtime import MUSIC_ROOT, _s
 from backend.matching_contract import AiState, build_recording_matching_decision, compute_decision_version
-from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
+from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title, strip_in_mono_suffix
 from helpers_mb import _fetch_mb_recording_details
 from backend.matching_service import _ai_model_and_endpoint, _album_track_title_variants
 
@@ -85,8 +85,9 @@ def _ai_evidence_extract_year(value: str) -> tuple[str, str]:
 
 
 def _ai_evidence_clean_artist_guess(value: str) -> str:
-    text = _ai_evidence_clean_segment(value)
-    text = re.sub(r"\s+\bin\s+mono\b$", "", text, flags=re.I).strip()
+    # SEC-5 (ReDoS): cap free text (1024 chars) before the regexes below.
+    text = _ai_evidence_clean_segment(_s(value)[:1024])
+    text = strip_in_mono_suffix(text)
     text, _ = _ai_evidence_extract_year(text)
     return text
 
@@ -116,11 +117,12 @@ def _ai_evidence_weak_album_guess(value: str, *, disc_context: bool = False) -> 
 
 
 def _ai_evidence_scene_guess(folder_name: str) -> tuple[str, str, str]:
-    raw = _s(folder_name).replace("_", " ").strip()
+    raw = _s(folder_name)[:1024].replace("_", " ").strip()
     if not raw:
         return "", "", ""
     raw, year = _ai_evidence_extract_year(raw)
-    parts = [p.strip() for p in re.split(r"\s*-\s*", raw) if p.strip()]
+    # SEC-5: equals re.split(r"\s*-\s*") once each part is stripped; no regex needed.
+    parts = [p.strip() for p in raw.split("-") if p.strip()]
     cleaned: List[str] = []
     for idx, part in enumerate(parts):
         seg = _ai_evidence_clean_segment(part)

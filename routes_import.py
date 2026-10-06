@@ -170,9 +170,17 @@ def cleanup_import_review_files():
             return jsonify({"ok": False, "error": plan_res.get("error", "Failed to create file cleanup plan."), "log": log}), 400
 
         op_id = plan_res.get("operation_id")
-        apply_res = composite_workflows.apply_import_review_cleanup(op_id)
+        # The operator's explicit cleanup request is the approval; apply
+        # records it through a CAS so a concurrent caller cannot apply twice.
+        apply_res = composite_workflows.apply_import_review_cleanup(
+            op_id, approved_by="operator request (import review file cleanup)")
         if not apply_res.get("ok"):
-            return jsonify({"ok": False, "error": apply_res.get("error", "Failed to apply cleanup plan."), "log": apply_res.get("log", log)}), 400
+            return jsonify({"ok": False, "operation_id": op_id, "status": apply_res.get("status"),
+                            "code": apply_res.get("code"),
+                            "error": apply_res.get("error", "Failed to apply cleanup plan."),
+                            "deleted": apply_res.get("deleted", []), "quarantined": apply_res.get("moved", []),
+                            "failures": apply_res.get("failures", []),
+                            "log": apply_res.get("log", log)}), 400
 
         deleted = apply_res.get("deleted", [])
         moved = apply_res.get("moved", [])

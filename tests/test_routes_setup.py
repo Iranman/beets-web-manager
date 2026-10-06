@@ -959,13 +959,14 @@ class RoutesSetupHelperTests(unittest.TestCase):
         _, self.module = _load_routes_setup_against_stub_app(self)
 
     def test_mask_short_value(self):
-        self.assertEqual(self.module._mask("ab"), "**")
+        self.assertEqual(self.module._mask("ab"), "********")
 
-    def test_mask_long_value_keeps_edges(self):
-        masked = self.module._mask("sk-1234567890")
-        self.assertTrue(masked.startswith("sk"))
-        self.assertTrue(masked.endswith("90"))
-        self.assertNotIn("1234567890"[:6], masked)
+    def test_mask_reveals_no_characters_or_length(self):
+        # FE-16: the old mask kept the first and last two characters.
+        for secret in ("sk-1234567890", "a" * 64, "xyz"):
+            masked = self.module._mask(secret)
+            self.assertEqual(masked, "********")
+            self.assertFalse(set(masked) & set(secret.replace("*", "")))
 
     def test_mask_empty_value(self):
         self.assertEqual(self.module._mask(""), "")

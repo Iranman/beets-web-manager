@@ -806,6 +806,9 @@ def _dedup_pairs_for_paths(paths: List[str]) -> Tuple[List[Dict[str, Any]], List
     for state in states:
         for dup in state.get("duplicates") or []:
             key = _dedup_norm_path(dup.get("source_path"))
+            # O-1: an AI suggestion without fingerprint proof is never a pair.
+            if _s(dup.get("match_type")).startswith("AI duplicate") and dup.get("fingerprint_verified") is not True:
+                continue
             if key in wanted and key not in pairs and dup.get("source_item_id") and dup.get("lib_id"):
                 pairs[key] = {"delete_item_id": int(dup["source_item_id"]), "keep_item_id": int(dup["lib_id"])}
     from backend.maintenance_service import _maintenance_load_last_report

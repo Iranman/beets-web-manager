@@ -84,6 +84,10 @@ docker compose up -d
 
 Open **`http://<server-ip>:8337`** in your browser. On your first visit, you will see the **First-Run Setup Wizard** where you can create your administrator username and password.
 
+### Step 5: Add your AcoustID application key
+
+Audio fingerprint lookups need your own free AcoustID application key; there is no built-in shared key. Register an application at <https://acoustid.org/new-application>, then set `ACOUSTID_API_KEY` in the stack `.env` (or in **System → Settings**) and recreate the `beets-web-manager` container. Until it is set, the System page and `/api/setup/status` report **AcoustID not configured**, and fingerprint evidence is reported as unavailable (never as "no match"), so imports that need it go to the review queue instead of being decided without it. `ACOUSTID_USER_KEY` (from your AcoustID account page) is only needed to submit fingerprints.
+
 ---
 
 ## Directory & Volume Architecture
