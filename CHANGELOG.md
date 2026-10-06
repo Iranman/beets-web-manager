@@ -36,6 +36,8 @@ The project uses Semantic Versioning.
 - Internal playlist media cleanup (after a playlist import or library-wide removal) now removes Beets rows only and keeps the files; it needs an Approved transaction and runs once.
 
 ### Fixed
+
+- `docker-compose.full.yml`: the default `BEETS_OUTBOUND_ALLOWLIST` now includes `bgutil-provider:4416`, so the bundled yt-dlp PO token provider is no longer blocked by the outbound policy out of the box.
 - The Library album cleanup dialog (opened by the album's "Remove from Library…" button, previously "Delete Album…") no longer says it deletes track files. Its plan never sends `delete_files`, so it removes the album and track rows from Beets and keeps the files on disk. The title, warning, before/after summary, completion summary and rollback text now say so (#184).
 - The `DELETE ALBUM FILES` approval dialog in Library Changes now exposes its consequence text as the dialog's accessible description (`aria-describedby`), so screen readers announce it (#187 F-7).
 - **Rollout `--rollback` now actually rolls back (RD-5).** It used to report "Rollback complete" while the new version kept running: the image override was a process substitution whose errors were discarded, the fallback recreated from the `.env` that the deploy had already moved to the new version, and nothing checked the result. Rollback now restores the `BEETS_WEB_MANAGER_VERSION` line in the stack `.env`, recreates through a temporary override file, and fails unless the running image ID is the recorded previous one, `docker compose config` resolves to it (so a later `docker compose up -d` keeps it) and `/health/live` reports the previous version.

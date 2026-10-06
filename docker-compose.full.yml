@@ -67,7 +67,7 @@ services:
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337}
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337,bgutil-provider:4416}
 
       # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
       # the artist-folder-reconcile long controlled mutation only -- not a

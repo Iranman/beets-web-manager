@@ -188,5 +188,13 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         self.assertNotIn("127.0.0.1:4416", compose_source)
 
 
+class FullStackPoProviderAllowlistTests(unittest.TestCase):
+    def test_full_stack_allowlist_default_admits_bundled_po_provider(self):
+        compose = (Path(__file__).resolve().parents[1] / "docker-compose.full.yml").read_text(encoding="utf-8")
+        po_url = re.search(r"YTDLP_PO_PROVIDER_URL: \$\{YTDLP_PO_PROVIDER_URL:-http://([^}]+)\}", compose).group(1)
+        allow = re.search(r"BEETS_OUTBOUND_ALLOWLIST: \$\{BEETS_OUTBOUND_ALLOWLIST:-([^}]*)\}", compose).group(1)
+        self.assertIn(po_url.rstrip("/"), allow.split(","))
+
+
 if __name__ == "__main__":
     unittest.main()
