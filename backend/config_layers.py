@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -281,7 +282,8 @@ def container_path(canonical: str, default: str, *, environ: Optional[Dict[str, 
     if value:
         return value
     if raw.strip():
-        _warn_once("Ignoring %s=%r: container paths must be absolute; using the default.", canonical, raw.strip())
+        # Only the name: the raw value is operator input and is not logged.
+        _warn_once("Ignoring %s: container paths must be absolute; using the default.", canonical)
     for alias, target in DEPRECATED_CONTAINER_ALIASES.items():
         if target != canonical:
             continue
@@ -292,7 +294,7 @@ def container_path(canonical: str, default: str, *, environ: Optional[Dict[str, 
             # DOWNLOAD_PATH=/downloads; only warn when an operator chose a
             # different value through the deprecated name.
             if alias_value != default:
-                _warn_once("%s is deprecated; set %s instead (using %s).", alias, canonical, alias_value)
+                _warn_once("%s is deprecated; set %s instead.", alias, canonical)
             return alias_value
     return default
 
@@ -315,6 +317,64 @@ DEFAULT_BEETS_WEB_URL = "http://beets:8337"
 def beets_web_url(environ: Optional[Dict[str, str]] = None) -> str:
     env = os.environ if environ is None else environ
     return (env.get("BEETS_WEB_URL", "") or "").strip() or DEFAULT_BEETS_WEB_URL
+
+
+def redact_url_userinfo(url: str) -> str:
+    """``url`` without ``user:pass@``, query or fragment, for display/logs."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "<invalid-url>"
+    netloc = parts.netloc.rpartition("@")[2]
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+# ── Private (mode 0600) files ────────────────────────────────────────────────
+
+def create_private_file(path: Path, data: str, *, unique: bool = False) -> Path:
+    """Create a new file holding ``data`` at mode 0600 and return its path.
+
+    The mode is set atomically by ``os.open(O_CREAT|O_EXCL, 0o600)``, so the
+    file never exists at the umask mode (it may hold secrets). An existing
+    path (or symlink) is never reused: with ``unique`` a ``-1``, ``-2``...
+    suffix is tried, otherwise ``FileExistsError`` is raised.
+    """
+    for attempt in range(100 if unique else 1):
+        candidate = path if attempt == 0 else path.with_name(f"{path.name}-{attempt}")
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except FileExistsError:
+            if unique:
+                continue
+            raise
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data.encode("utf-8"))
+        except BaseException:
+            try:
+                os.unlink(candidate)
+            except OSError:
+                pass
+            raise
+        return candidate
+    raise FileExistsError(f"no free file name for {path.name}")
+
+
+def replace_private_file(path: Path, data: str) -> None:
+    """Atomically replace ``path`` with ``data`` via a fresh 0600 temp file."""
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.unlink(missing_ok=True)  # stale temp from a crash; never reuse its mode
+    create_private_file(tmp, data)
+    tmp.replace(path)
+    ensure_private_mode(path)
+
+
+def ensure_private_mode(path: Path) -> None:
+    """chmod 0600; a failure (e.g. a filesystem without POSIX modes) is logged."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError as ex:
+        log.warning("Could not set mode 0600 on %s (%s)", path.name, type(ex).__name__)
 
 
 # ── Saved settings file (/web-manager-data/.env) ─────────────────────────────
@@ -385,27 +445,17 @@ def migrate_saved_env_file(env_file: Path) -> Dict[str, object]:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup = env_file.with_name(f"{env_file.name}.bak-migration-{stamp}")
     try:
-        backup.write_text(text, encoding="utf-8")
-        try:
-            os.chmod(backup, 0o600)
-        except Exception:
-            pass
-        tmp = env_file.with_name(f"{env_file.name}.migrate.tmp")
-        tmp.write_text("\n".join(kept).rstrip() + "\n" if kept else "", encoding="utf-8")
-        try:
-            os.chmod(tmp, 0o600)
-        except Exception:
-            pass
-        tmp.replace(env_file)
+        backup = create_private_file(backup, text, unique=True)
+        replace_private_file(env_file, "\n".join(kept).rstrip() + "\n" if kept else "")
     except Exception as ex:
         log.warning("Saved settings migration failed for %s (%s); leaving file unchanged", env_file, type(ex).__name__)
         return report
 
-    report = {"removed": sorted(removed), "backup": str(backup), "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    report = {"removed": sorted(removed), "backup": backup.name, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     try:
-        migration_report_path(env_file).write_text(json.dumps(report, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        replace_private_file(migration_report_path(env_file), json.dumps(report, indent=2))
+    except Exception as ex:
+        log.warning("Could not write the settings migration report (%s)", type(ex).__name__)
     log.warning(
         "Removed %d deployment-only key(s) from saved settings %s: %s (backup: %s)",
         len(removed), env_file, ", ".join(sorted(removed)), backup.name,
