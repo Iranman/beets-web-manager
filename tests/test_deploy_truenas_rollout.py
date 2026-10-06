@@ -1095,7 +1095,8 @@ class DryRunTests(EndToEndFixture):
         self._save_state()
         res = self.run_script("--dry-run")
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("expected 'ghcr.io/iranman/beets-web-manager:0.1.3'", res.stderr)
+        self.assertIn("Reason code:           compose_image_mismatch", res.stderr)
+        self.assertIn("'ghcr.io/iranman/beets-web-manager:0.1.3' (pinned to this script's VERSION)", res.stderr)
 
     def test_dry_run_rejects_wrong_revision_label(self):
         self.state["images"][self.GOOD_IMAGE]["Config"]["Labels"]["org.opencontainers.image.revision"] = "0000000deadbeef"
@@ -1390,7 +1391,9 @@ class RollbackProofTests(VersionedStackFixture):
         self.save_state(st)
         res = self.run_script("--rollback", self.backup_dir())
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("expected the previous image sha256:oldimageid", res.stderr)
+        # Caught before the recreate now: the previous image cannot be
+        # re-tagged because it is gone and no registry digest was recorded.
+        self.assertIn("sha256:oldimageid", res.stderr)
         self.assertNotIn("Rollback complete", res.stderr)
 
     def test_rollback_works_when_the_web_manager_is_stopped(self):
@@ -1476,6 +1479,184 @@ class RollbackProofTests(VersionedStackFixture):
         res = self.run_script("--rollback", self.backup_dir())
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("'docker compose stop beets-web-manager' failed", res.stderr)
+        self.assertNotIn("Rollback complete", res.stderr)
+
+
+class LatestTagStackFixture(EndToEndFixture):
+    """The shipped layout: the Compose file uses the literal
+    `ghcr.io/iranman/beets-web-manager:latest`, and the .env has no version
+    line. The stack currently runs 0.1.2 under :latest; the registry's
+    :latest is 0.1.3 (VERSION) unless a test moves it."""
+
+    LATEST = "ghcr.io/iranman/beets-web-manager:latest"
+    REPO = "ghcr.io/iranman/beets-web-manager"
+    OLD_DIGEST = REPO + "@sha256:" + "1" * 64
+    NEW_DIGEST = REPO + "@sha256:" + "3" * 64
+    OLD_REVISION = "1111111111111111111111111111111111111111"
+
+    def old_entry(self):
+        return {"Id": "sha256:oldimageid", "RepoDigests": [self.OLD_DIGEST],
+                "Config": {"Labels": {"org.opencontainers.image.version": "0.1.2",
+                                      "org.opencontainers.image.revision": self.OLD_REVISION}}}
+
+    def new_entry(self, version="0.1.3", revision=None):
+        return {"Id": "sha256:goodimageid", "RepoDigests": [self.NEW_DIGEST],
+                "Config": {"Labels": {"org.opencontainers.image.version": version,
+                                      "org.opencontainers.image.revision": revision or self.GOOD_REVISION}}}
+
+    def setUp(self):
+        super().setUp()
+        Path(self.compose_file).write_text(
+            "services:\n  beets:\n    image: beets-engine:local\n"
+            f"  beets-web-manager:\n    image: {self.LATEST}\n"
+            "  lidarr:\n    image: lidarr:local\n",
+            encoding="utf-8",
+        )
+        self.stack_env = os.path.join(self.stack_dir, ".env")
+        Path(self.stack_env).write_text("OTHER_SETTING=keep-me\n", encoding="utf-8")
+        Path(self.webmgr_dir, ".auth_token").write_text("tok-not-printed", encoding="utf-8")
+        self.state["compose_literal_images"] = True
+        self.state["images"] = {self.LATEST: self.old_entry()}
+        self.state["registry"] = {self.LATEST: self.new_entry()}
+        webmgr = self.state["containers"]["cid-webmgr"]
+        webmgr["Config"]["Image"] = self.LATEST
+        webmgr["Image"] = "sha256:oldimageid"
+        self._save_state()
+        self.compose_before = Path(self.compose_file).read_bytes()
+        self.env_before = Path(self.stack_env).read_bytes()
+
+    def load_state(self):
+        with open(self.state_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_state(self, st):
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+
+    def webmgr(self):
+        st = self.load_state()
+        return st["containers"][st["service_containers"]["beets-web-manager"]]
+
+    def backup_dirs(self):
+        root = os.path.join(self.stack_dir, "_backups")
+        return [os.path.join(root, n) for n in os.listdir(root)] if os.path.isdir(root) else []
+
+    def assert_compose_and_env_untouched(self):
+        self.assertEqual(Path(self.compose_file).read_bytes(), self.compose_before, "the Compose file must not be edited")
+        self.assertEqual(Path(self.stack_env).read_bytes(), self.env_before, "the stack .env must not be edited")
+
+
+class LatestTagDeployTests(LatestTagStackFixture):
+    def test_deploy_pulls_latest_verifies_its_version_and_edits_nothing(self):
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cont = self.webmgr()
+        self.assertEqual(cont["Config"]["Image"], self.LATEST)
+        self.assertEqual(cont["Image"], "sha256:goodimageid")
+        self.assertIn("layout: latest", res.stderr)
+        self.assertIn("Image labels verified: ghcr.io/iranman/beets-web-manager:latest version=0.1.3", res.stderr)
+        self.assert_compose_and_env_untouched()
+        (bdir,) = self.backup_dirs()
+        record = Path(bdir, "previous-image.txt").read_text(encoding="utf-8")
+        self.assertIn("previous_image_id=sha256:oldimageid", record)
+        self.assertIn(f"previous_image_ref={self.LATEST}", record)
+        self.assertIn(f"previous_image_repo_digest={self.OLD_DIGEST}", record)
+
+    def test_deploy_refuses_when_latest_does_not_carry_version_yet(self):
+        st = self.load_state()
+        st["registry"][self.LATEST] = self.old_entry()  # 0.1.3 not published as latest yet
+        self.save_state(st)
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           latest_image_not_requested_version", res.stderr)
+        self.assertIn("carries version '0.1.2', not '0.1.3'", res.stderr)
+        self.assertIn("Failed stage:          image-pull-verification", res.stderr)
+        cont = self.webmgr()
+        self.assertEqual(cont["Image"], "sha256:oldimageid", "production must not change")
+        self.assertEqual(cont["State"]["Status"], "running", "the web manager must not be stopped")
+        self.assertEqual(self.backup_dirs(), [], "refused before any mutating step")
+        self.assert_compose_and_env_untouched()
+
+    def test_deploy_refuses_when_latest_is_newer_than_version(self):
+        st = self.load_state()
+        st["registry"][self.LATEST] = self.new_entry(version="0.1.4")
+        self.save_state(st)
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           latest_image_not_requested_version", res.stderr)
+        self.assertEqual(self.webmgr()["Image"], "sha256:oldimageid")
+
+    def test_deploy_refuses_a_latest_with_the_wrong_revision(self):
+        st = self.load_state()
+        st["registry"][self.LATEST] = self.new_entry(revision="0" * 40)
+        self.save_state(st)
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           image_revision_label_mismatch", res.stderr)
+        self.assertEqual(self.webmgr()["Image"], "sha256:oldimageid")
+
+    def test_dry_run_refuses_when_latest_does_not_carry_version(self):
+        st = self.load_state()
+        st["registry"][self.LATEST] = self.old_entry()
+        self.save_state(st)
+        res = self.run_script("--dry-run")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           latest_image_not_requested_version", res.stderr)
+
+    def test_compose_pinned_to_another_version_is_refused_not_edited(self):
+        Path(self.compose_file).write_text(
+            Path(self.compose_file).read_text(encoding="utf-8").replace(":latest", ":0.1.1"), encoding="utf-8")
+        before = Path(self.compose_file).read_bytes()
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           compose_image_mismatch", res.stderr)
+        self.assertEqual(Path(self.compose_file).read_bytes(), before)
+
+
+class LatestTagRollbackTests(LatestTagStackFixture):
+    def deploy(self):
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        (bdir,) = self.backup_dirs()
+        return bdir
+
+    def test_rollback_retags_latest_to_the_previous_image(self):
+        bdir = self.deploy()
+        res = self.run_script("--rollback", bdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cont = self.webmgr()
+        self.assertEqual(cont["Config"]["Image"], self.LATEST)
+        self.assertEqual(cont["Image"], "sha256:oldimageid")
+        st = self.load_state()
+        self.assertEqual(st["images"][self.LATEST]["Id"], "sha256:oldimageid",
+                         "a later plain 'docker compose up -d' must keep the previous image")
+        self.assertIn(["sha256:oldimageid", self.LATEST], st["tagged"])
+        self.assertIn("rollback is durable", res.stderr)
+        self.assertIn("/health/live reports version 0.1.2", res.stderr)
+        self.assert_compose_and_env_untouched()
+
+    def test_rollback_pulls_a_pruned_previous_image_back_by_digest(self):
+        bdir = self.deploy()
+        st = self.load_state()
+        del st["images"]["sha256:oldimageid"]  # `docker image prune` removed the dangling image
+        st["registry"][self.OLD_DIGEST] = self.old_entry()
+        self.save_state(st)
+        res = self.run_script("--rollback", bdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        st = self.load_state()
+        self.assertEqual(st["pulled_by_digest"], [self.OLD_DIGEST])
+        self.assertEqual(self.webmgr()["Image"], "sha256:oldimageid")
+        self.assert_compose_and_env_untouched()
+
+    def test_rollback_refuses_when_the_digest_pull_returns_another_image(self):
+        bdir = self.deploy()
+        st = self.load_state()
+        del st["images"]["sha256:oldimageid"]
+        st["registry"][self.OLD_DIGEST] = self.new_entry()
+        self.save_state(st)
+        res = self.run_script("--rollback", bdir)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("is not the recorded previous image sha256:oldimageid", res.stderr)
         self.assertNotIn("Rollback complete", res.stderr)
 
 

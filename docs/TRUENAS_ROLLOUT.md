@@ -18,7 +18,18 @@ docker image inspect ghcr.io/iranman/beets-web-manager:<VERSION> \
 # org.opencontainers.image.version  must equal <VERSION>
 ```
 
-Do not deploy moving aliases such as `latest`, `stable`, or `edge`. `VERSION` must be an explicit numbered release.
+`VERSION` must be an explicit numbered release, never `latest`, `stable` or `edge`.
+
+### Compose image line
+
+The shipped Compose files use the literal `image: ghcr.io/iranman/beets-web-manager:latest`,
+and the script never edits that line or the stack `.env`. It accepts three layouts:
+
+| Compose image line | What the rollout does |
+|---|---|
+| `...:latest` (shipped) | pulls `:latest` and deploys it only if its `org.opencontainers.image.version` label is `VERSION` (and its revision label is `EXPECTED_REVISION`, when set). If `:latest` does not carry `VERSION` yet, or already carries a newer release, it stops with reason code `latest_image_not_requested_version` before anything in the stack changes. |
+| `...:<VERSION>` (pinned by you) | pulls and verifies that tag. A tag pinned to any other version is refused (`compose_image_mismatch`); change the line yourself. |
+| `...:${BEETS_WEB_MANAGER_VERSION...}` (older stacks) | exports the variable for its own Compose calls and, after a verified deploy, rewrites that one line of the stack `.env` (see step 9). |
 
 ## Expected host layout (verify, don't trust)
 
@@ -73,8 +84,10 @@ Order of operations -- nothing in the second half runs unless every check in
 the first half passes:
 
 1. **Pre-flight (read-only):** resolve Compose file and container mounts;
-   verify Compose resolves the `beets-web-manager` service to exactly
-   `ghcr.io/iranman/beets-web-manager:${VERSION}`; take the **online
+   verify Compose resolves the `beets-web-manager` service to
+   `ghcr.io/iranman/beets-web-manager:latest` or exactly
+   `ghcr.io/iranman/beets-web-manager:${VERSION}` (see "Compose image line");
+   take the **online
    semantic snapshot** of the running library (see "Database integrity"
    below: counts not suspiciously low, identity digest, plugin healthy) and
    check the authoritative DB file is distinct in path/inode/checksum from
@@ -82,7 +95,9 @@ the first half passes:
    inspect the stale DB if present (same checks, plus refusing anything that
    looks like real library data); inspect the persistent auth token; record
    `/api/setup/status` (status and `blocking_reasons`); plan (not create)
-   the backup directory.
+   the backup directory; **pull** the image the Compose file names and check
+   its `org.opencontainers.image.{version,revision}` labels against
+   `VERSION`/`EXPECTED_REVISION`, recording its image ID.
 2. **Backup:** timestamped directory under
    `$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS/`. Directories
    are mode 700 and files mode 600. See "Backup contents" below.
@@ -99,10 +114,9 @@ the first half passes:
    existing destination, refuses if the legacy value equals
    `BEETS_API_TOKEN` (never uses the Beets engine's API token as the web
    auth token), copies atomically with a checksum check, `chmod 600`.
-6. **Pull and verify** the pinned image (`BEETS_WEB_MANAGER_VERSION` is
-   exported for this run's own `docker compose` calls), check its
-   `org.opencontainers.image.{version,revision}` labels before recreating
-   anything.
+6. **Re-check the image:** the tag must still point at the image ID that
+   was pulled and verified in pre-flight (a moving `:latest` that changed in
+   between stops the rollout with `image_tag_moved`). It is not pulled again.
 7. **Recreate only `beets-web-manager`** (`--no-deps --force-recreate`);
    every other Compose service's container ID is snapshotted before and
    after and asserted unchanged -- Plex, Lidarr, etc. are never touched.
@@ -141,7 +155,9 @@ the first half passes:
      Compare `setup-status-before.json` with the printed "after" reasons; if
      only the wording changed, the failure is a false positive and the new
      version can stay; otherwise roll back.
-9. **Persist the version:** only after every check above passed, the
+9. **Persist the version** (only for a Compose file that uses
+   `${BEETS_WEB_MANAGER_VERSION}`; with `:latest` or a pinned tag nothing is
+   written): only after every check above passed, the
    script **edits the stack `.env`**: it rewrites the
    `BEETS_WEB_MANAGER_VERSION=` line to the deployed version (or appends
    one), leaving every other line as it was, and sets the file to mode 600.
@@ -156,7 +172,7 @@ the first half passes:
 |---|---|---|
 | `docker-compose.yml.bak` | the Compose file | restored as-is |
 | `.env.bak` | the stack `.env`, verbatim (contains secrets) | its `BEETS_WEB_MANAGER_VERSION` line |
-| `previous-image.txt`, `previous-image-labels.json` | image ref, image ID and labels that were running | the target and the proof |
+| `previous-image.txt`, `previous-image-labels.json` | image ref, image ID, registry digest and labels that were running | the target and the proof |
 | `auth_token.bak`, `token-metadata.txt` | the web auth token and its checksum metadata | guarded token restore |
 | `web-manager-data/` | `.env` (Settings), `.browser_username`, `.browser_password`, `.flask_secret_key`, `.setup_complete`, `.browser_setup_state`, `transactions/` | restored (see Rollback) |
 | `beets-config/` | Beets `config.yaml` and `beetsplug/` | restored |
@@ -231,9 +247,17 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    added back, but records written after the deploy are never overwritten or
    removed. Backups made by older versions of this script have no state
    folders; the script warns and leaves the state as it is.
-4. **Edits the stack `.env`**: sets `BEETS_WEB_MANAGER_VERSION=` back to the
-   value in `.env.bak` (or, if that had none, to the tag of the previous
-   image). No other line changes.
+4. Only when the Compose file uses `${BEETS_WEB_MANAGER_VERSION}`: **edits
+   the stack `.env`**, setting `BEETS_WEB_MANAGER_VERSION=` back to the value
+   in `.env.bak` (or, if that had none, to the tag of the previous image). No
+   other line changes. With `:latest` or a pinned tag the `.env` is left alone.
+   **Re-tags the previous image:** if the previous image reference (for
+   example `:latest`) now names a different image, the script points the
+   local tag back at the recorded previous image ID (`docker tag`). If that
+   image was pruned meanwhile, it is first pulled back by the registry digest
+   recorded in `previous-image.txt` and must have the recorded ID. A later
+   plain `docker compose up -d` then keeps the previous image; the next
+   `docker compose pull` moves `:latest` forward again.
 5. Recreates `beets-web-manager` on the previous image reference through a
    temporary Compose override file (`.rollback-override.*`, written next to
    the Compose file and removed afterwards). A stopped service is still
@@ -265,6 +289,11 @@ meaning gets a new code.
 | --- | --- | --- |
 | `setup_status_unavailable` | `setup-status-after` | `/api/setup/status` did not answer 200 after the recreate |
 | `setup_new_blocking_reason` | `setup-status-after` | the new version reports a blocking reason that was not there before |
+| `compose_image_mismatch` | `compose-image-verification` | the Compose file names neither `:latest` nor `:<VERSION>` |
+| `latest_image_not_requested_version` | `image-pull-verification` | the pulled `:latest` image's version label is not `VERSION` |
+| `image_version_label_mismatch` | `image-pull-verification` | the pulled `:<VERSION>` image's version label is not `VERSION` |
+| `image_revision_label_mismatch` | `image-pull-verification` | the revision label is not `EXPECTED_REVISION` |
+| `image_tag_moved` | `image-deployment` | the tag no longer points at the image verified in pre-flight |
 
 ### Backup and restore safety
 
@@ -327,9 +356,9 @@ BACKUP_ROOT             default $STACK_DIR/_backups
 RESTORE_STALE_DB        rollback only, default 0
 ```
 
-The Compose file must pin the web manager through the version variable, for
-example `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`;
-a hard-coded tag makes the pre-flight image check fail.
+The Compose image line may be the shipped `ghcr.io/iranman/beets-web-manager:latest`,
+an exact `:<VERSION>`, or use the `BEETS_WEB_MANAGER_VERSION` variable (see
+"Compose image line").
 
 ## Testing
 

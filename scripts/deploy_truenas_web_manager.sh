@@ -72,7 +72,20 @@ ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
 # run_dry_run()/run_deploy() only. --rollback never needs a version -- it
 # restores whatever image reference the backup recorded.
 VERSION="${VERSION:-}"
-EXPECTED_IMAGE="ghcr.io/iranman/beets-web-manager:${VERSION}"
+IMAGE_REPO="ghcr.io/iranman/beets-web-manager"
+EXPECTED_IMAGE="${IMAGE_REPO}:${VERSION}"
+# The shipped Compose files use the literal moving tag below. The script
+# never edits it: it pulls that tag, proves the pulled image's version label
+# is VERSION before anything changes, and records the previous image ID and
+# registry digest so --rollback can re-tag it locally.
+LATEST_IMAGE="${IMAGE_REPO}:latest"
+# Set by verify_compose_image(): "latest" (the literal :latest tag),
+# "pinned" (an exact :VERSION tag) or "variable" (${BEETS_WEB_MANAGER_VERSION}).
+IMAGE_LAYOUT=""
+# The image reference the Compose file resolves to, and the image ID that
+# was pulled and verified for it before the recreate.
+DEPLOY_REF=""
+DEPLOY_IMAGE_ID=""
 # Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>)
 # to pin the exact org.opencontainers.image.revision label. Strongly recommended
 # for pinned production rollouts. When unset, revision-label check is skipped
@@ -522,11 +535,20 @@ discover_and_verify_mounts() {
 verify_compose_image() {
   STAGE="compose-image-verification"
   local resolved_image
+  # Only a Compose file that uses ${BEETS_WEB_MANAGER_VERSION} reads this.
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
   resolved_image="$(compose_service_image "$SERVICE")"
   [[ -n "$resolved_image" ]] || die "compose service '${SERVICE}' has no image defined in ${COMPOSE_FILE}"
-  [[ "$resolved_image" == "$EXPECTED_IMAGE" ]] || die "compose service '${SERVICE}' resolves to '${resolved_image}', expected '${EXPECTED_IMAGE}' (check .env BEETS_WEB_MANAGER_VERSION and this script's VERSION)"
-  log "Compose service '${SERVICE}' resolves to expected image: ${resolved_image}"
+  if [[ "$resolved_image" == "$LATEST_IMAGE" ]]; then
+    IMAGE_LAYOUT="latest"
+  elif [[ "$resolved_image" == "$EXPECTED_IMAGE" ]]; then
+    if grep -q 'BEETS_WEB_MANAGER_VERSION' "$COMPOSE_FILE"; then IMAGE_LAYOUT="variable"; else IMAGE_LAYOUT="pinned"; fi
+  else
+    REASON_CODE="compose_image_mismatch"
+    die "compose service '${SERVICE}' resolves to '${resolved_image}', expected '${LATEST_IMAGE}' (the shipped layout) or '${EXPECTED_IMAGE}' (pinned to this script's VERSION). This script never edits the image line; change it yourself or deploy the version it pins."
+  fi
+  DEPLOY_REF="$resolved_image"
+  log "Compose service '${SERVICE}' resolves to ${resolved_image} (layout: ${IMAGE_LAYOUT})"
 }
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1297,11 @@ restore_env_version_line() {
     [[ -z "$prev_line" ]] || warn "backup .env had BEETS_WEB_MANAGER_VERSION but ${env_file} no longer exists -- not recreating it"
     return 0
   fi
+  if [[ -z "$prev_line" ]] && ! grep -q 'BEETS_WEB_MANAGER_VERSION' "$COMPOSE_FILE"; then
+    # The Compose file does not use the variable (literal :latest or a
+    # pinned tag): the .env is not part of the image choice; leave it alone.
+    return 0
+  fi
   if ! [[ "$prev_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?$ ]]; then
     warn "could not determine a numbered previous version for ${env_file} (got '${prev_ver}') -- BEETS_WEB_MANAGER_VERSION left as is; the post-rollback check below decides whether that is safe"
     return 0
@@ -1348,6 +1375,7 @@ run_dry_run() {
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
   _compose pull "$SERVICE" >&2 || warn "image pull failed in dry-run (network/registry issue) -- label verification skipped"
   verify_image_labels_if_present || true
+  [[ "$IMAGE_LAYOUT" != "latest" ]] || log "Compose uses ${LATEST_IMAGE}: the real run deploys it only if its version label is ${VERSION} (checked above)."
   if docker inspect --format '{{.State.Status}}' "$WEBMGR_CID" >/dev/null 2>&1; then
     verify_endpoints "dry-run" || warn "endpoint verification reported issues (see above) -- not fatal in dry-run"
     record_setup_status_before
@@ -1358,19 +1386,41 @@ run_dry_run() {
   log "=== DRY RUN COMPLETE: all checks passed. Nothing in the stack was changed (the image may have been pulled into the local image store; probe bodies went to temp files). ==="
 }
 
+# Verifies the labels of the image DEPLOY_REF points at locally and records
+# its ID in DEPLOY_IMAGE_ID (the recreate must land on exactly that image).
 verify_image_labels_if_present() {
   local img_id revision version
-  img_id="$(docker image inspect "$EXPECTED_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
-  [[ -n "$img_id" ]] || { warn "image ${EXPECTED_IMAGE} not present locally"; return 1; }
-  revision="$(docker image inspect "$EXPECTED_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
-  version="$(docker image inspect "$EXPECTED_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
-  [[ "$version" == "$VERSION" ]] || die "image org.opencontainers.image.version label is '${version}', expected '${VERSION}'"
+  img_id="$(docker image inspect "$DEPLOY_REF" --format '{{.Id}}' 2>/dev/null || true)"
+  [[ -n "$img_id" ]] || { warn "image ${DEPLOY_REF} not present locally"; return 1; }
+  revision="$(docker image inspect "$DEPLOY_REF" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  version="$(docker image inspect "$DEPLOY_REF" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  if [[ "$version" != "$VERSION" ]]; then
+    if [[ "$IMAGE_LAYOUT" == "latest" ]]; then
+      REASON_CODE="latest_image_not_requested_version"
+      die "${LATEST_IMAGE} carries version '${version}', not '${VERSION}' -- ${VERSION} is not published as latest yet, or a newer release is. Nothing in the stack was changed. Retry once :latest is ${VERSION}, or deploy the version :latest carries."
+    fi
+    REASON_CODE="image_version_label_mismatch"
+    die "image org.opencontainers.image.version label is '${version}', expected '${VERSION}'"
+  fi
   if [[ -n "$EXPECTED_REVISION" ]]; then
-    [[ "$revision" == "$EXPECTED_REVISION" ]] || die "image org.opencontainers.image.revision label is '${revision}', expected '${EXPECTED_REVISION}'"
+    if [[ "$revision" != "$EXPECTED_REVISION" ]]; then
+      REASON_CODE="image_revision_label_mismatch"
+      die "image org.opencontainers.image.revision label is '${revision}', expected '${EXPECTED_REVISION}'"
+    fi
   else
     warn "EXPECTED_REVISION not set -- skipping the exact revision-label pin (relying on the version label '${version}' alone). Set EXPECTED_REVISION=<release commit sha> once it's known for a fully pinned deployment."
   fi
-  log "Image labels verified: version=${version} revision=${revision:-<none>}"
+  DEPLOY_IMAGE_ID="$img_id"
+  log "Image labels verified: ${DEPLOY_REF} version=${version} revision=${revision:-<none>} id=${img_id}"
+}
+
+# Pull and verify BEFORE anything in the stack changes: a :latest tag that
+# does not carry VERSION must stop the rollout with production untouched.
+pull_and_verify_image() {
+  STAGE="image-pull-verification"
+  log "Pulling ${DEPLOY_REF}..."
+  _compose pull "$SERVICE"
+  verify_image_labels_if_present || die "image ${DEPLOY_REF} is not present after the pull"
 }
 
 # ---------------------------------------------------------------------------
@@ -1399,9 +1449,20 @@ create_backup_dir() {
   PREVIOUS_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID" 2>/dev/null || echo "")"
   local previous_image_ref
   previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$WEBMGR_CID" 2>/dev/null || echo "")"
+  # The registry digest lets --rollback pull the previous image back by
+  # digest if it was pruned after a moving tag (:latest) left it untagged.
+  local previous_repo_digest=""
+  previous_repo_digest="$(docker image inspect "$PREVIOUS_IMAGE_ID" --format '{{json .RepoDigests}}' 2>/dev/null | _py -c '
+import json, sys
+try:
+    digests = json.load(sys.stdin) or []
+except Exception:
+    digests = []
+print(next((d for d in digests if d.startswith(sys.argv[1] + "@sha256:")), ""))' "$IMAGE_REPO" || true)"
   {
     echo "previous_image_id=${PREVIOUS_IMAGE_ID}"
     echo "previous_image_ref=${previous_image_ref}"
+    echo "previous_image_repo_digest=${previous_repo_digest}"
   } > "$BACKUP_DIR/previous-image.txt"
   docker inspect "$PREVIOUS_IMAGE_ID" --format '{{json .Config.Labels}}' > "$BACKUP_DIR/previous-image-labels.json" 2>/dev/null || true
 
@@ -1525,9 +1586,14 @@ migrate_token_if_needed() {
 deploy_image() {
   STAGE="image-deployment"
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
-  log "Pulling ${EXPECTED_IMAGE}..."
-  _compose pull "$SERVICE"
-  verify_image_labels_if_present
+  # Pulled and verified in pre-flight. A moving tag must still point at that
+  # exact image now; it is not pulled again.
+  local tag_id
+  tag_id="$(docker image inspect "$DEPLOY_REF" --format '{{.Id}}' 2>/dev/null || true)"
+  if [[ "$tag_id" != "$DEPLOY_IMAGE_ID" ]]; then
+    REASON_CODE="image_tag_moved"
+    die "${DEPLOY_REF} now points at ${tag_id:-nothing}, not the verified image ${DEPLOY_IMAGE_ID} -- refusing to recreate on an unverified image"
+  fi
 
   local other_services other_before other_after
   other_services="$(compose_config_json | _py -c "
@@ -1547,16 +1613,14 @@ print('\n'.join(s for s in data.get('services', {}) if s != '$SERVICE'))
   local configured_image running_image_id
   configured_image="$(docker inspect --format '{{.Config.Image}}' "$WEBMGR_CID")"
   running_image_id="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID")"
-  local expected_image_id
-  expected_image_id="$(docker image inspect "$EXPECTED_IMAGE" --format '{{.Id}}')"
-  [[ "$configured_image" == "$EXPECTED_IMAGE" ]] || die "recreated container's configured image is '${configured_image}', expected '${EXPECTED_IMAGE}'"
-  [[ "$running_image_id" == "$expected_image_id" ]] || die "recreated container's running image ID does not match the pulled ${EXPECTED_IMAGE} image ID"
+  [[ "$configured_image" == "$DEPLOY_REF" ]] || die "recreated container's configured image is '${configured_image}', expected '${DEPLOY_REF}'"
+  [[ "$running_image_id" == "$DEPLOY_IMAGE_ID" ]] || die "recreated container's running image ID ${running_image_id} is not the pulled and verified ${DEPLOY_REF} image ${DEPLOY_IMAGE_ID}"
 
   log "Waiting up to ${HEALTH_TIMEOUT_SECONDS}s for ${SERVICE} to become healthy..."
   if ! wait_for_health "$WEBMGR_CID" "$HEALTH_TIMEOUT_SECONDS"; then
     die "container did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s"
   fi
-  log "${SERVICE} is healthy on image ${EXPECTED_IMAGE} (id=${running_image_id})."
+  log "${SERVICE} is healthy on image ${DEPLOY_REF} (version ${VERSION}, id=${running_image_id})."
 }
 
 assert_authoritative_db_unchanged() {
@@ -1625,6 +1689,10 @@ verify_post_deploy() {
 # version is actually healthy -- never persist a version that didn't verify.
 persist_deployed_version() {
   STAGE="persist-version"
+  if [[ "$IMAGE_LAYOUT" == "latest" ]]; then
+    log "Compose uses ${LATEST_IMAGE}: nothing is written to .env or the Compose file. A later 'docker compose pull' moves to whatever :latest is then."
+    return 0
+  fi
   local env_file
   env_file="$(dirname "$COMPOSE_FILE")/.env"
   [[ -f "$env_file" ]] || { warn "no .env file at ${env_file} -- BEETS_WEB_MANAGER_VERSION not persisted (in-process export for this run only)"; return 0; }
@@ -1772,6 +1840,7 @@ run_deploy() {
   inspect_auth_token
   record_setup_status_before
   plan_backup_dir
+  pull_and_verify_image
   log "=== All pre-flight safety checks passed. Beginning mutating actions. ==="
 
   create_backup_dir
@@ -1905,6 +1974,25 @@ print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previo
   restore_env_version_line "$previous_image_ref"
   # Resolve from the files on disk only, never from this shell's environment.
   unset BEETS_WEB_MANAGER_VERSION
+
+  # A moving tag (:latest) now names the newer image. Point the local tag
+  # back at the recorded previous image (pulled back by its registry digest
+  # if it was pruned), so the recreate below and any later plain
+  # 'docker compose up -d' use it. The Compose file and .env are not edited.
+  local tag_id previous_repo_digest=""
+  previous_repo_digest="$(grep '^previous_image_repo_digest=' "$ROLLBACK_DIR/previous-image.txt" | cut -d= -f2- || true)"
+  tag_id="$(docker image inspect "$previous_image_ref" --format '{{.Id}}' 2>/dev/null || true)"
+  if [[ "$tag_id" != "$previous_image_id" ]]; then
+    if ! docker image inspect "$previous_image_id" --format '{{.Id}}' >/dev/null 2>&1; then
+      [[ -n "$previous_repo_digest" ]] || die "the previous image ${previous_image_id} is no longer on this host and the backup has no registry digest for it -- cannot roll back automatically"
+      log "Previous image is no longer local; pulling it back by digest ${previous_repo_digest}..."
+      docker pull "$previous_repo_digest" >&2 || die "pulling the previous image by digest (${previous_repo_digest}) failed"
+      [[ "$(docker image inspect "$previous_repo_digest" --format '{{.Id}}' 2>/dev/null || true)" == "$previous_image_id" ]] \
+        || die "the image pulled by digest ${previous_repo_digest} is not the recorded previous image ${previous_image_id}"
+    fi
+    docker tag "$previous_image_id" "$previous_image_ref"
+    log "Re-tagged ${previous_image_ref} to the previous image ${previous_image_id} (it pointed at ${tag_id:-nothing}). A later 'docker compose pull' moves it forward again."
+  fi
 
   local override
   # Next to the Compose file (removed again below): the docker CLI must be
