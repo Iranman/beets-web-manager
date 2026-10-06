@@ -834,6 +834,12 @@ def _write_config_text(path: Path, text: str, *, backup_prefix: Optional[str]) -
     Fails closed: if the backup cannot be made, config.yaml is not touched.
     Returns the backup's file name only (never a host/container path).
     """
+    # Shared by every config.yaml editor: a config.yaml symlink resolving
+    # outside its own directory would have us back up and rewrite content
+    # read from another file. Callers resolve the directory itself through
+    # config_manager.get_config_path() (BEETSDIR containment).
+    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(path.parent):
+        raise BeetsConfigEditError(f"{path.name} resolves outside the Beets config directory; refusing to edit it")
     backup_path: Optional[Path] = None
     if backup_prefix:
         try:
@@ -959,6 +965,13 @@ def _timestamped_backup_prefix(path: Path) -> str:
     return f"{path.name}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
+# S-7: the preview diff's context lines quote config.yaml verbatim; mask the
+# value of any key/token/secret/password setting (e.g. `apikey: ...`).
+_SECRET_DIFF_LINE_RE = re.compile(
+    r"(?i)^([ +-][ \t]*-?[ \t]*[\w.-]*(?:key|token|secret|password)[\w.-]*[ \t]*:[ \t]*)(?=\S)[^\r\n]*"
+)
+
+
 def preview_recommended_plugins(config_path: Path | str) -> Dict[str, Any]:
     """Read-only preview of enabling the missing RECOMMENDED plugins (BI-5)."""
     path = Path(config_path)
@@ -969,7 +982,8 @@ def preview_recommended_plugins(config_path: Path | str) -> Dict[str, Any]:
         text, missing, parse_configured_pluginpath(text) or ["/config/beetsplug"]
     )
     diff = "".join(
-        difflib.unified_diff(
+        _SECRET_DIFF_LINE_RE.sub(r"\1********", line)
+        for line in difflib.unified_diff(
             text.splitlines(keepends=True),
             new_text.splitlines(keepends=True),
             fromfile="config.yaml",

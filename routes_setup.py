@@ -3986,10 +3986,14 @@ def plugins_provision():
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
-    beets_config_path = Path(config_layers.beets_config_file())
+    from backend.config_manager import ConfigPathError, get_config_path
     try:
+        # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
+        beets_config_path = get_config_path()
         from backend.beets_plugins import provision_and_verify
         result = provision_and_verify(beets_config_path.parent)
+    except ConfigPathError as exc:
+        return jsonify({"ok": False, "all_required_healthy": False, "error": str(exc)}), exc.status_code
     except Exception as exc:
         app.logger.error("plugins_provision failed: %s", exc, exc_info=True)
         return jsonify({

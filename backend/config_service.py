@@ -109,7 +109,9 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
     """
     try:
         from backend.beets_plugins import provision_bundled_plugins, update_config_yaml_plugins
-        cfg_dir = config_dir if config_dir else Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")).parent
+        from backend.config_manager import get_config_path
+        # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
+        cfg_dir = config_dir if config_dir else get_config_path().parent
         if cfg_dir.exists():
             provision_bundled_plugins(cfg_dir)
             update_config_yaml_plugins(cfg_dir / "config.yaml")

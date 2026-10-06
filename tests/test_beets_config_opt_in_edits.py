@@ -195,10 +195,29 @@ class ConfigBackupTests(_TempConfigMixin, unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX permission bits")
     def test_backup_is_created_0600(self):
+        """The backup is never observable with a wider mode than 0600: it is
+        created 0600 (os.open), not copied with the source's 0644 and then
+        chmod-ed. Every chmod of a backup records the mode it had before."""
+        import backend.beets_plugins as bp
         from backend.beets_plugins import ensure_web_include_paths
         path = self._make_config()
-        backup = ensure_web_include_paths(path)["backup"]
-        self.assertEqual(stat.S_IMODE(os.stat(self.config_dir / backup).st_mode), 0o600)
+        os.chmod(path, 0o644)
+        observed = []
+        real_chmod = os.chmod
+
+        def spy_chmod(target, mode, *args, **kwargs):
+            if ".bak-" in os.fspath(target):
+                observed.append(stat.S_IMODE(os.stat(target).st_mode))
+            return real_chmod(target, mode, *args, **kwargs)
+
+        old_umask = os.umask(0)
+        try:
+            with mock.patch.object(bp.os, "chmod", spy_chmod):
+                backup = ensure_web_include_paths(path)["backup"]
+        finally:
+            os.umask(old_umask)
+        observed.append(stat.S_IMODE(os.stat(self.config_dir / backup).st_mode))
+        self.assertEqual(set(observed), {0o600})
 
     def test_plugin_update_fails_closed_when_backup_fails(self):
         from backend.beets_plugins import update_config_yaml_plugins
@@ -263,6 +282,22 @@ class EnsureWebIncludePathsTests(_TempConfigMixin, unittest.TestCase):
 
 
 class RecommendedPluginsTests(_TempConfigMixin, unittest.TestCase):
+    def test_preview_diff_masks_secret_values(self):
+        """S-7: config.yaml context lines in the preview never echo secrets."""
+        from backend.beets_plugins import preview_recommended_plugins
+        text = (
+            "acoustid:\n  apikey: SECRETVALUE1\n"
+            "plugins: web webmanager\n"
+            "discogs:\n  user_token: SECRETVALUE2\n  password: SECRETVALUE3\n"
+        )
+        path = self._make_config(text)
+        diff = preview_recommended_plugins(path)["diff"]
+        self.assertIn(" acoustid:", diff)
+        self.assertIn("apikey: ********", diff)
+        self.assertIn("user_token: ********", diff)
+        self.assertNotIn("SECRETVALUE", diff)
+        self.assertEqual(path.read_text(encoding="utf-8"), text)
+
     def test_preview_lists_missing_and_diff_without_writing(self):
         from backend.beets_plugins import RECOMMENDED_CONFIG_PLUGINS, preview_recommended_plugins
         path = self._make_config()
@@ -315,6 +350,49 @@ class RecommendedPluginsTests(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(self._backups(), [])
 
 
+class ConfigPathContainmentTests(_TempConfigMixin, unittest.TestCase):
+    """S-3 residual: every config.yaml writer gets the containment check."""
+
+    def _make_outside(self):
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        self.outside = Path(other.name) / "config.yaml"
+        self.outside.write_text(_BASE_CONFIG, encoding="utf-8")
+
+    def test_shared_write_path_refuses_symlink_escape(self):
+        from backend.beets_plugins import update_config_yaml_plugins
+        self._make_config(text=None)
+        self._make_outside()
+        os.symlink(self.outside, self.config_path)
+        with self.assertRaises(RuntimeError):
+            update_config_yaml_plugins(self.config_path)
+        self.assertTrue(self.config_path.is_symlink())
+        self.assertEqual(self.outside.read_text(encoding="utf-8"), _BASE_CONFIG)
+        self.assertEqual(sorted(p.name for p in self.config_dir.iterdir()), ["config.yaml"])
+
+    def test_startup_auto_provision_refuses_beets_config_outside_beetsdir(self):
+        from backend.config_service import _bootstrap_beets_plugins
+        self._make_config()
+        if not str(self.config_path).startswith("/"):
+            self.skipTest("get_config_path requires POSIX container paths")
+        self._make_outside()
+        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.outside), "BEETSDIR": str(self.config_dir)}):
+            _bootstrap_beets_plugins()
+        self.assertEqual(self.outside.read_text(encoding="utf-8"), _BASE_CONFIG)
+        self.assertEqual(sorted(p.name for p in self.outside.parent.iterdir()), ["config.yaml"])
+
+    def test_startup_auto_provision_edits_contained_config(self):
+        from backend.beets_plugins import read_web_include_paths
+        from backend.config_service import _bootstrap_beets_plugins
+        self._make_config()
+        if not str(self.config_path).startswith("/"):
+            self.skipTest("get_config_path requires POSIX container paths")
+        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.config_path), "BEETSDIR": str(self.config_dir)}):
+            _bootstrap_beets_plugins()
+        self.assertTrue(read_web_include_paths(self.config_path.read_text(encoding="utf-8")))
+        self.assertTrue((self.config_dir / "beetsplug").is_dir())
+
+
 class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
@@ -336,12 +414,14 @@ class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
             self.client.post("/api/setup/beets-config/include-paths"),
             self.client.get("/api/setup/plugins/recommended"),
             self.client.post("/api/setup/plugins/recommended/apply", json={"plugins": ["fetchart"]}),
+            self.client.post("/api/setup/plugins/provision"),
         )
         for response in responses:
             self.assertEqual(response.status_code, 500)
             self.assertIn("Beets config directory", response.get_json()["error"])
         self.assertEqual(self.outside.read_text(encoding="utf-8"), outside_before)
         self.assertEqual(list(self.outside.parent.glob("*.bak-*")), [])
+        self.assertFalse((self.outside.parent / "beetsplug").exists())
 
     def _make_outside(self):
         other = tempfile.TemporaryDirectory()
