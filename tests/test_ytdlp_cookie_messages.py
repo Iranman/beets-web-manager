@@ -183,7 +183,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         self.assertIn("['slskd', 'spotiflac', 'ytdlp', 'soundcloud']", playlist_source)
         self.assertIn("{ value: 'ytdlp', label: 'YouTube' }", playlist_source)
         self.assertIn("bgutil-provider:", compose_source)
-        self.assertIn("image: brainicism/bgutil-ytdlp-pot-provider:2.0.1-deno", compose_source)
+        self.assertIn("image: brainicism/bgutil-ytdlp-pot-provider:2.0.1-deno@sha256:6e17b6fac7f91dbf59dffbdc7ee5da8988c6b2c76001b8653a5b967e8b99f389", compose_source)
         self.assertIn("YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-http://bgutil-provider:4416}", compose_source)
         self.assertNotIn("127.0.0.1:4416", compose_source)
 
