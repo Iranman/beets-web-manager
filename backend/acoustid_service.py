@@ -331,6 +331,52 @@ def _acoustid_fingerprint_match(source_path: str, lib_path: str) -> Tuple[str, L
     return "", src_ids, lib_ids
 
 
+def _acoustid_hits_or_none(file_path: str) -> Optional[List[Dict[str, Any]]]:
+    """AcoustID hits for a file, or None when no real answer was obtained
+    (outage, throttle, missing file). [] means "looked up, no result"."""
+    if not file_path or not Path(file_path).is_file():
+        return None
+    try:
+        result = _acoustid_lookup_cached_outcome(file_path)
+    except Exception:
+        return None
+    if result.outcome not in (ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT):
+        return None
+    return list(result.data or [])
+
+
+def same_recording_proof(drop_path: str, keep_path: str, expected_recording_id: str = "") -> Dict[str, Any]:
+    """Positive same-recording proof for two files (MI-3 containment).
+
+    Both files must have a real AcoustID answer and BOTH must classify as
+    CONFIRMED (acoustid_evidence_from_hits) for one recording: the keeper's
+    embedded Recording ID when given, else the keeper's top hit. Anything
+    else -- unavailable, no result, ambiguous, conflict -- is not proof.
+    Returns {"proven": bool, "recording_id", "reason", "drop_status", "keep_status"}."""
+    from backend.matching import acoustid_evidence_from_hits
+    keep_hits = _acoustid_hits_or_none(keep_path)
+    drop_hits = _acoustid_hits_or_none(drop_path)
+    if keep_hits is None or drop_hits is None:
+        return {"proven": False, "recording_id": "", "reason": "fingerprint_unavailable",
+                "drop_status": "unavailable" if drop_hits is None else "", "keep_status":
+                "unavailable" if keep_hits is None else ""}
+    target = _s(expected_recording_id).strip().lower()
+    if not target:
+        scored = sorted(((_s(h.get("mb_trackid") or h.get("recording_id") or "").strip().lower(),
+                          float(h.get("score") or 0)) for h in keep_hits), key=lambda r: -r[1])
+        target = next((rid for rid, _ in scored if rid), "")
+    if not target:
+        return {"proven": False, "recording_id": "", "reason": "no_recording_for_keeper",
+                "drop_status": "", "keep_status": "no_result"}
+    keep_ev = acoustid_evidence_from_hits(keep_hits, target)
+    drop_ev = acoustid_evidence_from_hits(drop_hits, target)
+    proven = keep_ev.status == AcoustIDStatus.CONFIRMED and drop_ev.status == AcoustIDStatus.CONFIRMED
+    return {"proven": proven, "recording_id": target if proven else "",
+            "reason": "" if proven else "not_both_confirmed_for_one_recording",
+            "drop_status": _s(getattr(drop_ev.status, "value", drop_ev.status)),
+            "keep_status": _s(getattr(keep_ev.status, "value", keep_ev.status))}
+
+
 def _acoustid_multi_file(
     audio_files: List[str], max_files: int = 5
 ) -> Dict[str, int]:

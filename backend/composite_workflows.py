@@ -91,16 +91,46 @@ def _s(val: Any) -> str:
 # -----------------------------------------------------------------------------
 
 
+def _data_dir() -> Path:
+    return Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")).resolve()
+
+
 def _get_staging_roots() -> List[Path]:
+    """Roots under which staging helpers may touch files: the configured
+    import/download roots plus ``<data dir>/playlist_staging``. The data
+    directory itself is NOT a staging root -- it holds transactions.db,
+    caches and backups (S1/F1)."""
     roots_env = os.environ.get("BEETS_IMPORT_ROOTS") or os.environ.get("DOWNLOAD_PATH") or "/downloads"
     paths = []
     for r in roots_env.split(","):
         r = r.strip()
         if r:
             paths.append(Path(r).resolve())
-    data_dir = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")).resolve()
-    paths.append(data_dir)
+    paths.append((_data_dir() / "playlist_staging").resolve())
     return paths
+
+
+_PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".blb")
+
+
+def _is_protected_data_path(resolved: Path) -> bool:
+    """True for paths a staging helper must never delete or move (S1/F1):
+    the data dir, any ancestor of it, anything inside it outside
+    ``playlist_staging``, its backups, and any database file anywhere."""
+    data_dir = _data_dir()
+    if resolved == data_dir or resolved in data_dir.parents:
+        return True
+    name = resolved.name.lower()
+    if name.endswith(_PROTECTED_SUFFIXES):
+        return True
+    if data_dir in resolved.parents:
+        staging = (data_dir / "playlist_staging").resolve()
+        if resolved != staging and staging not in resolved.parents:
+            return True
+    backups = (data_dir / "backups").resolve()
+    if resolved == backups or backups in resolved.parents:
+        return True
+    return False
 
 
 def _is_within_music_root(path: Union[str, Path]) -> bool:
@@ -114,7 +144,26 @@ def _is_within_music_root(path: Union[str, Path]) -> bool:
     return p == music_root or music_root in p.parents
 
 
+def _has_symlink_component(path: Union[str, Path]) -> bool:
+    """True if the path itself or any existing parent is a symlink. Relative
+    paths are absolutized first so every real parent is checked (S1/F4)."""
+    p = Path(os.path.abspath(str(path)))
+    for candidate in [p, *p.parents]:
+        try:
+            if candidate.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _music_root() -> Path:
+    return Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
+
+
 def _is_safe_staging_path(path: Union[str, Path]) -> bool:
+    if _has_symlink_component(path):
+        return False
     p = Path(path).resolve()
     music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
     # Must NOT be inside music root
@@ -122,6 +171,9 @@ def _is_safe_staging_path(path: Union[str, Path]) -> bool:
         if p == music_root or music_root in p.parents:
             return False
     except Exception:
+        return False
+    # Never the data dir, its databases or backups (S1/F1)
+    if _is_protected_data_path(p):
         return False
     # Must be within allowed staging roots
     for stg in _get_staging_roots():
@@ -133,30 +185,77 @@ def _is_safe_staging_path(path: Union[str, Path]) -> bool:
     return False
 
 
-def delete_staging_file(path: str) -> Dict[str, Any]:
-    """Delete a file safely within staging/download roots (never inside music library)."""
-    p = Path(path).resolve()
-    if not p.exists():
-        return {"ok": True, "deleted": False, "message": "File does not exist"}
-    if not _is_safe_staging_path(p):
-        raise ValueError(f"Refusing to delete file outside staging roots: {path}")
-    if p.is_dir():
-        shutil.rmtree(str(p), ignore_errors=True)
+def _is_staging_root(resolved: Path) -> bool:
+    return any(resolved == root for root in _get_staging_roots())
+
+
+def _same_entry(before: os.stat_result, now: os.stat_result) -> bool:
+    return (now.st_ino, now.st_dev, stat.S_IFMT(now.st_mode)) == (
+        before.st_ino, before.st_dev, stat.S_IFMT(before.st_mode))
+
+
+def _validated_staging_target(path: Union[str, Path], what: str) -> Path:
+    """Resolve once, refuse anything outside staging, a staging root itself,
+    protected data, or a symlink. Returns the resolved path to operate on."""
+    raw = Path(path)
+    if not _is_safe_staging_path(raw):
+        raise ValueError(f"Refusing to {what} outside staging roots: {path}")
+    resolved = raw.resolve()
+    if _is_staging_root(resolved):
+        raise ValueError(f"Refusing to {what} a staging root itself: {path}")
+    if _is_protected_data_path(resolved) or _has_symlink_component(resolved):
+        raise ValueError(f"Refusing to {what} a protected path: {path}")
+    return resolved
+
+
+def _remove_resolved(resolved: Path) -> None:
+    """Delete an already-validated resolved path, re-checking with lstat
+    immediately before the call (S1/F3)."""
+    before = os.lstat(str(resolved))
+    if stat.S_ISLNK(before.st_mode) or _has_symlink_component(resolved):
+        raise ValueError(f"Refusing to delete through a symlink: {resolved}")
+    now = os.lstat(str(resolved))
+    if not _same_entry(before, now):
+        raise ValueError(f"Path changed during validation: {resolved}")
+    if stat.S_ISDIR(now.st_mode):
+        shutil.rmtree(str(resolved))
     else:
-        p.unlink()
-    return {"ok": True, "deleted": True, "path": str(p)}
+        os.unlink(str(resolved))
+
+
+def _move_resolved(src: Path, dst: Path) -> None:
+    """Move an already-validated resolved source to a validated resolved
+    target, re-checking with lstat immediately before the call (S1/F3)."""
+    before = os.lstat(str(src))
+    if stat.S_ISLNK(before.st_mode):
+        raise ValueError(f"Refusing to move a symlink: {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if _has_symlink_component(dst.parent) or _has_symlink_component(src) or os.path.lexists(str(dst)):
+        raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
+    if not _same_entry(before, os.lstat(str(src))):
+        raise ValueError(f"Source changed during validation: {src}")
+    shutil.move(str(src), str(dst))
+
+
+def delete_staging_file(path: str) -> Dict[str, Any]:
+    """Delete a file safely within staging/download roots (never inside the
+    music library, never the data dir or a staging root). A failed delete
+    raises -- it is never reported as success."""
+    p = Path(path)
+    if not p.exists() and not p.is_symlink():
+        return {"ok": True, "deleted": False, "message": "File does not exist"}
+    resolved = _validated_staging_target(p, "delete")
+    _remove_resolved(resolved)
+    return {"ok": True, "deleted": True, "path": str(resolved)}
 
 
 def move_staging_file(src: str, dst: str) -> Dict[str, Any]:
     """Move a file safely within staging roots."""
-    p_src = Path(src).resolve()
-    p_dst = Path(dst).resolve()
-    if not p_src.exists():
+    if not Path(src).exists():
         raise FileNotFoundError(f"Source file does not exist: {src}")
-    if not _is_safe_staging_path(p_src) or not _is_safe_staging_path(p_dst):
-        raise ValueError("Move operations must stay within staging roots")
-    p_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(p_src), str(p_dst))
+    p_src = _validated_staging_target(src, "move")
+    p_dst = _validated_staging_target(dst, "move to")
+    _move_resolved(p_src, p_dst)
     return {"ok": True, "source": str(p_src), "destination": str(p_dst)}
 
 
@@ -522,32 +621,142 @@ def rollback_existing_album_reconcile(
 # -----------------------------------------------------------------------------
 
 
+#: Above this share of rows "missing", the music mount is assumed broken and
+#: nothing is removed (same rule as Clean All's missing-files stage).
+MISSING_ROW_RATIO_CAP = 0.5
+
+
+def _item_abs_path(raw: Any) -> str:
+    """Absolute path of a Beets item as seen from this container."""
+    p = _decode_path(raw)
+    if not p:
+        return ""
+    if os.path.isabs(p) or p.startswith("/"):
+        return p
+    return str(_music_root() / p)
+
+
+def _music_root_usable() -> Tuple[bool, str]:
+    """The music mount must exist and be non-empty before a missing file can
+    be told apart from a missing mount."""
+    root = _music_root()
+    try:
+        if not root.is_dir():
+            return False, f"music root is not accessible: {root}"
+        if not any(root.iterdir()):
+            return False, f"music root is empty (mount missing?): {root}"
+    except OSError as exc:
+        log.warning("Music root %s is not readable: %s", root, exc)
+        return False, f"music root is not readable ({type(exc).__name__}): {root}"
+    return True, ""
+
+
+def _record_row_removal(store: Optional[TransactionStore], *, summary: str, rows: List[Dict[str, Any]],
+                        reason: str) -> str:
+    """Audit record for a row-only removal (files untouched). The row
+    snapshots are kept so a removed row can be re-attached by hand."""
+    st = _get_store(store)
+    tx = st.create(
+        operation_type="Library Cleanup",
+        status="Running",
+        summary=summary,
+        reason=reason,
+        changes=[{"action": "remove_row_keep_file", "item_id": r.get("id"), "path": _decode_path(r.get("path"))}
+                 for r in rows],
+        rollback_available=False,
+        rollback_reason="Row-only removal: the audio files were not touched. Re-attach a file through "
+                        "untracked recovery if it reappears.",
+        metadata={"mutation_family": "missing_row_removal_v1", "row_snapshots": rows},
+    )
+    return tx["id"]
+
+
+def _apply_row_removal(ad: BeetsAdapter, store: Optional[TransactionStore], op_id: str,
+                       item_ids: List[int]) -> Optional[str]:
+    """Remove the rows and finish the audit record. On an exception the
+    transaction is marked Failed (never left Running) and the error text is
+    returned so the caller can report it honestly."""
+    st = _get_store(store)
+    try:
+        ad.remove(item_ids=item_ids, delete_files=False)
+    except Exception as exc:  # report honestly; Beets state is unknown
+        err = f"{type(exc).__name__}: {exc}"
+        try:
+            st.update(op_id, status="Failed", error=err)
+        except Exception:
+            log.exception("Could not mark row-removal transaction %s Failed", op_id)
+        return err
+    st.update(op_id, status="Completed")
+    return None
+
+
+def _verified_missing(ad: BeetsAdapter, item_ids: List[int]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Re-read each requested item from live Beets; return (missing, skipped).
+    An item is "missing" only if it still exists in Beets and its file is
+    absent on disk now. Anything else is skipped with a reason."""
+    missing, skipped = [], []
+    for iid in item_ids:
+        item = ad.get_item(int(iid))
+        if not item:
+            skipped.append({"id": int(iid), "reason": "not_in_library"})
+            continue
+        path = _item_abs_path(item.get("path"))
+        if not path:
+            skipped.append({"id": int(iid), "reason": "no_path"})
+        elif os.path.lexists(path):
+            skipped.append({"id": int(iid), "reason": "file_present"})
+        else:
+            missing.append(item)
+    return missing, skipped
+
+
 def sync_deleted_files(
-    dry_run: bool = False,
+    dry_run: bool = True,
     limit: int = 50000,
     adapter: Optional[BeetsAdapter] = None,
+    item_ids: Optional[List[int]] = None,
+    store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Find items in Beets database whose physical files no longer exist on disk, and prune them."""
+    """Find Beets rows whose files are gone and (apply) remove those ROWS.
+
+    Never deletes files. Preview lists the missing rows; apply acts only on
+    the ``item_ids`` a preview returned, re-verified now (LT-2), and refuses
+    when the music root is unusable or too many rows look missing."""
     ad = adapter or beets_adapter
+    ok_root, root_reason = _music_root_usable()
     item_records = ad.list_item_paths(details=True)
-    missing_items = []
-    for rec in item_records[:limit]:
-        p_str = rec.get("path")
-        if p_str and not os.path.exists(p_str):
-            missing_items.append(rec)
-
-    if not dry_run and missing_items:
-        missing_ids = [int(r["id"]) for r in missing_items if r.get("id")]
-        if missing_ids:
-            ad.remove(item_ids=missing_ids, delete_files=False)
-
-    return {
-        "ok": True,
-        "dry_run": dry_run,
-        "scanned": len(item_records),
-        "missing_count": len(missing_items),
-        "missing_items": missing_items[:100],
-    }
+    scanned = len(item_records)
+    base = {"ok": True, "dry_run": dry_run, "scanned": scanned, "scanned_items": scanned,
+            "removed_from_db": 0, "missing_albums_count": 0}
+    if not ok_root:
+        return {**base, "ok": False, "code": "music_root_unusable", "error": root_reason,
+                "missing_count": 0, "missing_items": [], "missing_item_ids": []}
+    missing_items = [rec for rec in item_records[:limit]
+                     if rec.get("path") and not os.path.lexists(_item_abs_path(rec.get("path")))]
+    if scanned and len(missing_items) / scanned >= MISSING_ROW_RATIO_CAP:
+        return {**base, "ok": False, "code": "too_many_missing",
+                "error": f"{len(missing_items)}/{scanned} rows look missing; possible mount issue. Nothing removed.",
+                "missing_count": len(missing_items), "missing_items": missing_items[:100], "missing_item_ids": []}
+    result = {**base, "missing_count": len(missing_items), "missing_items": missing_items[:100],
+              "missing_item_ids": [int(r["id"]) for r in missing_items if r.get("id")]}
+    if dry_run:
+        return result
+    if not item_ids:
+        return {**result, "ok": False, "code": "planned_ids_required",
+                "error": "Apply needs the item_ids from a preview; nothing was removed."}
+    planned = {int(x) for x in item_ids}
+    still_missing = {int(r["id"]) for r in missing_items if r.get("id")}
+    targets, skipped = _verified_missing(ad, sorted(planned & still_missing))
+    skipped += [{"id": i, "reason": "no_longer_missing_or_not_planned"} for i in sorted(planned - still_missing)]
+    if not targets:
+        return {**result, "skipped": skipped}
+    op_id = _record_row_removal(store, summary=f"Remove {len(targets)} Beets row(s) whose files are missing",
+                                rows=targets, reason="sync deleted files")
+    err = _apply_row_removal(ad, store, op_id, [int(t["id"]) for t in targets])
+    if err:
+        return {**result, "ok": False, "code": "remove_failed", "error": err, "skipped": skipped,
+                "operation_id": op_id}
+    return {**result, "removed_from_db": len(targets), "skipped": skipped, "operation_id": op_id}
 
 
 def clean_orphaned_items(
@@ -555,23 +764,40 @@ def clean_orphaned_items(
     dry_run: bool = True,
     candidate_ids: Optional[List[int]] = None,
     adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Find and prune tracks that have no valid album association in the database."""
+    """Remove the Beets ROWS of explicitly requested items whose files are
+    missing on disk (LT-1). Never deletes files. Each id is re-verified
+    against live Beets and the disk; anything else is skipped. An empty
+    request is refused -- it never widens to the whole library."""
     ad = adapter or beets_adapter
-    ids = item_ids or candidate_ids
-    if ids is None:
-        all_albums = {int(a["id"]) for a in ad.get_albums() if a.get("id")}
-        orphans = []
-        for it in ad.get_items():
-            aid = it.get("album_id")
-            if aid is None or int(aid) not in all_albums:
-                orphans.append(int(it["id"]))
-        ids = orphans
-
-    if not dry_run and ids:
-        ad.remove(item_ids=[int(x) for x in ids], delete_files=True)
-
-    return {"ok": True, "dry_run": dry_run, "orphaned_count": len(ids), "item_ids": ids}
+    ids = [int(x) for x in (item_ids if item_ids is not None else candidate_ids) or [] if int(x) > 0]
+    empty = {"dry_run": dry_run, "selected": 0, "removed_count": 0, "orphaned_count": 0,
+             "item_ids": [], "orphaned_items": [], "skipped": []}
+    if not ids:
+        return {**empty, "ok": False, "code": "empty_selection",
+                "error": "No item ids were given; nothing was removed."}
+    ok_root, root_reason = _music_root_usable()
+    if not ok_root:
+        return {**empty, "ok": False, "code": "music_root_unusable", "error": root_reason}
+    targets, skipped = _verified_missing(ad, sorted(set(ids)))
+    total = int((ad.get_stats() or {}).get("items") or 0)
+    if total and len(targets) / total >= MISSING_ROW_RATIO_CAP:
+        return {**empty, "ok": False, "code": "too_many_missing", "skipped": skipped,
+                "error": f"{len(targets)}/{total} rows look missing; possible mount issue. Nothing removed."}
+    out = {"ok": True, "dry_run": dry_run, "selected": len(targets), "removed_count": 0,
+           "orphaned_count": len(targets), "item_ids": [int(t["id"]) for t in targets],
+           "orphaned_items": [{"id": t.get("id"), "artist": t.get("artist", ""), "title": t.get("title", ""),
+                               "path": _decode_path(t.get("path"))} for t in targets],
+           "skipped": skipped}
+    if dry_run or not targets:
+        return out
+    op_id = _record_row_removal(store, summary=f"Remove {len(targets)} Beets row(s) whose files are missing",
+                                rows=targets, reason="orphaned item cleanup")
+    err = _apply_row_removal(ad, store, op_id, out["item_ids"])
+    if err:
+        return {**out, "ok": False, "code": "remove_failed", "error": err, "operation_id": op_id}
+    return {**out, "removed_count": len(targets), "operation_id": op_id}
 
 
 def clean_empty_albums(
@@ -580,42 +806,100 @@ def clean_empty_albums(
     candidate_ids: Optional[List[int]] = None,
     adapter: Optional[BeetsAdapter] = None,
 ) -> Dict[str, Any]:
-    """Find and prune album database rows that contain 0 tracks."""
+    """Remove explicitly requested album rows that have no items (verified
+    live). An empty request is refused; files are never touched."""
     ad = adapter or beets_adapter
-    ids = album_ids or candidate_ids
-    if ids is None:
-        orphans = ad.find_all_orphan_albums()
-        ids = [int(a["id"]) for a in orphans if a.get("id")]
-
-    if not dry_run and ids:
-        ad.remove(album_ids=[int(x) for x in ids], delete_files=False)
-
-    return {"ok": True, "dry_run": dry_run, "empty_albums_count": len(ids), "album_ids": ids}
+    ids = [int(x) for x in (album_ids if album_ids is not None else candidate_ids) or [] if int(x) > 0]
+    if not ids:
+        return {"ok": False, "code": "empty_selection", "error": "No album ids were given; nothing was removed.",
+                "dry_run": dry_run, "empty_albums_count": 0, "album_ids": [], "removed_count": 0}
+    empty = [aid for aid in sorted(set(ids)) if ad.get_album(aid) and not ad.find_all_items_by_album_id(aid)]
+    if not dry_run and empty:
+        ad.remove(album_ids=empty, delete_files=False)
+    return {"ok": True, "dry_run": dry_run, "empty_albums_count": len(empty), "album_ids": empty,
+            "removed_count": 0 if dry_run else len(empty)}
 
 
 def scan_library_integrity(adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
-    """Scan library and return integrity health metrics."""
+    """Counts-only integrity summary (see get_library_health for the report)."""
+    report = get_library_health(adapter=adapter, orphan_sample_limit=0, duplicate_limit=0, empty_limit=0)
+    return {"ok": True, "total_items": report["item_row_count"], "total_albums": report["album_row_count"],
+            "missing_files_sample": report["orphaned_item_count"]}
+
+
+def get_library_health(
+    adapter: Optional[BeetsAdapter] = None,
+    *,
+    orphan_sample_limit: int = 100,
+    duplicate_limit: int = 100,
+    empty_limit: int = 100,
+) -> Dict[str, Any]:
+    """Read-only library health report from live Beets reads (LT-18).
+
+    "Orphaned" items are rows whose file is missing on disk (as seen from
+    this container); when the music root is unusable none are reported,
+    because a missing mount would make every row look orphaned.
+    rgid_duplicate_groups is returned untruncated (the caller splits it by
+    operator resolution first). Duplicate groups carry no merge_safe flag:
+    merging is decided by the album-row merge planner, never by this report."""
     ad = adapter or beets_adapter
-    stats = ad.get_stats()
-    items = ad.get_items()
-    albums = ad.get_albums()
+    albums = ad.get_albums() or []
+    items = ad.get_items() or []
+    ok_root, root_reason = _music_root_usable()
+    by_album: Dict[int, List[Dict[str, Any]]] = {}
+    for it in items:
+        if it.get("album_id") is not None:
+            by_album.setdefault(int(it["album_id"]), []).append(it)
+    orphans: List[Dict[str, Any]] = []
+    if ok_root:
+        orphans = [it for it in items if it.get("path") and not os.path.lexists(_item_abs_path(it.get("path")))]
+    album_rows = {int(a["id"]): a for a in albums if a.get("id") is not None}
+    empty = [a for aid, a in album_rows.items() if not by_album.get(aid)]
 
-    missing_paths = 0
-    for it in items[:1000]:
-        p = it.get("path")
-        if p and not os.path.exists(_decode_path(p)):
-            missing_paths += 1
+    def _album_view(a: Dict[str, Any]) -> Dict[str, Any]:
+        aitems = by_album.get(int(a["id"]), [])
+        aldir = str(Path(_decode_path(aitems[0].get("path"))).parent) if aitems else ""
+        return {"album_id": int(a["id"]), "albumartist": a.get("albumartist", ""), "album": a.get("album", ""),
+                "year": a.get("year") or 0, "track_count": len(aitems), "mb_albumid": a.get("mb_albumid", ""),
+                "mb_releasegroupid": a.get("mb_releasegroupid", ""), "aldir": aldir}
 
+    name_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    rg_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for a in album_rows.values():
+        key = (_s(a.get("albumartist")).strip().lower(), _s(a.get("album")).strip().lower())
+        if key[1]:
+            name_groups.setdefault(key, []).append(a)
+        rg = _s(a.get("mb_releasegroupid")).strip().lower()
+        if rg:
+            rg_groups.setdefault(rg, []).append(a)
+    dup_albums = [{"albumartist": g[0].get("albumartist", ""), "album": g[0].get("album", ""), "count": len(g),
+                   "albums": [_album_view(a) for a in g]} for g in name_groups.values() if len(g) > 1]
+    rg_dups = [{"mb_releasegroupid": rg, "count": len(g), "albums": [_album_view(a) for a in g]}
+               for rg, g in rg_groups.items() if len(g) > 1]
+    summary = {
+        "database_rows_scanned": len(items) + len(albums), "albums_count": len(albums), "tracks_count": len(items),
+        "duplicate_album_groups": len(dup_albums), "same_release_group_id_groups": len(rg_dups),
+        "orphaned_items": len(orphans), "empty_albums": len(empty), "missing_files": len(orphans),
+    }
     return {
         "ok": True,
-        "total_items": stats.get("items", len(items)),
-        "total_albums": stats.get("albums", len(albums)),
-        "missing_files_sample": missing_paths,
+        "music_root_usable": ok_root, "music_root_problem": root_reason,
+        "duplicate_albums": dup_albums[:max(0, int(duplicate_limit))], "duplicate_album_count": len(dup_albums),
+        "rgid_duplicate_groups": rg_dups, "rgid_duplicate_group_count": len(rg_dups),
+        "rgid_resolved_groups": [], "rgid_resolved_group_count": 0,
+        "orphaned_items": [{"id": it.get("id"), "title": it.get("title", ""), "artist": it.get("artist", ""),
+                            "album": it.get("album", ""), "path": _decode_path(it.get("path"))}
+                           for it in orphans[:max(0, int(orphan_sample_limit))]],
+        "orphaned_item_count": len(orphans),
+        "orphaned_item_ids": [int(it["id"]) for it in orphans if it.get("id") is not None],
+        "empty_albums": [{"album_id": int(a["id"]), "albumartist": a.get("albumartist", ""),
+                          "album": a.get("album", ""), "year": a.get("year") or 0}
+                         for a in empty[:max(0, int(empty_limit))]],
+        "empty_album_count": len(empty),
+        "database_rows_scanned": summary["database_rows_scanned"],
+        "album_row_count": len(albums), "item_row_count": len(items),
+        "final_summary": summary,
     }
-
-
-def get_library_health(adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
-    return scan_library_integrity(adapter=adapter)
 
 
 def plan_library_cleanup(
@@ -941,11 +1225,74 @@ def rollback_folder_cleanup(
     return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
 
 
+def safe_rename_library_folder(
+    source: str,
+    target: str,
+    approved_by: str,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Rename one library folder through the canonical folder_cleanup_v1
+    engine (plan -> Approved -> claimed -> apply), for callers whose own run
+    is the operator's explicit confirmation (Clean All ``folder_safe_renames``).
+
+    The engine refuses the library root itself, paths outside MUSIC_ROOT,
+    symlinks, a missing target parent, an existing target and folders the
+    Beets DB still references; it re-checks the folder identity at apply and
+    records the rename so it can be rolled back. Never deletes media."""
+    from backend.transaction_engine import create_folder_cleanup_plan, execute_folder_cleanup_apply
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    st = _get_store(store)
+    plan = create_folder_cleanup_plan(
+        st, {"action": "safe_rename", "source": source, "target": target},
+        db_path=os.environ.get("BEETS_LIBRARY_DB", ""))
+    if not plan.get("ok"):
+        return {"ok": False, "renamed": False, "code": plan.get("code") or "plan_failed",
+                "error": plan.get("error") or "Rename plan was refused."}
+    op_id = plan["operation_id"]
+    if not _approve_preview(st, op_id, approved_by):
+        return {"ok": False, "renamed": False, "operation_id": op_id, "code": "not_approved",
+                "error": "The rename preview could not be approved (status changed)."}
+    with resource_locks().hold(["workflow:folder-safe-rename"], attempt_owner(op_id), timeout=10):
+        if claim_approved(st, op_id) is None:
+            return {"ok": False, "renamed": False, "operation_id": op_id, "code": "already_applied",
+                    "error": "This rename was already claimed or applied."}
+        try:
+            res = execute_folder_cleanup_apply(st, op_id)
+        except Exception as exc:
+            st.update(op_id, status="Failed", logs=[f"Apply raised: {exc}"])
+            raise
+    if not res.get("ok"):
+        return {"ok": False, "renamed": False, "operation_id": op_id,
+                "code": res.get("code") or "apply_failed", "error": res.get("error") or "Rename failed."}
+    return {"ok": True, "renamed": bool(res.get("moved_records")), "operation_id": op_id,
+            "status": res.get("status"), "moved_records": res.get("moved_records") or []}
+
+
+ALBUM_CLEANUP_FAMILY = "album_cleanup_v1"
+
+#: Phrase an operator must send to plan an album removal that ALSO deletes
+#: the audio files (irreversible). Without it a removal is row-only.
+DELETE_ALBUM_FILES_CONFIRMATION = "DELETE ALBUM FILES"
+
+
+def _transport_error(exc: BaseException) -> bool:
+    """A client-side transport failure: the engine may still have applied."""
+    return isinstance(exc, (BeetsAdapterTimeoutError, BeetsAdapterConnectionError))
+
+
 def plan_album_cleanup(
     album_id: int,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    *,
+    delete_files: bool = False,
+    reason: str = "",
 ) -> Dict[str, Any]:
+    """Preview removing an album row and its item rows (LT-4).
+
+    Row-only by default: the files stay on disk. ``delete_files`` must be
+    decided here, by the caller that holds the operator's explicit
+    confirmation; it is recorded on the plan and Apply never widens it."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     album = ad.get_album(int(album_id))
@@ -953,13 +1300,22 @@ def plan_album_cleanup(
         return {"ok": False, "error": f"Album {album_id} not found"}
 
     items = ad.find_all_items_by_album_id(int(album_id))
+    item_ids = sorted(int(it.get("id")) for it in items if it.get("id"))
     tx = st.create(
         operation_type="Delete",
         status="Preview",
-        summary=f"Delete album {album_id} ({album.get('album')}) and {len(items)} tracks",
-        metadata={"album_id": album_id, "item_ids": [it.get("id") for it in items if it.get("id")]},
+        summary=(f"Remove album {album_id} ({album.get('album')}) and {len(items)} track row(s)"
+                 + (" AND DELETE THEIR FILES" if delete_files else "; files stay on disk")),
+        reason=_s(reason),
+        rollback_available=False,
+        rollback_reason=("Files were deleted by Beets; there is no rollback." if delete_files else
+                         "Row-only removal: re-attach the files through untracked recovery."),
+        metadata={"mutation_family": ALBUM_CLEANUP_FAMILY, "album_id": int(album_id), "item_ids": item_ids,
+                  "delete_files": bool(delete_files), "album_snapshot": album,
+                  "item_snapshots": items},
     )
-    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", "album": album, "items": items}
+    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview",
+            "requires_approval": True, "delete_files": bool(delete_files), "album": album, "items": items}
 
 
 def apply_album_cleanup(
@@ -967,14 +1323,275 @@ def apply_album_cleanup(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Apply an Approved album removal exactly as planned (LT-4).
+
+    Refuses an unapproved, already-applied or drifted plan (the album's item
+    set must still equal the planned one). Never re-sent: a second apply is
+    refused."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    tx = st.get(operation_id)
-    aid = tx.get("metadata", {}).get("album_id")
-    if aid:
-        ad.remove(album_ids=[int(aid)], delete_files=True)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found", "mutated": False}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != ALBUM_CLEANUP_FAMILY:
+        return {"ok": False, "code": "wrong_family", "error": "Not an album cleanup transaction.", "mutated": False}
+    if meta.get("engine_result") or tx.get("status") in ("Completed", "Running"):
+        return {"ok": False, "code": "already_applied", "error": "This album cleanup was already applied.",
+                "mutated": False}
+    if tx.get("status") != "Approved":
+        return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it.",
+                "mutated": False}
+    aid = int(meta["album_id"])
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    with resource_locks().hold([f"album:{aid}"], attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "mutated": False,
+                    "error": "Another attempt already claimed this transaction."}
+        live = sorted(int(it.get("id")) for it in ad.find_all_items_by_album_id(aid) if it.get("id"))
+        if not ad.get_album(aid) or live != list(meta.get("item_ids") or []):
+            st.update(operation_id, status="Failed", logs=["Album changed since the plan; nothing was removed."])
+            return {"ok": False, "code": "stale_plan", "mutated": False,
+                    "error": "The album changed since it was planned; nothing was removed. Plan again."}
+        st.update(operation_id, metadata={"engine_request": {"album_id": aid}})
+        try:
+            res = ad.remove(album_ids=[aid], delete_files=bool(meta.get("delete_files")),
+                            idempotency_key=operation_id)
+        except Exception as exc:
+            if _transport_error(exc):
+                st.append_log(operation_id, "Engine call outcome unknown (transport error); left Running "
+                                            "for verification -- do not re-apply.")
+            else:
+                st.update(operation_id, status="Failed", logs=["Engine refused the album removal."])
+            raise
+        gone = not ad.get_album(aid)
+        status = "Completed" if gone else "Recovery Required"
+        st.update(operation_id, status=status, metadata={"engine_result": res if isinstance(res, dict) else {}},
+                  logs=[f"Removed album {aid} and {len(live)} item row(s); "
+                        f"files {'deleted' if meta.get('delete_files') else 'kept on disk'}."])
+    return {"ok": gone, "operation_id": operation_id, "status": status, "mutated": True,
+            "delete_files": bool(meta.get("delete_files")), "removed_item_ids": live,
+            "deleted": live if meta.get("delete_files") else [],
+            **({} if gone else {"error": "Album row still present after removal.", "code": "verification_failed"})}
+
+
+def finish_album_cleanup(
+    operation_id: str,
+    res: Dict[str, Any],
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Restart recovery for an album cleanup left Running: verify from live
+    Beets, never re-apply."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    meta = st.get(operation_id).get("metadata") or {}
+    aid = int(meta.get("album_id") or 0)
+    gone = bool(aid) and not ad.get_album(aid)
+    status = "Completed" if gone else "Recovery Required"
+    engine = res.get("result") if isinstance(res.get("result"), dict) else res
+    st.update(operation_id, status=status, metadata={"engine_result": engine or {"recovered": True}},
+              logs=[f"Recovered after restart: album {aid} {'is gone' if gone else 'is still present'}."])
+    return {"ok": gone, "operation_id": operation_id, "status": status}
+
+
+def remove_album_rows_after_failed_import(
+    album_id: int,
+    *,
+    reason: str,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Undo the album ROW a failed import created -- files are never
+    deleted (LT-17). Used only by automatic import rollback paths."""
+    plan = plan_album_cleanup(album_id, adapter=adapter, store=store, delete_files=False, reason=reason)
+    if not plan.get("ok"):
+        return plan
+    st = _get_store(store)
+    if st.transition(plan["operation_id"], "Preview", "Approved",
+                     metadata={"approved_by": f"automatic import rollback (row-only): {_s(reason)}"}) is None:
+        return {"ok": False, "code": "not_approved", "error": "Could not approve the row-only removal."}
+    return apply_album_cleanup(plan["operation_id"], adapter=adapter, store=store)
+
+
+
+
+# -----------------------------------------------------------------------------
+# 6b. Track quarantine (operator-selected bad tracks; never deleted)
+# -----------------------------------------------------------------------------
+
+
+TRACK_QUARANTINE_FAMILY = "track_quarantine_v1"
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def plan_track_quarantine(
+    album_id: int,
+    item_ids: List[int],
+    *,
+    reason: str = "",
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+    create: bool = True,
+) -> Dict[str, Any]:
+    """Preview moving operator-selected tracks of one album into the engine
+    quarantine (row removed, file kept and restorable). Read-only.
+
+    Every item must still be in ``album_id`` with its file present; its
+    SHA-256 is pinned so the engine refuses a file that changed. Selecting
+    every item of the album is refused (the engine never empties an album
+    row implicitly; use an album cleanup). ``create=False`` validates only."""
+    ad = adapter or beets_adapter
+    ids = sorted({int(x) for x in item_ids or [] if str(x).strip().lstrip("-").isdigit() and int(x) > 0})
+    if not ids:
+        return {"ok": False, "code": "empty_selection", "error": "No tracks were selected."}
+    members = {int(it.get("id")) for it in ad.find_all_items_by_album_id(int(album_id)) if it.get("id")}
+    if not members:
+        return {"ok": False, "code": "album_not_found", "error": f"Album {album_id} has no tracks."}
+    if set(ids) >= members:
+        return {"ok": False, "code": "album_would_empty",
+                "error": "Every track of the album was selected; remove the album through an album cleanup."}
+    entries: List[Dict[str, Any]] = []
+    problems: List[Dict[str, Any]] = []
+    for iid in ids:
+        item = ad.get_item(iid)
+        if not item or iid not in members:
+            problems.append({"item_id": iid, "reason": "not_in_album"})
+            continue
+        path = _item_abs_path(item.get("path"))
+        if not path or not os.path.isfile(path) or os.path.islink(path):
+            problems.append({"item_id": iid, "reason": "file_missing"})
+            continue
+        entries.append({"item_id": iid, "sha256": _file_sha256(path), "path": path,
+                        "title": item.get("title", ""), "track": item.get("track"), "disc": item.get("disc"),
+                        "mb_trackid": item.get("mb_trackid", "")})
+    if problems:
+        return {"ok": False, "code": "selection_invalid", "problems": problems,
+                "error": "Some selected tracks are not removable; nothing was planned."}
+    if not create:
+        return {"ok": True, "dry_run": True, "items": entries, "album_id": int(album_id)}
+    tx = _get_store(store).create(
+        operation_type="Delete",
+        status="Preview",
+        summary=f"Quarantine {len(entries)} track(s) of album {album_id} (files kept, restorable)",
+        reason=_s(reason),
+        changes=[{"action": "quarantine_remove", "item_id": e["item_id"], "path": e["path"], "title": e["title"]}
+                 for e in entries],
+        rollback_available=True,
+        metadata={"mutation_family": TRACK_QUARANTINE_FAMILY, "album_id": int(album_id), "items": entries},
+    )
+    return {"ok": True, "operation_id": tx["id"], "status": "Preview", "requires_approval": True,
+            "album_id": int(album_id), "items": entries}
+
+
+def apply_track_quarantine(
+    operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Apply an Approved track quarantine through the Beets engine."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != TRACK_QUARANTINE_FAMILY:
+        return {"ok": False, "code": "wrong_family", "error": "Not a track quarantine transaction."}
+    if meta.get("engine_result"):
+        return {"ok": False, "code": "already_applied", "error": "This quarantine was already applied."}
+    if tx.get("status") != "Approved":
+        return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
+    entries = meta.get("items") or []
+    aid = int(meta["album_id"])
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    with resource_locks().hold([f"album:{aid}"] + [f"item:{int(e['item_id'])}" for e in entries],
+                               attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+        items_before = int((ad.get_stats() or {}).get("items") or 0)
+        st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
+        try:
+            res = ad.quarantine_remove_items([{"item_id": int(e["item_id"]), "sha256": e["sha256"]} for e in entries],
+                                             idempotency_key=operation_id)
+        except Exception as exc:
+            if _transport_error(exc):
+                st.append_log(operation_id, "Engine call outcome unknown (transport error); left Running for "
+                                            "the recovery sweep -- do not re-apply.")
+            else:
+                st.update(operation_id, status="Failed", logs=["Engine refused the quarantine; nothing was removed."])
+            raise
+        return finish_track_quarantine(operation_id, res, adapter=ad, store=st)
+
+
+def finish_track_quarantine(
+    operation_id: str,
+    res: Dict[str, Any],
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Verify an applied quarantine from engine evidence (also used by the
+    restart recovery sweep -- never re-applies)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    meta = st.get(operation_id).get("metadata") or {}
+    engine = res.get("result") if isinstance(res.get("result"), dict) else res
+    entries = meta.get("items") or []
+    problems = [f"item {e['item_id']} still in library" for e in entries if ad.get_item(int(e["item_id"]))]
+    items_before = int(((meta.get("engine_request") or {}).get("items_before")) or 0)
+    items_after = int((ad.get_stats() or {}).get("items") or 0)
+    if items_before and items_before - items_after != len(entries):
+        problems.append(f"library item count changed by {items_before - items_after}, expected {len(entries)}")
+    status = "Completed" if not problems else "Recovery Required"
+    st.update(operation_id, status=status,
+              metadata={"engine_result": engine, "verification_problems": problems, "items_after": items_after},
+              logs=[f"Quarantined item {r.get('item_id')}: {r.get('quarantine_path')}" for r in engine.get("removed") or []]
+              + [f"Verification problem: {p}" for p in problems])
+    return {"ok": not problems, "operation_id": operation_id, "status": status,
+            "quarantine_id": engine.get("quarantine_id"), "removed": engine.get("removed") or [],
+            "verification_problems": problems}
+
+
+def rollback_track_quarantine(
+    operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Restore quarantined tracks through the engine's own manifest."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    if meta.get("mutation_family") != TRACK_QUARANTINE_FAMILY or not engine.get("quarantine_id"):
+        return {"ok": False, "code": "not_applied", "error": "No applied track quarantine to roll back."}
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
+    result = res.get("result") if isinstance(res.get("result"), dict) else (res or {})
+    if res.get("ok") is False or result.get("ok") is False:
+        st.append_log(operation_id, f"Engine rollback refused or failed: {result.get('error') or res.get('error')}")
+        return {"ok": False, "code": "rollback_failed", "operation_id": operation_id,
+                "status": tx.get("status"), "error": result.get("error") or res.get("error") or "Rollback failed."}
+    moved = st.transition(operation_id, tx.get("status"), "Rolled Back", metadata={"rollback_result": result},
+                          logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
+                                for r in result.get("restored") or []])
+    if moved is None:
+        return {"ok": False, "code": "conflict", "operation_id": operation_id,
+                "error": "The transaction changed state during rollback; reload and check it."}
+    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored": result.get("restored") or []}
 
 
 # -----------------------------------------------------------------------------
@@ -1076,30 +1693,19 @@ def delete_album_art(
 
 def replace_album_art(
     album_id: int,
-    image_bytes: bytes,
+    image_data: Any = b"",
     ext: str = "jpg",
     adapter: Optional[BeetsAdapter] = None,
+    **_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Save custom image bytes to album directory and embed into tracks."""
-    ad = adapter or beets_adapter
-    aid = int(album_id)
-    album = ad.get_album(aid)
-    if not album:
-        return {"ok": False, "error": f"Album {aid} not found"}
+    """Replacing album art is refused (LT-18).
 
-    items = ad.find_all_items_by_album_id(aid)
-    if not items:
-        return {"ok": False, "error": f"No tracks found for album {aid}"}
-
-    first_item_path = _decode_path(items[0].get("path"))
-    album_dir = Path(first_item_path).parent
-    target_art = album_dir / f"cover.{ext}"
-    target_art.write_bytes(image_bytes)
-
-    ad.modify(fields={"artpath": str(target_art)}, album_ids=[aid])
-    ad.embed_art(album_ids=[aid])
-
-    return {"ok": True, "album_id": aid, "artpath": str(target_art)}
+    It wrote the image straight into the album folder from this container
+    (the music mount is read-only here) and set artpath with a bare modify,
+    with no audit or rollback; its caller also passed arguments it did not
+    accept. A correct version needs an engine artwork-write operation."""
+    return {"ok": False, "code": "not_supported", "album_id": int(album_id),
+            "error": "Replacing album artwork is not supported yet; nothing was changed."}
 
 
 def plan_album_artwork(
@@ -1462,6 +2068,12 @@ def update_item_metadata(
 # -----------------------------------------------------------------------------
 
 
+#: Modes apply_album_maintenance actually implements. Everything else is
+#: refused (LT-3): removing tracks goes through the track quarantine family,
+#: duplicates through backend.duplicate_cleanup, renames through relocation.
+_ALBUM_MAINTENANCE_SUPPORTED_MODES = frozenset({"remove_album"})
+
+
 def plan_album_maintenance(
     payload: Dict[str, Any],
     adapter: Optional[BeetsAdapter] = None,
@@ -1482,15 +2094,36 @@ def apply_album_maintenance(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Apply an album-maintenance plan.
+
+    Only ``remove_album`` of an album row that is empty right now is
+    implemented (row only, never files). Every other mode used to fall
+    through to an unrequested ``move`` while reporting Completed; it is now
+    refused with ``not_supported`` and the transaction is marked Failed."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     tx = st.get(operation_id)
     meta = tx.get("metadata", {})
-    aid = meta.get("album_id")
-    if aid:
-        ad.move(album_ids=[int(aid)])
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    mode = _s(meta.get("mode"))
+    aid = int(meta.get("album_id") or 0)
+    if tx.get("status") in ("Completed", "Failed", "Rolled Back", "Running"):
+        return {"ok": False, "code": "already_applied", "operation_id": operation_id,
+                "error": f"Transaction is {tx.get('status')}; it cannot be applied again."}
+    if mode not in _ALBUM_MAINTENANCE_SUPPORTED_MODES or not aid:
+        st.update(operation_id, status="Failed",
+                  logs=[f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."])
+        return {"ok": False, "code": "not_supported", "operation_id": operation_id, "status": "Failed",
+                "error": f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."}
+    if not ad.get_album(aid):
+        st.update(operation_id, status="Completed", logs=[f"Album {aid} is already gone."])
+        return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted_albums": 0}
+    if ad.find_all_items_by_album_id(aid):
+        st.update(operation_id, status="Failed", logs=[f"Album {aid} still has items; nothing was removed."])
+        return {"ok": False, "code": "album_not_empty", "operation_id": operation_id, "status": "Failed",
+                "error": f"Album {aid} still has items; only an empty album row can be removed here."}
+    ad.remove(album_ids=[aid], delete_files=False)
+    st.update(operation_id, status="Completed", logs=[f"Removed empty album row {aid}."])
+    return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted_albums": 1}
 
 
 def rollback_album_maintenance(
@@ -1576,14 +2209,15 @@ def relocate_album(
     }
 
 
-def move_library(adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
-    """Move all albums in the library to conform to current path templates."""
-    ad = adapter or beets_adapter
-    all_albums = ad.get_albums()
-    aids = [int(a["id"]) for a in all_albums if a.get("id")]
-    if aids:
-        ad.move(album_ids=aids)
-    return {"ok": True, "albums_moved": len(aids)}
+def move_library(*_args: Any, adapter: Optional[BeetsAdapter] = None, **_kwargs: Any) -> Dict[str, Any]:
+    """Whole-library move (LT-18): refused.
+
+    It used to move every album in one unaudited call with no plan or
+    rollback, and its only caller passed arguments it did not accept. A
+    library-wide move needs a planned, per-album relocation family first."""
+    return {"ok": False, "code": "not_supported",
+            "error": "Moving the whole library at once is not supported; nothing was moved. "
+                     "Relocate albums individually."}
 
 
 # -----------------------------------------------------------------------------
@@ -1669,46 +2303,220 @@ def repair_album_genre(
 # -----------------------------------------------------------------------------
 
 
+IMPORT_REVIEW_CLEANUP_FAMILY = "import_review_cleanup_v1"
+
+
+def _import_review_quarantine_root() -> str:
+    return os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR") or str(_data_dir() / "import_review_quarantine")
+
+
+def _import_review_allowed_roots(allow_music: bool) -> List[str]:
+    from backend.serializers import _import_review_cleanup_roots
+    roots: List[str] = []
+    # The configured staging roots (BEETS_IMPORT_ROOTS/DOWNLOAD_PATH) stay
+    # cleanable, exactly as the pre-engine apply allowed.
+    for root in list(_import_review_cleanup_roots(allow_music=allow_music)) + _get_staging_roots():
+        try:
+            resolved = Path(root).resolve()
+        except Exception:
+            continue
+        if _is_protected_data_path(resolved) or str(resolved) in roots:
+            continue
+        roots.append(str(resolved))
+    return roots
+
+
 def plan_import_review_cleanup(
     payload_or_folder: Any = None,
     store: Optional[TransactionStore] = None,
     **kwargs,
 ) -> Dict[str, Any]:
+    """Preview an Import Review folder/file cleanup through the canonical
+    engine planner (``import_review_cleanup_v1``): root containment, per-file
+    stat preconditions, server-derived quarantine. Nothing is touched here;
+    the plan must be Approved before :func:`apply_import_review_cleanup`."""
+    from backend.transaction_engine import _normpath_within_roots, execute_import_review_cleanup_plan
     st = _get_store(store)
-    data = payload_or_folder if isinstance(payload_or_folder, dict) else kwargs
-    folder = data.get("folder") or data.get("folder_path") or data.get("source") or ""
-    tx = st.create(
-        operation_type="Library Cleanup",
-        status="Preview",
-        summary=f"Import review cleanup for folder {folder}",
-        metadata=data,
-    )
-    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **data}
+    if isinstance(payload_or_folder, dict):
+        data = dict(payload_or_folder)
+    elif payload_or_folder:
+        data = {"path": str(payload_or_folder), **kwargs}
+    else:
+        data = dict(kwargs)
+    if not data.get("path"):
+        data["path"] = data.get("folder") or data.get("folder_path") or data.get("source") or ""
+    if not data.get("path"):
+        return {"ok": False, "error": "A folder or file path is required."}
+    try:
+        album_id = int(data.get("album_id") or 0)
+    except (TypeError, ValueError):
+        album_id = 0
+    allow_music = bool(data.get("confirmed_wrong_library_folder") or data.get("allow_library_delete")) or album_id > 0
+    library_quarantined = False
+    try:
+        # realpath (symlinks collapsed, like resolve()) + normpath prefix
+        # containment: classification only, never a filesystem operation.
+        in_library = _normpath_within_roots(os.path.realpath(str(data["path"])), [_music_root()])
+    except Exception:
+        in_library = False
+    if in_library and str(data.get("action") or "").strip().lower() not in (
+            "quarantine_rejected", "quarantine_duplicate"):
+        # S1: files inside the music library are never hard-deleted by Import
+        # Review cleanup -- they are moved to the server-derived quarantine
+        # (RECOVERABLE, rollback available) even when a delete was requested.
+        data["action"] = "quarantine_rejected"
+        library_quarantined = True
+    try:
+        res = execute_import_review_cleanup_plan(
+            st, data, _import_review_allowed_roots(allow_music), music_root=str(_music_root()))
+    except ValueError as exc:
+        log.warning("Import Review cleanup preview rejected: %s", exc)
+        return {"ok": False, "code": "invalid_request", "error": "Invalid cleanup request."}
+    if res.get("ok") and res.get("operation_id"):
+        res.setdefault("token", res["operation_id"])
+        res["library_paths_quarantined"] = library_quarantined
+    return res
+
+
+def _approve_preview(st: TransactionStore, operation_id: str, approved_by: str) -> bool:
+    """CAS Preview -> Approved for callers whose own request already is the
+    operator's explicit confirmation. False if anyone else moved it first."""
+    return st.transition(operation_id, "Preview", "Approved", metadata={"approved_by": approved_by}) is not None
 
 
 def apply_import_review_cleanup(
     operation_id: str,
     store: Optional[TransactionStore] = None,
+    approved_by: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Apply an Approved Import Review cleanup exactly once.
+
+    ``approved_by`` is for callers whose own request already is the
+    operator's explicit confirmation: a Preview plan is CAS-approved in the
+    same store first (refused if anyone else moved it).
+
+    Requires status Approved, claims it (CAS Approved -> Running) under the
+    ``workflow:import-review-cleanup`` lock, then runs the canonical engine
+    apply. A delete or move that fails is reported as a failure -- never as
+    Completed -- with the per-file details."""
     st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-    folder = meta.get("folder") or meta.get("folder_path") or meta.get("source")
-    if folder:
-        p = Path(folder).resolve()
-        if p.exists() and _is_safe_staging_path(p):
-            shutil.rmtree(str(p), ignore_errors=True)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    status = tx.get("status")
+    if approved_by and status == "Preview":
+        if not _approve_preview(st, operation_id, approved_by):
+            return {"ok": False, "code": "not_approved", "operation_id": operation_id,
+                    "error": "Cleanup preview changed state before it could be approved."}
+        status = "Approved"
+    if status in ("Completed", "Running", "Failed", "Partially Rolled Back", "Rolled Back") or meta.get("engine_result"):
+        return {"ok": False, "code": "already_applied", "operation_id": operation_id, "status": status,
+                "error": f"This cleanup was already applied (status {status})."}
+    if status != "Approved":
+        return {"ok": False, "code": "not_approved", "operation_id": operation_id, "status": status,
+                "error": "Approve the cleanup preview before applying it."}
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    with resource_locks().hold(["workflow:import-review-cleanup"], attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "operation_id": operation_id,
+                    "error": "Another attempt already claimed this transaction."}
+        try:
+            if meta.get("mutation_family") == IMPORT_REVIEW_CLEANUP_FAMILY:
+                return _apply_engine_import_review_cleanup(st, operation_id)
+            return _apply_legacy_folder_cleanup(st, operation_id, meta)
+        except Exception as exc:
+            log.exception("Import Review cleanup apply failed; the transaction is marked Failed")
+            reason = f"Cleanup failed ({type(exc).__name__}); see server logs."
+            st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": reason}},
+                      logs=[reason])
+            return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
+                    "error": reason, "deleted": [], "moved": [], "skipped": []}
+
+
+def _apply_engine_import_review_cleanup(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
+    from backend.transaction_engine import execute_import_review_cleanup_apply
+    res = execute_import_review_cleanup_apply(st, operation_id, quarantine_root=_import_review_quarantine_root())
+    skipped = list(res.get("skipped") or [])
+    failures = [e for e in skipped if isinstance(e, dict) and str(e.get("reason") or "").startswith("failed_")]
+    current = st.get(operation_id).get("status")
+    if res.get("ok") and not failures and current == "Completed":
+        st.update(operation_id, metadata={"engine_result": {"ok": True, "status": "Completed"}})
+        return res
+    deleted = list(res.get("deleted") or [])
+    moved = list(res.get("moved") or [])
+    partial = bool(deleted or moved)
+    final = "Partially Rolled Back" if partial else "Failed"
+    detail = res.get("error") or ("; ".join(f"{e.get('file')}: {e.get('reason')}" for e in failures)
+                                  or f"engine finished with status {current}")
+    st.update(operation_id, status=final,
+              metadata={"engine_result": {"ok": False, "status": final, "failures": failures, "error": detail}},
+              logs=[f"Cleanup did not complete: {detail}"])
+    return {**res, "ok": False, "code": "partial" if partial else "failed", "status": final,
+            "operation_id": operation_id, "error": f"Cleanup did not complete: {detail}",
+            "failures": failures, "deleted": deleted, "moved": moved, "skipped": skipped}
+
+
+def _apply_legacy_folder_cleanup(st: TransactionStore, operation_id: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Pre-engine transactions that only carry ``folder``: a single staging
+    folder delete through the validated, lstat-rechecked helper."""
+    folder = meta.get("folder") or meta.get("folder_path") or meta.get("source") or meta.get("path")
+    if not folder:
+        st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": "no folder"}},
+                  logs=["Cleanup plan names no folder; nothing was deleted."])
+        return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
+                "error": "Cleanup plan names no folder.", "deleted": [], "moved": [], "skipped": []}
+    p = Path(folder)
+    if not p.exists() and not p.is_symlink():
+        st.update(operation_id, status="Completed", metadata={"engine_result": {"ok": True, "deleted": []}},
+                  logs=[f"{folder} was already gone; nothing to delete."])
+        return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted": [], "moved": [],
+                "skipped": [{"file": str(folder), "reason": "not_found"}]}
+    resolved = _validated_staging_target(p, "delete")
+    _remove_resolved(resolved)
+    if os.path.lexists(str(resolved)):
+        st.update(operation_id, status="Failed",
+                  metadata={"engine_result": {"ok": False, "error": "folder still exists after delete"}},
+                  logs=[f"{resolved} still exists after the delete; reported as failed."])
+        return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
+                "error": f"{resolved} still exists after the delete.", "deleted": [], "moved": [], "skipped": []}
+    st.update(operation_id, status="Completed", metadata={"engine_result": {"ok": True, "deleted": [str(resolved)]}},
+              logs=[f"Deleted {resolved}"])
+    return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted": [str(resolved)],
+            "moved": [], "skipped": []}
 
 
 def rollback_import_review_cleanup(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Restore quarantined files of an engine cleanup. Deletes are not
+    reversible and are reported as ``not_supported`` -- never as Rolled Back."""
     st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != IMPORT_REVIEW_CLEANUP_FAMILY or not meta.get("rollback_available"):
+        return {"ok": False, "code": "not_supported", "operation_id": operation_id,
+                "error": "This cleanup deleted files (or was never applied); there is nothing to restore."}
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    from backend.transaction_engine import rollback_import_review_cleanup as engine_rollback
+    expected = [s for s in (meta.get("steps") or []) if s.get("type") == "move_quarantine"
+                and s.get("status") == "completed"]
+    res = engine_rollback(st, operation_id)
+    if not res.get("ok"):
+        return {**res, "ok": False, "code": "rollback_failed"}
+    restored = res.get("restored") or []
+    if len(restored) < len(expected):
+        st.update(operation_id, status="Partially Rolled Back",
+                  logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
+        return {**res, "ok": False, "code": "partial", "status": "Partially Rolled Back",
+                "error": f"Only {len(restored)} of {len(expected)} quarantined files were restored."}
+    return res
 
 
 def plan_confirmed_import(
@@ -1736,7 +2544,11 @@ def apply_confirmed_import(
     meta = tx.get("metadata", {})
     paths = meta.get("paths") or meta.get("path") or []
     fields = meta.get("fields") or meta.get("set_fields") or {}
-    res = ad.run_import(paths=paths, autotag=False, move=True, write=True, set_fields=fields)
+    # LT-17: honour the caller's copy/move choice (it used to force move=True,
+    # so a "copy" import consumed its source).
+    use_move = meta.get("use_move", True) is not False
+    res = ad.run_import(paths=paths, autotag=False, copy=not use_move, move=use_move, write=True,
+                        set_fields=fields)
     st.update(operation_id, status="Completed")
     return {"ok": True, "operation_id": operation_id, "status": "Completed", "result": res}
 
@@ -1830,9 +2642,19 @@ def ensure_playlist_staging(playlist_key: str, playlist_id: str = "", name: str 
 
 
 def delete_playlist_staged_track(playlist_key: str, track_id: str, requested_path: str = "") -> Dict[str, Any]:
-    if requested_path and os.path.exists(requested_path) and _is_safe_staging_path(requested_path):
-        os.unlink(requested_path)
-    return {"ok": True, "track_id": track_id}
+    """Delete one staged track file. A refused delete (outside staging, the
+    data dir, a staging root, a symlink or a directory) is reported as
+    ok=False -- never as success (S1)."""
+    if not requested_path or not os.path.lexists(requested_path):
+        return {"ok": True, "deleted": False, "track_id": track_id}
+    try:
+        resolved = _validated_staging_target(requested_path, "delete")
+        if resolved.is_dir():
+            raise ValueError(f"Refusing to delete a directory as a staged track: {requested_path}")
+        _remove_resolved(resolved)
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "deleted": False, "track_id": track_id, "error": str(exc)}
+    return {"ok": True, "deleted": True, "track_id": track_id}
 
 
 def inspect_playlist_staged_track(playlist_key: str, track_id: str, requested_path: str = "") -> Dict[str, Any]:
@@ -1872,20 +2694,39 @@ def import_playlist_staged(playlist_key: str, track_id: str, item_id: int, adapt
     return {"ok": True, "playlist_key": playlist_key, "track_id": track_id, "item_id": item_id}
 
 
+PLAYLIST_MEDIA_CLEANUP_FAMILY = "playlist_media_cleanup_v1"
+
+
 def plan_playlist_media_cleanup(
     payload: Dict[str, Any],
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Preview removing playlist-media library ROWS. Files are kept on disk:
+    this workflow never deletes media (S1). The plan must be Approved before
+    :func:`apply_playlist_media_cleanup`."""
     st = _get_store(store)
-    item_ids = payload.get("item_ids") or []
+    item_ids: List[int] = []
+    for raw in payload.get("item_ids") or []:
+        try:
+            iid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if iid > 0 and iid not in item_ids:
+            item_ids.append(iid)
+    if not item_ids:
+        return {"ok": False, "error": "No valid item ids to remove."}
+    reason = str(payload.get("reason") or "playlist media cleanup")
     tx = st.create(
         operation_type="Delete",
         status="Preview",
-        summary=f"Delete {len(item_ids)} playlist media tracks",
-        metadata=payload,
+        summary=f"Remove {len(item_ids)} playlist media rows from the library (files kept on disk)",
+        rollback_available=False,
+        metadata={"mutation_family": PLAYLIST_MEDIA_CLEANUP_FAMILY, "item_ids": item_ids,
+                  "delete_files": False, "reason": reason},
     )
-    return {"ok": True, "operation_id": tx["id"], "status": "Preview", **payload}
+    return {"ok": True, "operation_id": tx["id"], "status": "Preview", "item_ids": item_ids,
+            "delete_files": False, "reason": reason}
 
 
 def apply_playlist_media_cleanup(
@@ -1893,23 +2734,93 @@ def apply_playlist_media_cleanup(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Remove the planned rows (``delete_files=False``) exactly once, only
+    from an Approved plan, and verify through the engine that they are gone."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    tx = st.get(operation_id)
-    item_ids = tx.get("metadata", {}).get("item_ids", [])
-    if item_ids:
-        ad.remove(item_ids=[int(x) for x in item_ids], delete_files=True)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != PLAYLIST_MEDIA_CLEANUP_FAMILY:
+        return {"ok": False, "code": "wrong_family", "error": "Not a playlist media cleanup transaction."}
+    status = tx.get("status")
+    if meta.get("engine_result") or status in ("Completed", "Running", "Recovery Required", "Failed"):
+        return {"ok": False, "code": "already_applied", "operation_id": operation_id, "status": status,
+                "error": f"This cleanup was already applied (status {status})."}
+    if status != "Approved":
+        return {"ok": False, "code": "not_approved", "operation_id": operation_id, "status": status,
+                "error": "Approve the cleanup preview before applying it."}
+    item_ids = [int(x) for x in meta.get("item_ids") or []]
+    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    with resource_locks().hold([f"item:{i}" for i in sorted(item_ids)], attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "operation_id": operation_id,
+                    "error": "Another attempt already claimed this transaction."}
+        st.update(operation_id, metadata={"engine_request": {"item_ids": item_ids, "delete_files": False}})
+        try:
+            res = ad.remove(item_ids=item_ids, delete_files=False, idempotency_key=operation_id)
+        except TypeError:
+            res = ad.remove(item_ids=item_ids, delete_files=False)
+        except Exception as exc:
+            if _transport_error(exc):
+                st.append_log(operation_id, "Engine call outcome unknown (transport error); left Running for "
+                                            "the recovery sweep -- do not re-apply.")
+            else:
+                st.update(operation_id, status="Failed", logs=[f"Engine refused the removal: {exc}"])
+            raise
+        getter = getattr(ad, "get_item", None)
+        remaining: List[int] = []
+        if callable(getter):
+            for iid in item_ids:
+                try:
+                    if getter(iid):
+                        remaining.append(iid)
+                except Exception:
+                    pass
+        removed = [i for i in item_ids if i not in remaining]
+        final = "Completed" if not remaining else "Recovery Required"
+        st.update(operation_id, status=final,
+                  metadata={"engine_result": res if isinstance(res, dict) else {"result": res},
+                            "removed_item_ids": removed, "remaining_item_ids": remaining},
+                  logs=[f"Removed {len(removed)} library rows; files kept on disk."]
+                  + [f"Item {i} is still in the library" for i in remaining])
+        return {"ok": not remaining, "operation_id": operation_id, "status": final, "deleted_items": removed,
+                "remaining_items": remaining, "files_kept": True, "files_deleted": 0}
+
+
+def remove_item_rows_keep_files(
+    item_ids: List[int],
+    reason: str,
+    approved_by: str,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Plan -> Approve -> Apply a rows-only removal for an internal caller whose
+    own (already operator-confirmed) workflow decided these stale rows must go.
+    Files are never touched. Approval is recorded with ``approved_by`` through a
+    CAS, so the transaction log shows who authorised it; the apply itself is
+    the same claimed, locked, verified path as the UI flow."""
+    st = _get_store(store)
+    plan = plan_playlist_media_cleanup({"item_ids": item_ids, "reason": reason}, adapter=adapter, store=st)
+    if not plan.get("ok"):
+        return plan
+    op_id = plan["operation_id"]
+    if not _approve_preview(st, op_id, approved_by):
+        return {"ok": False, "code": "not_approved", "operation_id": op_id,
+                "error": "The cleanup preview could not be approved (it changed state)."}
+    return apply_playlist_media_cleanup(op_id, adapter=adapter, store=st)
 
 
 def rollback_playlist_media_cleanup(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    """Row removal has no engine rollback; the files are still on disk and can
+    be re-imported. Reported honestly as not supported."""
+    return {"ok": False, "code": "not_supported", "operation_id": operation_id,
+            "error": "Library rows were removed but the files were kept on disk; re-import them to restore."}
 
 
 # -----------------------------------------------------------------------------
@@ -2138,14 +3049,35 @@ def find_files_for_hardlink(
     return matches
 
 
-def create_hardlink(src_path: str, dst_path: str) -> Dict[str, Any]:
+def create_hardlink(src_path: str, dst_path: str, expected_size: Optional[int] = None) -> Dict[str, Any]:
+    """Hardlink a file into a staging/download root (LT-18).
+
+    The target must be inside a staging root (never MUSIC_ROOT, no symlink
+    component); the source must be a regular file of ``expected_size`` when
+    given. An existing target is accepted only when it already IS the source
+    (``already_present``); anything else is refused, never overwritten."""
     p_src = Path(src_path)
     p_dst = Path(dst_path)
-    if not p_src.exists():
+    if not p_src.is_file() or p_src.is_symlink():
         raise FileNotFoundError(f"Source file not found: {src_path}")
+    if expected_size is not None and p_src.stat().st_size != int(expected_size):
+        raise ValueError("Source file size changed; nothing was linked.")
+    if not _is_safe_staging_path(p_dst.parent if not p_dst.exists() else p_dst):
+        raise ValueError("Refusing to link outside staging roots")
+    p_dst = p_dst.parent.resolve() / p_dst.name
+    if _is_protected_data_path(p_dst) or _is_staging_root(p_dst):
+        raise ValueError("Refusing to link onto a protected path")
+    if p_dst.exists():
+        if os.path.samefile(p_src, p_dst):
+            return {"ok": True, "already_present": True, "source": str(p_src), "destination": str(p_dst)}
+        raise ValueError(f"Refusing to overwrite an existing file: {dst_path}")
     p_dst.parent.mkdir(parents=True, exist_ok=True)
+    # Re-check right before linking (S1/F3): no symlink swapped into the
+    # destination chain and nothing created at the target meanwhile.
+    if _has_symlink_component(p_dst.parent) or os.path.lexists(str(p_dst)):
+        raise ValueError("Destination changed during validation; nothing was linked.")
     os.link(str(p_src), str(p_dst))
-    return {"ok": True, "source": str(p_src), "destination": str(p_dst)}
+    return {"ok": True, "already_present": False, "source": str(p_src), "destination": str(p_dst)}
 
 
 def repoint_item_db_path(
@@ -2161,11 +3093,25 @@ def repoint_item_db_path(
 
 
 def cancel_job(job_id: str) -> Dict[str, Any]:
-    return {"ok": True, "job_id": job_id, "cancelled": True}
+    """The engine has no cancel endpoint (LT-12): report that honestly
+    instead of claiming a cancellation."""
+    return {"ok": False, "job_id": job_id, "cancelled": False, "code": "not_supported",
+            "error": "The Beets engine cannot cancel a running operation."}
 
 
-def get_job(job_id: str) -> Dict[str, Any]:
-    return {"id": job_id, "status": "success", "returncode": 0, "stdout": [], "stderr": []}
+def get_job(job_id: str, adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
+    """Status of an engine operation from its registry (LT-12). It used to
+    return a constant success for any id."""
+    ad = adapter or beets_adapter
+    try:
+        op = ad.get_operation(str(job_id)) or {}
+    except BeetsNotFoundError:
+        return {"id": job_id, "status": "failed", "returncode": 1, "stdout": [], "stderr": [],
+                "error": "The engine has no record of this operation."}
+    raw = _s(op.get("status")).lower()
+    status = {"running": "running", "succeeded": "success", "failed": "failed"}.get(raw, "failed")
+    return {"id": job_id, "status": status, "returncode": 0 if status == "success" else (None if status == "running" else 1),
+            "stdout": [], "stderr": [_s(op.get("error"))] if op.get("error") else [], "result": op.get("result")}
 
 
 def clear_album_artpath(
@@ -2186,52 +3132,57 @@ def set_album_artpath(
 
 def delete_album(
     album_id: int,
-    delete_files: bool = True,
+    delete_files: bool = False,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Perform transaction-controlled album removal through album_maintenance family."""
+    """Remove an EMPTY album row (LT-3). An album that still has items is
+    refused: removing tracks needs the approved track quarantine family and
+    removing a whole album needs an approved album cleanup. Files are never
+    deleted here, whatever ``delete_files`` says."""
     ad = adapter or beets_adapter
-    album_data = lib.get_album(album_id) or {}
-    items = album_data.get("items") or []
-    item_ids = [int(it.get("id") or 0) for it in items if int(it.get("id") or 0) > 0]
-
     plan_res = plan_album_maintenance(
-        {
-            "mode": "remove_album" if not item_ids else "remove_tracks",
-            "album_id": int(album_id),
-            "track_ids": item_ids,
-            "delete_files": bool(delete_files),
-            "source": "delete_album",
-        },
+        {"mode": "remove_album", "album_id": int(album_id), "delete_files": False, "source": "delete_album"},
         store=store,
     )
     if not plan_res.get("ok"):
         return plan_res
-    op_id = plan_res.get("operation_id")
-    return apply_album_maintenance(op_id, adapter=ad, store=store)
+    return apply_album_maintenance(plan_res["operation_id"], adapter=ad, store=store)
 
 
 def delete_file(path: str) -> Dict[str, Any]:
-    """Delete a file or directory safely."""
+    """Delete a staging file or folder (LT-13).
+
+    Only paths inside a staging/download root are accepted: never anything
+    under MUSIC_ROOT, never a staging root itself, never the Web Manager data
+    dir, its databases or backups, never through a symlink. The path is
+    resolved once and re-checked with lstat right before the delete. Library
+    files leave the library only through engine quarantine. Raises
+    ValueError on a refused path and OSError on a real failure -- a partial
+    delete is never reported as success."""
     p = Path(path)
-    if not p.exists():
+    if not p.exists() and not p.is_symlink():
         return {"ok": True, "deleted": False, "reason": "not_found"}
-    if p.is_dir():
-        shutil.rmtree(p, ignore_errors=True)
-    else:
-        p.unlink(missing_ok=True)
-    return {"ok": True, "deleted": True, "path": str(p)}
+    resolved = _validated_staging_target(p, "delete")
+    _remove_resolved(resolved)
+    return {"ok": True, "deleted": True, "path": str(resolved)}
 
 
 def move_file(source: str, target: str) -> Dict[str, Any]:
+    """Move a staging file or folder within staging roots (LT-13).
+
+    Refuses MUSIC_ROOT, a staging root itself (source or target), the data
+    dir and its databases/backups, symlinks and an existing target; library
+    moves go through the Beets engine (relocation family)."""
     src = Path(source)
-    dst = Path(target)
     if not src.exists():
         return {"ok": False, "error": f"Source file does not exist: {source}"}
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dst))
-    return {"ok": True, "source": str(src), "target": str(dst)}
+    p_src = _validated_staging_target(src, "move")
+    p_dst = _validated_staging_target(target, "move to")
+    if os.path.lexists(str(p_dst)):
+        raise ValueError(f"Refusing to overwrite an existing target: {target}")
+    _move_resolved(p_src, p_dst)
+    return {"ok": True, "source": str(p_src), "target": str(p_dst)}
 
 
 def find_albums_with_mbid(
@@ -2278,11 +3229,12 @@ def list_transactions(
 
 
 def move_album_to_library(
-    album_id: int, adapter: Optional[BeetsAdapter] = None
+    album_id: int, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    ad = adapter or beets_adapter
-    res = ad.move(f"id:{album_id}", album=True)
-    return {"ok": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr}
+    """Move an album to its Beets path-template location through the album
+    relocation family (LT-18: it called adapter.move() with arguments that
+    do not exist and read a missing returncode)."""
+    return relocate_album(int(album_id), mode="move", adapter=adapter, store=store)
 
 
 _ALLOWED_COMMANDS = frozenset({"mbsubmit"})
@@ -2294,38 +3246,25 @@ def run_command(
     timeout: float = 60.0,
     adapter: Optional[BeetsAdapter] = None,
 ) -> Dict[str, Any]:
-    """Execute a strictly bounded, allowlisted Beets command.
+    """Arbitrary/legacy Beets commands are not supported (LT-12).
 
-    Security Gate:
-    - Prohibits arbitrary command names. Only strictly allowlisted commands ('mbsubmit') are permitted.
-    - Prohibits arbitrary shell commands, subprocess execution in Web Manager, Docker execution, SQL,
-      and filesystem commands.
-    - Validates argument strings against command injection patterns.
-    """
+    This used to return a fabricated "mbsubmit ... completed" without
+    contacting the engine. The stock-Beets engine has no command runner;
+    AcoustID submission goes through beets_adapter.mbsubmit() (the
+    submissions workflow). Nothing is executed here."""
     if command not in _ALLOWED_COMMANDS:
         raise ValueError(
             f"Prohibited command '{command}'. Arbitrary command execution is not permitted; "
             f"only allowlisted operations {_ALLOWED_COMMANDS} are allowed."
         )
-
-    safe_args = []
-    if args:
-        for arg in args:
-            if not isinstance(arg, str):
-                raise ValueError(f"Invalid argument type: {type(arg)}")
-            if any(char in arg for char in (";", "|", "&", "$", "`", "\n", "\r")):
-                raise ValueError(f"Illegal character in command argument: {arg!r}")
-            safe_args.append(arg)
-
-    ad = adapter or beets_adapter
-    query = safe_args[0] if safe_args else ""
-    return {
-        "ok": True,
-        "returncode": 0,
-        "stdout": f"mbsubmit {query} completed",
-        "stderr": "",
-        "output": f"mbsubmit {query} completed",
-    }
+    for arg in args or []:
+        if not isinstance(arg, str):
+            raise ValueError(f"Invalid argument type: {type(arg)}")
+        if any(char in arg for char in (";", "|", "&", "$", "`", "\n", "\r")):
+            raise ValueError(f"Illegal character in command argument: {arg!r}")
+    return {"ok": False, "code": "not_supported", "returncode": 1, "stdout": "", "stderr": "",
+            "error": "Generating a MusicBrainz submission through the Beets engine is not supported; "
+                     "nothing was run. Use the submissions workflow."}
 
 
 def write_tags(file_path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
@@ -2396,7 +3335,10 @@ def get_album_cleanup_index() -> List[Dict[str, Any]]:
 def mbsync(
     query: str = "", *, async_job: bool = False, timeout: float = 300.0
 ) -> Dict[str, Any]:
-    return beets_adapter.mbsync(query=query)
+    """Library-wide/query mbsync is refused (LT-18).
 
-
-
+    It forwarded ``query`` to beets_adapter.mbsync(), which has no such
+    parameter (TypeError), and a library-wide MusicBrainz rewrite has no
+    snapshot or rollback. Per-album repairs use plan/apply_album_mb_track_repair."""
+    return {"ok": False, "code": "not_supported",
+            "error": "Syncing the whole library from MusicBrainz at once is not supported; nothing was changed."}

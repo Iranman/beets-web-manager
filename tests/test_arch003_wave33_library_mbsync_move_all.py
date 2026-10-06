@@ -78,7 +78,8 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
 
         mock_find.assert_called_once_with()
-        mock_delete.assert_called_once_with(2, delete_files=True)
+        # S1: pruning an orphaned album row must never delete media files.
+        mock_delete.assert_called_once_with(2, delete_files=False)
         mock_mbsync.assert_called_once_with(query="", async_job=True)
         self.assertTrue(any("Pruned 1/1" in line for line in log))
 
