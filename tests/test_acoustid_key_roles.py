@@ -47,8 +47,13 @@ class AcoustidKeyRoleTests(unittest.TestCase):
         # The key is read by the typed lookup the compatibility wrapper uses.
         start = src.index("def acoustid_lookup_outcome(")
         body = src[start:src.index("\ndef ", start + 10)]
-        self.assertIn('os.environ.get("ACOUSTID_API_KEY")', body)
+        self.assertIn("acoustid_api_key()", body)
         self.assertNotIn("ACOUSTID_USER_KEY", body)
+        # IA-12: the shared resolver reads only the application key and its
+        # legacy alias, never the user (submission) key.
+        resolver = src[src.index("def acoustid_api_key("):start]
+        self.assertIn('("ACOUSTID_API_KEY", "ACOUSTID_KEY")', resolver)
+        self.assertNotIn("ACOUSTID_USER_KEY", resolver)
 
 
 if __name__ == "__main__":

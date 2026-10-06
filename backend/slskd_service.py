@@ -7,6 +7,7 @@ import backend.provider_boundary as provider_boundary
 import difflib, json, math, os, re, time, uuid
 import urllib.error
 from backend.matching import strip_track_filename_id_suffix as _canonical_strip_track_filename_id_suffix
+from backend.title_normalize import split_ws_led, strip_bracket_credits
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -98,10 +99,15 @@ def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:
     return tracks
 
 
+# SEC-5 (ReDoS): the leading \s+ of r"\s+-\s+" is applied by split_ws_led.
+_DASH_SEP_CORE_RE = re.compile(r"-\s+")
+
+
 def _slskd_title_norm(value: str) -> str:
-    text = _strip_track_filename_id_suffix(value).casefold().replace("&", " and ")
+    # SEC-5 (ReDoS): cap free text (1024 chars) before the regexes below.
+    text = _strip_track_filename_id_suffix(_s(value)[:1024]).casefold().replace("&", " and ")
     text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*[\(\[]\s*(?:feat\.?|ft\.?|with|prod\.?|produced\s+by|remix|edit|version|bonus|clean|explicit).*?[\)\]]\s*", " ", text, flags=re.IGNORECASE)
+    text = strip_bracket_credits(text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())
 
@@ -164,7 +170,7 @@ def _slskd_title_guess_from_name(name: str) -> str:
     # the scene artist prefix is removed below.
     stem = re.sub(r"^\s*\d{1,2}[\s._-]+\d{2,3}(?=[\s.-])[\s._-]+", "", stem)
     stem = re.sub(r"^\s*\d{1,3}\s*[\s._-]+\s*", "", stem)
-    parts = [p.strip() for p in re.split(r"\s+-\s+", stem) if p.strip()]
+    parts = [p.strip() for p in split_ws_led(stem, _DASH_SEP_CORE_RE, need_ws=True) if p.strip()]
     if len(parts) >= 2:
         stem = parts[-1]
     else:

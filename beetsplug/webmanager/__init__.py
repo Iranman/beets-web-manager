@@ -7,7 +7,7 @@ and metadata management.
 
 from beets.plugins import BeetsPlugin
 from .compat import register_webmanager_blueprint
-from .schemas import DEFAULT_ALLOWED_ROOTS, DEFAULT_API_KEY_FILE, DEFAULT_IMPORT_ROOTS
+from .schemas import DEFAULT_API_KEY_FILE, DEFAULT_IMPORT_ROOTS
 from .version import PLUGIN_VERSION, PROTOCOL_VERSION
 
 __version__ = PLUGIN_VERSION
@@ -60,7 +60,10 @@ class WebManagerPlugin(BeetsPlugin):
         self.config.add(
             {
                 "api_key_file": DEFAULT_API_KEY_FILE,
-                "allowed_roots": DEFAULT_ALLOWED_ROOTS,
+                # Empty means "derive from Beets": [directory] + import_roots
+                # (see operations.get_allowed_roots). An explicit list in
+                # config.yaml still wins.
+                "allowed_roots": [],
                 "import_roots": DEFAULT_IMPORT_ROOTS,
                 "async_retention_seconds": 3600,
             }

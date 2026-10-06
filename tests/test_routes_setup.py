@@ -837,16 +837,20 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
 
     def test_page_refresh_after_save_returns_updated_state(self):
         r = self.client.post("/api/setup/env", json={
-            "variables": {"PUID": "2000", "TZ": "Europe/London", "AI_MODEL": "claude-3.5-haiku"},
+            "variables": {"AI_MODEL": "claude-3.5-haiku"},
             "clear": [],
         })
         self.assertEqual(r.status_code, 200)
         get_r = self.client.get("/api/setup/env")
         self.assertEqual(get_r.status_code, 200)
         variables = {item["name"]: item for item in get_r.get_json()["variables"]}
-        self.assertEqual(variables["PUID"]["value"], "2000")
-        self.assertEqual(variables["TZ"]["value"], "Europe/London")
         self.assertEqual(variables["AI_MODEL"]["value"], "claude-3.5-haiku")
+        # PUID/TZ are Compose-pinned deployment settings: a saved value
+        # could never take effect, so the save is rejected (config layers).
+        r = self.client.post("/api/setup/env", json={"variables": {"PUID": "2000", "TZ": "Europe/London"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(variables["PUID"]["editable"])
+        self.assertEqual(variables["PUID"]["layer"], "deployment")
 
     def test_revealable_secrets_return_plaintext_via_reveal_endpoint(self):
         self.env_file.write_text("OPENAI_API_KEY=sk-testsecretkey123\nPLEX_TOKEN=plex-secret-token-67890\n", encoding="utf-8")
@@ -912,7 +916,6 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
             ("TZ", "System & Environment", False),
             ("WEBCONTROL_PORT", "System & Environment", False),
             ("DEMO_MODE", "System & Environment", False),
-            ("BEETS_SQLITE_TIMEOUT", "System & Environment", False),
             ("BEETS_LONG_OPERATION_MAX_SECONDS", "System & Environment", False),
             ("BEETS_WEB_USERNAME", "Authentication & Security", False),
             ("BEETS_WEB_PASSWORD", "Authentication & Security", True),
@@ -927,7 +930,6 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
             ("MUSIC_PATH", "Storage & Paths", False),
             ("DOWNLOADS_PATH", "Storage & Paths", False),
             ("BEETS_CONFIG_PATH", "Storage & Paths", False),
-            ("PLAYLIST_DIR", "Storage & Paths", False),
             ("ACOUSTID_API_KEY", "Music Services & Metadata", True),
             ("ACOUSTID_USER_KEY", "Music Services & Metadata", True),
             ("DISCOGS_TOKEN", "Music Services & Metadata", True),
@@ -957,13 +959,14 @@ class RoutesSetupHelperTests(unittest.TestCase):
         _, self.module = _load_routes_setup_against_stub_app(self)
 
     def test_mask_short_value(self):
-        self.assertEqual(self.module._mask("ab"), "**")
+        self.assertEqual(self.module._mask("ab"), "********")
 
-    def test_mask_long_value_keeps_edges(self):
-        masked = self.module._mask("sk-1234567890")
-        self.assertTrue(masked.startswith("sk"))
-        self.assertTrue(masked.endswith("90"))
-        self.assertNotIn("1234567890"[:6], masked)
+    def test_mask_reveals_no_characters_or_length(self):
+        # FE-16: the old mask kept the first and last two characters.
+        for secret in ("sk-1234567890", "a" * 64, "xyz"):
+            masked = self.module._mask(secret)
+            self.assertEqual(masked, "********")
+            self.assertFalse(set(masked) & set(secret.replace("*", "")))
 
     def test_mask_empty_value(self):
         self.assertEqual(self.module._mask(""), "")
@@ -976,3 +979,114 @@ class RoutesSetupHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoutesSetupConfigLayerTests(unittest.TestCase):
+    """BI-1/3/7/15/17: saved settings hold only application keys; local path
+    checks use container roots and survive a Beets outage."""
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
+        self.client = self.flask_app.test_client()
+        self.tempdir = tempfile.TemporaryDirectory()
+        root = Path(self.tempdir.name)
+        self.env_file = root / ".env"
+        self.example_file = root / ".env.example"
+        self.example_file.write_text(
+            "PUID=1000\nTZ=UTC\nBEETS_CONFIG_PATH=./beets\nDOWNLOADS_PATH=./downloads\nAI_MODEL=\nPLEX_URL=\n",
+            encoding="utf-8",
+        )
+        self.module._SETUP_ENV_FILE = self.env_file
+        self.module._ENV_EXAMPLE_FILE = self.example_file
+        self._saved_env = dict(os.environ)
+        for var in ("AI_MODEL", "PLEX_URL", "DOWNLOADS_PATH", "BEETS_CONFIG_PATH", "DOWNLOADS_ROOT", "MUSIC_ROOT"):
+            os.environ.pop(var, None)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.tempdir.cleanup()
+        os.environ.clear()
+        os.environ.update(self._saved_env)
+
+    def test_first_save_writes_only_saved_keys_never_the_template(self):
+        self.assertFalse(self.env_file.exists())
+        r = self.client.post("/api/setup/env", json={"variables": {"AI_MODEL": "m1"}})
+        self.assertEqual(r.status_code, 200)
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("AI_MODEL=m1", text)
+        for leaked in ("DOWNLOADS_PATH", "BEETS_CONFIG_PATH", "PUID", "TZ", "PLEX_URL"):
+            self.assertNotIn(leaked, text)
+        self.assertNotIn("DOWNLOADS_PATH", os.environ)
+
+    def test_save_rejects_every_non_application_layer(self):
+        for key, value in (("DOWNLOADS_PATH", "/x"), ("PUID", "2000"), ("WEBCONTROL_PORT", "9000"),
+                           ("MUSIC_ROOT", "/srv/music"), ("BEETS_CONFIG", "/config/x.yaml"), ("PLAYLIST_DIR", "/x")):
+            r = self.client.post("/api/setup/env", json={"variables": {key: value}})
+            self.assertEqual(r.status_code, 400, key)
+        self.assertFalse(self.env_file.exists())
+
+    def test_env_payload_reports_layers_apply_mode_and_migration(self):
+        body = self.client.get("/api/setup/env").get_json()
+        variables = {item["name"]: item for item in body["variables"]}
+        self.assertEqual(variables["DOWNLOADS_PATH"]["layer"], "host")
+        self.assertFalse(variables["DOWNLOADS_PATH"]["editable"])
+        self.assertEqual(variables["DOWNLOADS_PATH"]["apply"], "deploy")
+        self.assertEqual(variables["PUID"]["layer"], "deployment")
+        self.assertFalse(variables["PUID"]["editable"])
+        self.assertEqual(variables["AI_MODEL"]["layer"], "app")
+        self.assertTrue(variables["AI_MODEL"]["editable"])
+        self.assertEqual(variables["AI_MODEL"]["apply"], "live")
+        self.assertEqual(variables["BEETS_WEB_URL"]["apply"], "restart")
+        for dead in ("PLAYLIST_DIR", "BEETS_SQLITE_TIMEOUT", "WEB_MANAGER_PATH"):
+            self.assertNotIn(dead, variables)
+        self.assertIn("removed_count", body["migration"])
+
+    def test_downloads_check_uses_container_root_not_host_variable(self):
+        with mock.patch.dict(os.environ, {"DOWNLOADS_PATH": "./downloads"}):
+            report = self.module._local_paths_report(Path("/config/config.yaml"))
+        self.assertEqual(Path(report["downloads"]["path"]).as_posix(), "/downloads")
+        with mock.patch.dict(os.environ, {"DOWNLOADS_ROOT": "/srv/incoming"}):
+            report = self.module._local_paths_report(Path("/config/config.yaml"))
+        self.assertEqual(Path(report["downloads"]["path"]).as_posix(), "/srv/incoming")
+
+    def test_config_file_report_is_ok_for_a_readable_file(self):
+        cfg = Path(self.tempdir.name) / "config.yaml"
+        cfg.write_text("directory: /music\n", encoding="utf-8")
+        report = self.module._local_file_report(cfg)
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["is_file"])
+        self.assertFalse(self.module._local_file_report(Path(self.tempdir.name))["ok"])
+
+    def _ok_paths(self):
+        ok = {"path": "/x", "exists": True, "is_dir": True, "readable": True, "writable": True, "ok": True}
+        return {"config": dict(ok), "music_library": dict(ok), "downloads": dict(ok),
+                "beets_config": dict(ok, is_dir=False, is_file=True)}
+
+    def test_beets_unavailable_is_the_single_primary_reason(self):
+        from backend.beets_adapter import beets_adapter, BeetsAdapterConnectionError
+        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=BeetsAdapterConnectionError("down")), \
+             mock.patch.object(self.module, "_local_paths_report", return_value=self._ok_paths()):
+            body = self.client.get("/api/setup/status?refresh=1").get_json()
+        self.assertEqual(len(body["blocking_reasons"]), 1, body["blocking_reasons"])
+        self.assertTrue(body["blocking_reasons"][0].startswith("Stock Beets is unavailable"))
+        self.assertEqual(body["fpcalc"]["state"], "unknown")
+        self.assertEqual(body["beets"]["fpcalc_state"], "unknown")
+        self.assertTrue(body["paths"]["downloads"]["writable"])
+
+    def test_beets_unavailable_still_reports_real_local_failures(self):
+        from backend.beets_adapter import beets_adapter, BeetsAdapterConnectionError
+        paths = self._ok_paths()
+        paths["downloads"].update(writable=False, ok=False)
+        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=BeetsAdapterConnectionError("down")), \
+             mock.patch.object(self.module, "_local_paths_report", return_value=paths):
+            body = self.client.get("/api/setup/status?refresh=1").get_json()
+        self.assertEqual(len(body["blocking_reasons"]), 2)
+        self.assertTrue(any("downloads" in reason for reason in body["blocking_reasons"]))
+
+    def test_health_ready_beets_down_reports_no_false_local_failures(self):
+        from backend.beets_adapter import beets_adapter, BeetsAdapterConnectionError
+        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=BeetsAdapterConnectionError("down")), \
+             mock.patch.object(self.module, "_local_paths_report", return_value=self._ok_paths()):
+            r = self.client.get("/health/ready")
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.get_json()["blocking_reasons"], ["stock Beets unavailable"])

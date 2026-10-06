@@ -222,3 +222,50 @@ class SetupAcoustidProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetupAcoustidKeyAndAuthTests(unittest.TestCase):
+    """IA-11 / IA-12 additions (reuse the probe helpers above)."""
+
+    setUp = SetupAcoustidProbeTests.setUp
+    _probe = SetupAcoustidProbeTests._probe
+    _both_forms = SetupAcoustidProbeTests._both_forms
+
+    def test_code_6_is_rejected_key(self):
+        for form, body in self._both_forms(400, 6):
+            with self.subTest(form=form):
+                self.assertFalse(body["ok"])
+                self.assertEqual(body["reason"], "auth_failed")
+
+    def test_http_401_403_without_body_is_rejected_key(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                body = self._probe(raises=_http_error(status, b""))
+                self.assertEqual(body["reason"], "auth_failed")
+                self.assertIn("API key was rejected", body["error"])
+
+    def test_http_error_is_closed(self):
+        err = _http_error(400, _error_body(4))
+        with mock.patch.object(err, "close", wraps=err.close) as close:
+            self._probe(raises=err)
+        close.assert_called()
+
+    def _probe_without_body_key(self, env):
+        with mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=_DIAGNOSTICS), \
+             mock.patch.object(self.module.urllib.request, "urlopen",
+                               return_value=_Response(b'{"status": "ok", "results": []}')) as urlopen:
+            r = self.client.post("/api/setup/test/acoustid", json={})
+        return r.get_json(), urlopen
+
+    def test_no_key_anywhere_is_not_configured_and_sends_nothing(self):
+        body, urlopen = self._probe_without_body_key({"ACOUSTID_API_KEY": "", "ACOUSTID_KEY": ""})
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "not_configured")
+        self.assertIn("AcoustID not configured", body["error"])
+        urlopen.assert_not_called()
+
+    def test_legacy_alias_is_used(self):
+        body, urlopen = self._probe_without_body_key({"ACOUSTID_API_KEY": "", "ACOUSTID_KEY": "alias-key-1234"})
+        self.assertTrue(body["ok"])
+        self.assertIn("client=alias-key-1234", urlopen.call_args.args[0].full_url)

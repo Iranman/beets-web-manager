@@ -154,7 +154,7 @@ Key variables include:
 - `OPENAI_API_KEY` or compatible provider key: **optional** AI metadata features — see [How AI Matching Works](#how-ai-matching-works).
 - `PLEX_URL` and `PLEX_TOKEN`: Plex sync and refresh integration (optional).
 - `LIDARR_URL` and `LIDARR_API_KEY`: wanted-music and Arr integration (optional).
-- `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: optional — AcoustID lookups work without a key via a shared, rate-limited test key.
+- `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: your own AcoustID application key (https://acoustid.org/new-application). Required for fingerprint lookups; without it AcoustID is reported as not configured and fingerprint evidence is unavailable.
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
 
 ### Required vs. optional integrations
@@ -163,7 +163,7 @@ Key variables include:
 | ----------- | ----------- | ----- |
 | Beets | Required | Core music library engine; runs in the same Compose stack |
 | MusicBrainz | Built-in | Public metadata API used for release and recording matching |
-| AcoustID | Optional | Audio fingerprint matching and safety verification |
+| AcoustID | Recommended (needs your own application key) | Audio fingerprint matching and safety verification |
 | Plex | Optional | Media server sync and playlist synchronization |
 | SLSKD | Optional | Missing-track acquisition via Soulseek |
 | AI (OpenAI / OpenRouter) | Optional | Enhancement for candidate metadata ranking |

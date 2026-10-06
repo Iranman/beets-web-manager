@@ -3,8 +3,11 @@ installs whose /config/config.yaml predates the Issue #14 packaging fix
 (https://github.com/Iranman/beets-web-manager/issues/14). setup.sh/setup.ps1
 only copy config.yaml.example into place when config.yaml does not already
 exist, so an install set up before that fix shipped stays stuck on the old
-plexsync/pluginpath/mp3gain defaults across every later image update -- a
-raw `beet` CLI invocation inside the container reads this file directly.
+plexsync default across every later image update -- a raw `beet` CLI
+invocation reads this file directly. Since plugin 1.6.0 (BI-5) the repair
+only drops the never-installed `plexsync` token: it no longer injects
+/app/beetsplug into pluginpath or rewrites the replaygain backend, because
+this config is read by the stock LinuxServer Beets container.
 These tests import the real app.py (same isolated-temp-environment pattern
 as tests/test_ai_batch_retry_race.py) and call the actual function against
 synthetic config.yaml fixtures on disk.
@@ -113,47 +116,54 @@ class LegacyBeetsConfigMigrationTests(unittest.TestCase):
         self.assertIn("discpath", first_line)
         self.assertIn("fetchart", first_line)
 
-    def test_upgrades_single_string_pluginpath_to_list_with_app_beetsplug(self):
+    def test_leaves_single_string_pluginpath_unchanged(self):
+        # BI-5 (plugin 1.6.0): /app/beetsplug does not exist in the stock
+        # LinuxServer Beets container, so it is never injected any more.
         self._write(OLD_BROKEN_CONFIG)
         self._repair()
         result = self.config_path.read_text(encoding="utf-8")
-        self.assertIn("pluginpath:\n  - /config/beetsplug\n  - /app/beetsplug\n", result)
+        self.assertIn("pluginpath: /config/beetsplug\n", result)
+        self.assertNotIn("/app/beetsplug", result)
 
-    def test_inserts_missing_pluginpath_after_plugins_line(self):
-        text = "plugins: fetchart discpath\ndirectory: /data/media/music\n"
+    def test_does_not_insert_missing_pluginpath(self):
+        text = "plugins: fetchart discpath plexsync\ndirectory: /data/media/music\n"
         self._write(text)
         self._repair()
         result = self.config_path.read_text(encoding="utf-8")
-        self.assertIn("pluginpath:\n  - /config/beetsplug\n  - /app/beetsplug\n", result)
-        self.assertLess(result.index("pluginpath:"), result.index("directory:"))
+        self.assertNotIn("pluginpath", result)
+        self.assertNotIn("plexsync", result.splitlines()[0])
 
-    def test_appends_missing_app_beetsplug_to_existing_pluginpath_list(self):
-        text = "plugins: fetchart discpath\npluginpath:\n  - /config/beetsplug\n  - /config/custom-plugins\ndirectory: /x\n"
+    def test_does_not_append_app_beetsplug_to_existing_pluginpath_list(self):
+        text = "plugins: fetchart discpath plexsync\npluginpath:\n  - /config/beetsplug\n  - /config/custom-plugins\ndirectory: /x\n"
         self._write(text)
         self._repair()
         result = self.config_path.read_text(encoding="utf-8")
-        self.assertIn("/config/custom-plugins", result)
-        self.assertIn("/app/beetsplug", result)
+        self.assertIn("pluginpath:\n  - /config/beetsplug\n  - /config/custom-plugins\ndirectory: /x\n", result)
+        self.assertNotIn("/app/beetsplug", result)
 
-    def test_switches_mp3gain_backend_to_ffmpeg_when_mp3gain_unavailable(self):
-        self._write(OLD_BROKEN_CONFIG)
-        self._repair(mp3gain_present=False, ffmpeg_present=True)
-        result = self.config_path.read_text(encoding="utf-8")
-        self.assertIn("backend: ffmpeg", result)
-
-    def test_inserts_backend_line_when_replaygain_section_has_none(self):
-        self._write(OLD_BROKEN_CONFIG)
-        self._repair()
-        result = self.config_path.read_text(encoding="utf-8")
-        self.assertIn("replaygain:\n    auto: no\n    backend: ffmpeg\n", result)
-
-    def test_replaces_explicit_mp3gain_backend_value(self):
-        text = "plugins: fetchart\nreplaygain:\n    auto: no\n    backend: mp3gain\n"
+    def test_does_not_rewrite_mp3gain_backend_even_when_unavailable_here(self):
+        # The available replaygain backend is a property of the Beets
+        # container, not of the Web Manager image this code runs in.
+        text = "plugins: fetchart plexsync\nreplaygain:\n    auto: no\n    backend: mp3gain\n"
         self._write(text)
         self._repair(mp3gain_present=False, ffmpeg_present=True)
         result = self.config_path.read_text(encoding="utf-8")
-        self.assertIn("backend: ffmpeg", result)
-        self.assertNotIn("backend: mp3gain", result)
+        self.assertIn("backend: mp3gain", result)
+        self.assertNotIn("backend: ffmpeg", result)
+
+    def test_does_not_insert_backend_line_when_replaygain_section_has_none(self):
+        self._write(OLD_BROKEN_CONFIG)
+        self._repair()
+        result = self.config_path.read_text(encoding="utf-8")
+        self.assertIn("replaygain:\n    auto: no\n\nscrub:", result)
+        self.assertNotIn("backend:", result)
+
+    def test_config_without_plexsync_is_never_rewritten(self):
+        text = "plugins: fetchart\npluginpath: /config/beetsplug\nreplaygain:\n    auto: no\n    backend: mp3gain\n"
+        self._write(text)
+        self._repair(mp3gain_present=False, ffmpeg_present=True)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), text)
+        self.assertFalse((self.tmp / "config.yaml.bak-legacy-plugin-migration").exists())
 
     def test_does_not_touch_working_mp3gain_setup(self):
         text = "plugins: fetchart\nreplaygain:\n    auto: no\n    backend: mp3gain\n"
@@ -192,15 +202,17 @@ class LegacyBeetsConfigMigrationTests(unittest.TestCase):
         # No config.yaml written at all -- must not crash startup.
         APP._repair_legacy_beets_config(str(self.tmp / "does-not-exist.yaml"))
 
-    def test_full_reporter_scenario_ends_up_fully_repaired(self):
+    def test_full_reporter_scenario_only_drops_plexsync(self):
         self._write(OLD_BROKEN_CONFIG)
         self._repair(mp3gain_present=False, ffmpeg_present=True)
         result = self.config_path.read_text(encoding="utf-8")
         first_line = result.splitlines()[0]
         self.assertNotIn("plexsync", first_line)
-        self.assertIn("pluginpath:\n  - /config/beetsplug\n  - /app/beetsplug\n", result)
-        self.assertIn("backend: ffmpeg", result)
-        self.assertNotIn("backend: mp3gain", result)
+        # Everything after the plugins: line is unchanged (marker appended).
+        old_rest = OLD_BROKEN_CONFIG.split("\n", 1)[1]
+        self.assertIn(old_rest, result)
+        self.assertNotIn("/app/beetsplug", result)
+        self.assertNotIn("backend:", result)
 
 
 if __name__ == "__main__":

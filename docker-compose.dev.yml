@@ -16,8 +16,8 @@ services:
       - TZ=${TZ:-UTC}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-./music}:/music
-      - ${DOWNLOADS_PATH:-./downloads}:/downloads
+      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music
+      - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
     expose:
       - "8337"
     # See the primary docker-compose.yml: Web Manager provisions the
@@ -46,8 +46,16 @@ services:
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      BEETS_WEB_URL: http://beets:8337
-      BEETS_OUTBOUND_ALLOWLIST: beets:8337
+      BEETS_WEB_URL: ${BEETS_WEB_URL:-http://beets:8337}
+      # Must include the host:port of BEETS_WEB_URL when you change it.
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337}
+
+      # Container-side paths. They must match the mount targets below and
+      # Beets' own `directory:` (see docs/CONFIGURATION.md). Change them only
+      # together with the matching volume target.
+      MUSIC_ROOT: /music
+      DOWNLOADS_ROOT: /downloads
+      BEETS_CONFIG: /config/config.yaml
       WEB_MANAGER_DATA_DIR: /web-manager-data
       BEETS_TRANSACTION_DIR: /web-manager-data/transactions
 
@@ -65,6 +73,7 @@ services:
 
       ACOUSTID_API_KEY: ${ACOUSTID_API_KEY:-}
       ACOUSTID_USER_KEY: ${ACOUSTID_USER_KEY:-}
+      ACOUSTID_KEY: ${ACOUSTID_KEY:-}
       DISCOGS_TOKEN: ${DISCOGS_TOKEN:-}
       LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
 
@@ -82,9 +91,9 @@ services:
       DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-./music}:/music:ro
-      - ${DOWNLOADS_PATH:-./downloads}:/downloads
-      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/web-manager-data
+      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music:ro
+      - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
+      - ${WEB_MANAGER_DATA_PATH:-${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager}}:/web-manager-data
     healthcheck:
       test:
         - CMD

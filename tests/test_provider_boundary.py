@@ -98,7 +98,9 @@ class AcoustIdCallerTests(unittest.TestCase):
                   mock.patch.object(helpers_mb.subprocess, "run", return_value=fp),
                   mock.patch.object(helpers_mb, "_ACOUSTID_MIN_INTERVAL_SECONDS", 0),
                   mock.patch("backend.provider_boundary.time.sleep"),
-                  mock.patch.object(acoustid_service, "_ACOUSTID_FILE_CACHE_DIR", Path(self._tmp.name) / "cache")):
+                  mock.patch.object(acoustid_service, "_ACOUSTID_FILE_CACHE_DIR", Path(self._tmp.name) / "cache"),
+                  # IA-12: there is no built-in fallback key any more.
+                  mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "test-app-key"})):
             p.start()
             self.addCleanup(p.stop)
 

@@ -229,6 +229,14 @@ def _audio_probe_timeout(name: str, default: int) -> int:
         return default
 
 
+def ffmpeg_file_input(path_value: Any) -> str:
+    """An ffmpeg/ffprobe input argument that can only name a local file
+    (SEC-13). Without the ``file:`` protocol prefix, a path such as
+    ``http://...``, ``concat:...`` or ``-option`` would be interpreted as a
+    network URL, another protocol, or a command-line option."""
+    return "file:" + str(path_value)
+
+
 def decoded_audio_md5(path_value: str, *, ffmpeg_bin: Optional[str] = None) -> str:
     """MD5 of the decoded PCM audio stream (ffmpeg's md5 muxer), or "".
 
@@ -237,7 +245,7 @@ def decoded_audio_md5(path_value: str, *, ffmpeg_bin: Optional[str] = None) -> s
     ffmpeg = ffmpeg_bin or shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
     try:
         proc = subprocess.run(
-            [ffmpeg, "-v", "error", "-nostdin", "-i", str(path_value), "-map", "0:a:0", "-f", "md5", "-"],
+            [ffmpeg, "-v", "error", "-nostdin", "-i", ffmpeg_file_input(path_value), "-map", "0:a:0", "-f", "md5", "-"],
             timeout=_audio_probe_timeout("AUDIO_DECODE_MD5_TIMEOUT", 120),
             capture_output=True,
             text=True,
@@ -278,7 +286,7 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
                 "-show_streams",
                 "-show_format",
                 "-of", "json",
-                str(path),
+                ffmpeg_file_input(path),
             ],
             timeout=full_timeout,
             capture_output=True,
@@ -295,7 +303,7 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
                     "-show_entries",
                     "stream=codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,side_data_list,tags:format=duration,bit_rate,tags",
                     "-of", "json",
-                    str(path),
+                    ffmpeg_file_input(path),
                 ],
                 timeout=fast_timeout,
                 capture_output=True,

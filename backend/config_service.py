@@ -37,18 +37,18 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
     the job-config overrides the web app's own operations already get
     (_BEETS_PLUGINPATH_CONFIG, _JOB_PLUGIN_EXCLUDED).
 
-    Repairs exactly three known-legacy patterns and nothing else a user
-    configured:
-      1. drops the never-installed `plexsync` token from `plugins:`
-      2. adds `/app/beetsplug` to `pluginpath:` (where the bundled discpath
-         plugin now lives) if missing
-      3. switches an existing `replaygain:` section's backend to `ffmpeg`
-         (the one this image actually installs) when it's still pointed at
-         mp3gain -- explicitly or by omission, beets' own default -- and
-         mp3gain isn't actually available
+    Repairs exactly one known-legacy pattern and nothing else a user
+    configured: drops the never-installed `plexsync` token from `plugins:`.
 
-    Does not create a replaygain: section that isn't already present; that
-    narrower scope keeps this a config repair, not a config generator.
+    Earlier versions also injected `/app/beetsplug` into `pluginpath:` and
+    rewrote an existing `replaygain:` backend to `ffmpeg`.  Both were
+    removed in plugin 1.6.0 (BI-5): this config is read by the *stock*
+    LinuxServer Beets container, where `/app/beetsplug` does not exist and
+    the available replaygain backend is a property of that container (not of
+    the Web Manager image this code runs in), so neither rewrite was safe to
+    make on the user's behalf.  The replaygain backend is now only written
+    when the user explicitly opts in to recommended plugins.
+
     Idempotent: writes a marker comment on first repair and no-ops on every
     later startup. Backs up the original once, to its own filename (not the
     config editor's /api/config/revert backup), before ever touching it.
@@ -72,41 +72,6 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
         return "plugins: " + " ".join(t for t in tokens if t != "plexsync")
 
     text = re.sub(r"(?m)^plugins:[ \t]*(.*)$", _fix_plugins_line, text, count=1)
-
-    pluginpath_match = re.search(r"(?m)^pluginpath:[ \t]*(.*)$((?:\n[ \t]+-[ \t]*\S.*$)*)", text)
-    if pluginpath_match is None:
-        changed = True
-        block = "pluginpath:\n  - /config/beetsplug\n  - /app/beetsplug\n"
-        if re.search(r"(?m)^plugins:.*$", text):
-            text = re.sub(r"(?m)^plugins:.*$\n", lambda m: m.group(0) + block, text, count=1)
-        else:
-            text = block + text
-    else:
-        inline_value = pluginpath_match.group(1).strip()
-        list_block = pluginpath_match.group(2) or ""
-        entries = [inline_value] if inline_value else []
-        entries += [ln.split("-", 1)[1].strip() for ln in list_block.splitlines() if ln.strip().startswith("-")]
-        if "/app/beetsplug" not in entries:
-            changed = True
-            new_entries = (entries or ["/config/beetsplug"]) + ["/app/beetsplug"]
-            replacement = "pluginpath:\n" + "".join(f"  - {e}\n" for e in new_entries if e)
-            text = text[:pluginpath_match.start()] + replacement.rstrip("\n") + text[pluginpath_match.end():]
-
-    replaygain_match = re.search(r"(?m)^replaygain:[ \t]*$((?:\n[ \t]+\S.*$)*)", text)
-    if replaygain_match is not None:
-        block = replaygain_match.group(1) or ""
-        backend_match = re.search(r"(?m)^([ \t]+)backend:[ \t]*(\S+)[ \t]*$", block)
-        current_backend = backend_match.group(2) if backend_match else "mp3gain"
-        if current_backend != "ffmpeg" and not shutil.which("mp3gain") and shutil.which("ffmpeg"):
-            changed = True
-            if backend_match:
-                indent = backend_match.group(1)
-                new_block = block[:backend_match.start()] + f"{indent}backend: ffmpeg" + block[backend_match.end():]
-            else:
-                indent_search = re.search(r"(?m)^([ \t]+)\S", block)
-                indent = indent_search.group(1) if indent_search else "    "
-                new_block = block + f"\n{indent}backend: ffmpeg"
-            text = text[:replaygain_match.start(1)] + new_block + text[replaygain_match.end(1):]
 
     if not changed:
         return
