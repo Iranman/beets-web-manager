@@ -567,8 +567,9 @@ def _scan_no_audio_folder_candidates(root: Path, log: Optional[List[str]] = None
             children = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold()))
         except Exception as ex:
             summary["errors"] += 1
+            _app_logger.warning("Cannot read folder %r: %s", str(folder), ex)
             if log is not None:
-                log.append(f"  WARN: cannot read {folder}: {ex}")
+                log.append(f"  WARN: cannot read {folder} ({type(ex).__name__})")
             return {
                 "has_audio": True,
                 "files": 0,
@@ -765,9 +766,9 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
             log.append(f"  Deleted folder tree: {folder}")
         except Exception as ex:
             failures += 1
-            _app_logger.warning("Could not delete folder tree %r: %s", str(folder), type(ex).__name__)
+            _app_logger.warning("Could not delete folder tree %r: %s", str(folder), ex)
             results[-1]["error"] = "Could not delete this folder."
-            log.append(f"  ERROR deleting {folder}: {ex}")
+            log.append(f"  ERROR deleting {folder} ({type(ex).__name__})")
 
     summary = {
         "folders_removed": removed,

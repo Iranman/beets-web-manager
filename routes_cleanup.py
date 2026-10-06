@@ -1231,7 +1231,9 @@ def clean_album_tracks_remove():
                 log=log,
             )
         except RuntimeError as exc:
-            return jsonify({"ok": False, "dry_run": True, "error": str(exc), "log": log}), 400
+            _app_logger.warning("Album track removal preview failed for album %s: %s", album_id, exc)
+            return jsonify({"ok": False, "dry_run": True, "code": "preview_failed",
+                            "error": "Could not preview the track removal; see server logs.", "log": log}), 400
         return jsonify({"ok": True, "dry_run": True, "summary": summary, "log": log})
 
     def _do(log, cancel_event=None):

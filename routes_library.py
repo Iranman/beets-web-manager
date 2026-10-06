@@ -1733,7 +1733,8 @@ def album_remove(aid):
     try:
         plan = composite_workflows.plan_album_cleanup(aid, delete_files=delete_files, reason="album remove request")
     except (BeetsUnavailableError, BeetsError) as ex:
-        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+        _app_logger.warning("Album remove plan failed: Beets engine unavailable (%s)", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE"}), 503
     status_code = 200 if plan.get("ok") else 400
     return jsonify({**plan, "item_count": len(item_ids),
                     "next_step": "POST /api/albums/cleanup/apply with this operation_id"}), status_code

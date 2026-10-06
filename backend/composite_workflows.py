@@ -646,7 +646,8 @@ def _music_root_usable() -> Tuple[bool, str]:
         if not any(root.iterdir()):
             return False, f"music root is empty (mount missing?): {root}"
     except OSError as exc:
-        return False, f"music root is not readable: {exc}"
+        log.warning("Music root %s is not readable: %s", root, exc)
+        return False, f"music root is not readable ({type(exc).__name__}): {root}"
     return True, ""
 
 
@@ -2334,7 +2335,7 @@ def plan_import_review_cleanup(
     engine planner (``import_review_cleanup_v1``): root containment, per-file
     stat preconditions, server-derived quarantine. Nothing is touched here;
     the plan must be Approved before :func:`apply_import_review_cleanup`."""
-    from backend.transaction_engine import execute_import_review_cleanup_plan
+    from backend.transaction_engine import _normpath_within_roots, execute_import_review_cleanup_plan
     st = _get_store(store)
     if isinstance(payload_or_folder, dict):
         data = dict(payload_or_folder)
@@ -2353,9 +2354,9 @@ def plan_import_review_cleanup(
     allow_music = bool(data.get("confirmed_wrong_library_folder") or data.get("allow_library_delete")) or album_id > 0
     library_quarantined = False
     try:
-        resolved_target = Path(str(data["path"])).resolve(strict=False)
-        mroot = _music_root()
-        in_library = resolved_target == mroot or mroot in resolved_target.parents
+        # realpath (symlinks collapsed, like resolve()) + normpath prefix
+        # containment: classification only, never a filesystem operation.
+        in_library = _normpath_within_roots(os.path.realpath(str(data["path"])), [_music_root()])
     except Exception:
         in_library = False
     if in_library and str(data.get("action") or "").strip().lower() not in (
@@ -2369,7 +2370,8 @@ def plan_import_review_cleanup(
         res = execute_import_review_cleanup_plan(
             st, data, _import_review_allowed_roots(allow_music), music_root=str(_music_root()))
     except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
+        log.warning("Import Review cleanup preview rejected: %s", exc)
+        return {"ok": False, "code": "invalid_request", "error": "Invalid cleanup request."}
     if res.get("ok") and res.get("operation_id"):
         res.setdefault("token", res["operation_id"])
         res["library_paths_quarantined"] = library_quarantined
@@ -2425,10 +2427,12 @@ def apply_import_review_cleanup(
                 return _apply_engine_import_review_cleanup(st, operation_id)
             return _apply_legacy_folder_cleanup(st, operation_id, meta)
         except Exception as exc:
-            st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": str(exc)}},
-                      logs=[f"Cleanup failed: {exc}"])
+            log.exception("Import Review cleanup %s failed", operation_id)
+            reason = f"Cleanup failed ({type(exc).__name__}); see server logs."
+            st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": reason}},
+                      logs=[reason])
             return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
-                    "error": str(exc), "deleted": [], "moved": [], "skipped": []}
+                    "error": reason, "deleted": [], "moved": [], "skipped": []}
 
 
 def _apply_engine_import_review_cleanup(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
