@@ -701,6 +701,29 @@ class WebManagerPhase3MutationTests(unittest.TestCase):
         self.assertEqual(res.get_json()["result"]["processed_albums"], 0)
 
 
+class DerivedAllowedRootsTests(unittest.TestCase):
+    """S-5: a Beets ``directory`` of ``/`` or an ancestor of the config dir
+    must not become a mutation root (config.yaml / API key in scope)."""
+
+    def setUp(self):
+        ops_mod.set_import_roots(["/downloads"])
+        self.addCleanup(ops_mod.set_import_roots, None)
+        self.config_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.config_dir, True)
+
+    def _derived(self, directory):
+        with patch.object(ops_mod, "get_library_directory", return_value=directory),                 patch.object(ops_mod.beets_config, "config_dir", return_value=self.config_dir):
+            return ops_mod._derived_allowed_roots()
+
+    def test_root_and_config_ancestors_fall_back_to_defaults(self):
+        for directory in ("/", "/config", self.config_dir, os.path.dirname(self.config_dir)):
+            self.assertEqual(self._derived(directory), list(ops_mod.DEFAULT_ALLOWED_ROOTS), directory)
+
+    def test_normal_library_directory_is_used(self):
+        music = os.path.join(self.config_dir + "-music", "lib")
+        self.assertEqual(self._derived(music), [os.path.normpath(music), "/downloads"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

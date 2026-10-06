@@ -225,9 +225,28 @@ def get_library_db_path() -> Optional[str]:
     return str(value)
 
 
+def _covers_config_dir(directory: str) -> bool:
+    """True when ``directory`` is ``/`` or the Beets config dir or one of its
+    ancestors. Such a library ``directory`` must not become a mutation root:
+    it would put config.yaml, the API key file and the library DB in scope."""
+    config_dirs = ["/config"]
+    try:
+        config_dirs.append(str(beets_config.config_dir()))
+    except Exception:
+        pass
+    directory = os.path.realpath(str(directory))
+    for config_dir in config_dirs:
+        try:
+            if os.path.commonpath([directory, os.path.realpath(config_dir)]) == directory:
+                return True
+        except ValueError:  # different drives (Windows)
+            continue
+    return False
+
+
 def _derived_allowed_roots() -> List[str]:
     directory = get_library_directory()
-    if not directory:
+    if not directory or _covers_config_dir(directory):
         return list(DEFAULT_ALLOWED_ROOTS)
     roots: List[str] = []
     for root in [directory] + list(get_import_roots()):
