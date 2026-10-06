@@ -42,6 +42,25 @@ This guide covers common errors and resolution steps for Beets Web Manager.
   2. If you mount it somewhere else, set `MUSIC_ROOT` to that path under the `beets-web-manager` service's `environment:`. It must match Beets' `directory:` in the `beets` container (see `docs/CONFIGURATION.md`).
   3. Check that the container's `PUID`/`PGID` can read the host directory.
 
+### 6. Setup says "Cannot write to downloads/staging path ..."
+* **Cause**: Web Manager checks `DOWNLOADS_ROOT` (default `/downloads`) inside the `beets-web-manager` container. In v0.1.49 and earlier it read the host-side `DOWNLOADS_PATH` instead. A saved Settings value such as `DOWNLOADS_PATH=./downloads` therefore produced the false path `downloads`.
+* **Fix**:
+  1. Upgrade. On startup Web Manager removes host-side keys from `/web-manager-data/.env` once, keeping a `.env.bak-migration-<timestamp>` backup.
+  2. Confirm the downloads volume is mounted at `/downloads` and is writable by `PUID`/`PGID`.
+  3. If you mount it elsewhere, set `DOWNLOADS_ROOT` under the service's `environment:`.
+
+---
+
+### 7. The Config page shows an empty `config.yaml`, or says the config was not found
+* **Cause**: The editor reads `BEETS_CONFIG` (default `/config/config.yaml`). In v0.1.49 and earlier it read the host-side `BEETS_CONFIG_PATH`. After any Settings save, that sent it to an empty file inside the container, and edits were never written to Beets' real config.
+* **Fix**: Upgrade. If you saved edits from the Config page on v0.1.49 or earlier, they are not in `/config/config.yaml`; apply them again. The editor now refuses to read or write anything other than a file directly inside the Beets config directory.
+
+---
+
+### 8. Setup says "Stock Beets is unavailable"
+* **Cause**: Web Manager cannot reach the `webmanager` plugin at `BEETS_WEB_URL` (default `http://beets:8337`). While Beets is down, plugin and fpcalc checks show as unknown. Only real local mount problems are listed in addition.
+* **Fix**: `docker compose ps beets`, `docker compose logs beets`. For an external Beets, check that `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` agree.
+
 ---
 
 ## Operational Diagnostics

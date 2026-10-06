@@ -25,6 +25,8 @@ except ImportError:
 
 log = logging.getLogger("beets.adapter")
 
+DEFAULT_BEETS_WEB_URL = "http://beets:8337"
+
 
 class BeetsAdapterError(Exception):
     """Base exception for Beets adapter errors.
@@ -184,10 +186,12 @@ class BeetsAdapter:
         api_key_file: Optional[str] = None,
         timeout: float = 30.0,
     ):
+        # One default everywhere: the stock Beets Compose service. The old
+        # fallback (http://127.0.0.1:8337) pointed at Web Manager itself.
         raw_url = (
             base_url
-            or os.environ.get("BEETS_WEB_URL")
-            or "http://127.0.0.1:8337"
+            or (os.environ.get("BEETS_WEB_URL") or "").strip()
+            or DEFAULT_BEETS_WEB_URL
         )
         self.base_url = raw_url.rstrip("/")
         self._api_key = api_key or os.environ.get("BEETS_WEBMANAGER_API_KEY")
