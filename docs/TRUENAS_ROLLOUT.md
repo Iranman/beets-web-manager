@@ -128,14 +128,19 @@ the first half passes:
      version is left running; the failure block prints the `--rollback`
      command). If the "before" status could not be read, any blocking
      reason fails it.
-     *Known limitation:* `/api/setup/status` returns blocking reasons as
-     human-readable sentences with no stable codes, so the before/after
-     comparison is an exact string match. A release that only rewords an
-     existing reason (or embeds a changed path or number in it) reports it
-     as a NEW reason and fails the rollout. Compare
-     `setup-status-before.json` with the printed "after" reasons: if the
-     condition is the same and only the wording changed, the failure is a
-     false positive and the new version can stay; otherwise roll back.
+     Reasons are compared by their stable reason codes when both the
+     previous and the new version report `blocking_reason_codes` (a list
+     parallel to `blocking_reasons`), so rewording a message never trips the
+     gate. Each new reason is printed as
+     `NEW setup blocking reason after deploy: <message> (reason_code=<code>)`
+     and the log says which comparison was used.
+     *Fallback:* when either version does not report codes (versions from
+     before they existed, or a malformed list), the comparison is an exact
+     message match: a release that only rewords a reason, or embeds a
+     changed path or number in it, reports it as NEW and fails the rollout.
+     Compare `setup-status-before.json` with the printed "after" reasons; if
+     only the wording changed, the failure is a false positive and the new
+     version can stay; otherwise roll back.
 9. **Persist the version:** only after every check above passed, the
    script **edits the stack `.env`**: it rewrites the
    `BEETS_WEB_MANAGER_VERSION=` line to the deployed version (or appends
@@ -248,6 +253,43 @@ Stale database files are **left archived** by default -- current-architecture
 code never reads them. Pass `RESTORE_STALE_DB=1` to restore them anyway (e.g.
 rolling back to a pre-#64 image that still depends on the local-DB fallback).
 The library database is never touched or recreated by rollback.
+
+### Failure reason codes
+
+When the script stops, the `ROLLOUT FAILED` block prints the failed stage
+and, for the gates below, a stable `Reason code:` line. Automation and tests
+match the code, never the message text. Codes are never renamed; a changed
+meaning gets a new code.
+
+| Reason code | Stage | Meaning |
+| --- | --- | --- |
+| `setup_status_unavailable` | `setup-status-after` | `/api/setup/status` did not answer 200 after the recreate |
+| `setup_new_blocking_reason` | `setup-status-after` | the new version reports a blocking reason that was not there before |
+
+### Backup and restore safety
+
+The rollback (and `scripts/restore.sh`) runs as root over folders the
+containers can write to, so a path that passed a check could be swapped for
+a symbolic link before the copy runs. Neither tool writes a restored file
+through its final path:
+
+- each file or folder is copied with links never followed (`cp -P`) into a
+  fresh `mktemp -d` staging folder (mode 0700, owned by the restoring user)
+  inside the target folder, re-checked there (only regular files and
+  folders are accepted), and then renamed onto the target path. A rename
+  replaces a link planted at the target instead of writing through it;
+- `beetsplug/` is restored the same way: the backed-up tree is staged, the
+  current folder is kept under `pre-rollback-*/` and renamed out of the way,
+  and the staged tree is renamed in;
+- `restore.sh` first copies the archive into its own private temporary
+  folder and lists, verifies and extracts only that copy, so the archive it
+  checked is the archive it restores. If anything appears at a restored path
+  during the restore, or a `.pre-restore-<timestamp>` folder it did not
+  create already exists, it stops and says so.
+
+Someone who can rename entries in the target folder itself can still
+replace files there after the restore; the tools only guarantee that they
+never write through such a change.
 
 ## Backup retention (opt-in)
 

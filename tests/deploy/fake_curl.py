@@ -3,6 +3,7 @@
 for the fixed set of paths the rollout script probes, honoring `-o FILE`,
 `-w FORMAT`, and reading FAKE_CURL_STATE (a JSON file: {"item_count": N,
 "fail_paths": [...], "blocking_reasons_by_image": {image_ref: [...]},
+"blocking_reason_codes_by_image": {image_ref: [...]},
 "setup_status_http_by_image": {image_ref: "503"}}) so
 tests can control counts and simulate failures without a real HTTP server.
 
@@ -82,8 +83,12 @@ def main():
         elif path.startswith("/api/setup/status"):
             ref, _version = _running_webmgr()
             reasons = (state.get("blocking_reasons_by_image") or {}).get(ref, [])
-            body = json.dumps({"ok": True, "status": "warning" if reasons else "ready",
-                               "blocking_reasons": reasons})
+            payload = {"ok": True, "status": "warning" if reasons else "ready",
+                       "blocking_reasons": reasons}
+            codes_by_image = state.get("blocking_reason_codes_by_image") or {}
+            if ref in codes_by_image:  # absent = a version without reason codes
+                payload["blocking_reason_codes"] = codes_by_image[ref]
+            body = json.dumps(payload)
         elif path.startswith("/api/library"):
             qs = url.split("?", 1)[1] if "?" in url else ""
             limit = 50

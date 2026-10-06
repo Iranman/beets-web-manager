@@ -153,6 +153,10 @@ done
 # Logging / error trap
 # ---------------------------------------------------------------------------
 STAGE="init"
+# Stable, machine-readable code for a failure, printed in the failure block
+# next to the human message (set just before the matching die). Codes are
+# listed in docs/TRUENAS_ROLLOUT.md; never rename one -- add a new code.
+REASON_CODE=""
 BACKUP_DIR=""
 PREVIOUS_IMAGE_ID=""
 
@@ -174,6 +178,7 @@ report_failure() {
       echo "==================== ROLLOUT FAILED ===================="
     fi
     echo "Failed stage:          ${STAGE}"
+    [[ -z "$REASON_CODE" ]] || echo "Reason code:           ${REASON_CODE}"
     echo "Backup directory:      ${BACKUP_DIR:-<none created yet>}"
     echo "Previous image ID:     ${PREVIOUS_IMAGE_ID:-<unknown/not reached>}"
     echo "Current container status:"
@@ -801,9 +806,16 @@ except Exception:
 # (e.g. a new "Cannot write to downloads/staging path" blocking reason).
 # The status and blocking_reasons are recorded before anything changes and
 # compared after the recreate; a NEW blocking reason fails the deploy.
+#
+# Reasons are compared by their stable machine-readable codes when both the
+# previous and the new version report them (`blocking_reason_codes`, a list
+# parallel to `blocking_reasons`), so rewording a message never changes the
+# gate. When either side has no codes (a version from before they existed)
+# the comparison falls back to the exact message text and says so.
 SETUP_STATUS_BEFORE=""
 
-# Prints {"http": "<code>", "status": "...", "blocking_reasons": [...]}.
+# Prints {"http": "<code>", "status": "...", "blocking_reasons": [...],
+# "blocking_reason_codes": [...] or null}.
 fetch_setup_status() {
   local tok_arg=() body http
   if [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
@@ -821,11 +833,20 @@ try:
     data = json.load(open(path, encoding="utf-8"))
 except Exception:
     data = {}
-reasons = data.get("blocking_reasons") if isinstance(data, dict) else None
+if not isinstance(data, dict):
+    data = {}
+reasons = data.get("blocking_reasons")
+reasons = [str(r) for r in reasons] if isinstance(reasons, list) else []
+codes = data.get("blocking_reason_codes")
+# Codes are usable only as a list of non-empty strings parallel to the messages.
+if not (isinstance(codes, list) and len(codes) == len(reasons)
+        and all(isinstance(c, str) and c for c in codes)):
+    codes = None
 print(json.dumps({
     "http": http,
-    "status": str(data.get("status", "")) if isinstance(data, dict) else "",
-    "blocking_reasons": [str(r) for r in reasons] if isinstance(reasons, list) else [],
+    "status": str(data.get("status", "")),
+    "blocking_reasons": reasons,
+    "blocking_reason_codes": codes,
 }))
 PYEOF
   rm -f "$body"
@@ -834,7 +855,7 @@ PYEOF
 record_setup_status_before() {
   STAGE="setup-status-before"
   SETUP_STATUS_BEFORE="$(fetch_setup_status)"
-  log "Setup status before: $(snapshot_field "$SETUP_STATUS_BEFORE" status) http=$(snapshot_field "$SETUP_STATUS_BEFORE" http) blocking_reasons=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["blocking_reasons"]))' "$SETUP_STATUS_BEFORE")"
+  log "Setup status before: $(snapshot_field "$SETUP_STATUS_BEFORE" status) http=$(snapshot_field "$SETUP_STATUS_BEFORE" http) blocking_reasons=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["blocking_reasons"]))' "$SETUP_STATUS_BEFORE") blocking_reason_codes=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]).get("blocking_reason_codes")))' "$SETUP_STATUS_BEFORE")"
   if [[ "$(snapshot_field "$SETUP_STATUS_BEFORE" http)" != "200" ]]; then
     warn "could not read /api/setup/status before the deploy -- after the deploy ANY blocking reason will fail it"
   fi
@@ -844,26 +865,53 @@ record_setup_status_before() {
 # before (or any blocking reason, if "before" could not be read).
 assert_no_new_setup_blocking_reasons() {
   STAGE="setup-status-after"
-  local after new before_json="${SETUP_STATUS_BEFORE}"
+  local after new by before_json="${SETUP_STATUS_BEFORE}"
   [[ -n "$before_json" ]] || before_json='{}'
   after="$(fetch_setup_status)"
-  [[ "$(snapshot_field "$after" http)" == "200" ]] || die "/api/setup/status did not answer 200 after the deploy (http=$(snapshot_field "$after" http)). Roll back with: $0 --rollback ${BACKUP_DIR}"
+  if [[ "$(snapshot_field "$after" http)" != "200" ]]; then
+    REASON_CODE="setup_status_unavailable"
+    die "/api/setup/status did not answer 200 after the deploy (http=$(snapshot_field "$after" http)). Roll back with: $0 --rollback ${BACKUP_DIR}"
+  fi
+  # First output line: what the reasons were compared by ("code" or
+  # "message"). Then one "<message><TAB><code>" line per NEW reason.
   new="$(_py - "$before_json" "$after" <<'PYEOF'
 import json, sys
 before = json.loads(sys.argv[1] or "{}")
 after = json.loads(sys.argv[2])
-known = set(before.get("blocking_reasons") or []) if before.get("http") == "200" else set()
-for reason in after.get("blocking_reasons") or []:
-    if reason not in known:
-        print(reason)
+before_ok = before.get("http") == "200"
+messages = after.get("blocking_reasons") or []
+after_codes = after.get("blocking_reason_codes")
+before_codes = before.get("blocking_reason_codes")
+if after_codes is not None and (before_codes is not None or not before_ok):
+    by, keys, known = "code", after_codes, set(before_codes or []) if before_ok else set()
+else:
+    by, keys = "message", messages
+    known = set(before.get("blocking_reasons") or []) if before_ok else set()
+print(by)
+for i, key in enumerate(keys):
+    if key not in known:
+        code = after_codes[i] if after_codes is not None else ""
+        print(f"{messages[i]}\t{code}")
 PYEOF
 )"
+  by="${new%%$'\n'*}"
+  new="${new#"$by"}"
+  new="${new#$'\n'}"
   log "Setup status after: $(snapshot_field "$after" status)"
+  if [[ "$by" == "code" ]]; then
+    log "Setup blocking reasons compared by reason code."
+  else
+    log "Setup blocking reasons compared by exact message text: the previous or the new version does not report blocking_reason_codes."
+  fi
   if [[ -n "$new" ]]; then
-    local r
+    local r msg code
     while IFS= read -r r; do
-      [[ -n "$r" ]] && warn "NEW setup blocking reason after deploy: ${r}"
+      [[ -n "$r" ]] || continue
+      msg="${r%$'\t'*}"
+      code="${r##*$'\t'}"
+      warn "NEW setup blocking reason after deploy: ${msg} (reason_code=${code:-none})"
     done <<< "$new"
+    REASON_CODE="setup_new_blocking_reason"
     die "the deploy introduced new setup blocking reason(s) (listed above). The new version is running but not ready; fix the cause, or roll back with: $0 --rollback ${BACKUP_DIR}"
   fi
   log "No new setup blocking reasons."
@@ -1021,11 +1069,14 @@ json.dump(data, sys.stdout, indent=1)
 # planted in either place must never redirect a root-owned copy to or from
 # an arbitrary host path, so every copy below goes through these helpers.
 
-# copy_regular_file <src> <dst>: copies a regular, non-link file. Refuses a
-# symlinked source or a symlinked destination folder; a destination that is
-# itself a symlink is removed (the link only, never its target) first.
+# copy_regular_file <src> <dst> [mode]: copies a regular, non-link file.
+# Refuses a symlinked source or a symlinked destination folder. The copy is
+# never written to <dst> by name (a link could be planted there between a
+# check and the copy): it goes to a private staging folder next to <dst>,
+# is re-checked and (optionally) chmod-ed there, then renamed over <dst>.
+# rename(2) replaces a link at <dst> instead of writing through it.
 copy_regular_file() {
-  local src="$1" dst="$2"
+  local src="$1" dst="$2" mode="${3:-}"
   if [[ -L "$src" || ! -f "$src" ]]; then
     warn "not copying ${src}: it is a symbolic link or not a regular file"
     return 1
@@ -1034,10 +1085,27 @@ copy_regular_file() {
     warn "not copying to ${dst}: its folder is a symbolic link"
     return 1
   fi
-  if [[ -L "$dst" ]]; then
-    rm -f -- "$dst"
+  place_by_rename "$src" "$dst" "$mode"
+}
+
+# place_by_rename <src> <dst> [mode]: copy <src> (file or folder) without
+# following links into a fresh 0700 staging folder in <dst>'s folder (same
+# filesystem), refuse the copy if it is or holds anything but regular files
+# and folders, then `mv -T` it onto exactly <dst>. Returns 1 (with a
+# warning) instead of copying when any step fails.
+place_by_rename() {
+  local src="$1" dst="$2" mode="${3:-}" stage rc=1
+  stage="$(mktemp -d "$(dirname -- "$dst")/.rollback-stage.XXXXXX")" || return 1
+  if cp -RPp -- "$src" "$stage/item" \
+    && [[ -z "$(find "$stage/item" ! -type f ! -type d -print -quit)" ]] \
+    && { [[ -z "$mode" ]] || chmod "$mode" "$stage/item"; } \
+    && mv -fT -- "$stage/item" "$dst"; then
+    rc=0
+  else
+    warn "${src} was not copied to ${dst}: the copy failed, or it is or contains a link or special file"
   fi
-  cp -p -- "$src" "$dst"
+  rm -rf -- "$stage"
+  return "$rc"
 }
 
 # tree_has_symlink <dir>: true if <dir> is a symlink or contains one.
@@ -1114,7 +1182,7 @@ restore_state_files() {
   for f in "${WEBMGR_STATE_FILES[@]}"; do
     if [[ -f "$ROLLBACK_DIR/web-manager-data/${f}" ]]; then
       if [[ -f "${data_src}/${f}" && ! -L "${data_src}/${f}" ]]; then
-        cp -p -- "${data_src}/${f}" "$pre/web-manager-data/${f}"
+        cp -Pp -- "${data_src}/${f}" "$pre/web-manager-data/${f}"
       fi
       if copy_regular_file "$ROLLBACK_DIR/web-manager-data/${f}" "${data_src}/${f}"; then
         log "Restored web-manager-data/${f}"
@@ -1137,15 +1205,16 @@ restore_state_files() {
       rel="${src#"$ROLLBACK_DIR/web-manager-data/transactions/"}"
       if [[ ! -e "${data_src}/transactions/${rel}" && ! -L "${data_src}/transactions/${rel}" ]]; then
         mkdir -p "$(dirname "${data_src}/transactions/${rel}")"
-        cp -p -- "$src" "${data_src}/transactions/${rel}"
-        added=$((added + 1))
+        if copy_regular_file "$src" "${data_src}/transactions/${rel}"; then
+          added=$((added + 1))
+        fi
       fi
     done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -type f -print0)
     log "transactions/: ${added} missing record(s) restored; records written after the deploy were kept."
   fi
   if [[ -f "$ROLLBACK_DIR/beets-config/config.yaml" ]]; then
     if [[ -f "${engine_src}/config.yaml" && ! -L "${engine_src}/config.yaml" ]]; then
-      cp -p -- "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
+      cp -Pp -- "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
     fi
     if copy_regular_file "$ROLLBACK_DIR/beets-config/config.yaml" "${engine_src}/config.yaml"; then
       log "Restored Beets config.yaml (takes effect at the engine's next start)."
@@ -1159,18 +1228,29 @@ restore_state_files() {
     else
       # Exact restore: files the new version added must not survive the
       # rollback (a stale module can shadow or break the old plugin). The
-      # current contents are kept under pre-rollback/ first, then cleared.
-      # Neither tree contains a link (checked above) and find -delete never
-      # follows links, so nothing outside beetsplug/ can be touched.
-      if [[ -d "${engine_src}/beetsplug" ]]; then
-        cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
-        [[ -n "$engine_src" && -d "$engine_src/beetsplug" && ! -L "$engine_src/beetsplug" ]] \
-          || die "Beets beetsplug/ is not a plain folder any more (became a symbolic link?) -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
-        find "${engine_src}/beetsplug" -mindepth 1 -delete
-      else
-        mkdir -p "${engine_src}/beetsplug"
+      # backed-up tree is copied (links never followed) into a private
+      # staging folder inside the Beets config folder and checked there; the
+      # current beetsplug/ is kept under pre-rollback/, renamed out of the
+      # way and the staged copy renamed in. Nothing is copied into or
+      # deleted from beetsplug/ by path, so a link planted inside it during
+      # the rollback cannot redirect a write.
+      local stage bp="${engine_src}/beetsplug"
+      stage="$(mktemp -d "${engine_src}/.rollback-stage.XXXXXX")"
+      cp -RPp -- "$ROLLBACK_DIR/beets-config/beetsplug" "$stage/new"
+      if [[ -n "$(find "$stage/new" ! -type f ! -type d -print -quit)" ]]; then
+        rm -rf -- "$stage"
+        die "the backed-up beetsplug/ contains a link or special file -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking it"
       fi
-      cp -RPp -- "$ROLLBACK_DIR/beets-config/beetsplug/." "${engine_src}/beetsplug/"
+      if [[ -e "$bp" || -L "$bp" ]]; then
+        if [[ ! -d "$bp" || -L "$bp" ]]; then
+          rm -rf -- "$stage"
+          die "Beets beetsplug/ is not a plain folder any more (became a symbolic link?) -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
+        fi
+        cp -RPp -- "$bp" "$pre/beets-config/beetsplug"
+        mv -fT -- "$bp" "$stage/old"
+      fi
+      mv -fT -- "$stage/new" "$bp"
+      rm -rf -- "$stage"
       log "Restored Beets beetsplug/ exactly as backed up (current contents kept in ${pre}/beets-config/beetsplug/)."
     fi
   fi
@@ -1750,13 +1830,13 @@ run_rollback() {
         if [[ -n "$p_sha" && "$current_sha" != "$p_sha" ]]; then
           warn "current token differs from recorded pre-rollout value (${p_sha}) -- NOT restoring automatically; restore ${ROLLBACK_DIR}/auth_token.bak manually if needed"
         else
-          cp "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH"
-          chmod 600 "$TOKEN_PATH"
+          copy_regular_file "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH" 600 \
+            || die "the pre-rollout token was NOT restored to ${TOKEN_PATH}; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking the path"
           log "Restored pre-rollout persistent token."
         fi
       elif [[ -f "$ROLLBACK_DIR/auth_token.bak" && ! -f "$TOKEN_PATH" ]]; then
-        cp "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH"
-        chmod 600 "$TOKEN_PATH"
+        copy_regular_file "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH" 600 \
+          || die "the pre-rollout token was NOT restored to ${TOKEN_PATH}; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking the path"
         log "Restored pre-rollout persistent token (file was missing)."
       fi
     elif [[ "$p_existed" == "0" && "$migration_performed" == "1" ]]; then

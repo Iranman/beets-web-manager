@@ -1007,6 +1007,7 @@ class EndToEndFixture(unittest.TestCase):
             "item_count": overrides.pop("curl_item_count", 3144),
             "fail_paths": overrides.pop("curl_fail_paths", []),
             "blocking_reasons_by_image": overrides.pop("curl_blocking_reasons_by_image", {}),
+            "blocking_reason_codes_by_image": overrides.pop("curl_blocking_reason_codes_by_image", {}),
             "setup_status_http_by_image": overrides.pop("curl_setup_status_http_by_image", {}),
         }
         curl_state_path = os.path.join(self.tmp, "curl_state.json")
@@ -1582,6 +1583,74 @@ class RestoreBeetsplugGuardTests(RolloutScriptTestBase):
 
 
 @unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
+class RollbackCopyRaceTests(RolloutScriptTestBase):
+    """#177: a path that passed the link check can be swapped for a link
+    before the copy runs. The rollback copies into a private staging folder
+    and renames into place, so a link planted in that window is replaced,
+    never written through. `cp` is wrapped to plant the link right before
+    every copy -- the worst-case timing."""
+
+    def _victim(self):
+        victim = os.path.join(self.tmp, "host-file")
+        Path(victim).write_text("host-only-content", encoding="utf-8")
+        return victim
+
+    def test_copy_regular_file_does_not_write_through_a_link_planted_before_the_copy(self):
+        victim = self._victim()
+        src = os.path.join(self.tmp, "src.txt")
+        Path(src).write_text("restored", encoding="utf-8")
+        dst = os.path.join(self.tmp, "data", "settings")
+        os.makedirs(os.path.dirname(dst))
+        Path(dst).write_text("current", encoding="utf-8")
+        res = self.run_snippet(
+            f'cp() {{ command rm -f -- "{dst}"; command ln -s "{victim}" "{dst}"; command cp "$@"; }}\n'
+            f'copy_regular_file "{src}" "{dst}" 600'
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(Path(victim).read_text(encoding="utf-8"), "host-only-content")
+        self.assertFalse(os.path.islink(dst))
+        self.assertEqual(Path(dst).read_text(encoding="utf-8"), "restored")
+        self.assertEqual(os.stat(dst).st_mode & 0o777, 0o600)
+        self.assertEqual([n for n in os.listdir(os.path.dirname(dst)) if n.startswith(".rollback-stage.")], [])
+
+    def test_copy_regular_file_refuses_a_source_swapped_for_a_link(self):
+        victim = self._victim()
+        src = os.path.join(self.tmp, "src.txt")
+        Path(src).write_text("restored", encoding="utf-8")
+        dst = os.path.join(self.tmp, "dst.txt")
+        res = self.run_snippet(
+            f'cp() {{ command rm -f -- "{src}"; command ln -s "{victim}" "{src}"; command cp "$@"; }}\n'
+            f'if copy_regular_file "{src}" "{dst}"; then echo COPIED; else echo REFUSED; fi'
+        )
+        self.assertIn("REFUSED", res.stdout, res.stderr)
+        self.assertFalse(os.path.lexists(dst), "nothing may be placed from a swapped source")
+
+    def test_beetsplug_restore_does_not_write_through_a_link_planted_inside_it(self):
+        victim = self._victim()
+        engine = os.path.join(self.tmp, "engine")
+        data = os.path.join(self.tmp, "data")
+        rb = os.path.join(self.tmp, "rollback")
+        os.makedirs(os.path.join(engine, "beetsplug", "webmanager"))
+        os.makedirs(data)
+        os.makedirs(os.path.join(rb, "beets-config", "beetsplug", "webmanager"))
+        Path(rb, "beets-config", "beetsplug", "webmanager", "version.py").write_text("v = 1\n", encoding="utf-8")
+        Path(engine, "beetsplug", "webmanager", "version.py").write_text("v = 2\n", encoding="utf-8")
+        planted = os.path.join(engine, "beetsplug", "webmanager", "version.py")
+        res = self.run_snippet(
+            f'ENGINE_CONFIG_SRC="{engine}"; WEBMGR_DATA_SRC="{data}"; ROLLBACK_DIR="{rb}"\n'
+            f'cp() {{ command mkdir -p "{os.path.dirname(planted)}"; command rm -f -- "{planted}"; '
+            f'command ln -s "{victim}" "{planted}"; command cp "$@"; }}\n'
+            "restore_state_files"
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(Path(victim).read_text(encoding="utf-8"), "host-only-content",
+                         "the rollback wrote through a link planted inside beetsplug/")
+        self.assertFalse(os.path.islink(planted))
+        self.assertEqual(Path(planted).read_text(encoding="utf-8"), "v = 1\n")
+        self.assertEqual([n for n in os.listdir(engine) if n.startswith(".rollback-stage.")], [])
+
+
+@unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
 class SymlinkSafetyTests(VersionedStackFixture):
     """The script runs as root: a link planted in a container-writable data
     folder must never redirect a backup or restore copy to another path."""
@@ -1653,9 +1722,59 @@ class SetupStatusGateTests(VersionedStackFixture):
         res = self.run_script(env=self.env(curl_blocking_reasons_by_image={self.GOOD_IMAGE: [reason]}))
         self.assertNotEqual(res.returncode, 0)
         self.assertIn(f"NEW setup blocking reason after deploy: {reason}", res.stderr)
+        self.assertIn("Reason code:           setup_new_blocking_reason", res.stderr)
         self.assertIn("--rollback", res.stderr)
         self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.2", Path(self.stack_env).read_text(encoding="utf-8"),
                       "an unverified version must not be persisted to .env")
+
+    # --- #179: compare by stable reason codes, not message text ------------
+
+    def test_reworded_reason_with_the_same_code_does_not_fail_the_deploy(self):
+        res = self.deploy(
+            curl_blocking_reasons_by_image={self.OLD_IMAGE: ["Music library path /music is not accessible"],
+                                            self.GOOD_IMAGE: ["Cannot read the music library at /music"]},
+            curl_blocking_reason_codes_by_image={self.OLD_IMAGE: ["music_path_not_accessible"],
+                                                 self.GOOD_IMAGE: ["music_path_not_accessible"]})
+        self.assertIn("Setup blocking reasons compared by reason code.", res.stderr)
+        self.assertIn("No new setup blocking reasons.", res.stderr)
+
+    def test_new_reason_code_fails_the_deploy_and_reports_both_codes(self):
+        same_text = "Music library path /music is not accessible"
+        res = self.run_script(env=self.env(
+            curl_blocking_reasons_by_image={self.OLD_IMAGE: [same_text], self.GOOD_IMAGE: [same_text]},
+            curl_blocking_reason_codes_by_image={self.OLD_IMAGE: ["music_path_not_accessible"],
+                                                 self.GOOD_IMAGE: ["downloads_not_writable"]}))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("(reason_code=downloads_not_writable)", res.stderr)
+        self.assertIn("Reason code:           setup_new_blocking_reason", res.stderr)
+        self.assertIn("Failed stage:          setup-status-after", res.stderr)
+
+    def test_previous_version_without_codes_falls_back_to_message_text(self):
+        reason = "Music library path /music is not accessible"
+        res = self.deploy(
+            curl_blocking_reasons_by_image={self.OLD_IMAGE: [reason], self.GOOD_IMAGE: [reason]},
+            curl_blocking_reason_codes_by_image={self.GOOD_IMAGE: ["music_path_not_accessible"]})
+        self.assertIn("compared by exact message text", res.stderr)
+        self.assertIn("No new setup blocking reasons.", res.stderr)
+
+    def test_malformed_codes_are_ignored_in_favor_of_message_text(self):
+        reason = "Music library path /music is not accessible"
+        res = self.deploy(
+            curl_blocking_reasons_by_image={self.OLD_IMAGE: [reason], self.GOOD_IMAGE: [reason]},
+            curl_blocking_reason_codes_by_image={self.OLD_IMAGE: ["music_path_not_accessible"],
+                                                 self.GOOD_IMAGE: []})
+        self.assertIn("compared by exact message text", res.stderr)
+
+    def test_unreadable_status_before_fails_on_any_coded_reason(self):
+        reason = "Music library path /music is not accessible"
+        res = self.run_script(env=self.env(
+            curl_setup_status_http_by_image={self.OLD_IMAGE: "503"},
+            curl_blocking_reasons_by_image={self.OLD_IMAGE: [reason], self.GOOD_IMAGE: [reason]},
+            curl_blocking_reason_codes_by_image={self.OLD_IMAGE: ["music_path_not_accessible"],
+                                                 self.GOOD_IMAGE: ["music_path_not_accessible"]}))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("(reason_code=music_path_not_accessible)", res.stderr)
+        self.assertIn("Reason code:           setup_new_blocking_reason", res.stderr)
 
     def test_blocking_reason_that_already_existed_does_not_fail_the_deploy(self):
         reason = "Music library path /music is not accessible"
