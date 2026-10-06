@@ -25,7 +25,7 @@ import type {
   TransactionSummary,
 } from '../api/types';
 
-const STATUS_OPTIONS = ['all', 'Pending', 'Preview', 'Approved', 'Running', 'Completed', 'Cancelled', 'Failed', 'Rolled Back', 'Partially Rolled Back'];
+const STATUS_OPTIONS = ['all', 'Pending', 'Preview', 'Approved', 'Running', 'Completed', 'Cancelled', 'Failed', 'Rolled Back', 'Partially Rolled Back', 'Recovery Required'];
 const OPERATION_OPTIONS = [
   'all',
   'Import',
