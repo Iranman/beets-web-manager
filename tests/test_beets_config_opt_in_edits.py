@@ -124,6 +124,26 @@ class TopLevelBlockReDoSTests(unittest.TestCase):
         self.assertEqual(match.group(2), "\n  host: x\n\n  \t\n  port: 1")
         self.assertIsNone(_find_top_level_block("web: {a: 1}\n", "web"))
 
+    def test_include_paths_long_whitespace_line_is_fast(self):
+        from backend.beets_plugins import _set_web_include_paths
+        text = "web:\n  include_paths: a" + " " * 100_000 + "b\n"
+        start = time.perf_counter()
+        _, changed = _set_web_include_paths(text, overwrite_false=False)
+        self.assertLess(time.perf_counter() - start, 1.0)
+        self.assertFalse(changed)
+
+    def test_include_paths_value_and_comment_parsing_unchanged(self):
+        from backend.beets_plugins import _set_web_include_paths
+        cases = {
+            "web:\n  include_paths: yes  # keep\n": ("web:\n  include_paths: yes  # keep\n", False),
+            "web:\n\tinclude_paths: no \t\n": ("web:\n\tinclude_paths: yes\n", True),
+            "web:\n  include_paths: 'false'   # off\n": ("web:\n  include_paths: yes  # off\n", True),
+            "web:\n  include_paths:\n  host: x\n": ("web:\n  include_paths: yes\n  host: x\n", True),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(_set_web_include_paths(text, overwrite_false=True), expected)
+
 
 @unittest.skipIf(os.name == "nt", "POSIX permission bits")
 class ConfigWriteModeTests(_TempConfigMixin, unittest.TestCase):

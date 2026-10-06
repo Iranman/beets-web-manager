@@ -709,7 +709,7 @@ def _set_web_include_paths(text: str, *, overwrite_false: bool) -> Tuple[str, bo
     if not block:
         return text.rstrip("\n") + "\n\nweb:\n    include_paths: yes\n", True
     body = block.group(2) or ""
-    existing = re.search(r"(?m)^([ \t]+)include_paths:[ \t]*([^#\n]*?)[ \t]*(#.*)?$", body)
+    existing = re.search(r"(?m)^([ \t]+)include_paths:[ \t]*+([^#\n]*)(#.*)?$", body)
     if existing:
         current = existing.group(2).strip().strip("'\"").lower()
         if current in _TRUTHY_YAML:
