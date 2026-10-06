@@ -1,38 +1,42 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AlbumCleanupModal } from '../src/components/AlbumCleanupModal';
-import { planAlbumCleanup, applyAlbumCleanup, rollbackAlbumCleanup } from '../src/api/client';
+import { planAlbumCleanup, applyAlbumCleanup } from '../src/api/client';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 vi.mock('../src/api/client', () => ({
   planAlbumCleanup: vi.fn(),
   applyAlbumCleanup: vi.fn(),
-  rollbackAlbumCleanup: vi.fn(),
 }));
 
 const mockPlan = vi.mocked(planAlbumCleanup);
 const mockApply = vi.mocked(applyAlbumCleanup);
-const mockRollback = vi.mocked(rollbackAlbumCleanup);
 
+// Exactly the keys plan_album_cleanup (backend/composite_workflows.py)
+// returns: album and items are the Beets web API rows it snapshotted.
 function makePlanResponse(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     ok: true,
     operation_id: 'txn_1700000000_abcdef012345',
+    token: 'txn_1700000000_abcdef012345',
     status: 'Preview',
-    album_id: 42,
-    target_path: '/music/Artist/Album',
-    file_count: 2,
-    transaction: {
-      metadata: {
-        reversibility: 'IRREVERSIBLE',
-        rollback_available: false,
-        steps: [
-          { step_id: 'step_1', type: 'delete_file', source: '/music/Artist/Album/01.flac', status: 'pending', reversibility: 'IRREVERSIBLE' },
-          { step_id: 'step_2', type: 'delete_file', source: '/music/Artist/Album/02.flac', status: 'pending', reversibility: 'IRREVERSIBLE' },
-        ],
-      },
+    requires_approval: true,
+    delete_files: false,
+    album: {
+      id: 42,
+      album: 'Plan Album',
+      albumartist: 'Plan Artist',
+      mb_releasegroupid: 'rg-0000-plan',
+      year: 2001,
     },
+    items: [
+      { id: 101, album_id: 42, title: 'First Song', artist: 'Plan Artist', track: 1, disc: 1, path: '/music/Plan Artist/Plan Album/01 First Song.flac' },
+      { id: 102, album_id: 42, title: 'Second Song', artist: 'Plan Artist', track: 2, disc: 1, path: '/music/Plan Artist/Plan Album/02 Second Song.flac' },
+    ],
     ...overrides,
   };
 }
@@ -73,12 +77,38 @@ describe('AlbumCleanupModal', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy());
   });
 
-  it('itemizes the real plan steps, not a generic placeholder', async () => {
+  // QA F-2: the review step used to read target_path and
+  // transaction.metadata.steps, which the plan never returns, so it showed an
+  // empty directory and "Proposed Mutations (0 steps)".
+  it('renders the album and tracks from the real plan shape', async () => {
     mockPlan.mockResolvedValue(makePlanResponse());
     renderModal();
-    await waitFor(() => expect(screen.getByText(/Proposed Mutations \(2 steps\)/i)).toBeTruthy());
-    expect(screen.getByText(/01\.flac/)).toBeTruthy();
-    expect(screen.getByText(/02\.flac/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/Tracks to remove from the library \(2\)/i)).toBeTruthy());
+    expect(screen.getByText('Plan Album')).toBeTruthy();
+    expect(screen.getByText('Plan Artist')).toBeTruthy();
+    expect(screen.getByText('rg-0000-plan')).toBeTruthy();
+    expect(screen.getByText(/First Song$/)).toBeTruthy();
+    expect(screen.getByText('/music/Plan Artist/Plan Album/02 Second Song.flac')).toBeTruthy();
+    const text = screen.getByRole('dialog').textContent ?? '';
+    expect(text).not.toMatch(/Target Album Directory/);
+    expect(text).not.toMatch(/Proposed Mutations/);
+    expect(text).toMatch(/audio files are kept on\s+disk/i);
+  });
+
+  it('says so when the plan has no tracks', async () => {
+    mockPlan.mockResolvedValue(makePlanResponse({ items: [] }));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/Tracks to remove from the library \(0\)/i)).toBeTruthy());
+    expect(screen.getByText(/Beets reported no tracks for this album/)).toBeTruthy();
+  });
+
+  it('never offers Apply for a plan that deletes files and points to the typed approval', async () => {
+    mockPlan.mockResolvedValue(makePlanResponse({ delete_files: true }));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/This plan deletes files/)).toBeTruthy());
+    expect(screen.getByText(/DELETE ALBUM FILES/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Apply Cleanup/i })).toBeNull();
+    expect(screen.getByRole('dialog').textContent).not.toMatch(/kept on\s+disk/i);
   });
 
   it('shows the irreversible warning prominently before Apply is available', async () => {
@@ -87,8 +117,31 @@ describe('AlbumCleanupModal', () => {
     // Multiple elements legitimately say "Irreversible" (the banner, the
     // steps-list chip, and each per-step badge) -- assert on the specific
     // warning banner text, not just presence of the word anywhere.
-    await waitFor(() => expect(screen.getByText(/permanently delete every catalogued track file/i)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/remove the\s+album and its track records from the Beets library/i)).toBeTruthy());
     expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy();
+  });
+
+  // #184: planAlbumCleanup sends no delete_files, so the plan is row-only.
+  // Nothing in this flow may claim that files are deleted.
+  it('says the cleanup removes library rows only and keeps files, never that it deletes files', async () => {
+    mockPlan.mockResolvedValue(makePlanResponse());
+    mockApply.mockResolvedValue({
+      ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Completed',
+      deleted: [], removed_item_ids: [1, 2], log: [],
+    });
+    renderModal();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy());
+    const dialog = screen.getByRole('dialog');
+    const deletesFiles = /delet\w* (every |the )?(catalogued )?(track |audio )?files?|files? deleted/i;
+    expect(dialog.textContent).not.toMatch(deletesFiles);
+    expect(dialog.textContent).toMatch(/files stay on disk/i);
+    expect(screen.getByRole('heading', { name: 'Remove Album from Library' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Apply Cleanup/i }));
+    await waitFor(() => expect(screen.getByText(/Album Cleanup Completed/i)).toBeTruthy());
+    expect(screen.getByRole('dialog').textContent).not.toMatch(deletesFiles);
+    expect(screen.getByText(/Track row\(s\) removed from the library: 2/)).toBeTruthy();
+    expect(screen.getByText(/Audio files kept on disk$/)).toBeTruthy();
   });
 
   it('does not call Apply until the user clicks Apply Cleanup', async () => {
@@ -191,7 +244,7 @@ describe('AlbumCleanupModal', () => {
 
   it('refreshes the library and closes on "Done & Refresh View" after a successful Apply', async () => {
     mockPlan.mockResolvedValue(makePlanResponse());
-    mockApply.mockResolvedValue({ ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Completed', deleted: ['/music/Artist/Album/01.flac'], log: [] });
+    mockApply.mockResolvedValue({ ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Completed', deleted: [101], log: [] });
     const { onClose, onSuccess } = renderModal();
 
     await waitFor(() => expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy());
@@ -203,8 +256,8 @@ describe('AlbumCleanupModal', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('hides the rollback button when the transaction reports rollback_available: false', async () => {
-    mockPlan.mockResolvedValue(makePlanResponse()); // rollback_available: false
+  it('says rollback is unavailable after a completed cleanup, with no rollback control', async () => {
+    mockPlan.mockResolvedValue(makePlanResponse());
     mockApply.mockResolvedValue({ ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Completed', deleted: [], log: [] });
     renderModal();
 
@@ -214,31 +267,6 @@ describe('AlbumCleanupModal', () => {
     await waitFor(() => expect(screen.getByText(/Rollback is unavailable for this transaction/i)).toBeTruthy());
     expect(screen.queryByRole('button', { name: /Rollback Cleanup/i })).toBeNull();
   });
-
-  it('shows a rollback control only when the transaction truthfully reports rollback_available: true, and it calls the rollback API', async () => {
-    mockPlan.mockResolvedValue(
-      makePlanResponse({
-        transaction: {
-          metadata: {
-            reversibility: 'RECOVERABLE',
-            rollback_available: true,
-            steps: [],
-          },
-        },
-      }),
-    );
-    mockApply.mockResolvedValue({ ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Completed', deleted: [], log: [] });
-    mockRollback.mockResolvedValue({ ok: true, operation_id: 'txn_1700000000_abcdef012345', status: 'Rolled Back', restored: [], log: [] });
-    renderModal();
-
-    await waitFor(() => expect(screen.getByRole('button', { name: /Apply Cleanup/i })).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: /Apply Cleanup/i }));
-
-    await waitFor(() => expect(screen.getByRole('button', { name: /Rollback Cleanup/i })).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: /Rollback Cleanup/i }));
-    await waitFor(() => expect(mockRollback).toHaveBeenCalledWith('txn_1700000000_abcdef012345'));
-  });
-
   it('does not treat a thrown network error as "nothing changed"', async () => {
     mockPlan.mockResolvedValue(makePlanResponse());
     mockApply.mockRejectedValue(new Error('Failed to fetch'));
