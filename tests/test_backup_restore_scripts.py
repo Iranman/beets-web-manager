@@ -9,6 +9,7 @@ the online backup captures them without modifying the live database.
 
 Linux/macOS only (POSIX bash, tar); skipped on Windows.
 """
+import datetime
 import hashlib
 import os
 import shutil
@@ -246,6 +247,76 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
         self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm, "--yes", archive)
         for f in ("config.yaml", ".webmanager_api_key"):
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.beets, f)).st_mode), 0o600, f)
+
+    def _rewrite_archive(self, archive, change):
+        """Extract archive, apply change(root_dir) to its single top folder,
+        and write it back to a new .tar.gz (returned)."""
+        work = os.path.join(self.tmp, "rewrite")
+        with tarfile.open(archive) as tf:
+            tf.extractall(work, filter="data")
+        (top,) = os.listdir(work)
+        change(os.path.join(work, top))
+        out = os.path.join(self.tmp, "rewritten.tar.gz")
+        with tarfile.open(out, "w:gz") as tf:
+            tf.add(os.path.join(work, top), arcname=top)
+        return out
+
+    def _assert_restore_refused_untouched(self, archive, message):
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        # Change the live files after the backup so a restore would be visible.
+        Path(self.wm, ".env").write_text("AI_MODEL=current\n", encoding="utf-8")
+        beets_before, wm_before = _tree(self.beets), _tree(self.wm)
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn(message, res.stderr)
+        self.assertEqual(_tree(self.beets), beets_before, "nothing may be restored into the Beets config")
+        self.assertEqual(_tree(self.wm), wm_before, "nothing may be restored into the Web Manager data")
+        for d in (self.beets, self.wm):
+            self.assertFalse([n for n in os.listdir(d) if n.startswith(".pre-restore-")])
+
+    def test_restore_refuses_a_file_that_does_not_match_the_manifest(self):
+        archive = self.backup("python")
+
+        def tamper(top):
+            Path(top, "web-manager-data", ".env").write_text("AI_MODEL=tampered\n", encoding="utf-8")
+        self._assert_restore_refused_untouched(self._rewrite_archive(archive, tamper), "checksum mismatch")
+
+    def test_restore_refuses_a_file_missing_from_the_manifest(self):
+        archive = self.backup("python")
+
+        def plant(top):
+            Path(top, "beets", "beetsplug", "planted.py").write_text("x = 1\n", encoding="utf-8")
+        self._assert_restore_refused_untouched(self._rewrite_archive(archive, plant), "not listed in MANIFEST.txt")
+
+    def test_restore_refuses_a_new_layout_backup_without_a_manifest(self):
+        archive = self.backup("python")
+
+        def drop(top):
+            os.remove(os.path.join(top, "MANIFEST.txt"))
+        self._assert_restore_refused_untouched(self._rewrite_archive(archive, drop), "no MANIFEST.txt")
+
+    def test_restore_reports_verified_checksums(self):
+        archive = self.backup("python")
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm, "--yes", archive)
+        self.assertRegex(res.stderr, r"Verified \d+ file checksums against MANIFEST.txt")
+
+    def test_backup_name_and_manifest_use_utc(self):
+        env = dict(os.environ, TZ="America/Los_Angeles", BWM_BACKUP_FORCE_METHOD="python")
+        before = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
+        subprocess.run([BASH, str(BACKUP), "--beets-config", self.beets, "--web-manager-data", self.wm,
+                        "--out", self.out], cwd=self.tmp, env=env, check=True, capture_output=True, timeout=120)
+        after = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
+        (name,) = [n for n in os.listdir(self.out) if n.endswith(".tar.gz")]
+        stamp = datetime.datetime.strptime(name[len("beets-backup-"):-len(".tar.gz")], "%Y%m%d-%H%M%S")
+        self.assertTrue(before <= stamp <= after, f"{stamp} is not between {before} and {after} UTC")
+        with tarfile.open(os.path.join(self.out, name)) as tf:
+            member = next(m for m in tf.getmembers() if m.name.endswith("MANIFEST.txt"))
+            manifest = tf.extractfile(member).read().decode()
+        self.assertIn(f"created={stamp:%Y%m%d-%H%M%S} (UTC)", manifest)
 
     def _backup_into_quoted_folder(self, method):
         out = os.path.join(self.tmp, "it's backups")

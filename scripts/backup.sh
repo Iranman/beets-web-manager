@@ -61,7 +61,7 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
   Pass --web-manager-data <dir> / set WEB_MANAGER_DATA_DIR."
 
 DB="${BEETS_CONFIG_DIR}/musiclibrary.blb"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+STAMP="$(date -u +%Y%m%d-%H%M%S)"  # UTC, so names sort the same on every host
 NAME="beets-backup-${STAMP}"
 umask 077
 mkdir -p "${BACKUP_DIR}"
@@ -154,7 +154,7 @@ find "${BEETS_CONFIG_DIR}" -maxdepth 1 -name "*.json" -exec cp -p {} "${STAGE}/b
     --exclude='*.lock' . ) | ( cd "${STAGE}/web-manager-data" && tar -xf - )
 
 {
-  echo "created=${STAMP}"
+  echo "created=${STAMP} (UTC)"
   echo "database_method=${METHOD}"
   echo "database_check=${CHECK:-n/a}"
   echo "beets_config_dir=${BEETS_CONFIG_DIR}"

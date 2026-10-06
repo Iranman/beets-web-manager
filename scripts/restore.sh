@@ -73,6 +73,34 @@ else
   echo "Note: this is an older backup without Web Manager state; only Beets files will be restored." >&2
 fi
 
+# Verify every file against the sha256 list in MANIFEST.txt before anything
+# is restored. A corrupted or edited archive is refused with the restore
+# targets untouched. backup.sh has written MANIFEST.txt since it began using
+# the beets/ + web-manager-data/ layout, so only older top-level archives may
+# lack one.
+MANIFEST="${EXTRACTED}/MANIFEST.txt"
+if [ -f "${MANIFEST}" ]; then
+  SUMS="${TMP_DIR}/manifest.sha256"
+  grep -E '^[0-9a-f]{64}  ' "${MANIFEST}" > "${SUMS}" || true
+  [ -s "${SUMS}" ] || fail "MANIFEST.txt lists no checksums -- refusing to restore a backup that cannot be verified"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ( cd "${EXTRACTED}" && sha256sum --quiet -c "${SUMS}" ) >&2 \
+      || fail "checksum mismatch against MANIFEST.txt -- the backup is damaged or was modified; nothing was restored"
+  else
+    ( cd "${EXTRACTED}" && shasum -a 256 --quiet -c "${SUMS}" ) >&2 \
+      || fail "checksum mismatch against MANIFEST.txt -- the backup is damaged or was modified; nothing was restored"
+  fi
+  UNLISTED="$(cd "${EXTRACTED}" && find . -type f ! -path ./MANIFEST.txt -print | LC_ALL=C sort \
+    | LC_ALL=C comm -23 - <(sed -E 's/^[0-9a-f]{64}  //' "${SUMS}" | LC_ALL=C sort))"
+  [ -z "${UNLISTED}" ] || fail "the backup contains files not listed in MANIFEST.txt -- nothing was restored:
+${UNLISTED}"
+  echo "Verified $(wc -l < "${SUMS}" | tr -d ' ') file checksums against MANIFEST.txt." >&2
+elif [ -n "${SRC_WM}" ]; then
+  fail "the backup has no MANIFEST.txt, so its contents cannot be verified -- refusing to restore it"
+else
+  echo "Note: older backup without MANIFEST.txt; file checksums cannot be verified." >&2
+fi
+
 if [ -s "${BEETS_CONFIG_DIR}/musiclibrary.blb-wal" ]; then
   fail "${BEETS_CONFIG_DIR}/musiclibrary.blb-wal is not empty -- Beets looks like it is still running.
   Stop both containers first (docker compose stop)."
@@ -88,7 +116,7 @@ if [ "${ASSUME_YES}" -ne 1 ]; then
   case "${confirm}" in y|Y) : ;; *) echo "Aborted."; exit 1 ;; esac
 fi
 
-STAMP="$(date +%Y%m%d-%H%M%S)"
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
 
 # move_aside <dir> <relative path>: keep the current file/dir before replacing it.
 move_aside() {
