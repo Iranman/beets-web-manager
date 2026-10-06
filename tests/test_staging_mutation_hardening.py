@@ -181,6 +181,60 @@ class AlbumCleanupRouteTests(_RouteEnv):
         self.assertEqual(rb.get_json()["code"], "not_supported")
 
 
+class _AlbumStaysAdapter(FakeAdapter):
+    def remove(self, item_ids=None, album_ids=None, delete_files=False, idempotency_key=None):
+        self.calls.append(("remove", sorted(item_ids or []), sorted(album_ids or []), delete_files))
+        return {"success": True}  # the album row survives: verification_failed
+
+
+class AlbumCleanupFailureMessageTests(_RouteEnv):
+    """PR #200 QA F-1: a row-only failure never claims files were deleted."""
+
+    def test_classifier_row_only(self):
+        from backend.cleanup_service import _classify_album_cleanup_apply_failure as classify
+        kind, msg = classify({"ok": False, "mutated": True, "delete_files": False,
+                              "error": "Album row still present after removal."})
+        self.assertEqual(kind, "partial_mutation")
+        self.assertNotIn("deleted", msg)
+        self.assertIn("no audio files", msg)
+
+    def test_classifier_delete_files(self):
+        from backend.cleanup_service import _classify_album_cleanup_apply_failure as classify
+        for res in ({"mutated": True, "delete_files": True, "error": "x"}, {"mutated": True, "error": "x"}):
+            kind, msg = classify(res)
+            self.assertEqual(kind, "partial_mutation")
+            self.assertIn("already deleted", msg)
+
+    def test_row_only_route_failure_message(self):
+        path = self.media("A/B/01.flac")
+        ad = _AlbumStaysAdapter(items={7: {"id": 7, "album_id": 5, "path": path}}, albums={5: {"id": 5}})
+        plan = cw.plan_album_cleanup(5, adapter=ad, store=self.store)
+        with mock.patch.object(cw, "beets_adapter", ad):
+            resp = self.client.post("/api/albums/cleanup/apply", json={"operation_id": plan["operation_id"]})
+        body = resp.get_json()
+        self.assertEqual(resp.status_code, 400, body)
+        self.assertTrue(body["mutated"])
+        self.assertEqual(body["error_kind"], "partial_mutation")
+        self.assertNotIn("deleted", body["error"])
+        self.assertTrue(os.path.exists(path))
+
+
+class AlbumCleanupRowOnlyResultTests(_Env):
+    """PR #200 QA F-3: the UI count relies on removed_item_ids / deleted."""
+
+    def test_row_only_apply_result(self):
+        path = self.media("A/B/01.flac")
+        ad = FakeAdapter(items={7: {"id": 7, "album_id": 5, "path": path},
+                                8: {"id": 8, "album_id": 5, "path": path}}, albums={5: {"id": 5}})
+        plan = cw.plan_album_cleanup(5, adapter=ad, store=self.store)
+        self.store.transition(plan["operation_id"], "Preview", "Approved")
+        res = cw.apply_album_cleanup(plan["operation_id"], adapter=ad, store=self.store)
+        self.assertTrue(res["ok"], res)
+        self.assertFalse(res["delete_files"])
+        self.assertEqual(res["removed_item_ids"], [7, 8])
+        self.assertEqual(res["deleted"], [])
+
+
 class CancelCasTests(_RouteEnv):
     """#187 F-6: cancel is a compare-and-set."""
 
