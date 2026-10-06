@@ -85,7 +85,15 @@ class PlaylistParseCredentialAttachmentTests(unittest.TestCase):
         fake_yt_dlp = types.ModuleType("yt_dlp")
         fake_yt_dlp.YoutubeDL = mock.Mock(return_value=fake_ydl_instance)
 
+        import socket
+
+        def _public_dns(host, port, *a, **kw):
+            # SEC-2: the yt-dlp guard resolves allowlisted hosts; keep this
+            # test offline and deterministic.
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("142.250.0.1", port or 443))]
+
         with mock.patch.dict(sys.modules, {"yt_dlp": fake_yt_dlp}), \
+             mock.patch("socket.getaddrinfo", side_effect=_public_dns), \
              mock.patch.object(app_module._ytdlp_ready, "wait", return_value=True), \
              patch_app_family(app_module, "_apply_ytdlp_netrc") as mock_netrc, \
              app_module.app.test_request_context(

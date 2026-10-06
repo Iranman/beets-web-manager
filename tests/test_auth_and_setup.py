@@ -154,7 +154,7 @@ class AuthAndSetupTests(unittest.TestCase):
         self.assertFalse(me_logout.get_json()["authenticated"])
 
     def test_failed_login_rate_limit_returns_429_and_valid_login_recovers(self):
-        """Repeated bad logins receive 429, but correct credentials are not permanently locked out."""
+        """Repeated bad logins receive 429; correct credentials are refused while limited and work again after the window."""
         headers = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
         admin_pass = "correct horse battery staple"
         self.client.post("/api/setup/first-run", json={"username": "admin", "password": admin_pass}, headers=headers)
@@ -173,7 +173,16 @@ class AuthAndSetupTests(unittest.TestCase):
             self.assertEqual(limited.status_code, 429)
             self.assertIn("Retry-After", limited.headers)
 
-            recovered = self.client.post("/api/login", json={"username": "admin", "password": admin_pass}, headers=headers)
+            # SEC-3: while limited, even the correct password is refused
+            # (otherwise the limiter never slows a brute force) ...
+            still_limited = self.client.post("/api/login", json={"username": "admin", "password": admin_pass}, headers=headers)
+            self.assertEqual(still_limited.status_code, 429)
+
+            # ... and the correct password works again once the window passes.
+            import backend.auth_service as _auth_service
+            later = _auth_service.time.time() + 11
+            with mock.patch.object(_auth_service.time, "time", return_value=later):
+                recovered = self.client.post("/api/login", json={"username": "admin", "password": admin_pass}, headers=headers)
             self.assertEqual(recovered.status_code, 200)
             self.assertTrue(recovered.get_json()["ok"])
 

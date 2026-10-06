@@ -40,7 +40,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:stable
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -51,6 +51,10 @@ services:
       - TZ=Etc/UTC
       - BEETS_WEB_URL=http://beets:8337
       - BEETS_OUTBOUND_ALLOWLIST=beets:8337
+      # Container paths: must match the mount targets below.
+      - MUSIC_ROOT=/music
+      - DOWNLOADS_ROOT=/downloads
+      - BEETS_CONFIG=/config/config.yaml
     volumes:
       - ./beets:/config
       - /path/to/music:/music:ro
@@ -68,6 +72,8 @@ services:
 > - Update `/path/to/music` to point to your music library on the host.
 > - Update `/path/to/downloads` to point to your downloads or staging directory.
 > - `./beets` and `./web-manager` will be created automatically in your current directory for persistent configuration and application state.
+> - The Web Manager image tag comes from `BEETS_WEB_MANAGER_VERSION` (default `stable`). Set it in a `.env` file next to `docker-compose.yml` to pin an exact release such as `0.1.49`; see [Configuration](CONFIGURATION.md#1-host-compose-interpolation-only).
+> - Change only the **left** side of each volume (the host folder). The right side (`/music`, `/downloads`, `/config`) is the path inside the containers. Web Manager's `MUSIC_ROOT`/`DOWNLOADS_ROOT`/`BEETS_CONFIG` and Beets' own `directory:` refer to it. If you change a right side, change it in both services and set the matching variable (see `docs/CONFIGURATION.md`, "Configuration layers").
 
 ### Step 3: Start the stack
 
@@ -78,6 +84,10 @@ docker compose up -d
 ### Step 4: Open Beets Web Manager
 
 Open **`http://<server-ip>:8337`** in your browser. On your first visit, you will see the **First-Run Setup Wizard** where you can create your administrator username and password.
+
+### Step 5: Add your AcoustID application key
+
+Audio fingerprint lookups need your own free AcoustID application key; there is no built-in shared key. Register an application at <https://acoustid.org/new-application>, then set `ACOUSTID_API_KEY` in the stack `.env` (or in **System → Settings**) and recreate the `beets-web-manager` container. Until it is set, the System page and `/api/setup/status` report **AcoustID not configured**, and fingerprint evidence is reported as unavailable (never as "no match"), so imports that need it go to the review queue instead of being decided without it. `ACOUSTID_USER_KEY` (from your AcoustID account page) is only needed to submit fingerprints.
 
 ---
 
@@ -120,6 +130,7 @@ If you run Beets on a separate host (e.g. TrueNAS, Unraid, or another server) an
 1. Use [examples/docker-compose.external-beets.yml](../examples/docker-compose.external-beets.yml).
 2. Configure `BEETS_WEB_URL` (e.g. `http://192.168.1.50:8337`) and `BEETS_OUTBOUND_ALLOWLIST`.
 3. The remote Beets instance must already have its `web`/`webmanager` plugins enabled and provisioned — Web Manager cannot provision a plugin into a filesystem it does not mount.
+4. Without the shared `/config` mount Web Manager cannot read the integration key file. Copy the 64-hex key from the Beets host's `/config/.webmanager_api_key` into `BEETS_WEBMANAGER_API_KEY` (System page, or the Compose environment).
 
 ---
 
@@ -135,12 +146,15 @@ docker compose -f docker-compose.dev.yml up -d --build
 
 ## Upgrades
 
-To upgrade to the latest stable release:
+To upgrade to the latest stable release, back up first (see [Backups](../README.md#backups)), then:
 
 ```bash
 docker compose pull
 docker compose up -d
+docker compose restart beets   # load a new webmanager plugin version, if the release ships one
 ```
+
+Read the release's Upgrade Notes in [`CHANGELOG.md`](../CHANGELOG.md) before upgrading. The full upgrade, verification and rollback steps are in the README's [Upgrades](../README.md#upgrades) section.
 
 ---
 

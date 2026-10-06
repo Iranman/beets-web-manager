@@ -90,7 +90,7 @@ export function AlbumCleanupModal({
         // driven by the engine's own "mutated" flag, never guessed here by
         // matching substrings in the error text. "stale_plan" is the only
         // kind that may ever be presented as "nothing changed";
-        // "partial_mutation" means some file(s) were already deleted
+        // "partial_mutation" means the library was already changed
         // before the failure and must be shown as a distinct, more urgent
         // state, never folded into the same reassuring copy.
         setErrorMsg(res.error || 'Apply failed.');
@@ -148,12 +148,12 @@ export function AlbumCleanupModal({
             <div className="flex items-start justify-between gap-3 border-b border-graphite-800 pb-3">
               <div>
                 <DialogTitle className="text-lg font-semibold text-zinc-100">
-                  Delete Album Files &amp; Database Records
+                  Remove Album from Library
                 </DialogTitle>
                 <p className="mt-0.5 text-xs text-zinc-400">
-                  Review the engine's plan before confirming. This deletes every track file Beets has
-                  catalogued for this album and removes its database records -- it does not detect or
-                  remove duplicates selectively.
+                  Review the engine's plan before confirming. This removes the album and its track
+                  records from the Beets library. The audio files stay on disk -- nothing is deleted.
+                  It does not detect or remove duplicates selectively.
                 </p>
               </div>
               <Button size="small" variant="outlined" onClick={onClose}>
@@ -202,18 +202,16 @@ export function AlbumCleanupModal({
                   </div>
                 </div>
 
-                {/* Reversibility Status Banner. Album Cleanup is always
-                    IRREVERSIBLE today (execute_album_cleanup_apply unlinks
-                    files and deletes DB rows directly, with no quarantine/
-                    backup step) -- there is deliberately no "Recoverable"
-                    branch here to describe. Reintroduce one only once a
-                    real, tested recovery model exists for this mutation
-                    family; a dead branch describing a capability that
-                    cannot occur is itself a way to accidentally lie later. */}
+                {/* Reversibility Status Banner. planAlbumCleanup sends no
+                    delete_files, so the plan is row-only (#184): Beets rows
+                    are removed, files stay on disk. The row removal itself
+                    has no automatic rollback -- there is deliberately no
+                    "Recoverable" branch here. */}
                 <Alert severity="warning">
-                  <strong className="font-semibold">Irreversible</strong> — This will permanently
-                  delete every catalogued track file for this album and remove its database records.
-                  There is no rollback or quarantine for this operation.
+                  <strong className="font-semibold">Irreversible</strong> — This will remove the
+                  album and its track records from the Beets library. The audio files are kept on
+                  disk. There is no automatic rollback; to get the album back into the library,
+                  re-import its files.
                 </Alert>
 
                 {/* Before / After Diff */}
@@ -224,21 +222,19 @@ export function AlbumCleanupModal({
                   <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs">
                     <div className="rounded border border-rose-900/40 bg-rose-950/20 p-2 text-rose-200">
                       <div className="font-semibold text-rose-300 mb-1">Before Cleanup</div>
-                      <div>• {plan.file_count} track audio file(s) on disk</div>
                       <div>• 1 Beets album database record</div>
                       <div>• Track item DB rows for album_id {albumId}</div>
+                      <div>• Audio files on disk</div>
                     </div>
                     <div className="rounded border border-emerald-900/40 bg-emerald-950/20 p-2 text-emerald-200">
                       <div className="font-semibold text-emerald-300 mb-1">After Cleanup</div>
-                      <div>• Track files deleted from disk</div>
-                      <div>• Album & item DB rows deleted</div>
-                      <div>• Album directory removed only if nothing else remains in it</div>
+                      <div>• Album & item DB rows removed from the library</div>
+                      <div>• Audio files kept on disk, unchanged</div>
                     </div>
                   </div>
                   <p className="mt-2 text-[0.7rem] text-zinc-500">
-                    Only the track files Beets has catalogued for this album are deleted. Artwork,
-                    .cue/.log files, booklets, and any other non-catalogued files in the album
-                    directory are left in place -- if any remain, the directory itself is not removed.
+                    No files are deleted or moved. The album directory, its audio files, artwork,
+                    and any other files in it stay where they are.
                   </p>
                 </div>
 
@@ -322,8 +318,13 @@ export function AlbumCleanupModal({
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/50 p-3 text-xs space-y-1.5">
                   <div className="font-semibold text-zinc-200">Execution Summary:</div>
                   <div className="text-zinc-400">
-                    • Deleted file(s): {applyResult.deleted?.length || 0}
+                    • Track row(s) removed from the library: {applyResult.removed_item_ids?.length ?? 0}
                   </div>
+                  {applyResult.deleted?.length ? (
+                    <div className="text-zinc-400">• Deleted file(s): {applyResult.deleted.length}</div>
+                  ) : (
+                    <div className="text-zinc-400">• Audio files kept on disk</div>
+                  )}
                   {applyResult.moved?.length ? (
                     <div className="text-zinc-400">• Quarantined file(s): {applyResult.moved.length}</div>
                   ) : null}
@@ -361,7 +362,7 @@ export function AlbumCleanupModal({
                     </div>
                   ) : (
                     <p className="text-zinc-500">
-                      Rollback is unavailable for this transaction (contains irreversible file unlinks or DB deletions).
+                      Rollback is unavailable for this transaction: removed library rows cannot be restored automatically. The audio files are still on disk -- re-import them to add the album back.
                     </p>
                   )}
                 </div>
@@ -402,7 +403,7 @@ export function AlbumCleanupModal({
 
             {/* Step: Partial -- distinct from Stale. The Web Manager only
                 ever sets this when the engine's "mutated" flag confirms at
-                least one file was already irreversibly deleted before the
+                least one library change was already made before the
                 failure (see error_kind === 'partial_mutation' in
                 handleApply). This must never be presented as "nothing
                 changed," and blindly offering "Generate New Plan" here
@@ -416,9 +417,9 @@ export function AlbumCleanupModal({
                   {errorMsg}
                 </Alert>
                 <p className="text-xs text-zinc-400">
-                  Some file(s) for this album were already deleted before the operation stopped. The
-                  album's current state on disk and in the database may no longer match what was shown
-                  in the review step. Close this dialog and check the album before deciding what to do
+                  The library was already partly changed before the operation stopped. The album's
+                  current state in the database may no longer match what was shown in the review step.
+                  This cleanup does not delete audio files. Close this dialog and check the album before deciding what to do
                   next -- do not assume a new plan reflects a clean starting point.
                 </p>
                 <div className="flex justify-end gap-2 pt-2 border-t border-graphite-800">

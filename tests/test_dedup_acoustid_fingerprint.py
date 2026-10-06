@@ -72,8 +72,13 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         start = self.app_source.index('def album_deduplicate(aid):')
         end = self.app_source.index('@app.get("/api/albums/<int:aid>/duplicate-resolver")')
         dedup_album_source = self.app_source[start:end]
-        self.assertIn("_acoustid_fingerprint_match(_abs(d[\"path\"]), kept_abs)", dedup_album_source)
+        # Wave 0 (MI-3): positive same-recording proof is now REQUIRED (unknown
+        # evidence spares the copy) and removal goes through the reviewed
+        # duplicate cleanup (quarantine), never album maintenance.
+        self.assertIn("same_recording_proof(_abs(d[\"path\"]), kept_abs", dedup_album_source)
         self.assertIn("spared", dedup_album_source)
+        self.assertIn("_duplicate_cleanup.plan_reviewed_cleanup(", dedup_album_source)
+        self.assertNotIn("plan_album_maintenance(", dedup_album_source)
 
     def test_track_relabel_rejects_fingerprint_mismatch(self):
         # ARCH-003 Wave 33 continuation: _match_tracks_from_mb_shared no

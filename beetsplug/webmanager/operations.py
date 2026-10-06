@@ -1,6 +1,7 @@
 """Operation implementations for the WebManager Beets integration plugin."""
 
 import os
+import shutil
 import time
 import uuid
 import logging
@@ -173,7 +174,15 @@ def set_allowed_roots(roots: Optional[List[str]]):
 
 
 def get_allowed_roots() -> List[str]:
-    """Get configured allowed roots or defaults."""
+    """Effective allowed roots for path containment checks.
+
+    Precedence: runtime override > BEETS_ALLOWED_ROOTS env >
+    explicit ``webmanager.allowed_roots`` in config.yaml > derived default.
+    The derived default is Beets' own library ``directory`` plus the
+    configured import roots, so Beets stays the authority over where its
+    library lives. DEFAULT_ALLOWED_ROOTS is used only if Beets' directory
+    cannot be read at all.
+    """
     global _CUSTOM_ALLOWED_ROOTS
     if _CUSTOM_ALLOWED_ROOTS is not None:
         return _CUSTOM_ALLOWED_ROOTS
@@ -191,7 +200,41 @@ def get_allowed_roots() -> List[str]:
                 return list(roots)
     except Exception:
         pass
-    return DEFAULT_ALLOWED_ROOTS
+    return _derived_allowed_roots()
+
+
+def get_library_directory() -> Optional[str]:
+    """Beets' configured library directory, or None when unreadable."""
+    try:
+        value = beets_config["directory"].as_filename()
+    except Exception:
+        return None
+    if not value or not str(value).strip():
+        return None
+    return str(value)
+
+
+def get_library_db_path() -> Optional[str]:
+    """Beets' configured library database path, or None when unreadable."""
+    try:
+        value = beets_config["library"].as_filename()
+    except Exception:
+        return None
+    if not value or not str(value).strip():
+        return None
+    return str(value)
+
+
+def _derived_allowed_roots() -> List[str]:
+    directory = get_library_directory()
+    if not directory:
+        return list(DEFAULT_ALLOWED_ROOTS)
+    roots: List[str] = []
+    for root in [directory] + list(get_import_roots()):
+        normalized = os.path.normpath(str(root))
+        if normalized and normalized not in roots:
+            roots.append(normalized)
+    return roots
 
 
 _CUSTOM_IMPORT_ROOTS: Optional[List[str]] = None
@@ -300,8 +343,33 @@ def get_status():
             "library_ready": lib_ready,
             "upstream_web_readonly": get_upstream_web_readonly(),
             "plugin_mutations_enabled": True,
+            # Added in plugin 1.6.0 (protocol 1.0, additive). Older plugins
+            # omit these; Web Manager reports them as "unknown".
+            "library_directory": get_library_directory(),
+            "library_path": get_library_db_path(),
+            "allowed_roots": list(get_allowed_roots()),
+            "import_roots": list(get_import_roots()),
+            "web_include_paths": get_web_include_paths(),
+            "fpcalc_available": _binary_available("fpcalc"),
+            "ffmpeg_available": _binary_available("ffmpeg"),
         }
     )
+
+
+def get_web_include_paths() -> Optional[bool]:
+    """Beets' own web.include_paths, or None when unreadable."""
+    try:
+        return bool(beets_config["web"]["include_paths"].get(bool))
+    except Exception:
+        return None
+
+
+def _binary_available(name: str) -> bool:
+    """Whether an executable is on PATH inside the Beets container."""
+    try:
+        return shutil.which(name) is not None
+    except Exception:
+        return False
 
 
 @webmanager_bp.route("/operations/<string:op_id>", methods=["GET"])

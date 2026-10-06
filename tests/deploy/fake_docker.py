@@ -121,20 +121,78 @@ def cmd_image_inspect(args, state):
     return 0
 
 
-def _resolved_services(state, override_files):
+_VERSION_VAR_RE = re.compile(r"\$\{BEETS_WEB_MANAGER_VERSION(?::-([^}]*))?\}")
+
+
+def _interpolate_version(image, compose_file):
+    """Resolve ${BEETS_WEB_MANAGER_VERSION[:-default]} the way Compose does:
+    process environment first, then the .env next to the Compose file, then
+    the default."""
+    m = _VERSION_VAR_RE.search(image)
+    if not m:
+        return image
+    value = os.environ.get("BEETS_WEB_MANAGER_VERSION", "")
+    env_file = os.path.join(os.path.dirname(compose_file), ".env")
+    if not value and os.path.exists(env_file):
+        for line in open(env_file, encoding="utf-8").read().splitlines():
+            if line.startswith("BEETS_WEB_MANAGER_VERSION="):
+                value = line.split("=", 1)[1].strip()
+    if not value:
+        value = m.group(1) or ""
+    return image[:m.start()] + value + image[m.end():]
+
+
+def _parse_service_images(content):
+    """{service: image} from a Compose/override file. Handles the block form
+    (`services:` / `  svc:` / `    image: x`) and the one-line flow form
+    (`services: {svc: {image: x}}`). Quotes are stripped."""
+    found = {}
+    for m in re.finditer(r"\{([\w][\w-]*):\s*\{image:\s*\"?([^\s,}\"]+)\"?", content):
+        found[m.group(1)] = m.group(2)
+    current = None
+    for line in content.splitlines():
+        svc_m = re.match(r"^  ([\w][\w-]*):\s*$", line)
+        if svc_m:
+            current = svc_m.group(1)
+            continue
+        img_m = re.match(r"^    image:\s*\"?([^\s\"]+)\"?\s*$", line)
+        if img_m and current:
+            found[current] = img_m.group(1)
+    return found
+
+
+def _resolved_services(state, files):
     services = {}
     for svc, cid in state["service_containers"].items():
         cont = state["containers"][cid]
         services[svc] = {"image": cont["Config"]["Image"]}
-    for f in override_files:
+    # The base Compose file only matters where it interpolates the version
+    # variable (literal images keep the running container's image, which is
+    # what the existing "wrong compose image" tests rely on).
+    if files:
+        try:
+            base = open(files[0], encoding="utf-8").read()
+        except OSError:
+            base = ""
+        for svc, image in _parse_service_images(base).items():
+            if svc in services and _VERSION_VAR_RE.search(image):
+                services[svc]["image"] = _interpolate_version(image, files[0])
+    for f in files[1:]:
         try:
             content = open(f, encoding="utf-8").read()
         except OSError:
             continue
-        img_m = re.search(r"image:\s*([^\s,}]+)", content)
-        svc_m = re.search(r"\{(\w[\w-]*):", content)
-        if img_m and svc_m and svc_m.group(1) in services:
-            services[svc_m.group(1)]["image"] = img_m.group(1)
+        for svc, image in _parse_service_images(content).items():
+            if svc in services:
+                services[svc]["image"] = image
+    for svc, env in (state.get("compose_environment") or {}).items():
+        if svc in services:
+            services[svc]["environment"] = dict(env)
+    # Extra per-service keys (command, labels, healthcheck, build, x-*) that a
+    # test wants to see in "compose config" output.
+    for svc, extra in (state.get("compose_service_extra") or {}).items():
+        if svc in services:
+            services[svc].update(json.loads(json.dumps(extra)))
     return services
 
 
@@ -151,16 +209,20 @@ def cmd_compose(args, state):
     rest = args[i + 1:]
 
     if sub == "ps":
-        # rest == ["-q", svc]
+        # rest == ["-q", svc] or ["-a", "-q", svc]. Like the real CLI,
+        # without -a a stopped container is not listed.
         svc = rest[-1]
         cid = state["service_containers"].get(svc, "")
-        if cid:
+        status = ((state["containers"].get(cid) or {}).get("State") or {}).get("Status", "running") if cid else ""
+        if cid and ("-a" in rest or status == "running"):
             print(cid)
         return 0
 
     if sub == "config":
-        services = _resolved_services(state, files[1:])
-        print(json.dumps({"services": services}))
+        services = _resolved_services(state, files)
+        top = dict(state.get("compose_top_extra") or {})
+        top["services"] = services
+        print(json.dumps(top))
         return 0
 
     if sub == "pull":
@@ -174,7 +236,7 @@ def cmd_compose(args, state):
         if state.get("up_should_fail"):
             print("fake_docker: simulated up failure", file=sys.stderr)
             return 1
-        services = _resolved_services(state, files[1:])
+        services = _resolved_services(state, files)
         resolved_image = services.get(svc, {}).get("image", "")
         cid = state["service_containers"][svc]
         cont = state["containers"][cid]
@@ -197,6 +259,9 @@ def cmd_compose(args, state):
         return 0
 
     if sub == "stop":
+        if state.get("stop_should_fail"):
+            sys.stderr.write("Error response from daemon: simulated stop failure\n")
+            return 1
         svc = rest[-1]
         cid = state["service_containers"].get(svc)
         if cid:
@@ -216,6 +281,17 @@ def cmd_compose(args, state):
     if sub == "restart":
         svc = rest[-1]
         cid = state["service_containers"].get(svc)
+        state.setdefault("restarted", []).append(svc)
+        # Restarting the engine re-imports the provisioned plugin files.
+        if svc == "beets" and state.get("plugin_version_after_restart"):
+            new_version = state["plugin_version_after_restart"]
+            if state.get("semantic_snapshot"):
+                state["semantic_snapshot"]["plugin_version"] = new_version
+            for snap in state.get("semantic_snapshots") or []:
+                snap["plugin_version"] = new_version
+        if svc == "beets" and state.get("digest_after_restart"):
+            if state.get("semantic_snapshot"):
+                state["semantic_snapshot"]["digest"] = state["digest_after_restart"]
         if cid:
             if state.get("never_healthy"):
                 state["containers"][cid]["State"] = {"Status": "running"}

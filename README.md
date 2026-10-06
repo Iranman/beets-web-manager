@@ -61,7 +61,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:stable
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -154,7 +154,7 @@ Key variables include:
 - `OPENAI_API_KEY` or compatible provider key: **optional** AI metadata features — see [How AI Matching Works](#how-ai-matching-works).
 - `PLEX_URL` and `PLEX_TOKEN`: Plex sync and refresh integration (optional).
 - `LIDARR_URL` and `LIDARR_API_KEY`: wanted-music and Arr integration (optional).
-- `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: optional — AcoustID lookups work without a key via a shared, rate-limited test key.
+- `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: your own AcoustID application key (https://acoustid.org/new-application). Required for fingerprint lookups; without it AcoustID is reported as not configured and fingerprint evidence is unavailable.
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
 
 ### Required vs. optional integrations
@@ -163,7 +163,7 @@ Key variables include:
 | ----------- | ----------- | ----- |
 | Beets | Required | Core music library engine; runs in the same Compose stack |
 | MusicBrainz | Built-in | Public metadata API used for release and recording matching |
-| AcoustID | Optional | Audio fingerprint matching and safety verification |
+| AcoustID | Recommended (needs your own application key) | Audio fingerprint matching and safety verification |
 | Plex | Optional | Media server sync and playlist synchronization |
 | SLSKD | Optional | Missing-track acquisition via Soulseek |
 | AI (OpenAI / OpenRouter) | Optional | Enhancement for candidate metadata ranking |
@@ -284,12 +284,31 @@ Generates a few short, self-synthesized sine-wave WAV files (not copies of any r
 
 ## Backups
 
+`scripts/backup.sh` and `scripts/restore.sh` are plain bash scripts you run on the Docker host. Copy them into your stack directory (the one with `docker-compose.yml`), or run them from a clone of this repository and pass the folders explicitly.
+
 ```bash
-./scripts/backup.sh              # writes ./backups/beets-backup-<timestamp>.tar.gz
-./scripts/restore.sh <file.tar.gz>
+# From the stack directory: backs up ./beets and ./web-manager into ./backups/
+./backup.sh
+
+# Or name the folders (the host folders mounted at /config and /web-manager-data)
+./backup.sh --beets-config /srv/stack/beets --web-manager-data /srv/stack/web-manager --out /srv/backups
 ```
 
-Back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin configuration, and web-manager state files under `/config` before upgrades or migrations — **not** your music library, which should be backed up separately with storage/snapshot tooling.
+A backup holds:
+
+- the Beets library database (`musiclibrary.blb`), copied with SQLite's online backup API so it is consistent while Beets runs. This needs the `sqlite3` command or `python3` on the host. Without either, stop Beets first (`docker compose stop beets`) and pass `--beets-stopped`.
+- Beets `config.yaml`, `beetsplug/` and the plugin key file;
+- Web Manager's whole state folder (`/web-manager-data`): settings, login, API token, session key and the transaction audit trail.
+
+It does **not** include your music files; back those up with your storage's snapshot tooling. The archive contains secrets and is written with mode 600.
+
+To restore, stop both containers, restore, and start them again. Files the restore replaces are moved to `.pre-restore-<timestamp>/` in the same folder, never deleted:
+
+```bash
+docker compose stop
+./restore.sh backups/beets-backup-<timestamp>.tar.gz      # add --beets-config/--web-manager-data if not ./beets and ./web-manager
+docker compose up -d
+```
 
 ## Manual Beets CLI
 
@@ -308,30 +327,39 @@ For mutating operations (`beet import`, `beet move`, `beet write`, etc.), prefer
 
 Upgrading the **Beets image version** specifically (bumping the `beets` service's tag, not just recreating the same version) needs the additional backup/verification/rollback steps in `docs/BEETS_ENGINE_MIGRATION.md` — newer Beets releases can perform an automatic, one-time, non-reversible database schema migration on first open.
 
+Read the release's **Upgrade Notes** in [`CHANGELOG.md`](CHANGELOG.md) or on the GitHub release page first.
+
 ```bash
-# 1. Back up config and library
-./scripts/backup.sh
+# 1. Back up the library database, Beets config and Web Manager state
+./backup.sh
 
 # 2. Pull the new images
 docker compose pull
 
-# 3. Re-create and restart the stack
+# 3. Re-create the stack
 docker compose up -d
 
-# 4. Verify Beets and Web Manager health
+# 4. A new Web Manager version can ship a new webmanager plugin. Beets loads
+#    plugin code only when it starts, so restart it once after the upgrade:
+docker compose restart beets
+
+# 5. Verify
 docker compose exec beets beet version
-curl -s http://127.0.0.1:8337/api/health
+curl -s http://127.0.0.1:8337/health/live      # reports the running Web Manager version
 curl -s http://127.0.0.1:8337/health/ready
-curl -s http://127.0.0.1:8337/api/setup/status
+curl -s http://127.0.0.1:8337/api/setup/status  # "blocking_reasons" should be empty
 ```
 
 ### Rollback
 
-If a rollback is required, restore the prior image tags and `/config` backup:
+Put the previous version back in the `image:` line of `beets-web-manager` (for example `ghcr.io/iranman/beets-web-manager:0.1.48` instead of `:stable`), restore the backup you made before upgrading, and start again:
 
 ```bash
-./scripts/restore.sh ./backups/beets-backup-<timestamp>.tar.gz
+docker compose stop
+./restore.sh backups/beets-backup-<timestamp>.tar.gz
 docker compose up -d --force-recreate
+docker compose restart beets     # load the previous plugin version
+curl -s http://127.0.0.1:8337/health/live   # confirm the version
 ```
 
 ## Support Beets Web Manager

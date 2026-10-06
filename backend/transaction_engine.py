@@ -569,6 +569,17 @@ class TransactionStore:
                     tx[key] = value
             return self._write(tx)
 
+    def transition(self, transaction_id: str, expected_status: str, new_status: str,
+                   **updates: Any) -> Optional[Dict[str, Any]]:
+        """Compare-and-set status change: move ``expected_status`` ->
+        ``new_status`` (plus ``updates``) atomically under the store lock.
+        Returns None, changing nothing, when the current status differs."""
+        with self._lock:
+            tx = self._read(transaction_id)
+            if tx.get("status") != _status(str(expected_status)):
+                return None
+            return self.update(transaction_id, status=new_status, **updates)
+
     def attach_job(self, transaction_id: str, job_id: str) -> Dict[str, Any]:
         return self.update(transaction_id, originating_job=job_id, metadata={"job_id": job_id})
 

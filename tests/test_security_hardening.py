@@ -59,7 +59,8 @@ class SecurityHardeningTests(unittest.TestCase):
 
     def test_rate_limit_identity_does_not_trust_spoofed_proxy_headers(self):
         self.assertIn("def _request_client_identity", APP)
-        self.assertIn("direct_peer_is_trusted(peer, _trusted_proxy_cidrs())", APP)
+        self.assertIn("direct_peer_is_trusted(peer, trusted)", APP)
+        self.assertIn("for hop in reversed(hops):", APP)  # SEC-4: right-to-left XFF walk
         self.assertIn("BEETS_TRUSTED_PROXIES", APP)
         self.assertIn("X-Forwarded-For", APP)
         self.assertIn("X-Real-IP", APP)

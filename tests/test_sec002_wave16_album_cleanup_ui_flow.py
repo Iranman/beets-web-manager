@@ -72,7 +72,7 @@ class Wave16RouteDelegationTests(unittest.TestCase):
         data = resp.get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["operation_id"], "txn_1700000000_abcdef012345")
-        mock_plan.assert_called_once_with(42)
+        mock_plan.assert_called_once_with(42, delete_files=False, reason="")  # row-only by default (LT-4)
 
     @patch("app.composite_workflows.plan_album_cleanup")
     def test_plan_album_cleanup_engine_unreachable(self, mock_plan):

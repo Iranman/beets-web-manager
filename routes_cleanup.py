@@ -535,7 +535,7 @@ def clean_no_audio_folders_delete():
     payload = request.get_json(silent=True) or {}
     root = (payload.get("root") or str(MUSIC_ROOT)).strip()
     paths = payload.get("paths") or []
-    dry_run = bool(payload.get("dry_run", True))
+    dry_run = payload.get("dry_run", True) is not False
     if not isinstance(paths, list) or not paths:
         return jsonify({"ok": False, "error": "paths required"}), 400
     try:
@@ -545,10 +545,16 @@ def clean_no_audio_folders_delete():
     if dry_run:
         log: List[str] = []
         result = _delete_no_audio_folders(root, paths, dry_run=True, log=log)
-        return jsonify(result)
+        return jsonify(result), (200 if result.get("ok") else 400)
+    if payload.get("confirm") is not True:
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "Deleting folders needs explicit confirmation (confirm: true) after a dry run."}), 400
 
     def _do(log, cancel_event=None):
-        return _delete_no_audio_folders(root, paths, dry_run=False, log=log)
+        result = _delete_no_audio_folders(root, paths, dry_run=False, log=log)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "Folder deletion failed.")
+        return result
 
     job = jobs.start_python(_do, label="Clean empty/no-audio folders")
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -1089,14 +1095,21 @@ def clean_rgid_group_send_to_repair():
 def clean_remove_orphaned_items():
     payload = request.get_json(silent=True) or {}
     raw_ids = payload.get("item_ids") or []
-    dry_run = bool(payload.get("dry_run", True))
+    dry_run = payload.get("dry_run", True) is not False
     if not isinstance(raw_ids, list):
         return jsonify({"ok": False, "error": "item_ids must be a list"}), 400
     item_ids = [int(i) for i in raw_ids if str(i).isdigit()]
+    if not item_ids:
+        return jsonify({"ok": False, "code": "empty_selection",
+                        "error": "item_ids is empty; nothing to remove."}), 400
 
     def _do(log, cancel_event=None):
-        log.append(f"{'Dry run: ' if dry_run else ''}Removing orphaned library item rows")
-        return _clean_remove_orphaned_items(item_ids, dry_run=dry_run, log=log)
+        log.append(f"{'Dry run: ' if dry_run else ''}Removing DB rows of items whose files are missing "
+                   "(files are never deleted)")
+        result = _clean_remove_orphaned_items(item_ids, dry_run=dry_run, log=log)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "Orphaned-item cleanup was refused.")
+        return result
 
     job = jobs.start_python(_do, label="Clean orphaned library items")
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -1106,7 +1119,7 @@ def clean_remove_orphaned_items():
 def clean_remove_empty_albums():
     payload = request.get_json(silent=True) or {}
     raw_ids = payload.get("album_ids") or []
-    dry_run = bool(payload.get("dry_run", True))
+    dry_run = payload.get("dry_run", True) is not False
     if not isinstance(raw_ids, list):
         return jsonify({"ok": False, "error": "album_ids must be a list"}), 400
     album_ids = [int(i) for i in raw_ids if str(i).isdigit()]
@@ -1193,24 +1206,34 @@ def clean_album_tracks_remove():
     payload = request.get_json(silent=True) or {}
     album_id = int(payload.get("album_id") or 0)
     item_ids = payload.get("item_ids") or []
-    dry_run = bool(payload.get("dry_run", True))
-    delete_files = bool(payload.get("delete_files", True))
-    clean_empty_folders = bool(payload.get("clean_empty_folders", False))
+    dry_run = payload.get("dry_run", True) is not False
+    # Files are never deleted by this route: selected tracks go to the engine
+    # quarantine (restorable). delete_files is accepted for compatibility only.
+    delete_files = False
+    clean_empty_folders = False
     if not album_id:
         return jsonify({"ok": False, "error": "album_id required"}), 400
     if not isinstance(item_ids, list) or not item_ids:
         return jsonify({"ok": False, "error": "item_ids required"}), 400
+    if not dry_run and payload.get("confirm") is not True:
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "Removing tracks needs explicit confirmation (confirm: true) after a dry run."}), 400
 
     if dry_run:
         log: List[str] = []
-        summary = _remove_album_track_items(
-            album_id,
-            item_ids,
-            dry_run=True,
-            delete_files=delete_files,
-            clean_empty_folders=clean_empty_folders,
-            log=log,
-        )
+        try:
+            summary = _remove_album_track_items(
+                album_id,
+                item_ids,
+                dry_run=True,
+                delete_files=delete_files,
+                clean_empty_folders=clean_empty_folders,
+                log=log,
+            )
+        except RuntimeError as exc:
+            _app_logger.warning("Album track removal preview failed for album %s: %s", album_id, exc)
+            return jsonify({"ok": False, "dry_run": True, "code": "preview_failed",
+                            "error": "Could not preview the track removal; see server logs.", "log": log}), 400
         return jsonify({"ok": True, "dry_run": True, "summary": summary, "log": log})
 
     def _do(log, cancel_event=None):
@@ -1221,6 +1244,7 @@ def clean_album_tracks_remove():
             delete_files=delete_files,
             clean_empty_folders=clean_empty_folders,
             log=log,
+            approved_by="operator confirmed track removal (/api/clean/album-tracks/remove)",
         )
 
     job = jobs.start_python(_do, label=f"Remove bad tracks: album {album_id}")
@@ -1231,11 +1255,14 @@ def clean_album_tracks_remove():
 def clean_album_tracks_remove_batch():
     payload = request.get_json(silent=True) or {}
     groups = payload.get("groups") or []
-    dry_run = bool(payload.get("dry_run", False))
-    delete_files = bool(payload.get("delete_files", True))
-    clean_empty_folders = bool(payload.get("clean_empty_folders", False))
+    dry_run = payload.get("dry_run", True) is not False
+    delete_files = False  # never deletes: tracks go to the engine quarantine
+    clean_empty_folders = False
     if not isinstance(groups, list) or not groups:
         return jsonify({"ok": False, "error": "groups required"}), 400
+    if not dry_run and payload.get("confirm") is not True:
+        return jsonify({"ok": False, "code": "confirmation_required",
+                        "error": "Removing tracks needs explicit confirmation (confirm: true) after a dry run."}), 400
 
     clean_groups: List[Dict[str, Any]] = []
     for group in groups:
@@ -1279,15 +1306,23 @@ def clean_album_tracks_remove_batch():
             album_id = int(group["album_id"])
             item_ids = group["item_ids"]
             log.append(f"[{idx}/{len(clean_groups)}] album_id {album_id}: {len(item_ids)} track(s)")
-            summary = _remove_album_track_items(
-                album_id,
-                item_ids,
-                dry_run=dry_run,
-                delete_files=delete_files,
-                clean_empty_folders=clean_empty_folders,
-                log=log,
-            )
+            try:
+                summary = _remove_album_track_items(
+                    album_id,
+                    item_ids,
+                    dry_run=dry_run,
+                    delete_files=delete_files,
+                    clean_empty_folders=clean_empty_folders,
+                    log=log,
+                    approved_by="" if dry_run else "operator confirmed batch track removal",
+                )
+            except RuntimeError as exc:
+                log.append(f"  album_id {album_id}: {exc}")
+                summaries.append({"album_id": album_id, "ok": False, "error": str(exc)})
+                totals["failed"] = totals.get("failed", 0) + 1
+                continue
             summaries.append({"album_id": album_id, **summary})
+            totals["quarantined_files"] = totals.get("quarantined_files", 0) + int(summary.get("quarantined_files") or 0)
             totals["albums"] += 1
             totals["removed_db"] += int(summary.get("removed_db") or 0)
             totals["deleted_files"] += int(summary.get("deleted_files") or 0)
@@ -1296,11 +1331,11 @@ def clean_album_tracks_remove_batch():
                 totals["album_deleted"] += 1
         log.append(
             "Done: "
-            f"{totals['deleted_files']} file(s) deleted, "
-            f"{totals['removed_db']} DB row(s) removed, "
-            f"{totals['album_deleted']} empty album record(s) removed."
+            f"{totals.get('quarantined_files', 0)} file(s) {'would be ' if dry_run else ''}quarantined (kept, restorable), "
+            f"{totals['removed_db']} DB row(s), "
+            f"{totals.get('failed', 0)} album(s) refused."
         )
-        return {"ok": True, "dry_run": dry_run, "totals": totals, "albums": summaries}
+        return {"ok": not totals.get("failed"), "dry_run": dry_run, "totals": totals, "albums": summaries}
 
     job = jobs.start_python(_do, label="Remove bad tracks: batch")
     return jsonify({"ok": True, "job_id": job.job_id})
