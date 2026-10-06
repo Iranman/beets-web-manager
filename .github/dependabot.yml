@@ -5,6 +5,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      # Bump React and its types together; split PRs leave peer ranges out of sync.
+      react:
+        patterns:
+          - react
+          - react-dom
+          - "@types/react"
+          - "@types/react-dom"
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -20,3 +28,8 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 2
+    ignore:
+      # The frontend build stage tracks Node LTS (even majors). Odd majors are
+      # short-lived "Current" releases that never become LTS.
+      - dependency-name: node
+        versions: ["25.x", "27.x", "29.x", "31.x"]
