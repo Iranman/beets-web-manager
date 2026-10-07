@@ -117,9 +117,17 @@ the first half passes:
 6. **Re-check the image:** the tag must still point at the image ID that
    was pulled and verified in pre-flight (a moving `:latest` that changed in
    between stops the rollout with `image_tag_moved`). It is not pulled again.
-7. **Recreate only `beets-web-manager`** (`--no-deps --force-recreate`);
-   every other Compose service's container ID is snapshotted before and
-   after and asserted unchanged -- Plex, Lidarr, etc. are never touched.
+   With `:latest`, any stop before the recreate (and every dry run) points
+   the local `:latest` back at the image it named before the pull, so a
+   later plain `docker compose up -d` cannot start an image that was pulled
+   but not deployed.
+7. **Recreate only `beets-web-manager`** (`--no-deps --pull never
+   --force-recreate`, so `up` cannot fetch a tag that moved, e.g. through a
+   `pull_policy: always`); every other Compose service's container ID is
+   snapshotted before and after and asserted unchanged -- Plex, Lidarr, etc.
+   are never touched. If the recreated container still runs another image
+   than the verified one, it is stopped and the rollout fails with
+   `recreated_image_unverified`.
 8. **Post-deploy verification:**
    - take the online semantic snapshot again and assert counts and the
      identity digest are unchanged (the live main-file hash is logged for
@@ -257,7 +265,11 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    image was pruned meanwhile, it is first pulled back by the registry digest
    recorded in `previous-image.txt` and must have the recorded ID. A later
    plain `docker compose up -d` then keeps the previous image; the next
-   `docker compose pull` moves `:latest` forward again.
+   `docker compose pull` moves `:latest` forward again. When the old
+   container was created from another reference (for example a pinned
+   `:0.1.2`) and the Compose file now names `:latest`, `:latest` is re-tagged
+   to the previous image as well; "durable" is checked by the image ID the
+   Compose reference resolves to, not by the reference text.
 5. Recreates `beets-web-manager` on the previous image reference through a
    temporary Compose override file (`.rollback-override.*`, written next to
    the Compose file and removed afterwards). A stopped service is still
@@ -294,6 +306,7 @@ meaning gets a new code.
 | `image_version_label_mismatch` | `image-pull-verification` | the pulled `:<VERSION>` image's version label is not `VERSION` |
 | `image_revision_label_mismatch` | `image-pull-verification` | the revision label is not `EXPECTED_REVISION` |
 | `image_tag_moved` | `image-deployment` | the tag no longer points at the image verified in pre-flight |
+| `recreated_image_unverified` | `image-deployment` / `rollback-recreate` | the recreated container runs another image than the verified (or recorded previous) one; it was stopped |
 
 ### Backup and restore safety
 
@@ -314,7 +327,21 @@ through its final path:
   folder and lists, verifies and extracts only that copy, so the archive it
   checked is the archive it restores. If anything appears at a restored path
   during the restore, or a `.pre-restore-<timestamp>` folder it did not
-  create already exists, it stops and says so.
+  create already exists, it stops and says so;
+- a staging or keep folder sits in a folder the containers can write to, so
+  its name could be swapped for a link right after it is created. Both
+  tools `cd` into the folder, check that `pwd -P` is still the folder they
+  created and that they own it, and then copy, chmod and rename only
+  through `./` paths: the working directory is the folder itself, so a
+  later rename of its name cannot redirect anything;
+- every rename is GNU `mv -T`; `restore.sh` refuses to run on a system
+  whose `mv` lacks `-T`;
+- a file restored by `restore.sh` keeps the owner (uid:gid) of the file it
+  replaces, or of its folder when it is new, so the containers' `PUID`/`PGID`
+  can still read it (they also re-own their folders on start);
+- text from `/api/setup/status` (blocking reasons, reason codes, status) is
+  logged with control characters escaped (`\u000a` etc.), so it cannot
+  forge log lines.
 
 Someone who can rename entries in the target folder itself can still
 replace files there after the restore; the tools only guarantee that they

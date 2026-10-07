@@ -382,6 +382,63 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
         os.chmod(path, 0o755)
         return {"PATH": fakebin + os.pathsep + os.environ["PATH"]}
 
+    def _closed_live(self):
+        archive = self.backup("python")
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        return archive
+
+    def test_restore_refuses_a_staging_folder_swapped_for_a_link(self):
+        archive = self._closed_live()
+        victim = os.path.join(self.tmp, "host-file")
+        Path(victim).write_text("host-only-content", encoding="utf-8")
+        atk = os.path.join(self.tmp, "atk")
+        os.makedirs(atk)
+        os.symlink(victim, os.path.join(atk, "item"))
+        # A racer that can rename entries in the target folder swaps the
+        # fresh staging folder for a link to its own folder, whose "item"
+        # links to a host file.
+        env = self._shim("mktemp", f'case "$*" in *.restore-stage.*) d="$("{shutil.which("mktemp")}" "$@")"; '
+                                   f'mv "$d" "$d.away"; ln -s "{atk}" "$d"; echo "$d"; exit 0;; esac')
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False, env_extra=env)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("was replaced while the restore was running", res.stderr)
+        self.assertEqual(Path(victim).read_text(encoding="utf-8"), "host-only-content",
+                         "the restore copied through a swapped staging folder")
+        self.assertEqual(os.listdir(atk), ["item"])
+
+    def test_restore_refuses_a_keep_folder_swapped_for_a_link(self):
+        archive = self._closed_live()
+        victim_dir = os.path.join(self.tmp, "host-dir")
+        os.makedirs(victim_dir)
+        env = self._shim("mkdir", f'case "$*" in *.pre-restore-*) "{shutil.which("mkdir")}" "$@" || exit 1; '
+                                  f'k="${{@: -1}}"; mv "$k" "$k.away"; ln -s "{victim_dir}" "$k"; exit 0;; esac')
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False, env_extra=env)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("was replaced while the restore was running", res.stderr)
+        self.assertEqual(os.listdir(victim_dir), [], "a replaced file was moved through a swapped keep folder")
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "chown needs root")
+    def test_restored_files_keep_the_owner_of_what_they_replace(self):
+        archive = self._closed_live()
+        cfg = os.path.join(self.beets, "config.yaml")
+        os.chown(cfg, 1234, 1235)
+        os.chown(self.wm, 1000, 1001)
+        new_names = [n for n in os.listdir(self.wm) if os.path.isfile(os.path.join(self.wm, n))]
+        for name in new_names:
+            os.remove(os.path.join(self.wm, name))
+        self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm, "--yes", archive)
+        st = os.stat(cfg)
+        self.assertEqual((st.st_uid, st.st_gid), (1234, 1235), "config.yaml must keep its owner (PUID/PGID)")
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        restored = [n for n in new_names if os.path.exists(os.path.join(self.wm, n))]  # files in the backup
+        self.assertTrue(restored)
+        for name in restored:
+            st = os.stat(os.path.join(self.wm, name))
+            self.assertEqual((st.st_uid, st.st_gid), (1000, 1001), f"{name}: new files get the folder's owner")
+
     def test_restore_never_writes_through_a_link_planted_during_the_restore(self):
         archive = self.backup("python")
         self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")

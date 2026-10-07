@@ -24,6 +24,8 @@
 # into place, so a link planted in the target folder is never written
 # through. If anything appears at a restored path while the restore runs,
 # the restore stops (see "Backup and restore safety" in docs/TRUENAS_ROLLOUT.md).
+# A restored file keeps the owner of the file it replaces (else the owner of
+# its folder), so the containers' PUID/PGID can still read it. Needs GNU mv.
 set -euo pipefail
 
 BEETS_CONFIG_DIR="${BEETS_CONFIG_DIR:-./beets}"
@@ -31,7 +33,7 @@ WEB_MANAGER_DATA_DIR="${WEB_MANAGER_DATA_DIR:-./web-manager}"
 ASSUME_YES=0
 BACKUP_FILE=""
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -144,72 +146,101 @@ fi
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 
-# GNU mv -T renames onto exactly the path given, even if a link to a folder
-# was planted there. Other mv implementations rely on the checks below.
-MV_EXACT=()
-if mv --version >/dev/null 2>&1; then MV_EXACT=(-T); fi
+# Every rename below is `mv -T` (GNU coreutils): it renames onto exactly the
+# path given and replaces a link planted there instead of moving into the
+# folder it points at. Without it the restore cannot be made safe, so it stops.
+touch "${TMP_DIR}/mvt-a"
+mv -T -- "${TMP_DIR}/mvt-a" "${TMP_DIR}/mvt-b" 2>/dev/null \
+  || fail "this system's mv does not support -T (GNU coreutils) -- the restore needs it to rename files safely; run it on a Linux host"
+rm -f -- "${TMP_DIR}/mvt-b"
 
-# move_aside <dir> <name>: keep the current file/dir before replacing it.
-# The keep folder is created by this run (mkdir fails if anything is already
-# there) with umask 077, so nobody else can plant a link inside it.
+# pinned_cd <dir>: cd into a folder this run just created and refuse it if
+# its name was swapped (for a link or another folder) in the meantime. The
+# target folders may be writable by the containers' user, who can rename
+# entries in them; once the cwd is the folder itself, later renames of its
+# name no longer matter, so everything after this works on ./ paths.
+pinned_cd() {
+  local want="$1" parent
+  parent="$(cd -- "$(dirname -- "${want}")" && pwd -P)" || fail "${want} vanished while the restore was running -- stopped"
+  cd -- "${want}" 2>/dev/null && [ "$(pwd -P)" = "${parent}/$(basename -- "${want}")" ] && [ -O . ] \
+    || fail "${want} was replaced while the restore was running -- stopped"
+}
+
+# move_aside <dir> <name>: keep the current <dir>/<name> under
+# <dir>/.pre-restore-<stamp>/ before it is replaced, and print its owner
+# (uid:gid) so the restored copy can be given the same one. The keep folder
+# is created by this run (mkdir refuses an existing one) with umask 077.
+# Call it as $(move_aside ...): it changes directory.
 move_aside() {
-  local dir="$1" rel="$2" keep="$1/.pre-restore-${STAMP}"
+  local dir rel="$2" keep
+  dir="$(cd -- "$1" && pwd -P)" || fail "cannot open $1"
+  keep="${dir}/.pre-restore-${STAMP}"
   if [ -e "${dir}/${rel}" ] || [ -L "${dir}/${rel}" ]; then
     if [ ! -d "${keep}" ] || [ -L "${keep}" ] || [ ! -O "${keep}" ]; then
       mkdir "${keep}" || fail "${keep} already exists and was not created by this restore -- stopped"
     fi
-    mv ${MV_EXACT[@]+"${MV_EXACT[@]}"} "${dir}/${rel}" "${keep}/${rel}"
+    pinned_cd "${keep}"
+    mv -T -- "${dir}/${rel}" "./${rel}" || fail "could not move ${dir}/${rel} aside -- stopped"
+    if [ ! -L "./${rel}" ]; then stat -c '%u:%g' -- "./${rel}"; fi
   fi
 }
 
-# place <src> <dir> <name> [mode]: restore one file or folder as <dir>/<name>.
-# It is copied without following links into a private staging folder inside
-# <dir> (same filesystem, so the last step is a rename), re-checked there,
-# and renamed into place. Nothing is written through a path another user can
-# swap, and anything that appeared at <dir>/<name> after move_aside stops the
-# restore instead of being overwritten or followed.
+# place <src> <dir> <name> [mode] [owner]: restore one file or folder as
+# <dir>/<name>. It is copied without following links into a private 0700
+# staging folder inside <dir> (same filesystem, so the last step is a
+# rename), entered by pinned_cd so a swapped stage cannot redirect the copy,
+# re-checked, given [owner] (default: the owner of <dir>; only when running
+# as root) and [mode], then renamed onto exactly <dir>/<name>. Anything that
+# appeared at <dir>/<name> after move_aside stops the restore.
 place() {
-  local src="$1" dir="$2" name="$3" mode="${4:-}" stage
+  local src="$1" dir name="$3" mode="${4:-}" owner="${5:-}" stage
+  dir="$(cd -- "$2" && pwd -P)" || fail "cannot open $2"
+  [ -n "${owner}" ] || owner="$(stat -c '%u:%g' -- "${dir}")"
   stage="$(mktemp -d "${dir}/.restore-stage.XXXXXX")"
   STAGES+=("${stage}")
-  cp -RPp -- "${src}" "${stage}/item"
-  if [ -n "$(find "${stage}/item" ! -type f ! -type d -print -quit)" ]; then
-    fail "${src} is or contains a link or special file -- ${dir}/${name} was not restored"
-  fi
-  [ -z "${mode}" ] || chmod "${mode}" "${stage}/item"
-  if [ -e "${dir}/${name}" ] || [ -L "${dir}/${name}" ]; then
-    fail "${dir}/${name} appeared while the restore was running -- it was left as is and the restore stopped; check what else writes to ${dir}.
+  (
+    pinned_cd "${stage}"
+    cp -RPp -- "${src}" ./item || fail "could not copy ${src} -- ${dir}/${name} was not restored"
+    if [ -n "$(find ./item ! -type f ! -type d -print -quit)" ]; then
+      fail "${src} is or contains a link or special file -- ${dir}/${name} was not restored"
+    fi
+    if [ "$(id -u)" = 0 ]; then chown -R -- "${owner}" ./item || fail "could not set the owner of ${dir}/${name}"; fi
+    if [ -n "${mode}" ]; then chmod "${mode}" ./item || fail "could not set the mode of ${dir}/${name}"; fi
+    if [ -e "${dir}/${name}" ] || [ -L "${dir}/${name}" ]; then
+      fail "${dir}/${name} appeared while the restore was running -- it was left as is and the restore stopped; check what else writes to ${dir}.
   Files restored so far stay in place; what they replaced is in ${dir}/.pre-restore-${STAMP}/."
-  fi
-  mv ${MV_EXACT[@]+"${MV_EXACT[@]}"} "${stage}/item" "${dir}/${name}"
-  rmdir "${stage}"
+    fi
+    mv -T -- ./item "${dir}/${name}" || fail "could not rename the restored copy onto ${dir}/${name}"
+  ) || exit 1
+  rmdir -- "${stage}" 2>/dev/null || true
 }
 
 mkdir -p "${BEETS_CONFIG_DIR}"
 if [ -f "${SRC_BEETS}/musiclibrary.blb" ]; then
   # The -wal/-shm of the current database belong to it, not to the restored copy.
-  for f in musiclibrary.blb musiclibrary.blb-wal musiclibrary.blb-shm; do move_aside "${BEETS_CONFIG_DIR}" "$f"; done
-  place "${SRC_BEETS}/musiclibrary.blb" "${BEETS_CONFIG_DIR}" musiclibrary.blb
+  owner="$(move_aside "${BEETS_CONFIG_DIR}" musiclibrary.blb)"
+  for f in musiclibrary.blb-wal musiclibrary.blb-shm; do ( move_aside "${BEETS_CONFIG_DIR}" "$f" >/dev/null ) || exit 1; done
+  place "${SRC_BEETS}/musiclibrary.blb" "${BEETS_CONFIG_DIR}" musiclibrary.blb "" "${owner}"
   # Older backups also carried -wal/-shm copies.
   for f in musiclibrary.blb-wal musiclibrary.blb-shm; do
-    if [ -f "${SRC_BEETS}/$f" ]; then place "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}" "$f"; fi
+    if [ -f "${SRC_BEETS}/$f" ]; then place "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}" "$f" "" "${owner}"; fi
   done
 fi
 for f in config.yaml .webmanager_api_key; do
   if [ -f "${SRC_BEETS}/$f" ]; then
-    move_aside "${BEETS_CONFIG_DIR}" "$f"
-    place "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}" "$f" 600  # config.yaml and the plugin key hold credentials
+    owner="$(move_aside "${BEETS_CONFIG_DIR}" "$f")"
+    place "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}" "$f" 600 "${owner}"  # config.yaml and the plugin key hold credentials
   fi
 done
 if [ -d "${SRC_BEETS}/beetsplug" ]; then
-  move_aside "${BEETS_CONFIG_DIR}" beetsplug
-  place "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}" beetsplug
+  owner="$(move_aside "${BEETS_CONFIG_DIR}" beetsplug)"
+  place "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}" beetsplug "" "${owner}"
 fi
 if [ -d "${SRC_BEETS}/state" ]; then
   for f in "${SRC_BEETS}/state/"*.json; do
     [ -f "$f" ] || continue
-    move_aside "${BEETS_CONFIG_DIR}" "$(basename "$f")"
-    place "$f" "${BEETS_CONFIG_DIR}" "$(basename "$f")"
+    owner="$(move_aside "${BEETS_CONFIG_DIR}" "$(basename "$f")")"
+    place "$f" "${BEETS_CONFIG_DIR}" "$(basename "$f")" "" "${owner}"
   done
 fi
 
@@ -218,8 +249,8 @@ if [ -n "${SRC_WM}" ] && [ -d "${SRC_WM}" ]; then
   for entry in "${SRC_WM}"/* "${SRC_WM}"/.[!.]*; do
     [ -e "${entry}" ] || continue
     name="$(basename "${entry}")"
-    move_aside "${WEB_MANAGER_DATA_DIR}" "${name}"
-    place "${entry}" "${WEB_MANAGER_DATA_DIR}" "${name}"
+    owner="$(move_aside "${WEB_MANAGER_DATA_DIR}" "${name}")"
+    place "${entry}" "${WEB_MANAGER_DATA_DIR}" "${name}" "" "${owner}"
   done
 fi
 

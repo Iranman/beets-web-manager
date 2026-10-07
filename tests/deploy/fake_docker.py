@@ -292,6 +292,15 @@ def cmd_compose(args, state):
             return 1
         services = _resolved_services(state, files)
         resolved_image = services.get(svc, {}).get("image", "")
+        state.setdefault("up_args", []).append(rest)
+        # state["registry_at_up"]: a tag that moves when `up` pulls (a
+        # `pull_policy: always`, or a concurrent pull), unless --pull never
+        # (state["up_ignores_pull_never"] models a pull that lands anyway).
+        pull_never = ("--pull" in rest and rest[rest.index("--pull") + 1] == "never"
+                      and not state.get("up_ignores_pull_never"))
+        moved = (state.get("registry_at_up") or {}).get(resolved_image)
+        if moved is not None and not pull_never:
+            _store_image(state, resolved_image, moved)
         cid = state["service_containers"][svc]
         cont = state["containers"][cid]
         cont["Config"]["Image"] = resolved_image

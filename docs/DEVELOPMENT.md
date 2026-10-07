@@ -63,7 +63,7 @@ Releases are container images, never file copies onto a host:
 1. Merge the change to `main` with CI green (including CodeQL).
 2. A release PR retitles `## Unreleased` in `CHANGELOG.md` to `## vX.Y.Z - YYYY-MM-DD` and bumps `VERSION` (CI's `release-metadata` job checks they agree). The versioning policy (minor vs patch) is in `CONTRIBUTING.md`.
 3. Pushing the annotated tag `vX.Y.Z` makes `.github/workflows/docker-build.yml` publish `ghcr.io/iranman/beets-web-manager:X.Y.Z` (labels `org.opencontainers.image.version`/`revision`) and then create the GitHub Release from the CHANGELOG section.
-4. Deploy a numbered tag, never `latest`/`stable`/`edge`. For the maintainer's TrueNAS stack that is `scripts/deploy_truenas_web_manager.sh` (dry run, then the real run; `--rollback <backup dir>` to undo), described in `docs/TRUENAS_ROLLOUT.md`. For a plain Compose install it is the README's Upgrades section.
+4. Deploy a numbered version: `VERSION` is always an exact `X.Y.Z`, never `latest`/`stable`/`edge`. The Compose file may name `:latest` (the shipped layout); the rollout script then deploys it only after verifying that its version label is `VERSION`. For the maintainer's TrueNAS stack that is `scripts/deploy_truenas_web_manager.sh` (dry run, then the real run; `--rollback <backup dir>` to undo), described in `docs/TRUENAS_ROLLOUT.md`. For a plain Compose install it is the README's Upgrades section.
 5. Verify out of band and report each fact separately: the image labels, `/health/live` version, `/api/setup/status` blocking reasons, library counts. A successful build or a healthy container is not proof that the right version is serving.
 
 Never copy raw local backup files, private config, generated caches, or unrelated dirty work into a deployment target.

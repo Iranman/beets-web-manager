@@ -1612,6 +1612,65 @@ class LatestTagDeployTests(LatestTagStackFixture):
         self.assertIn("Reason code:           compose_image_mismatch", res.stderr)
         self.assertEqual(Path(self.compose_file).read_bytes(), before)
 
+    def test_a_comment_naming_the_version_variable_does_not_make_a_pin_a_variable_layout(self):
+        pinned = self.REPO + ":0.1.3"
+        Path(self.compose_file).write_text(
+            "# Pin by setting BEETS_WEB_MANAGER_VERSION? No: edit the tag below.\n"
+            + Path(self.compose_file).read_text(encoding="utf-8").replace(":latest", ":0.1.3"), encoding="utf-8")
+        st = self.load_state()
+        st["registry"][pinned] = self.new_entry()
+        self.save_state(st)
+        res = self.run_script("--dry-run")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("layout: pinned", res.stderr)
+
+    # --- N1: a pulled but undeployed :latest must not stay the local tag ---
+
+    def test_refused_deploy_points_local_latest_back_at_the_previous_image(self):
+        st = self.load_state()
+        st["registry"][self.LATEST] = self.new_entry(version="0.1.4")
+        self.save_state(st)
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           latest_image_not_requested_version", res.stderr)
+        self.assertEqual(self.load_state()["images"][self.LATEST]["Id"], "sha256:oldimageid",
+                         "a later plain 'docker compose up -d' must not start the refused image")
+
+    def test_dry_run_points_local_latest_back_at_the_previous_image(self):
+        res = self.run_script("--dry-run")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.load_state()["images"][self.LATEST]["Id"], "sha256:oldimageid")
+        self.assertIn("Re-tagged ghcr.io/iranman/beets-web-manager:latest back to sha256:oldimageid", res.stderr)
+
+    # --- S3: `up` must not pull a tag that moved after verification -------
+
+    def evil_entry(self):
+        return {"Id": "sha256:evilimageid", "RepoDigests": [],
+                "Config": {"Labels": {"org.opencontainers.image.version": "6.6.6",
+                                      "org.opencontainers.image.revision": "e" * 40}}}
+
+    def test_recreate_never_pulls_a_tag_that_moved_at_up_time(self):
+        st = self.load_state()
+        st["registry_at_up"] = {self.LATEST: self.evil_entry()}  # pull_policy: always / concurrent pull
+        self.save_state(st)
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.webmgr()["Image"], "sha256:goodimageid")
+        st = self.load_state()
+        self.assertTrue(all("--pull" in a and a[a.index("--pull") + 1] == "never" for a in st["up_args"]), st["up_args"])
+
+    def test_an_unverified_image_after_recreate_is_stopped_not_left_running(self):
+        st = self.load_state()
+        st["registry_at_up"] = {self.LATEST: self.evil_entry()}
+        st["up_ignores_pull_never"] = True
+        self.save_state(st)
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           recreated_image_unverified", res.stderr)
+        cont = self.webmgr()
+        self.assertEqual(cont["Image"], "sha256:evilimageid")
+        self.assertEqual(cont["State"]["Status"], "exited", "the unverified image must not keep running")
+
 
 class LatestTagRollbackTests(LatestTagStackFixture):
     def deploy(self):
@@ -1634,6 +1693,36 @@ class LatestTagRollbackTests(LatestTagStackFixture):
         self.assertIn("rollback is durable", res.stderr)
         self.assertIn("/health/live reports version 0.1.2", res.stderr)
         self.assert_compose_and_env_untouched()
+
+    def test_migration_from_pinned_container_to_literal_latest_then_rollback(self):
+        # B1: the old container was created from :0.1.2 (pinned layout); the
+        # operator then switched the Compose file to the shipped :latest.
+        st = self.load_state()
+        pinned = self.REPO + ":0.1.2"
+        st["images"] = {pinned: self.old_entry()}
+        st["containers"]["cid-webmgr"]["Config"]["Image"] = pinned
+        self.save_state(st)
+        bdir = self.deploy()
+        res = self.run_script("--rollback", bdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        st = self.load_state()
+        self.assertEqual(st["images"][self.LATEST]["Id"], "sha256:oldimageid",
+                         "a later plain 'docker compose up -d' must stay on the previous image")
+        self.assertEqual(self.webmgr()["Image"], "sha256:oldimageid")
+        self.assertIn("rollback is durable", res.stderr)
+        self.assertIn("/health/live reports version 0.1.2", res.stderr)
+        self.assertIn("running plugin is", res.stderr)  # refresh_engine_plugin_if_stale ran
+        self.assert_compose_and_env_untouched()
+
+    def test_failed_rollback_does_not_claim_nothing_to_roll_back(self):
+        bdir = self.deploy()
+        st = self.load_state()
+        st["up_should_fail"] = True
+        self.save_state(st)
+        res = self.run_script("--rollback", bdir)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("nothing to roll back", res.stderr)
+        self.assertIn("the rollback itself failed", res.stderr)
 
     def test_rollback_pulls_a_pruned_previous_image_back_by_digest(self):
         bdir = self.deploy()
@@ -1831,6 +1920,52 @@ class RollbackCopyRaceTests(RolloutScriptTestBase):
         self.assertEqual([n for n in os.listdir(engine) if n.startswith(".rollback-stage.")], [])
 
 
+    def _stage_swap(self, victim_target):
+        """A `mktemp` wrapper that does what a racer owning the target folder
+        can do the moment a staging folder exists: rename it away and plant a
+        link to an attacker folder whose entries link to a host path."""
+        atk = os.path.join(self.tmp, "atk")
+        os.makedirs(atk, exist_ok=True)
+        for name in ("item", "new"):
+            os.symlink(victim_target, os.path.join(atk, name))
+        return (f'mktemp() {{ local d; d="$(command mktemp "$@")" || return 1; '
+                f'case "$d" in */.rollback-stage.*) command mv "$d" "$d.away"; command ln -s "{atk}" "$d";; esac; '
+                f'printf "%s\\n" "$d"; }}\n')
+
+    def test_copy_regular_file_refuses_a_staging_folder_swapped_for_a_link(self):
+        victim = self._victim()
+        src = os.path.join(self.tmp, "token.bak")
+        Path(src).write_text("pre-rollout-token", encoding="utf-8")
+        dst = os.path.join(self.tmp, "data", "auth_token")
+        os.makedirs(os.path.dirname(dst))
+        Path(dst).write_text("current", encoding="utf-8")
+        res = self.run_snippet(self._stage_swap(victim)
+                               + f'if copy_regular_file "{src}" "{dst}" 600; then echo COPIED; else echo REFUSED; fi')
+        self.assertIn("REFUSED", res.stdout, res.stderr)
+        self.assertEqual(Path(victim).read_text(encoding="utf-8"), "host-only-content",
+                         "the copy was redirected through a swapped staging folder")
+        self.assertEqual(Path(dst).read_text(encoding="utf-8"), "current")
+
+    def test_beetsplug_restore_refuses_a_staging_folder_swapped_for_a_link(self):
+        victim_dir = os.path.join(self.tmp, "host-dir")
+        os.makedirs(victim_dir)
+        engine = os.path.join(self.tmp, "engine")
+        data = os.path.join(self.tmp, "data")
+        rb = os.path.join(self.tmp, "rollback")
+        os.makedirs(os.path.join(engine, "beetsplug", "webmanager"))
+        os.makedirs(data)
+        os.makedirs(os.path.join(rb, "beets-config", "beetsplug", "webmanager"))
+        Path(rb, "beets-config", "beetsplug", "webmanager", "version.py").write_text("v = 1\n", encoding="utf-8")
+        Path(engine, "beetsplug", "webmanager", "version.py").write_text("v = 2\n", encoding="utf-8")
+        res = self.run_snippet(self._stage_swap(victim_dir)
+                               + f'ENGINE_CONFIG_SRC="{engine}"; WEBMGR_DATA_SRC="{data}"; ROLLBACK_DIR="{rb}"\n'
+                               "restore_state_files")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("was replaced while the rollback ran", res.stderr)
+        self.assertEqual(os.listdir(victim_dir), [], "the rollback wrote into a swapped staging folder")
+        self.assertEqual(Path(engine, "beetsplug", "webmanager", "version.py").read_text(encoding="utf-8"), "v = 2\n")
+
+
 @unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
 class SymlinkSafetyTests(VersionedStackFixture):
     """The script runs as root: a link planted in a container-writable data
@@ -1929,6 +2064,19 @@ class SetupStatusGateTests(VersionedStackFixture):
         self.assertIn("(reason_code=downloads_not_writable)", res.stderr)
         self.assertIn("Reason code:           setup_new_blocking_reason", res.stderr)
         self.assertIn("Failed stage:          setup-status-after", res.stderr)
+
+    def test_control_characters_in_reasons_cannot_forge_log_lines(self):
+        forged = "x\n[00:00:00] === Rollback complete (forged) ===\x1b[31m\tcode-in-message"
+        res = self.run_script(env=self.env(
+            curl_blocking_reasons_by_image={self.GOOD_IMAGE: [forged]},
+            curl_blocking_reason_codes_by_image={self.GOOD_IMAGE: ["a\tb\nc"]}))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("\x1b", res.stderr)
+        self.assertFalse([l for l in res.stderr.splitlines() if l.startswith("[00:00:00] === Rollback complete (forged)")],
+                         "a reason must not start a log line of its own")
+        (line,) = [l for l in res.stderr.splitlines() if "NEW setup blocking reason after deploy" in l]
+        self.assertIn("x\\u000a[00:00:00] === Rollback complete (forged) ===\\u001b[31m\\u0009code-in-message", line)
+        self.assertIn("(reason_code=a\\u0009b\\u000ac)", line)
 
     def test_previous_version_without_codes_falls_back_to_message_text(self):
         reason = "Music library path /music is not accessible"
