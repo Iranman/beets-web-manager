@@ -18,7 +18,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached, _normalize_albumartist, same_recording_proof
+from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached_outcome, acoustid_failure_status, _normalize_albumartist, same_recording_proof
 import backend.duplicate_cleanup as _duplicate_cleanup
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
@@ -921,7 +921,10 @@ def ai_suggest(iid):
     _mb_t, _mb_a = _clean_for_mb(search_title, search_artist)
 
     # ── 1. AcoustID fingerprint (most reliable) ───────────────────────────────
-    acoustid_cands = _acoustid_lookup_cached(item_path) if item_path else []
+    # #252 NF-2: not asked (no key, rejected key, outage) is not "no match".
+    acoustid_lookup = _acoustid_lookup_cached_outcome(item_path) if item_path else None
+    acoustid_status = acoustid_failure_status(acoustid_lookup) if acoustid_lookup else ""
+    acoustid_cands = list(acoustid_lookup.data or []) if acoustid_lookup else []
 
     # ── 2. MusicBrainz text search ────────────────────────────────────────────
     # A MusicBrainz outage keeps the AcoustID evidence; the MB part is
@@ -940,7 +943,7 @@ def ai_suggest(iid):
 
     # Merge AcoustID + MB, deduplicate by mb_trackid (candidate generation
     # only -- the canonical evaluator decides, with the full hit set).
-    acoustid_hits = recording_review.acoustid_hits_for(item_path, acoustid_cands)
+    acoustid_hits = None if acoustid_status else recording_review.acoustid_hits_for(item_path, acoustid_cands)
     mb_candidates = recording_review.merge_recording_candidates(
         acoustid_cands, mb_text_cands, item_path=item_path,
         score_fn=lambda c: _score_track_ai_candidate(current, _mb_t, _mb_a, filename, c),
@@ -1200,7 +1203,9 @@ def ai_suggest(iid):
                         "evidence": evidence,
                         "acoustid_candidates": acoustid_cands,
                         "discogs_candidates": discogs_cands,
-                        "musicbrainz_unavailable": musicbrainz_unavailable})
+                        "musicbrainz_unavailable": musicbrainz_unavailable,
+                        "acoustid_unavailable": bool(acoustid_status),
+                        "acoustid_status": acoustid_status})
     except Exception as exc:
         _app_logger.warning("AI track suggestion failed: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not generate suggestions."})

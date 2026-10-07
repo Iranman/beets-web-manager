@@ -12,6 +12,13 @@ from backend.matching import AcoustIDStatus
 APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 
 
+def _answer(hits):
+    """A real AcoustID answer for synthetic hits (the lookup seam is typed)."""
+    from backend.provider_boundary import ProviderOutcome, ProviderResult
+    hits = list(hits or [])
+    return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if hits else ProviderOutcome.NO_RESULT, data=hits)
+
+
 def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lookup=None):
     names = {
         "_ALBUM_TRACK_PREFIX_RE",
@@ -57,7 +64,7 @@ def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lo
         # unavailable/ambiguous) can be exercised deterministically without
         # a real fingerprint/network call.
         "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
-        "_acoustid_lookup_cached": acoustid_lookup or (lambda _path: []),
+        "_acoustid_lookup_cached_outcome": lambda path: _answer((acoustid_lookup or (lambda _path: []))(path)),
     }
     return load_app_symbols(names, extra_ns=extra_ns)
 
@@ -403,9 +410,9 @@ class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
                 "_s": lambda value: str(value or ""),
                 "_album_item_position_hints": lambda item: (int(item.get("disc") or 1), int(item.get("track") or 0)),
                 "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
-                "_acoustid_lookup_cached": lambda _path: [
+                "_acoustid_lookup_cached_outcome": lambda _path: _answer([
                     {"mb_trackid": "rec-a-totally-unrelated-song", "title": "A Totally Unrelated Song", "score": 95}
-                ],
+                ]),
                 "_MB_TRACK_PREFLIGHT_MATCH_THRESHOLD": 0.82,
             }
             ns = load_app_symbols(names, extra_ns=extra_ns)

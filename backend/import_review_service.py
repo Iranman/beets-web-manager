@@ -18,7 +18,7 @@ from backend.import_reconciliation_service import _import_review_auto_job_for_ke
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _redact_security_text
 from helpers_mb import _fetch_mb_recording_details, _resolve_release_group_to_release, _mb_release_group_candidates
 from backend.beets_adapter import lib
-from backend.acoustid_service import _album_track_fingerprint_check, _album_track_norm
+from backend.acoustid_service import ACOUSTID_FAILURE_MESSAGES, _album_track_fingerprint_check, _album_track_norm
 from backend.slskd_service import _slskd_title_guess_from_name
 from backend.matching_service import _audio_position_from_path, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _preflight_match_ratio
 from backend.app_runtime import jobs
@@ -360,6 +360,10 @@ def _candidate_track_build_comparison(
     if not matched_count:
         if fingerprint_status_counts.get(AcoustIDStatus.CONFLICT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID matched a recording outside this Release Group."
+        elif any(fingerprint_status_counts.get(k) for k in ACOUSTID_FAILURE_MESSAGES):
+            # D5: "not checked" (no key, rejected key, outage) is never "no recording".
+            failure = next(k for k in ACOUSTID_FAILURE_MESSAGES if fingerprint_status_counts.get(k))
+            preflight_error = f"Fuzzy title matching failed; {ACOUSTID_FAILURE_MESSAGES[failure]}"
         elif fingerprint_status_counts.get(AcoustIDStatus.NO_RESULT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID lookup returned no recording."
         elif fingerprint_status_counts.get(AcoustIDStatus.UNAVAILABLE.value):
