@@ -256,9 +256,11 @@ def _start_metadata_apply_transaction(transaction_id: str):
             label=f"Apply metadata transaction {transaction_id}",
             metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
         )
-    except Exception:
+    except Exception as ex:
         transactions.update(transaction_id, status="Failed", logs=["The apply job could not be started."])
-        raise
+        # Fixed text (#220 DELTA-3): callers echo ValueError text with a 409;
+        # a start failure must reach the generic 500 handler instead.
+        raise RuntimeError("The apply job could not be started.") from ex
     transactions.attach_job(transaction_id, job.job_id)
     return job
 

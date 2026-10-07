@@ -53,6 +53,16 @@ const pageSize = 50;
 // Mirrors the backend's cancellable states (POST /api/transactions/<id>/cancel
 // returns 409 not_cancellable otherwise); the server stays the authority.
 const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
+// Mirrors the server's rollback gates (POST /api/transactions/<id>/rollback):
+// only an applied transaction can be rolled back -- Completed, or any other
+// non-terminal-for-rollback status with an engine apply record (engine
+// families accept e.g. Recovery Required for a retry). The server still
+// enforces it; this hides a button that would always be refused.
+const NO_ROLLBACK_STATUSES = new Set(['Running', 'Rolled Back', 'Pending', 'Preview', 'Approved', 'Cancelled']);
+function canRollback(tx: TransactionDetail) {
+  if (!tx.rollback?.available || NO_ROLLBACK_STATUSES.has(tx.status)) return false;
+  return tx.status === 'Completed' || Boolean(tx.metadata?.engine_result);
+}
 
 // The phrase the backend requires (and verifies) before approving an
 // album-cleanup plan that deletes audio files. The UI only detects the plan
@@ -79,14 +89,15 @@ function approveErrorMessage(ex: unknown) {
 // Only claim "nothing changed" when the response proves the request was
 // refused before any mutation. Apply can fail after mutating (mutated: true,
 // partial_mutation), or with an unknown outcome (5xx, timeout, network loss).
-function actionErrorMessage(verb: 'Cancel' | 'Apply', ex: unknown) {
+function actionErrorMessage(verb: 'Cancel' | 'Apply' | 'Rollback', ex: unknown) {
   const raw = ex instanceof Error ? ex.message : String(ex);
   const reason = /[.!?]$/.test(raw) ? raw : `${raw}.`;
   const status = (ex as { httpStatus?: number } | null)?.httpStatus;
   const body = apiErrorBody(ex) as { code?: string; mutated?: boolean; partial_mutation?: boolean } | undefined;
-  if (verb === 'Apply' && (body?.mutated === true || body?.partial_mutation === true || body?.code === 'partial_mutation'
+  // Apply and Rollback both write the library; Cancel only changes status.
+  if (verb !== 'Cancel' && (body?.mutated === true || body?.partial_mutation === true || body?.code === 'partial_mutation'
     || status === undefined || status === 0 || status >= 500)) {
-    return `Apply failed: ${reason} The library may have been partly changed, or the outcome is unknown. Do not apply again. Check the transaction's current status below (for example Recovery Required) and follow its recovery guidance.`;
+    return `${verb} failed: ${reason} The library may have been partly changed, or the outcome is unknown. Do not ${verb === 'Apply' ? 'apply' : 'roll back'} again. Check the transaction's current status below (for example Recovery Required) and follow its recovery guidance.`;
   }
   // A timed-out or 5xx cancel may still have landed, so only 404/409 (CAS
   // refusals) or an explicit mutated:false prove nothing changed.
@@ -330,8 +341,8 @@ export default function LibraryChanges() {
   // Same refusal handling as doApprove: show the server's reason, then reload
   // the detail and rows so the user sees the transaction's real state.
   const runAction = async (
-    verb: 'Cancel' | 'Apply',
-    request: (id: string) => Promise<{ transaction: TransactionDetail; job_id?: string }>,
+    verb: 'Cancel' | 'Apply' | 'Rollback',
+    request: (id: string) => Promise<{ transaction?: TransactionDetail; job_id?: string }>,
     success: (response: { job_id?: string }) => string,
   ) => {
     if (!detail) return;
@@ -340,7 +351,9 @@ export default function LibraryChanges() {
     let failure = '';
     try {
       const response = await request(detail.id);
-      setDetail(response.transaction);
+      // Engine-backed families answer without a `transaction` key; reload it.
+      if (response.transaction) setDetail(response.transaction);
+      else await loadDetail(detail.id);
       setMessage(success(response));
     } catch (ex) {
       failure = actionErrorMessage(verb, ex);
@@ -353,17 +366,9 @@ export default function LibraryChanges() {
   const doCancel = () => runAction('Cancel', cancelTransaction, () => 'Transaction cancelled.');
   const doApply = () => runAction('Apply', applyTransaction, (r) => (r.job_id ? `Apply job started: ${r.job_id}` : 'Transaction applied.'));
 
-  const doRollback = async () => {
-    if (!detail) return;
+  const doRollback = () => {
     if (!window.confirm('Rollback this transaction? Review the rollback availability before continuing.')) return;
-    try {
-      const response = await rollbackTransaction(detail.id);
-      setDetail(response.transaction);
-      setMessage('Rollback started.');
-      await loadRows();
-    } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
-    }
+    void runAction('Rollback', rollbackTransaction, (r) => (r.job_id ? `Rollback job started: ${r.job_id}` : 'Rollback finished.'));
   };
 
   return (
@@ -469,7 +474,7 @@ export default function LibraryChanges() {
                   <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
                   <Button size="small" color="warning" variant="outlined" disabled={!CANCELLABLE_STATUSES.has(detail.status)} onClick={() => void doCancel()}>Cancel</Button>
-                  <Button size="small" color="error" variant="outlined" disabled={!detail.rollback?.available || detail.status === 'Running'} onClick={() => void doRollback()}>Rollback</Button>
+                  <Button size="small" color="error" variant="outlined" disabled={!canRollback(detail)} onClick={doRollback}>Rollback</Button>
                 </div>
               </div>
 
