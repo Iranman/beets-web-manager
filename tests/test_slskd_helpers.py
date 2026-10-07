@@ -1,8 +1,10 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from backend.slskd import (
+    QueuedRemote,
     build_album_candidates,
     cleanup_failed_candidate_files,
     file_remote_name,
@@ -233,9 +235,10 @@ class SlskdHelperTests(unittest.TestCase):
             cover = album_dir / "cover.jpg"
             for path in (queued_one, queued_two, unqueued, cover):
                 path.write_text(path.name, encoding="utf-8")
+            queued_at = time.time() - 60
             remote_files = [
-                r"MP3-ARCHIVE\A-D\Album\01 Intro.mp3",
-                r"MP3-ARCHIVE\A-D\Album\02 Got One.flac",
+                QueuedRemote(r"MP3-ARCHIVE\A-D\Album\01 Intro.mp3", len("01 Intro.mp3"), queued_at),
+                QueuedRemote(r"MP3-ARCHIVE\A-D\Album\02 Got One.flac", len("02 Got One.flac"), queued_at),
             ]
             log = []
 

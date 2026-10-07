@@ -26,7 +26,9 @@ def _ticks(epoch: float) -> int:
 
 class CleanupScopeTests(unittest.TestCase):
     def _run(self, dl: Path, remotes):
-        log = []
+        # The real queue gives every remote its queued size and queue time.
+        log, queued_at = [], time.time() - 60
+        remotes = [QueuedRemote(r, 1, queued_at) for r in remotes]
         return cleanup_failed_candidate_files(dl, "peer", remotes, EXTS, log, [dl]), log
 
     def test_same_named_file_in_other_download_folder_survives(self):
@@ -34,9 +36,9 @@ class CleanupScopeTests(unittest.TestCase):
             dl = Path(tmp)
             own_full = _touch(dl / "peer" / "Music" / "Album" / "01.flac")
             own_flat = _touch(dl / "peer" / "Album" / "02.flac")
-            other_flat = _touch(dl / "Album" / "01.flac")
-            other_nested = _touch(dl / "Music" / "Album" / "02.flac")
-            other_peer = _touch(dl / "otherpeer" / "Album" / "01.flac")
+            other_flat = _touch(dl / "Album" / "01.flac", b"other")
+            other_nested = _touch(dl / "Music" / "Album" / "02.flac", b"other")
+            other_peer = _touch(dl / "otherpeer" / "Album" / "01.flac", b"other")
 
             removed, log = self._run(dl, [r"Music\Album\01.flac", r"Music\Album\02.flac"])
 
@@ -134,6 +136,17 @@ class DefaultLayoutEvidenceTests(unittest.TestCase):
         self.assertFalse(renamed.exists())
         for p in (original, older_copy, wrong_size):
             self.assertTrue(p.exists(), p)
+
+    def test_peer_folder_file_also_needs_proof(self):
+        """The peer name is peer-chosen: <dl>/<peer> can be another
+        download's album folder, so the peer-folder forms need proof too."""
+        foreign = _touch(self.dl / "peer" / "01.flac", b"abcdef")
+        own = _touch(self.dl / "peer" / "Album" / "01.flac", b"abcd")
+        removed, log = self._run([self._q("01.flac"), self._q(r"Music\Album\01.flac")])
+        self.assertEqual(removed, 1)
+        self.assertTrue(foreign.exists())
+        self.assertFalse(own.exists())
+        self.assertIn(repr(str(Path("peer") / "01.flac")), "\n".join(log))
 
     def test_renamed_copy_in_peer_folder_is_removed(self):
         renamed = _touch(self.dl / "peer" / "Music" / "Album" / f"01_{_ticks(self.queued_at + 5)}.flac", b"abcd")

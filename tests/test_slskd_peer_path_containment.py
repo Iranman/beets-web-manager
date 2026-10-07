@@ -11,13 +11,14 @@ import itertools
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import backend.app_runtime as rt
 import backend.slskd_service as slskd
-from backend.slskd import _remote_path, cleanup_failed_candidate_files, safe_peer_username
+from backend.slskd import QueuedRemote, _remote_path, cleanup_failed_candidate_files, safe_peer_username
 
 
 class _Tree:
@@ -185,7 +186,8 @@ class FailedCandidateCleanupContainmentTests(unittest.TestCase):
             started = _apply(tree.patches())
             try:
                 log = []
-                slskd._slskd_cleanup_failed_candidate_files("DJ Böb", [remote], log)
+                slskd._slskd_cleanup_failed_candidate_files(
+                    "DJ Böb", [QueuedRemote(remote, 1, time.time() - 60)], log)
             finally:
                 for p in started:
                     p.stop()

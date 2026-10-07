@@ -302,14 +302,14 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
     """Remove only queued audio files from a failed SLSKD candidate.
 
     Never searches by base name (#277). Candidate paths per queued file:
-
-    - <root>/<peer>/<remote path> and <root>/<peer>/<remote folder>/<file>
-      (peer-folder layouts): removed.
-    - <root>/<remote folder>/<file> (slskd's default layout) and slskd's
-      rename-on-collision copies <stem>_<ticks><ext> in any of these
-      folders: removed only when ``_proven_from_transfer`` (queued size and
-      mtime at or after the queue time). A same-named file without that
-      proof is left and logged.
+    <root>/<remote folder>/<file> (slskd's default layout),
+    <root>/<peer>/<remote path> and <root>/<peer>/<remote folder>/<file>
+    (peer-folder layouts), and slskd's rename-on-collision copies
+    <stem>_<ticks><ext> in those folders. Every one is removed only when
+    ``_proven_from_transfer`` (queued size, mtime at or after the queue
+    time): the peer name is peer-chosen, so <root>/<peer> can be another
+    download's album folder (peer "CD1", remote "01.flac"). A same-named
+    file without that proof is left and logged.
 
     Never outside ``allowed_roots`` (#248).
     """
@@ -333,19 +333,13 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
         rp = _remote_path(remote)
         if not rp.name or rp.suffix.lower() not in audio_ext_set:
             continue
-        peer_dirs = (peer_root / rp.parent, peer_root / rp.parent.name)
-        flat_dir = root / rp.parent.name
-        for d in peer_dirs:
-            targets.append(d / rp.name)
-        flat = flat_dir / rp.name
-        if flat not in targets and within_roots(flat, allowed) and flat.is_file():
-            if _proven_from_transfer(flat, remote):
-                targets.append(flat)
-            else:
-                left.append(flat)
-        for d in dict.fromkeys((*peer_dirs, flat_dir)):
+        dirs = dict.fromkeys((root / rp.parent.name, peer_root / rp.parent, peer_root / rp.parent.name))
+        for d in dirs:
             if not within_roots(d, allowed):
                 continue
+            exact = d / rp.name
+            if exact.is_file():
+                (targets if _proven_from_transfer(exact, remote) else left).append(exact)
             for copy in _renamed_copies(d, rp.name, getattr(remote, "queued_at", 0.0)):
                 if _proven_from_transfer(copy, remote):
                     targets.append(copy)
@@ -361,7 +355,7 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
             touched_dirs.add(path.parent)
         except Exception:
             pass
-    for path in dict.fromkeys(left):
+    for path in dict.fromkeys(p for p in left if p not in targets):
         log.append(f"  [slskd] Left {rel(path)!r}: no proof it belongs to the failed candidate.")
 
     for start in sorted(touched_dirs, key=lambda p: len(str(p)), reverse=True):
