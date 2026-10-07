@@ -53,11 +53,10 @@ class ImportReviewProbeTests(unittest.TestCase):
     def _patched(self):
         import backend.serializers as ser
         patches = (
-            mock.patch.object(ser, "DOWNLOADS_ROOT", self.data),
             mock.patch.object(ser, "MUSIC_ROOT", self.music),
             mock.patch.object(ser, "_DOWNLOADS_ROOTS", [str(self.data)]),
             mock.patch.object(ser, "TORRENT_SOURCE_ROOTS", (self.data,)),
-            mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ROOT", self.root / "playlist"),
+            mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (self.root / "playlist",)),
             mock.patch.dict(os.environ, {"MUSIC_ROOT": str(self.music), "DOWNLOADS_ROOT": str(self.data),
                                          "BEETS_IMPORT_ROOTS": str(self.root / "staging")}),
         )

@@ -14,14 +14,6 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 
-# Files that still hold a /data/ literal, owned by another open change. Remove
-# an entry once its literal is gone (test_allowlist_is_not_stale enforces it).
-_ALLOWLIST = {
-    # #251 part 2, after PR #265 merges: the "Root must be under ..." error text.
-    "backend/cleanup_service.py",
-}
-
-
 def _data_literals(path: Path):
     """Non-docstring string literals containing "/data/" (comments and
     docstring examples are not defaults)."""
@@ -54,14 +46,55 @@ class NoDataPathLiteralGuard(unittest.TestCase):
         self.assertIn("app.py", _backend_files())
         offenders = {
             name: lines for name, path in _backend_files().items()
-            if name not in _ALLOWLIST and (lines := _data_literals(path))
+            if (lines := _data_literals(path))
         }
         self.assertEqual(offenders, {}, "derive the path from MUSIC_ROOT/DOWNLOADS_ROOT (config_layers)")
 
-    def test_allowlist_is_not_stale(self):
-        files = _backend_files()
-        for name in _ALLOWLIST:
-            self.assertTrue(_data_literals(files[name]), f"{name} is clean; drop it from _ALLOWLIST")
+
+class CleanupRootErrorNamesConfiguredRoots(unittest.TestCase):
+    def test_error_lists_the_configured_roots(self):
+        import backend.cleanup_service as cs
+        with tempfile.TemporaryDirectory() as tmp:
+            music, dl = Path(tmp, "music"), Path(tmp, "dl")
+            with mock.patch.object(cs, "FOLDER_CLEAN_ROOTS", [music, dl]), \
+                    self.assertRaises(RuntimeError) as ctx:
+                cs._folder_clean_root(str(Path(tmp, "elsewhere")))
+        self.assertEqual(str(ctx.exception), f"Root must be under {music} or {dl}.")
+
+
+class SerializersUseValidatedDownloadRoots(unittest.TestCase):
+    """An unsafe DOWNLOADS_ROOT (here one around the library, so it is dropped
+    from DOWNLOADS_ALLOWED_ROOTS) is neither a cleanup root nor a "Downloads"
+    origin label for library paths."""
+
+    def test_dropped_downloads_root_is_not_allowed_or_labelled(self):
+        import backend.serializers as ser
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            music = base / "music"
+            folder = music / "Artist" / "Album"
+            folder.mkdir(parents=True)
+            # create=True: serializers no longer reads the raw settings at all.
+            with mock.patch.object(ser, "DOWNLOADS_ROOT", base, create=True), \
+                    mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ROOT", base, create=True), \
+                    mock.patch.object(ser, "MUSIC_ROOT", music), \
+                    mock.patch.object(ser, "_DOWNLOADS_ROOTS", []), \
+                    mock.patch.object(ser, "TORRENT_SOURCE_ROOTS", ()), \
+                    mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()):
+                roots = ser._import_review_cleanup_roots(allow_music=True)
+                hint = ser._path_origin_hint(folder.as_posix())
+        self.assertNotIn(base, roots)
+        self.assertNotEqual(hint.get("origin_type"), "playlist", hint)
+        self.assertEqual(hint, {"source_folder": folder.as_posix()})
+
+    def test_dropped_playlist_root_is_not_a_cleanup_root(self):
+        import backend.serializers as ser
+        raw = Path(tempfile.gettempdir()).resolve() / "playlist"
+        with mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ROOT", raw, create=True), \
+                mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()), \
+                mock.patch.object(ser, "_DOWNLOADS_ROOTS", []), \
+                mock.patch.object(ser, "TORRENT_SOURCE_ROOTS", ()):
+            self.assertEqual(ser._import_review_cleanup_roots(allow_music=False), [])
 
 
 def _runtime_defaults(env_overrides):
