@@ -292,11 +292,51 @@ class RecommendedPluginsTests(_TempConfigMixin, unittest.TestCase):
         )
         path = self._make_config(text)
         diff = preview_recommended_plugins(path)["diff"]
-        self.assertIn(" acoustid:", diff)
-        self.assertIn("apikey: ********", diff)
-        self.assertIn("user_token: ********", diff)
+        # n=0: unchanged lines (the leak vector) are not sent at all.
+        self.assertNotIn("acoustid", diff)
+        self.assertIn("fetchart", diff)
         self.assertNotIn("SECRETVALUE", diff)
         self.assertEqual(path.read_text(encoding="utf-8"), text)
+
+    def test_changed_line_masking_covers_yaml_forms(self):
+        """F2/F6: flow mappings, quoted keys, list items, block scalars,
+        nested mappings under a secret key and URL userinfo are masked."""
+        from backend.beets_plugins import _mask_config_diff
+        lines = [
+            "--- config.yaml\n", "+++ config.yaml (proposed)\n", "@@ -1,0 +1,12 @@\n",
+            "+plex: {host: h, apikey: SECRET01, port: 1}\n",
+            '+"api_key": SECRET02\n',
+            "+  - token: SECRET03\n",
+            "+lastfm_passwd: SECRET04\n",
+            "+Authorization: Bearer SECRET05\n",
+            "+client_secret: |\n", "+    SECRET06\n", "+\n", "+    SECRET07\n",
+            "+credentials:\n", "+  user: SECRET08\n",
+            "+url: http://user:SECRET09@host:32400/x\n",
+            "-plugins: web keyfinder\n",
+            "+directory: /music\n",
+        ]
+        out = _mask_config_diff(lines)
+        # QA probe cases (#202), each as its own changed hunk.
+        for probe in ("password: |\n    X1X\n", "apikey:\n    X1X\n", '"api_key": X1X\n',
+                      "discogs: {user_token: X1X}\n", "pass: X1X\n", "musicbrainz:\n  pass: X1X\n"):
+            probe_lines = ["+" + ln for ln in probe.splitlines(keepends=True)]
+            self.assertNotIn("X1X", _mask_config_diff(["@@ -0,0 +1 @@\n"] + probe_lines), probe)
+        for n in range(1, 10):
+            self.assertNotIn(f"SECRET0{n}", out)
+        self.assertIn("+url: http://user:********@host:32400/x\n", out)
+        self.assertIn("-plugins: web keyfinder\n", out)
+        self.assertIn("+directory: /music\n", out)
+        self.assertIn("@@ -1,0 +1,12 @@\n", out)
+
+    def test_preview_is_linear_on_pathological_lines(self):
+        """F2: no polynomial regex; a 100k-char line takes well under 1 s."""
+        from backend.beets_plugins import _mask_config_diff, preview_recommended_plugins
+        for bad in (" " * 100_000, "key" * 33_334, "key:" * 25_000, "{," * 50_000, "://" * 33_334):
+            path = self._make_config("plugins: web webmanager\n" + bad + "\n")
+            start = time.perf_counter()
+            preview_recommended_plugins(path)
+            _mask_config_diff(["+" + bad + "\n", "-" + bad + "\n"])
+            self.assertLess(time.perf_counter() - start, 1.0, bad[:8])
 
     def test_preview_lists_missing_and_diff_without_writing(self):
         from backend.beets_plugins import RECOMMENDED_CONFIG_PLUGINS, preview_recommended_plugins
@@ -391,6 +431,88 @@ class ConfigPathContainmentTests(_TempConfigMixin, unittest.TestCase):
             _bootstrap_beets_plugins()
         self.assertTrue(read_web_include_paths(self.config_path.read_text(encoding="utf-8")))
         self.assertTrue((self.config_dir / "beetsplug").is_dir())
+
+
+class ConfigSnapshotRaceTests(_TempConfigMixin, unittest.TestCase):
+    """F4: config.yaml is read once (O_NOFOLLOW); the backup and the rewrite
+    both come from that snapshot, never from a file swapped in afterwards."""
+
+    def _make_outside(self):
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        self.outside = Path(other.name) / "victim.yaml"
+        self.outside.write_text("victim: OUTSIDECONTENT\n", encoding="utf-8")
+
+    def test_symlink_swap_after_read_never_leaks_outside_content(self):
+        import backend.beets_plugins as bp
+        path = self._make_config()
+        self._make_outside()
+        real_plan = bp._plan_config_yaml_plugins
+
+        def plan_then_swap(*args, **kwargs):
+            result = real_plan(*args, **kwargs)
+            os.unlink(path)
+            os.symlink(self.outside, path)
+            return result
+
+        with mock.patch.object(bp, "_plan_config_yaml_plugins", plan_then_swap):
+            backup = bp.apply_recommended_plugins(path, ["fetchart"])["backup"]
+        self.assertEqual((self.config_dir / backup).read_text(encoding="utf-8"), _BASE_CONFIG)
+        self.assertNotIn("OUTSIDECONTENT", path.read_text(encoding="utf-8"))
+        self.assertFalse(path.is_symlink())
+        self.assertEqual(self.outside.read_text(encoding="utf-8"), "victim: OUTSIDECONTENT\n")
+
+    def test_symlinked_config_is_refused_by_every_editor(self):
+        from backend.beets_plugins import (
+            BeetsConfigEditError, apply_recommended_plugins, ensure_web_include_paths,
+            preview_recommended_plugins, update_config_yaml_plugins,
+        )
+        self._make_config(text=None)
+        real = self.config_dir / "real.yaml"
+        real.write_text(_BASE_CONFIG, encoding="utf-8")
+        os.symlink(real, self.config_path)
+        for call in (
+            lambda: ensure_web_include_paths(self.config_path),
+            lambda: apply_recommended_plugins(self.config_path, ["fetchart"]),
+            lambda: preview_recommended_plugins(self.config_path),
+        ):
+            with self.assertRaises(BeetsConfigEditError):
+                call()
+        with self.assertRaises(RuntimeError):
+            update_config_yaml_plugins(self.config_path)
+        self.assertTrue(self.config_path.is_symlink())
+        self.assertEqual(real.read_text(encoding="utf-8"), _BASE_CONFIG)
+
+
+class ProvisionSymlinkTests(unittest.TestCase):
+    """F5: provisioning replaces, never writes through, symlinked targets."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.config_dir = Path(tmp.name) / "config"
+        self.outside = Path(tmp.name) / "outside"
+        self.outside.mkdir()
+        self.victim = self.outside / "victim.py"
+        self.victim.write_text("VICTIM\n", encoding="utf-8")
+
+    def test_symlinked_subpackage_file_is_replaced_not_written_through(self):
+        from backend.beets_plugins import provision_bundled_plugins
+        dest = self.config_dir / "beetsplug" / "webmanager" / "version.py"
+        dest.parent.mkdir(parents=True)
+        os.symlink(self.victim, dest)
+        provision_bundled_plugins(self.config_dir)
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "VICTIM\n")
+        self.assertFalse(dest.is_symlink())
+        self.assertIn("PLUGIN_VERSION", dest.read_text(encoding="utf-8"))
+
+    def test_symlinked_subpackage_dir_is_refused(self):
+        from backend.beets_plugins import provision_bundled_plugins
+        (self.config_dir / "beetsplug").mkdir(parents=True)
+        os.symlink(self.outside, self.config_dir / "beetsplug" / "webmanager")
+        with self.assertRaises(RuntimeError):
+            provision_bundled_plugins(self.config_dir)
+        self.assertEqual(sorted(p.name for p in self.outside.iterdir()), ["victim.py"])
 
 
 class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):

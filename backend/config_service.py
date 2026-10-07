@@ -53,9 +53,13 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
     later startup. Backs up the original once, to its own filename (not the
     config editor's /api/config/revert backup), before ever touching it.
     """
-    path = Path(config_path or os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    from backend.beets_plugins import _decode_config, _read_config_snapshot, _write_config_text
+    from backend.config_manager import get_config_path
     try:
-        text = path.read_text(encoding="utf-8")
+        # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR, and the
+        # O_NOFOLLOW snapshot refuses a symlinked config.yaml (S-3).
+        path = Path(config_path) if config_path else get_config_path()
+        text = _decode_config(_read_config_snapshot(path), path.name)
     except Exception:
         return
     if _LEGACY_BEETS_CONFIG_MIGRATION_MARKER in text:
@@ -82,7 +86,7 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
         if not text.endswith("\n"):
             text += "\n"
         text += f"{_LEGACY_BEETS_CONFIG_MIGRATION_MARKER}\n"
-        path.write_text(text, encoding="utf-8")
+        _write_config_text(path, text, backup_prefix=None)
         print(
             "Repaired legacy config.yaml defaults from before the Issue #14 fix "
             f"(backup saved to {backup}).",

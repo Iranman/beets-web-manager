@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -425,6 +426,32 @@ def ensure_plugin_sys_path(config_dir: Optional[Path | str] = None) -> None:
 # Bundled Plugin Provisioning
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _replace_plugin_file(dest: Path, content: bytes, root: Path) -> None:
+    """Atomically (temp file + os.replace) install ``content`` at ``dest``.
+
+    A symlinked destination is replaced, never written through, and a
+    destination whose directory resolves outside ``root`` is refused.
+    """
+    real_root = os.path.realpath(root)
+    real_parent = os.path.realpath(dest.parent)
+    if os.path.commonpath([real_root, real_parent]) != real_root:
+        raise RuntimeError(f"Refusing to provision {dest.name}: its directory resolves outside beetsplug")
+    if not dest.is_symlink() and dest.is_file() and dest.read_bytes() == content:
+        return
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=str(dest.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content)
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[str]:
     """Copy all Web Manager bundled plugins from `beetsplug/` into `/config/beetsplug`.
 
@@ -479,14 +506,15 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
 
         elif entry.is_dir() and not entry.name.startswith((".", "_", "__pycache__")):
             target_sub = target_beetsplug_dir / entry.name
+            if target_sub.is_symlink():
+                raise RuntimeError(f"Refusing to provision {entry.name}: beetsplug/{entry.name} is a symbolic link")
             target_sub.mkdir(parents=True, exist_ok=True)
             for sub_entry in entry.rglob("*"):
                 if sub_entry.is_file() and not sub_entry.name.endswith(".pyc") and "__pycache__" not in sub_entry.parts:
                     rel_p = sub_entry.relative_to(entry)
                     dest_file = target_sub / rel_p
                     dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    if not dest_file.exists() or dest_file.read_bytes() != sub_entry.read_bytes():
-                        shutil.copy2(sub_entry, dest_file)
+                    _replace_plugin_file(dest_file, sub_entry.read_bytes(), target_beetsplug_dir)
             provisioned.append(entry.name)
 
     # Ensure .webmanager_api_key file is provisioned in config directory
@@ -803,8 +831,40 @@ def _plan_config_yaml_plugins(
     return text, missing_plugins, changed
 
 
-def _create_backup(path: Path, prefix: str) -> Path:
-    """Copy ``path`` to a new, never-reused ``<prefix><n>`` file (mode 0600).
+def _read_config_snapshot(path: Path) -> bytes:
+    """Read config.yaml once, refusing a symlink (O_NOFOLLOW).
+
+    The planner input and the backup both come from these bytes, so a
+    config.yaml swapped for a symlink between read, backup and replace can
+    never pull another file's content into the backup or the rewrite.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and os.path.islink(path):  # pragma: no cover - Windows
+        raise BeetsConfigEditError(f"{path.name} is a symbolic link; refusing to edit it")
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow)
+    except FileNotFoundError as exc:
+        raise BeetsConfigEditError(f"{path.name} does not exist") from exc
+    except OSError as exc:
+        if os.path.islink(path):
+            raise BeetsConfigEditError(f"{path.name} is a symbolic link; refusing to edit it") from exc
+        raise BeetsConfigEditError(f"Could not read {path.name}: {type(exc).__name__}") from exc
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+
+def _decode_config(data: bytes, name: str) -> str:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BeetsConfigEditError(f"Could not read {name}: {type(exc).__name__}") from exc
+    # Same newline handling as Path.read_text (universal newlines).
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _create_backup(path: Path, prefix: str, data: bytes) -> Path:
+    """Write ``data`` (the snapshot config.yaml was read from) to a new,
+    never-reused ``<prefix><n>`` file created 0600.
 
     O_EXCL guarantees two writes in the same second never share or overwrite
     a backup: on a name collision a ``-1``, ``-2``... suffix is tried.
@@ -816,8 +876,8 @@ def _create_backup(path: Path, prefix: str) -> Path:
         except FileExistsError:
             continue
         try:
-            with os.fdopen(fd, "wb") as dst, open(path, "rb") as src:
-                shutil.copyfileobj(src, dst)
+            with os.fdopen(fd, "wb") as dst:
+                dst.write(data)
         except BaseException:
             try:
                 os.unlink(candidate)
@@ -828,22 +888,23 @@ def _create_backup(path: Path, prefix: str) -> Path:
     raise FileExistsError(f"no free backup name for {prefix}")
 
 
-def _write_config_text(path: Path, text: str, *, backup_prefix: Optional[str]) -> Optional[str]:
-    """Back up ``path`` (when ``backup_prefix``) and atomically replace it.
+def _write_config_text(
+    path: Path, text: str, *, backup_prefix: Optional[str], original: Optional[bytes] = None
+) -> Optional[str]:
+    """Back up ``original`` (when ``backup_prefix``) and atomically replace
+    ``path``. ``original`` must be the _read_config_snapshot() bytes the new
+    text was planned from; callers resolve the directory itself through
+    config_manager.get_config_path() (BEETSDIR containment).
 
     Fails closed: if the backup cannot be made, config.yaml is not touched.
     Returns the backup's file name only (never a host/container path).
     """
-    # Shared by every config.yaml editor: a config.yaml symlink resolving
-    # outside its own directory would have us back up and rewrite content
-    # read from another file. Callers resolve the directory itself through
-    # config_manager.get_config_path() (BEETSDIR containment).
-    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(path.parent):
-        raise BeetsConfigEditError(f"{path.name} resolves outside the Beets config directory; refusing to edit it")
     backup_path: Optional[Path] = None
     if backup_prefix:
+        if original is None:
+            raise BeetsConfigEditError("internal error: backup requested without the original snapshot")
         try:
-            backup_path = _create_backup(path, backup_prefix)
+            backup_path = _create_backup(path, backup_prefix, original)
         except Exception as exc:
             raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
 
@@ -863,7 +924,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
     gets 0644.
     """
     try:
-        mode = os.stat(path).st_mode & 0o7777
+        st = os.lstat(path)
+        # Never copy a symlink target's mode (the link itself is replaced).
+        mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
     except FileNotFoundError:
         mode = 0o644
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -906,7 +969,7 @@ def update_config_yaml_plugins(
     plugins_to_ensure = ensure_plugins if ensure_plugins is not None else list(REQUIRED_CONFIG_PLUGINS)
     pluginpath_to_ensure = ensure_pluginpath if ensure_pluginpath is not None else ["/config/beetsplug"]
 
-    if not path.exists():
+    if not os.path.lexists(path):
         # Create default config.yaml with canonical settings
         example_path = ROOT / "config.yaml.example"
         if example_path.exists():
@@ -929,9 +992,10 @@ def update_config_yaml_plugins(
         return True, "Created default config.yaml with required plugins"
 
     try:
-        text = path.read_text(encoding="utf-8")
-    except Exception as exc:
-        raise RuntimeError(f"Could not read {path}: {exc}") from exc
+        original = _read_config_snapshot(path)
+        text = _decode_config(original, path.name)
+    except BeetsConfigEditError as exc:
+        raise RuntimeError(str(exc)) from exc
 
     text, missing_plugins, changed = _plan_config_yaml_plugins(text, plugins_to_ensure, pluginpath_to_ensure)
 
@@ -943,7 +1007,7 @@ def update_config_yaml_plugins(
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_prefix = f"{_PLUGIN_MIGRATION_BACKUP_PREFIX}{ts}"
     try:
-        _write_config_text(path, text, backup_prefix=backup_prefix)
+        _write_config_text(path, text, backup_prefix=backup_prefix, original=original)
     except BeetsConfigEditError as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -952,42 +1016,121 @@ def update_config_yaml_plugins(
     return True, "Updated pluginpath / web settings in config.yaml"
 
 
-def _read_config_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise BeetsConfigEditError(f"{path.name} does not exist") from exc
-    except Exception as exc:
-        raise BeetsConfigEditError(f"Could not read {path.name}: {type(exc).__name__}") from exc
+def _read_config_text(path: Path) -> Tuple[str, bytes]:
+    original = _read_config_snapshot(path)
+    return _decode_config(original, path.name), original
 
 
 def _timestamped_backup_prefix(path: Path) -> str:
     return f"{path.name}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
-# S-7: the preview diff's context lines quote config.yaml verbatim; mask the
-# value of any key/token/secret/password setting (e.g. `apikey: ...`).
-_SECRET_DIFF_LINE_RE = re.compile(
-    r"(?i)^([ +-][ \t]*-?[ \t]*[\w.-]*(?:key|token|secret|password)[\w.-]*[ \t]*:[ \t]*)(?=\S)[^\r\n]*"
-)
+# S-7: the preview diff must never echo config.yaml secrets. It is built
+# with no context lines (n=0), and every changed line is masked by
+# _mask_secret_config_line(). No regex: config text is untrusted input and
+# an earlier regex here was polynomial (py/polynomial-redos); every step
+# below is a single O(len(line)) scan.
+_SECRET_KEY_WORDS = ("password", "passwd", "secret", "token", "bearer", "credential")
+_SECRET_MASK = "********"
+
+
+def _is_secret_key(key: str) -> bool:
+    k = key.strip().strip("\"'").strip().lower()
+    if not k:
+        return False
+    return (
+        k.endswith("key") or k.endswith("pass") or k.startswith("auth")
+        or any(word in k for word in _SECRET_KEY_WORDS)
+    )
+
+
+def _mask_url_userinfo(body: str) -> str:
+    """``scheme://user:pass@host`` -> ``scheme://user:********@host`` (linear)."""
+    out: List[str] = []
+    pos = 0
+    while True:
+        start = body.find("://", pos)
+        if start < 0:
+            break
+        auth_start = start + 3
+        end = auth_start
+        while end < len(body) and body[end] not in "/@ \t\"'":
+            end += 1
+        if end < len(body) and body[end] == "@":
+            colon = body.find(":", auth_start, end)
+            if colon >= 0:
+                out.append(body[pos:colon + 1] + _SECRET_MASK)
+                pos = end
+                continue
+        out.append(body[pos:auth_start])
+        pos = auth_start
+    out.append(body[pos:])
+    return "".join(out)
+
+
+def _mask_secret_config_line(body: str) -> Tuple[str, bool]:
+    """Mask everything after the first secret-looking ``key:`` on a line.
+
+    Handles block (``apikey: x``), list (``- token: x``), quoted keys and
+    flow mappings (``{user: a, apikey: x}``). Returns (masked, opens_block):
+    opens_block is True when the secret value continues on indented lines
+    (``key:`` with an empty value or a ``|``/``>`` block scalar).
+    """
+    body = _mask_url_userinfo(body)
+    seg_start = 0
+    for i, ch in enumerate(body):
+        if ch in "{[,":
+            seg_start = i + 1
+        elif ch == ":":
+            key = body[seg_start:i].lstrip(" \t-")
+            if _is_secret_key(key):
+                rest = body[i + 1:].strip()
+                opens_block = not rest or rest[0] in "|>"
+                return body[:i + 1] + ("" if not rest else " " + _SECRET_MASK), opens_block
+            seg_start = i + 1
+    return body, False
+
+
+def _mask_config_diff(lines: Iterable[str]) -> str:
+    out: List[str] = []
+    block_indent: Optional[int] = None
+    for line in lines:
+        if line.startswith(("---", "+++", "@@")) or not line:
+            block_indent = None
+            out.append(line)
+            continue
+        sign, rest = line[0], line[1:]
+        body = rest.rstrip("\r\n")
+        ending = rest[len(body):]
+        stripped = body.lstrip(" \t")
+        indent = len(body) - len(stripped)
+        if block_indent is not None and (not stripped or indent > block_indent):
+            out.append(f"{sign}{body[:indent]}{_SECRET_MASK if stripped else ''}{ending}")
+            continue
+        block_indent = None
+        masked, opens_block = _mask_secret_config_line(body)
+        if opens_block:
+            block_indent = indent
+        out.append(f"{sign}{masked}{ending}")
+    return "".join(out)
 
 
 def preview_recommended_plugins(config_path: Path | str) -> Dict[str, Any]:
     """Read-only preview of enabling the missing RECOMMENDED plugins (BI-5)."""
     path = Path(config_path)
-    text = _read_config_text(path)
+    text, _original = _read_config_text(path)
     configured = parse_configured_plugins(text)
     missing = [p for p in RECOMMENDED_CONFIG_PLUGINS if p not in configured]
     new_text, _added, _changed = _plan_config_yaml_plugins(
         text, missing, parse_configured_pluginpath(text) or ["/config/beetsplug"]
     )
-    diff = "".join(
-        _SECRET_DIFF_LINE_RE.sub(r"\1********", line)
-        for line in difflib.unified_diff(
+    diff = _mask_config_diff(
+        difflib.unified_diff(
             text.splitlines(keepends=True),
             new_text.splitlines(keepends=True),
             fromfile="config.yaml",
             tofile="config.yaml (proposed)",
+            n=0,
         )
     )
     return {
@@ -1014,13 +1157,13 @@ def apply_recommended_plugins(config_path: Path | str, plugins: Iterable[str]) -
     ordered = [p for p in RECOMMENDED_CONFIG_PLUGINS if p in requested]
 
     path = Path(config_path)
-    text = _read_config_text(path)
+    text, original = _read_config_text(path)
     new_text, added, changed = _plan_config_yaml_plugins(
         text, ordered, parse_configured_pluginpath(text) or ["/config/beetsplug"]
     )
     if not changed:
         return {"ok": True, "changed": False, "added": [], "backup": None, "restart_required": False}
-    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path))
+    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path), original=original)
     return {"ok": True, "changed": True, "added": added, "backup": backup, "restart_required": True}
 
 
@@ -1032,11 +1175,11 @@ def ensure_web_include_paths(config_path: Path | str) -> Dict[str, Any]:
     aborts the write) and atomic replace. Beets must be restarted.
     """
     path = Path(config_path)
-    text = _read_config_text(path)
+    text, original = _read_config_text(path)
     new_text, changed = _set_web_include_paths(text, overwrite_false=True)
     if not changed:
         return {"ok": True, "changed": False, "backup": None, "restart_required": False}
-    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path))
+    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path), original=original)
     return {"ok": True, "changed": True, "backup": backup, "restart_required": True}
 
 
