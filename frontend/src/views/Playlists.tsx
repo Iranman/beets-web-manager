@@ -41,6 +41,7 @@ import type {
   PlaylistTrackSuggestion,
 } from '../api/types';
 import { LogViewer } from '../components/LogViewer';
+import { MusicBrainzUnavailableNotice } from '../components/MusicBrainzUnavailableNotice';
 
 type Notice = {
   severity: 'info' | 'success' | 'warning' | 'error';
@@ -1168,6 +1169,7 @@ export default function Playlists() {
 
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [musicbrainzUnavailable, setMusicbrainzUnavailable] = useState(false);
   const [confirmDownload, setConfirmDownload] = useState(false);
   const [downloadJobId, setDownloadJobId] = useState(() => localStorage.getItem(PLAYLIST_JOB_STORAGE_KEY) ?? '');
   const [lastDownloadJobId, setLastDownloadJobId] = useState(() => localStorage.getItem(PLAYLIST_LAST_JOB_STORAGE_KEY) ?? '');
@@ -1830,9 +1832,11 @@ export default function Playlists() {
     if (!savedPlaylistName) return;
     setLoadingSuggestions(true);
     setNotice(null);
+    setMusicbrainzUnavailable(false);
     try {
       const result = await getPlaylistSuggestions(savedPlaylistName);
       setSuggestionRows(result.rows ?? []);
+      setMusicbrainzUnavailable(result.musicbrainz_unavailable === true);
       setNotice({
         severity: 'info',
         message: `${result.safe_count.toLocaleString()} safe suggestion(s) found for ${result.total_missing.toLocaleString()} missing track(s).`,
@@ -1848,9 +1852,11 @@ export default function Playlists() {
     if (!savedPlaylistName) return;
     setApplyingSuggestions(true);
     setNotice(null);
+    setMusicbrainzUnavailable(false);
     try {
       const result = await applySafePlaylistSuggestions(savedPlaylistName);
       setParseResult(result);
+      setMusicbrainzUnavailable(result.musicbrainz_unavailable === true);
       setSuggestionRows([]);
       setResolveDraft(null);
       setNotice({
@@ -2623,6 +2629,7 @@ export default function Playlists() {
           </div>
 
           {notice ? <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.message}</Alert> : null}
+          <MusicBrainzUnavailableNotice show={musicbrainzUnavailable} />
 
           <div className="flex flex-wrap gap-1.5">
             {trackGroups.map((group) => (

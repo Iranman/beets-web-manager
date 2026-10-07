@@ -1551,11 +1551,13 @@ export interface PlaylistSuggestionsResponse extends ApiOkResponse {
   total_missing: number;
   safe_count: number;
   rows: PlaylistSuggestionRow[];
+  musicbrainz_unavailable?: boolean;
 }
 
 export interface PlaylistApplySuggestionsResponse extends PlaylistResolveTrackResponse {
   suggested?: Array<{ track: PlaylistTrack; best?: PlaylistTrackSuggestion | null }>;
   safe_count?: number;
+  musicbrainz_unavailable?: boolean;
 }
 
 export interface PlaylistPlexResult {
@@ -1776,7 +1778,10 @@ export interface LidarrWantedAlbum {
   year: string;
   type: string;
   lidarr_id: number;
+  /** Empty: Lidarr reports a release group, not a Release (IA-07). */
   mb_albumid: string;
+  /** Canonical album identity: Lidarr foreignAlbumId (MusicBrainz release group). */
+  mb_releasegroupid?: string;
   mb_url: string;
   monitored: boolean;
 }
@@ -1971,6 +1976,8 @@ export interface LidarrArtistAlbum {
   track_file_count: number;
   total_track_count: number;
   percent: number;
+  /** Lidarr foreignAlbumId. Despite the name this is a MusicBrainz release
+   * group ID, not a Release ID (routes_lidarr._album_payload). */
   mb_albumid: string;
   cover_url: string;
   disk_path: string;
@@ -1995,6 +2002,7 @@ export interface DownloadAlbumPayload {
   year?: string;
   track_count?: number;
   mb_albumid?: string;
+  mb_releasegroupid?: string;
   existing_album_id?: number;
   album_id?: number;
   method?: DownloadMethod;
@@ -2185,6 +2193,8 @@ export interface AiSuggestResponse extends ApiOkResponse {
   recording_id_conflicts?: string[];
   title_mismatch_warnings?: string[];
   required_review?: boolean;
+  /** True when MusicBrainz was unreachable; results are local/fingerprint only. */
+  musicbrainz_unavailable?: boolean;
 }
 
 export interface ImportReviewSelectedMatch {
