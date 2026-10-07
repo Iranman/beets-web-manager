@@ -229,6 +229,8 @@ LIDARR_KEY    = (
 )
 
 
+from backend import config_layers as _config_layers  # noqa: E402  (leaf module, no backend imports)
+
 WEB_MANAGER_DATA_DIR = Path(os.environ["WEB_MANAGER_DATA_DIR"])
 
 
@@ -238,7 +240,10 @@ PLAYLIST_STATE_ROOT = WEB_MANAGER_DATA_DIR / "playlists"
 PLAYLIST_MANIFESTS_DIR = PLAYLIST_STATE_ROOT / "manifests"
 
 
-PLAYLIST_JOB_STATE_DIR = Path(os.environ.get("PLAYLIST_JOB_STATE_DIR", "")) or (PLAYLIST_STATE_ROOT / "jobs")
+# Absolute only (config_layers.container_path): Path("") is Path("."), which is
+# truthy, so an unset value used to put checkpoints in the working directory (#276).
+PLAYLIST_JOB_STATE_DIR = Path(_config_layers.container_path(
+    "PLAYLIST_JOB_STATE_DIR", str(PLAYLIST_STATE_ROOT / "jobs")))
 
 
 PLAYLIST_EXPORTS_DIR = PLAYLIST_STATE_ROOT / "exports"
@@ -246,8 +251,6 @@ PLAYLIST_EXPORTS_DIR = PLAYLIST_STATE_ROOT / "exports"
 
 PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
 
-
-from backend import config_layers as _config_layers  # noqa: E402  (leaf module, no backend imports)
 
 # Container-side roots (backend.config_layers): absolute paths inside this
 # container that must match the Compose mount targets. Never derived from the
