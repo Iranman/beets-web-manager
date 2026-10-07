@@ -96,4 +96,9 @@ if awk '$5 == "/config" { found = 1 } END { exit !found }' /proc/self/mountinfo;
 fi
 chown "$RUN_AS" /music /downloads 2>/dev/null || true
 
-exec gosu "$RUN_AS" "$@"
+# D6: tini is started after the privilege drop, as the app's uid. A root
+# tini under cap_drop: ALL has no CAP_KILL and cannot signal the app, so
+# `docker stop` hung until SIGKILL ("Unexpected error when forwarding
+# signal: 'Operation not permitted'"). This script is PID 1 until here, so
+# tini still becomes PID 1 and keeps reaping zombies.
+exec gosu "$RUN_AS" tini -- "$@"
