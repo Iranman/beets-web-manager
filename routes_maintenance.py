@@ -18,7 +18,7 @@ from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
 from backend.transaction_service import _start_metadata_apply_transaction, _sync_transactions_from_jobs
-from backend.cleanup_service import album_cleanup_apply_response, controlled_apply_error
+from backend.cleanup_service import album_cleanup_apply_response, controlled_apply_error, controlled_rollback_error
 from backend.playlist_service import playlist_sync_status_payload
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 
@@ -727,15 +727,20 @@ def api_transaction_cancel(transaction_id):
                              f"(this one is {current})."}), 409
 
 
-def _item_file_replacement_response(fn, transaction_id):
+def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None):
     """Run an engine-backed apply/rollback (item-file replacement, reviewed
     duplicate cleanup) with the same error mapping as the item replacement
     routes (no raw engine text leaks): every raised exception gets the
-    controlled contract of cleanup_service.controlled_apply_error (#220)."""
+    controlled contract of cleanup_service.controlled_apply_error (#220), or
+    of controlled_rollback_error when ``rollback_family`` is given (#227)."""
     try:
         res = fn(transaction_id)
     except Exception as exc:
-        body, status = controlled_apply_error(exc, transaction_id)
+        if rollback_family is None:
+            body, status = controlled_apply_error(exc, transaction_id)
+        else:
+            body, status = controlled_rollback_error(
+                exc, transaction_id, lock_before_write=rollback_family in _ROLLBACK_LOCKS_BEFORE_WRITE)
         return jsonify(body), status
     status_code = 200 if res.get("ok") else (409 if res.get("code") in ("not_approved", "already_applied") else 400)
     return jsonify(res), status_code
@@ -759,6 +764,15 @@ _ENGINE_FAMILIES = {
     composite_workflows.ALBUM_CLEANUP_FAMILY: (composite_workflows.apply_album_cleanup,
                                                composite_workflows.rollback_album_cleanup),
 }
+
+#: Families whose rollback executor acquires its resource locks before any
+#: engine call or store write, so a ResourceLockConflictError from it proves
+#: nothing changed (#227). The item replacement, track quarantine and reviewed
+#: cleanup rollbacks take no lock, so a conflict from them proves nothing.
+_ROLLBACK_LOCKS_BEFORE_WRITE = frozenset({
+    album_row_merge.ALBUM_ROW_MERGE_FAMILY, untracked_recovery.ATTACH_FAMILY,
+    untracked_recovery.QUARANTINE_FAMILY, untracked_recovery.ATTACH_ALBUM_FAMILY,
+})
 
 
 @app.post("/api/transactions/<transaction_id>/apply")
@@ -856,9 +870,10 @@ def api_transaction_rollback(transaction_id):
             return jsonify({"ok": False, "error": "Rollback failed.", "code": exc.error_code or "beets_error"}), 400
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
-    engine_family = _ENGINE_FAMILIES.get((tx.get("metadata") or {}).get("mutation_family"))
+    family = (tx.get("metadata") or {}).get("mutation_family")
+    engine_family = _ENGINE_FAMILIES.get(family)
     if engine_family:
-        return _item_file_replacement_response(engine_family[1], transaction_id)
+        return _item_file_replacement_response(engine_family[1], transaction_id, rollback_family=family)
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:

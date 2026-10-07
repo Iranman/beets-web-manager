@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-import hashlib, json, os, re, shutil, sqlite3, time, unicodedata, uuid
+import hashlib, json, os, re, shutil, sqlite3, time, traceback, unicodedata, uuid
 from backend.matching import track_filename_has_source_id_suffix as _canonical_track_filename_has_source_id_suffix
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, ALBUM_FOLDER_CLEANUP_LAST_FILE, AUDIO_EXT, DOWNLOADS_ROOT, METADATA_CACHE_ROOT, MUSIC_ROOT, RGID_RESOLUTION_STATE_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _s
+from backend.app_runtime import _redact_security_text
 from backend.app_runtime import _normalize_name, _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _path_under, _safe_path_component, _same_resolved_path
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
 from backend.resource_locks import ResourceLockConflictError
@@ -505,8 +506,48 @@ def controlled_apply_error(ex: BaseException, operation_id: str, *,
         return {**body, "code": getattr(ex, "error_code", "") or "beets_error", "error": refused}, 400
     if isinstance(ex, (ResourceLockConflictError, TimeoutError)) and untouched:
         return {**body, "code": "resource_busy", "error": busy}, 409
-    _app_logger.exception("transaction %s failed (%s)", operation_id, type(ex).__name__)
+    _log_controlled_failure(ex, operation_id)
     return {**body, "code": "apply_failed", "error": failed}, 500
+
+
+def _log_controlled_failure(ex: BaseException, operation_id: str) -> None:
+    """Log an unexpected executor failure the way app._handle_unexpected_error
+    does: message and traceback both pass through _redact_security_text."""
+    _app_logger.error(
+        "transaction %s failed (%s): %s\n%s", operation_id, type(ex).__name__, _redact_security_text(ex),
+        _redact_security_text("".join(traceback.format_exception(type(ex), ex, ex.__traceback__))))
+
+
+def controlled_rollback_error(ex: BaseException, operation_id: str, *,
+                              lock_before_write: bool = False) -> Tuple[Dict[str, Any], int]:
+    """Map an exception raised by an engine-family rollback executor to a
+    controlled (JSON body, HTTP status) (#227 SEC-227-1).
+
+    A rollback never runs on an Approved transaction, so the apply mapping's
+    "still Approved" proof never holds. Beets unavailable -> 503, engine
+    refusal -> 400, a lock conflict -> 409 ``resource_busy``, anything else
+    (a lock-registry timeout included: it can come from the release after the
+    engine wrote) -> a fixed 500 ``rollback_failed``. ``mutated: False`` is
+    reported only for a lock conflict when the caller states the executor
+    takes its locks before any write (``lock_before_write``); otherwise the
+    key is omitted. The body never carries exception text."""
+    if isinstance(ex, BeetsUnavailableError):
+        return {"ok": False, "code": getattr(ex, "error_code", "") or "beets_unavailable",
+                "error": "Beets engine is unavailable."}, 503
+    if isinstance(ex, BeetsError):
+        return {"ok": False, "code": getattr(ex, "error_code", "") or "beets_error",
+                "error": "The engine refused the rollback."}, 400
+    if isinstance(ex, ResourceLockConflictError):
+        if lock_before_write:
+            return {"ok": False, "mutated": False, "code": "resource_busy",
+                    "error": "Another operation is using these library items; nothing was changed. "
+                             "Try again shortly."}, 409
+        return {"ok": False, "code": "resource_busy",
+                "error": "Another operation is using these library items. Reload the transaction "
+                         "to check its state before retrying."}, 409
+    _log_controlled_failure(ex, operation_id)
+    return {"ok": False, "code": "rollback_failed",
+            "error": "The rollback failed. Reload the transaction to check its state."}, 500
 
 
 def album_cleanup_apply_response(operation_id: str) -> Tuple[Dict[str, Any], int]:
