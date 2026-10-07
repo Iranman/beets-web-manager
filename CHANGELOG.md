@@ -183,6 +183,7 @@ The project uses Semantic Versioning.
 - `PLAYLIST_DIR`, `BEETS_SQLITE_TIMEOUT` and `WEB_MANAGER_PATH` are removed from the settings catalog; nothing used them. `BEETS_LIBRARY` is marked deprecated and read-only.
 - The built-in fallback settings template no longer lists unrelated variables (`DIGARR_INITIAL_PASSWORD`, `POSTGRES_PASSWORD`, `BEETS_UID`, `BEETS_GID`).
 - Docs: `ARCHITECTURE.md`, `DEVELOPMENT.md` and `CONFIGURATION.md` no longer describe the deleted `backend/beets_client.py` as present or ARCH-010 as open.
+- Frontend dependencies: `react`/`react-dom` 19.3.0 with `@types/react`/`@types/react-dom` 19.3.0, `@mui/material` 9.4.0, `jsdom` 30.1.1, `typescript-eslint` 8.71.1, `@types/node` 26.6.4. No code changes were needed.
 
 
 ## v0.1.49 - 2026-10-04
