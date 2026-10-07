@@ -308,6 +308,12 @@ DOWNLOADS_ROOT = DOWNLOADS_CONTAINER_ROOT
 DOWNLOADS_ALLOWED_ROOTS = _config_layers.safe_roots("DOWNLOADS_ROOT", [DOWNLOADS_ROOT], _MUSIC_ROOT_SETTING)
 
 
+# PLAYLIST_DOWNLOAD_ROOT under the same rule: empty when it is "/" or overlaps
+# the library, so it is neither allowlisted nor app-managed (#268 S-4).
+PLAYLIST_DOWNLOAD_ALLOWED_ROOTS = _config_layers.safe_roots(
+    "PLAYLIST_DOWNLOAD_ROOT", [PLAYLIST_DOWNLOAD_ROOT], _MUSIC_ROOT_SETTING)
+
+
 def validated_downloads_root() -> Path:
     """DOWNLOADS_ROOT for creating download folders, or RuntimeError (with the
     setup-block message) when it is "/" or overlaps the library (#251 F-1)."""

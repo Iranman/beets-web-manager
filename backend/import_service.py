@@ -17,7 +17,7 @@ from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
 from backend.cleanup_service import _cleanup_template_tokens_for_album
-from backend.app_runtime import _path_is_under, _safe_path_component
+from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
 from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing, missing_wanted_tracks_block_retag as _guard_missing_wanted_tracks_block_retag
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
@@ -86,8 +86,10 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
                                 force_stage: bool = False,
                                 target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
     """Copy a selected subset to a clean import folder when the source has extras."""
+    # Validated root only; an unsafe DOWNLOADS_ROOT raises the setup-block
+    # message instead of creating _beets_missing_import inside it (#268 S-2).
     return _stage_selected_audio_files_impl(
-        DOWNLOADS_ROOT, AUDIO_EXT, aldir, audio_files, artist, album, log,
+        validated_downloads_root(), AUDIO_EXT, aldir, audio_files, artist, album, log,
         force_stage=force_stage,
         target_tracks=target_tracks,
     )

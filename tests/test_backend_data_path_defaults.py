@@ -131,7 +131,7 @@ class LibraryServiceDownloadRoots(unittest.TestCase):
             mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", torrent_roots),
             mock.patch.object(lib, "TORRENT_SOURCE_MOVE_ALLOWED", False),
             mock.patch.object(lib, "MUSIC_ROOT", self.music),
-            mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ROOT", self.root / "playlist"),
+            mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (self.root / "playlist",)),
         )
 
     def _run(self, fn, path, allowed, torrent_roots=()):

@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, _redact_security_text, CONFIG_FILE, DOWNLOADS_ROOT, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_PATH_ROOT_ALIASES, PLEX_API_TIMEOUT, PLEX_INDEX_CACHE_TTL, PLEX_INDEX_PAGE_SIZE, PLEX_INDEX_TIMEOUT, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_FALLBACK_SEARCHES, PLEX_TOKEN, PLEX_URL, WEB_MANAGER_DATA_DIR, _MB_UUID_RE, _s
-from backend.app_runtime import _norm, _path_is_under
+from backend.app_runtime import _norm, _path_is_under, DOWNLOADS_ALLOWED_ROOTS, PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
 
 # ── ARCH-001 extracted code ──
 
@@ -33,10 +33,11 @@ def _playlist_resolve_item_path(path_value: Any) -> Path:
     if not raw:
         return _PLAYLIST_UNRESOLVED_PATH
     path = Path(raw)
-    allowed_roots = [
-        MUSIC_ROOT.resolve(strict=False),
-        PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
-        DOWNLOADS_ROOT.resolve(strict=False),
+    # Validated download roots only: an unsafe DOWNLOADS_ROOT or
+    # PLAYLIST_DOWNLOAD_ROOT ("/" or overlapping the library) adds nothing (#268 S-4).
+    allowed_roots = [MUSIC_ROOT.resolve(strict=False)] + [
+        root.resolve(strict=False)
+        for root in (*PLAYLIST_DOWNLOAD_ALLOWED_ROOTS, *DOWNLOADS_ALLOWED_ROOTS)
     ]
     for alias in PLAYLIST_PATH_ROOT_ALIASES:
         try:

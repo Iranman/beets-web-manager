@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import copy, difflib, json, re, time
+import copy, difflib, json, os, re, time
 import urllib.error
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -69,6 +69,26 @@ def _download_method_job_label(method: Any) -> str:
     }.get(method, method)
 
 
+_DOWNLOAD_FOLDER_ERROR = "Artist and album must be usable folder names."
+
+
+def _download_folder_segment(value: Any) -> str:
+    """``value`` as one folder name (separators and reserved characters become
+    "_"), or "" when nothing but dots and whitespace is left ("", ".", "..")."""
+    text = re.sub(r'[\\/:*?"<>|]', '_', str(value)).strip()
+    return text if text.replace(".", "").strip() else ""
+
+
+def _download_dest_under(root: Path, *segments: str) -> Path:
+    """root/segments, or ValueError unless it lands strictly inside root (#268 S-1)."""
+    if not all(segments):
+        raise ValueError(_DOWNLOAD_FOLDER_ERROR)
+    dest = root.joinpath(*segments)
+    if Path(os.path.realpath(str(root))) not in Path(os.path.realpath(str(dest))).parents:
+        raise ValueError(_DOWNLOAD_FOLDER_ERROR)
+    return dest
+
+
 # Service behind POST /api/download/album (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
 def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
@@ -127,11 +147,18 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         downloads_root = validated_downloads_root()
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc)}, 200
+    # Refused here, before any job or folder exists: "."/".." names would
+    # otherwise climb out of DOWNLOADS_ROOT (#268 S-1).
+    safe_artist = _download_folder_segment(artist)
+    safe_album = _download_folder_segment(album)
+    yr_sfx = f" ({_download_folder_segment(year)})" if year else ""
+    try:
+        dest_dir = str(_download_dest_under(
+            downloads_root, safe_artist, safe_album and safe_album + yr_sfx))
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}, 200
 
     def _do(log, cancel_event=None):
-        _safe = lambda s: re.sub(r'[\\/:*?"<>|]', '_', str(s)).strip()
-        yr_sfx   = f" ({year})" if year else ""
-        dest_dir = str(downloads_root / _safe(artist) / (_safe(album) + yr_sfx))
         download_result: Dict[str, Any]
         resolved_mbid = mb_albumid
         effective_track_count = track_count
@@ -350,11 +377,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if active_tracks:
                 suffix = str(int(time.time() * 1000))
                 source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
-                return str(
-                    downloads_root
-                    / _safe(artist)
-                    / f"{_safe(album)}{yr_sfx} - {source_slug} missing {suffix}"
-                )
+                return str(_download_dest_under(
+                    downloads_root, safe_artist,
+                    f"{safe_album}{yr_sfx} - {source_slug} missing {suffix}",
+                ))
             return dest_dir
 
         def _download_ytdlp_selection(

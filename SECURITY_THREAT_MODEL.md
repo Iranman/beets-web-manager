@@ -5,7 +5,7 @@ This model covers Beets Web Manager: the Flask API, React frontend, Beets engine
 ## Trust Boundaries
 
 - Browser to Flask API: all metadata, filenames, job IDs, playlist names, paths, and request bodies are untrusted.
-- Flask API to filesystem: configured roots such as `/config`, `/data/media/music`, `/data/torrents/music`, playlist staging, caches, and backup paths must be separately authorized and canonicalized.
+- Flask API to filesystem: configured roots such as `/config`, the library (`MUSIC_ROOT`, default `/music`), downloads (`DOWNLOADS_ROOT`, default `/downloads`), playlist staging, caches, and backup paths must be separately authorized and canonicalized.
 - Flask API to subprocesses: Beets, ffmpeg/ffprobe/fpcalc, yt-dlp, Git, package managers, and helper runtimes must treat arguments and environments as untrusted.
 - Flask API to external services: MusicBrainz, AcoustID, Plex, Discogs, qBittorrent, Lidarr, SLSKD, Spotify, OpenAI/OpenRouter, and download providers can fail, lie, return hostile text, or leak data.
 - Flask API to AI provider: prompts and model outputs are not a security boundary. Model output must be schema-validated and re-authorized by deterministic code.
