@@ -113,6 +113,7 @@ def dash_suffix_group(text: str) -> Optional[Tuple[str, str]]:
 
 
 _SLSKD_KW_RE = re.compile(r"feat\.?|ft\.?|with|prod\.?|produced\s+by|remix|edit|version|bonus|clean|explicit", re.I)
+_PRODUCED_BY_RE = re.compile(r"produced\s+by", re.I)
 
 
 def strip_bracket_credits(text: str) -> str:
@@ -135,10 +136,14 @@ def strip_bracket_credits(text: str) -> str:
         q = o + 1
         while q < n and text[q].isspace():
             q += 1
-        # ".*?[)\]]" succeeds iff a closer precedes the next newline; which keyword
-        # alternative matched cannot change that, so the first alternative suffices.
-        m = _SLSKD_KW_RE.match(text, q)
-        closer = next_closer[m.end()] if m and next_closer[m.end()] < next_nl[m.end()] else -1
+        # ".*?[)\]]" succeeds iff a closer precedes the next newline after the
+        # keyword. Only "produced\s+by" can consume a newline, so when the first
+        # alternative ("prod") finds no closer the regex backtracks into it (#186 N1).
+        closer = -1
+        for m in (_SLSKD_KW_RE.match(text, q), _PRODUCED_BY_RE.match(text, q)):
+            if m and next_closer[m.end()] < next_nl[m.end()]:
+                closer = next_closer[m.end()]
+                break
         if closer < 0:
             o += 1
             continue
