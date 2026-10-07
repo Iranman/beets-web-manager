@@ -594,7 +594,13 @@ def apply_existing_album_reconcile(
     def _apply_cleanup(cleanup_id: str) -> Dict[str, Any]:
         if not approve_duplicates:
             return {"ok": True, "operation_id": cleanup_id, "status": "Preview", "awaiting_approval": True}
-        st.update(cleanup_id, status="Approved", metadata={"approved_by": _s(approved_by)})
+        from backend.resource_locks import approve_preview
+        try:
+            approved = approve_preview(st, cleanup_id, _s(approved_by))
+        except KeyError:
+            return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+        if approved is None:
+            return {"ok": False, "code": "not_preview", "error": "Only a Preview transaction can be approved; it was cancelled or already finished."}
         return duplicate_cleanup.apply_reviewed_cleanup(cleanup_id, adapter=adapter, store=store)
 
     if meta.get("mutation_family") == duplicate_cleanup.REVIEWED_CLEANUP_FAMILY:
@@ -1089,11 +1095,11 @@ def apply_track_replacement(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
 
     target_id, source_id = int(meta["target_item_id"]), int(meta["source_item_id"])
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"item:{min(target_id, source_id)}", f"item:{max(target_id, source_id)}"],
                                attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
-            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
         # Recorded before the engine call: a restart mid-call is finished from
         # engine evidence by backend/transaction_recovery.py, never replayed.
         st.update(operation_id, status="Running", metadata={"engine_request": {"operation_id": operation_id}})
@@ -1259,7 +1265,7 @@ def safe_rename_library_folder(
     Beets DB still references; it re-checks the folder identity at apply and
     records the rename so it can be rolled back. Never deletes media."""
     from backend.transaction_engine import create_folder_cleanup_plan, execute_folder_cleanup_apply
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     st = _get_store(store)
     plan = create_folder_cleanup_plan(
         st, {"action": "safe_rename", "source": source, "target": target},
@@ -1274,7 +1280,7 @@ def safe_rename_library_folder(
     with resource_locks().hold(["workflow:folder-safe-rename"], attempt_owner(op_id), timeout=10):
         if claim_approved(st, op_id) is None:
             return {"ok": False, "renamed": False, "operation_id": op_id, "code": "already_applied",
-                    "error": "This rename was already claimed or applied."}
+                    "error": claim_refusal(st, op_id)}
         try:
             res = execute_folder_cleanup_apply(st, op_id)
         except Exception as exc:
@@ -1377,11 +1383,11 @@ def apply_album_cleanup(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it.",
                 "mutated": False}
     aid = int(meta["album_id"])
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"], attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
             return {"ok": False, "code": "not_approved", "mutated": False,
-                    "error": "Another attempt already claimed this transaction."}
+                    "error": claim_refusal(st, operation_id)}
         live = sorted(int(it.get("id")) for it in ad.find_all_items_by_album_id(aid) if it.get("id"))
         if not ad.get_album(aid) or live != list(meta.get("item_ids") or []):
             st.update(operation_id, status="Failed", logs=["Album changed since the plan; nothing was removed."])
@@ -1546,11 +1552,11 @@ def apply_track_quarantine(
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
     entries = meta.get("items") or []
     aid = int(meta["album_id"])
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"] + [f"item:{int(e['item_id'])}" for e in entries],
                                attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
-            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
         items_before = int((ad.get_stats() or {}).get("items") or 0)
         st.update(operation_id, status="Running", metadata={"engine_request": {"items_before": items_before}})
         try:
@@ -2456,11 +2462,11 @@ def apply_import_review_cleanup(
     if status != "Approved":
         return {"ok": False, "code": "not_approved", "operation_id": operation_id, "status": status,
                 "error": "Approve the cleanup preview before applying it."}
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold(["workflow:import-review-cleanup"], attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
             return {"ok": False, "code": "not_approved", "operation_id": operation_id,
-                    "error": "Another attempt already claimed this transaction."}
+                    "error": claim_refusal(st, operation_id)}
         try:
             if meta.get("mutation_family") == IMPORT_REVIEW_CLEANUP_FAMILY:
                 return _apply_engine_import_review_cleanup(st, operation_id)
@@ -2792,11 +2798,11 @@ def apply_playlist_media_cleanup(
         return {"ok": False, "code": "not_approved", "operation_id": operation_id, "status": status,
                 "error": "Approve the cleanup preview before applying it."}
     item_ids = [int(x) for x in meta.get("item_ids") or []]
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"item:{i}" for i in sorted(item_ids)], attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
             return {"ok": False, "code": "not_approved", "operation_id": operation_id,
-                    "error": "Another attempt already claimed this transaction."}
+                    "error": claim_refusal(st, operation_id)}
         st.update(operation_id, metadata={"engine_request": {"item_ids": item_ids, "delete_files": False}})
         # Decide up front whether the adapter takes the key (#182): a
         # TypeError raised inside remove() is a failure, never a retry.

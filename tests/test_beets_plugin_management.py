@@ -287,14 +287,12 @@ class BeetsPluginApiRoutesTests(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp()
         self.config_dir = Path(self.tmp_dir)
         self.config_path = self.config_dir / "config.yaml"
-        self.old_config_env = os.environ.get("BEETS_CONFIG")
-        os.environ["BEETS_CONFIG"] = str(self.config_path)
+        # BEETS_CONFIG must sit directly inside BEETSDIR (S-3 containment).
+        env = mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.config_path), "BEETSDIR": str(self.config_dir)})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self):
-        if self.old_config_env is not None:
-            os.environ["BEETS_CONFIG"] = self.old_config_env
-        else:
-            os.environ.pop("BEETS_CONFIG", None)
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_get_plugins_status_endpoint(self):

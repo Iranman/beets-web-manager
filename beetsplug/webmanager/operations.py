@@ -225,15 +225,51 @@ def get_library_db_path() -> Optional[str]:
     return str(value)
 
 
+def _covers_config_dir(directory: str) -> bool:
+    """True when ``directory`` is ``/`` or the Beets config dir or one of its
+    ancestors. Such a library ``directory`` must not become a mutation root:
+    it would put config.yaml, the API key file and the library DB in scope."""
+    config_dirs = ["/config"]
+    try:
+        config_dirs.append(str(beets_config.config_dir()))
+    except Exception:
+        pass
+    directory = os.path.realpath(str(directory))
+    for config_dir in config_dirs:
+        try:
+            if os.path.commonpath([directory, os.path.realpath(config_dir)]) == directory:
+                return True
+        except ValueError:  # different drives (Windows)
+            continue
+    return False
+
+
+def _warn_dropped_root(root: str, source: str) -> None:
+    log.warning(
+        "webmanager: not using %s %r as an allowed mutation root (it is / or contains the Beets "
+        "config directory); set webmanager.allowed_roots explicitly if you need something else",
+        source, root,
+    )
+
+
 def _derived_allowed_roots() -> List[str]:
     directory = get_library_directory()
+    if directory and _covers_config_dir(directory):
+        _warn_dropped_root(directory, "directory")
+        return list(DEFAULT_ALLOWED_ROOTS)
     if not directory:
         return list(DEFAULT_ALLOWED_ROOTS)
     roots: List[str] = []
     for root in [directory] + list(get_import_roots()):
         normalized = os.path.normpath(str(root))
-        if normalized and normalized not in roots:
-            roots.append(normalized)
+        # An import root of `/` or `/config` would put config.yaml and the
+        # API key file in mutation scope too: skip it (S-5).
+        if not normalized or normalized in roots:
+            continue
+        if _covers_config_dir(normalized):
+            _warn_dropped_root(normalized, "webmanager.import_roots")
+            continue
+        roots.append(normalized)
     return roots
 
 

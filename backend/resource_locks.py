@@ -294,12 +294,36 @@ def attempt_owner(operation_id: str) -> str:
 
 def claim_approved(store, operation_id: str) -> Optional[Dict[str, Any]]:
     """Re-read the transaction INSIDE the held lock and move it Approved ->
-    Running; None if another attempt already claimed or applied it."""
+    Running with a compare-and-set; None if another attempt already claimed
+    or applied it, or a cancel won the race (#206 F3)."""
     tx = store.get(operation_id)
-    meta = tx.get("metadata") or {}
-    if tx.get("status") != "Approved" or meta.get("engine_result"):
+    if (tx.get("metadata") or {}).get("engine_result"):
         return None
-    store.update(operation_id, status="Running")
+    return store.transition(operation_id, "Approved", "Running")
+
+
+def claim_refusal(store, operation_id: str) -> str:
+    """The message for a failed claim_approved, read once after the CAS lost
+    (QA-217-3): a cancel and a second apply look different to the caller."""
+    try:
+        status = store.get(operation_id).get("status")
+    except KeyError:
+        return "Transaction not found."
+    if status == "Approved":
+        return "This transaction was already applied."
+    return f"This transaction is no longer Approved (now {status})."
+
+
+def approve_preview(store, operation_id: str, approved_by: str) -> Optional[Dict[str, Any]]:
+    """Compare-and-set Preview -> Approved (#206 F4). An already-Approved
+    transaction passes unchanged; any other status (Cancelled, Failed,
+    Completed, ...) returns None and is never resurrected. KeyError if the
+    transaction does not exist."""
+    tx = store.transition(operation_id, "Preview", "Approved", metadata={"approved_by": str(approved_by or "")})
+    if tx is None:
+        tx = store.get(operation_id)
+        if tx.get("status") != "Approved":
+            return None
     return tx
 
 

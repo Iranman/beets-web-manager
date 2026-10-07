@@ -286,11 +286,11 @@ def apply_reviewed_cleanup(
     ids = sorted({int(p["delete_item_id"]) for p in pairs} | {int(p["keep_item_id"]) for p in pairs})
     rows = sorted({int(p["retire_album"][k]) for p in pairs if p.get("retire_album")
                    for k in ("album_id", "keeper_album_id")})
-    from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"album:{a}" for a in rows] + [f"item:{i}" for i in ids],
                                attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
-            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
         stats = ad.get_stats() or {}
         items_before, albums_before = int(stats.get("items") or 0), int(stats.get("albums") or 0)
         # Recorded before the engine call: a restart mid-call is finished from
