@@ -41,12 +41,17 @@ def _data_literals(path: Path):
 
 
 def _backend_files():
-    files = sorted(REPO.glob("backend/**/*.py")) + sorted(REPO.glob("routes_*.py"))
+    # backend/** plus every repo-root module (app.py, helpers_mb.py,
+    # job_engine.py, routes_*.py, ...). The "/data" state-mount default for
+    # WEB_MANAGER_DATA_DIR in app_runtime has no trailing slash and is not a
+    # library path, so it does not match.
+    files = sorted(REPO.glob("backend/**/*.py")) + sorted(REPO.glob("*.py"))
     return {p.relative_to(REPO).as_posix(): p for p in files}
 
 
 class NoDataPathLiteralGuard(unittest.TestCase):
     def test_no_data_literal_in_backend_defaults(self):
+        self.assertIn("app.py", _backend_files())
         offenders = {
             name: lines for name, path in _backend_files().items()
             if name not in _ALLOWLIST and (lines := _data_literals(path))

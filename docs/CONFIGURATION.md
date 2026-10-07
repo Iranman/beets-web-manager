@@ -128,7 +128,7 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 | `DISCOGS_TOKEN`, `DISCOGS_USER_TOKEN` | Optional Discogs metadata. |
 | `LISTENBRAINZ_TOKEN` | Optional ListenBrainz integration. |
 | `PLEX_URL`, `PLEX_TOKEN` | Optional Plex sync and refresh. Use deployment-specific URLs, not committed private LAN defaults. |
-| `PLEX_MUSIC_ROOTS`, `PLAYLIST_PATH_ROOT_ALIASES` | `PLEX_MUSIC_ROOTS`: comma-separated library paths as Plex sees them (Plex path mapping). `PLAYLIST_PATH_ROOT_ALIASES`: extra library roots that playlist and Plex track paths may start with; falls back to `PLEX_MUSIC_ROOT`. Defaults to `MUSIC_ROOT`; no other path is assumed. |
+| `PLEX_MUSIC_ROOTS`, `PLAYLIST_PATH_ROOT_ALIASES` | `PLEX_MUSIC_ROOTS`: comma-separated library paths as Plex sees them (Plex path mapping); it can also be set as `plex_music_roots` in the `plex:` section of the Beets `config.yaml`. `PLAYLIST_PATH_ROOT_ALIASES`: comma-separated library roots that playlist and Plex track paths may start with; falls back to `PLEX_MUSIC_ROOT`, then to `MUSIC_ROOT`. Plex path mapping also always tries `MUSIC_ROOT` and `/music`. Neither variable is an application setting: the System page cannot save them, they are not loaded from `/web-manager-data/.env`, and the shipped Compose files do not pass them through, so set them under the Web Manager service's `environment:` in Compose and recreate the container. |
 | `LIDARR_URL`, `LIDARR_API_KEY` | Optional wanted-album integration. |
 | `SLSKD_URL`, `SLSKD_API_KEY`, `SLSKD_API_KEY_FILE`, `SLSKD_SLSK_USERNAME`, `SLSKD_SLSK_PASSWORD` | Optional SLSKD/Soulseek acquisition. |
 | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | Optional Spotify playlist parsing. |
