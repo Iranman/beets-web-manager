@@ -110,6 +110,27 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
     return result
 
 
+#: Fingerprint statuses for a lookup that never got an answer (D5/#252 NF-2).
+#: "Not checked" is not "no recording": these are never NO_RESULT, never
+#: cached, and never negative identity evidence.
+ACOUSTID_FAILURE_MESSAGES = {
+    "not_configured": "AcoustID not configured (set ACOUSTID_API_KEY); fingerprints were not checked.",
+    "auth_failed": "AcoustID rejected the API key (check ACOUSTID_API_KEY); fingerprints were not checked.",
+    "lookup_failed": "AcoustID lookup failed (service unavailable or rate limited); fingerprints were not checked.",
+}
+
+
+def acoustid_failure_status(result: ProviderResult) -> str:
+    """"" for a real answer, else why no answer was obtained."""
+    if result.answered:
+        return ""
+    if result.outcome == ProviderOutcome.NOT_CONFIGURED:
+        return "not_configured"
+    if result.outcome == ProviderOutcome.AUTHENTICATION_ERROR:
+        return "auth_failed"
+    return "lookup_failed"
+
+
 def _acoustid_lookup_cached(file_path: str) -> List[Dict[str, Any]]:
     """AcoustID candidates for a file (cached answers only; see
     _acoustid_lookup_cached_outcome). Returns [] when there is no match AND
@@ -189,7 +210,22 @@ def _audio_identity_decision(file_path: str, *, expected_artist: str = "",
         return result
 
     try:
-        candidates = acoustid_candidates if acoustid_candidates is not None else _acoustid_lookup_cached(str(path))
+        if acoustid_candidates is not None:
+            candidates = acoustid_candidates
+        else:
+            from backend.acoustid_service import ACOUSTID_FAILURE_MESSAGES, acoustid_failure_status  # self-import: tests AST-extract this function
+            lookup = _acoustid_lookup_cached_outcome(str(path))
+            failure = acoustid_failure_status(lookup)
+            if failure:
+                result.update({
+                    "fingerprint_status": failure,
+                    "acoustid_status": failure,
+                    "decision_reason": ACOUSTID_FAILURE_MESSAGES[failure],
+                    "ai_assessment": "Review required because the fingerprint could not be checked.",
+                    "conflicts": [f"acoustid_{failure}"],
+                })
+                return result
+            candidates = lookup.data
     except Exception as ex:
         result.update({
             "fingerprint_status": "failed",
@@ -541,11 +577,19 @@ def _album_track_fingerprint_check(item: Dict[str, Any],
       "match"    (a candidate's MBID is in mb_tracks) -> CONFIRMED
       "mismatch" (confident candidate, no title match) -> CONFLICT
       "unclear"  (weak/uncertain candidate)        -> AMBIGUOUS
+    A lookup with no answer returns acoustid_failure_status() instead
+    (not_configured / auth_failed / lookup_failed), never NO_RESULT.
     """
     path = _album_item_abs_path(item.get("path", ""))
     if not path or not Path(path).exists():
         return {"status": AcoustIDStatus.UNAVAILABLE.value, "path": path}
-    cands = _acoustid_lookup_cached(path)
+    from backend.acoustid_service import acoustid_failure_status  # self-import: tests AST-extract this function
+    lookup = _acoustid_lookup_cached_outcome(path)
+    failure = acoustid_failure_status(lookup)
+    if failure:
+        # Not checked is not "no recording" (D5): never NO_RESULT.
+        return {"status": failure, "path": path}
+    cands = list(lookup.data or [])
     if not cands:
         return {"status": AcoustIDStatus.NO_RESULT.value}
 

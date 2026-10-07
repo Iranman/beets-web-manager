@@ -77,8 +77,10 @@ class AlbumTrackFingerprintCheckTests(unittest.TestCase):
     TRACKS = [{"mb_trackid": REC_A, "title": "Crossfire", "title_norm": "crossfire"}]
 
     def _check(self, cands):
+        from backend.provider_boundary import ProviderOutcome, ProviderResult
+        answer = ProviderResult("acoustid", ProviderOutcome.CONFIRMED if cands else ProviderOutcome.NO_RESULT, data=cands)
         with tempfile.NamedTemporaryFile(suffix=".flac") as tf, \
-                mock.patch.object(acs, "_acoustid_lookup_cached", return_value=cands):
+                mock.patch.object(acs, "_acoustid_lookup_cached_outcome", return_value=answer):
             return acs._album_track_fingerprint_check({"path": tf.name}, self.TRACKS)["status"]
 
     def test_weak_member_hit_is_not_confirmed(self):

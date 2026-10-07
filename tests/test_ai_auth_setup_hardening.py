@@ -209,7 +209,7 @@ class ItemAiSuggestFallbackSourceTests(unittest.TestCase):
 
     def test_acoustid_mb_discogs_gathering_happens_before_ai_gate(self):
         ai_gate_pos = self.fn.index("if ai_available:")
-        acoustid_pos = self.fn.index("_acoustid_lookup_cached(item_path)")
+        acoustid_pos = self.fn.index("_acoustid_lookup_cached_outcome(item_path)")
         mb_pos = self.fn.index("_mb_recording_search(")
         discogs_pos = self.fn.index("_discogs_track_search(")
         self.assertLess(acoustid_pos, ai_gate_pos)
