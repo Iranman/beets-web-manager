@@ -58,9 +58,9 @@ const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
 // the action disabled.
 function rollbackBlockedReason(tx: TransactionDetail) {
   if (typeof tx.rollback?.allowed !== 'boolean') {
-    return 'The server did not report whether this transaction can be rolled back, so Rollback is disabled. Reload the page; if this persists, update Web Manager so the web UI and server versions match.';
+    return 'Rollback unavailable: the server did not report whether this transaction can be rolled back, so Rollback is disabled. Reload the page; if this persists, update Web Manager so the web UI and server versions match.';
   }
-  return tx.rollback.allowed_reason || 'The server does not allow rolling back this transaction.';
+  return tx.rollback.allowed_reason || 'Rollback unavailable: the server does not allow rolling back this transaction.';
 }
 
 // The phrase the backend requires (and verifies) before approving an
@@ -322,8 +322,9 @@ export default function LibraryChanges() {
     setMessage('');
     let failure = '';
     try {
-      const response = await approveTransaction(detail.id, confirmDeleteFiles);
-      setDetail(response.transaction);
+      await approveTransaction(detail.id, confirmDeleteFiles);
+      // Action responses omit rollback.allowed; only the detail GET has it.
+      await loadDetail(detail.id);
       setMessage('Transaction approved.');
     } catch (ex) {
       failure = approveErrorMessage(ex);
@@ -350,9 +351,9 @@ export default function LibraryChanges() {
     let failure = '';
     try {
       const response = await request(detail.id);
-      // Engine-backed families answer without a `transaction` key; reload it.
-      if (response.transaction) setDetail(response.transaction);
-      else await loadDetail(detail.id);
+      // Action responses omit rollback.allowed (and engine families omit the
+      // transaction); only the detail GET has it, so always reload.
+      await loadDetail(detail.id);
       setMessage(success(response));
     } catch (ex) {
       failure = actionErrorMessage(verb, ex);
@@ -465,8 +466,9 @@ export default function LibraryChanges() {
                   <div>Undo: {detail.rollback?.allowed === true ? 'Available' : 'Unavailable'}</div>
                 </div>
                 {detail.rollback?.allowed !== true && (
-                  <Alert id="rollback-blocked-reason" severity="warning" className="mt-3">
-                    Rollback unavailable. {rollbackBlockedReason(detail)}
+                  // role="status": selecting a transaction should not announce an alert.
+                  <Alert id="rollback-blocked-reason" role="status" severity="warning" className="mt-3">
+                    {rollbackBlockedReason(detail)}
                   </Alert>
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">

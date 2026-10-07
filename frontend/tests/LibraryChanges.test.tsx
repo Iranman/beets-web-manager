@@ -280,6 +280,16 @@ describe('LibraryChanges rollback', () => {
     expect(screen.getByText(/Undo: Unavailable/)).toBeTruthy();
   });
 
+  it('does not repeat "Rollback unavailable." when the server reason is exactly that', async () => {
+    await renderWith({
+      ...tx({}, 'Completed'),
+      rollback: { available: false, allowed: false, allowed_code: 'unavailable', allowed_reason: 'Rollback unavailable.' },
+    });
+    const description = document.getElementById(button().getAttribute('aria-describedby')!);
+    expect(description?.textContent).toBe('Rollback unavailable.');
+    expect(description?.getAttribute('role')).toBe('status');
+  });
+
   it('disables Rollback when the response has no allowed field (older backend)', async () => {
     await renderWith({ ...tx({}, 'Completed'), rollback: { available: true } });
     expect(button().disabled).toBe(true);
