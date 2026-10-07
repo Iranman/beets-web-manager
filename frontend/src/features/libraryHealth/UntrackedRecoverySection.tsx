@@ -146,7 +146,16 @@ export const UntrackedRecoverySection: React.FC = () => {
   const rollback = () =>
     run(async () => {
       if (!plan?.operation_id) return;
-      const res = (await rollbackTransaction(plan.operation_id)) as unknown as UntrackedTransactionResponse;
+      const id = plan.operation_id;
+      let res: UntrackedTransactionResponse;
+      try {
+        res = (await rollbackTransaction(id)) as unknown as UntrackedTransactionResponse;
+      } catch (err) {
+        // Refused (409 resource_busy) or failed (500): re-read the server
+        // verdict so "Roll back" reflects rollback.allowed, not a stale value.
+        await loadRollbackState(id);
+        throw err;
+      }
       setMessage({ severity: res.ok ? 'success' : 'error', text: `Rollback: ${res.status ?? ''}` });
       setPlan(null);
       setRollbackState(null);
