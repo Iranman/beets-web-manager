@@ -4624,8 +4624,8 @@
    "name": "_read_file_media_tags",
    "module": "backend/acoustid_service.py",
    "lines": [
-    23,
-    62
+    24,
+    63
    ],
    "size": 40,
    "body_lines": 35,
@@ -4651,8 +4651,8 @@
    "name": "_audio_cache_file_identity",
    "module": "backend/acoustid_service.py",
    "lines": [
-    68,
-    78
+    69,
+    79
    ],
    "size": 11,
    "body_lines": 9,
@@ -4672,8 +4672,8 @@
    "name": "_acoustid_lookup_cached_outcome",
    "module": "backend/acoustid_service.py",
    "lines": [
-    81,
-    109
+    82,
+    110
    ],
    "size": 29,
    "body_lines": 21,
@@ -4695,8 +4695,8 @@
    "name": "_acoustid_lookup_cached",
    "module": "backend/acoustid_service.py",
    "lines": [
-    112,
-    117
+    113,
+    118
    ],
    "size": 6,
    "body_lines": 1,
@@ -4731,11 +4731,11 @@
    "name": "_audio_identity_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    120,
-    125
+    121,
+    124
    ],
-   "size": 6,
-   "body_lines": 5,
+   "size": 4,
+   "body_lines": 2,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -4753,8 +4753,8 @@
    "name": "_audio_identity_compact_candidate",
    "module": "backend/acoustid_service.py",
    "lines": [
-    128,
-    139
+    127,
+    138
    ],
    "size": 12,
    "body_lines": 11,
@@ -4776,8 +4776,8 @@
    "name": "_audio_identity_decision",
    "module": "backend/acoustid_service.py",
    "lines": [
-    142,
-    245
+    141,
+    244
    ],
    "size": 104,
    "body_lines": 98,
@@ -4801,8 +4801,8 @@
    "name": "_acoustid_verify_match",
    "module": "backend/acoustid_service.py",
    "lines": [
-    248,
-    285
+    247,
+    284
    ],
    "size": 38,
    "body_lines": 24,
@@ -4825,32 +4825,11 @@
    ]
   },
   {
-   "name": "_acoustid_hit_score",
-   "module": "backend/acoustid_service.py",
-   "lines": [
-    288,
-    295
-   ],
-   "size": 8,
-   "body_lines": 5,
-   "route": null,
-   "mutation_capable": false,
-   "domain": "ACOUSTID",
-   "desired_owner": "backend/acoustid_service.py",
-   "migration_status": "EXTRACTED",
-   "callers": [
-    "_acoustid_confirmed_recording",
-    "_acoustid_top_tier"
-   ],
-   "caller_count": 2,
-   "dependencies": []
-  },
-  {
    "name": "_acoustid_top_tier",
    "module": "backend/acoustid_service.py",
    "lines": [
-    298,
-    307
+    287,
+    296
    ],
    "size": 10,
    "body_lines": 6,
@@ -4865,7 +4844,6 @@
    ],
    "caller_count": 2,
    "dependencies": [
-    "_acoustid_hit_score",
     "_s"
    ]
   },
@@ -4873,8 +4851,8 @@
    "name": "_acoustid_confirmed_recording",
    "module": "backend/acoustid_service.py",
    "lines": [
-    310,
-    322
+    299,
+    311
    ],
    "size": 13,
    "body_lines": 8,
@@ -4890,7 +4868,6 @@
    ],
    "caller_count": 3,
    "dependencies": [
-    "_acoustid_hit_score",
     "_acoustid_top_tier",
     "_s"
    ]
@@ -4899,8 +4876,8 @@
    "name": "_confirmed_recording_ids",
    "module": "backend/acoustid_service.py",
    "lines": [
-    325,
-    327
+    314,
+    316
    ],
    "size": 3,
    "body_lines": 2,
@@ -4923,8 +4900,8 @@
    "name": "_acoustid_fingerprint_ids",
    "module": "backend/acoustid_service.py",
    "lines": [
-    330,
-    347
+    319,
+    336
    ],
    "size": 18,
    "body_lines": 8,
@@ -4948,8 +4925,8 @@
    "name": "_acoustid_cached_fingerprint_ids",
    "module": "backend/acoustid_service.py",
    "lines": [
-    350,
-    365
+    339,
+    354
    ],
    "size": 16,
    "body_lines": 11,
@@ -4969,8 +4946,8 @@
    "name": "_acoustid_fingerprint_match",
    "module": "backend/acoustid_service.py",
    "lines": [
-    368,
-    388
+    357,
+    377
    ],
    "size": 21,
    "body_lines": 8,
@@ -4993,8 +4970,8 @@
    "name": "_acoustid_hits_or_none",
    "module": "backend/acoustid_service.py",
    "lines": [
-    391,
-    402
+    380,
+    391
    ],
    "size": 12,
    "body_lines": 9,
@@ -5015,8 +4992,8 @@
    "name": "same_recording_proof",
    "module": "backend/acoustid_service.py",
    "lines": [
-    405,
-    434
+    394,
+    423
    ],
    "size": 30,
    "body_lines": 22,
@@ -5038,8 +5015,8 @@
    "name": "_acoustid_multi_file",
    "module": "backend/acoustid_service.py",
    "lines": [
-    437,
-    484
+    426,
+    473
    ],
    "size": 48,
    "body_lines": 39,
@@ -5064,8 +5041,8 @@
    "name": "_normalize_albumartist",
    "module": "backend/acoustid_service.py",
    "lines": [
-    498,
-    515
+    487,
+    504
    ],
    "size": 18,
    "body_lines": 8,
@@ -5095,8 +5072,8 @@
    "name": "_album_track_norm",
    "module": "backend/acoustid_service.py",
    "lines": [
-    523,
-    528
+    512,
+    517
    ],
    "size": 6,
    "body_lines": 5,
@@ -5128,8 +5105,8 @@
    "name": "_album_item_abs_path",
    "module": "backend/acoustid_service.py",
    "lines": [
-    531,
-    535
+    520,
+    524
    ],
    "size": 5,
    "body_lines": 4,
@@ -5155,8 +5132,8 @@
    "name": "_album_track_fingerprint_check",
    "module": "backend/acoustid_service.py",
    "lines": [
-    538,
-    590
+    527,
+    579
    ],
    "size": 53,
    "body_lines": 35,
@@ -5184,8 +5161,8 @@
    "name": "_artist_folder_fingerprint_confirms",
    "module": "backend/acoustid_service.py",
    "lines": [
-    593,
-    632
+    582,
+    621
    ],
    "size": 40,
    "body_lines": 29,
@@ -5210,8 +5187,8 @@
    "name": "_playlist_title_variants",
    "module": "backend/acoustid_service.py",
    "lines": [
-    635,
-    666
+    624,
+    655
    ],
    "size": 32,
    "body_lines": 31,
@@ -5234,8 +5211,8 @@
    "name": "_playlist_token_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    669,
-    675
+    658,
+    664
    ],
    "size": 7,
    "body_lines": 6,
@@ -5256,8 +5233,8 @@
    "name": "_playlist_title_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    678,
-    696
+    667,
+    685
    ],
    "size": 19,
    "body_lines": 18,
@@ -5290,8 +5267,8 @@
    "name": "_playlist_strip_artist_channel_noise",
    "module": "backend/acoustid_service.py",
    "lines": [
-    705,
-    721
+    694,
+    710
    ],
    "size": 17,
    "body_lines": 11,
@@ -5312,8 +5289,8 @@
    "name": "_playlist_artist_name_variants",
    "module": "backend/acoustid_service.py",
    "lines": [
-    724,
-    750
+    713,
+    739
    ],
    "size": 27,
    "body_lines": 26,
@@ -5337,8 +5314,8 @@
    "name": "_playlist_artist_name_pair_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    753,
-    765
+    742,
+    754
    ],
    "size": 13,
    "body_lines": 12,
@@ -5362,8 +5339,8 @@
    "name": "_playlist_artist_name_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    768,
-    778
+    757,
+    767
    ],
    "size": 11,
    "body_lines": 10,

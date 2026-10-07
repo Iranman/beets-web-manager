@@ -7,6 +7,7 @@ import difflib, hashlib, json, os, re, sys
 from backend.matching import AcoustIDStatus, normalize_track_title_for_matching, similarity as _canonical_similarity
 from backend.matching import acoustid_evidence_from_hits
 from backend.matching.recording import ACOUSTID_MIN_SCORE
+from backend.matching.track_alignment import _hit_score
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import METADATA_CACHE_ROOT, MUSIC_ROOT, _s
@@ -118,11 +119,9 @@ def _acoustid_lookup_cached(file_path: str) -> List[Dict[str, Any]]:
 
 
 def _audio_identity_score(candidate: Dict[str, Any]) -> float:
-    try:
-        score = float(candidate.get("score") or 0)
-    except Exception:
-        return 0.0
-    return round(score / 100.0 if score > 1 else score, 3)
+    """0..1 display score; integer scores are percents (canonical rule)."""
+    from backend.matching.track_alignment import acoustid_score_percent
+    return round(acoustid_score_percent(candidate.get("score")) / 100.0, 3)
 
 
 def _audio_identity_compact_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
@@ -285,26 +284,16 @@ def _acoustid_verify_match(file_path: str, artist: str, title: str) -> str:
     return "unverified" if agreeing else "mismatch"
 
 
-def _acoustid_hit_score(candidate: Dict[str, Any]) -> float:
-    """Hit score on the 0..100 scale (AcoustID candidates store 0..100;
-    a 0..1 value is scaled)."""
-    try:
-        score = float(candidate.get("score") or 0)
-    except Exception:
-        return 0.0
-    return score * 100.0 if score <= 1.0 else score
-
-
 def _acoustid_top_tier(cands: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """The hits that decide identity: recording-bearing hits at or above the
     canonical floor (ACOUSTID_MIN_SCORE) within 3 points of the best one --
     the same window backend.matching uses. [] when nothing clears the floor."""
     high = [c for c in (cands or []) if isinstance(c, dict) and _s(c.get("mb_trackid") or "").strip()
-            and _acoustid_hit_score(c) >= ACOUSTID_MIN_SCORE]
+            and _hit_score(c) >= ACOUSTID_MIN_SCORE]
     if not high:
         return []
-    top = max(_acoustid_hit_score(c) for c in high)
-    return [c for c in high if _acoustid_hit_score(c) >= top - 3.0]
+    top = max(_hit_score(c) for c in high)
+    return [c for c in high if _hit_score(c) >= top - 3.0]
 
 
 def _acoustid_confirmed_recording(cands: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
@@ -315,7 +304,7 @@ def _acoustid_confirmed_recording(cands: Optional[List[Dict[str, Any]]]) -> Opti
     tier = _acoustid_top_tier(cands)
     if not tier:
         return None
-    best = max(tier, key=_acoustid_hit_score)
+    best = max(tier, key=_hit_score)
     rid = _s(best.get("mb_trackid") or "").strip().lower()
     if acoustid_evidence_from_hits(cands, rid).status != AcoustIDStatus.CONFIRMED:
         return None

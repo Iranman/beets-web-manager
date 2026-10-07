@@ -224,6 +224,33 @@ class ReleaseIdTests(unittest.TestCase):
         self.assertEqual(_release_id({"mb_albumid": RELEASE.upper()}), RELEASE)
 
 
+class HitScoreScaleTests(unittest.TestCase):
+    """Integer scores are percents; only a float in 0..1 is a fraction."""
+
+    def test_scale(self):
+        from backend.matching.track_alignment import acoustid_score_percent as pct
+        self.assertEqual(pct(1), 1.0)
+        self.assertEqual(pct(0), 0.0)
+        self.assertEqual(pct(95), 95.0)
+        self.assertEqual(pct(1.0), 100.0)
+        self.assertEqual(pct(0.95), 95.0)
+        self.assertEqual(pct(95.5), 95.5)
+        self.assertEqual(pct("1"), 1.0)
+        self.assertEqual(pct("0.95"), 95.0)
+        self.assertEqual(pct(None), 0.0)
+        self.assertEqual(pct(True), 0.0)
+        self.assertEqual(pct("junk"), 0.0)
+
+    def test_one_percent_hit_is_not_confirmed(self):
+        from backend.matching import acoustid_evidence_from_hits
+        ev = acoustid_evidence_from_hits([{"mb_trackid": REC_A, "score": 1}], REC_A)
+        self.assertNotEqual(ev.status, AcoustIDStatus.CONFIRMED)
+        with lookup({"src": [hit(REC_A, 1)], "lib": [hit(REC_A, 1)]}):
+            self.assertEqual(acs._acoustid_fingerprint_match("src", "lib"), ("", [], []))
+        self.assertEqual(acs._audio_identity_score({"score": 1}), 0.01)
+        self.assertEqual(acs._audio_identity_score({"score": 0.95}), 0.95)
+
+
 class ResolveUnmatchedTests(unittest.TestCase):
     """Fresh-import AcoustID promotion uses the canonical ambiguity window."""
 
