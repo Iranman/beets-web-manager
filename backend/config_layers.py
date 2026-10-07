@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -355,13 +356,20 @@ def beets_web_url(environ: Optional[Dict[str, str]] = None) -> str:
     return (env.get("BEETS_WEB_URL", "") or "").strip() or DEFAULT_BEETS_WEB_URL
 
 
+def url_has_userinfo(url: str) -> bool:
+    """True when ``url`` carries (or would be read as carrying) userinfo:
+    any "@", also percent-encoded (%40) or a compatibility form such as the
+    fullwidth U+FF20 that NFKC normalization turns into "@" (#208)."""
+    return "@" in unicodedata.normalize("NFKC", urllib.parse.unquote(url or ""))
+
+
 def redact_url_userinfo(url: str) -> str:
     """``url`` without ``user:pass@``, query or fragment, for display/logs."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return "<invalid-url>"
-    if "@" in url and ("@" not in parts.netloc or not parts.scheme or not parts.netloc):
+    if url_has_userinfo(url) and ("@" not in parts.netloc or not parts.scheme or not parts.netloc):
         # Unencoded / ? # in a password, no scheme, or "http:/u:p@h": the
         # parser did not see the userinfo, so fail closed.
         return "<redacted-url>"
