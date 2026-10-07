@@ -10,7 +10,9 @@ Orchestrates multi-step, user-confirmed workflows across stock Beets:
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
+import errno
 import hashlib
 import inspect
 import json
@@ -221,39 +223,156 @@ def _validated_staging_target(path: Union[str, Path], what: str) -> Path:
     return resolved
 
 
-def _check_validated_entry(resolved: Path, what: str) -> os.stat_result:
-    """Re-check right before a destructive call: no symlink component, and
-    the entry is still the one :func:`_validated_staging_target` saw (same
-    st_dev/st_ino/type). An unvalidated path is refused (S1/F3, #182)."""
-    if _has_symlink_component(resolved):
-        raise ValueError(f"Refusing to {what} through a symlink: {resolved}")
-    now = os.lstat(str(resolved))
+def _require_dir_fd_support() -> None:
+    """Staging mutations are fd-relative only (#206 F1). Fail closed where the
+    platform cannot do that; never fall back to path-based operations."""
+    ops = (os.open, os.stat, os.mkdir, os.rmdir, os.unlink, os.rename)
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+            and all(op in os.supports_dir_fd for op in ops)
+            and shutil.rmtree.avoids_symlink_attacks):
+        raise ValueError("Refusing a staging mutation: fd-relative filesystem operations are unavailable.")
+
+
+def _staging_parts(resolved: Path) -> Tuple[Path, Tuple[str, ...]]:
+    """The most specific staging root strictly above ``resolved``, and the
+    path components below it."""
+    roots = [r for r in _get_staging_roots() if r in resolved.parents]
+    if not roots:
+        raise ValueError(f"Refusing to touch a path outside staging roots: {resolved}")
+    root = max(roots, key=lambda r: len(r.parts))
+    return root, resolved.relative_to(root).parts
+
+
+@contextlib.contextmanager
+def _staging_dir_fd(root: Path, parts: Tuple[str, ...], created: Optional[List[Tuple[int, str]]] = None):
+    """Yield an fd for ``root/parts...``, opened one component at a time with
+    O_DIRECTORY|O_NOFOLLOW so a component swapped for a symlink is refused,
+    not followed (#206 F1). With ``created`` given, missing components are
+    made with ``mkdir(dir_fd=)``; if the caller's block then raises, those
+    directories are removed again while still empty (#206 F2)."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds = [os.open(str(root), flags)]
+    try:
+        for name in parts:
+            try:
+                fd = os.open(name, flags, dir_fd=fds[-1])
+            except FileNotFoundError:
+                if created is None:
+                    raise
+                os.mkdir(name, dir_fd=fds[-1])
+                created.append((fds[-1], name))
+                fd = os.open(name, flags, dir_fd=fds[-1])
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError("Refusing to operate through a symlink or non-directory component.") from exc
+                raise
+            fds.append(fd)
+        yield fds[-1]
+    except BaseException:
+        for parent_fd, name in reversed(created or []):
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def _check_leaf(parent_fd: int, name: str, resolved: Path) -> os.stat_result:
+    """Right before a destructive call: ``name`` in ``parent_fd`` must still be
+    the entry :func:`_validated_staging_target` saw (st_dev/st_ino/type). An
+    unvalidated path is refused (S1/F3, #182)."""
     expected = getattr(resolved, "identity", None)
-    if expected is None or not _same_entry(expected, now):
+    try:
+        now = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        now = None
+    if expected is None or now is None or not _same_entry(expected, now):
         raise ValueError(f"Path changed since validation: {resolved}")
     return now
 
 
 def _remove_resolved(resolved: Path) -> None:
-    """Delete a path returned by :func:`_validated_staging_target`."""
-    now = _check_validated_entry(resolved, "delete")
-    if stat.S_ISDIR(now.st_mode):
-        shutil.rmtree(str(resolved))
-    else:
-        os.unlink(str(resolved))
+    """Delete a path returned by :func:`_validated_staging_target`, fd-relative
+    from its staging root, so a parent swapped for a symlink cannot redirect
+    the delete (#206 F1)."""
+    _require_dir_fd_support()
+    root, parts = _staging_parts(resolved)
+    with _staging_dir_fd(root, parts[:-1]) as parent_fd:
+        now = _check_leaf(parent_fd, parts[-1], resolved)
+        if stat.S_ISDIR(now.st_mode):
+            shutil.rmtree(parts[-1], dir_fd=parent_fd)
+        else:
+            os.unlink(parts[-1], dir_fd=parent_fd)
+
+
+def _copy_file_across_fs(src_fd: int, src_name: str, dst_fd: int, dst_name: str,
+                         expected: os.stat_result) -> None:
+    """EXDEV fallback for :func:`_move_resolved` (staging roots may be on
+    different mounts). Regular files only; a directory is refused and nothing
+    is moved. The source is opened O_NOFOLLOW and identity-checked, the target
+    is created O_CREAT|O_EXCL|O_NOFOLLOW, the copy is fsynced, and the source
+    is unlinked only if it is still the same entry; otherwise the copy is
+    removed and the source is left in place."""
+    if not stat.S_ISREG(expected.st_mode):
+        raise ValueError("Refusing a cross-filesystem move of a directory; nothing was moved.")
+    sfd = os.open(src_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=src_fd)
+    try:
+        st = os.fstat(sfd)
+        if not _same_entry(expected, st):
+            raise ValueError("Source changed since validation; nothing was moved.")
+        dfd = os.open(dst_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dst_fd)
+        try:
+            with open(sfd, "rb", closefd=False) as fin, open(dfd, "wb", closefd=False) as fout:
+                shutil.copyfileobj(fin, fout, 1 << 20)
+            os.fchmod(dfd, stat.S_IMODE(st.st_mode))
+            os.utime(dfd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.fsync(dfd)
+            os.close(dfd)
+            dfd = -1
+            now = os.stat(src_name, dir_fd=src_fd, follow_symlinks=False)
+            if not _same_entry(st, now):
+                raise ValueError("Source changed during the copy; nothing was moved.")
+        except BaseException:
+            if dfd >= 0:
+                os.close(dfd)
+            os.unlink(dst_name, dir_fd=dst_fd)
+            raise
+        os.unlink(src_name, dir_fd=src_fd)
+    finally:
+        os.close(sfd)
 
 
 def _move_resolved(src: Path, dst: Path) -> None:
-    """Move a validated source to a validated target. The symlink re-check
-    runs before ``mkdir`` creates any target parent (#182) and again after."""
-    if _has_symlink_component(dst.parent) or os.path.lexists(str(dst)):
+    """Move a validated source to a validated target, fd-relative from their
+    staging roots (#206 F1). Every refusal happens before a target parent is
+    created, and parents created for a move that then fails are removed
+    (#182, #206 F2). On one filesystem this is a single ``rename``; across
+    filesystems a regular file is copied then unlinked through fds
+    (:func:`_copy_file_across_fs`) and a directory is refused."""
+    _require_dir_fd_support()
+    if getattr(dst, "identity", None) is not None or _has_symlink_component(dst.parent) \
+            or os.path.lexists(str(dst)):
         raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
-    _check_validated_entry(src, "move")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if _has_symlink_component(dst.parent) or os.path.lexists(str(dst)):
-        raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
-    _check_validated_entry(src, "move")
-    shutil.move(str(src), str(dst))
+    s_root, s_parts = _staging_parts(src)
+    d_root, d_parts = _staging_parts(dst)
+    with _staging_dir_fd(s_root, s_parts[:-1]) as s_fd:
+        expected = _check_leaf(s_fd, s_parts[-1], src)
+        with _staging_dir_fd(d_root, d_parts[:-1], created=[]) as d_fd:
+            try:
+                os.stat(d_parts[-1], dir_fd=d_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
+            try:
+                os.rename(s_parts[-1], d_parts[-1], src_dir_fd=s_fd, dst_dir_fd=d_fd)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                _copy_file_across_fs(s_fd, s_parts[-1], d_fd, d_parts[-1], expected)
 
 
 def delete_staging_file(path: str) -> Dict[str, Any]:
@@ -2698,7 +2817,10 @@ def delete_playlist_staged_track(playlist_key: str, track_id: str, requested_pat
             raise ValueError(f"Refusing to delete a directory as a staged track: {requested_path}")
         _remove_resolved(resolved)
     except (ValueError, OSError) as exc:
-        return {"ok": False, "deleted": False, "track_id": track_id, "error": str(exc)}
+        # The detail names absolute staging paths: server log only (#206 F5).
+        log.warning("Staged track delete refused or failed for %r: %s", requested_path, exc)
+        return {"ok": False, "deleted": False, "track_id": track_id,
+                "error": "Could not delete the staged track file."}
     return {"ok": True, "deleted": True, "track_id": track_id}
 
 
