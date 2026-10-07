@@ -25,7 +25,7 @@ from backend.matching_service import _MB_VARIOUS_ARTISTS_ID, _artist_folder_name
 from backend.app_runtime import jobs
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
 from backend.serializers import _json_from_flask_response
-from backend.plex_service import _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
+from backend.plex_service import _plex_timeout_error, _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
 
 # ── ARCH-001 extracted code ──
 
@@ -701,7 +701,13 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
                 "canonical_source": "library-title",
             }
 
-    for cand in _mb_recording_search(title, "", limit=8) or []:
+    try:
+        mb_title_cands = _mb_recording_search(title, "", limit=8) or []
+    except provider_boundary.ProviderError:
+        # Title tidying only: with MusicBrainz unavailable the source text
+        # is kept as-is. No identity or match decision is made here.
+        mb_title_cands = []
+    for cand in mb_title_cands:
         cand_title = _s(cand.get("title") or "").strip()
         cand_artist = _playlist_primary_artist_name(cand.get("artist") or "")
         mb_score = int(cand.get("score") or 0)
@@ -1653,19 +1659,27 @@ def _plex_create_audio_playlist(machine_id: str, title: str, keys: List[str],
         playlist_key = _s(metadata[0].get("ratingKey") or metadata[0].get("key") or "").strip()
     playlist_key = playlist_key.strip("/").split("/")[-1] if playlist_key else ""
     added = len(chunks[0])
-    for chunk in chunks[1:]:
-        if not playlist_key:
-            raise RuntimeError("Plex playlist was created but no playlist key was returned for chunked append")
-        _plex_request(f"/playlists/{playlist_key}/items", {
-            "uri": _plex_playlist_uri(machine_id, chunk),
-        }, method="PUT", timeout=PLEX_API_TIMEOUT)
-        added += len(chunk)
+    try:
+        for chunk in chunks[1:]:
+            if not playlist_key:
+                raise RuntimeError("Plex playlist was created but no playlist key was returned for chunked append")
+            _plex_request(f"/playlists/{playlist_key}/items", {
+                "uri": _plex_playlist_uri(machine_id, chunk),
+            }, method="PUT", timeout=PLEX_API_TIMEOUT)
+            added += len(chunk)
+    except Exception:
+        # IA-16: never leave a partial, untracked copy behind. The previous
+        # playlist is still intact (sync deletes it only after this create
+        # succeeds).
+        if playlist_key:
+            _plex_delete_playlist_by_rating_key(playlist_key, log=log)
+        raise
     if log is not None and len(chunks) > 1:
         log.append(f"  [plex] Added playlist tracks in {len(chunks)} chunks")
     return added, playlist_key
 
 
-def _plex_delete_playlist_by_rating_key(rating_key: str, log=None) -> int:
+def _plex_delete_playlist_by_rating_key(rating_key: str, log=None, *, raise_errors: bool = False) -> int:
     """Delete exactly one Plex playlist by its own stable ratingKey -- the
     unambiguous, preferred deletion authority (SEC-002 Wave 10 second final
     review). Unlike title-based matching this cannot collide with another
@@ -1676,9 +1690,19 @@ def _plex_delete_playlist_by_rating_key(rating_key: str, log=None) -> int:
     path = key.split("?", 1)[0] if key.startswith("/playlists/") else f"/playlists/{key}"
     try:
         _plex_request(path, method="DELETE", timeout=10)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return 0  # already gone
+        if log is not None:
+            log.append(f"  [plex] Could not delete playlist by ratingKey {key!r}: HTTP {exc.code}")
+        if raise_errors:
+            raise
+        return 0
     except Exception as exc:
         if log is not None:
             log.append(f"  [plex] Could not delete playlist by ratingKey {key!r}: {exc}")
+        if raise_errors:
+            raise
         return 0
     if log is not None:
         log.append(f"  [plex] Deleted playlist by ratingKey: {key}")
@@ -1742,22 +1766,18 @@ def _playlist_other_live_pids_with_name(clean_name: str, exclude_pid: str = "") 
     return others
 
 
-def _plex_replace_playlist_safely(name: str,
-                                  pid: str,
-                                  previous_manifest: Optional[Dict[str, Any]],
-                                  log=None) -> Dict[str, Any]:
-    """Delete/replace this playlist's own existing Plex playlist before a
-    fresh sync, without risking another same-named app playlist's Plex
-    playlist (SEC-002 Wave 10 second final review). Prefers a previously
-    stored ratingKey; only falls back to legacy title-based replacement
-    when no other live app playlist shares this display name and exactly
-    one Plex playlist exists with this title (SEC-002 Wave 11)."""
-    result = {"replaced": 0, "ambiguous": False}
-    prior_rating_key = ""
+def _plex_replace_target(name: str,
+                         pid: str,
+                         previous_manifest: Optional[Dict[str, Any]],
+                         log=None) -> Dict[str, Any]:
+    """Which existing Plex playlist a fresh sync replaces, resolved BEFORE the
+    new one is created (IA-03): its stored ratingKey, else -- legacy -- the
+    single Plex playlist with this title, and only when no other live app
+    playlist shares the name (SEC-002 Wave 10/11). Deletes nothing."""
+    result: Dict[str, Any] = {"rating_key": "", "ambiguous": False}
     if isinstance(previous_manifest, dict):
-        prior_rating_key = _s((previous_manifest.get("last_plex") or {}).get("rating_key") or "").strip()
-    if prior_rating_key:
-        result["replaced"] = _plex_delete_playlist_by_rating_key(prior_rating_key, log=log)
+        result["rating_key"] = _s((previous_manifest.get("last_plex") or {}).get("rating_key") or "").strip()
+    if result["rating_key"]:
         return result
     others = _playlist_other_live_pids_with_name(_clean_playlist_name(name), exclude_pid=pid)
     if others:
@@ -1768,11 +1788,17 @@ def _plex_replace_playlist_safely(name: str,
                 f"{len(others)} other playlist(s) share this name and have no stored ratingKey"
             )
         return result
-    deleted, err = _plex_delete_playlist_by_title_unambiguous(name, log=log)
-    result["replaced"] = deleted
-    if err:
-        result["ambiguous"] = err == "ambiguous_plex_playlist"
-        result["error"] = err
+    candidates = _plex_playlist_candidates_by_title(name)
+    if len(candidates) > 1:
+        result["ambiguous"] = True
+        result["error"] = "ambiguous_plex_playlist"
+        if log is not None:
+            log.append(
+                f"  [plex] Refusing title-based replace for {name!r}: "
+                f"{len(candidates)} matching Plex playlists found (ambiguous_plex_playlist)"
+            )
+    elif candidates:
+        result["rating_key"] = candidates[0][1]
     return result
 
 
@@ -2382,7 +2408,9 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         "issue_reason": "",
         "action_needed": "",
         "replaced": 0,
-        "rating_key": "",
+        # IA-16: until a new playlist exists, the stored identity is the
+        # previous one -- a failed sync must not erase it.
+        "rating_key": prior_rating_key,
         "scan_triggered": False,
         "section_key": "",
         "section_title": "",
@@ -2461,25 +2489,43 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         log.append(f"  [plex] {plex['error']}")
                 elif keys:
                     playlist_keys = list(dict.fromkeys(str(key) for key in keys if str(key)))
+                    replace_target: Dict[str, Any] = {}
                     if replace_plex:
-                        replace_result = _plex_replace_playlist_safely(name, pid, manifest, log=log)
-                        plex["replaced"] = replace_result["replaced"]
-                        if replace_result.get("ambiguous"):
-                            plex["issue_reason"] = "ambiguous Plex playlist title"
-                            plex["action_needed"] = (
-                                "Another playlist shares this name with no stored Plex ratingKey; "
-                                "sync it once more to safely establish separate Plex identity"
-                            )
+                        replace_target = _plex_replace_target(name, pid, manifest, log=log)
+                    # IA-03: create first; the old playlist is deleted only
+                    # once the new one exists in full.
                     added, new_rating_key = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
                     plex["created"] = True
                     plex["tracks_added"] = added
                     plex["rating_key"] = new_rating_key
+                    old_rating_key = _s(replace_target.get("rating_key") or "").strip()
+                    old_delete_failed = False
+                    if old_rating_key and old_rating_key != _s(new_rating_key).strip():
+                        try:
+                            plex["replaced"] = _plex_delete_playlist_by_rating_key(
+                                old_rating_key, log=log, raise_errors=True)
+                        except Exception:
+                            old_delete_failed = True
                     plex["matched_track_ids"] = list(match_details.get("matched_track_ids") or [])
                     plex["complete"] = pending_count == 0 and len(keys) == len(items)
                     plex["status"] = "success" if plex["complete"] else "partial_success"
                     if pending_count:
                         plex["issue_reason"] = "pending Plex matches"
                         plex["action_needed"] = "Retry pending Plex matches after Plex scans the affected files"
+                    if replace_target.get("ambiguous"):
+                        plex["issue_reason"] = "ambiguous Plex playlist title"
+                        plex["action_needed"] = (
+                            "Another playlist shares this name with no stored Plex ratingKey; "
+                            "sync it once more to safely establish separate Plex identity"
+                        )
+                    if old_delete_failed:
+                        plex["complete"] = False
+                        plex["status"] = "partial_success"
+                        plex["issue_reason"] = "previous Plex playlist could not be removed"
+                        plex["action_needed"] = (
+                            "The new Plex playlist was created, but the previous copy is still in Plex; "
+                            "delete the older duplicate in Plex"
+                        )
                     plex["summary_message"] = (
                         f"Plex playlist updated with {len(keys)} of {len(items)} track(s); "
                         f"{pending_count} pending Plex match(es)."
@@ -2546,6 +2592,13 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
             plex["status"] = "failed"
             plex["issue_reason"] = "filesystem or Plex API operation failed"
             plex["action_needed"] = "Check the Plex job log"
+            if not plex.get("created") and _plex_timeout_error(exc):
+                # IA-02: a create that timed out is never re-sent; Plex may
+                # or may not have applied it.
+                plex["issue_reason"] = "Plex did not answer in time"
+                plex["action_needed"] = (
+                    "Plex may have created the playlist anyway; check Plex for a duplicate before syncing again"
+                )
             if log is not None:
                 log.append(f"  [plex] Playlist sync error: {exc}")
 
@@ -3093,6 +3146,30 @@ class _SpotifyFetchError(RuntimeError):
     pass
 
 
+def _spotify_error(stage: str, exc: BaseException) -> _SpotifyFetchError:
+    """A user-facing message that says what actually went wrong (IA-19)."""
+    err = provider_boundary.classify_exception(exc)
+    outcome = err.outcome
+    _app_logger.warning("Spotify %s failed: %s (%s)", stage, outcome.value, type(exc).__name__)
+    if outcome == provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR:
+        if stage == "auth":
+            return _SpotifyFetchError("Spotify rejected the client ID/secret.")
+        return _SpotifyFetchError("Spotify refused access to this playlist.")
+    if outcome == provider_boundary.ProviderOutcome.RATE_LIMITED:
+        return _SpotifyFetchError("Spotify is rate limiting requests; try again in a few minutes.")
+    if err.status_code == 404 and stage != "auth":
+        return _SpotifyFetchError(
+            "Spotify playlist not found or not available to API apps "
+            "(Spotify-owned and algorithmic playlists cannot be read).")
+    malformed = isinstance(exc, (ValueError, KeyError, TypeError, AttributeError))
+    if not malformed and outcome in (provider_boundary.ProviderOutcome.UNAVAILABLE,
+                                     provider_boundary.ProviderOutcome.TRANSIENT_ERROR):
+        return _SpotifyFetchError("Spotify is unavailable; try again later.")
+    if stage == "auth":
+        return _SpotifyFetchError("Spotify authentication failed.")
+    return _SpotifyFetchError("Spotify playlist fetch failed.")
+
+
 def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str, str]]:
     """Fetch all tracks for a Spotify playlist ID via client-credentials auth.
 
@@ -3108,10 +3185,10 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
     try:
         with provider_boundary.opened("spotify", tok_req, timeout=10) as r:
             token = json.loads(r.read())["access_token"]
-    except (urllib.error.URLError, socket.timeout, TimeoutError,
-            json.JSONDecodeError, KeyError) as ex:
-        _app_logger.warning("Spotify auth failed: %s", type(ex).__name__)
-        raise _SpotifyFetchError("Spotify authentication failed.") from ex
+        if not isinstance(token, str) or not token:
+            raise ValueError("malformed token response")
+    except Exception as ex:
+        raise _spotify_error("auth", ex) from ex
 
     tracks: List[Dict[str, str]] = []
     offset = 0
@@ -3122,16 +3199,17 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
         try:
             with provider_boundary.opened("spotify", req, timeout=10) as r:
                 data = json.loads(r.read())
-        except (urllib.error.URLError, socket.timeout, TimeoutError,
-                json.JSONDecodeError) as ex:
-            _app_logger.warning("Spotify playlist fetch failed: %s", type(ex).__name__)
-            raise _SpotifyFetchError("Spotify playlist fetch failed.") from ex
+            if not isinstance(data, dict) or not isinstance(data.get("items", []), list):
+                raise ValueError("malformed playlist page")
+        except Exception as ex:
+            raise _spotify_error("playlist", ex) from ex
         for item in data.get("items", []):
-            trk = item.get("track") or {}
-            if not trk.get("name"):
+            trk = (item.get("track") if isinstance(item, dict) else None) or {}
+            if not isinstance(trk, dict) or not trk.get("name"):
                 continue
-            artist = ", ".join(a["name"] for a in trk.get("artists", []))
-            tracks.append({"artist": artist, "title": trk["name"]})
+            artist = ", ".join(_s(a.get("name")) for a in (trk.get("artists") or [])
+                               if isinstance(a, dict) and a.get("name"))
+            tracks.append({"artist": artist, "title": _s(trk["name"])})
         if not data.get("next"):
             break
         offset += 100

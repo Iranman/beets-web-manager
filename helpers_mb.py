@@ -243,6 +243,18 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
     return result
 
 
+def _mb_unavailable(ex: BaseException) -> Optional[provider_boundary.ProviderError]:
+    """The error to raise when MusicBrainz could not be asked (outage,
+    timeout, 401, 429, 5xx, malformed reply); None when MusicBrainz answered
+    by refusing this particular query (a 4xx), which is an empty answer.
+    Retries already happened inside provider_boundary.opened (BA-5)."""
+    err = provider_boundary.classify_exception(ex)
+    if err.outcome == provider_boundary.ProviderOutcome.REJECTED and err.status_code is not None:
+        return None
+    return provider_boundary.ProviderError(err.outcome, f"MusicBrainz unavailable ({err})",
+                                           status_code=err.status_code, retry_after=err.retry_after)
+
+
 def _mb_recording_search(title: str, artist: str, limit: int = 8):
     """Query MusicBrainz for recording candidates. Returns list of candidate dicts."""
     parts = []
@@ -284,7 +296,10 @@ def _mb_recording_search(title: str, artist: str, limit: int = 8):
                 "duration":   dur,
             })
         return out
-    except Exception:
+    except Exception as ex:
+        unavailable = _mb_unavailable(ex)
+        if unavailable is not None:
+            raise unavailable from ex
         return []
 
 
@@ -322,27 +337,19 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
     url = f"https://musicbrainz.org/ws/2/release?{params}"
     req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"})
     data: Dict[str, Any] = {}
-    transient_codes = {429, 500, 502, 503, 504}
-    for attempt in range(1, 4):
-        try:
-            with provider_boundary.opened("musicbrainz", req, timeout=25) as r:
-                data = json.loads(r.read())
-            break
-        except Exception as ex:
-            code = getattr(ex, "code", None)
-            reason = str(getattr(ex, "reason", "") or "").lower()
-            transient = code in transient_codes or "timed out" in reason or "temporarily" in reason
-            if transient and attempt < 3:
-                if log is not None:
-                    log.append(
-                        f"  MB release search transient error ({code or reason or ex}); "
-                        f"retrying {attempt + 1}/3"
-                    )
-                time.sleep(1.5 * attempt)
-                continue
-            if log is not None:
-                log.append(f"  WARN: MusicBrainz release search failed: {ex}")
-            return []
+    # BA-5: provider_boundary.opened already retries (musicbrainz policy);
+    # a second loop here multiplied the requests. An outage raises -- it is
+    # never "no candidates".
+    try:
+        with provider_boundary.opened("musicbrainz", req, timeout=25) as r:
+            data = json.loads(r.read())
+    except Exception as ex:
+        unavailable = _mb_unavailable(ex)
+        if log is not None:
+            log.append(f"  WARN: MusicBrainz release search failed: {unavailable or ex}")
+        if unavailable is not None:
+            raise unavailable from ex
+        return []
 
     _COUNTRY_RANK = {"US": 0, "USA": 0, "XW": 1, "WORLDWIDE": 1, "GB": 2, "CA": 3, "AU": 4}
 
@@ -932,8 +939,12 @@ def _resolve_mb_release_id(mb_input: str, log: list) -> str:
                            f" ({chosen.get('title','?')} {chosen.get('date','')})")
                 return chosen["id"].lower()
             log.append(f"  WARN: release-group {mb_uuid} has no releases")
+            return ""
         except Exception as ex:
-            log.append(f"  WARN: release-group lookup failed ({ex}), using raw UUID")
+            # A release-group UUID is not a release UUID: never hand it on as
+            # one (canonical identity rule). The caller sees "unresolved".
+            log.append(f"  WARN: release-group lookup failed ({ex}); release not resolved")
+            return ""
     return mb_uuid
 
 
@@ -949,25 +960,17 @@ def fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None)
         headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}
     )
     mb_data: Dict[str, Any] = {}
-    transient_codes = {429, 500, 502, 503, 504}
-    for attempt in range(1, 4):
-        try:
-            with provider_boundary.opened("musicbrainz", req, timeout=30) as resp:
-                mb_data = json.loads(resp.read())
-            break
-        except Exception as ex:
-            code = getattr(ex, "code", None)
-            reason = str(getattr(ex, "reason", "") or "").lower()
-            transient = code in transient_codes or "timed out" in reason or "temporarily" in reason
-            if transient and attempt < 3:
-                if log is not None:
-                    public_reason = code if code is not None else "transient network error"
-                    log.append(f"  MB fetch transient error ({public_reason}); retrying {attempt + 1}/3")
-                time.sleep(1.5 * attempt)
-                continue
-            if log is not None:
-                log.append("  MB fetch failed: MusicBrainz lookup failed.")
-            return {"ok": False, "error": "MusicBrainz lookup failed.", "tracks": []}
+    # BA-5: retries happen once, inside provider_boundary.opened.
+    try:
+        with provider_boundary.opened("musicbrainz", req, timeout=30) as resp:
+            mb_data = json.loads(resp.read())
+    except Exception as ex:
+        unavailable = _mb_unavailable(ex)
+        error = "MusicBrainz is unavailable." if unavailable is not None else "MusicBrainz lookup failed."
+        if log is not None:
+            log.append(f"  MB fetch failed: {error}")
+        return {"ok": False, "error": error, "tracks": [],
+                "unavailable": unavailable is not None}
 
     rg = mb_data.get("release-group") or {}
     release_group_id = str(rg.get("id") or "").strip().lower()

@@ -10,9 +10,14 @@ from backend.matching import strip_track_filename_id_suffix as _canonical_strip_
 from backend.title_normalize import split_ws_led, strip_bracket_credits
 from collections import Counter, defaultdict
 from pathlib import Path
+from backend import config_layers
 from typing import Any, Dict, List, Optional
-from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, SLSKD_URL, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
+from backend.app_runtime import AUDIO_EXT, SLSKD_URL, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
 from backend.slskd import build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl
+
+# BA-12: where slskd and other download clients write, from DOWNLOADS_ROOT
+# (alias DOWNLOAD_PATH, default /downloads); never a maintainer path.
+DOWNLOADS_ROOT = Path(config_layers.downloads_root())
 
 # ── ARCH-001 extracted code ──
 
@@ -49,9 +54,8 @@ def _slskd_req(method: str, path: str, body=None) -> Any:
             raw = r.read()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
-        raise RuntimeError(
-            f"slskd {method} /{path} → HTTP {e.code}: "
-            f"{e.read()[:300].decode('utf-8', 'replace')}")
+        # Never echo the provider body: it can carry tokens, paths or peer data.
+        raise RuntimeError(f"slskd {method} /{path} → HTTP {e.code}") from None
 
 
 def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:
@@ -371,10 +375,13 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
             _inline_responses = rows
 
     missing_rows_logged = False
+    poll_error: Optional[BaseException] = None
     for _ in range(45):
         time.sleep(1)
         try:
             st = _slskd_req("GET", f"searches/{search_id}?includeResponses=true")
+            if not isinstance(st, dict):
+                raise ValueError("slskd returned a malformed search status")
             resp_count = max(resp_count, int(st.get("responseCount") or 0))
             state = st.get("state", "").lower()
             _cache_responses(st)
@@ -390,27 +397,37 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
 
             if _inline_responses and (state in ("completed", "stopped") or resp_count >= 5):
                 break
-        except Exception:
+        except Exception as exc:
+            poll_error = exc
             break
+    if poll_error is not None and not resp_count:
+        # IA-06: an outage, timeout or 401 while polling is not "no results".
+        log.append(f"  [slskd] Search polling failed: {poll_error}")
+        raise RuntimeError(f"slskd unavailable while searching for '{search_text}': {poll_error}") from poll_error
     log.append(f"  [slskd] {resp_count} response(s) returned")
     if not resp_count:
         raise RuntimeError(f"No Soulseek results for '{search_text}'")
 
     # 3. Get responses — prefer dedicated endpoint, fall back to cached rows.
     responses = []
+    fetch_error: Optional[BaseException] = None
     for _ in range(8):
         try:
             responses = _normalise_search_responses(
                 _slskd_req("GET", f"searches/{search_id}/responses") or []
             )
-        except Exception:
+            fetch_error = None
+        except Exception as exc:
             responses = []
+            fetch_error = exc
         if responses or _inline_responses:
             break
         time.sleep(1)
     if not responses and _inline_responses:
         log.append(f"  [slskd] Using {len(_inline_responses)} cached inline responses")
         responses = _inline_responses
+    if not responses and fetch_error is not None:
+        raise RuntimeError(f"slskd unavailable while reading search responses: {fetch_error}") from fetch_error
     if not responses:
         raise RuntimeError(
             f"Got {resp_count} matches but responses list is empty "
@@ -934,8 +951,6 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
         expected,
         user_root,
         DOWNLOADS_ROOT,
-        DOWNLOADS_ROOT.parent,
-        "/data/downloads",
         "/downloads",
         "/download",
         "/tmp",
@@ -981,7 +996,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
 
     log.append(
         "  [slskd] Could not locate completed queued files. "
-        "Checked transfer hints, expected dir, /data/torrents/music, /data/downloads, /downloads, /download, /tmp."
+        f"Checked transfer hints, expected dir, {DOWNLOADS_ROOT}, /downloads, /download, /tmp."
     )
     return str(expected), []
 

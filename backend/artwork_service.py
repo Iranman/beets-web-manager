@@ -913,6 +913,27 @@ def _validate_album_art_bytes(data: bytes) -> Dict[str, Any]:
     return {"format": image_format, "width": width, "height": height, "bytes": len(data)}
 
 
+def _album_art_download_error(exc: BaseException) -> "AlbumArtRequestError":
+    """Say why the image could not be fetched (IA-20): the image host's own
+    refusal is the caller's to fix (4xx); an unreachable or failing host is
+    a gateway problem (502/504), and a throttling host asks to retry (503)."""
+    err = provider_boundary.classify_exception(exc)
+    outcome = err.outcome
+    if outcome == provider_boundary.ProviderOutcome.RATE_LIMITED:
+        return AlbumArtRequestError("The image host is rate limiting requests; try again later", 503)
+    if outcome == provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR:
+        return AlbumArtRequestError(f"The image host refused access (HTTP {err.status_code})", 400)
+    if err.status_code == 404:
+        return AlbumArtRequestError("No image at that URL (HTTP 404)", 400)
+    if outcome == provider_boundary.ProviderOutcome.REJECTED and err.status_code is not None:
+        return AlbumArtRequestError(f"The image host refused the request (HTTP {err.status_code})", 400)
+    if outcome == provider_boundary.ProviderOutcome.TRANSIENT_ERROR and "timed out" in str(err):
+        return AlbumArtRequestError("The image host did not respond in time", 504)
+    if outcome == provider_boundary.ProviderOutcome.UNAVAILABLE and err.status_code is not None:
+        return AlbumArtRequestError(f"The image host is unavailable (HTTP {err.status_code})", 502)
+    return AlbumArtRequestError("Could not reach the image host", 502)
+
+
 def _download_album_art_bytes(image_url: str) -> Tuple[bytes, Dict[str, Any]]:
     parsed = urllib.parse.urlparse(image_url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -927,7 +948,7 @@ def _download_album_art_bytes(image_url: str) -> Tuple[bytes, Dict[str, Any]]:
     except OutboundPolicyError as exc:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
     except Exception as exc:
-        raise AlbumArtRequestError("Image download failed", 400) from exc
+        raise _album_art_download_error(exc) from exc
     info = _validate_album_art_bytes(data)
     return data, info
 
