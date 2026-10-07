@@ -1963,6 +1963,18 @@ def _web_manager_downloads_root() -> Path:
     return Path(config_layers.downloads_root())
 
 
+def _checked_beets_config_path() -> Tuple[Path, str]:
+    """BEETS_CONFIG through the same BEETSDIR containment check that
+    provisioning and the config editors use (#222 QA F2), so status and
+    provisioning agree. On refusal: the raw path (for local mount checks
+    only) and the ConfigPathError message; otherwise an empty message."""
+    from backend.config_manager import ConfigPathError, get_config_path
+    try:
+        return get_config_path(), ""
+    except ConfigPathError as exc:
+        return Path(config_layers.beets_config_file()), str(exc)
+
+
 def _local_paths_report(config_path: Path) -> Dict[str, Any]:
     """Web Manager's own mounts, checked locally. Independent of whether
     stock Beets is reachable (BI-7)."""
@@ -2074,7 +2086,9 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
 
     try:
         from backend.beets_plugins import verify_all_plugins
-        plugins_report = verify_all_plugins(config_path.parent, loaded_plugins=loaded_plugins)
+        plugins_report = verify_all_plugins(
+            config_path.parent, config_file=config_path, loaded_plugins=loaded_plugins
+        )
         configured_plugins = sorted({
             p["name"] for p in plugins_report.get("plugins", []) if p.get("enabled")
         })
@@ -2754,7 +2768,7 @@ def _beets_setup_warnings(
 def _build_setup_status_payload() -> Dict[str, Any]:
     settings = _load_settings()
 
-    beets_config_path = Path(config_layers.beets_config_file())
+    beets_config_path, config_path_error = _checked_beets_config_path()
     diagnostics = _beets_plugin_diagnostics(beets_config_path)
     remote_paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) else {}
 
@@ -2765,6 +2779,10 @@ def _build_setup_status_payload() -> Dict[str, Any]:
     music_check = dict(local_paths["music_library"])
     downloads_check = dict(local_paths["downloads"])
     config_file_report = dict(local_paths["beets_config"])
+    if config_path_error:
+        # Provisioning and the config editors refuse this path: not usable.
+        config_file_report["exists"] = False
+        config_file_report["error"] = config_path_error
     beets_config_exists = bool(config_file_report.get("exists"))
     beets_config_report_path = str(config_file_report.get("path") or beets_config_path)
     beets_reachable = bool(diagnostics.get("available"))
@@ -2884,7 +2902,9 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             f"Cannot write to downloads/staging path {downloads_check['path']} - mount your downloads "
             "folder there or set DOWNLOADS_ROOT to where it is mounted in the Web Manager container"
         )
-    if not beets_config_exists:
+    if config_path_error:
+        blocking.append(config_path_error)
+    elif not beets_config_exists:
         blocking.append(
             f"Beets config not found at {beets_config_report_path} - copy config.yaml.example to config.yaml"
         )
@@ -2906,6 +2926,12 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         if beets_reachable
         else ([], [])
     )
+    if config_path_error:
+        warnings.insert(0, {
+            "id": "beets_config_path_invalid",
+            "severity": "warning",
+            "message": config_path_error,
+        })
 
     ready = not blocking
     demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -2948,6 +2974,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         from backend.beets_plugins import verify_all_plugins
         plugins_report = verify_all_plugins(
             beets_config_path.parent,
+            config_file=beets_config_path,
             loaded_plugins=diagnostics.get("loaded_plugins"),
             available_binaries={
                 "fpcalc": bool(diagnostics.get("fpcalc_available")),
@@ -3908,7 +3935,7 @@ def health_live():
 def health_ready():
     """Readiness probe: stock Beets reachable over the plugin handshake plus
     this container's own mounts (checked locally, independent of Beets)."""
-    config_path = Path(config_layers.beets_config_file())
+    config_path, config_path_error = _checked_beets_config_path()
     diagnostics = _beets_plugin_diagnostics(config_path)
     paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) and diagnostics.get("paths") else _local_paths_report(config_path)
 
@@ -3921,7 +3948,9 @@ def health_ready():
     if not (paths.get("downloads") or {}).get("writable"):
         blocking.append("downloads path not writable")
     beets_config = paths.get("beets_config") or {}
-    if not beets_config.get("exists"):
+    if config_path_error:
+        blocking.append("beets config path invalid")
+    elif not beets_config.get("exists"):
         blocking.append("beets config missing")
     if reachable and beets_config.get("exists") and not diagnostics.get("plugin_loader_ok"):
         blocking.append("beets plugin loader failed")
@@ -3951,10 +3980,12 @@ def health_root():
 @app.get("/api/setup/plugins")
 def plugins_status():
     """Return comprehensive Beets plugin verification report across categories."""
-    beets_config_path = Path(config_layers.beets_config_file())
+    beets_config_path, config_path_error = _checked_beets_config_path()
+    if config_path_error:
+        return jsonify({"ok": False, "all_required_healthy": False, "error": config_path_error}), 409
     try:
         from backend.beets_plugins import verify_all_plugins
-        report = verify_all_plugins(beets_config_path.parent)
+        report = verify_all_plugins(beets_config_path.parent, config_file=beets_config_path)
     except Exception as exc:
         app.logger.error("plugins_status failed: %s", exc, exc_info=True)
         report = {
@@ -3982,7 +4013,7 @@ def plugins_provision():
         # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
         beets_config_path = get_config_path()
         from backend.beets_plugins import provision_and_verify
-        result = provision_and_verify(beets_config_path.parent)
+        result = provision_and_verify(beets_config_path.parent, config_file=beets_config_path)
     except ConfigPathError as exc:
         return jsonify({"ok": False, "all_required_healthy": False, "error": str(exc)}), exc.status_code
     except Exception as exc:
@@ -4003,10 +4034,12 @@ def plugins_verify():
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
-    beets_config_path = Path(config_layers.beets_config_file())
+    beets_config_path, config_path_error = _checked_beets_config_path()
+    if config_path_error:
+        return jsonify({"ok": False, "all_required_healthy": False, "error": config_path_error}), 409
     try:
         from backend.beets_plugins import verify_all_plugins
-        result = verify_all_plugins(beets_config_path.parent)
+        result = verify_all_plugins(beets_config_path.parent, config_file=beets_config_path)
     except Exception as exc:
         app.logger.error("plugins_verify failed: %s", exc, exc_info=True)
         return jsonify({

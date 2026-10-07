@@ -65,7 +65,9 @@ class ConfigPathError(ConfigError):
     some other file and reporting success."""
 
     def __init__(self, message: str):
-        super().__init__(message, error_code="CONFIG_PATH_INVALID", status_code=500)
+        # 409, not 500: a setup state the user must fix (BEETS_CONFIG /
+        # BEETSDIR), not a server fault.
+        super().__init__(message, error_code="CONFIG_PATH_INVALID", status_code=409)
 
 
 class ConfigNotFoundError(ConfigError):
@@ -96,16 +98,17 @@ def get_config_path() -> Path:
     config_dir = posixpath.normpath(_config_dir())
     target = posixpath.normpath(raw)
     if posixpath.dirname(target) != config_dir:
+        # F8: the message reaches the browser; never echo BEETSDIR.
         raise ConfigPathError(
             "BEETS_CONFIG must point to a file directly inside the Beets config directory "
-            f"({config_dir}); refusing to read or write another file."
+            "(BEETSDIR); refusing to read or write another file."
         )
     # Lexical containment is not enough: a symlinked config.yaml (or config
     # dir) could still resolve elsewhere. Compare resolved real paths too.
     if os.path.dirname(os.path.realpath(target)) != os.path.realpath(config_dir):
         raise ConfigPathError(
             "BEETS_CONFIG resolves outside the Beets config directory "
-            f"({config_dir}); refusing to read or write another file."
+            "(BEETSDIR); refusing to read or write another file."
         )
     return Path(target)
 

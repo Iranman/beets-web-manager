@@ -552,10 +552,17 @@ class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
             self.client.get("/api/setup/plugins/recommended"),
             self.client.post("/api/setup/plugins/recommended/apply", json={"plugins": ["fetchart"]}),
             self.client.post("/api/setup/plugins/provision"),
+            # #222 QA F2: status/verify use the same check as provisioning.
+            self.client.get("/api/plugins/status"),
+            self.client.post("/api/plugins/verify"),
         )
         for response in responses:
-            self.assertEqual(response.status_code, 500)
-            self.assertIn("Beets config directory", response.get_json()["error"])
+            self.assertEqual(response.status_code, 409)
+            error = response.get_json()["error"]
+            self.assertIn("Beets config directory", error)
+            # F8: the browser-facing message never names BEETSDIR.
+            self.assertNotIn(str(self.config_dir), error)
+            self.assertNotIn(self.config_dir.name, error)
         self.assertEqual(self.outside.read_text(encoding="utf-8"), outside_before)
         self.assertEqual(list(self.outside.parent.glob("*.bak-*")), [])
         self.assertFalse((self.outside.parent / "beetsplug").exists())
@@ -748,6 +755,148 @@ class SetupStatusIntegrationTests(unittest.TestCase):
         ids = [w["id"] for w in body["warnings"]]
         self.assertIn("beets_web_include_paths_disabled", ids)
         self.assertIn("enable_web_include_paths", [a["id"] for a in body["actions"]])
+
+
+class ConfigFollowupTests(_TempConfigMixin, unittest.TestCase):
+    """#222 / #183 F7-F9 follow-ups."""
+
+    def _masked(self, *changed):
+        from backend.beets_plugins import _mask_config_diff
+        head = ["--- config.yaml\n", "+++ config.yaml (proposed)\n", "@@ -1 +1 @@\n"]
+        return _mask_config_diff(head + list(changed))
+
+    def test_masker_bypasses_f2r(self):
+        probes = {
+            "pwd key": ["+pwd: X1X\n"],
+            "passphrase key": ["+  passphrase: X1X\n"],
+            "plain continuation": ["+apikey: abc\n", "+  X1X\n"],
+            "same-indent list item": ["+apikey:\n", "+- X1X\n"],
+            "explicit key pair": ["+? apikey\n", "+: X1X\n"],
+            "removed --- line": ["--- {apikey: X1X}\n"],
+            "added +++ line": ["+++ {token: X1X}\n"],
+            "url password with @": ["+url: http://user:X1X@Y1Y@host/x\n"],
+            "url password with space": ["+url: http://user:X1X Y1Y@host/x\n"],
+        }
+        for name, lines in probes.items():
+            out = self._masked(*lines)
+            self.assertNotIn("X1X", out, name)
+            self.assertNotIn("Y1Y", out, name)
+        self.assertIn("+url: http://user:********@host/x\n", self._masked("+url: http://user:X1X@Y1Y@host/x\n"))
+        # Changed lines with a key stay readable; the two file headers are kept.
+        out = self._masked("+plugins: web webmanager fetchart\n")
+        self.assertIn("+plugins: web webmanager fetchart\n", out)
+        self.assertTrue(out.startswith("--- config.yaml\n+++ config.yaml (proposed)\n@@"))
+
+    def test_masker_and_editor_share_one_secret_key_list(self):
+        from backend import config_layers
+        from backend.config_service import _CONFIG_SECRET_KEYS, _redact_config_content
+        self.assertIs(_CONFIG_SECRET_KEYS, config_layers.SECRET_CONFIG_KEYS)
+        for key in ("pwd", "passphrase", "apisecret", "google_key", "lastfm_key", "fanarttv_key"):
+            self.assertIn(key, _CONFIG_SECRET_KEYS)
+            self.assertNotIn("X1X", _redact_config_content(f"  {key}: X1X\n"), key)
+            self.assertNotIn("X1X", self._masked(f"+  {key}: X1X\n"), key)
+
+    def test_preview_without_trailing_newline_f2n(self):
+        from backend.beets_plugins import preview_recommended_plugins
+        path = self._make_config("plugins: web webmanager\nmyplugin:\n  password: |\n    X1X")
+        diff = preview_recommended_plugins(path)["diff"]
+        self.assertIn("fetchart", diff)
+        self.assertNotIn("X1X", diff)
+        self.assertEqual(diff.count("\n-"), 1, diff)  # only the plugins: line
+
+    def test_symlinked_beetsplug_dir_is_refused_before_mkdir_f5c(self):
+        from backend.beets_plugins import provision_bundled_plugins
+        self._make_config()
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        os.symlink(outside.name, self.config_dir / "beetsplug")
+        with self.assertRaises(RuntimeError):
+            provision_bundled_plugins(self.config_dir)
+        self.assertEqual(os.listdir(outside.name), [])
+        self.assertFalse((self.config_dir / ".webmanager_api_key").exists())
+
+    def test_plugin_dirs_are_appended_to_sys_path_f9(self):
+        import sys
+        from backend.beets_plugins import ensure_plugin_sys_path
+        self._make_config()
+        (self.config_dir / "beetsplug").mkdir()
+        before = list(sys.path)
+        self.addCleanup(setattr, sys, "path", before)
+        ensure_plugin_sys_path(self.config_dir)
+        self.assertEqual(sys.path[: len(before)], before)
+        self.assertEqual(sys.path[-1], str(self.config_dir / "beetsplug"))
+
+    def test_provision_edits_the_beets_config_file_f7(self):
+        from backend.beets_plugins import provision_and_verify, read_web_include_paths
+        self._make_config(text=None)
+        other = self.config_dir / "beets.yaml"
+        other.write_text(_BASE_CONFIG, encoding="utf-8")
+        with mock.patch("backend.beets_adapter.beets_adapter.get_plugin_status", side_effect=RuntimeError("down")):
+            result = provision_and_verify(self.config_dir, config_file=other)
+        self.assertTrue(result["config_updated"])
+        self.assertTrue(read_web_include_paths(other.read_text(encoding="utf-8")))
+        self.assertFalse(self.config_path.exists())
+
+    def test_startup_provision_edits_the_beets_config_file_f7(self):
+        from backend.beets_plugins import read_web_include_paths
+        from backend.config_service import _bootstrap_beets_plugins
+        self._make_config(text=None)
+        if not str(self.config_dir).startswith("/"):
+            self.skipTest("get_config_path requires POSIX container paths")
+        other = self.config_dir / "beets.yaml"
+        other.write_text(_BASE_CONFIG, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(other), "BEETSDIR": str(self.config_dir)}):
+            _bootstrap_beets_plugins()
+        self.assertTrue(read_web_include_paths(other.read_text(encoding="utf-8")))
+        self.assertFalse(self.config_path.exists())
+
+
+class ConfigPathStatusTests(_TempConfigMixin, unittest.TestCase):
+    """#222 QA F2: setup status and readiness flag a BEETS_CONFIG that
+    provisioning refuses instead of reading it as if it were fine."""
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
+        self.client = self.flask_app.test_client()
+        self._make_config()
+        if not str(self.config_path).startswith("/"):
+            self.skipTest("get_config_path requires POSIX container paths")
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        self.outside = Path(other.name) / "config.yaml"
+        self.outside.write_text(_BASE_CONFIG, encoding="utf-8")
+        (self.config_dir / "music").mkdir()
+        (self.config_dir / "downloads").mkdir()
+
+    def _get(self, url, beets_config):
+        from backend.beets_adapter import beets_adapter
+        env = {
+            "BEETS_CONFIG": str(beets_config), "BEETSDIR": str(self.config_dir),
+            "MUSIC_ROOT": str(self.config_dir / "music"), "DOWNLOADS_ROOT": str(self.config_dir / "downloads"),
+        }
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(beets_adapter, "get_plugin_status", return_value=_plugin_status()), \
+             mock.patch.object(beets_adapter, "get_stats", return_value={"items": 0, "albums": 0}), \
+             mock.patch("backend.beets_plugins.verify_all_plugins", return_value=_plugins_report()):
+            self.module._invalidate_setup_status_cache()
+            return self.client.get(url)
+
+    def test_setup_status_warns_and_blocks_on_refused_path(self):
+        body = self._get("/api/setup/status", self.outside).get_json()
+        warning = next(w for w in body["warnings"] if w["id"] == "beets_config_path_invalid")
+        self.assertNotIn(str(self.config_dir), warning["message"])
+        self.assertTrue(any("Beets config directory" in b for b in body["blocking_reasons"]), body["blocking_reasons"])
+
+    def test_setup_status_has_no_path_warning_for_contained_config(self):
+        body = self._get("/api/setup/status", self.config_path).get_json()
+        self.assertNotIn("beets_config_path_invalid", [w["id"] for w in body.get("warnings", [])])
+
+    def test_health_ready_blocks_on_refused_path(self):
+        response = self._get("/health/ready", self.outside)
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("beets config path invalid", response.get_json()["blocking_reasons"])
+        response = self._get("/health/ready", self.config_path)
+        self.assertNotIn("beets config path invalid", response.get_json()["blocking_reasons"])
 
 
 class AdapterPathsUnavailableTests(unittest.TestCase):
