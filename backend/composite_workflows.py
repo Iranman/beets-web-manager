@@ -202,8 +202,10 @@ def _get_staging_roots() -> List[Path]:
     downloads root (``config_layers.downloads_root``) plus
     ``<data dir>/playlist_staging``. The data directory itself is NOT a
     staging root -- it holds transactions.db, caches and backups (S1/F1)."""
-    from backend.config_layers import downloads_root
-    return [Path(downloads_root()).resolve(), (_data_dir() / "playlist_staging").resolve()]
+    from backend.config_layers import downloads_root, music_root, safe_roots
+    # #235: a downloads root that is "/" or overlaps the library is dropped.
+    return [Path(r).resolve() for r in safe_roots("DOWNLOADS_ROOT", [downloads_root()], music_root())] + [
+        (_data_dir() / "playlist_staging").resolve()]
 
 
 _PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".blb")
@@ -1417,9 +1419,19 @@ def _library_refs_under(folder: Any, adapter: Optional[BeetsAdapter] = None) -> 
     with art but no items under the folder is not seen).
 
     A pure string comparison of normalized absolute paths: nothing here
-    touches the filesystem with the caller's path (CodeQL #1381)."""
+    touches the filesystem with the caller's path (CodeQL #1381). Paths
+    under the configured MUSIC_ROOT as written are rewritten onto its
+    realpath (F-243-2), so a symlinked MUSIC_ROOT matches however Beets
+    stores the item path (relative items are already built on the realpath)."""
+    from backend.config_layers import music_root
+    written = os.path.abspath(os.path.normpath(music_root()))
+    real = os.path.realpath(music_root())
+
     def norm(p: Any) -> str:
-        return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+        n = os.path.abspath(os.path.normpath(str(p)))
+        if n == written or n.startswith(written.rstrip(os.sep) + os.sep):
+            n = real + n[len(written):]
+        return os.path.normcase(n)
 
     target = norm(_decode_path(folder))
     prefix = target.rstrip(os.sep) + os.sep
@@ -2876,11 +2888,8 @@ def plan_import_review_cleanup(
         data["path"] = data.get("folder") or data.get("folder_path") or data.get("source") or ""
     if not data.get("path"):
         return {"ok": False, "error": "A folder or file path is required."}
-    try:
-        album_id = int(data.get("album_id") or 0)
-    except (TypeError, ValueError):
-        album_id = 0
-    allow_music = bool(data.get("confirmed_wrong_library_folder") or data.get("allow_library_delete")) or album_id > 0
+    # F-3: album_id alone never opens the library (the caller verifies it).
+    allow_music = bool(data.get("confirmed_wrong_library_folder") or data.get("allow_library_delete"))
     library_quarantined = False
     try:
         # realpath (symlinks collapsed, like resolve()) + normpath prefix

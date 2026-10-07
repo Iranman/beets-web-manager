@@ -1065,7 +1065,7 @@ class RoutesSetupConfigLayerTests(unittest.TestCase):
 
     def _ok_paths(self):
         ok = {"path": "/x", "exists": True, "is_dir": True, "readable": True, "writable": True, "ok": True}
-        return {"config": dict(ok), "music_library": dict(ok), "downloads": dict(ok),
+        return {"config": dict(ok), "music_library": dict(ok), "downloads": dict(ok, path="/y"),
                 "beets_config": dict(ok, is_dir=False, is_file=True)}
 
     def test_beets_unavailable_is_the_single_primary_reason(self):

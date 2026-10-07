@@ -2706,6 +2706,16 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 # Service behind POST /api/folders/import-with-id (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
+def _retag_release_operator_selected(album_id: int, *, auto_import: bool, confirmed_album_id: int,
+                                     operator_album_id: int) -> bool:
+    """F-2: the retag stamp may move an album to the selected Release's
+    Release Group only for the album this import verifiably produced or the
+    existing album the operator named -- never for an id found by a guessing
+    strategy, and never under auto-import."""
+    return (not auto_import and int(album_id or 0) > 0
+            and int(album_id) in (int(confirmed_album_id or 0), int(operator_album_id or 0)))
+
+
 def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """Two-step import for a skipped folder:
       1. beet import --quiet-fallback asis  (always succeeds, gets files into library)
@@ -2761,6 +2771,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     queue_review_on_uncertain = payload.get("queue_review", True) is not False
     light_confirm = bool(payload.get("light_confirm"))
     auto_import = bool(payload.get("auto_import"))
+    # F-2: only an id the operator sent may follow the selected Release into
+    # another Release Group -- never a guessed id, never under auto-import.
+    operator_album_id = 0 if auto_import else existing_album_id
     review_item_id = _s(payload.get("review_item_id")).strip()
     auto_import_idempotency_key = _s(payload.get("auto_import_idempotency_key")).strip()
     trigger_plex_refresh_after = bool(payload.get("trigger_plex"))
@@ -3827,7 +3840,11 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if album_db_id is not None:
                 aid = int(album_db_id)
                 try:
-                    composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
+                    composite_workflows.update_album_metadata(
+                        aid, {"mb_albumid": mb_albumid},
+                        release_selected_by_operator=_retag_release_operator_selected(
+                            aid, auto_import=auto_import, confirmed_album_id=confirmed_import_album_id,
+                            operator_album_id=operator_album_id))
                 except Exception as _mbe:
                     log.append(f"  update_album_metadata warning: {_mbe}")
 

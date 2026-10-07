@@ -247,16 +247,6 @@ def _load_settings() -> Dict[str, Any]:
     return dict(_load_settings_record().get("settings") or {})
 
 
-def _save_settings(data: Dict[str, Any], *, expected_revision: Optional[str] = None) -> Dict[str, Any]:
-    store, relative_name = _settings_store_for_target()
-    return store.save_json(
-        relative_name,
-        data,
-        is_secret=False,
-        expected_revision=expected_revision,
-    )
-
-
 def _setup_csrf_failure():
     """Require same-origin intent for first-run POST probes that make outbound checks."""
     if getattr(sys.modules.get("app"), "__routes_setup_test_stub__", False):
@@ -2959,6 +2949,10 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             f"Cannot write to downloads/staging path {downloads_check['path']} - mount your downloads "
             "folder there or set DOWNLOADS_ROOT to where it is mounted in the Web Manager container"
         )
+    if downloads_check.get("path") and music_check.get("path") and config_layers.unsafe_root_reason(
+            downloads_check["path"], music_check["path"]):
+        # Fail closed: such a DOWNLOADS_ROOT is left out of every allowlist.
+        blocking.append(config_layers.UNSAFE_DOWNLOADS_ROOT_MESSAGE)
     if config_path_error:
         blocking.append(config_path_error)
     elif not beets_config_exists:

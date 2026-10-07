@@ -9,7 +9,7 @@ import urllib.error, urllib.parse, urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from backend.app_runtime import _app_logger, CONFIG_FILE, DOWNLOADS_ROOT, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_PATH_ROOT_ALIASES, PLEX_API_TIMEOUT, PLEX_INDEX_CACHE_TTL, PLEX_INDEX_PAGE_SIZE, PLEX_INDEX_TIMEOUT, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_FALLBACK_SEARCHES, PLEX_TOKEN, PLEX_URL, WEB_MANAGER_DATA_DIR, _MB_UUID_RE, _s
+from backend.app_runtime import _app_logger, _redact_security_text, CONFIG_FILE, DOWNLOADS_ROOT, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_PATH_ROOT_ALIASES, PLEX_API_TIMEOUT, PLEX_INDEX_CACHE_TTL, PLEX_INDEX_PAGE_SIZE, PLEX_INDEX_TIMEOUT, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_FALLBACK_SEARCHES, PLEX_TOKEN, PLEX_URL, WEB_MANAGER_DATA_DIR, _MB_UUID_RE, _s
 from backend.app_runtime import _norm, _path_is_under
 
 # ── ARCH-001 extracted code ──
@@ -544,34 +544,22 @@ def _trigger_plex_refresh(log: list, *, workflow: str = "") -> bool:
     settings = _plex_settings()
     if not settings.get("url") or not settings.get("token"):
         return False
-    result: Dict[str, Any] = {"done": False, "ok": False, "message": ""}
-
-    def _worker() -> None:
-        try:
-            _, section_key, section_title = _plex_find_music_section()
-            if not section_key:
-                result.update({
-                    "ok": False,
-                    "message": "  [plex] No Plex music library section found",
-                })
-                return
-            _plex_request(f"/library/sections/{section_key}/refresh", timeout=10)
-            label = section_title or section_key
-            result.update({"ok": True, "message": f"  [plex] Refresh triggered ({label})"})
-        except Exception as ex:
-            result.update({"ok": False, "message": f"  [plex] {ex}"})
-        finally:
-            result["done"] = True
-
-    thread = threading.Thread(target=_worker, name="plex-refresh", daemon=True)
-    thread.start()
-    thread.join(12)
-    if not result.get("done"):
-        log.append("  [plex] Refresh request timed out; continuing without blocking job")
+    # Runs inline in the calling job (BA-16): each Plex request carries its
+    # own timeout, so no helper thread is left running after a timeout.
+    try:
+        _, section_key, section_title = _plex_find_music_section()
+        if not section_key:
+            log.append("  [plex] No Plex music library section found")
+            return False
+        _plex_request(f"/library/sections/{section_key}/refresh", timeout=10, attempts=1)
+    except Exception as ex:
+        # The job log can reach a route response, so it gets a fixed line;
+        # the detail goes to the server log only (CodeQL #1374).
+        _app_logger.warning("Plex refresh failed: %s", _redact_security_text(str(ex)))
+        log.append("  [plex] Refresh failed; continuing without it (see server logs).")
         return False
-    if result.get("message"):
-        log.append(result["message"])
-    return bool(result.get("ok"))
+    log.append(f"  [plex] Refresh triggered ({section_title or section_key})")
+    return True
 
 
 def _plex_is_final_library_path(path_value: Any) -> bool:

@@ -13,6 +13,7 @@ import backend.composite_workflows as composite_workflows
 from backend.matching_service import _invalidate_lib_cache
 from backend.app_runtime import jobs, transactions
 from backend.job_service import _call_job_fn
+from job_engine import DuplicateJobError, reports_failure
 from backend.import_review_service import _metadata_transaction_pending_fields
 
 from backend.auth_service import _transaction_user_label
@@ -118,6 +119,15 @@ def _install_transaction_job_hooks() -> None:
 
     def start_python_with_transaction(fn, label="", metadata=None):
         metadata_payload = dict(metadata or {})
+        # The duplicate check, the transaction and the start happen under one
+        # store lock, so a refused start never records a transaction (QA F3).
+        with jobs.start_guard(metadata_payload):
+            existing = jobs.find_duplicate(metadata_payload)
+            if existing is not None:  # refuse before a transaction is recorded (BA-6)
+                raise DuplicateJobError(existing)
+            return _start_with_transaction(fn, label, metadata_payload)
+
+    def _start_with_transaction(fn, label, metadata_payload):
         tx = _transaction_create_for_job(label, metadata_payload)
         tx_id = tx.get("id") if tx else ""
         if tx_id:
@@ -140,11 +150,18 @@ def _install_transaction_job_hooks() -> None:
                     transactions.append_log(tx_id, f"ERROR: {ex}")
                     raise
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
+                if reports_failure(result):
+                    next_status = "Failed"  # BA-3: the same rule as job_engine
                 transactions.update(tx_id, status="Cancelled" if cancelled() else next_status)
                 return result
         else:
             wrapped = fn
-        job = original_start_python(wrapped, label=label, metadata=metadata_payload)
+        try:
+            job = original_start_python(wrapped, label=label, metadata=metadata_payload)
+        except Exception:
+            if tx_id:  # no job runs, so the transaction must not stay Running (#229)
+                transactions.update(tx_id, status="Failed")
+            raise
         if tx_id:
             transactions.attach_job(tx_id, job.job_id)
         return job
