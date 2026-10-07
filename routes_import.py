@@ -149,14 +149,18 @@ _IMPORT_REVIEW_PLAN_CODE_ERRORS = {
     "import_review_unsafe_root": "An allowed cleanup root is unsafe; check the downloads root configuration.",
     "invalid_request": "Invalid cleanup request.",
 }
+# (prefix, suffix, message): matched against the engine's fixed wording at
+# both ends, so a user path embedded in the middle never changes the kind.
 _IMPORT_REVIEW_PLAN_ERRORS = (
-    ("required", "Review path is required."),
-    ("unsafe encoded", "Path contains unsafe encoded characters."),
-    ("Symlinks", "Symlinks are not permitted."),
-    ("approved root", "Cannot clean up an approved root folder itself."),
-    ("music library", "Review folder is inside the music library."),
-    ("outside", "Review folder or file is outside the allowed cleanup roots."),
-    ("Invalid", "Invalid cleanup request."),
+    ("Review path is required.", "", "Review path is required."),
+    ("A folder or file path is required.", "", "Review path is required."),
+    ("Path contains unsafe encoded characters.", "", "Path contains unsafe encoded characters."),
+    ("Symlinks are not permitted: ", "", "Symlinks are not permitted."),
+    ("Cannot delete approved root ", " itself.", "Cannot clean up an approved root folder itself."),
+    ("Review folder path ", " is inside music library.", "Review folder is inside the music library."),
+    ("Target path ", " is outside allowed root boundaries.", "Review folder or file is outside the allowed cleanup roots."),
+    ("Source path ", " is outside allowed root boundaries.", "Review folder or file is outside the allowed cleanup roots."),
+    ("Invalid review folder path.", "", "Invalid cleanup request."),
 )
 
 
@@ -165,8 +169,8 @@ def _import_review_cleanup_plan_error(plan_res: Dict[str, Any]) -> str:
     if by_code:
         return by_code
     text = str(plan_res.get("error") or "")
-    for needle, message in _IMPORT_REVIEW_PLAN_ERRORS:
-        if needle in text:
+    for prefix, suffix, message in _IMPORT_REVIEW_PLAN_ERRORS:
+        if text.startswith(prefix) and text.endswith(suffix):
             return message
     return "Failed to create file cleanup plan."
 

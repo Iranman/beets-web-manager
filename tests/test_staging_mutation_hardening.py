@@ -150,6 +150,32 @@ class StagingTextContainmentTests(_Env):
         self.assertFalse((sub.parent / "planted.flac").exists())
         self.assertTrue((sub.parent / "a.flac").exists())
 
+    @unittest.skipUnless(CAN_SYMLINK, "symlinks unavailable")
+    def test_symlink_behind_missing_or_file_dotdot_refused(self):
+        """#265 QA round 4: lstat of ``dl/nx/../link`` fails (nx missing or a
+        file), yet resolve() applies ``..`` lexically and follows ``link``.
+        Main refused the first two. The third (``link`` only in a normalized
+        prefix, not in the normalized whole) also passed main's check."""
+        real = self.dl / "real" / "deep"
+        real.mkdir(parents=True)
+        os.symlink(real, self.dl / "link", target_is_directory=True)
+        (self.dl / "file.flac").write_bytes(b"f")
+        src = self.dl / "src.flac"
+        src.write_bytes(b"s")
+        sep = os.sep
+        dl = str(self.dl)
+        for hidden in (dl + sep + "nx" + sep + ".." + sep + "link",
+                       dl + sep + "file.flac" + sep + ".." + sep + "link",
+                       dl + sep + "nx" + sep + ".." + sep + "link" + sep + ".." + sep + "f.flac"):
+            with self.subTest(hidden=hidden):
+                self.assertFalse(cw._is_safe_staging_path(hidden))
+                self.assertFalse(cw._is_safe_staging_path(hidden + sep + "v.flac"))
+                self.assertFalse(cw.inspect_import_source(hidden)["ok"])
+                with self.assertRaises(ValueError):
+                    cw.create_hardlink(str(src), hidden + sep + "new.flac")
+        self.assertEqual(sorted(os.listdir(real)), [])
+        self.assertFalse((self.dl / "real" / "f.flac").exists())
+
 
 class ImportReviewFamilyTests(_Env):
     """#182 item 4: the family is checked before the Preview -> Approved CAS."""

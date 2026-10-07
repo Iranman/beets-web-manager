@@ -155,7 +155,7 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
 
     def test_cleanup_import_review_files_plan_error_is_fixed_text(self):
         """CodeQL #1365: a planner refusal (raw ValueError text) maps to fixed text."""
-        leak = "LEAK_MARKER Traceback: Target path /private/x is outside allowed root boundaries."
+        leak = "Target path /private/x/LEAK_MARKER Traceback is outside allowed root boundaries."
         with app_module.app.test_request_context(
             "/api/import/review-files/cleanup", method="POST",
             data=json.dumps({"path": "/data/downloads/Some Album", "review_item_id": "x", "files": ["a.flac"]}),
@@ -182,7 +182,7 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
             {"code": "import_review_unsafe_root", "error": "/ is unsafe"},
             {"error": "Review folder path /m/x is inside music library."},
             {"error": "Target path /x is outside allowed root boundaries."},
-            {"error": "Cannot clean up approved root folder /d"},
+            {"error": "Cannot delete approved root /d itself."},
             {"error": "Symlinks are not permitted: /d/l"},
             {"error": "something unexpected at /secret"},
         ]
@@ -190,6 +190,17 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
         self.assertEqual(len(set(messages)), len(messages), messages)
         for message in messages:
             self.assertNotIn("/", message)
+
+    def test_cleanup_plan_error_kind_ignores_user_path_text(self):
+        """#265 QA: a user path inside the engine text cannot change the kind."""
+        import routes_import
+        f = routes_import._import_review_cleanup_plan_error
+        self.assertEqual(f({"error": "Symlinks are not permitted: /dl/required"}), "Symlinks are not permitted.")
+        self.assertEqual(f({"error": "Target path /dl/Symlinks music library is outside allowed root boundaries."}),
+                         "Review folder or file is outside the allowed cleanup roots.")
+        self.assertEqual(f({"error": "Review folder path /m/outside/Invalid is inside music library."}),
+                         "Review folder is inside the music library.")
+        self.assertEqual(f({"error": "/dl/Symlinks are not permitted: required"}), "Failed to create file cleanup plan.")
 
     def test_transaction_rollback_dispatch_never_returns_executor_log(self):
         """CodeQL #1368: the rollback executor's log embeds raw exception

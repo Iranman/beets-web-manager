@@ -245,18 +245,22 @@ def _is_within_music_root(path: Union[str, Path]) -> bool:
 def _has_symlink_component(path: Union[str, Path]) -> bool:
     """True if the path itself or any existing parent is a symlink. Relative
     paths are absolutized first so every real parent is checked (S1/F4).
-    ``..`` is NOT collapsed (#265 QA): in ``root/link/..`` the kernel follows
-    ``link`` first, so ``link`` must be checked; os.path.abspath would
-    normalize it away and let the path pass the textual staging check."""
+
+    Every lexical prefix is checked twice (#265 QA): as written, because the
+    kernel follows ``link`` in ``root/link/..`` before applying ``..``; and
+    normalized, because resolve() applies ``..`` lexically after a missing or
+    non-directory component, so ``root/nx/../link`` follows ``link`` though
+    lstat of the written form fails."""
     p = Path(path)
     if not p.is_absolute():
         p = Path(os.getcwd()) / p
-    for candidate in [p, *p.parents]:
-        try:
-            if candidate.is_symlink():
+    for prefix in [p, *p.parents]:
+        for candidate in (prefix, Path(os.path.normpath(str(prefix)))):
+            try:
+                if candidate.is_symlink():
+                    return True
+            except OSError:
                 return True
-        except OSError:
-            return True
     return False
 
 
