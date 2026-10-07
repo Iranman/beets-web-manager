@@ -49,9 +49,9 @@ class CandidateTracksAlignmentStructureTests(unittest.TestCase):
         self._fn = _candidate_tracks_source(self._src)
 
     def test_title_prefix_normalizer_handles_review_torrent_paths(self):
-        """Review folders under /data/torrents/music must strip artist/album prefixes before fuzzy matching."""
+        """Review folders under <downloads>/torrents/music must strip artist/album prefixes before fuzzy matching."""
         self.assertIn('def _album_track_path_prefixes', self._src)
-        self.assertIn('"/data/torrents/music/"', self._src)
+        self.assertIn('"/torrents/music/"', self._src)
         self.assertIn('def _prefix_candidates(value: str)', self._src)
         self.assertIn('_artist_folder_name_without_mbid(text)', self._src)
         self.assertIn('prefixes.extend(_prefix_candidates(parts[0]))', self._src)
