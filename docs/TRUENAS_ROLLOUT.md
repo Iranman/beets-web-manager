@@ -267,9 +267,16 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    If a deploy fails after it started its backup (for example while copying
    state), it checksums what the backup holds at that moment and marks it
    `incomplete_backup_stage=<stage>`. The failure block says so, and
-   `--rollback` accepts that backup with an `INCOMPLETE BACKUP` warning;
-   files it had not copied yet are not restored. A file changed after that
-   is still refused.
+   `--rollback` accepts that backup with an `INCOMPLETE BACKUP` warning.
+   Such a deploy failed before it deployed the new image, so it never
+   changed the Compose file, `.env`, Web Manager state or Beets config:
+   the rollback skips steps 1 (Compose file), 3 (state) and 4 (`.env`) and
+   the stale-database restore, and only recreates `beets-web-manager` on
+   the previous image (step 2's checksum-guarded token handling still
+   runs). No live file is replaced from a backup that may hold partial
+   copies; a copy cut off mid-write is never kept under its final name
+   (it is written as `<name>.part` and deleted if the copy fails). A
+   file changed after that is still refused.
 1. Stops only `beets-web-manager` and restores the prior Compose file.
 2. Restores or removes the persistent token according to the token
    migration metadata and recorded checksums.

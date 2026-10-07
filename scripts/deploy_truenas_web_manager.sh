@@ -113,6 +113,7 @@ RESTORE_STALE_DB="${RESTORE_STALE_DB:-0}"
 MODE="deploy"
 ROLLBACK_DIR=""
 ALLOW_LEGACY_BACKUP=0
+INCOMPLETE_BACKUP_STAGE=""  # set by verify_backup_manifest
 DRY_RUN=0
 PRUNE_DAYS=""
 
@@ -191,12 +192,17 @@ _FAILURE_REPORTED=0
 # that fails in between leaves a backup that is still usable by --rollback:
 # this checksums every file it holds (all written by this run into its own
 # root-only folder) and marks the manifest incomplete, so the rollback
-# says what it is restoring from.
+# says what it is restoring from. A copy that was cut off (BACKUP_PART,
+# see backup_copy) is deleted first, so no partial copy is ever recorded
+# under a final name.
 BACKUP_BUILDING=0
+BACKUP_PART=""
 seal_failed_backup() {
   # Main shell only: an ERR trap in a subshell does not end the run.
   [[ "$BACKUP_BUILDING" -eq 1 && "$BASHPID" == "$$" ]] || return 0
   BACKUP_BUILDING=0
+  [[ -z "$BACKUP_PART" ]] || rm -rf -- "$BACKUP_PART"
+  BACKUP_PART=""
   { echo "incomplete_backup_stage=${STAGE}" >> "$BACKUP_DIR/state-manifest.txt" && manifest_record_all; } 2>/dev/null \
     || warn "could not finish the checksum manifest of ${BACKUP_DIR} -- --rollback will refuse it"
 }
@@ -230,7 +236,7 @@ report_failure() {
     elif [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" && -f "$BACKUP_DIR/docker-compose.yml.bak" ]]; then
       echo "  $0 --rollback ${BACKUP_DIR}"
       if grep -q '^incomplete_backup_stage=' "$BACKUP_DIR/state-manifest.txt" 2>/dev/null; then
-        echo "  (the backup is incomplete: this run failed during ${STAGE} before it finished copying; the rollback restores only what it holds and says so)"
+        echo "  (the backup is incomplete: this run failed during ${STAGE}, before the new image was deployed; the rollback only recreates ${SERVICE} on the previous image and leaves every live file as it is)"
       fi
     else
       echo "  (no backup was created yet -- nothing to roll back; production was not touched)"
@@ -310,7 +316,8 @@ curl_auth() {
   local a
   for a in "$@"; do
     case "$a" in
-      --location|--location-trusted|-[!-]*L*)
+      # Any short-option cluster holding L (-L, -sL, -Ls, -fL, ...).
+      --location|--location-trusted|-L*|-[!-]*L*)
         printf '[%s] WARNING: curl_auth refuses to follow redirects (%s).\n' "$(date -u +%H:%M:%S)" "$a" >&9
         return 2 ;;
     esac
@@ -1345,9 +1352,21 @@ verify_backup_manifest() {
   log "Verified ${#want[@]} backup file checksum(s) against ${manifest}."
   line="$(grep '^incomplete_backup_stage=' "$manifest" | tail -n 1 || true)"
   if [[ -n "$line" ]]; then
-    warn "INCOMPLETE BACKUP: the deploy that made ${ROLLBACK_DIR} failed during ${line#*=} before it finished the backup; its files match the checksums taken when it failed, but files it had not copied yet are not restored"
+    INCOMPLETE_BACKUP_STAGE="${line#*=}"
+    warn "INCOMPLETE BACKUP: the deploy that made ${ROLLBACK_DIR} failed during ${INCOMPLETE_BACKUP_STAGE}, before it deployed the new image, so it never changed the Compose file, .env, Web Manager state or Beets config -- this rollback leaves all of them as they are (the backup's copies may be partial) and only recreates ${SERVICE} on the previous image"
   fi
   STAGE="rollback"
+}
+
+# backup_copy <cp options...> <src> <dst>: cp into <dst>.part, then rename
+# it to <dst>. A cp that fails midway never leaves a partial copy under the
+# final name; seal_failed_backup deletes the .part.
+backup_copy() {
+  local dst="${*: -1}"
+  BACKUP_PART="${dst}.part"
+  cp "${@:1:$#-1}" "$BACKUP_PART"
+  mv -T -- "$BACKUP_PART" "$dst"
+  BACKUP_PART=""
 }
 
 backup_state_files() {
@@ -1362,7 +1381,7 @@ backup_state_files() {
       warn "web-manager-data/${f} is a symbolic link -- not backed up"
       echo "web-manager-data/${f} skipped (symbolic link)" >> "$manifest"
     elif [[ -f "${data_src}/${f}" ]]; then
-      cp -p -- "${data_src}/${f}" "$BACKUP_DIR/web-manager-data/${f}"
+      backup_copy -p -- "${data_src}/${f}" "$BACKUP_DIR/web-manager-data/${f}"
       echo "web-manager-data/${f} sha256=$(sha256_file "${data_src}/${f}")" >> "$manifest"
     else
       echo "web-manager-data/${f} absent" >> "$manifest"
@@ -1374,7 +1393,7 @@ backup_state_files() {
       echo "web-manager-data/${d}/ skipped (symbolic link)" >> "$manifest"
     elif [[ -d "${data_src}/${d}" ]]; then
       # -P: copy links as links (never follow them), then drop them.
-      cp -RPp -- "${data_src}/${d}" "$BACKUP_DIR/web-manager-data/${d}"
+      backup_copy -RPp -- "${data_src}/${d}" "$BACKUP_DIR/web-manager-data/${d}"
       find "$BACKUP_DIR/web-manager-data/${d}" -type l -delete
       echo "web-manager-data/${d}/ files=$(find "${data_src}/${d}" -type f | wc -l | tr -d ' ')" >> "$manifest"
     fi
@@ -1385,14 +1404,14 @@ backup_state_files() {
     warn "Beets config.yaml is a symbolic link -- not backed up"
     echo "beets-config/config.yaml skipped (symbolic link)" >> "$manifest"
   elif [[ -f "${engine_src}/config.yaml" ]]; then
-    cp -p -- "${engine_src}/config.yaml" "$BACKUP_DIR/beets-config/config.yaml"
+    backup_copy -p -- "${engine_src}/config.yaml" "$BACKUP_DIR/beets-config/config.yaml"
     echo "beets-config/config.yaml sha256=$(sha256_file "${engine_src}/config.yaml")" >> "$manifest"
   fi
   if [[ -L "${engine_src}/beetsplug" ]]; then
     warn "Beets beetsplug/ is a symbolic link -- not backed up"
     echo "beets-config/beetsplug/ skipped (symbolic link)" >> "$manifest"
   elif [[ -d "${engine_src}/beetsplug" ]]; then
-    cp -RPp -- "${engine_src}/beetsplug" "$BACKUP_DIR/beets-config/beetsplug"
+    backup_copy -RPp -- "${engine_src}/beetsplug" "$BACKUP_DIR/beets-config/beetsplug"
     find "$BACKUP_DIR/beets-config/beetsplug" -type l -delete
     echo "beets-config/beetsplug/ files=$(find "${engine_src}/beetsplug" -type f | wc -l | tr -d ' ')" >> "$manifest"
   fi
@@ -1679,12 +1698,12 @@ create_backup_dir() {
   chmod 600 "$BACKUP_DIR/state-manifest.txt"
   BACKUP_BUILDING=1
 
-  cp "$COMPOSE_FILE" "$BACKUP_DIR/docker-compose.yml.bak"
+  backup_copy -- "$COMPOSE_FILE" "$BACKUP_DIR/docker-compose.yml.bak"
   local env_file
   env_file="$(dirname "$COMPOSE_FILE")/.env"
   if [[ -f "$env_file" ]]; then
     # Verbatim: rollback restores BEETS_WEB_MANAGER_VERSION from it.
-    cp "$env_file" "$BACKUP_DIR/.env.bak"
+    backup_copy -- "$env_file" "$BACKUP_DIR/.env.bak"
     chmod 600 "$BACKUP_DIR/.env.bak"
   fi
   # Diagnostic copies only (rollback never reads them): environment VALUES
@@ -1730,7 +1749,7 @@ print(next((d for d in digests if d.startswith(sys.argv[1] + "@sha256:")), ""))'
   if [[ -f "$TOKEN_PATH" ]]; then
     persistent_existed=1
     persistent_sha="$(sha256_file "$TOKEN_PATH")"
-    cp "$TOKEN_PATH" "$BACKUP_DIR/auth_token.bak"
+    backup_copy -- "$TOKEN_PATH" "$BACKUP_DIR/auth_token.bak"
     chmod 600 "$BACKUP_DIR/auth_token.bak"
   fi
   if [[ -n "$LEGACY_TOKEN_PATH" && -f "$LEGACY_TOKEN_PATH" ]]; then
@@ -2142,8 +2161,12 @@ run_rollback() {
     warn "'docker compose stop ${SERVICE}' failed (exit ${stop_rc}) -- continuing the rollback; the forced recreate and the image/version proof below decide whether it succeeded"
   fi
 
-  log "Restoring Compose file from backup..."
-  cp "$ROLLBACK_DIR/docker-compose.yml.bak" "$COMPOSE_FILE"
+  if [[ -n "$INCOMPLETE_BACKUP_STAGE" ]]; then
+    log "Incomplete backup: the Compose file was never changed by that deploy -- left as it is."
+  else
+    log "Restoring Compose file from backup..."
+    cp "$ROLLBACK_DIR/docker-compose.yml.bak" "$COMPOSE_FILE"
+  fi
 
   if [[ -L "$TOKEN_PATH" ]]; then
     warn "the auth token path (${TOKEN_PATH}) is a symbolic link -- token left untouched; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking it"
@@ -2194,7 +2217,9 @@ run_rollback() {
     warn "missing token metadata in backup directory ${ROLLBACK_DIR} -- leaving token file at ${TOKEN_PATH} untouched"
   fi
 
-  if [[ "$RESTORE_STALE_DB" -eq 1 && -d "$ROLLBACK_DIR/stale-database" ]]; then
+  if [[ -n "$INCOMPLETE_BACKUP_STAGE" ]]; then
+    log "Incomplete backup: stale database files and Web Manager/Beets state are NOT restored (the failed deploy never changed them; the backup's copies may be partial).$([[ -d "$ROLLBACK_DIR/stale-database" ]] && echo " Archived stale database files stay in ${ROLLBACK_DIR}/stale-database/.")"
+  elif [[ "$RESTORE_STALE_DB" -eq 1 && -d "$ROLLBACK_DIR/stale-database" ]]; then
     log "RESTORE_STALE_DB=1 -- restoring archived stale database files..."
     for f in "$DB_FILENAME" "$WAL_FILENAME" "$SHM_FILENAME"; do
       if [[ -f "$ROLLBACK_DIR/stale-database/$f" ]]; then
@@ -2205,7 +2230,7 @@ run_rollback() {
     log "Stale database files left archived (set RESTORE_STALE_DB=1 to restore them -- current architecture never reads them)."
   fi
 
-  restore_state_files
+  [[ -n "$INCOMPLETE_BACKUP_STAGE" ]] || restore_state_files
 
   rollback_recreate_and_verify
 
@@ -2235,7 +2260,8 @@ print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previo
   fi
 
   # The on-disk .env decides what any later `docker compose up -d` deploys.
-  restore_env_version_line "$previous_image_ref"
+  # An incomplete backup's deploy never reached persist_deployed_version.
+  [[ -n "$INCOMPLETE_BACKUP_STAGE" ]] || restore_env_version_line "$previous_image_ref"
   # Resolve from the files on disk only, never from this shell's environment.
   unset BEETS_WEB_MANAGER_VERSION
 
