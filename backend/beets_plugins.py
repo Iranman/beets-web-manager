@@ -484,25 +484,12 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
             target_file = target_beetsplug_dir / entry.name
             content = entry.read_bytes()
 
-            # Atomic write to target file if not identical
-            if not target_file.exists() or target_file.read_bytes() != content:
-                tmp_file = target_file.with_suffix(".tmp." + entry.suffix)
-                try:
-                    tmp_file.write_bytes(content)
-                    try:
-                        os.chmod(tmp_file, 0o644)
-                    except Exception:
-                        pass
-                    tmp_file.replace(target_file)
-                    provisioned.append(entry.name)
-                except Exception as exc:
-                    try:
-                        tmp_file.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"Failed to copy bundled plugin {entry.name}: {exc}") from exc
-            else:
-                provisioned.append(entry.name)
+            # Replace, never write through, a symlinked or planted target (F5b).
+            try:
+                _replace_plugin_file(target_file, content, target_beetsplug_dir)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to copy bundled plugin {entry.name}: {exc}") from exc
+            provisioned.append(entry.name)
 
         elif entry.is_dir() and not entry.name.startswith((".", "_", "__pycache__")):
             target_sub = target_beetsplug_dir / entry.name

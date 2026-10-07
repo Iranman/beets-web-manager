@@ -506,6 +506,21 @@ class ProvisionSymlinkTests(unittest.TestCase):
         self.assertFalse(dest.is_symlink())
         self.assertIn("PLUGIN_VERSION", dest.read_text(encoding="utf-8"))
 
+    def test_symlinked_top_level_plugin_and_planted_tmp_are_not_written_through(self):
+        # F5b: the top-level .py branch used a predictable tmp name and
+        # write_bytes, so a planted symlink overwrote and chmodded the victim.
+        from backend.beets_plugins import provision_bundled_plugins
+        beetsplug = self.config_dir / "beetsplug"
+        beetsplug.mkdir(parents=True)
+        os.chmod(self.victim, 0o600)
+        os.symlink(self.victim, beetsplug / "discpath.tmp..py")
+        os.symlink(self.victim, beetsplug / "discpath.py")
+        provision_bundled_plugins(self.config_dir)
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "VICTIM\n")
+        self.assertEqual(self.victim.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((beetsplug / "discpath.py").is_symlink())
+        self.assertNotEqual((beetsplug / "discpath.py").read_text(encoding="utf-8"), "VICTIM\n")
+
     def test_symlinked_subpackage_dir_is_refused(self):
         from backend.beets_plugins import provision_bundled_plugins
         (self.config_dir / "beetsplug").mkdir(parents=True)
