@@ -11,10 +11,8 @@ import { useNavigate } from 'react-router';
 import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
 import type { AiBatchFolderState, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
 import { LogViewer } from '../../components/LogViewer';
-import { useJobPoll } from '../../lib/hooks';
+import { downloadsRootProblem, useDownloadsRoot, useJobPoll } from '../../lib/hooks';
 
-const DEFAULT_PATH = '/data/torrents/music';
-const FAILED_IMPORTS_PATH = '/data/torrents/music/failed_imports';
 const AI_BATCH_JOB_STORAGE_KEY = 'beets:ai-batch-import-job-id';
 
 function cx(...classes: Array<string | false | null | undefined>) {
@@ -649,7 +647,16 @@ type IntakePanelProps = {
 };
 
 export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
-  const [path, setPath] = useState(DEFAULT_PATH);
+  const downloads = useDownloadsRoot();
+  const downloadsRoot = downloads.root;
+  const downloadsProblem = downloadsRootProblem(downloads);
+  const [path, setPath] = useState('');
+  // Prefill with the configured root once it loads, unless the user (or a
+  // resumed batch) already chose a path.
+  useEffect(() => {
+    if (downloadsRoot) setPath((current) => current || downloadsRoot);
+  }, [downloadsRoot]);
+  const failedImportsPath = downloadsRoot ? `${downloadsRoot.replace(/\/+$/, '')}/failed_imports` : '';
   const [scanning, setScanning] = useState(false);
   const [preflight, setPreflight] = useState<PreflightResponse | null>(null);
   const [preflightError, setPreflightError] = useState('');
@@ -693,7 +700,8 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     };
   }, [jobId, rememberJobId]);
   const scan = useCallback(async () => {
-    const nextPath = path.trim() || DEFAULT_PATH;
+    const nextPath = path.trim() || downloadsRoot;
+    if (!nextPath) return;
     setScanning(true);
     setPreflightError('');
     setImportError('');
@@ -707,7 +715,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     } finally {
       setScanning(false);
     }
-  }, [path]);
+  }, [path, downloadsRoot]);
 
   // A cold scan of a large downloads folder can genuinely take 40-60+
   // seconds (confirmed live: 2217 folders / 14461 files took ~41s server-side)
@@ -770,7 +778,8 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     }
   };
   const startImport = async () => {
-    const nextPath = path.trim() || DEFAULT_PATH;
+    const nextPath = path.trim() || downloadsRoot;
+    if (!nextPath) return;
     setImporting(true);
     setImportError('');
     try {
@@ -811,7 +820,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
               slotProps={{ input: { style: { fontFamily: 'monospace', fontSize: '0.82rem' } } }}
             />
             <div className="flex flex-wrap gap-2">
-              <Button disabled={scanning || Boolean(jobId)} variant="outlined" onClick={() => void scan()}>
+              <Button disabled={scanning || Boolean(jobId) || !(path.trim() || downloadsRoot)} variant="outlined" onClick={() => void scan()}>
                 {scanning ? `Previewing... ${scanElapsedSeconds}s` : 'Preview Import All'}
               </Button>
               {!jobId ? (
@@ -825,20 +834,22 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
                 </Button>
               ) : null}
               <Button
-                disabled={scanning || Boolean(jobId)}
+                disabled={scanning || Boolean(jobId) || !downloadsRoot}
+                title={downloadsRoot ? `Use the configured downloads folder (${downloadsRoot})` : 'Configured downloads folder not available'}
                 variant="outlined"
                 onClick={() => {
-                  setPath(DEFAULT_PATH);
+                  setPath(downloadsRoot);
                   setPreflight(null);
                 }}
               >
                 Downloads
               </Button>
               <Button
-                disabled={scanning || Boolean(jobId)}
+                disabled={scanning || Boolean(jobId) || !failedImportsPath}
+                title={failedImportsPath ? `Preview ${failedImportsPath}` : 'Configured downloads folder not available'}
                 variant="outlined"
                 onClick={() => {
-                  setPath(FAILED_IMPORTS_PATH);
+                  setPath(failedImportsPath);
                   setPreflight(null);
                 }}
               >
@@ -856,11 +867,16 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Chip label="/data/torrents/music source" size="small" variant="outlined" />
+            <Chip
+              label={downloads.loading ? 'Downloads folder: loading…' : `Downloads folder: ${downloadsRoot || 'unavailable'}`}
+              size="small"
+              variant="outlined"
+            />
             <Chip label="Preview is read-only" size="small" color="info" variant="outlined" />
             <Chip label="Eligible matches import" size="small" color="success" variant="outlined" />
             <Chip label="Unsafe matches stay in Review" size="small" color="warning" variant="outlined" />
           </div>
+          {downloadsProblem ? <Alert severity="warning">{downloadsProblem}</Alert> : null}
           {scanning ? (
             <div className="text-xs text-zinc-500">
               Scanning the source folder{scanElapsedSeconds > 0 ? ` (${scanElapsedSeconds}s elapsed)` : ''} — a large
@@ -934,7 +950,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         fileCount={preflight?.audio_files ?? 0}
         folderCount={newFolderCount}
         open={confirmOpen}
-        path={path.trim() || DEFAULT_PATH}
+        path={path.trim() || downloadsRoot}
         onClose={() => setConfirmOpen(false)}
         onConfirm={() => void startImport()}
       />

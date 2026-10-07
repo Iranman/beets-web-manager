@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getDedupScan } from '../api/client';
+import { getDedupScan, getSetupStatus } from '../api/client';
 import { ApiError, apiGet, apiPost } from './api';
 import type { Job } from '../types/api';
 import type { DedupScanState } from '../api/types';
@@ -132,6 +132,32 @@ export function useDedupScan(jid: string | null): {
   }, [jid]);
 
   return { scan, error };
+}
+
+// ── useDownloadsRoot ──────────────────────────────────────────────────────────
+// The server's configured DOWNLOADS_ROOT, as reported by GET /api/setup/status
+// (paths.downloads.path). `root` is '' while loading, on error, or when the
+// server reports no path -- callers must never substitute a hard-coded path.
+export function useDownloadsRoot(): { root: string; loading: boolean; error: string | null } {
+  const query = useQuery({
+    queryKey: ['setup-status'],
+    queryFn: () => getSetupStatus(),
+    staleTime: 60_000,
+  });
+  const err = query.error;
+  return {
+    root: query.data?.paths?.downloads?.path?.trim() ?? '',
+    loading: query.isPending,
+    error: err ? (err instanceof Error ? err.message : String(err)) : null,
+  };
+}
+
+/** User-facing problem text for a failed/empty downloads root, or '' when fine or still loading. */
+export function downloadsRootProblem({ root, loading, error }: ReturnType<typeof useDownloadsRoot>): string {
+  if (loading || root) return '';
+  return error
+    ? `Could not load the configured downloads folder (DOWNLOADS_ROOT) from setup status: ${error}. Enter a path manually, or check System setup.`
+    : 'The server reported no downloads folder (DOWNLOADS_ROOT). Set it in the container environment, or enter a path manually.';
 }
 
 // ── useJobKill ────────────────────────────────────────────────────────────────
