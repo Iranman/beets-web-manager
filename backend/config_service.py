@@ -54,13 +54,18 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
     later startup. Backs up the original once, to its own filename (not the
     config editor's /api/config/revert backup), before ever touching it.
     """
-    path = Path(config_path or os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    from backend.beets_plugins import _decode_config, _read_config_snapshot, _write_config_text
+    from backend.config_manager import get_config_path
     try:
-        text = path.read_text(encoding="utf-8")
+        # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR, and the
+        # O_NOFOLLOW snapshot refuses a symlinked config.yaml (S-3).
+        path = Path(config_path) if config_path else get_config_path()
+        text = _decode_config(_read_config_snapshot(path), path.name)
     except Exception:
         return
     if _LEGACY_BEETS_CONFIG_MIGRATION_MARKER in text:
         return
+    original = text  # backup from the same snapshot that is rewritten (F4)
 
     changed = False
 
@@ -79,7 +84,7 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
     try:
         backup = path.with_name(path.name + ".bak-legacy-plugin-migration")
         try:  # 0600 via O_EXCL: config.yaml can hold tokens. Kept once.
-            config_layers.create_private_file(backup, path.read_text(encoding="utf-8"))
+            config_layers.create_private_file(backup, original)
         except FileExistsError:
             # Left by an older version (copy2, often 0644): tighten it, but
             # never chmod through a symlink.
@@ -88,7 +93,7 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
         if not text.endswith("\n"):
             text += "\n"
         text += f"{_LEGACY_BEETS_CONFIG_MIGRATION_MARKER}\n"
-        path.write_text(text, encoding="utf-8")
+        _write_config_text(path, text, backup_prefix=None)
         print(
             "Repaired legacy config.yaml defaults from before the Issue #14 fix "
             f"(backup saved to {backup.name}).",
@@ -115,7 +120,9 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
     """
     try:
         from backend.beets_plugins import provision_bundled_plugins, update_config_yaml_plugins
-        cfg_dir = config_dir if config_dir else Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")).parent
+        from backend.config_manager import get_config_path
+        # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
+        cfg_dir = config_dir if config_dir else get_config_path().parent
         if cfg_dir.exists():
             provision_bundled_plugins(cfg_dir)
             update_config_yaml_plugins(cfg_dir / "config.yaml")

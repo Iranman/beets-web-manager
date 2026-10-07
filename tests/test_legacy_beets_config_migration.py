@@ -198,6 +198,30 @@ class LegacyBeetsConfigMigrationTests(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertEqual(backup.stat().st_mtime, backup_mtime)
 
+    def test_symlinked_config_is_not_written_through(self):
+        """F1: a config.yaml symlinked elsewhere is never rewritten."""
+        victim = self.tmp / "outside" / "victim.yaml"
+        victim.parent.mkdir()
+        victim.write_text(OLD_BROKEN_CONFIG, encoding="utf-8")
+        os.symlink(victim, self.config_path)
+        self._repair()
+        self.assertEqual(victim.read_text(encoding="utf-8"), OLD_BROKEN_CONFIG)
+        self.assertTrue(self.config_path.is_symlink())
+        self.assertEqual(sorted(p.name for p in victim.parent.iterdir()), ["victim.yaml"])
+
+    def test_beets_config_outside_beetsdir_is_not_repaired(self):
+        """F1: with no explicit path, BEETS_CONFIG must sit inside BEETSDIR."""
+        other = self.tmp / "outside"
+        other.mkdir()
+        target = other / "other.yaml"
+        target.write_text(OLD_BROKEN_CONFIG, encoding="utf-8")
+        beetsdir = self.tmp / "beetsdir"
+        beetsdir.mkdir()
+        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(target), "BEETSDIR": str(beetsdir)}):
+            APP._repair_legacy_beets_config()
+        self.assertEqual(target.read_text(encoding="utf-8"), OLD_BROKEN_CONFIG)
+        self.assertEqual(sorted(p.name for p in other.iterdir()), ["other.yaml"])
+
     def test_missing_config_file_does_not_raise(self):
         # No config.yaml written at all -- must not crash startup.
         APP._repair_legacy_beets_config(str(self.tmp / "does-not-exist.yaml"))
