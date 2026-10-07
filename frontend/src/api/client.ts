@@ -1535,14 +1535,34 @@ export function albumAddMbids(
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/add-mbids`, jsonRequest('POST', payload));
 }
 
+/** Beets album/item rows as the Beets web API returns them (the plan
+ * snapshots them verbatim); only the fields the UI reads are typed. */
+export interface AlbumCleanupPlanAlbum {
+  id?: number;
+  album?: string;
+  albumartist?: string;
+  mb_releasegroupid?: string;
+}
+
+export interface AlbumCleanupPlanItem {
+  id?: number;
+  title?: string;
+  artist?: string;
+  track?: number;
+  disc?: number;
+  path?: string;
+}
+
+/** Shape of plan_album_cleanup (backend/composite_workflows.py). */
 export interface AlbumCleanupPlanResponse extends ApiOkResponse {
   operation_id?: string;
+  token?: string;
   status?: string;
-  album_id?: number;
-  target_path?: string;
-  file_count?: number;
-  transaction?: Record<string, unknown>;
-  reversibility?: string;
+  requires_approval?: boolean;
+  /** False for a row-only plan: library rows are removed, files stay on disk. */
+  delete_files?: boolean;
+  album?: AlbumCleanupPlanAlbum;
+  items?: AlbumCleanupPlanItem[];
   error?: string;
 }
 
@@ -1556,21 +1576,15 @@ export type AlbumCleanupApplyErrorKind = 'stale_plan' | 'partial_mutation' | 'ot
 export interface AlbumCleanupApplyResponse extends ApiOkResponse {
   operation_id?: string;
   status?: string;
-  deleted?: string[];
-  moved?: string[];
-  skipped?: Array<{ file: string; reason: string }>;
+  delete_files?: boolean;
+  /** Beets item ids whose files were deleted; empty for a row-only plan. */
+  deleted?: number[];
+  /** Beets item ids whose library rows were removed. */
+  removed_item_ids?: number[];
   log?: string[];
   error?: string;
   error_kind?: AlbumCleanupApplyErrorKind;
   mutated?: boolean;
-}
-
-export interface AlbumCleanupRollbackResponse extends ApiOkResponse {
-  operation_id?: string;
-  status?: string;
-  restored?: string[];
-  log?: string[];
-  error?: string;
 }
 
 export function planAlbumCleanup(albumId: number): Promise<AlbumCleanupPlanResponse> {
@@ -1579,16 +1593,6 @@ export function planAlbumCleanup(albumId: number): Promise<AlbumCleanupPlanRespo
 
 export function applyAlbumCleanup(operationId: string): Promise<AlbumCleanupApplyResponse> {
   return apiJson<AlbumCleanupApplyResponse>('/api/albums/cleanup/apply', jsonRequest('POST', { operation_id: operationId }));
-}
-
-// Album Cleanup transactions are irreversible by design (Wave 15/16): the
-// engine always sets reversibility=IRREVERSIBLE and rollback_available=False
-// for this mutation family, so this always resolves with ok:false. It still
-// calls the generic /api/transactions/<id>/rollback route (not a dedicated
-// album-cleanup route) so the same transaction-family enforcement the
-// engine applies to every rollback request applies here too.
-export function rollbackAlbumCleanup(operationId: string): Promise<AlbumCleanupRollbackResponse> {
-  return apiJson<AlbumCleanupRollbackResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
 }
 
 // --- Track Replacement (SEC-002 Wave 17) ---
