@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy, hashlib, json, math, os, re, sqlite3, threading, time
 import backend.job_contract as job_contract
-from backend.matching import AcoustIDStatus
+from backend.matching import AcoustIDStatus, verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
@@ -1787,9 +1787,10 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         log.append(f"  AcoustID validation warning: {ex}")
         return {"ok": True, "checked": 0, "mismatches": [], "warning": str(ex)}
 
-    target_release = _s(mb_albumid).strip().lower()
     checked = 0
     no_result = 0
+    confirmed = 0
+    unverified: List[Dict[str, Any]] = []
     mismatches: List[Dict[str, Any]] = []
     for row in rows:
         item = {
@@ -1817,32 +1818,40 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             continue
         checked += 1
         target_trackid = _s(target.get("mb_trackid", "")).strip().lower()
-        confirmed = False
-        for cand in cands:
-            cand_trackid = _s(cand.get("mb_trackid", "")).strip().lower()
-            cand_releases = {
-                _s(r).strip().lower()
-                for r in (cand.get("mb_albumids") or [])
-                if r
-            }
-            if (target_trackid and cand_trackid == target_trackid) or target_release in cand_releases:
-                confirmed = True
-                break
-        top = cands[0]
-        if not confirmed and int(top.get("score") or 0) >= 70:
-            mismatches.append({
-                "item_id": int(row["id"]),
-                "title": item.get("title", ""),
-                "path": path,
-                "target": target,
-                "candidate": top,
-            })
+        # MI-7: the canonical requested-audio check decides. Only the
+        # target Recording ID counts -- membership of the target *release*
+        # in a hit's releases proves nothing about which track this is --
+        # and only hits at/above the canonical floor, with the ambiguity
+        # window, are evidence. A reject (a different song) blocks the
+        # merge; a review outcome is recorded as unverified, never as
+        # confirmed and never as grounds to delete the download.
+        verdict = verify_audio_against_request(
+            cands,
+            expected_title=_s(target.get("title") or ""),
+            expected_recording_id=target_trackid,
+        ) if target_trackid else {"decision": "review", "recording_id": ""}
+        if verdict.get("decision") == "accept":
+            confirmed += 1
+            continue
+        if verdict.get("decision") != "reject":
+            unverified.append({"item_id": int(row["id"]), "title": item.get("title", ""),
+                               "reason": _s(verdict.get("reason") or "no target recording ID")})
+            continue
+        rejected_id = _s(verdict.get("recording_id") or "")
+        top = next((c for c in cands if _s(c.get("mb_trackid", "")).strip().lower() == rejected_id), cands[0])
+        mismatches.append({
+            "item_id": int(row["id"]),
+            "title": item.get("title", ""),
+            "path": path,
+            "target": target,
+            "candidate": top,
+        })
 
     if checked or no_result:
         log.append(
             "  AcoustID missing-track validation: "
-            f"{checked} checked, {no_result} without fingerprint result, "
-            f"{len(mismatches)} mismatch(es)."
+            f"{checked} checked, {confirmed} confirmed, {len(unverified)} unverified, "
+            f"{no_result} without fingerprint result, {len(mismatches)} mismatch(es)."
         )
     for mismatch in mismatches[:5]:
         cand = mismatch.get("candidate") or {}
@@ -1856,6 +1865,8 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
     return {
         "ok": not mismatches,
         "checked": checked,
+        "confirmed": confirmed,
+        "unverified": unverified,
         "no_result": no_result,
         "mismatches": mismatches,
     }
