@@ -251,6 +251,7 @@ die() {
 on_error() {
   local ec=$?
   [[ "$ec" -eq 0 ]] && return 0
+  restore_pre_pull_latest_tag
   restart_engine_if_stopped
   report_failure "$ec"
   exit "$ec"
@@ -1149,15 +1150,15 @@ copy_regular_file() {
   place_by_rename "$src" "$dst" "$mode"
 }
 
-# pinned_cd <dir>: cd into a folder this run just created and fail if its
-# name was swapped (for a link or another folder) in the meantime. The
-# target folders are writable by the containers' user, who can rename
-# entries in them; once the cwd is the folder itself, later renames of its
-# name no longer matter, so callers work on ./ paths after this.
+# pinned_cd <dir>: cd into a folder this run just created and fail unless
+# its real path is exactly <dir> (which callers build from a canonical root,
+# never resolved again) and this run owns it. That refuses a swapped name and
+# a link anywhere between the root and the folder. The target folders are
+# writable by the containers' user, who can rename entries in them; once the
+# cwd is the folder itself, later renames no longer matter, so callers work
+# on ./ and ../ paths after this.
 pinned_cd() {
-  local want="$1" parent
-  parent="$(cd -- "$(dirname -- "$want")" && pwd -P)" || return 1
-  cd -- "$want" 2>/dev/null && [[ "$(pwd -P)" == "${parent}/$(basename -- "$want")" && -O . ]]
+  cd -- "$1" 2>/dev/null && [[ "$(pwd -P)" == "$1" && -O . ]]
 }
 
 # place_by_rename <src> <dst> [mode]: copy <src> (file or folder) without
@@ -1166,16 +1167,21 @@ pinned_cd() {
 # the copy; refuse the copy if it is or holds anything but regular files
 # and folders, then `mv -T` it onto exactly <dst>. Returns 1 (with a
 # warning) instead of copying when any step fails.
+# <dst>'s folder must be given as a canonical path (callers build it from
+# canon_path roots); it is not resolved again, so a link planted anywhere on
+# the way makes pinned_cd refuse. The final rename is ./item -> ../<name>
+# from inside the pinned stage, so it lands next to the stage whatever
+# happened to the path since.
 place_by_rename() {
-  local src="$1" dst="$2" mode="${3:-}" stage rc=1
+  local src="$1" dst="$2" mode="${3:-}" stage name rc=1
   src="$(canon_path "$(dirname -- "$src")")/$(basename -- "$src")"
-  dst="$(canon_path "$(dirname -- "$dst")")/$(basename -- "$dst")"
+  name="$(basename -- "$dst")"
   stage="$(mktemp -d "$(dirname -- "$dst")/.rollback-stage.XXXXXX")" || return 1
   if ( pinned_cd "$stage" \
       && cp -RPp -- "$src" ./item \
       && [[ -z "$(find ./item ! -type f ! -type d -print -quit)" ]] \
       && { [[ -z "$mode" ]] || chmod "$mode" ./item; } \
-      && mv -fT -- ./item "$dst" ); then
+      && mv -fT -- ./item "../${name}" ); then
     rc=0
   else
     warn "${src} was not copied to ${dst}: the copy failed, its staging folder was replaced, or it is or contains a link or special file"
@@ -1276,16 +1282,21 @@ restore_state_files() {
   elif [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]]; then
     mkdir -p "${data_src}/transactions"
     # Audit trail: add back missing records only; never overwrite or delete.
+    # The transaction store keeps its records flat (<id>.json), so only
+    # top-level *.json files are restored: a nested path would be resolved
+    # through folders a container could replace with a link meanwhile.
     local added=0 src rel
+    if [[ -n "$(find "$ROLLBACK_DIR/web-manager-data/transactions" -mindepth 2 -print -quit)" ]]; then
+      warn "web-manager-data/transactions/ in the backup has subfolders -- only its top-level *.json records are restored"
+    fi
     while IFS= read -r -d '' src; do
-      rel="${src#"$ROLLBACK_DIR/web-manager-data/transactions/"}"
+      rel="${src##*/}"
       if [[ ! -e "${data_src}/transactions/${rel}" && ! -L "${data_src}/transactions/${rel}" ]]; then
-        mkdir -p "$(dirname "${data_src}/transactions/${rel}")"
         if copy_regular_file "$src" "${data_src}/transactions/${rel}"; then
           added=$((added + 1))
         fi
       fi
-    done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -type f -print0)
+    done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print0)
     log "transactions/: ${added} missing record(s) restored; records written after the deploy were kept."
   fi
   if [[ -f "$ROLLBACK_DIR/beets-config/config.yaml" ]]; then

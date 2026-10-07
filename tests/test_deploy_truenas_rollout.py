@@ -1946,6 +1946,31 @@ class RollbackCopyRaceTests(RolloutScriptTestBase):
                          "the copy was redirected through a swapped staging folder")
         self.assertEqual(Path(dst).read_text(encoding="utf-8"), "current")
 
+    def test_transactions_restore_never_follows_a_folder_planted_after_the_link_check(self):
+        # R1: a racer plants transactions/zz -> <host dir> once the one-time
+        # tree_has_symlink check has passed; a backed-up record under
+        # transactions/zz/etc/ must not be written through it.
+        victim = os.path.join(self.tmp, "host-root")
+        os.makedirs(os.path.join(victim, "etc"))
+        engine = os.path.join(self.tmp, "engine")
+        data = os.path.join(self.tmp, "data")
+        rb = os.path.join(self.tmp, "rollback")
+        os.makedirs(engine)
+        os.makedirs(os.path.join(data, "transactions"))
+        os.makedirs(os.path.join(rb, "web-manager-data", "transactions", "zz", "etc"))
+        Path(rb, "web-manager-data", "transactions", "txn_a.json").write_text("{}", encoding="utf-8")
+        Path(rb, "web-manager-data", "transactions", "zz", "etc", "ld.so.preload").write_text("/evil.so\n", encoding="utf-8")
+        planted = os.path.join(data, "transactions", "zz")
+        res = self.run_snippet(
+            f'ENGINE_CONFIG_SRC="{engine}"; WEBMGR_DATA_SRC="{data}"; ROLLBACK_DIR="{rb}"\n'
+            f'cp() {{ [[ -L "{planted}" ]] || command ln -s "{victim}" "{planted}"; command cp "$@"; }}\n'
+            "restore_state_files"
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(os.listdir(os.path.join(victim, "etc")), [],
+                         "the rollback wrote through a folder planted inside transactions/")
+        self.assertEqual(Path(data, "transactions", "txn_a.json").read_text(encoding="utf-8"), "{}")
+
     def test_beetsplug_restore_refuses_a_staging_folder_swapped_for_a_link(self):
         victim_dir = os.path.join(self.tmp, "host-dir")
         os.makedirs(victim_dir)
