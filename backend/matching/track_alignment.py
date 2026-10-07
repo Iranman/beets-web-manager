@@ -203,8 +203,14 @@ def _edge_for(local_index: int, target_index: int, local: Dict[str, Any], target
         if local_rec == target_rec:
             positives.append("embedded_recording_id_matches")
             hard_positive = True
-        elif trust_model == "existing_library":
+        else:
+            # MI-10: an embedded Recording ID that contradicts the target is
+            # evidence under every trust model, fresh imports included. When
+            # the fingerprint confirms the target anyway, the two top-tier
+            # sources disagree: surface that, never pick a side.
             conflicts.append("recording_id_conflict")
+            if acoustid_status == AcoustIDStatus.CONFIRMED:
+                conflicts.append("fingerprint_recording_id_conflict")
 
     if acoustid_status == AcoustIDStatus.CONFIRMED:
         hard_positive = True

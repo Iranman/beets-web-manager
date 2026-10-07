@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import difflib, hashlib, json, os, re, sys
 from backend.matching import AcoustIDStatus, normalize_track_title_for_matching, similarity as _canonical_similarity
+from backend.matching import acoustid_evidence_from_hits
+from backend.matching.recording import ACOUSTID_MIN_SCORE
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import METADATA_CACHE_ROOT, MUSIC_ROOT, _s
@@ -249,7 +251,13 @@ def _acoustid_verify_match(file_path: str, artist: str, title: str) -> str:
     Returns:
       "confirmed"  – fingerprint agrees with the expected artist/title
       "mismatch"   – fingerprint found but disagrees (different song)
-      "unverified" – no fingerprint available (fpcalc absent, API error, no result)
+      "unverified" – no fingerprint available (fpcalc absent, API error, no
+                     result), only hits below the canonical score floor, or
+                     a top tier that is only partly the expected song
+
+    MI-13: only the confident top tier counts (score >= ACOUSTID_MIN_SCORE,
+    within the shared 3-point window of the best hit); "confirmed" needs
+    every recording in that tier to be the expected song.
     """
     if not file_path:
         return "unverified"
@@ -257,25 +265,77 @@ def _acoustid_verify_match(file_path: str, artist: str, title: str) -> str:
         cands = _acoustid_lookup_cached(file_path)
     except Exception:
         return "unverified"
-    if not cands:
+    from backend.acoustid_service import _acoustid_top_tier  # self-import: tests AST-extract this function
+    tier = _acoustid_top_tier(cands)
+    if not tier:
         return "unverified"
-    for c in cands[:5]:
+
+    def _agrees(c: Dict[str, Any]) -> bool:
         c_title = _s(c.get("title") or "").strip()
         c_artist = _s(c.get("artist") or "").strip()
         if not c_title:
-            continue
+            return False
         title_ok = _playlist_title_score(title, c_title) >= 0.78
         artist_ok = (not artist) or _playlist_artist_name_score(artist, c_artist) >= 0.72
-        if title_ok and artist_ok:
-            return "confirmed"
-    return "mismatch"
+        return title_ok and artist_ok
+
+    agreeing = sum(1 for c in tier if _agrees(c))
+    if agreeing == len(tier):
+        return "confirmed"
+    return "unverified" if agreeing else "mismatch"
+
+
+def _acoustid_hit_score(candidate: Dict[str, Any]) -> float:
+    """Hit score on the 0..100 scale (AcoustID candidates store 0..100;
+    a 0..1 value is scaled)."""
+    try:
+        score = float(candidate.get("score") or 0)
+    except Exception:
+        return 0.0
+    return score * 100.0 if score <= 1.0 else score
+
+
+def _acoustid_top_tier(cands: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """The hits that decide identity: recording-bearing hits at or above the
+    canonical floor (ACOUSTID_MIN_SCORE) within 3 points of the best one --
+    the same window backend.matching uses. [] when nothing clears the floor."""
+    high = [c for c in (cands or []) if isinstance(c, dict) and _s(c.get("mb_trackid") or "").strip()
+            and _acoustid_hit_score(c) >= ACOUSTID_MIN_SCORE]
+    if not high:
+        return []
+    top = max(_acoustid_hit_score(c) for c in high)
+    return [c for c in high if _acoustid_hit_score(c) >= top - 3.0]
+
+
+def _acoustid_confirmed_recording(cands: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    """The single hit whose recording these candidates CONFIRM under the
+    canonical rule (backend.matching.acoustid_evidence_from_hits: at or above
+    the floor, no other recording within the ambiguity window), or None.
+    MI-5/MI-6/MI-11: identity proofs use this, never "any top-5 hit"."""
+    tier = _acoustid_top_tier(cands)
+    if not tier:
+        return None
+    best = max(tier, key=_acoustid_hit_score)
+    rid = _s(best.get("mb_trackid") or "").strip().lower()
+    if acoustid_evidence_from_hits(cands, rid).status != AcoustIDStatus.CONFIRMED:
+        return None
+    return best
+
+
+def _confirmed_recording_ids(cands: Any) -> List[str]:
+    best = _acoustid_confirmed_recording(cands if isinstance(cands, list) else [])
+    return [_s(best.get("mb_trackid")).strip().lower()] if best else []
 
 
 def _acoustid_fingerprint_ids(file_path: str, limit: int = 5) -> List[str]:
-    """Return the top AcoustID-resolved MusicBrainz recording IDs for a file.
+    """The MusicBrainz recording ID AcoustID CONFIRMS for a file, as a
+    0- or 1-element list (MI-5).
 
-    Ordered by AcoustID match confidence, most confident first. Empty when
-    fpcalc is unavailable, the lookup fails, or the file has no fingerprint.
+    Empty when fpcalc is unavailable, the lookup fails, the file has no
+    fingerprint, every hit is below the canonical score floor, or two
+    recordings sit in the ambiguity window -- i.e. "no proof", never
+    "proof of a different recording". ``limit`` is kept for call-site
+    compatibility only.
     """
     if not file_path:
         return []
@@ -283,12 +343,8 @@ def _acoustid_fingerprint_ids(file_path: str, limit: int = 5) -> List[str]:
         cands = _acoustid_lookup_cached(file_path)
     except Exception:
         return []
-    ids: List[str] = []
-    for c in cands[:limit]:
-        rid = _s(c.get("mb_trackid") or "").strip().lower()
-        if rid and rid not in ids:
-            ids.append(rid)
-    return ids
+    from backend.acoustid_service import _confirmed_recording_ids  # self-import: tests AST-extract this function
+    return _confirmed_recording_ids(cands)
 
 
 def _acoustid_cached_fingerprint_ids(file_path: str, limit: int = 5) -> Optional[List[str]]:
@@ -304,22 +360,23 @@ def _acoustid_cached_fingerprint_ids(file_path: str, limit: int = 5) -> Optional
         cands = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    ids: List[str] = []
-    for c in (cands if isinstance(cands, list) else [])[:limit]:
-        rid = _s((c or {}).get("mb_trackid") or "").strip().lower()
-        if rid and rid not in ids:
-            ids.append(rid)
-    return ids
+    # MI-5: same confirmed-only rule as _acoustid_fingerprint_ids.
+    from backend.acoustid_service import _confirmed_recording_ids  # self-import: tests AST-extract this function
+    return _confirmed_recording_ids(cands)
 
 
 def _acoustid_fingerprint_match(source_path: str, lib_path: str) -> Tuple[str, List[str], List[str]]:
     """Fingerprint-verify that two audio files are the same recording via AcoustID.
 
-    Returns (shared_mb_trackid, source_recording_ids, lib_recording_ids). The
-    shared ID is empty either when the source has no usable fingerprint, or
-    when both files fingerprinted successfully but resolve to different
-    recordings (a genuine mismatch — callers should treat that as "verified
-    not a duplicate", not "unknown").
+    Returns (shared_mb_trackid, source_recording_ids, lib_recording_ids).
+    Each ID list holds only the recording AcoustID CONFIRMS for that file
+    (_acoustid_fingerprint_ids, MI-5), so:
+      shared set           -> both files confirm the same recording;
+      both lists non-empty -> each file confirms a *different* recording
+                              (callers treat that as "verified not a
+                              duplicate", not "unknown");
+      either list empty    -> no proof either way (weak, ambiguous or
+                              unavailable fingerprint).
     """
     src_ids = _acoustid_fingerprint_ids(source_path)
     if not src_ids:
@@ -503,21 +560,24 @@ def _album_track_fingerprint_check(item: Dict[str, Any],
     if not cands:
         return {"status": AcoustIDStatus.NO_RESULT.value}
 
-    mb_ids = {t.get("mb_trackid") for t in mb_tracks if t.get("mb_trackid")}
-    for cand in cands:
-        cand_id = _s(cand.get("mb_trackid", "")).strip().lower()
-        if cand_id and cand_id in mb_ids:
-            return {"status": AcoustIDStatus.CONFIRMED.value, "candidate": cand}
+    # MI-6: only a recording AcoustID CONFIRMS (canonical floor, no rival
+    # recording in the ambiguity window) can confirm or contradict the
+    # tracklist; weak or tied hits are AMBIGUOUS.
+    mb_ids = {_s(t.get("mb_trackid")).strip().lower() for t in mb_tracks if t.get("mb_trackid")}
+    from backend.acoustid_service import _acoustid_confirmed_recording  # self-import: tests AST-extract this function
+    confirmed = _acoustid_confirmed_recording(cands)
+    if confirmed is not None and _s(confirmed.get("mb_trackid")).strip().lower() in mb_ids:
+        return {"status": AcoustIDStatus.CONFIRMED.value, "candidate": confirmed}
 
     from difflib import SequenceMatcher
-    best_cand = cands[0]
+    best_cand = confirmed or cands[0]
     cand_title = _album_track_norm(best_cand.get("title", ""))
     best_title_score = max(
         (SequenceMatcher(None, cand_title, t.get("title_norm", "")).ratio()
          for t in mb_tracks if cand_title and t.get("title_norm")),
         default=0.0,
     )
-    if int(best_cand.get("score") or 0) >= 70 and best_title_score < 0.72:
+    if confirmed is not None and best_title_score < 0.72:
         return {
             "status": AcoustIDStatus.CONFLICT.value,
             "candidate": best_cand,
@@ -533,11 +593,13 @@ def _album_track_fingerprint_check(item: Dict[str, Any],
 def _artist_folder_fingerprint_confirms(folder: Path, canonical_name: str, sample_limit: int = 3) -> Optional[bool]:
     """Sample audio files under `folder` and AcoustID-verify they belong to `canonical_name`.
 
-    Returns True when at least one sampled file's fingerprint resolves to a
-    matching artist, False when every fingerprinted file resolves to a
-    disagreeing artist (confirmed mismatch — merge would commingle two
-    different artists' catalogs), or None when no sampled file produced
-    usable fingerprint data (unverified — caller should not block on this).
+    Only a recording AcoustID CONFIRMS for a file counts (MI-11: canonical
+    score floor, no rival recording in the ambiguity window). Returns True
+    when at least one sampled file confirms a recording by a matching artist
+    and none confirms a different artist; False when any sampled file
+    confirms a different artist (merge would commingle two catalogs); None
+    when no sampled file produced a confirmed recording (unverified --
+    callers must not treat that as confirmation).
     """
     if not canonical_name:
         return None
@@ -553,22 +615,21 @@ def _artist_folder_fingerprint_confirms(folder: Path, canonical_name: str, sampl
     if not sample_paths:
         return None
 
-    saw_fingerprint_data = False
+    from backend.acoustid_service import _acoustid_confirmed_recording  # self-import: tests AST-extract this function
+    agreed = False
     for p in sample_paths:
         try:
             cands = _acoustid_lookup_cached(str(p))
         except Exception:
             continue
-        if not cands:
+        confirmed = _acoustid_confirmed_recording(cands)
+        c_artist = _s((confirmed or {}).get("artist") or "").strip()
+        if not c_artist:
             continue
-        for c in cands[:5]:
-            c_artist = _s(c.get("artist") or "").strip()
-            if not c_artist:
-                continue
-            saw_fingerprint_data = True
-            if _playlist_artist_name_score(canonical_name, c_artist) >= 0.72:
-                return True
-    return False if saw_fingerprint_data else None
+        if _playlist_artist_name_score(canonical_name, c_artist) < 0.72:
+            return False
+        agreed = True
+    return True if agreed else None
 
 
 def _playlist_title_variants(value):
