@@ -57,6 +57,28 @@ class ThirdPartyImageTests(unittest.TestCase):
             "x.yml", errors)
         self.assertEqual(errors, [])
 
+    def test_service_after_a_column_0_comment_is_checked(self):
+        errors = []
+        vcs._check_third_party_images(
+            "services:\n  beets:\n    image: lscr.io/linuxserver/beets:latest\n"
+            "# optional sidecar\n  sidecar:\n    image: foo:1.0\n"
+            "volumes:\n  data:\n", "x.yml", errors)
+        self.assertEqual(errors, ["x.yml: sidecar image is not digest-pinned: foo:1.0"])
+
+    def test_services_indented_by_four_spaces_are_checked(self):
+        errors = []
+        vcs._check_third_party_images(
+            "services:\n    beets:\n        image: lscr.io/linuxserver/beets:latest\n"
+            "    sidecar:\n        image: foo:1.0\n", "x.yml", errors)
+        self.assertEqual(errors, ["x.yml: sidecar image is not digest-pinned: foo:1.0"])
+
+    def test_top_level_keys_after_services_are_not_services(self):
+        errors = []
+        vcs._check_third_party_images(
+            "services:\n  sidecar:\n    image: foo:1.0@sha256:" + "a" * 64 + "\n"
+            "networks:\n  backend:\n    driver: bridge\n", "x.yml", errors)
+        self.assertEqual(errors, [])
+
     def test_service_without_image_fails(self):
         errors = []
         vcs._check_third_party_images("services:\n  sidecar:\n    restart: always\n", "x.yml", errors)

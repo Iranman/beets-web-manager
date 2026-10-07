@@ -172,17 +172,38 @@ def _check_third_party_images(text: str, label: str, errors: list[str]) -> None:
     bgutil-provider sidecar) runs a third-party image: it must be pinned by
     digest so a moved tag can never change what runs. Services built from
     source here (`build:`) are not third-party images and are skipped."""
-    section = re.search(r"^services:\n(?P<body>.*?)(?=^\S|\Z)", text, re.M | re.S)
-    if not section:
-        return
-    services = section.group("body")
-    for name in re.findall(r"^  ([A-Za-z0-9_.-]+):", services, re.M):
-        if name in _PROJECT_SERVICES:
-            continue
-        block = _service_block(services, name)
-        if _has_build_block(block):
+    for name, block in _services(text).items():
+        if name in _PROJECT_SERVICES or _has_build_block(block):
             continue
         _check_image_digest_semantics(f"{label}: {name}", _image_line(block), False, errors)
+
+
+def _services(text: str) -> dict[str, str]:
+    """{name: body} for the top-level `services:` mapping, at whatever
+    indentation the file uses. Blank and comment lines (even at column 0)
+    do not end the section; the next top-level key does."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"services:\s*(#.*)?$", line)), None)
+    if start is None:
+        return {}
+    bodies: dict[str, list[str]] = {}
+    name, indent = None, None
+    for line in lines[start + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        depth = len(line) - len(line.lstrip())
+        if depth == 0:
+            break
+        if indent is None:
+            indent = depth
+        if depth <= indent:
+            match = re.match(r"\s*[\"']?([A-Za-z0-9_.-]+)[\"']?\s*:", line)
+            name = match.group(1) if match else None
+            if name:
+                bodies[name] = []
+        elif name:
+            bodies[name].append(line)
+    return {n: "\n".join(body) for n, body in bodies.items()}
 
 
 def _check_no_hardcoded_lan_allowlist(text: str, source_label: str, errors: list[str]) -> None:

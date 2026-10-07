@@ -256,8 +256,14 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    by an older version of this script has no checksum list and is refused
    with `backup_manifest_missing`, unless you add `--allow-legacy-backup`:
    then it is restored unverified, with an `UNVERIFIED BACKUP` warning.
-   `scripts/restore.sh` applies the same rule to archives without
-   `MANIFEST.txt` (same reason code and flag).
+   `scripts/restore.sh` applies the same rule to old-layout archives
+   without `MANIFEST.txt` (same reason code and flag).
+   If a deploy fails after it started its backup (for example while copying
+   state), it checksums what the backup holds at that moment and marks it
+   `incomplete_backup_stage=<stage>`. The failure block says so, and
+   `--rollback` accepts that backup with an `INCOMPLETE BACKUP` warning;
+   files it had not copied yet are not restored. A file changed after that
+   is still refused.
 1. Stops only `beets-web-manager` and restores the prior Compose file.
 2. Restores or removes the persistent token according to the token
    migration metadata and recorded checksums.

@@ -185,6 +185,20 @@ warn() { printf '[%s] WARNING: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
 _FAILURE_REPORTED=0
 
+# Set from create_backup_dir until the last backup write of a deploy. A run
+# that fails in between leaves a backup that is still usable by --rollback:
+# this checksums every file it holds (all written by this run into its own
+# root-only folder) and marks the manifest incomplete, so the rollback
+# says what it is restoring from.
+BACKUP_BUILDING=0
+seal_failed_backup() {
+  # Main shell only: an ERR trap in a subshell does not end the run.
+  [[ "$BACKUP_BUILDING" -eq 1 && "$BASHPID" == "$$" ]] || return 0
+  BACKUP_BUILDING=0
+  { echo "incomplete_backup_stage=${STAGE}" >> "$BACKUP_DIR/state-manifest.txt" && manifest_record_all; } 2>/dev/null \
+    || warn "could not finish the checksum manifest of ${BACKUP_DIR} -- --rollback will refuse it"
+}
+
 # Prints the failed-stage/backup-dir/rollback-command diagnostic block.
 report_failure() {
   local ec="$1"
@@ -213,6 +227,9 @@ report_failure() {
       echo "  (the rollback itself failed -- fix the cause above, then re-run: $0 --rollback ${ROLLBACK_DIR})"
     elif [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" && -f "$BACKUP_DIR/docker-compose.yml.bak" ]]; then
       echo "  $0 --rollback ${BACKUP_DIR}"
+      if grep -q '^incomplete_backup_stage=' "$BACKUP_DIR/state-manifest.txt" 2>/dev/null; then
+        echo "  (the backup is incomplete: this run failed during ${STAGE} before it finished copying; the rollback restores only what it holds and says so)"
+      fi
     else
       echo "  (no backup was created yet -- nothing to roll back; production was not touched)"
     fi
@@ -249,6 +266,7 @@ restore_pre_pull_latest_tag() {
 
 die() {
   printf '[%s] FATAL (%s): %s\n' "$(date -u +%H:%M:%S)" "$STAGE" "$*" >&2
+  seal_failed_backup
   restore_pre_pull_latest_tag
   restart_engine_if_stopped
   report_failure 1
@@ -258,6 +276,7 @@ die() {
 on_error() {
   local ec=$?
   [[ "$ec" -eq 0 ]] && return 0
+  seal_failed_backup
   restore_pre_pull_latest_tag
   restart_engine_if_stopped
   report_failure "$ec"
@@ -1271,7 +1290,7 @@ verify_backup_manifest() {
     [[ -n "${want["$rel"]+x}" ]] || bad+="  ${rel} (not in the manifest)"$'\n'
   done < <(cd "$ROLLBACK_DIR" && {
     find ./web-manager-data ./beets-config ./stale-database ! -type d -print0 2>/dev/null || true
-    for rel in docker-compose.yml.bak .env.bak auth_token.bak token-metadata.txt previous-image.txt; do
+    for rel in docker-compose.yml.bak .env.bak auth_token.bak token-metadata.txt previous-image.txt previous-image-labels.json; do
       [[ ! -e "$rel" && ! -L "$rel" ]] || printf './%s\0' "$rel"
     done
   })
@@ -1281,6 +1300,10 @@ verify_backup_manifest() {
     die "${ROLLBACK_DIR} does not match its checksum manifest (files listed above) -- the backup is damaged or was modified; nothing was stopped or changed"
   fi
   log "Verified ${#want[@]} backup file checksum(s) against ${manifest}."
+  line="$(grep '^incomplete_backup_stage=' "$manifest" | tail -n 1 || true)"
+  if [[ -n "$line" ]]; then
+    warn "INCOMPLETE BACKUP: the deploy that made ${ROLLBACK_DIR} failed during ${line#*=} before it finished the backup; its files match the checksums taken when it failed, but files it had not copied yet are not restored"
+  fi
   STAGE="rollback"
 }
 
@@ -1607,6 +1630,11 @@ create_backup_dir() {
   STAGE="backup-creation"
   ( umask 077; mkdir -p "$BACKUP_DIR" )
   chmod 700 "$BACKUP_DIR"
+  # Checksum manifest from the start; if the run fails before the backup is
+  # complete, seal_failed_backup checksums what it holds so far.
+  echo "$STATE_MANIFEST_VERSION" > "$BACKUP_DIR/state-manifest.txt"
+  chmod 600 "$BACKUP_DIR/state-manifest.txt"
+  BACKUP_BUILDING=1
 
   cp "$COMPOSE_FILE" "$BACKUP_DIR/docker-compose.yml.bak"
   local env_file
@@ -1679,10 +1707,6 @@ print(next((d for d in digests if d.startswith(sys.argv[1] + "@sha256:")), ""))'
 
   [[ -n "$SETUP_STATUS_BEFORE" ]] && printf '%s\n' "$SETUP_STATUS_BEFORE" > "$BACKUP_DIR/setup-status-before.json"
   find "$BACKUP_DIR" -type f -exec chmod 600 {} +
-  # Checksum manifest from the start, so a run that fails before the state
-  # backup still leaves a backup --rollback accepts.
-  echo "$STATE_MANIFEST_VERSION" > "$BACKUP_DIR/state-manifest.txt"
-  chmod 600 "$BACKUP_DIR/state-manifest.txt"
   manifest_record_all
 
   log "Backup created at ${BACKUP_DIR}"
@@ -2042,6 +2066,7 @@ run_deploy() {
   backup_web_manager_and_beets_config
   archive_stale_database
   migrate_token_if_needed
+  BACKUP_BUILDING=0  # nothing writes restore inputs into the backup after this
   deploy_image
   verify_post_deploy
   persist_deployed_version
