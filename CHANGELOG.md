@@ -42,6 +42,23 @@ The project uses Semantic Versioning.
 - **A second Move All or MBSync All is refused while one runs.** Starting either library-wide job while the same one still runs returns HTTP 409 `job_already_running` with the running job's `job_id`; nothing new starts and no transaction is recorded. Other jobs are not affected: the guard applies only to jobs that declare an explicit `dedupe_key`.
 
 ### Fixed
+- Integrations report a provider outage as "unavailable" instead of "no results". Covers wave-5 findings IA-01..IA-03, IA-05..IA-08, IA-10, IA-16, IA-17, IA-19, IA-20 and BA-5.
+  - MusicBrainz searches and tracklist lookups no longer stack their own retries on top of the provider boundary's: 3 requests per outage instead of up to 9. An outage, timeout or 5xx raises or reports `unavailable`. Before, it came back as "no candidates" or as the release-group ID used as a release.
+  - Cover Art Archive timeouts and 5xx are no longer cached as "no art"; only a real 404 is.
+  - Plex POST/PUT requests are never re-sent after a timeout.
+  - Playlist sync creates the new Plex playlist before deleting the old one. A failed create keeps the old playlist and its stored rating key. A failed chunk append removes the partial copy. A failed old-playlist delete is reported as partial success.
+  - The Plex path map uses the Beets root unchanged when Plex sees the same folder, and never falls back to a built-in alias.
+  - slskd searches report an slskd outage during polling as unavailable, not "No Soulseek results". slskd error messages carry only the HTTP status, never the response body, and a polling or response-read outage is reported with fixed text (the detail goes to the server log only).
+  - Lidarr wanted-list fetches report auth, rate-limit, malformed-response and unreachable failures. A failed later page no longer yields a partial list.
+  - Lidarr `foreignAlbumId` is treated as a release-group ID (`mb_releasegroupid`), never as `mb_albumid`. The acquisition queue merges local albums and wanted rows by release group, so a local copy with a different year suppresses its wanted row, and a different release group with the same title stays wanted.
+  - Provider health no longer counts a 4xx answer (for example a MusicBrainz 404) as a provider failure. A response body that fails mid-read is recorded as a failure. HTTP-date `Retry-After` values are honoured.
+  - Spotify playlist import tells bad credentials, private playlists, rate limiting, Spotify-owned playlists and outages apart, and skips malformed artist entries instead of failing.
+  - The Plex and slskd services take the download folder from `DOWNLOADS_ROOT` (alias `DOWNLOAD_PATH`, default `/downloads`) instead of a hard-coded `/data/torrents/music` (BA-12). The slskd completed-file search looks only in the expected folder, the per-user and main download folders, and `TORRENT_SOURCE_ROOTS`. It uses a transfer path hint only when it lies inside one of those, and never scans the parent of the download folder, `/tmp`, `/download` or `/downloads`.
+  - A provider outage that reaches an API route returns HTTP 503 with `{"ok": false, "error": "<provider> is unavailable; try again later", "unavailable": true}` instead of a generic 500. Affected routes include the item and album MusicBrainz candidate routes. The message is fixed text: no exception text, URL or body.
+  - Folder and track AI suggestions keep their AcoustID evidence during a MusicBrainz outage and report `musicbrainz_unavailable: true`. The folder suggestion keeps its "MusicBrainz lookup failed" reason. Playlist suggestions keep the Beets-local suggestions, mark `musicbrainz_unavailable: true`, and stop asking MusicBrainz for the remaining tracks.
+  - A malformed `Retry-After` date can no longer replace the provider's HTTP error with an `OverflowError`. A bug in the caller's own response handling is no longer recorded as a provider failure.
+  - Lidarr routes report a rejected API key and a malformed response instead of "Could not reach Lidarr".
+  - Album art downloads from a URL return 504 for a timeout, 503 for rate limiting, 502 for an unreachable host and 400 for a missing image, instead of one generic error.
 - Jobs that return a failed result (`{"ok": false}`) now end `failed` instead of `success`, and a job-created transaction ends `Failed` (BA-3).
 - A job whose worker thread cannot start is marked `failed` instead of showing as running forever, and its transaction is `Failed` (#229).
 - "Clear done" on the Jobs page no longer deletes `recovery_required` jobs, which still need the operator (BA-10).

@@ -252,14 +252,21 @@ def _plex_selected_path_map(settings: Optional[Dict[str, str]] = None,
                             section_locations: Optional[Iterable[str]] = None) -> Dict[str, str]:
     settings = settings or _plex_settings()
     beets_root = _plex_beets_music_root(settings)
-    roots = _plex_effective_music_roots(settings, section_locations)
-    target = ""
+    beets_key = _plex_path_case_key(beets_root)
     location_roots = [_plex_norm_path(root) for root in (section_locations or []) if _plex_norm_path(root)]
-    target = next((root for root in location_roots
-                   if _plex_path_case_key(root) != _plex_path_case_key(beets_root)), "")
-    if not target:
-        target = next((root for root in roots
-                       if _plex_path_case_key(root) != _plex_path_case_key(beets_root)), "")
+    location_keys = {_plex_path_case_key(root) for root in location_roots}
+    configured = [_plex_norm_path(root) for root in _plex_split_roots(settings.get("plex_music_roots") or "")]
+    if beets_key in location_keys:
+        # IA-05: Plex reports the Beets root itself (same mount path in both
+        # containers): the mapping is the identity, not some other alias.
+        target = beets_root
+    else:
+        # An operator-configured root Plex confirms, else the first Plex
+        # location, else the configured root. Built-in aliases are lookup
+        # candidates only; with nothing known the honest default is identity.
+        target = (next((root for root in configured if _plex_path_case_key(root) in location_keys), "")
+                  or next(iter(location_roots), "")
+                  or next((root for root in configured if _plex_path_case_key(root) != beets_key), ""))
     return {"beets_root": beets_root, "plex_root": target or beets_root}
 
 
@@ -427,21 +434,12 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     headers.update(_plex_client_headers())
     req = urllib.request.Request(url, headers=headers, method=method)
     timeout = int(timeout or PLEX_API_TIMEOUT)
-    last_exc: Optional[BaseException] = None
-    for attempt in range(max(1, int(attempts or 1))):
-        try:
-            with provider_boundary.opened("plex", req, timeout=timeout) as r:
-                raw = r.read()
-            break
-        except urllib.error.HTTPError:
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if not _plex_timeout_error(exc) or attempt >= max(1, int(attempts or 1)) - 1:
-                raise
-            time.sleep(1.0 + attempt)
-    else:
-        raise RuntimeError(last_exc or "Plex request failed")
+    # IA-02 / BA-5: the boundary owns retries -- at most ``attempts`` for a
+    # GET, and never a re-send of a POST/PUT/DELETE, which Plex may already
+    # have applied before the timeout (a duplicate playlist or append).
+    with provider_boundary.opened("plex", req, timeout=timeout,
+                                  max_attempts=max(1, int(attempts or 1))) as r:
+        raw = r.read()
     if not raw:
         return {}
     try:
@@ -570,8 +568,6 @@ def _plex_is_final_library_path(path_value: Any) -> bool:
     staging_roots = [
         str(PLAYLIST_DOWNLOAD_ROOT),
         str(DOWNLOADS_ROOT),
-        "/data/torrents",
-        "/data/downloads",
     ]
     for root in staging_roots:
         root_norm = _s(root).replace("\\", "/").rstrip("/").casefold()
