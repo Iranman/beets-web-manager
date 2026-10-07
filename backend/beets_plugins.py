@@ -229,7 +229,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.INTEGRATION,
         plugin_type=PluginType.BUILTIN,
         description="Deezer cover art and metadata search provider.",
-        python_packages=["deezer-python==2.1.0"],
+        python_packages=["deezer-python==7.4.0"],
     ),
     "spotify": PluginDefinition(
         name="spotify",
@@ -303,7 +303,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.OPTIONAL,
         plugin_type=PluginType.BUILTIN,
         description="Downloads song lyrics from Genius, Musixmatch, and web sources.",
-        python_packages=["beautifulsoup4==4.12.3"],
+        python_packages=["beautifulsoup4==4.15.0"],
         commands=["lyrics"],
     ),
     "parentwork": PluginDefinition(
