@@ -1487,6 +1487,7 @@ export default function Playlists() {
     setParseError('');
     setNotice(null);
     setSuggestionRows([]);
+    setMusicbrainzUnavailable(false);
     setDownloadState(null);
     setDownloadError('');
     setDownloadJobId('');
@@ -1555,6 +1556,7 @@ export default function Playlists() {
     setNotice(null);
     clearDownloadPanel();
     setSuggestionRows([]);
+    setMusicbrainzUnavailable(false);
     try {
       const result = await getPlaylistDetails(playlist.name, { mode: 'summary' });
       setName(result.name || playlist.name);
