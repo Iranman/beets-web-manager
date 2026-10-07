@@ -244,15 +244,32 @@ def _covers_config_dir(directory: str) -> bool:
     return False
 
 
+def _warn_dropped_root(root: str, source: str) -> None:
+    log.warning(
+        "webmanager: not using %s %r as an allowed mutation root (it is / or contains the Beets "
+        "config directory); set webmanager.allowed_roots explicitly if you need something else",
+        source, root,
+    )
+
+
 def _derived_allowed_roots() -> List[str]:
     directory = get_library_directory()
-    if not directory or _covers_config_dir(directory):
+    if directory and _covers_config_dir(directory):
+        _warn_dropped_root(directory, "directory")
+        return list(DEFAULT_ALLOWED_ROOTS)
+    if not directory:
         return list(DEFAULT_ALLOWED_ROOTS)
     roots: List[str] = []
     for root in [directory] + list(get_import_roots()):
         normalized = os.path.normpath(str(root))
-        if normalized and normalized not in roots:
-            roots.append(normalized)
+        # An import root of `/` or `/config` would put config.yaml and the
+        # API key file in mutation scope too: skip it (S-5).
+        if not normalized or normalized in roots:
+            continue
+        if _covers_config_dir(normalized):
+            _warn_dropped_root(normalized, "webmanager.import_roots")
+            continue
+        roots.append(normalized)
     return roots
 
 
