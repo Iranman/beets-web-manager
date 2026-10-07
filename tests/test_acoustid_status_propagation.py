@@ -14,9 +14,17 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-import backend.acoustid_service as acs
-import backend.import_review_service as irs
 import helpers_mb
+
+acs = irs = None
+
+
+def setUpModule():
+    # Import the app family at run time, not collection time: modules that
+    # sort later (test_ai_batch_retry_race) must be first to import it.
+    global acs, irs
+    import backend.acoustid_service as acs
+    import backend.import_review_service as irs
 
 TRACKS = {"release_group": "rg-1", "tracks": [
     {"mb_trackid": "rec-1", "title": "Crossfire", "title_norm": "crossfire", "track": 1},
