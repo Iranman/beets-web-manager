@@ -931,11 +931,18 @@ def api_transaction_rollback(transaction_id):
             transactions.append_log(transaction_id, f"ERROR: rollback failed: {ex}")
             raise
 
-    job = jobs.start_python(
-        _do,
-        label=f"Rollback transaction {transaction_id}",
-        metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
-    )
+    try:
+        job = jobs.start_python(
+            _do,
+            label=f"Rollback transaction {transaction_id}",
+            metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
+        )
+    except Exception as ex:
+        # Nothing ran: hand the claim back so the rollback can be retried
+        # (SEC-223-2). The global handler returns a fixed 500.
+        transactions.transition(transaction_id, "Running", source)
+        transactions.append_log(transaction_id, "The rollback job could not be started; nothing was restored.")
+        raise RuntimeError("The rollback job could not be started.") from ex
     transactions.update(transaction_id, metadata={"rollback_job_id": job.job_id})
     return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})
 

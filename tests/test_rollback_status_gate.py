@@ -82,6 +82,19 @@ class RollbackStatusGateTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual(self.store.get(tid)["status"], "Rolled Back")
 
+    def test_job_start_failure_returns_fixed_500_and_restores_the_source_status(self):
+        """SEC-223-2: a claim whose job never started must not strand Running."""
+        self.start.side_effect = ValueError("/secret")
+        for source, meta in (("Completed", {}), ("Failed", {"engine_result": {"applied": True}})):
+            with self.subTest(source=source):
+                tid = self._tx(source, **meta)
+                res = self.client.post(f"/api/transactions/{tid}/rollback")
+                self.assertEqual(res.status_code, 500)
+                self.assertNotIn("/secret", res.get_data(as_text=True))
+                self.assertEqual(res.get_json(), {"ok": False, "error": "Unexpected server error"})
+                self.assertEqual(self.store.get(tid)["status"], source)
+                self.restores["_run_item_metadata_restore"].assert_not_called()
+
     def test_cas_lost_to_a_concurrent_status_change_is_refused(self):
         """The status flips between the route's read and its claim."""
         tid = self._tx("Completed")
