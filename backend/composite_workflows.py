@@ -1475,7 +1475,7 @@ def plan_folder_cleanup(
                             data.get("action") or data.get("mode"))
     if refusal:
         return refusal
-    return create_folder_cleanup_plan(_get_store(store), data, db_path="")
+    return create_folder_cleanup_plan(_get_store(store), data)
 
 
 def apply_folder_cleanup(
@@ -1501,7 +1501,7 @@ def apply_folder_cleanup(
         return {"ok": False, "code": "not_applicable", "operation_id": operation_id, "mutated": False,
                 "error": claim_refusal(st, operation_id)}
     try:
-        return execute_folder_cleanup_apply(st, operation_id, db_path="")
+        return execute_folder_cleanup_apply(st, operation_id)
     except Exception as exc:
         st.update(operation_id, status="Failed", logs=[f"Apply raised: {type(exc).__name__}"])
         raise
@@ -1540,7 +1540,7 @@ def safe_rename_library_folder(
     if refusal:
         return {"ok": False, "renamed": False, "code": refusal["code"], "error": refusal["error"]}
     plan = create_folder_cleanup_plan(
-        st, {"action": "safe_rename", "source": source, "target": target}, db_path="")
+        st, {"action": "safe_rename", "source": source, "target": target})
     if not plan.get("ok"):
         return {"ok": False, "renamed": False, "code": plan.get("code") or "plan_failed",
                 "error": plan.get("error") or "Rename plan was refused."}
@@ -1553,7 +1553,7 @@ def safe_rename_library_folder(
             return {"ok": False, "renamed": False, "operation_id": op_id, "code": "already_applied",
                     "error": claim_refusal(st, op_id)}
         try:
-            res = execute_folder_cleanup_apply(st, op_id, db_path="")
+            res = execute_folder_cleanup_apply(st, op_id)
         except Exception as exc:
             st.update(op_id, status="Failed", logs=[f"Apply raised: {exc}"])
             raise
@@ -2297,6 +2297,12 @@ def rollback_album_mb_track_repair(
 _ALBUM_IDENTITY_FIELDS = ("mb_albumid", "mb_releasegroupid")
 
 
+ALBUM_METADATA_FAMILY = "album_metadata_repair_v1"
+ITEM_METADATA_FAMILY = "item_metadata_repair_v1"
+ALBUM_RELOCATION_FAMILY = "album_relocation_v1"
+GENRE_REPAIR_FAMILY = "genre_repair_v1"
+
+
 def plan_album_metadata(
     payload: Optional[Dict[str, Any]] = None,
     *,
@@ -2388,7 +2394,7 @@ def plan_album_metadata(
         summary=summary,
         rollback_available=True,
         rollback_reason="Restores the album and track values captured before the update.",
-        metadata={**payload, "before_state": before},
+        metadata={**payload, "before_state": before, "mutation_family": ALBUM_METADATA_FAMILY},
     )
     return {
         "ok": True,
@@ -2540,7 +2546,7 @@ def plan_item_metadata(
         operation_type="Metadata Update",
         status="Preview",
         summary=f"Metadata update for item {iid}",
-        metadata=payload,
+        metadata={**payload, "mutation_family": ITEM_METADATA_FAMILY},
     )
     return {
         "ok": True,
@@ -2701,7 +2707,7 @@ def plan_album_relocation(
         operation_type="Move",
         status="Preview",
         summary=f"Album relocation for album {aid}",
-        metadata=payload,
+        metadata={**payload, "mutation_family": ALBUM_RELOCATION_FAMILY},
     )
     return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **payload}
 
@@ -2790,7 +2796,7 @@ def plan_album_genre_repair(
         operation_type="Repair",
         status="Preview",
         summary=f"Genre repair for album {aid}",
-        metadata=payload,
+        metadata={**payload, "mutation_family": GENRE_REPAIR_FAMILY},
     )
     return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **payload}
 

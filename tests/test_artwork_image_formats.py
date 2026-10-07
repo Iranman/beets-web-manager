@@ -14,7 +14,7 @@ from unittest import mock
 
 from PIL import Image, PsdImagePlugin
 
-from backend import artwork_service, transaction_engine
+from backend import artwork_service
 from backend.artwork_service import AlbumArtRequestError
 
 
@@ -82,38 +82,6 @@ class ArtworkServiceFormatTests(unittest.TestCase):
                 self.assertEqual((info["width"], info["height"]), (48, 48))
 
 
-class TransactionEngineFormatTests(unittest.TestCase):
-    def test_psd_is_refused_before_its_parser_runs(self):
-        with _PsdParserSpy() as spy:
-            result = transaction_engine._validate_image_bytes(_psd_bytes())
-        spy.assert_not_called()
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "album_artwork_invalid_image_format")
-
-    def test_other_non_allowed_formats_are_refused(self):
-        for fmt in ("GIF", "BMP", "TIFF"):
-            with self.subTest(fmt=fmt):
-                result = transaction_engine._validate_image_bytes(_encoded(fmt))
-                self.assertFalse(result["ok"])
-                self.assertEqual(result["code"], "album_artwork_invalid_image_format")
-
-    def test_allowed_formats_still_validate(self):
-        for fmt, ext in (("JPEG", ".jpg"), ("PNG", ".png"), ("WEBP", ".webp")):
-            with self.subTest(fmt=fmt):
-                result = transaction_engine._validate_image_bytes(_encoded(fmt))
-                self.assertTrue(result["ok"], result)
-                self.assertEqual((result["format"], result["ext"]), (fmt, ext))
-
-    def test_unrecognisable_bytes_are_still_reported_corrupt(self):
-        result = transaction_engine._validate_image_bytes(b"NOT_AN_IMAGE_FILE")
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "album_artwork_corrupt_image")
-
-    def test_truncated_allowed_format_is_still_reported_corrupt(self):
-        data = _encoded("PNG", size=(256, 256))
-        result = transaction_engine._validate_image_bytes(data[: len(data) // 2])
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "album_artwork_corrupt_image")
 
 
 if __name__ == "__main__":

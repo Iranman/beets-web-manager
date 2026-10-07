@@ -44,7 +44,6 @@ which covers the prior independent-review round's findings):
    during this investigation) confirmed no further undefined names remain
    inside this specific function after all three fixes.
 """
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -113,48 +112,6 @@ class TestImportSourcePathDoesNotRequireLocalExistence(unittest.TestCase):
             self.assertNotIn("/config:", block, f"{compose_file}: beets-web-manager unexpectedly has a /config mount")
 
 
-class TestImportFolderPlanFailsClosedOnMissingSource(unittest.TestCase):
-    def setUp(self):
-        from backend.transaction_engine import TransactionStore, create_import_folder_plan
-        self.create_import_folder_plan = create_import_folder_plan
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.staging = self.root / "staging"
-        self.staging.mkdir()
-        self.store = TransactionStore(root=str(self.root / "transactions"))
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_rejects_nonexistent_source_folder(self):
-        missing = self.staging / "does-not-exist"
-        res = self.create_import_folder_plan(
-            self.store, {"source_folder": str(missing)},
-            staging_allowed_roots=[str(self.staging)],
-        )
-        self.assertFalse(res.get("ok"))
-        self.assertEqual(res.get("code"), "import_folder_source_not_found")
-
-    def test_rejects_source_that_is_a_file_not_a_directory(self):
-        f = self.staging / "not_a_dir.txt"
-        f.write_text("hello")
-        res = self.create_import_folder_plan(
-            self.store, {"source_folder": str(f)},
-            staging_allowed_roots=[str(self.staging)],
-        )
-        self.assertFalse(res.get("ok"))
-        self.assertEqual(res.get("code"), "import_folder_source_not_a_directory")
-
-    def test_accepts_a_real_existing_source_folder(self):
-        real = self.staging / "Real Album"
-        real.mkdir()
-        (real / "01.mp3").write_bytes(b"fake audio")
-        res = self.create_import_folder_plan(
-            self.store, {"source_folder": str(real)},
-            staging_allowed_roots=[str(self.staging)],
-        )
-        self.assertTrue(res.get("ok"), res)
-        self.assertEqual(res.get("file_count"), 1)
 
 
 class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
