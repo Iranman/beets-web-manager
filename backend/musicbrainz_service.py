@@ -35,7 +35,6 @@ def _discogs_track_search(title: str, artist: str, limit: int = 5) -> List[Dict[
         "type":   "release",
         "per_page": limit,
         "page":   1,
-        "token":  DISCOGS_TOKEN,
     })
     headers = {
         "User-Agent": "BeetsWebControl/1.0",
@@ -108,7 +107,7 @@ def _discogs_artist_discography(artist_name: str) -> Dict[str, Any]:
     if not DISCOGS_TOKEN:
         return {"ok": False, "error": "DISCOGS_TOKEN not set"}
     # Step 1: find artist
-    q = _up.urlencode({"q": artist_name, "type": "artist", "per_page": 5, "page": 1, "token": DISCOGS_TOKEN})
+    q = _up.urlencode({"q": artist_name, "type": "artist", "per_page": 5, "page": 1})
     headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
@@ -119,14 +118,17 @@ def _discogs_artist_discography(artist_name: str) -> Dict[str, Any]:
     if not results:
         return {"ok": False, "error": f"Artist '{artist_name}' not found on Discogs"}
     artist_hit = max(results, key=lambda r: _discogs_artist_score(r, artist_name))
-    artist_id   = artist_hit["id"]
+    try:
+        artist_id = int(artist_hit.get("id"))  # IA-21: never interpolate a raw provider value into the path
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Discogs returned an invalid artist id"}
     artist_name_d = re.sub(r'\s+\(\d+\)\s*$', '', artist_hit.get("title") or artist_name)
     # Step 2: fetch releases (master releases = albums)
     releases: List[Dict] = []
     page = 1
     while page <= 5:
         time.sleep(1.1)   # Discogs: 60 req/min
-        q2 = _up.urlencode({"sort": "year", "sort_order": "asc", "per_page": 100, "page": page, "token": DISCOGS_TOKEN})
+        q2 = _up.urlencode({"sort": "year", "sort_order": "asc", "per_page": 100, "page": page})
         try:
             req2 = _ur.Request(f"https://api.discogs.com/artists/{artist_id}/releases?{q2}", headers=headers)
             with provider_boundary.opened("discogs", req2, timeout=15) as r2:
@@ -516,7 +518,6 @@ def _fetch_release_group_art_discogs(artist_name: str, album_title: str) -> str:
         "type": "release",
         "per_page": 3,
         "page": 1,
-        "token": DISCOGS_TOKEN,
     })
     headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
