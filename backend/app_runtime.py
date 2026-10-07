@@ -282,7 +282,9 @@ PLAYLIST_DOWNLOAD_BATCH_SIZE = _env_int("PLAYLIST_DOWNLOAD_BATCH_SIZE", 0, minim
 PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,spotiflac,ytdlp,soundcloud")
 
 
-PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
+# Absolute only (config_layers.container_path): an empty or relative value
+# falls back to the default instead of meaning the working directory (#269 F-3).
+PLAYLIST_DOWNLOAD_ROOT = Path(_config_layers.container_path(
     "PLAYLIST_DOWNLOAD_ROOT",
     str(DOWNLOADS_CONTAINER_ROOT / "music" / "Playlist Downloads"),
 ))
@@ -306,6 +308,12 @@ DOWNLOADS_ROOT = DOWNLOADS_CONTAINER_ROOT
 # DOWNLOADS_ROOT as an allowlist entry: empty when it is "/" or overlaps the
 # library, so a misconfiguration fails closed (the setup check blocks on it).
 DOWNLOADS_ALLOWED_ROOTS = _config_layers.safe_roots("DOWNLOADS_ROOT", [DOWNLOADS_ROOT], _MUSIC_ROOT_SETTING)
+
+
+# PLAYLIST_DOWNLOAD_ROOT under the same rule: empty when it is "/" or overlaps
+# the library, so it is neither allowlisted nor app-managed (#268 S-4).
+PLAYLIST_DOWNLOAD_ALLOWED_ROOTS = _config_layers.safe_roots(
+    "PLAYLIST_DOWNLOAD_ROOT", [PLAYLIST_DOWNLOAD_ROOT], _MUSIC_ROOT_SETTING)
 
 
 def validated_downloads_root() -> Path:

@@ -26,6 +26,8 @@ class PlaylistMatchQualityTests(unittest.TestCase):
             "MUSIC_ROOT": Path("/tmp/music"),
             "PLAYLIST_DOWNLOAD_ROOT": Path("/tmp/playlist-downloads"),
             "DOWNLOADS_ROOT": Path("/tmp/downloads"),
+            "DOWNLOADS_ALLOWED_ROOTS": (Path("/tmp/downloads"),),
+            "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS": (Path("/tmp/playlist-downloads"),),
             "PLAYLIST_PATH_ROOT_ALIASES": [],
             "_s": lambda v: "" if v is None else str(v),
             "_normalize_name": lambda s: str(s or ""),

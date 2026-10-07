@@ -161,7 +161,6 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `_restore_rows` restores with `move=True` even when the apply did not move files. This must be fixed before composite rollback is advertised broadly (QA #243 F-5).
   - A folder cleanup that fails part-way records no `engine_result`, so it cannot be rolled back through the route.
   - Folder reference checks compare Beets-reported item paths only; an album `artpath` under the folder is not checked.
-  - `backend/app_runtime.py` still hard-codes `DOWNLOADS_ROOT = Path("/data/torrents/music")` instead of `config_layers.downloads_root()` (BA-12 remainder).
 - Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
 - Priority: P2. Status: Open.
 

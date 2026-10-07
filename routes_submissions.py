@@ -24,7 +24,6 @@ from app import (  # noqa: E402
     AUDIO_EXT,
     _mb_release_group_for_release,
     DISCOGS_TOKEN,
-    DOWNLOADS_ROOT,
     MUSIC_ROOT,
     _MB_UUID_RE,
     _artist_folder_key,
@@ -53,7 +52,10 @@ from backend.beets_adapter import (
 from backend.security import OutboundPolicyError, resolve_public_target
 from backend.identity_contract import verify_album_identity
 
-_SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
+from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS  # noqa: E402
+
+# An unsafe DOWNLOADS_ROOT ("/" or overlapping the library) adds no root (#268 S-3).
+_SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, *DOWNLOADS_ALLOWED_ROOTS)
 _REFERENCE_URL_TIMEOUT = 20
 _REFERENCE_MAX_BYTES = 2_000_000
 
