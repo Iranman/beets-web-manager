@@ -970,7 +970,6 @@ def execute_import_review_cleanup_plan(
     confirmed_wrong_library_folder = bool(
         payload.get("confirmed_wrong_library_folder") or payload.get("allow_library_delete")
     )
-    album_id = int(payload.get("album_id") or 0)
     target_path = Path(current_decode)
 
     if os.path.islink(raw_path) or os.path.islink(target_path) or target_path.is_symlink():
@@ -997,13 +996,16 @@ def execute_import_review_cleanup_plan(
     # from os.environ on its own.
     from backend.config_layers import music_root as _configured_music_root
     music_root_path = Path(music_root or _configured_music_root()).resolve(strict=False)
-    library_delete_allowed = confirmed_wrong_library_folder or album_id > 0
+    # F-3: album_id is not a gate -- the engine cannot prove the album owns
+    # the target. The route verifies that and sets the explicit gate.
+    library_delete_allowed = confirmed_wrong_library_folder
 
     # Defense in depth for #235: an allowed root that is "/" or overlaps the
-    # library is refused; the library root itself only behind the gate.
+    # library is refused. The library root itself is governed by the
+    # library-delete gate (target and delete-source checks below).
     from backend.config_layers import unsafe_root_reason
     for r in resolved_roots:
-        if library_delete_allowed and os.path.realpath(str(r)) == os.path.realpath(str(music_root_path)):
+        if os.path.realpath(str(r)) == os.path.realpath(str(music_root_path)):
             continue
         reason = unsafe_root_reason(r, music_root_path)
         if reason:
@@ -1247,12 +1249,8 @@ def _execute_import_review_cleanup_apply_locked(
 
     # F2: re-check at apply against the recorded AND the current music root.
     from backend.config_layers import music_root as _configured_music_root
-    try:
-        gate_album_id = int(payload.get("album_id") or 0)
-    except (TypeError, ValueError):
-        gate_album_id = 0
     library_delete_allowed = bool(
-        payload.get("confirmed_wrong_library_folder") or payload.get("allow_library_delete")) or gate_album_id > 0
+        payload.get("confirmed_wrong_library_folder") or payload.get("allow_library_delete"))
     roots = [_configured_music_root()] + ([str(meta["music_root"])] if meta.get("music_root") else [])
     refusal = _import_review_library_refusal(
         str(meta.get("target_path", "")),

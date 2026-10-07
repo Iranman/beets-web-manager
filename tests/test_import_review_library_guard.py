@@ -90,7 +90,10 @@ class ReviewFolderDeleteAlbumGateTests(unittest.TestCase):
     def _call(self, matches):
         import app as app_module  # noqa: F401  (registers routes)
         import routes_import
-        with mock.patch.object(routes_import, "_library_no_mb_album_matches_folder", return_value=matches),              mock.patch.object(routes_import, "_AI_PENDING_FILE", Path(tempfile.gettempdir()) / "no-such-pending.json"),              mock.patch.object(routes_import, "_delete_review_source_folder", return_value={}) as delete:
+        with mock.patch.object(routes_import, "_library_no_mb_album_matches_folder", return_value=matches), \
+             mock.patch.object(routes_import, "_AI_PENDING_FILE",
+                               Path(tempfile.gettempdir()) / "no-such-pending.json"), \
+             mock.patch.object(routes_import, "_delete_review_source_folder", return_value={}) as delete:
             with routes_import.app.test_request_context(
                     "/api/import/review-folder/delete", method="POST",
                     json={"path": "/music/Artist/Album", "album_id": 5}):

@@ -2882,11 +2882,8 @@ def plan_import_review_cleanup(
         data["path"] = data.get("folder") or data.get("folder_path") or data.get("source") or ""
     if not data.get("path"):
         return {"ok": False, "error": "A folder or file path is required."}
-    try:
-        album_id = int(data.get("album_id") or 0)
-    except (TypeError, ValueError):
-        album_id = 0
-    allow_music = bool(data.get("confirmed_wrong_library_folder") or data.get("allow_library_delete")) or album_id > 0
+    # F-3: album_id alone never opens the library (the caller verifies it).
+    allow_music = bool(data.get("confirmed_wrong_library_folder") or data.get("allow_library_delete"))
     library_quarantined = False
     try:
         # realpath (symlinks collapsed, like resolve()) + normpath prefix

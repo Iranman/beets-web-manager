@@ -24241,14 +24241,34 @@
    ]
   },
   {
-   "name": "start_folder_import_with_id",
+   "name": "_retag_release_operator_selected",
    "module": "backend/import_service.py",
    "lines": [
     2709,
-    4068
+    2716
    ],
-   "size": 1360,
-   "body_lines": 1349,
+   "size": 8,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "start_folder_import_with_id"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "start_folder_import_with_id",
+   "module": "backend/import_service.py",
+   "lines": [
+    2719,
+    4085
+   ],
+   "size": 1367,
+   "body_lines": 1356,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT",
@@ -24294,20 +24314,20 @@
     "_repair_album_mbid_sticking_once",
     "_resolve_album_release_for_import",
     "_resolve_import_review_source_path",
+    "_retag_release_operator_selected",
     "_s",
     "_source_audio_missing_track_scan",
     "_stage_selected_audio_files",
     "_start_reimport_disk_job_internal",
-    "_strip_year_from_album_name",
-    "_trigger_plex_refresh"
+    "_strip_year_from_album_name"
    ]
   },
   {
    "name": "_coerce_library_import_all_album",
    "module": "backend/import_service.py",
    "lines": [
-    4077,
-    4104
+    4094,
+    4121
    ],
    "size": 28,
    "body_lines": 27,
@@ -24331,8 +24351,8 @@
    "name": "_library_import_all_retry_payload",
    "module": "backend/import_service.py",
    "lines": [
-    4107,
-    4115
+    4124,
+    4132
    ],
    "size": 9,
    "body_lines": 8,
@@ -24354,8 +24374,8 @@
    "name": "_library_import_all_record",
    "module": "backend/import_service.py",
    "lines": [
-    4118,
-    4129
+    4135,
+    4146
    ],
    "size": 12,
    "body_lines": 10,
@@ -24378,8 +24398,8 @@
    "name": "_library_import_all_read_last",
    "module": "backend/import_service.py",
    "lines": [
-    4132,
-    4140
+    4149,
+    4157
    ],
    "size": 9,
    "body_lines": 8,
@@ -24399,8 +24419,8 @@
    "name": "_library_import_all_write_last",
    "module": "backend/import_service.py",
    "lines": [
-    4143,
-    4151
+    4160,
+    4168
    ],
    "size": 9,
    "body_lines": 8,
@@ -24419,8 +24439,8 @@
    "name": "_resolve_import_source_path",
    "module": "backend/import_service.py",
    "lines": [
-    4159,
-    4193
+    4176,
+    4210
    ],
    "size": 35,
    "body_lines": 16,

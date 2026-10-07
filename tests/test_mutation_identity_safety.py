@@ -189,16 +189,25 @@ class OperatorReleaseAndCodeqlTests(_IdentityEnv):
         ad = self.adapter()
         captured = {}
         plan = {"matched_count": 1, "actual_count": 1, "expected_count": 1, "unmatched_items": []}
-        with mock.patch.object(cw, "beets_adapter", ad),              mock.patch.object(cw, "_get_store", return_value=self.store),              mock.patch.object(routes_library.lib, "get_album", return_value=mock.Mock(albumartist="A", album="Old Title")),              mock.patch.object(routes_library, "_resolve_mb_release_id", return_value=REL_B),              mock.patch.object(routes_library, "_album_mb_match_plan", return_value=plan),              mock.patch.object(routes_library.jobs, "start_python",
+        with mock.patch.object(cw, "beets_adapter", ad), \
+             mock.patch.object(cw, "_get_store", return_value=self.store), \
+             mock.patch.object(routes_library.lib, "get_album",
+                               return_value=mock.Mock(albumartist="A", album="Old Title")), \
+             mock.patch.object(routes_library, "_resolve_mb_release_id", return_value=REL_B), \
+             mock.patch.object(routes_library, "_album_mb_match_plan", return_value=plan), \
+             mock.patch.object(routes_library.jobs, "start_python",
                                side_effect=lambda fn, **kw: (captured.__setitem__("fn", fn), mock.Mock(job_id="j"))[1]):
             with routes_library.app.test_request_context(
                     "/api/albums/1/match", method="POST",
                     data=json.dumps({"mb_id": REL_B}), content_type="application/json"):
                 routes_library.match_album(1)
+            job_log = []
             try:
-                captured["fn"]([])
-            except Exception:
-                pass
+                captured["fn"](job_log)
+                job_error = None
+            except Exception as exc:  # a later stage may fail on the mocks
+                job_error = exc
+        self.assertNotIn("match album metadata update", str(job_error or ""), job_log)
         self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_B, RG_B))
 
     def test_library_refs_compare_normalized_strings_without_resolve(self):
@@ -232,6 +241,36 @@ class OperatorReleaseAndCodeqlTests(_IdentityEnv):
             roots = cw._get_staging_roots()
         self.assertEqual(roots[0], __import__("pathlib").Path(dl).resolve())
         self.assertNotIn("elsewhere", " ".join(map(str, roots)))
+
+
+class ImportRetagOperatorFlagTests(_IdentityEnv):
+    """QA F-2: the import retag stamp may change Release Group only for the
+    album this import produced or the album the operator named."""
+
+    def test_rule(self):
+        from backend.import_service import _retag_release_operator_selected as sel
+        self.assertTrue(sel(7, auto_import=False, confirmed_album_id=7, operator_album_id=0))
+        self.assertTrue(sel(9, auto_import=False, confirmed_album_id=0, operator_album_id=9))
+        # Guessed ids (strategies B-I): neither confirmed nor named.
+        self.assertFalse(sel(11, auto_import=False, confirmed_album_id=0, operator_album_id=0))
+        self.assertFalse(sel(11, auto_import=False, confirmed_album_id=7, operator_album_id=9))
+        # Auto-import never.
+        self.assertFalse(sel(7, auto_import=True, confirmed_album_id=7, operator_album_id=7))
+        self.assertFalse(sel(0, auto_import=False, confirmed_album_id=0, operator_album_id=0))
+
+    def test_retag_uses_the_rule(self):
+        import backend.import_service as imp
+        src = inspect.getsource(imp.start_folder_import_with_id)
+        self.assertNotIn("release_selected_by_operator=True", src)
+        self.assertIn("release_selected_by_operator=_retag_release_operator_selected(", src)
+        self.assertIn("operator_album_id = 0 if auto_import else existing_album_id", src)
+
+    def test_guessed_album_cannot_change_release_group(self):
+        ad = self.adapter()
+        res = cw.plan_album_metadata({"album_id": 1, "updates": {"mb_albumid": REL_B},
+                                      "release_selected_by_operator": False}, adapter=ad, store=self.store)
+        self.assertEqual(res.get("code"), "repair_identity_mismatch", res)
+        self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_A, RG_A))
 
 
 class FolderCleanupTests(_Env):
