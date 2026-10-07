@@ -7,7 +7,9 @@ redacted URL only. Each test fails on main."""
 import http.client
 import logging
 import os
+import tempfile
 import unittest
+from pathlib import Path
 import urllib.error
 from unittest import mock
 
@@ -24,6 +26,8 @@ USERINFO_URLS = (
     f"http://u:{SECRET}@beets",               # no port (was InvalidURL)
     "http://u:Sup3r%40SecretPw@beets:8337",   # percent-encoded password
     f"http://u:{SECRET}/x@beets:8337",        # "/" hides the "@" from urlsplit
+    f"http://u:{SECRET}\uff20beets:8337",     # fullwidth @ (NFKC -> "@")
+    f"http://u%3A{SECRET}%40beets:8337",      # whole userinfo percent-encoded
 )
 
 
@@ -118,6 +122,82 @@ class HttpClientExceptionTests(unittest.TestCase):
                 self.assertNotIn(SECRET, "\n".join(logs.output))
                 self.assertIsNone(ctx.exception.__cause__)
                 self.assertTrue(ctx.exception.__suppress_context__)
+
+
+class RequestConstructionTests(unittest.TestCase):
+    """#208 F2: Request() parses the URL; its ValueError can quote the URL,
+    so it is built inside the try and reported like any connection error."""
+
+    def test_request_construction_error_is_wrapped(self):
+        adapter = ba.BeetsAdapter(base_url="http://beets:8337")
+        for call in _calls():
+            with mock.patch.object(ba.urllib.request, "Request", side_effect=ValueError(f"bad netloc {SECRET}")), \
+                    self.assertLogs("beets.adapter", level="WARNING") as logs:
+                with self.assertRaises(ba.BeetsAdapterConnectionError) as ctx:
+                    call(adapter)
+            self.assertNotIn(SECRET, str(ctx.exception))
+            self.assertNotIn(SECRET, "\n".join(logs.output))
+
+
+class SetupEnvUrlRedactionTests(unittest.TestCase):
+    """#183 F1: GET /api/setup/env never returns user:pass@ of a URL setting,
+    and saving the form back does not overwrite the stored value."""
+
+    PLEX = f"http://u:{SECRET}@plex:32400"
+    AI = f"https://u:{SECRET}@ai.example/v1"
+    LIDARR = f"http://u:{SECRET}\uff20lidarr:8686"
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
+        self.client = self.flask_app.test_client()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.env_file = Path(tmp.name) / ".env"
+        self.env_file.write_text(
+            f"PLEX_URL={self.PLEX}\nAI_BASE_URL={self.AI}\nLIDARR_URL={self.LIDARR}\n"
+            f"BEETS_WEB_URL=http://u:{SECRET}@saved:8337\n",
+            encoding="utf-8",
+        )
+        self.module._SETUP_ENV_FILE = self.env_file
+        self.module._ENV_EXAMPLE_FILE = Path(tmp.name) / ".env.example"
+        saved = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        for var in ("PLEX_URL", "AI_BASE_URL", "LIDARR_URL"):
+            os.environ.pop(var, None)
+        # Environment overrides a different saved value: status_message
+        # used to quote the saved one.
+        os.environ["BEETS_WEB_URL"] = f"http://u:{SECRET}@env:8337"
+
+    def _variables(self):
+        response = self.client.get("/api/setup/env")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(SECRET, response.get_data(as_text=True))
+        return {v["name"]: v for v in response.get_json()["variables"]}
+
+    def test_url_settings_are_returned_without_userinfo(self):
+        variables = self._variables()
+        self.assertEqual(variables["PLEX_URL"]["value"], "http://plex:32400")
+        self.assertEqual(variables["PLEX_URL"]["saved_value"], "http://plex:32400")
+        self.assertEqual(variables["AI_BASE_URL"]["effective_value"], "https://ai.example/v1")
+        self.assertEqual(variables["BEETS_WEB_URL"]["value"], "http://env:8337")
+        self.assertEqual(variables["BEETS_WEB_URL"]["saved_value"], "http://saved:8337")
+        self.assertTrue(variables["BEETS_WEB_URL"]["is_overridden"])
+
+    def test_saving_the_redacted_form_keeps_the_stored_value(self):
+        variables = self._variables()
+        echo = {name: variables[name]["value"] for name in ("PLEX_URL", "AI_BASE_URL", "LIDARR_URL")}
+        response = self.client.post("/api/setup/env", json={"variables": echo})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertNotIn(SECRET, response.get_data(as_text=True))
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn(f"PLEX_URL={self.PLEX}", text)
+        self.assertIn(f"AI_BASE_URL={self.AI}", text)
+        self.assertIn(f"LIDARR_URL={self.LIDARR}", text)
+
+    def test_a_real_change_is_still_saved(self):
+        response = self.client.post("/api/setup/env", json={"variables": {"PLEX_URL": "http://plex2:32400"}})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertIn("PLEX_URL=http://plex2:32400", self.env_file.read_text(encoding="utf-8"))
 
 
 class SetupStatusUserinfoTests(unittest.TestCase):

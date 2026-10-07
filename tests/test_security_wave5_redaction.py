@@ -24,11 +24,14 @@ class BeetsAdapterUserinfoRedactionTests(unittest.TestCase):
     def test_connection_and_timeout_errors_never_carry_userinfo(self):
         adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")
         for call in (lambda a: a.get_stats(), lambda a: a.open_item_file(1), lambda a: a.open_album_art(1)):
-            with mock.patch.object(ba.urllib.request, "urlopen", side_effect=urllib.error.URLError("x")) as urlopen:
+            with mock.patch.object(ba.urllib.request, "urlopen", side_effect=urllib.error.URLError("x")) as urlopen, \
+                    self.assertLogs("beets.adapter", level="DEBUG") as logs:
+                ba.log.debug("capture")  # assertLogs needs one record
                 with self.assertRaises(ba.BeetsAdapterError) as ctx:
                     call(adapter)
             urlopen.assert_not_called()
             self.assertNotIn(SECRET, str(ctx.exception))
+            self.assertNotIn(SECRET, "\n".join(logs.output))
 
     def test_requests_never_use_the_credentialed_url(self):
         adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")

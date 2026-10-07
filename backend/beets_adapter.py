@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.error
 from typing import Any, Dict, List, Optional, Union
 
-from backend.config_layers import redact_url_userinfo
+from backend.config_layers import redact_url_userinfo, url_has_userinfo
 
 try:
     from backend.security import OutboundPolicyError
@@ -43,10 +43,10 @@ BEETS_WEB_URL_USERINFO_MESSAGE = (
 
 
 def beets_web_url_has_userinfo(url: str) -> bool:
-    """True for a URL that carries userinfo. Any "@" counts: a base URL has
-    no other use for it, and a password holding "/" or "?" hides the "@"
-    from urlsplit's netloc."""
-    return "@" in (url or "")
+    """True for a URL that carries userinfo. Any "@" counts, also %40 and
+    NFKC forms such as U+FF20: a base URL has no other use for it, and a
+    password holding "/" or "?" hides the "@" from urlsplit's netloc."""
+    return url_has_userinfo(url)
 
 
 class BeetsAdapterError(Exception):
@@ -339,9 +339,10 @@ class BeetsAdapter:
             elif not token and "Authorization" not in req_headers:
                 log.warning("No WebManager API key available when requesting %s", path)
 
-        req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
-
         try:
+            # Inside the try: Request() parses the URL and its ValueError
+            # can quote it (#208).
+            req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 data = resp.read()
@@ -527,8 +528,8 @@ class BeetsAdapter:
         """Open raw HTTP response stream for an item audio file."""
         self._refuse_if_misconfigured()
         url = self._build_url(f"/item/{int(item_id)}/file")
-        req = urllib.request.Request(url)
         try:
+            req = urllib.request.Request(url)  # inside the try (#208)
             return urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as ex:
             if ex.code == 404:
@@ -576,8 +577,8 @@ class BeetsAdapter:
         """Open raw HTTP response stream for an album cover art."""
         self._refuse_if_misconfigured()
         url = self._build_url(f"/album/{int(album_id)}/art")
-        req = urllib.request.Request(url)
         try:
+            req = urllib.request.Request(url)  # inside the try (#208)
             return urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as ex:
             if ex.code == 404:

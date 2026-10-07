@@ -30,7 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import jsonify, request, session
 
@@ -1481,6 +1481,44 @@ def _load_env_file() -> Tuple[List[Dict[str, Any]], Dict[str, str], bool]:
     return entries, values, True
 
 
+_URL_DISPLAY_FIELDS = ("value", "effective_value", "saved_value", "runtime_value", "default")
+
+
+def _is_url_setting(name: str) -> bool:
+    """URL-valued settings (BEETS_WEB_URL, PLEX_URL, AI_BASE_URL, ...). The
+    catalog has no URL type, so the *_URL naming convention is the marker."""
+    return name.endswith("_URL")
+
+
+def _redact_url_setting(name: str, item: Dict[str, Any], raw_values: Iterable[str]) -> None:
+    """#183 F1 / #208: never return user:pass@ of a URL setting from
+    GET /api/setup/env, in any field, status_message included."""
+    if not _is_url_setting(name):
+        return
+    for field in _URL_DISPLAY_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str) and config_layers.url_has_userinfo(value):
+            item[field] = config_layers.redact_url_userinfo(value)
+    message = item.get("status_message")
+    if isinstance(message, str):
+        for raw in raw_values:
+            if raw and config_layers.url_has_userinfo(raw):
+                message = message.replace(raw, config_layers.redact_url_userinfo(raw))
+        item["status_message"] = message
+
+
+def _is_redacted_url_echo(name: str, value: str, stored: Iterable[str]) -> bool:
+    """True when a saved URL setting is just the redacted form GET returned
+    for a stored credentialed URL; saving it must keep the stored value."""
+    if not _is_url_setting(name):
+        return False
+    return any(
+        raw and raw != value and config_layers.url_has_userinfo(raw)
+        and value == config_layers.redact_url_userinfo(raw)
+        for raw in stored
+    )
+
+
 def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     catalog = _env_catalog()
     _, persisted, exists = _load_env_file()
@@ -1507,6 +1545,7 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     for name in names:
         meta = catalog[name]
         var_item = _resolve_setting_item(name, meta, persisted)
+        _redact_url_setting(name, var_item, (persisted.get(name, "").strip(), os.environ.get(name, "").strip()))
         for field in ("layer", "apply", "layer_note"):
             if field in meta:
                 var_item[field] = meta[field]
@@ -3120,10 +3159,13 @@ def setup_save_env():
         return jsonify({"ok": False, "error": "expected variables object and clear list"}), 400
 
     updates: Dict[str, str] = {}
+    _, stored_env, _ = _load_env_file()
     for key, raw_value in raw_updates.items():
         key = str(key)
         value = "" if raw_value is None else str(raw_value)
         if _is_secret_env(key) and value == "" and key not in raw_clear:
+            continue
+        if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), os.environ.get(key, "").strip())):
             continue
         updates[key] = value
     clear = [str(key) for key in raw_clear]
