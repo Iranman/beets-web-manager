@@ -244,7 +244,7 @@ describe('LibraryChanges rollback', () => {
   const mockRollback = vi.mocked(rollbackTransaction);
   const rollbackable = (status: string, metadata: Record<string, unknown> = {}) => ({
     ...tx(metadata, status),
-    rollback: { available: true },
+    rollback: { available: true, allowed: true, allowed_code: 'allowed', allowed_reason: '' },
   });
   const button = () => screen.getByRole('button', { name: 'Rollback' }) as HTMLButtonElement;
 
@@ -257,38 +257,44 @@ describe('LibraryChanges rollback', () => {
     cleanup();
   });
 
-  it.each([
-    ['Completed', {}],
-    ['Failed', { engine_result: { ok: false } }],
-    // Engine families retry rollback from Recovery Required (QA F1).
-    ['Recovery Required', { engine_result: { ok: true } }],
-    ['Partially Rolled Back', { engine_result: { ok: true } }],
-  ])('enables Rollback for %s %o', async (status, metadata) => {
-    await renderWith(rollbackable(status, metadata));
+  it('enables Rollback when the server says allowed, whatever the status', async () => {
+    // Status and metadata alone would have disabled it under the old client rule.
+    await renderWith(rollbackable('Preview'));
     expect(button().disabled).toBe(false);
+    expect(button().getAttribute('aria-describedby')).toBeNull();
+    expect(screen.queryByText(/Rollback unavailable/)).toBeNull();
   });
 
-  it.each([
-    ['Pending', {}], ['Preview', {}], ['Approved', {}], ['Running', {}], ['Cancelled', {}],
-    ['Failed', {}], ['Rolled Back', {}], ['Partially Rolled Back', {}], ['Recovery Required', {}],
-    ['Preview', { engine_result: { ok: true } }], ['Approved', { engine_result: { ok: true } }],
-    ['Cancelled', { engine_result: { ok: true } }], ['Rolled Back', { engine_result: { ok: true } }],
-    ['Running', { engine_result: { ok: true } }],
-  ])('disables Rollback for %s %o', async (status, metadata) => {
-    await renderWith(rollbackable(status, metadata));
+  it('disables Rollback and explains the server reason when not allowed', async () => {
+    const reason = 'Only a completed transaction can be rolled back (status is Preview).';
+    // available:true and Completed would have enabled it under the old client rule.
+    await renderWith({
+      ...tx({}, 'Completed'),
+      rollback: { available: true, allowed: false, allowed_code: 'not_completed', allowed_reason: reason },
+    });
     expect(button().disabled).toBe(true);
+    const id = button().getAttribute('aria-describedby');
+    expect(id).toBeTruthy();
+    const description = document.getElementById(id!);
+    expect(description?.textContent).toContain(reason);
+    expect(screen.getByText(/Undo: Unavailable/)).toBeTruthy();
   });
 
-  it('disables Rollback for Completed when rollback is unavailable', async () => {
-    await renderWith(tx({}, 'Completed'));
+  it('disables Rollback when the response has no allowed field (older backend)', async () => {
+    await renderWith({ ...tx({}, 'Completed'), rollback: { available: true } });
     expect(button().disabled).toBe(true);
+    const description = document.getElementById(button().getAttribute('aria-describedby')!);
+    expect(description?.textContent).toMatch(/did not report whether this transaction can be rolled back/);
   });
 
   it('shows a 409 refusal, does not claim success, and reloads the detail and list', async () => {
     await renderWith(rollbackable('Completed'));
     vi.mocked(getTransaction).mockClear();
     vi.mocked(getTransactions).mockClear();
-    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: rollbackable('Running') });
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: {
+      ...rollbackable('Running'),
+      rollback: { available: true, allowed: false, allowed_code: 'not_completed', allowed_reason: 'Only a completed transaction can be rolled back (status is Running).' },
+    } });
     const msg = 'Only a completed transaction can be rolled back (status is Running).';
     mockRollback.mockRejectedValue(Object.assign(new Error(msg), {
       body: { ok: false, mutated: false, status: 'Running', error: msg },
@@ -323,7 +329,11 @@ describe('LibraryChanges rollback', () => {
     const recovering = rollbackable('Recovery Required', { engine_result: { ok: true } });
     await renderWith(recovering);
     vi.mocked(getTransaction).mockClear();
-    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: { ...recovering, status: 'Rolled Back' } });
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: {
+      ...recovering,
+      status: 'Rolled Back',
+      rollback: { available: true, allowed: false, allowed_code: 'already_rolled_back', allowed_reason: 'This transaction is already rolled back.' },
+    } });
     mockRollback.mockResolvedValue({ ok: true } as unknown as Awaited<ReturnType<typeof rollbackTransaction>>);
     fireEvent.click(button());
     await screen.findByText('Rollback finished.');

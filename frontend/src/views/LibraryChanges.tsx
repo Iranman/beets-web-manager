@@ -53,15 +53,14 @@ const pageSize = 50;
 // Mirrors the backend's cancellable states (POST /api/transactions/<id>/cancel
 // returns 409 not_cancellable otherwise); the server stays the authority.
 const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
-// Mirrors the server's rollback gates (POST /api/transactions/<id>/rollback):
-// only an applied transaction can be rolled back -- Completed, or any other
-// non-terminal-for-rollback status with an engine apply record (engine
-// families accept e.g. Recovery Required for a retry). The server still
-// enforces it; this hides a button that would always be refused.
-const NO_ROLLBACK_STATUSES = new Set(['Running', 'Rolled Back', 'Pending', 'Preview', 'Approved', 'Cancelled']);
-function canRollback(tx: TransactionDetail) {
-  if (!tx.rollback?.available || NO_ROLLBACK_STATUSES.has(tx.status)) return false;
-  return tx.status === 'Completed' || Boolean(tx.metadata?.engine_result);
+// Rollback eligibility is server-owned (#228): the UI reads rollback.allowed
+// and never re-derives it. A response without the field (older backend) keeps
+// the action disabled.
+function rollbackBlockedReason(tx: TransactionDetail) {
+  if (typeof tx.rollback?.allowed !== 'boolean') {
+    return 'The server did not report whether this transaction can be rolled back, so Rollback is disabled. Reload the page; if this persists, update Web Manager so the web UI and server versions match.';
+  }
+  return tx.rollback.allowed_reason || 'The server does not allow rolling back this transaction.';
 }
 
 // The phrase the backend requires (and verifies) before approving an
@@ -463,18 +462,18 @@ export default function LibraryChanges() {
                   <div>AcoustID: {pct(detail.confidence?.acoustid)}</div>
                   <div>MusicBrainz: {pct(detail.confidence?.musicbrainz)}</div>
                   <div>Artwork: {pct(detail.confidence?.artwork)}</div>
-                  <div>Undo: {detail.rollback?.available ? 'Available' : 'Unavailable'}</div>
+                  <div>Undo: {detail.rollback?.allowed === true ? 'Available' : 'Unavailable'}</div>
                 </div>
-                {!detail.rollback?.available && (
-                  <Alert severity="warning" className="mt-3">
-                    Rollback unavailable. {detail.rollback?.reason || 'This workflow has not recorded reversible operations yet.'}
+                {detail.rollback?.allowed !== true && (
+                  <Alert id="rollback-blocked-reason" severity="warning" className="mt-3">
+                    Rollback unavailable. {rollbackBlockedReason(detail)}
                   </Alert>
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
                   <Button size="small" color="warning" variant="outlined" disabled={!CANCELLABLE_STATUSES.has(detail.status)} onClick={() => void doCancel()}>Cancel</Button>
-                  <Button size="small" color="error" variant="outlined" disabled={!canRollback(detail)} onClick={doRollback}>Rollback</Button>
+                  <Button size="small" color="error" variant="outlined" disabled={detail.rollback?.allowed !== true} aria-describedby={detail.rollback?.allowed === true ? undefined : 'rollback-blocked-reason'} onClick={doRollback}>Rollback</Button>
                 </div>
               </div>
 
