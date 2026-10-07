@@ -72,16 +72,14 @@ class MusicRootSettingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env["WEB_MANAGER_DATA_DIR"] = tmp
             out = subprocess.check_output(
-                [sys.executable, "-c", "from backend import app_runtime as r; print(r.MUSIC_ROOT); print(r.PLAYLIST_DIR)"],
+                [sys.executable, "-c", "from backend import app_runtime as r; print(r.MUSIC_ROOT)"],
                 cwd=str(ROOT), env=env, text=True,
             ).strip().splitlines()
-        return [Path(v).as_posix() for v in out[-2:]]
+        return [Path(out[-1]).as_posix()]
 
     def test_music_root_is_one_configurable_setting_defaulting_to_the_stack_mount(self):
         self.assertEqual(self._root_for(None)[0], "/music")
-        root, playlists = self._root_for("/srv/library")
-        self.assertEqual(root, "/srv/library")
-        self.assertEqual(playlists, "/srv/library/playlists")
+        self.assertEqual(self._root_for("/srv/library")[0], "/srv/library")
 
     def test_no_module_hard_codes_the_legacy_library_root_as_its_root(self):
         """Code (not comments or docstrings) must use MUSIC_ROOT; the legacy

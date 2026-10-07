@@ -12,11 +12,10 @@ APP_SOURCE = app_family_source()
 
 class SqliteDbTimeoutTests(unittest.TestCase):
     def test_shared_db_helper_waits_for_transient_locks(self):
-        start = APP_SOURCE.index("def _sqlite_timeout_seconds")
+        start = APP_SOURCE.index("def _sqlite_is_locked_error")
         end = APP_SOURCE.index("def _stamp_album_release_id", start)
         source = APP_SOURCE[start:end]
 
-        self.assertIn("BEETS_SQLITE_TIMEOUT", source)
         # ARCH-001: _db() referenced a control-agent helper removed with the
         # custom engine (it could only raise NameError). It now fails closed
         # explicitly; the Web Manager never opens the Beets database.
@@ -25,7 +24,6 @@ class SqliteDbTimeoutTests(unittest.TestCase):
         self.assertNotIn("sqlite3.connect", source)
         self.assertIn("def _sqlite_write_retry", source)
         self.assertIn("database locked while", source)
-        self.assertIn("return 30.0", source)
 
 
 if __name__ == "__main__":

@@ -263,7 +263,6 @@ from backend import config_layers as _config_layers  # noqa: E402  (leaf module,
 # host-side Compose variables (MUSIC_PATH/DOWNLOADS_PATH/...).
 _MUSIC_ROOT_SETTING = Path(_config_layers.music_root())
 DOWNLOADS_CONTAINER_ROOT = Path(_config_layers.downloads_root())
-PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "").strip() or str(_MUSIC_ROOT_SETTING / "playlists"))
 
 
 PLAYLIST_PATH_ROOT_ALIASES = [
@@ -620,13 +619,6 @@ _ALBUMTYPE_SINGLE_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/%if{$year,%le
 
 
 _SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$artist - $album - %right{00$track,2} - $title ($disc)%if{$mb_artistid,{$mb_artistid$}}"
-
-
-def _sqlite_timeout_seconds() -> float:
-    try:
-        return max(1.0, float(os.environ.get("BEETS_SQLITE_TIMEOUT", "30") or "30"))
-    except Exception:
-        return 30.0
 
 
 _SQLITE_WAL_CONFIGURED: set = set()

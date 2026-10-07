@@ -120,7 +120,7 @@ class MigrationTests(unittest.TestCase):
             self.assertNotIn(gone, text)
         for kept in ("AI_MODEL=gpt-4o-mini", "OPENAI_API_KEY=sk-test-not-real", "SLSKD_URL=", "BEETS_WEB_USERNAME=admin"):
             self.assertIn(kept, text)
-        backup = Path(report["backup"])
+        backup = self.env_file.with_name(report["backup"])
         self.assertTrue(backup.name.startswith(".env.bak-migration-"))
         self.assertEqual(backup.read_text(encoding="utf-8"), SEEDED_0149_FILE)
         if os.name == "posix":
