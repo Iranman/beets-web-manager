@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, DOWNLOADS_ROOT, MUSIC_ROOT, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _s
+from backend.config_layers import downloads_root
 from backend.library_service import _scan_scope_label
 from backend.playlist_service import (
     _match_track,
@@ -285,7 +286,7 @@ def _resolve_dedup_scan_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
 def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """Start a background dedup scan; returns job_id immediately."""
     payload   = payload_in
-    path_raw  = payload.get("path", "/data/torrents/music")
+    path_raw  = payload.get("path") or downloads_root()
     # tracked_only: check only files Beets tracks (the scheduled cleanup can
     # only ever act on tracked pairs, so untracked files are out of scope).
     tracked_only = payload.get("tracked_only") is True
@@ -1230,14 +1231,16 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
                 cand for cand in candidates
                 if _s(cand.get("mb_trackid") or "").strip().lower() not in used_missing_targets
             ]
-            default_action = "delete"
+            # MI-14: a title score is not identity evidence, so it never
+            # preselects a destructive action. Every duplicate defaults to
+            # "skip"; the best title match is only a suggested retag target
+            # the operator can choose.
             default_target = None
             if available_candidates and float(available_candidates[0].get("score") or 0) >= 0.78:
-                default_action = "retag"
                 default_target = available_candidates[0]
                 used_missing_targets.add(_s(default_target.get("mb_trackid")).strip().lower())
             compact.update({
-                "default_action": default_action,
+                "default_action": "skip",
                 "default_target": default_target,
                 "retag_candidates": candidates,
             })

@@ -203,14 +203,17 @@ class TestCompositeWorkflows(unittest.TestCase):
         self.assertEqual(res["code"], "target_not_in_album")
 
     def test_album_mb_track_repair_flow(self):
-        self.mock_adapter.get_album.return_value = {"id": 20, "album": "Repair Album"}
+        rel, rg = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        self.mock_adapter.get_album.return_value = {"id": 20, "album": "Repair Album",
+                                                    "mb_albumid": rel, "mb_releasegroupid": rg}
         self.mock_adapter.find_all_items_by_album_id.return_value = [
             {"id": 201, "title": "Track 1", "mb_trackid": "old-mbid-1"}
         ]
 
-        plan_res = plan_album_mb_track_repair(
-            {"album_id": 20}, adapter=self.mock_adapter, store=self.store
-        )
+        with patch("backend.composite_workflows._release_group_for_release", return_value=rg):
+            plan_res = plan_album_mb_track_repair(
+                {"album_id": 20}, adapter=self.mock_adapter, store=self.store
+            )
         self.assertTrue(plan_res["ok"])
         op_id = plan_res["operation_id"]
 
@@ -224,10 +227,14 @@ class TestCompositeWorkflows(unittest.TestCase):
     def test_folder_and_album_cleanup_flow(self):
         sub_dir = Path(self.tmpdir.name) / "empty_dir"
         sub_dir.mkdir()
-        plan_res = plan_folder_cleanup({"source": str(sub_dir), "action": "remove_empty"}, store=self.store)
-        self.assertTrue(plan_res["ok"])
-        apply_res = apply_folder_cleanup(plan_res["operation_id"], store=self.store)
-        self.assertTrue(apply_res["ok"])
+        self.mock_adapter.list_item_paths.return_value = []
+        with patch.dict("os.environ", {"MUSIC_ROOT": self.tmpdir.name}), \
+             patch("backend.composite_workflows.beets_adapter", self.mock_adapter):
+            plan_res = plan_folder_cleanup({"source": str(sub_dir), "action": "remove_empty"}, store=self.store)
+            self.assertTrue(plan_res["ok"], plan_res)
+            apply_res = apply_folder_cleanup(plan_res["operation_id"], store=self.store)
+        self.assertTrue(apply_res["ok"], apply_res)
+        self.assertTrue(apply_res["mutated"])
         self.assertFalse(sub_dir.exists())
 
         self.mock_adapter.get_album.return_value = {"id": 30, "album": "Delete Me"}

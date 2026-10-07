@@ -678,19 +678,11 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             music_allowed_roots=[str(self.music_dir)],
             db_path=str(self.db_path),
         )
+        # MI-18: without AcoustID confirmation, title/position alignment
+        # alone never writes a Recording ID; the blank slot goes to review.
         self.assertTrue(plan.get("ok"), msg=plan.get("error"))
-        op_id = plan["operation_id"]
-
-        apply_res = transaction_engine.execute_album_mb_track_repair_apply(
-            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path), write_tags=False,
-        )
-        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
-
-        with sqlite3.connect(self.db_path) as conn:
-            # Check repaired track
-            r1 = conn.execute("SELECT mb_trackid, track FROM items WHERE id=601").fetchone()
-            self.assertEqual(r1[0], "77777777-7777-7777-7777-777777777777")
-            self.assertEqual(r1[1], 1)
+        self.assertEqual(plan.get("updated"), 0)
+        self.assertEqual(plan.get("conflicts"), 1)
 
     # ── album_duplicate_merge_v1 (Wave 30) ────────────────────────────────────
 

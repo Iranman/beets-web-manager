@@ -145,8 +145,11 @@ class HonestPlanFlagsTests(_RouteEnv):
 
     def test_album_mb_track_repair_plan(self):
         ad = mock.MagicMock()
-        ad.get_album.return_value = {"album": "A"}
-        ad.find_all_items_by_album_id.return_value = [{"id": 1, "title": "t", "mb_trackid": ""}]
-        plan = cw.plan_album_mb_track_repair({"album_id": 5}, adapter=ad, store=self.store)
+        rel, rg = "aaaaaaaa-0000-4000-8000-00000000000a", "aaaaaaaa-1111-4000-8000-00000000000a"
+        ad.get_album.return_value = {"id": 5, "album": "A", "mb_albumid": rel, "mb_releasegroupid": rg}
+        ad.find_all_items_by_album_id.return_value = [{"id": 1, "album_id": 5, "title": "t", "mb_trackid": ""}]
+        with mock.patch.object(cw, "_release_group_for_release", return_value=rg):
+            plan = cw.plan_album_mb_track_repair({"album_id": 5}, adapter=ad, store=self.store)
+        self.assertTrue(plan.get("ok"), plan)
         tx_id = plan.get("operation_id") or plan["transaction"]["id"]
         self.assertFalse(self.store.get(tx_id)["rollback"]["available"])

@@ -152,7 +152,7 @@ class LibraryMoveAllTests(LibraryTablesFixture):
             return_value={"ok": True, "operation_id": "op-1"},
         ) as mock_plan, mock.patch.object(
             app_module.composite_workflows, "apply_folder_cleanup",
-            return_value={"ok": True},
+            return_value={"ok": True, "mutated": True, "removed_dirs": ["/music/ArtistA/AlbumA"]},
         ) as mock_apply:
             log = self._run(app_module.library_move_all, "/api/library/move-all")
 

@@ -747,7 +747,12 @@ def item_attach_recording(iid: int):
                 actual_rgid = _s(getattr(persisted_item, "mb_releasegroupid", "")).strip().lower() if persisted_item else ""
 
                 if actual_mb_trackid != mb_trackid:
-                    transactions.update(audit_id, status="Failed", logs=list(log)[-500:])
+                    # The engine repair already ran: record that apply so the
+                    # Failed transaction stays rollback-eligible (#224).
+                    transactions.update(audit_id, status="Failed", logs=list(log)[-500:], metadata={
+                        "engine_result": {"mutated": True, "verified": False, "persisted_identity": {
+                            "mb_trackid": actual_mb_trackid, "mb_albumid": actual_mb_albumid,
+                            "mb_releasegroupid": actual_rgid}}})
                     transactions.append_log(
                         audit_id,
                         "ERROR: Requested Recording ID was not verified on the re-read item after mutation.",
@@ -2213,8 +2218,11 @@ def match_album(aid):
 
         # 2 ── set mb_albumid on both items AND the album record
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
-        metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+        metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
         _require_attach_stage_success(metadata_result, "match album metadata update")
+        rg_change = metadata_result.get("release_group_change") if isinstance(metadata_result, dict) else None
+        if rg_change:
+            log.append(f"  Release Group changed {rg_change.get('from')} -> {rg_change.get('to')} (operator-selected Release)")
         meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
         log.append(f"  albums.mb_albumid set to {mb_albumid}")
 
@@ -3720,8 +3728,10 @@ def library_move_all():
                 log.append(f"  [warn] Folder cleanup apply failed for {cdir}: {ex}")
                 continue
             if apply_res.get("ok"):
-                removed_dirs += 1
-                log.append(f"  Removed empty folder: {cdir}")
+                # BA-20: only a folder the engine actually removed is logged.
+                for removed in apply_res.get("removed_dirs") or []:
+                    removed_dirs += 1
+                    log.append(f"  Removed empty folder: {removed}")
             else:
                 log.append(f"  [warn] Folder cleanup apply rejected for {cdir}: {apply_res.get('error')}")
         if removed_dirs:
@@ -4317,7 +4327,7 @@ def apply_album_duplicate_resolver(aid):
                     # route already uses.
                     stamp_mbid = _s(plan.get("mb_albumid") or "")
                     if stamp_mbid:
-                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
+                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid}, release_selected_by_operator=True)
                         if not stamp_res.get("ok"):
                             log.append(f"  WARN: could not stamp target album mb_albumid: {stamp_res.get('error')}")
 

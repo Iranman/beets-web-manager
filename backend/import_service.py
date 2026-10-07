@@ -2706,6 +2706,58 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 # Service behind POST /api/folders/import-with-id (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
+def _release_is_operator_choice(final_release_id: str, final_releasegroup_id: str,
+                                operator_release_id: str, operator_releasegroup_id: str) -> bool:
+    """Music-identity F-1: the Release being stamped is the operator's own
+    choice -- the Release they picked, or one in the Release Group they named
+    -- and not a Release that ``_prefer_album_mb_release`` swapped in."""
+    final_rel = _s(final_release_id).strip().lower()
+    final_rg = _s(final_releasegroup_id).strip().lower()
+    op_rel = _s(operator_release_id).strip().lower()
+    op_rg = _s(operator_releasegroup_id).strip().lower()
+    return bool((op_rel and final_rel == op_rel) or (op_rg and final_rg == op_rg))
+
+
+def _retag_release_operator_selected(album_id: int, *, auto_import: bool, confirmed_album_id: int,
+                                     operator_album_id: int, release_is_operator_choice: bool = True) -> bool:
+    """F-2: the retag stamp may move an album to the selected Release's
+    Release Group only for the album this import verifiably produced or the
+    existing album the operator named -- never for an id found by a guessing
+    strategy, never under auto-import, and never for a Release the operator
+    did not choose (F-1)."""
+    return (release_is_operator_choice and not auto_import and int(album_id or 0) > 0
+            and int(album_id) in (int(confirmed_album_id or 0), int(operator_album_id or 0)))
+
+
+def _stamp_import_release(album_id: int, mb_albumid: str, resolved_releasegroupid: str, log: list, *,
+                          auto_import: bool, confirmed_album_id: int, operator_album_id: int,
+                          operator_release_id: str, operator_releasegroup_id: str) -> Dict[str, Any]:
+    """The import retag's Release stamp (step 3/4). It may move the album to
+    another Release Group only when the album and the Release are both the
+    operator's own choice (QA F-2, music-identity F-1). A refusal is logged
+    with its fixed code and message (F-4); a Release Group change is logged
+    (F-2)."""
+    selected = _retag_release_operator_selected(
+        album_id, auto_import=auto_import, confirmed_album_id=confirmed_album_id,
+        operator_album_id=operator_album_id,
+        release_is_operator_choice=_release_is_operator_choice(
+            mb_albumid, resolved_releasegroupid, operator_release_id, operator_releasegroup_id))
+    try:
+        res = composite_workflows.update_album_metadata(
+            int(album_id), {"mb_albumid": mb_albumid}, release_selected_by_operator=selected)
+    except Exception as exc:
+        log.append(f"  update_album_metadata warning: {type(exc).__name__}")
+        return {"ok": False, "code": "stamp_failed"}
+    res = res if isinstance(res, dict) else {"ok": bool(res)}
+    if not res.get("ok"):
+        log.append(f"  Release ID stamp refused for album {album_id}: "
+                   f"{_s(res.get('code')) or 'refused'}: {_s(res.get('error'))}")
+    elif res.get("release_group_change"):
+        change = res["release_group_change"]
+        log.append(f"  Release Group changed {change.get('from')} -> {change.get('to')} (operator-selected Release)")
+    return res
+
+
 def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """Two-step import for a skipped folder:
       1. beet import --quiet-fallback asis  (always succeeds, gets files into library)
@@ -2761,6 +2813,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     queue_review_on_uncertain = payload.get("queue_review", True) is not False
     light_confirm = bool(payload.get("light_confirm"))
     auto_import = bool(payload.get("auto_import"))
+    # F-2: only an id the operator sent may follow the selected Release into
+    # another Release Group -- never a guessed id, never under auto-import.
+    operator_album_id = 0 if auto_import else existing_album_id
     review_item_id = _s(payload.get("review_item_id")).strip()
     auto_import_idempotency_key = _s(payload.get("auto_import_idempotency_key")).strip()
     trigger_plex_refresh_after = bool(payload.get("trigger_plex"))
@@ -3386,6 +3441,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "torrent root; using --copy so qBittorrent source files remain."
             )
         import_mode = "--move" if selected_subset_import else ("--copy" if preserve_torrent_source or not use_move else "--move")
+        # Music-identity F-1: what the operator chose, before any preference swap.
+        operator_release_id = _s(mb_albumid).strip().lower()
+        operator_releasegroup_id = _s(selected_releasegroupid).strip().lower()
         mb_albumid = _prefer_album_mb_release(mb_albumid, log)
         mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
         if not mb_identity.get("ok"):
@@ -3826,10 +3884,10 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             log.append(f"[3/4] Setting mb_albumid on {label} via engine transaction…")
             if album_db_id is not None:
                 aid = int(album_db_id)
-                try:
-                    composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
-                except Exception as _mbe:
-                    log.append(f"  update_album_metadata warning: {_mbe}")
+                _stamp_import_release(
+                    aid, mb_albumid, resolved_releasegroupid, log, auto_import=auto_import,
+                    confirmed_album_id=confirmed_import_album_id, operator_album_id=operator_album_id,
+                    operator_release_id=operator_release_id, operator_releasegroup_id=operator_releasegroup_id)
 
                 verified_mapping_count = _apply_verified_review_track_mapping(aid)
                 importable_mapping_count = sum(

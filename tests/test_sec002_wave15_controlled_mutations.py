@@ -245,7 +245,7 @@ class BeetsClientIntegrationTests(unittest.TestCase):
             folder.mkdir()
             f = folder / "track1.mp3"
             f.write_text("audio")
-            with mock.patch.dict(os.environ, {"BEETS_IMPORT_ROOTS": tmp}):
+            with mock.patch.dict(os.environ, {"DOWNLOADS_ROOT": tmp}):
                 plan_res = composite_workflows.plan_import_review_cleanup(
                     folder_path=str(folder),
                     action="delete",

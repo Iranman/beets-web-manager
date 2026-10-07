@@ -9,9 +9,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from flask import jsonify, request
-from helpers_mb import _mb_release_search, _resolve_release_group_to_release, _mb_release_group_candidates
+from helpers_mb import _resolve_release_group_to_release, _mb_release_group_candidates
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
+from backend.config_layers import downloads_root
 from backend.identity_contract import verify_album_identity as _verify_album_identity
 from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_match, _album_track_norm, _read_file_media_tags
 from backend.app_runtime import ALBUM_FOLDER_CLEANUP_LAST_FILE, METADATA_CACHE_ROOT, MUSIC_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_under, _s, _ur, jobs
@@ -93,7 +94,7 @@ def dedup_ai_review():
         return jsonify({"ok": False, "error": "Original scan must complete before AI review"})
 
     already_matched = {d["source_path"] for d in scan_state.get("duplicates", [])}
-    scan_path = Path(scan_state.get("scan_path", "/data/torrents/music"))
+    scan_path = Path(scan_state.get("scan_path") or downloads_root())
 
     state: Dict[str, Any] = {
         "kind": "ai_review",
@@ -981,6 +982,13 @@ def clean_rgid_group_relink():
     mb_releasegroupid = _s(payload.get("mb_releasegroupid") or "").strip().lower()
     if not album_id:
         return jsonify({"ok": False, "error": "album_id is required"}), 400
+    # MI-9: identity is never taken from a text search. The operator must
+    # choose the Release or Release Group (e.g. from the group's candidate
+    # releases); a request without one is refused before any job starts.
+    if not _MB_UUID_RE.match(mb_albumid) and not _MB_UUID_RE.match(mb_releasegroupid):
+        return jsonify({"ok": False, "code": "relink_identity_required",
+                        "error": "Choose the MusicBrainz release or release group to relink to; "
+                                 "a text search result is never written as identity."}), 400
     row = composite_workflows.get_album(album_id)
     if not row:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
@@ -991,17 +999,7 @@ def clean_rgid_group_relink():
         if target_mbid and not _MB_UUID_RE.match(target_mbid):
             raise RuntimeError(f"'{target_mbid}' is not a valid MusicBrainz release id")
         if not target_mbid:
-            if target_rgid and _MB_UUID_RE.match(target_rgid):
-                target_mbid = _resolve_release_group_to_release(target_rgid, log)
-            else:
-                candidates = _mb_release_search(
-                    _s(row["album"]), _s(row["albumartist"]), limit=1,
-                    year=_s(row["year"] or ""), log=log,
-                )
-                if not candidates:
-                    raise RuntimeError("No MusicBrainz release found for this artist/album")
-                target_mbid = _s(candidates[0].get("mb_albumid") or "").strip().lower()
-                target_rgid = _s(candidates[0].get("mb_releasegroupid") or "").strip().lower()
+            target_mbid = _resolve_release_group_to_release(target_rgid, log)
         if not target_mbid or not _MB_UUID_RE.match(target_mbid):
             raise RuntimeError("Could not resolve a valid MusicBrainz release for relink")
         # ARCH-009: the Release Group written is always the release's

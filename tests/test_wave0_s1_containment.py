@@ -89,7 +89,7 @@ class _Env(unittest.TestCase):
             d.mkdir()
         (self.music / "keep.txt").write_text("library is mounted")
         env = mock.patch.dict(os.environ, {"MUSIC_ROOT": str(self.music), "DOWNLOAD_PATH": str(self.dl),
-                                           "BEETS_IMPORT_ROOTS": str(self.dl),
+                                           "DOWNLOADS_ROOT": str(self.dl),
                                            "WEB_MANAGER_DATA_DIR": str(self.data)})
         env.start()
         self.addCleanup(env.stop)

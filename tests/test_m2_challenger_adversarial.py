@@ -318,7 +318,7 @@ class TestTimeoutHandlingAndCleanup(M2AdversarialBase):
 
         def fake_apply(op_id):
             applied.append(op_id)
-            return {"ok": True}
+            return {"ok": True, "mutated": True, "removed_dirs": [f"/music/{op_id}"]}
 
         with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", return_value=["ArtistA/AlbumA/track1.mp3", "ArtistA/AlbumA/track2.mp3"]), \
              mock.patch.object(app_module.composite_workflows, "move_library", return_value={"ok": True, "job_id": remote_job_id}), \

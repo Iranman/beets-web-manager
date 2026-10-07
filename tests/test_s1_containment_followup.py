@@ -301,6 +301,23 @@ class RowsOnlyCleanupTests(_Env):
 class SafeRenameTests(_Env):
     """Item 2: Clean All folder renames go through the folder_cleanup engine."""
 
+    def setUp(self):
+        super().setUp()
+        self.adapter = FakeAdapter()
+        p = mock.patch.object(cw, "beets_adapter", self.adapter)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_folder_with_beets_items_is_refused(self):
+        """BA-7: references come from the adapter, never the Beets DB file."""
+        src = self.music / "Artist" / "Old Name"
+        src.mkdir(parents=True)
+        self.adapter.items[1] = {"id": 1, "album_id": 1, "path": str(src / "01.flac")}
+        (src / "01.flac").write_bytes(b"a")
+        res = cw.safe_rename_library_folder(str(src), str(self.music / "Artist" / "New"), approved_by="t", store=self.store)
+        self.assertEqual(res.get("code"), "folder_cleanup_db_references", res)
+        self.assertTrue((src / "01.flac").exists())
+
     def test_rename_inside_music_root(self):
         src = self.music / "Artist" / "Old Name"
         src.mkdir(parents=True)

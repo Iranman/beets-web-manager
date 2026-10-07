@@ -127,7 +127,7 @@ def delete_import_review_folder():
             src_path,
             log,
             confirmed_wrong_library_folder=confirmed_wrong_library_folder or missing_mbid_album_match,
-            album_id=album_id,
+            album_id=album_id if missing_mbid_album_match else 0,
         )
         return jsonify({"ok": True, **result, "log": log})
     except ValueError as ex:

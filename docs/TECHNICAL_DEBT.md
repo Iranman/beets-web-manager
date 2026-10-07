@@ -140,12 +140,29 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Affected area: `backend/composite_workflows.py`, `backend/import_service.py`, `backend/playlist_service.py`, `backend/transaction_engine.py`, `routes_maintenance.py`.
 - Evidence: the Wave 0 S1 containment fixes closed the unsafe paths by refusing or narrowing them. These gaps remain:
   - The import template pre-rename and the import Step 0b orphan pre-cleanup log `not_supported`. They need an in-library rename and a rows-only cleanup through the engine.
-  - `safe_rename_library_folder` asks the engine's folder-cleanup plan (`create_folder_cleanup_plan`) to refuse folders the Beets DB still references. `_library_cleanup_db_refs_beneath_folder` returns no references when `BEETS_LIBRARY_DB` is unset or the file is missing (fails open), and otherwise opens the Beets SQLite file directly. It should ask the adapter instead.
-  - `apply_folder_cleanup` marks any plan Completed and only handles `remove_empty` with a bare `rmdir`; it has no approval check, claim or audit of what it did.
+  - Folder references for `safe_rename_library_folder` and `plan_folder_cleanup`/`apply_folder_cleanup` now come from the adapter (`_library_refs_under`), item paths only; an album `artpath` under the folder is not checked. The re-check at apply runs before the engine's apply lock, so a narrow window remains. `remove_empty` skips the scan because the engine requires the folder to be empty.
   - Playlist media cleanup is rows-only by design: files stay, and rollback is `not_supported` (the files can be re-imported). An engine-owned quarantine would make it restorable.
   - `playlist_service._playlist_normalize_staged_file` moves staged downloads with `shutil.move` outside the staging helpers (staging-only, never `MUSIC_ROOT`).
   - Approving an `album_cleanup_v1` plan with `delete_files` works from the UI since #174: Library Changes opens a dialog that stays disabled until `DELETE ALBUM FILES` is typed and sends `confirm_delete_files`. Applying it through `POST /api/transactions/<id>/apply` still returns 409, because `album_cleanup_v1` is not in `routes_maintenance._ENGINE_FAMILIES` (#187 F-4).
 - Desired state: each of these runs through the canonical preview/approve/apply/audit workflow.
+- Priority: P2. Status: Open.
+
+## ARCH-023 Composite Mutation Status And Rollback Gaps (MI-1/MI-2 wave)
+
+- Affected area: `backend/composite_workflows.py`, `backend/transaction_service.py`, `routes_maintenance.py`, `frontend/`.
+- Evidence:
+  - The artwork, artwork-fetch, item-metadata, album-maintenance, album-relocation, genre-repair and import-folder rollbacks record nothing to restore. `_rollback_noop` now refuses unapplied transactions, but on an applied one it marks Rolled Back without restoring anything.
+  - These composite applies still mark Running without a compare-and-set: artist-folder reconcile, artwork, artwork fetch, item metadata, album relocation and genre repair.
+  - The job wrapper in `transaction_service.start_python_with_transaction` sets its audit transaction Running unconditionally.
+  - `routes_maintenance`'s generic rollback cannot reach the composite metadata and MusicBrainz rollbacks: they record no `rollback.operations`.
+  - `update_album_metadata(aid, {}, force_write_tags=True)` plans nothing, so it writes no tags.
+  - The frontend relink caller must send `mbAlbumId` or `mbReleaseGroupId`. Without one, the endpoint now refuses with `relink_identity_required`.
+  - Composite refusal transitions pass `logs=[...]`, which replaces the earlier log lines instead of appending (album metadata and MusicBrainz track repair refusals).
+  - `_restore_rows` restores with `move=True` even when the apply did not move files. This must be fixed before composite rollback is advertised broadly (QA #243 F-5).
+  - A folder cleanup that fails part-way records no `engine_result`, so it cannot be rolled back through the route.
+  - Folder reference checks compare Beets-reported item paths only; an album `artpath` under the folder is not checked.
+  - `backend/app_runtime.py` still hard-codes `DOWNLOADS_ROOT = Path("/data/torrents/music")` instead of `config_layers.downloads_root()` (BA-12 remainder).
+- Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
 - Priority: P2. Status: Open.
 
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
