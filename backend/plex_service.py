@@ -566,6 +566,9 @@ def _plex_is_final_library_path(path_value: Any) -> bool:
     if not raw:
         return False
     normalized = raw.replace("\\", "/").casefold()
+    # Raw settings on purpose (#251): this is a deny-list, so an unsafe root
+    # (dropped from the *_ALLOWED_ROOTS tuples) must still mark its paths as
+    # staging, never as final library paths.
     staging_roots = [
         str(PLAYLIST_DOWNLOAD_ROOT),
         str(DOWNLOADS_ROOT),

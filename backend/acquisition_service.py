@@ -429,6 +429,8 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         def _try_direct_sources_after_slskd(slskd_error: Exception,
                                             selection_tracks: Optional[List[Dict[str, Any]]] = None,
                                             fallback_from: str = "slskd") -> Dict[str, Any]:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("cancelled")
             active_tracks = (
                 _normalise_wanted_tracks(selection_tracks)
                 if selection_tracks is not None
@@ -524,13 +526,15 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             if selection_tracks and download_target_tracks
                             else expected_count
                         )
-                        aldir, transfer_hints = _slskd_wait_downloads(username, queued, log, timeout=600)
+                        aldir, transfer_hints = _slskd_wait_downloads(
+                            username, queued, log, timeout=600, cancel_event=cancel_event)
                         time.sleep(3)
                         aldir, afiles = _find_slskd_downloaded_files(
                             username, queued, expected or aldir, log,
                             artist=artist, album=album, track_count=download_expected_count,
                             transfer_hints=transfer_hints,
-                            wanted_tracks=download_target_tracks)
+                            wanted_tracks=download_target_tracks,
+                            cancel_event=cancel_event)
                         if not afiles:
                             raise RuntimeError(
                                 f"No queued Soulseek files found at {aldir} after download; "
@@ -570,18 +574,22 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         }
                     except Exception as ex:
                         last_slskd_error = ex
+                        # #251: a cancel cleans up the queued candidate, then ends the job.
+                        cancelled = cancel_event is not None and cancel_event.is_set()
                         if username or remote_dir:
                             if queued:
                                 log.append("  [slskd] Candidate failed after queueing; cancelling it before retrying.")
                                 _slskd_cancel_queued_downloads(username, queued, log)
                                 _slskd_cleanup_failed_candidate_files(username, queued, log)
                             slskd_skip_candidates.add(_skip_key(username, remote_dir))
-                            if attempt < max_slskd_attempts:
+                            if attempt < max_slskd_attempts and not cancelled:
                                 log.append(f"  [slskd] Candidate failed: {ex}")
                                 log.append(
                                     "  [slskd] Skipping that peer/folder and continuing automatically."
                                 )
                                 continue
+                        if cancelled:
+                            raise
                         if slskd_skip_candidates:
                             raise RuntimeError(
                                 f"SLSKD could not find a usable candidate after "

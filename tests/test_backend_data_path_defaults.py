@@ -79,11 +79,20 @@ class SerializersUseValidatedDownloadRoots(unittest.TestCase):
                     mock.patch.object(ser, "MUSIC_ROOT", music), \
                     mock.patch.object(ser, "_DOWNLOADS_ROOTS", []), \
                     mock.patch.object(ser, "TORRENT_SOURCE_ROOTS", ()), \
-                    mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ROOT", base / "playlist"):
+                    mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()):
                 roots = ser._import_review_cleanup_roots(allow_music=True)
                 hint = ser._path_origin_hint(folder.as_posix())
         self.assertNotIn(base, roots)
         self.assertEqual(hint, {"source_folder": folder.as_posix()})
+
+    def test_dropped_playlist_root_is_not_a_cleanup_root(self):
+        import backend.serializers as ser
+        raw = Path(tempfile.gettempdir()).resolve() / "playlist"
+        with mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ROOT", raw), \
+                mock.patch.object(ser, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()), \
+                mock.patch.object(ser, "_DOWNLOADS_ROOTS", []), \
+                mock.patch.object(ser, "TORRENT_SOURCE_ROOTS", ()):
+            self.assertEqual(ser._import_review_cleanup_roots(allow_music=False), [])
 
 
 def _runtime_defaults(env_overrides):

@@ -935,7 +935,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
 
 
 def _slskd_wait_downloads(username: str, remote_files: list, log: list,
-                           timeout: int = 600) -> tuple:
+                           timeout: int = 600, cancel_event: Optional[Any] = None) -> tuple:
     """Poll slskd until all queued files are Completed. Returns local dir."""
     deadline = time.time() + timeout
     pending  = set(remote_files)
@@ -994,7 +994,11 @@ def _slskd_wait_downloads(username: str, remote_files: list, log: list,
         return found
 
     while time.time() < deadline and pending:
-        time.sleep(10)
+        # #251: the poll honours the job's cancel request (as BA-16 does).
+        if cancel_event is None:
+            time.sleep(10)
+        elif cancel_event.wait(10):
+            raise RuntimeError("cancelled")
         try:
             result = _slskd_req(
                 "GET", f"transfers/downloads/{_up.quote(username, safe='')}")

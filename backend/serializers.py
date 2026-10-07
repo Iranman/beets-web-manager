@@ -7,7 +7,7 @@ import os, re
 import urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, TORRENT_SOURCE_ROOTS, _s
+from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ALLOWED_ROOTS, PLAYLIST_DOWNLOAD_ROOT, TORRENT_SOURCE_ROOTS, _s
 from backend.config_layers import safe_roots
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under
 
@@ -98,8 +98,9 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
     # reconfiguring one would silently widen or narrow the other. Import
     # review's own TORRENT_SOURCE_ROOTS already covers the same download-area
     # territory for this feature's own purposes, independently configurable.
-    # #251: the validated download roots only, never the raw DOWNLOADS_ROOT setting.
-    roots = [PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS)
+    # #251: the validated roots only, never the raw DOWNLOADS_ROOT or
+    # PLAYLIST_DOWNLOAD_ROOT setting.
+    roots = list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS) + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS)
     # Fail closed: "/" or a root overlapping the library would let a cleanup
     # plan delete library files (security F2). The library is added only
     # explicitly, below.

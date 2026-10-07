@@ -4110,7 +4110,13 @@ def _playlist_download_missing_tracks(
             log(f"  warning: engine staged-file listing IPC failed: {ex}")
         return []
 
+    def _cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
     for idx, trk in enumerate(tracks, start=1):
+        # #251: stop at once on cancel; the caller checkpoints and stops.
+        if _cancelled():
+            break
         artist = _s(trk.get("artist") or "").strip()
         title = _s(trk.get("title") or "").strip()
         label = _playlist_missing_track_label(trk)
@@ -4174,6 +4180,8 @@ def _playlist_download_missing_tracks(
                 _playlist_set_track_status(
                     state, trk, "source_failed", method=method, message=str(ex))
                 log(f"  {_download_method_label(method)} failed: {ex}")
+                if _cancelled():
+                    break
                 continue
 
             if not new_files:
@@ -4219,6 +4227,8 @@ def _playlist_download_missing_tracks(
                 break
             log(f"  {_download_method_label(method)} produced no new file")
 
+        if _cancelled():
+            break
         if not downloaded:
             state["failed"] += 1
             _playlist_set_track_status(state, trk, "failed", message="not downloaded")
@@ -6076,12 +6086,13 @@ def _playlist_slskd_download_track(artist: str, title: str,
             cancel_event=cancel_event)
         aldir, transfer_hints = _slskd_wait_downloads(
             username, queued, inner_log,
-            timeout=int(os.environ.get("PLAYLIST_SLSKD_TIMEOUT", "90") or "90")
+            timeout=int(os.environ.get("PLAYLIST_SLSKD_TIMEOUT", "90") or "90"),
+            cancel_event=cancel_event,
         )
         aldir, afiles = _find_slskd_downloaded_files(
             username, queued, expected or aldir, inner_log,
             artist=artist, album=title, track_count=max(1, len(queued)),
-            transfer_hints=transfer_hints, wanted_tracks=wanted)
+            transfer_hints=transfer_hints, wanted_tracks=wanted, cancel_event=cancel_event)
     finally:
         if raw_log is None:
             for line in inner_log:
