@@ -84,7 +84,7 @@ Absolute paths inside the Web Manager container. They must match the mount targe
 | Variable | Default | Meaning |
 |---|---|---|
 | `MUSIC_ROOT` | `/music` | Library mount inside Web Manager. Deprecated aliases: `MUSIC_LIBRARY_PATH`, `BEETS_MUSIC_DIR`. |
-| `DOWNLOADS_ROOT` | `/downloads` | Downloads/staging mount inside Web Manager. The setup "downloads" check tests this path. Deprecated alias: `DOWNLOAD_PATH`. |
+| `DOWNLOADS_ROOT` | `/downloads` | Downloads/staging mount inside Web Manager. The setup "downloads" check tests this path, and the app uses it as its downloads root. It is also the default for `TORRENT_SOURCE_ROOTS` and `QBIT_REPAIR_ALLOWED_ROOTS`; `PLAYLIST_DOWNLOAD_ROOT` defaults to `DOWNLOADS_ROOT/music/Playlist Downloads`. Because `TORRENT_SOURCE_ROOTS` defaults to it, a folder under it that the app did not create is a preserved torrent source (move imports are refused and imports copy, unless `ALLOW_TORRENT_SOURCE_MOVE=1`), and app-managed download folders under it are eligible for the "already in library" source cleanup. It must not be `/` or overlap `MUSIC_ROOT` (equal, inside or containing it): such a value is left out of every download, import and cleanup allowlist and blocks setup. The same rule drops matching `TORRENT_SOURCE_ROOTS` and `QBIT_REPAIR_ALLOWED_ROOTS` entries. Deprecated alias: `DOWNLOAD_PATH`. |
 | `BEETS_CONFIG` | `/config/config.yaml` | Beets `config.yaml` inside the container. The config editor reads and writes only this file. It refuses a relative path or a file outside the Beets config directory (`BEETSDIR`, default `/config`). |
 | `WEB_MANAGER_DATA_DIR` | `/web-manager-data` | Web Manager's own durable state. |
 | `BEETS_TRANSACTION_DIR` | `/web-manager-data/transactions` | Transaction and audit records. |

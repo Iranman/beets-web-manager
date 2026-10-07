@@ -15,7 +15,7 @@ import backend.import_reconciliation as _import_reconciliation
 import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
 from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
-from backend.app_runtime import AUDIO_EXT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _redact_security_text, _s, jobs
+from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _redact_security_text, _s, jobs
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _update_pending_review_revalidation
@@ -1109,7 +1109,7 @@ def import_review_revalidate():
 @app.post("/api/folders/ai-suggest")
 def ai_suggest_folder():
     """Identify an unimported folder using AI + MusicBrainz.
-    Body: { "path": "/data/torrents/music/Artist/Album (Year)" }
+    Body: { "path": "/downloads/Artist/Album (Year)" }
     Returns: { ok, suggestion: { mb_albumid, album, albumartist, year, label, country, confidence, reason, mb_valid, mb_url } }
     """
     payload = request.get_json(silent=True) or {}
@@ -1394,7 +1394,7 @@ def ai_batch_import_recover():
     if not state:
         return jsonify({"ok": False, "error": "No recoverable AI batch found"}), 404
     state = _ai_batch_reconcile_state(state)
-    source_path = _s(state.get("source_path") or payload.get("path") or "/data/torrents/music").strip()
+    source_path = _s(state.get("source_path") or payload.get("path") or str(DOWNLOADS_ROOT)).strip()
     batch_job_id = state.get("batch_job_id") or ident
     # Route-level optimization, not the correctness guarantee: this early
     # return avoids the retryable/terminal-status checks and a redundant
@@ -1438,9 +1438,9 @@ def start_ai_batch_import():
         # or a recover/retry call can race a state file edited between
         # requests) -- revalidate exactly like a fresh caller-supplied path,
         # not "already validated when queued".
-        scan_path = _s(state.get("source_path") or payload.get("path") or "/data/torrents/music").strip()
+        scan_path = _s(state.get("source_path") or payload.get("path") or str(DOWNLOADS_ROOT)).strip()
     else:
-        scan_path = _s(payload.get("path") or "/data/torrents/music").strip()
+        scan_path = _s(payload.get("path") or str(DOWNLOADS_ROOT)).strip()
 
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
@@ -1452,8 +1452,8 @@ def start_ai_batch_import():
     # require_exists=False for the same reason import_folder_with_id() was
     # already fixed to pass it (Wave 25 Docker acceptance round, found by
     # actually exercising the real two-service deployment): this process
-    # (beets-web-manager) has no filesystem mount for /data/torrents or
-    # /data/media/music at all -- only the engine container does. A local
+    # (beets-web-manager) has no filesystem mount for the downloads root or
+    # the library at all -- only the engine container does. A local
     # existence check here made every real /api/ai-batch-import call fail
     # with "Source path does not exist" regardless of whether the folder
     # was genuinely there. The engine's own discover_import_sources() call
@@ -1489,7 +1489,7 @@ def start_ai_batch_import():
 @app.post("/api/import")
 def start_import():
     payload  = request.get_json(silent=True) or {}
-    path_raw = payload.get("path", "/data/torrents/music")
+    path_raw = payload.get("path", str(DOWNLOADS_ROOT))
     validated_path, path_error = _resolve_import_source_path(path_raw)
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
@@ -1539,7 +1539,7 @@ def start_import():
 @app.post("/api/import/preflight")
 def import_preflight():
     payload = request.get_json(silent=True) or {}
-    path_raw = (payload.get("path") or "/data/torrents/music").strip()
+    path_raw = (payload.get("path") or str(DOWNLOADS_ROOT)).strip()
     scan_path, path_error = _resolve_import_source_path(path_raw)
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
@@ -1733,7 +1733,7 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     # through this check -- stored state is untrusted at execution time
     # just like a fresh request body. require_exists=False for the same
     # reason as the sibling check in start_ai_batch_import() above: this
-    # process has no local mount for /data/torrents or /data/media/music,
+    # process has no local mount for the downloads root or the library,
     # so a local existence check here always fails regardless of whether
     # the path is genuinely valid -- the engine-side discovery call is the
     # real, disk-backed check.

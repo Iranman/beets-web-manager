@@ -22,6 +22,7 @@ Engine-backed mutations are additionally protected by their transaction's
 idempotency key; see backend/transaction_recovery.py for how a transaction
 left Running by a restart is finished from engine evidence, never replayed.
 """
+import contextlib
 import json
 import os
 import threading
@@ -181,6 +182,11 @@ class PythonJob:
                 self.result = ret
             if self._cancel.is_set():
                 self.returncode = -1
+            elif reports_failure(ret):
+                # BA-3: a job that returns {"ok": False, ...} failed, even
+                # though it did not raise.
+                self.returncode = 1
+                self.log.append(f"ERROR: {str(ret.get('error') or 'the job reported a failed result')[:300]}")
             else:
                 self.returncode = 0
         except Exception as exc:
@@ -261,6 +267,30 @@ class PythonJob:
         return job
 
 
+def reports_failure(result: Any) -> bool:
+    """True for the failure shape jobs and services return: ``{"ok": False}``."""
+    return isinstance(result, dict) and result.get("ok") is False
+
+
+class DuplicateJobError(RuntimeError):
+    """A job with the same ``dedupe_key`` is already running (BA-6, ARCH-004)."""
+
+    def __init__(self, job: "PythonJob"):
+        super().__init__(f"This job is already running ({job.label or job.job_id}); "
+                         "wait for it to finish before starting it again.")
+        self.job = job
+
+
+def dedupe_key(metadata: Optional[Dict[str, Any]]) -> str:
+    """The caller's explicit ``metadata["dedupe_key"]``, or "" for no guard.
+
+    Opt-in on purpose: a label or metadata often leaves out the input that
+    makes two starts different (a folder path, an album set, dry run), so
+    an implicit key refused legitimate jobs. A caller opts in only when its
+    key names the whole input, e.g. a library-wide job with no parameters."""
+    return str((metadata or {}).get("dedupe_key") or "")
+
+
 def is_read_only_job(metadata: Optional[Dict[str, Any]]) -> bool:
     metadata = metadata or {}
     if metadata.get("mutating") is False:
@@ -286,7 +316,7 @@ class JobStore:
 
     def __init__(self, persistence_dir: Optional[Union[str, Path]] = None):
         self._jobs: Dict[str, "PythonJob"] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # re-entered via start_guard()
         self._write_lock = threading.Lock()
         self.root: Optional[Path] = Path(persistence_dir) if persistence_dir else None
         self.recovered: List[Dict[str, Any]] = []
@@ -365,14 +395,42 @@ class JobStore:
                     job.save(force=True)
 
     # -- API ------------------------------------------------------------------
+    def find_duplicate(self, metadata=None) -> Optional["PythonJob"]:
+        """The running job with the same ``dedupe_key``, if any."""
+        key = dedupe_key(metadata)
+        if not key:
+            return None
+        for job in list(self._jobs.values()):
+            if job.status == "running" and dedupe_key(job.metadata) == key:
+                return job
+        return None
+
+    def start_guard(self, metadata=None):
+        """Hold across a caller's own duplicate check and the start it guards,
+        so two racing starts cannot both pass the check (QA F3)."""
+        return self._lock if dedupe_key(metadata) else contextlib.nullcontext()
+
     def start_python(self, fn, label="", metadata=None) -> PythonJob:
+        """Start ``fn`` as a job. Raises DuplicateJobError when a job with the
+        same explicit ``metadata["dedupe_key"]`` is still running."""
         with self._lock:
+            existing = self.find_duplicate(metadata)
+            if existing is not None:
+                raise DuplicateJobError(existing)
             jid  = uuid.uuid4().hex
             job  = PythonJob(jid, fn, label, persist=self._write if self.root else None, start=False)
             if metadata:
                 job.metadata = metadata
             self._jobs[jid] = job
-        threading.Thread(target=job._run, daemon=True).start()
+        try:
+            threading.Thread(target=job._run, daemon=True).start()
+        except BaseException as exc:
+            # #229: a job whose thread never started must not show as running.
+            job.returncode = 1
+            job.finished_at = time.time()
+            job.log.append(f"ERROR: the job could not be started: {exc}")
+            job.save(force=True)
+            raise
         return job
 
     def get(self, jid) -> Optional["PythonJob"]:
@@ -382,9 +440,12 @@ class JobStore:
         return sorted(list(self._jobs.values()), key=lambda j: j.created_at, reverse=True)
 
     def clear_finished(self):
+        """Manual "clear done". Keeps running jobs and ``recovery_required``
+        records, which the operator still has to resolve (BA-10)."""
+        keep = ("running", "recovery_required")
         with self._lock:
-            removed = [k for k, v in self._jobs.items() if v.status != "running"]
-            self._jobs = {k: v for k, v in self._jobs.items() if v.status == "running"}
+            removed = [k for k, v in self._jobs.items() if v.status not in keep]
+            self._jobs = {k: v for k, v in self._jobs.items() if v.status in keep}
         for jid in removed:
             self._delete(jid)
 

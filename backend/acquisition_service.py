@@ -474,7 +474,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         username, queued, expected, remote_dir = _slskd_search_and_queue(
                             artist, album, year, log, track_count=effective_track_count,
                             wanted_tracks=selection_tracks,
-                            skip_candidates=slskd_skip_candidates)
+                            skip_candidates=slskd_skip_candidates, cancel_event=cancel_event)
                         matched_tracks = _wanted_tracks_satisfied_by_names(
                             queued, selection_tracks)
                         download_target_tracks = (
