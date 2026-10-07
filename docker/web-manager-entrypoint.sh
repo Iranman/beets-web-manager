@@ -24,8 +24,8 @@
 # /web-manager-data is exclusively Web Manager's own state (settings,
 # tokens, session keys, audit/transaction logs) and /config is shared only
 # with the beets sibling container's own equivalent PUID/PGID-driven
-# ownership fix -- both are small, so a full recursive chown on every start
-# is safe and fast. /music and /downloads can be enormous real media
+# ownership fix -- both are small, so a full recursive chown is safe and
+# fast; it runs only when the top level is not already PUID:PGID (#282). /music and /downloads can be enormous real media
 # libraries: only the top-level directory's own ownership is fixed (so the
 # app can create new files/subdirectories there), never a recursive walk
 # over existing files.
@@ -65,12 +65,34 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     fi
 fi
 
-chown -R "$RUN_AS" /web-manager-data
+# #282: the app keeps its data tree private (0700, PUID-owned). Under the
+# hardened settings (cap_drop ALL + CHOWN) root has no DAC_READ_SEARCH, so it
+# cannot even list such a tree and `chown -R` aborted every second boot. A
+# tree whose top level was already PUID:PGID before the walk is the app's own,
+# so a walk that cannot read it is expected there and is not an error.
+# The walk still always runs: with default capabilities it repairs stray
+# root-owned files (from `docker exec`, `sudo cp`, a root restore).
+own_tree() {
+    local owned=0 err
+    if [ "$(stat -c '%u:%g' "$1")" = "$PUID:$PGID" ]; then
+        owned=1
+    fi
+    if ! err="$(chown -R "$RUN_AS" "$1" 2>&1)"; then
+        # Hardened + already ours: chown's "cannot read directory" is
+        # expected on every boot, so keep it out of the logs.
+        [ "$owned" = 1 ] && return 0
+        echo "$err" >&2
+        echo "ERROR: cannot take ownership of $1 for $PUID:$PGID. If PUID/PGID changed under the hardened (cap_drop: ALL) settings, root cannot read the old private tree: run 'chown -R $PUID:$PGID' on the host directory once, then start again." >&2
+        exit 1
+    fi
+}
+
+own_tree /web-manager-data
 # /config is only mounted in the bundled-Beets layout. In the external-Beets
 # layout it is the image's own directory on a read-only root filesystem, and
 # an unconditional chown aborted startup there (EROFS under `set -e`).
 if awk '$5 == "/config" { found = 1 } END { exit !found }' /proc/self/mountinfo; then
-    chown -R "$RUN_AS" /config
+    own_tree /config
 fi
 chown "$RUN_AS" /music /downloads 2>/dev/null || true
 

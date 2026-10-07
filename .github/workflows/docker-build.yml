@@ -79,6 +79,8 @@ jobs:
       - run: docker compose -f examples/docker-compose.external-beets.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
+      - name: Hardened config survives repeated boots (#282)
+        run: bash docker/acceptance/hardened_restart.sh beets-web-manager:ci "$RUNNER_TEMP/bwm-sec-bind"
       - name: Installation smoke test
         run: |
           set -e
