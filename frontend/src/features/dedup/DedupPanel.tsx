@@ -14,12 +14,11 @@ import {
 import { CleanActionBar, CleanEmptyState, CleanMetricGrid, CleanPanelHeader } from '../../components/CleanPanel';
 import { LogViewer } from '../../components/LogViewer';
 import type { DedupDuplicate } from '../../api/types';
-import { useDedupScan } from '../../lib/hooks';
+import { downloadsRootProblem, useDedupScan, useDownloadsRoot } from '../../lib/hooks';
 import { UnattendedDuplicateReview } from './UnattendedDuplicateReview';
 
 // Replaced by the server's configured MUSIC_ROOT once loaded.
 const INITIAL_MUSIC_ROOT = '/music';
-const DOWNLOADS_ROOT = '/data/torrents/music';
 type DedupScanKind = 'standard' | 'ai';
 
 function shortScanId(scanId: string | null) {
@@ -104,6 +103,9 @@ export function DedupPanel() {
   const [path, setPath] = useState(INITIAL_MUSIC_ROOT);
   const DEFAULT_PATH = musicRoot;
   const MUSIC_ROOT = musicRoot;
+  const downloads = useDownloadsRoot();
+  const downloadsRoot = downloads.root;
+  const downloadsProblem = downloadsRootProblem(downloads);
   const handleMusicRoot = useCallback((root: string) => {
     setMusicRoot(root);
     setPath((current) => (current === INITIAL_MUSIC_ROOT ? root : current));
@@ -205,7 +207,7 @@ export function DedupPanel() {
   const isLibrary = path.trim().startsWith(MUSIC_ROOT);
   const scanScope = path.trim().startsWith(MUSIC_ROOT)
     ? 'Music Library'
-    : path.trim().startsWith(DOWNLOADS_ROOT)
+    : downloadsRoot && path.trim().startsWith(downloadsRoot)
       ? 'Downloads'
       : 'Custom path';
 
@@ -240,7 +242,9 @@ export function DedupPanel() {
             color={!isLibrary ? 'primary' : 'inherit'}
             size="small"
             variant={!isLibrary ? 'contained' : 'outlined'}
-            onClick={() => setPath(DOWNLOADS_ROOT)}
+            disabled={!downloadsRoot}
+            title={downloadsRoot ? `Scan the configured downloads folder (${downloadsRoot})` : downloads.loading ? 'Loading the configured downloads folder…' : 'Configured downloads folder not available'}
+            onClick={() => setPath(downloadsRoot)}
           >
             Downloads
           </Button>
@@ -269,6 +273,7 @@ export function DedupPanel() {
         </Button>
       </CleanActionBar>
 
+      {downloadsProblem && <Alert severity="warning">{downloadsProblem}</Alert>}
       {(error || scanError) && <Alert severity="error">{error || scanError}</Alert>}
 
       {!scan && (
