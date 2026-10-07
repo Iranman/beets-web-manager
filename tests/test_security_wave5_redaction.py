@@ -42,11 +42,13 @@ class BeetsAdapterUserinfoRedactionTests(unittest.TestCase):
         resp.__enter__.return_value = resp
         resp.headers = {"Content-Type": "application/json"}
         resp.read.return_value = b"{not json"
-        adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")
+        # Plain URL: a userinfo URL is refused before this branch (#208).
+        adapter = ba.BeetsAdapter(base_url="http://beets:8337")
         with mock.patch.object(ba.urllib.request, "urlopen", return_value=resp):
             with self.assertRaises(ba.BeetsAdapterError) as ctx:
                 adapter.get_stats()
-        self.assertNotIn(SECRET, str(ctx.exception))
+        self.assertEqual(ctx.exception.error_code, "MALFORMED_RESPONSE")
+        self.assertNotIn("not json", str(ctx.exception))
 
 
 class AiTrackReviewErrorBodyTests(unittest.TestCase):

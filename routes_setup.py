@@ -1509,8 +1509,10 @@ def _redact_url_setting(name: str, item: Dict[str, Any], raw_values: Iterable[st
 
 def _is_redacted_url_echo(name: str, value: str, stored: Iterable[str]) -> bool:
     """True when a saved URL setting is just the redacted form GET returned
-    for a stored credentialed URL; saving it must keep the stored value."""
-    if not _is_url_setting(name):
+    for a stored credentialed URL; saving it must keep the stored value.
+    BEETS_WEB_URL is exempt: its userinfo is refused (#208), so saving the
+    plain URL is exactly how the user removes it."""
+    if not _is_url_setting(name) or name == "BEETS_WEB_URL":
         return False
     return any(
         raw and raw != value and config_layers.url_has_userinfo(raw)
@@ -1661,6 +1663,12 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
             raise ValueError(f"{key} cannot contain newlines")
         if len(value) > 4096:
             raise ValueError(f"{key} is too long")
+        if key == "BEETS_WEB_URL":
+            from backend.beets_adapter import BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo
+            if beets_web_url_has_userinfo(value):
+                # #208: refused at save, not only after the next restart;
+                # the constant message never echoes the value.
+                raise ValueError(BEETS_WEB_URL_USERINFO_MESSAGE)
     if updates.get("BEETS_WEB_PASSWORD"):
         unmet = _password_requirements_unmet(updates["BEETS_WEB_PASSWORD"])
         if unmet:
@@ -3574,6 +3582,12 @@ def setup_save_settings():
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "expected a JSON object"}), 400
     expected_revision = payload.pop("expected_revision", None)
+    from backend.beets_adapter import (
+        BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo,
+    )
+    if beets_web_url_has_userinfo(str(payload.get("BEETS_WEB_URL") or "")):
+        # #208: same refusal as the adapter; never echo the value.
+        return jsonify({"ok": False, "error": BEETS_WEB_URL_USERINFO_MESSAGE, "code": BEETS_WEB_URL_USERINFO_CODE}), 400
     store, relative_name = _settings_store_for_target()
     record = store.read_text_record(relative_name)
     if record.get("exists") and not expected_revision:

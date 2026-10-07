@@ -14,6 +14,7 @@ import urllib.error
 from unittest import mock
 
 import backend.beets_adapter as ba
+from backend.security import OutboundPolicyError
 
 try:
     from test_routes_setup import _load_routes_setup_against_stub_app
@@ -200,6 +201,50 @@ class SetupEnvUrlRedactionTests(unittest.TestCase):
         self.assertIn("PLEX_URL=http://plex2:32400", self.env_file.read_text(encoding="utf-8"))
 
 
+    def test_env_save_refuses_userinfo_beets_web_url(self):
+        for url in USERINFO_URLS:
+            response = self.client.post("/api/setup/env", json={"variables": {"BEETS_WEB_URL": url}})
+            self.assertEqual(response.status_code, 400, url)
+            self.assertNotIn(SECRET, response.get_data(as_text=True))
+            self.assertEqual(response.get_json()["error"], ba.BEETS_WEB_URL_USERINFO_MESSAGE)
+        self.assertIn(f"BEETS_WEB_URL=http://u:{SECRET}@saved:8337", self.env_file.read_text(encoding="utf-8"))
+
+    def test_saving_plain_beets_web_url_removes_the_credentials(self):
+        # BEETS_WEB_URL is exempt from the keep-stored rule: the plain URL is
+        # the remediation for a refused userinfo URL.
+        response = self.client.post("/api/setup/env", json={"variables": {"BEETS_WEB_URL": "http://saved:8337"}})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("BEETS_WEB_URL=http://saved:8337", text)
+        self.assertNotIn(SECRET + "@saved", text)
+
+
+class SetupSettingsUserinfoTests(unittest.TestCase):
+    """QA F3: POST /api/setup/settings refuses a userinfo BEETS_WEB_URL at save."""
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
+        self.client = self.flask_app.test_client()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.module._SETTINGS_FILE = Path(tmp.name) / "app_settings.json"
+        patch = mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_userinfo_beets_web_url_is_refused(self):
+        for url in USERINFO_URLS:
+            response = self.client.post("/api/setup/settings", json={"BEETS_WEB_URL": url})
+            self.assertEqual(response.status_code, 400, url)
+            self.assertNotIn(SECRET, response.get_data(as_text=True))
+            self.assertEqual(response.get_json()["code"], ba.BEETS_WEB_URL_USERINFO_CODE)
+        self.assertNotIn(SECRET, self.client.get("/api/setup/settings").get_data(as_text=True))
+
+    def test_plain_beets_web_url_is_saved(self):
+        response = self.client.post("/api/setup/settings", json={"BEETS_WEB_URL": "http://beets:8337"})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+
+
 class SetupStatusUserinfoTests(unittest.TestCase):
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
@@ -229,6 +274,53 @@ class SetupStatusUserinfoTests(unittest.TestCase):
         body = self._status("http://beets:8337").get_json()
         self.assertNotIn(ba.BEETS_WEB_URL_USERINFO_CODE, [w["id"] for w in body.get("warnings", [])])
         self.assertNotIn(ba.BEETS_WEB_URL_USERINFO_MESSAGE, body["blocking_reasons"])
+
+
+# Adopted from QA (PR #247): plain-URL error branches and policy reasons.
+PLAIN_URL = "http://beets:8337"
+
+
+class PlainUrlErrorBranchTests(unittest.TestCase):
+    def test_connection_and_timeout_branches_name_the_host(self):
+        cases = [
+            (urllib.error.URLError("refused"), lambda a: a.get_stats(), ba.BeetsAdapterConnectionError),
+            (TimeoutError("timed out"), lambda a: a.get_stats(), ba.BeetsAdapterTimeoutError),
+            (OSError("unreachable"), lambda a: a.get_stats(), ba.BeetsAdapterConnectionError),
+            (urllib.error.URLError("refused"), lambda a: a.open_item_file(1), ba.BeetsAdapterConnectionError),
+            (TimeoutError("timed out"), lambda a: a.open_album_art(1), ba.BeetsAdapterTimeoutError),
+        ]
+        adapter = ba.BeetsAdapter(base_url=PLAIN_URL)
+        for exc, call, expected in cases:
+            with mock.patch.object(ba.urllib.request, "urlopen", side_effect=exc):
+                with self.assertRaises(expected) as ctx:
+                    call(adapter)
+            self.assertIn(PLAIN_URL, str(ctx.exception))
+
+    def test_malformed_json_branch_still_reached(self):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.headers = {"Content-Type": "application/json"}
+        resp.read.return_value = b"{not json"
+        adapter = ba.BeetsAdapter(base_url=PLAIN_URL)
+        with mock.patch.object(ba.urllib.request, "urlopen", return_value=resp):
+            with self.assertRaises(ba.BeetsAdapterError) as ctx:
+                adapter.get_stats()
+        self.assertEqual(ctx.exception.error_code, "MALFORMED_RESPONSE")
+
+
+class OutboundPolicyReasonTests(unittest.TestCase):
+    """OutboundPolicyError subclasses ValueError; its fixed reason text (for
+    example the response size limit) should stay in the adapter log."""
+
+    def test_policy_reason_is_logged(self):
+        adapter = ba.BeetsAdapter(base_url=PLAIN_URL)
+        for call in (lambda a: a.get_stats(), lambda a: a.open_item_file(1)):
+            exc = OutboundPolicyError("outbound response exceeded size limit")
+            with mock.patch.object(ba.urllib.request, "urlopen", side_effect=exc), \
+                    self.assertLogs("beets.adapter", level="WARNING") as logs:
+                with self.assertRaises(ba.BeetsAdapterConnectionError):
+                    call(adapter)
+            self.assertIn("exceeded size limit", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

@@ -415,13 +415,6 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
-        except (http.client.HTTPException, ValueError) as ex:
-            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
-            # log or raise str(ex); it can hold part of the URL.
-            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, type(ex).__name__)
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from None
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
             log.warning("Beets connection error at %s (%s): %s", self._display_url, path, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
@@ -431,6 +424,15 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
+        except (http.client.HTTPException, ValueError) as ex:
+            # After OutboundPolicyError (a ValueError subclass with fixed,
+            # loggable reasons).
+            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
+            # log or raise str(ex); it can hold part of the URL.
+            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, type(ex).__name__)
+            raise BeetsAdapterConnectionError(
+                f"Cannot connect to Beets server at {self._display_url}"
+            ) from None
 
     # -------------------------------------------------------------------------
     # Native Upstream Read Endpoints (beetsplug.web)
@@ -556,13 +558,6 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
-        except (http.client.HTTPException, ValueError) as ex:
-            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
-            # log or raise str(ex); it can hold part of the URL.
-            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, type(ex).__name__)
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from None
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
             log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
@@ -572,6 +567,15 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
+        except (http.client.HTTPException, ValueError) as ex:
+            # After OutboundPolicyError (a ValueError subclass with fixed,
+            # loggable reasons).
+            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
+            # log or raise str(ex); it can hold part of the URL.
+            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, type(ex).__name__)
+            raise BeetsAdapterConnectionError(
+                f"Cannot connect to Beets server at {self._display_url}"
+            ) from None
 
     def open_album_art(self, album_id: int):
         """Open raw HTTP response stream for an album cover art."""
@@ -605,13 +609,6 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
-        except (http.client.HTTPException, ValueError) as ex:
-            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
-            # log or raise str(ex); it can hold part of the URL.
-            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, type(ex).__name__)
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from None
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
             log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
@@ -621,6 +618,15 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
+        except (http.client.HTTPException, ValueError) as ex:
+            # After OutboundPolicyError (a ValueError subclass with fixed,
+            # loggable reasons).
+            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
+            # log or raise str(ex); it can hold part of the URL.
+            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, type(ex).__name__)
+            raise BeetsAdapterConnectionError(
+                f"Cannot connect to Beets server at {self._display_url}"
+            ) from None
 
     # -------------------------------------------------------------------------
     # Integration Plugin Mutation Endpoints (/webmanager/*)
