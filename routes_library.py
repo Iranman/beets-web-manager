@@ -747,7 +747,12 @@ def item_attach_recording(iid: int):
                 actual_rgid = _s(getattr(persisted_item, "mb_releasegroupid", "")).strip().lower() if persisted_item else ""
 
                 if actual_mb_trackid != mb_trackid:
-                    transactions.update(audit_id, status="Failed", logs=list(log)[-500:])
+                    # The engine repair already ran: record that apply so the
+                    # Failed transaction stays rollback-eligible (#224).
+                    transactions.update(audit_id, status="Failed", logs=list(log)[-500:], metadata={
+                        "engine_result": {"mutated": True, "verified": False, "persisted_identity": {
+                            "mb_trackid": actual_mb_trackid, "mb_albumid": actual_mb_albumid,
+                            "mb_releasegroupid": actual_rgid}}})
                     transactions.append_log(
                         audit_id,
                         "ERROR: Requested Recording ID was not verified on the re-read item after mutation.",
@@ -3713,8 +3718,10 @@ def library_move_all():
                 log.append(f"  [warn] Folder cleanup apply failed for {cdir}: {ex}")
                 continue
             if apply_res.get("ok"):
-                removed_dirs += 1
-                log.append(f"  Removed empty folder: {cdir}")
+                # BA-20: only a folder the engine actually removed is logged.
+                for removed in apply_res.get("removed_dirs") or []:
+                    removed_dirs += 1
+                    log.append(f"  Removed empty folder: {removed}")
             else:
                 log.append(f"  [warn] Folder cleanup apply rejected for {cdir}: {apply_res.get('error')}")
         if removed_dirs:

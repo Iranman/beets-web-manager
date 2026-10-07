@@ -19,7 +19,7 @@ from unittest import mock
 
 from backend.transaction_engine import (
     TransactionStore,
-    create_album_mb_track_repair_plan,
+    create_album_mb_track_repair_plan as _engine_repair_plan,
     execute_album_mb_track_repair_apply,
     rollback_album_mb_track_repair,
     _read_file_audio_tags,
@@ -35,6 +35,23 @@ try:  # ARCH-001: app.py module family
     from _app_ast_cache import app_family_source  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_ast_cache import app_family_source  # noqa: E402
+
+
+def _fingerprint_confirms(path):
+    """AcoustID evidence for the fixture files: trackN.wav is REC_TARGET_N."""
+    return [{"mb_trackid": {"track1.wav": REC_TARGET_1, "track2.wav": REC_TARGET_2, "track_b.wav": REC_TARGET_1}.get(Path(path).name, ""),
+             "score": 0.95}]
+
+
+def create_album_mb_track_repair_plan(store, payload, **kw):
+    """MI-18: a blank slot is repaired only with AcoustID confirmation, so the
+    fixtures plan with a confirming fingerprint lookup unless a test chooses
+    its own AcoustID setup."""
+    if "acoustid_verify" not in payload and "acoustid_lookup_fn" not in kw:
+        payload = {**payload, "acoustid_verify": True}
+        kw["acoustid_lookup_fn"] = _fingerprint_confirms
+    return _engine_repair_plan(store, payload, **kw)
+
 
 ITEMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS albums (

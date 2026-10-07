@@ -106,7 +106,7 @@ class RgidResolutionReuseTests(unittest.TestCase):
                                    self._section.index("def clean_rgid_group_send_to_repair")]
         self.assertIn("_repair_album_mbid_sticking_once(", relink_fn)
         self.assertIn("_resolve_release_group_to_release(target_rgid, log)", relink_fn)
-        self.assertIn("_mb_release_search(", relink_fn)
+        self.assertNotIn("_mb_release_search(", relink_fn)  # MI-9: no text-search identity
 
     def test_send_to_repair_reuses_import_resolution_and_source_folder_helper(self):
         repair_fn = self._section[self._section.index("def clean_rgid_group_send_to_repair"):]

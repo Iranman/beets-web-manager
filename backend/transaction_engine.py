@@ -141,6 +141,31 @@ def _get_apply_lock(operation_id: str) -> Any:
         return lock
 
 
+#: Statuses an Apply never starts from: the transaction was cancelled,
+#: already applied, or already undone.
+_APPLY_TERMINAL = frozenset({"Cancelled", "Completed", "Rolled Back", "Partially Rolled Back"})
+
+
+def _claim_apply_running(store: "TransactionStore", operation_id: str, observed_status: Any,
+                         metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Compare-and-set the status this Apply validated -> Running (#218).
+    None, changing nothing, when a cancel (or anything else) moved the
+    transaction since it was read, or it was read in a finished status."""
+    if observed_status in _APPLY_TERMINAL:
+        return None
+    return store.transition(operation_id, str(observed_status), "Running", metadata=metadata)
+
+
+def _claim_lost(store: "TransactionStore", operation_id: str) -> Dict[str, Any]:
+    try:
+        status = store.get(operation_id).get("status")
+    except KeyError:
+        status = "missing"
+    return {"ok": False, "code": "transaction_state_changed", "operation_id": operation_id, "status": status,
+            "mutated": False,
+            "error": f"The transaction is {status}, so Apply did not start; nothing was changed."}
+
+
 # SEC-002 Wave 17 final review: _get_apply_lock above only serializes two
 # Apply calls for the SAME operation_id. It does nothing to stop two
 # DIFFERENT transactions that both target the same underlying resource
@@ -1547,17 +1572,10 @@ def create_album_cleanup_plan(
     # real production caller (beets_control_agent.py's
     # /albums/cleanup/plan handler) always supplies allowed_roots via
     # _resolved_music_root()/_resolved_downloads_root(), so this was inert
-    # in practice (the stale "/music" default below never matches this
-    # container's real mount, /data/media/music, so it only ever added a
-    # dead extra root) -- but it is fixed here for defense-in-depth
-    # consistency with the rest of the module and so a real default is
-    # used if this function is ever called (directly, or by a future
-    # caller) without allowed_roots.
-    music_root = Path(
-        os.environ.get("BEETS_MUSIC_DIR")
-        or os.environ.get("MUSIC_ROOT")
-        or os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
-    ).resolve(strict=False)
+    # in practice. The default is the configured music root
+    # (config_layers.music_root, BA-12), never a host-specific path.
+    from backend.config_layers import music_root as _configured_music_root
+    music_root = Path(os.environ.get("BEETS_MUSIC_DIR") or _configured_music_root()).resolve(strict=False)
 
     roots = [Path(r).resolve(strict=False) for r in (allowed_roots or [])] or [music_root]
     is_under_root = any(album_dir == r or r in album_dir.parents for r in roots)
@@ -2164,9 +2182,9 @@ def _mb_track_repair_acoustid_check(
     fooled by similarly-named tracks (intros, live/remix versions), so a
     confirmed fingerprint mismatch against every track on the release means
     this file isn't actually the fuzzy-matched track, regardless of how
-    good the text match looked. Only "mismatch" ever excludes a row from
-    repair -- "none"/"unavailable"/"unclear" all fall through to trusting
-    the fuzzy match as before, same as app.py's version."""
+    good the text match looked. Only "match" lets a blank slot be repaired;
+    "mismatch" rejects the row and "none"/"unavailable"/"unclear" send it to
+    review (MI-18) -- fuzzy alignment alone never writes a Recording ID."""
     if not item_path.exists():
         return {"status": "missing"}
     try:
@@ -2178,14 +2196,25 @@ def _mb_track_repair_acoustid_check(
     if not candidates:
         return {"status": "none"}
 
+    # MI-6: only a recording AcoustID CONFIRMS under the canonical rule
+    # (backend.matching: score >= 80, no other recording within 3 points)
+    # can confirm or contradict the tracklist; weak or tied hits are "unclear".
+    from backend.matching import AcoustIDStatus, acoustid_evidence_from_hits
+
+    def _rid(cand: Dict[str, Any]) -> str:
+        return str(cand.get("mb_trackid") or "").strip().lower()
+
+    def _confirms(rid: str) -> bool:
+        return bool(rid) and acoustid_evidence_from_hits(candidates, rid).status == AcoustIDStatus.CONFIRMED
+
     mb_ids = {str(t.get("mb_trackid") or "").strip().lower() for t in mb_tracks if t.get("mb_trackid")}
     for cand in candidates:
-        cand_id = str(cand.get("mb_trackid") or "").strip().lower()
-        if cand_id and cand_id in mb_ids:
+        if _rid(cand) in mb_ids and _confirms(_rid(cand)):
             return {"status": "match", "candidate": cand}
 
     from difflib import SequenceMatcher
-    best_cand = candidates[0]
+    confirmed = next((c for c in candidates if _confirms(_rid(c))), None)
+    best_cand = confirmed or candidates[0]
     cand_title = _mb_track_repair_title_norm(best_cand.get("title", ""))
     best_title_score = max(
         (
@@ -2194,11 +2223,7 @@ def _mb_track_repair_acoustid_check(
         ),
         default=0.0,
     )
-    try:
-        cand_score = int(best_cand.get("score") or 0)
-    except Exception:
-        cand_score = 0
-    if cand_score >= 70 and best_title_score < 0.72:
+    if confirmed is not None and best_title_score < 0.72:
         return {"status": "mismatch", "candidate": best_cand, "best_title_score": round(best_title_score, 3)}
     return {"status": "unclear", "candidate": best_cand, "best_title_score": round(best_title_score, 3)}
 
@@ -2223,13 +2248,12 @@ def create_album_mb_track_repair_plan(
       missing tracks"), using the same shared, already-proven
       `release_track_matches_missing_target()` guard app.py's own
       `_match_tracks_from_mb_shared()` uses.
-    - `payload["acoustid_verify"]`: cross-check every fuzzy title/position/
-      duration match (i.e. every row with no pre-existing recording ID of
-      its own) against the file's AcoustID fingerprint before trusting it
-      enough to auto-repair -- mirrors app.py's
-      `_album_track_fingerprint_check()` policy. A confirmed fingerprint
-      mismatch against every track on the release excludes that row from
-      repair entirely rather than relabeling it on fuzzy evidence alone.
+    - `payload["acoustid_verify"]`: fingerprint every fuzzy title/position/
+      duration match (every row with no recording ID of its own). A blank
+      slot is repaired only on an AcoustID "match"; a mismatch is rejected
+      and every other outcome -- and every blank slot when this option is
+      off -- goes to review (MI-18): text/position alignment alone never
+      writes a Recording ID.
     - `payload["zero_unmatched"]`: for items that align to no track on the
       (possibly target_tracks-filtered) release at all, plan zeroing their
       `track` column (a dedup/cleanup signal for a later pass, never a tag
@@ -2624,19 +2648,33 @@ def create_album_mb_track_repair_plan(
             )
             conflicts_requiring_review.append(repair_spec)
         else:
-            if acoustid_verify:
-                fp = _mb_track_repair_acoustid_check(item_path, mb_tracks, _acoustid_lookup)
-                change_row["acoustid"] = fp
-                if fp.get("status") == "mismatch":
-                    change_row["status"] = "rejected"
-                    change_row["review_reason"] = (
-                        "AcoustID fingerprint does not match any track on this "
-                        "release; fuzzy title/position/duration scoring alone is "
-                        "not sufficient evidence to relabel this item."
-                    )
-                    acoustid_rejected.append(repair_spec)
-                    changes.append(change_row)
-                    continue
+            # MI-18: a blank slot gets a Recording ID only when the file's
+            # AcoustID fingerprint confirms a recording on this release.
+            # Text/position alignment alone -- including when AcoustID is
+            # off, unavailable, returns nothing or is unclear -- goes to
+            # review instead of being written.
+            fp = (_mb_track_repair_acoustid_check(item_path, mb_tracks, _acoustid_lookup)
+                  if acoustid_verify else {"status": "not_checked"})
+            change_row["acoustid"] = fp
+            if fp.get("status") == "mismatch":
+                change_row["status"] = "rejected"
+                change_row["review_reason"] = (
+                    "AcoustID fingerprint does not match any track on this "
+                    "release; fuzzy title/position/duration scoring alone is "
+                    "not sufficient evidence to relabel this item."
+                )
+                acoustid_rejected.append(repair_spec)
+                changes.append(change_row)
+                continue
+            if fp.get("status") != "match":
+                change_row["status"] = "requires_review"
+                change_row["review_reason"] = (
+                    "No AcoustID confirmation for this item; text/position alignment "
+                    "alone is not sufficient evidence to write a Recording ID."
+                )
+                conflicts_requiring_review.append(repair_spec)
+                changes.append(change_row)
+                continue
             change_row["status"] = "planned"
             tracks_to_repair.append(repair_spec)
         changes.append(change_row)
@@ -3080,7 +3118,8 @@ def execute_album_mb_track_repair_apply(
             # before Stage 1 even opened a connection, so a failure before
             # the first successful commit still left the transaction
             # falsely advertising itself as mutated/rollback-eligible.
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             def _persist_step(step_name: str, step_status: str, **extra: Any) -> None:
                 curr_tx = store.get(operation_id)
@@ -4374,7 +4413,8 @@ def execute_existing_album_reconcile_apply(
             # `db_mutated` are only set True immediately after each stage's
             # first real mutation actually succeeds (SEC-002 Wave 20 final
             # review, "mutated=True is set before mutation").
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             def _persist_step(step_name: str, step_status: str, **extra: Any) -> None:
                 curr_tx = store.get(operation_id)
@@ -5333,7 +5373,8 @@ def execute_artist_folder_reconcile_apply(
         # serializes concurrent Apply calls for the same operation_id;
         # this status write makes that in-progress state externally
         # observable to a client that lost its own HTTP response.
-        store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
+        if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "apply_started": True}) is None:
+            return _claim_lost(store, operation_id)
 
         resource_keys = meta.get("resource_keys") or []
         allowed_roots_raw = music_allowed_roots or tx.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
@@ -5436,7 +5477,7 @@ def execute_artist_folder_reconcile_apply(
                             or st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]):
                         return _fail("Quarantine source changed since plan.", "artist_reconcile_toctou_mismatch")
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            store.update(operation_id, metadata={**meta, "mutation_started": True})
 
             def _persist_fs_progress(quarantined: List[Dict[str, Any]], moved: List[Dict[str, Any]], removed: List[str], *, mutated: bool) -> None:
                 curr = store.get(operation_id).get("metadata", {})
@@ -7145,7 +7186,8 @@ def execute_album_maintenance_apply(
                         or st.st_size != exp_st.get("size") or st.st_mtime_ns != exp_st.get("mtime_ns")):
                     return _fail(f"Repoint target changed since plan: {dst_p}", "album_maintenance_toctou_mismatch")
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             q_dir = Path(q_base) / operation_id
@@ -7794,7 +7836,8 @@ def execute_album_duplicate_merge_apply(
                         "album_duplicate_merge_toctou_mismatch",
                     )
 
-                store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+                if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                    return _claim_lost(store, operation_id)
 
                 moved = 0
                 if move_item_ids:
@@ -8357,7 +8400,8 @@ def create_album_artwork_plan(
     trash_p = Path(q_base)
     stg_dir = trash_p / "staging"
 
-    allowed_roots = music_allowed_roots or [r for r in [os.environ.get("MUSIC_ROOT"), os.environ.get("MUSIC_LIBRARY_PATH"), "/music", "/data/media/music"] if r]
+    from backend.config_layers import music_root as _configured_music_root
+    allowed_roots = music_allowed_roots or [_configured_music_root()]
     stg_roots = staging_allowed_roots or [
         str(r) for r in [
             os.environ.get("DOWNLOADS_ROOT"),
@@ -8736,7 +8780,8 @@ def execute_album_artwork_apply(
                 if validated_target_dir is None:
                     return _fail(f"Artwork target outside allowed roots or symlinked: {target_dir_candidate}", "album_artwork_path_out_of_root")
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             q_dir = Path(q_base) / operation_id
@@ -9272,7 +9317,8 @@ def execute_album_artwork_fetch_apply(
             if meta.get("mb_releasegroupid") and cur_rgid and meta["mb_releasegroupid"] != cur_rgid:
                 return _fail("Album identity changed since plan (release group mismatch)", "album_artwork_fetch_stale_plan")
 
-            store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "apply_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             fetch_res = run_beet_command_fn("fetchart", [f"album_id:{album_id}"])
             if not fetch_res.get("ok"):
@@ -9815,7 +9861,8 @@ def execute_confirmed_import_apply(
             if not run_native_import_fn:
                 return _fail("No native import runner configured", "confirmed_import_no_runner")
 
-            store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "apply_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             import_res = run_native_import_fn(
                 source_folder, target_mb_albumid, use_move=bool(meta.get("use_move")),
@@ -9831,7 +9878,7 @@ def execute_confirmed_import_apply(
             # invoked, regardless of outcome, before doing anything else --
             # a crash between here and Completed leaves an honest trail for
             # the idempotency check above on the next Apply attempt.
-            store.update(operation_id, status="Running", metadata={
+            store.update(operation_id, metadata={
                 **store.get(operation_id).get("metadata", {}),
                 "native_import_invoked": True,
                 "filesystem_mutated": True,
@@ -10032,7 +10079,8 @@ def execute_import_folder_apply(
                     if st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]:
                         return _fail(f"Source file stat changed: {p}", "import_folder_toctou_mismatch")
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             # SEC-002 Wave 22 final review, finding #3 (CRITICAL): this
             # previously marked filesystem_mutated=True, db_mutated=True,
@@ -10635,7 +10683,8 @@ def execute_library_cleanup_apply(
                     return _fail(f"File became referenced by albums.artpath: {sp}", "library_cleanup_artpath_referenced")
                 validated_quarantines.append({"plan": q, "source": sp, "root": root})
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
             q_base = _cleanup_resolve_path(Path(quarantine_base_root or meta.get("quarantine_base_root") or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")))
             q_base_text = os.path.abspath(os.path.normpath(str(q_base)))
             q_dir_text = q_base_text
@@ -11076,7 +11125,7 @@ def execute_folder_cleanup_apply(
 
         resource_keys = meta.get("resource_keys") or []
         allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [str(os.environ.get("MUSIC_ROOT", "/music"))])
-        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        lib_db = db_path or ""  # BA-7: never read from the environment
 
         def _fail(msg: str, code: str) -> Dict[str, Any]:
             curr = store.get(operation_id)
@@ -11109,7 +11158,8 @@ def execute_folder_cleanup_apply(
                 if tp.exists() or tp.is_symlink():
                     return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             moved_records = []
             for fm in file_moves:
@@ -11440,7 +11490,8 @@ def execute_playlist_media_cleanup_apply(
                             or st.st_size != exp_st.get("size") or st.st_mtime_ns != exp_st.get("mtime_ns")):
                         return _fail(f"Source file changed since plan: {sp}", "playlist_media_cleanup_toctou_mismatch")
 
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
 
             q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             q_dir = Path(q_base) / operation_id
@@ -11987,8 +12038,9 @@ def execute_album_relocation_apply(
                     return _fail(f"Relocation artwork destination changed since plan: {dp}", "album_relocation_stale_destination")
 
             dest_dir = Path(meta["dest_dir"])
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
             dest_dir.mkdir(parents=True, exist_ok=True)
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
             moved_items: List[Dict[str, Any]] = []
             moved_artwork: List[Dict[str, Any]] = []
@@ -12548,7 +12600,8 @@ def execute_album_metadata_apply(
             return {"ok": False, "error": msg, "code": code, "mutated": True, "partial_mutation": True, "rollback_available": True}
 
         with _lock_resources(resource_keys):
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
             aid = int(meta["album_id"])
             album_diff = meta.get("album_diff") or {}
             item_diffs = meta.get("item_diffs") or []
@@ -12918,7 +12971,8 @@ def execute_item_metadata_apply(
                 if (st.st_dev != before.get("dev") or st.st_ino != before.get("ino")
                         or st.st_size != before.get("size") or st.st_mtime_ns != before.get("mtime_ns")):
                     return _fail(f"Media file changed since plan: {item_path}", "item_metadata_toctou_mismatch")
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
             db_mutated = False
             if diff:
                 con = sqlite3.connect(lib_db, timeout=10)
@@ -13279,7 +13333,8 @@ def execute_genre_repair_apply(
                     return {"ok": False, "error": f"Album {album_id} no longer exists", "code": "genre_repair_album_not_found"}
             finally:
                 con.close()
-            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+                return _claim_lost(store, operation_id)
             args = []
             if meta.get("force"):
                 args.append("-f")

@@ -30,7 +30,6 @@ from pathlib import Path
 from unittest import mock
 
 from backend.transaction_engine import (
-    create_album_mb_track_repair_plan,
     execute_album_mb_track_repair_apply,
     rollback_album_mb_track_repair,
 )
@@ -41,6 +40,7 @@ from tests.test_sec002_wave19_mb_track_repair import (
     REC_TARGET_2,
     Wave19FixtureBase,
     _fake_tracklist_a,
+    create_album_mb_track_repair_plan,
     _write_test_audio,
 )
 
@@ -142,9 +142,9 @@ class AcoustidVerifyTests(Wave19FixtureBase):
         self.assertEqual(res["updated"], 2)
         self.assertEqual(res["acoustid_rejected"], 0)
 
-    def test_acoustid_unavailable_falls_through_to_trusting_fuzzy_match(self):
-        """fpcalc/lookup failure (None) must not block repair -- same
-        fail-open-to-fuzzy-trust policy as app.py's version."""
+    def test_acoustid_unavailable_sends_blank_slots_to_review(self):
+        """MI-18: with no AcoustID answer (None), text/position alignment
+        alone never writes a Recording ID; the rows go to review."""
         self._create_album_and_items(album_id=1)
         res = create_album_mb_track_repair_plan(
             self.store,
@@ -155,7 +155,8 @@ class AcoustidVerifyTests(Wave19FixtureBase):
             acoustid_lookup_fn=lambda _path: None,
         )
         self.assertTrue(res.get("ok"), res)
-        self.assertEqual(res["updated"], 2)
+        self.assertEqual(res.get("updated", 0), 0)
+        self.assertEqual(res.get("conflicts"), 2)
 
     def test_acoustid_verify_false_never_calls_lookup_fn(self):
         """Default-off: acoustid_verify absent must never even call the

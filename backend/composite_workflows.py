@@ -90,6 +90,105 @@ def _s(val: Any) -> str:
 
 
 # -----------------------------------------------------------------------------
+# Status compare-and-set for the adapter-backed families (#218, #224)
+# -----------------------------------------------------------------------------
+
+
+def _claim_apply(st: TransactionStore, operation_id: str, **updates: Any) -> Optional[Dict[str, Any]]:
+    """CAS Approved|Preview -> Running before an apply writes anything (#218).
+    None when the transaction is in any other status: a cancel, a second
+    apply or a finished run won, and nothing may be written."""
+    for source in ("Approved", "Preview"):
+        tx = st.transition(operation_id, source, "Running", **updates)
+        if tx is not None:
+            return tx
+    return None
+
+
+def _apply_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
+    status = st.get(operation_id).get("status")
+    return {"ok": False, "code": "not_applicable", "operation_id": operation_id, "status": status,
+            "mutated": False,
+            "error": f"Only a Preview or Approved transaction can be applied (this one is {status}); nothing was changed."}
+
+
+def _claim_rollback(st: TransactionStore, operation_id: str, to: str = "Running") -> Optional[Dict[str, Any]]:
+    """CAS Completed (or Failed with an apply record) -> ``to`` (#224). A
+    Preview, Approved or Cancelled transaction never wrote anything, so it is
+    never marked Rolled Back."""
+    tx = st.get(operation_id)
+    applied_failed = tx.get("status") == "Failed" and (tx.get("metadata") or {}).get("engine_result")
+    return st.transition(operation_id, "Failed" if applied_failed else "Completed", to)
+
+
+def _rollback_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
+    status = st.get(operation_id).get("status")
+    return {"ok": False, "code": "rollback_not_eligible", "operation_id": operation_id, "status": status,
+            "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
+
+def _rollback_noop(operation_id: str, store: Optional[TransactionStore]) -> Dict[str, Any]:
+    """Rollback for families that record nothing to restore: CAS only (#224).
+    ponytail: marks Rolled Back without restoring anything; TECHNICAL_DEBT
+    tracks giving these families real before-state capture."""
+    st = _get_store(store)
+    if _claim_rollback(st, operation_id, "Rolled Back") is None:
+        return _rollback_refused(st, operation_id)
+    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+
+
+#: Fields a rollback never writes back: file/row bookkeeping, not metadata.
+_RESTORE_SKIP = frozenset({
+    "id", "album_id", "path", "artpath", "mtime", "added", "items", "length", "bitrate", "bitrate_mode",
+    "bitdepth", "samplerate", "channels", "format", "filesize", "encoder", "encoder_info", "encoder_settings",
+})
+
+
+def _restorable(row: Optional[Dict[str, Any]], fields: Optional[Any] = None) -> Dict[str, Any]:
+    """Scalar metadata of a Beets row (optionally only ``fields``) for a
+    before-state snapshot."""
+    row = row or {}
+    keys = list(fields) if fields is not None else list(row.keys())
+    return {k: row.get(k) for k in keys
+            if k not in _RESTORE_SKIP and (row.get(k) is None or isinstance(row.get(k), (str, int, float, bool)))}
+
+
+def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool) -> Tuple[int, int]:
+    """Write captured values back where they differ from the live row.
+    ``before`` = {"album": {"id", "fields"}, "items": [{"id", "fields"}]}.
+    Returns (restored rows, failed rows)."""
+    restored = failed = 0
+    album = before.get("album") or {}
+    targets = [("album", album)] if album.get("id") else []
+    targets += [("item", it) for it in before.get("items") or []]
+    for kind, snap in targets:
+        rid = int(snap["id"])
+        try:
+            live = ad.get_album(rid) if kind == "album" else ad.get_item(rid)
+            if not live:
+                failed += 1
+                continue
+            diff = {k: v for k, v in (snap.get("fields") or {}).items() if live.get(k) != v}
+            if diff:
+                ids = {"album_ids": [rid]} if kind == "album" else {"item_ids": [rid]}
+                res = ad.modify(fields=diff, write=write, move=True, **ids)
+                if isinstance(res, dict) and res.get("ok") is False:
+                    failed += 1
+                    continue
+            restored += 1
+        except Exception:
+            failed += 1
+    return restored, failed
+
+
+def _finish_rollback(st: TransactionStore, operation_id: str, restored: int, failed: int) -> Dict[str, Any]:
+    final = "Rolled Back" if not failed else ("Partially Rolled Back" if restored else "Failed")
+    st.transition(operation_id, "Running", final, counts={"rollback_ok": restored, "rollback_failed": failed})
+    return {"ok": not failed, "operation_id": operation_id, "status": final,
+            "rollback_ok": restored, "rollback_failed": failed}
+
+
+# -----------------------------------------------------------------------------
 # Path & Staging Utilities
 # -----------------------------------------------------------------------------
 
@@ -620,14 +719,16 @@ def rollback_artist_folder_reconcile(
     tx = st.get(operation_id)
     before_state = tx.get("metadata", {}).get("before_state", [])
 
-    for s in before_state:
-        aid = s.get("album_id")
-        orig = s.get("albumartist")
+    if _claim_rollback(st, operation_id) is None:
+        return _rollback_refused(st, operation_id)
+    restored = failed = 0
+    for snap in before_state:
+        aid = snap.get("album_id")
+        orig = snap.get("albumartist")
         if aid and orig:
-            ad.modify(fields={"albumartist": orig}, album_ids=[int(aid)], write=True, move=True)
-
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+            ok, bad = _restore_rows(ad, {"album": {"id": aid, "fields": {"albumartist": orig}}}, write=True)
+            restored, failed = restored + ok, failed + bad
+    return _finish_rollback(st, operation_id, restored, failed)
 
 
 # -----------------------------------------------------------------------------
@@ -1313,60 +1414,93 @@ def rollback_track_replacement(
 # -----------------------------------------------------------------------------
 
 
+def _library_refs_under(folder: Any, adapter: Optional[BeetsAdapter] = None) -> List[Dict[str, Any]]:
+    """Beets items whose file lies under ``folder``, read through the adapter
+    (BA-7: Web Manager never opens the Beets library file). Raises when Beets
+    is unavailable, so a folder change fails closed.
+    ponytail: item paths only; an album's artpath is not checked (an album
+    with art but no items under the folder is not seen)."""
+    target = Path(_decode_path(folder)).resolve(strict=False)
+    refs = []
+    for rec in (adapter or beets_adapter).list_item_paths(details=True):
+        p = Path(_item_abs_path(rec.get("path"))).resolve(strict=False) if rec.get("path") else None
+        if p is not None and (p == target or target in p.parents):
+            refs.append({"table": "items", "id": rec.get("id"), "path": _decode_path(rec.get("path"))})
+    return refs
+
+
+#: Actions that only ever remove an EMPTY folder (the engine re-checks that at
+#: plan and apply), so no tracked file can be under it and the adapter scan is
+#: skipped: move-all plans one per candidate folder.
+_EMPTY_ONLY_ACTIONS = frozenset({"remove_empty", "remove_empty_source"})
+
+
+def _refs_refusal(folder: Any, action: Any = "") -> Optional[Dict[str, Any]]:
+    if str(action or "remove_empty").strip() in _EMPTY_ONLY_ACTIONS:
+        return None
+    refs = _library_refs_under(folder)
+    if not refs:
+        return None
+    return {"ok": False, "code": "folder_cleanup_db_references", "mutated": False, "references": refs[:20],
+            "error": "The folder still holds files Beets tracks; nothing was changed."}
+
+
 def plan_folder_cleanup(
     payload_or_action: Any = None,
     store: Optional[TransactionStore] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    data = payload_or_action if isinstance(payload_or_action, dict) else kwargs
-    source = data.get("source") or data.get("source_path") or ""
-    action = data.get("action", "remove_empty")
-
-    tx = st.create(
-        operation_type="Library Cleanup",
-        status="Preview",
-        summary=f"Folder cleanup ({action}) on {source}",
-        metadata={"source": source, "action": action},
-    )
-    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", "action": action, "source": source}
+    """Plan a folder cleanup through the canonical folder_cleanup_v1 engine
+    (BA-2): the old local plan accepted any action and its apply reported
+    Completed without doing a safe_rename/merge at all."""
+    from backend.transaction_engine import create_folder_cleanup_plan
+    data = dict(payload_or_action if isinstance(payload_or_action, dict) else kwargs)
+    refusal = _refs_refusal(data.get("source") or data.get("source_folder") or data.get("source_path") or "",
+                            data.get("action") or data.get("mode"))
+    if refusal:
+        return refusal
+    return create_folder_cleanup_plan(_get_store(store), data, db_path="")
 
 
 def apply_folder_cleanup(
     operation_id: str,
     store: Optional[TransactionStore] = None,
+    approved_by: str = "operator (folder cleanup)",
 ) -> Dict[str, Any]:
+    """Approve, claim (CAS) and apply a folder_cleanup_v1 plan. The result
+    says what really happened: ``mutated``, ``moved_records``, ``removed_dirs``."""
+    from backend.transaction_engine import execute_folder_cleanup_apply
+    from backend.resource_locks import claim_approved, claim_refusal
     st = _get_store(store)
-    tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-    source = meta.get("source")
-    action = meta.get("action", "remove_empty")
-
-    if source and os.path.exists(source) and os.path.isdir(source):
-        music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
-        p_src = Path(source).resolve()
-        # Refuse to delete the root music directory itself
-        if p_src == music_root:
-            raise ValueError("Refusing to delete root music directory")
-        if action == "remove_empty":
-            try:
-                # Remove if empty
-                if not any(p_src.iterdir()):
-                    p_src.rmdir()
-            except Exception as exc:
-                log.warning("Could not remove empty directory %s: %s", source, exc)
-
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    if st.get(operation_id).get("status") == "Completed":
+        return execute_folder_cleanup_apply(st, operation_id)
+    if not _approve_preview(st, operation_id, approved_by) and st.get(operation_id).get("status") != "Approved":
+        return _apply_refused(st, operation_id)
+    meta = st.get(operation_id).get("metadata") or {}
+    refusal = _refs_refusal(meta.get("source") or "", meta.get("action"))
+    if refusal:
+        st.transition(operation_id, "Approved", "Failed", logs=["Apply refused: the folder gained Beets items."])
+        return {**refusal, "operation_id": operation_id}
+    if claim_approved(st, operation_id) is None:
+        return {"ok": False, "code": "not_applicable", "operation_id": operation_id, "mutated": False,
+                "error": claim_refusal(st, operation_id)}
+    try:
+        return execute_folder_cleanup_apply(st, operation_id, db_path="")
+    except Exception as exc:
+        st.update(operation_id, status="Failed", logs=[f"Apply raised: {type(exc).__name__}"])
+        raise
 
 
 def rollback_folder_cleanup(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Undo a folder_cleanup_v1 apply through the engine's own records."""
+    from backend.transaction_engine import rollback_folder_cleanup as engine_rollback
     st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    if _claim_rollback(st, operation_id) is None:
+        return _rollback_refused(st, operation_id)
+    return engine_rollback(st, operation_id)
 
 
 def safe_rename_library_folder(
@@ -1386,9 +1520,11 @@ def safe_rename_library_folder(
     from backend.transaction_engine import create_folder_cleanup_plan, execute_folder_cleanup_apply
     from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     st = _get_store(store)
+    refusal = _refs_refusal(source, "safe_rename")
+    if refusal:
+        return {"ok": False, "renamed": False, "code": refusal["code"], "error": refusal["error"]}
     plan = create_folder_cleanup_plan(
-        st, {"action": "safe_rename", "source": source, "target": target},
-        db_path=os.environ.get("BEETS_LIBRARY_DB", ""))
+        st, {"action": "safe_rename", "source": source, "target": target}, db_path="")
     if not plan.get("ok"):
         return {"ok": False, "renamed": False, "code": plan.get("code") or "plan_failed",
                 "error": plan.get("error") or "Rename plan was refused."}
@@ -1401,7 +1537,7 @@ def safe_rename_library_folder(
             return {"ok": False, "renamed": False, "operation_id": op_id, "code": "already_applied",
                     "error": claim_refusal(st, op_id)}
         try:
-            res = execute_folder_cleanup_apply(st, op_id)
+            res = execute_folder_cleanup_apply(st, op_id, db_path="")
         except Exception as exc:
             st.update(op_id, status="Failed", logs=[f"Apply raised: {exc}"])
             raise
@@ -1808,9 +1944,7 @@ def rollback_album_artwork_fetch(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 def fetch_and_embed_album_art(
@@ -1903,14 +2037,75 @@ def rollback_album_artwork(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 # -----------------------------------------------------------------------------
 # 8. MB Track Repair & Metadata Repair Workflows
 # -----------------------------------------------------------------------------
+
+
+_MB_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _uuid_or_blank(value: Any) -> str:
+    text = _s(value).strip().lower()
+    return text if _MB_UUID.match(text) else ""
+
+
+def _release_group_for_release(release_id: str) -> str:
+    """Authoritative Release Group of a Release from MusicBrainz ("" if
+    unknown). Same lookup as musicbrainz_service._mb_release_group_for_release,
+    which this adapter-layer module cannot import."""
+    from helpers_mb import _fetch_mb_release_candidate
+    return _s((_fetch_mb_release_candidate(release_id) or {}).get("mb_releasegroupid") or "").strip().lower()
+
+
+def _identity_write_error(fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The invariant every album identity write must hold (MI-1/MI-2): a
+    Release Group field is never blanked or malformed, and a Release ID is
+    never written without its Release Group. Pure; Plan and Apply both run it."""
+    if "mb_releasegroupid" in fields and not _uuid_or_blank(fields.get("mb_releasegroupid")):
+        return {"ok": False, "code": "release_group_blank",
+                "error": "Refusing to blank or write an invalid Release Group ID."}
+    if _s(fields.get("mb_albumid")).strip() and not _uuid_or_blank(fields.get("mb_releasegroupid")):
+        return {"ok": False, "code": "release_group_required",
+                "error": "Refusing to write a Release ID without its verified Release Group ID."}
+    return None
+
+
+def _verified_album_identity(album: Dict[str, Any], release_id: str, release_group_id: str = "", *,
+                             allow_establish: bool, rg_explicit: bool = False) -> Dict[str, Any]:
+    """Verify (release, release group) for an album row through the ARCH-009
+    contract. Refuses an unverifiable pairing, a Release from another Release
+    Group than the album's (unless the caller explicitly supplies the new,
+    verified Release Group: a relink), and establishing a Release Group on an
+    album that has none unless ``allow_establish``."""
+    from backend.identity_contract import verify_album_identity
+    identity = verify_album_identity(release_group_id, release_id,
+                                     resolve_release_group=_release_group_for_release)
+    if not identity.ok:
+        return {"ok": False, "code": identity.code, "error": identity.error}
+    current_rg = _uuid_or_blank(album.get("mb_releasegroupid"))
+    if current_rg and current_rg != identity.release_group_id and not rg_explicit:
+        return {"ok": False, "code": "repair_identity_mismatch",
+                "error": f"Release {identity.release_id} belongs to release group {identity.release_group_id}, "
+                         f"but the album is {current_rg}; refusing to change canonical identity implicitly."}
+    if not current_rg and not allow_establish:
+        return {"ok": False, "code": "repair_rg_not_established",
+                "error": "The album has no Release Group ID; this repair may not establish one."}
+    return {"ok": True, "release_id": identity.release_id, "release_group_id": identity.release_group_id}
+
+
+def _engine_ok(res: Any) -> Any:
+    """Raise when the engine answered a write with ok=false."""
+    if isinstance(res, dict) and res.get("ok") is False:
+        raise RuntimeError(_s(res.get("error") or res.get("code") or "engine refused the write"))
+    return res
+
+
+def _album_identity_snapshot(album: Dict[str, Any]) -> Dict[str, str]:
+    return {k: _s(album.get(k)).strip().lower() for k in ("mb_albumid", "mb_releasegroupid")}
 
 
 def plan_album_mb_track_repair(
@@ -1919,43 +2114,72 @@ def plan_album_mb_track_repair(
     store: Optional[TransactionStore] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Plan repairing MusicBrainz track IDs and titles on an album."""
+    """Plan an MusicBrainz sync of an album's tracks (``mbsync``).
+
+    The plan validates and records everything Apply will do (MI-1): the
+    target Release and its verified Release Group, whether a Release Group
+    may be established, and any explicit Recording IDs (``track_mbids``).
+    Options mbsync cannot honor (``target_tracks``, ``zero_unmatched``) are
+    refused rather than silently widened to the whole album. mbsync never
+    assigns Recording IDs from text or position, so no ``mb_trackid`` is
+    written from fuzzy alignment here (MI-18)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    payload = payload_or_album_id if isinstance(payload_or_album_id, dict) else kwargs
+    payload = dict(payload_or_album_id if isinstance(payload_or_album_id, dict) else kwargs)
 
     aid = int(payload.get("album_id") or payload.get("aid") or (payload_or_album_id if isinstance(payload_or_album_id, (int, str)) and str(payload_or_album_id).isdigit() else 0))
     if not aid:
         return {"ok": False, "error": "album_id required"}
+    unsupported = sorted(k for k in ("target_tracks", "zero_unmatched") if payload.get(k))
+    if unsupported:
+        return {"ok": False, "code": "repair_option_unsupported",
+                "error": f"MusicBrainz sync cannot honor {', '.join(unsupported)}; nothing was planned."}
 
     album = ad.get_album(aid)
     if not album:
         return {"ok": False, "error": f"Album {aid} not found"}
-
     items = ad.find_all_items_by_album_id(aid)
-    changes = []
-    before_state = []
-    for it in items:
-        before_state.append({
-            "item_id": it.get("id"),
-            "mb_trackid": it.get("mb_trackid"),
-            "title": it.get("title"),
-        })
-        changes.append({
-            "item_id": it.get("id"),
-            "title": it.get("title"),
-            "mb_trackid": it.get("mb_trackid"),
-        })
+    by_id = {int(it.get("id") or 0): it for it in items}
 
+    track_mbids: Dict[str, str] = {}
+    for raw_id, raw_mbid in (payload.get("track_mbids") or {}).items():
+        iid, mbid = int(raw_id), _uuid_or_blank(raw_mbid)
+        if iid not in by_id:
+            return {"ok": False, "code": "repair_item_not_in_album", "error": f"Item {iid} is not on album {aid}."}
+        if not mbid:
+            return {"ok": False, "code": "invalid_recording_id", "error": f"Invalid Recording ID for item {iid}."}
+        track_mbids[str(iid)] = mbid
+
+    current = _album_identity_snapshot(album)
+    target_rel = _s(payload.get("mb_albumid")).strip().lower() or current["mb_albumid"]
+    target_rg = ""
+    if target_rel:
+        verdict = _verified_album_identity(album, target_rel,
+                                           allow_establish=bool(payload.get("allow_establish_release_group")))
+        if not verdict["ok"]:
+            return verdict
+        target_rg = verdict["release_group_id"]
+    elif not track_mbids:
+        return {"ok": False, "code": "repair_no_release",
+                "error": "The album has no Release ID to sync from; nothing was planned."}
+
+    before = {"album": {"id": aid, "fields": _restorable(album)},
+              "items": [{"id": int(it.get("id") or 0), "fields": _restorable(it)} for it in items]}
+    changes = [{"item_id": it.get("id"), "title": it.get("title"), "mb_trackid": it.get("mb_trackid"),
+                "new_mb_trackid": track_mbids.get(str(it.get("id")))} for it in items]
+    plan = {"album_id": aid, "release_id": target_rel, "release_group_id": target_rg,
+            "establish_release_group": bool(target_rg) and not current["mb_releasegroupid"],
+            "track_mbids": track_mbids, "live_identity": current,
+            "live_track_ids": {k: _s(by_id[int(k)].get("mb_trackid")).strip().lower() for k in track_mbids}}
     tx = st.create(
         operation_type="MusicBrainz Match",
         status="Preview",
         summary=f"Repair MB track metadata for album {aid} ({album.get('album')})",
         changes=changes,
         rollback_available=True,
-        metadata={"album_id": aid, "before_state": before_state, "payload": payload},
+        rollback_reason="Restores the album and track metadata captured before the sync.",
+        metadata={"album_id": aid, "before_state": before, "payload": payload, "plan": plan},
     )
-
     return {
         "ok": True,
         "operation_id": tx["id"],
@@ -1964,6 +2188,7 @@ def plan_album_mb_track_repair(
         "album": album,
         "items": items,
         "changes": changes,
+        "updated": len(track_mbids),
     }
 
 
@@ -1973,14 +2198,64 @@ def apply_album_mb_track_repair(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Apply exactly what the plan validated, after re-checking it against
+    the live library (MI-1)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     tx = st.get(operation_id)
-    aid = tx.get("metadata", {}).get("album_id")
-    if aid:
-        ad.mbsync(album_ids=[int(aid)], write=write_tags, move=write_tags)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    plan = (tx.get("metadata") or {}).get("plan")
+    if not plan:
+        return {"ok": False, "code": "repair_plan_missing", "operation_id": operation_id,
+                "error": "This transaction has no validated repair plan; re-plan it."}
+    if tx.get("status") not in ("Preview", "Approved"):
+        return _apply_refused(st, operation_id)
+    aid = int(plan["album_id"])
+    album = ad.get_album(aid)
+    stale = ""
+    if not album:
+        stale = f"Album {aid} no longer exists."
+    elif _album_identity_snapshot(album) != plan["live_identity"]:
+        stale = "The album's Release or Release Group changed since the plan."
+    else:
+        live_items = {str(it.get("id")): it for it in ad.find_all_items_by_album_id(aid)}
+        for iid, before_mbid in (plan.get("live_track_ids") or {}).items():
+            if iid not in live_items or _s(live_items[iid].get("mb_trackid")).strip().lower() != before_mbid:
+                stale = f"Item {iid} changed since the plan."
+                break
+    if stale:
+        st.transition(operation_id, tx.get("status"), "Failed", logs=[f"Apply refused: {stale} Nothing was changed."])
+        return {"ok": False, "code": "repair_plan_stale", "operation_id": operation_id, "mutated": False,
+                "error": f"{stale} Nothing was changed; re-plan it."}
+    target_rel, target_rg = plan.get("release_id") or "", plan.get("release_group_id") or ""
+    album_fields = {"mb_albumid": target_rel, "mb_releasegroupid": target_rg} if target_rel else {}
+    refusal = _identity_write_error(album_fields)
+    if refusal:
+        return {**refusal, "operation_id": operation_id, "mutated": False}
+    if _claim_apply(st, operation_id, metadata={"engine_result": {"mutation_started": True}}) is None:
+        return _apply_refused(st, operation_id)
+    try:
+        if target_rel and (target_rel, target_rg) != (plan["live_identity"]["mb_albumid"],
+                                                     plan["live_identity"]["mb_releasegroupid"]):
+            _engine_ok(ad.modify(fields=album_fields, album_ids=[aid], write=write_tags, move=False))
+        for iid, mbid in (plan.get("track_mbids") or {}).items():
+            _engine_ok(ad.modify(fields={"mb_trackid": mbid}, item_ids=[int(iid)], write=write_tags, move=False))
+        if target_rel:
+            _engine_ok(ad.mbsync(album_ids=[aid], write=write_tags, move=write_tags))
+        after = _album_identity_snapshot(ad.get_album(aid) or {})
+    except Exception as ex:
+        st.transition(operation_id, "Running", "Failed", logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
+        return {"ok": False, "code": "repair_apply_failed", "operation_id": operation_id, "mutated": True,
+                "rollback_available": True, "error": f"MusicBrainz repair failed: {str(ex)[:200]}"}
+    if target_rel and after != {"mb_albumid": target_rel, "mb_releasegroupid": target_rg}:
+        st.transition(operation_id, "Running", "Failed",
+                      logs=[f"Album identity did not verify after the sync: {after}"])
+        return {"ok": False, "code": "repair_identity_unverified", "operation_id": operation_id, "mutated": True,
+                "rollback_available": True,
+                "error": "The album's Release/Release Group did not verify after the sync; roll it back."}
+    st.transition(operation_id, "Running", "Completed",
+                  metadata={"engine_result": {"album_identity": after, "track_mbids": plan.get("track_mbids") or {}}})
+    return {"ok": True, "operation_id": operation_id, "status": "Completed",
+            "updated": len(plan.get("track_mbids") or {})}
 
 
 def rollback_album_mb_track_repair(
@@ -1988,17 +2263,21 @@ def rollback_album_mb_track_repair(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Restore every album and track value captured at plan time."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    tx = st.get(operation_id)
-    before_state = tx.get("metadata", {}).get("before_state", [])
-    for s in before_state:
-        iid = s.get("item_id")
-        orig_mbid = s.get("mb_trackid")
-        if iid and orig_mbid is not None:
-            ad.modify(fields={"mb_trackid": orig_mbid}, item_ids=[int(iid)], write=True)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    before = (st.get(operation_id).get("metadata") or {}).get("before_state")
+    if not isinstance(before, dict):
+        return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
+                "error": "This transaction recorded no before-state to restore."}
+    if _claim_rollback(st, operation_id) is None:
+        return _rollback_refused(st, operation_id)
+    restored, failed = _restore_rows(ad, before, write=True)
+    return _finish_rollback(st, operation_id, restored, failed)
+
+
+#: Identity fields a per-item metadata update may not write (album-level).
+_ALBUM_IDENTITY_FIELDS = ("mb_albumid", "mb_releasegroupid")
 
 
 def plan_album_metadata(
@@ -2011,9 +2290,18 @@ def plan_album_metadata(
     item_updates: Optional[Dict[Any, Dict[str, Any]]] = None,
     force_write_tags: bool = False,
     write_tags: bool = True,
+    adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Plan an album/track metadata write. Identity writes are validated
+    (MI-2): a Release ID is written only with its verified Release Group
+    (resolved from MusicBrainz when not supplied); a Release from another
+    Release Group than the album's needs that Release Group stated
+    explicitly; a Release Group is never blanked; per-item album identity
+    writes are refused. The live values of every field written are captured
+    so Apply can detect a stale plan and rollback can restore them."""
+    ad = adapter or beets_adapter
     st = _get_store(store)
     if payload is None:
         payload = {
@@ -2024,20 +2312,52 @@ def plan_album_metadata(
             "write_tags": write_tags,
             **kwargs,
         }
-    aid = payload.get("album_id")
+    payload = dict(payload)
+    aid = int(payload.get("album_id") or 0)
+    album_updates = dict(payload.get("updates") or {})
+    per_item = {str(k): dict(v or {}) for k, v in (payload.get("item_updates") or {}).items()}
+    if any(f in fields for fields in per_item.values() for f in _ALBUM_IDENTITY_FIELDS):
+        return {"ok": False, "code": "item_identity_write_refused",
+                "error": "Release and Release Group IDs are album identity; write them on the album, not per item."}
+    album = ad.get_album(aid) if aid else None
+    if not album:
+        return {"ok": False, "code": "album_not_found", "error": f"Album {aid} not found"}
+    refusal = _identity_write_error({k: v for k, v in album_updates.items() if k == "mb_releasegroupid"})
+    if refusal:
+        return refusal
+    release_id = _s(album_updates.get("mb_albumid")).strip().lower()
+    if release_id:
+        verdict = _verified_album_identity(album, release_id, _s(album_updates.get("mb_releasegroupid")),
+                                           allow_establish=True, rg_explicit="mb_releasegroupid" in album_updates)
+        if not verdict["ok"]:
+            return verdict
+        album_updates["mb_albumid"] = verdict["release_id"]
+        album_updates["mb_releasegroupid"] = verdict["release_group_id"]
+    refusal = _identity_write_error(album_updates)
+    if refusal:
+        return refusal
+    payload["updates"], payload["item_updates"] = album_updates, per_item
+    before: Dict[str, Any] = {"album": {"id": aid, "fields": _restorable(album, album_updates)}, "items": []}
+    for iid, fields in per_item.items():
+        item = ad.get_item(int(iid))
+        if not item or int(item.get("album_id") or 0) != aid:
+            return {"ok": False, "code": "item_not_in_album", "error": f"Item {iid} is not on album {aid}."}
+        before["items"].append({"id": int(iid), "fields": _restorable(item, fields)})
     tx = st.create(
         operation_type="Metadata Update",
         status="Preview",
         summary=f"Metadata update for album {aid}",
-        metadata=payload,
+        rollback_available=True,
+        rollback_reason="Restores the album and track values captured before the update.",
+        metadata={**payload, "before_state": before},
     )
     return {
         "ok": True,
         "operation_id": tx["id"],
         "token": tx["id"],
         "status": "Preview",
-        "album_fields_changed": len(payload.get("updates") or {}),
-        "items_changed": len(payload.get("item_updates") or {}),
+        "album_fields_changed": len(album_updates),
+        "items_changed": len(per_item),
         **payload,
     }
 
@@ -2051,6 +2371,7 @@ def apply_album_metadata(
     store: Optional[TransactionStore] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Re-validate the plan against the live rows, then write it (MI-2)."""
     op_id = operation_id or plan_token
     if not op_id:
         return {"ok": False, "error": "operation_id or plan_token is required"}
@@ -2058,19 +2379,44 @@ def apply_album_metadata(
     st = _get_store(store)
     tx = st.get(op_id)
     meta = tx.get("metadata", {})
-    aid = meta.get("album_id")
+    before = meta.get("before_state")
+    if not isinstance(before, dict):
+        return {"ok": False, "code": "metadata_plan_missing", "operation_id": op_id,
+                "error": "This transaction has no validated metadata plan; re-plan it."}
+    if tx.get("status") not in ("Preview", "Approved"):
+        return _apply_refused(st, op_id)
+    aid = int(meta.get("album_id") or 0)
     updates = meta.get("updates") or {}
     item_updates = meta.get("item_updates") or {}
+    refusal = _identity_write_error(updates) or (
+        {"ok": False, "code": "item_identity_write_refused", "error": "Per-item album identity writes are refused."}
+        if any(f in fields for fields in item_updates.values() for f in _ALBUM_IDENTITY_FIELDS) else None)
+    if refusal:
+        return {**refusal, "operation_id": op_id, "mutated": False}
+    rows = [("album", before.get("album") or {})] + [("item", it) for it in before.get("items") or []]
+    for kind, snap in rows:
+        live = ad.get_album(int(snap["id"])) if kind == "album" else ad.get_item(int(snap["id"]))
+        if not live or _restorable(live, (snap.get("fields") or {}).keys()) != snap.get("fields"):
+            st.transition(op_id, tx.get("status"), "Failed",
+                          logs=[f"Apply refused: {kind} {snap.get('id')} changed since the plan. Nothing was changed."])
+            return {"ok": False, "code": "metadata_plan_stale", "operation_id": op_id, "mutated": False,
+                    "error": f"The {kind} {snap.get('id')} changed since the plan; nothing was changed. Re-plan it."}
     write = meta.get("write_tags", True)
     move = meta.get("force_write_tags", force_write_tags)
-
-    if aid and updates:
-        ad.modify(fields=updates, album_ids=[int(aid)], write=write, move=move)
-    if item_updates:
+    if _claim_apply(st, op_id, metadata={"engine_result": {"mutation_started": True}}) is None:
+        return _apply_refused(st, op_id)
+    try:
+        if aid and updates:
+            _engine_ok(ad.modify(fields=updates, album_ids=[aid], write=write, move=move))
         for iid, iup in item_updates.items():
             if iup:
-                ad.modify(fields=iup, item_ids=[int(iid)], write=write, move=move)
-    st.update(op_id, status="Completed")
+                _engine_ok(ad.modify(fields=iup, item_ids=[int(iid)], write=write, move=move))
+    except Exception as ex:
+        st.transition(op_id, "Running", "Failed", logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
+        return {"ok": False, "code": "metadata_apply_failed", "operation_id": op_id, "mutated": True,
+                "rollback_available": True, "error": f"Metadata update failed: {str(ex)[:200]}"}
+    st.transition(op_id, "Running", "Completed", metadata={"engine_result": {"album_fields": sorted(updates),
+                                                                              "items": sorted(item_updates)}})
     return {"ok": True, "operation_id": op_id, "status": "Completed"}
 
 
@@ -2079,9 +2425,18 @@ def rollback_album_metadata(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Restore the album and track values captured at plan time (MI-2)."""
+    ad = adapter or beets_adapter
     st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    meta = st.get(operation_id).get("metadata") or {}
+    before = meta.get("before_state")
+    if not isinstance(before, dict):
+        return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
+                "error": "This transaction recorded no before-state to restore."}
+    if _claim_rollback(st, operation_id) is None:
+        return _rollback_refused(st, operation_id)
+    restored, failed = _restore_rows(ad, before, write=bool(meta.get("write_tags", True)))
+    return _finish_rollback(st, operation_id, restored, failed)
 
 
 def update_album_metadata(
@@ -2103,7 +2458,7 @@ def update_album_metadata(
         "write_tags": write_tags,
         **kwargs,
     }
-    plan_res = plan_album_metadata(payload, store=store)
+    plan_res = plan_album_metadata(payload, adapter=adapter, store=store)
     if not plan_res.get("ok"):
         return {"ok": False, "error": plan_res.get("error") or "Metadata plan rejected", "code": plan_res.get("code")}
     op_id = plan_res.get("operation_id")
@@ -2187,9 +2542,7 @@ def rollback_item_metadata(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 def update_item_metadata(
@@ -2288,9 +2641,7 @@ def rollback_album_maintenance(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 def plan_album_relocation(
@@ -2339,9 +2690,7 @@ def rollback_album_relocation(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 def relocate_album(
@@ -2430,9 +2779,7 @@ def rollback_album_genre_repair(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 def repair_album_genre(
@@ -2721,9 +3068,7 @@ def rollback_import_folder(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    st = _get_store(store)
-    st.update(operation_id, status="Rolled Back")
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    return _rollback_noop(operation_id, store)
 
 
 def reimport_source(

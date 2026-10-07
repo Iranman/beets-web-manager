@@ -595,6 +595,9 @@ class PersistedStateVerificationTests(_AttachIntegrityTestCase):
         self.assertNotEqual(tx["status"], "Completed")
         rendered = json.dumps(tx)
         self.assertNotIn('"status": "Completed"', rendered)
+        # #224: the engine repair ran, so the Failed transaction records that
+        # apply and stays rollback-eligible.
+        self.assertIs(tx["metadata"]["engine_result"]["verified"], False)
 
     def test_c_relocation_dict_failure_fails_before_completed_status(self):
         iid = 43004
