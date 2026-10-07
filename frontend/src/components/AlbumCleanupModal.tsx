@@ -12,10 +12,9 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   applyAlbumCleanup,
   planAlbumCleanup,
-  rollbackAlbumCleanup,
   type AlbumCleanupApplyResponse,
+  type AlbumCleanupPlanItem,
   type AlbumCleanupPlanResponse,
-  type AlbumCleanupRollbackResponse,
 } from '../api/client';
 
 export interface AlbumCleanupModalProps {
@@ -42,9 +41,7 @@ export function AlbumCleanupModal({
   const [step, setStep] = useState<ModalStep>('planning');
   const [plan, setPlan] = useState<AlbumCleanupPlanResponse | null>(null);
   const [applyResult, setApplyResult] = useState<AlbumCleanupApplyResponse | null>(null);
-  const [rollbackResult, setRollbackResult] = useState<AlbumCleanupRollbackResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
-  const [rollbackLoading, setRollbackLoading] = useState(false);
 
   const fetchPlan = useCallback(async () => {
     if (!albumId || albumId <= 0) return;
@@ -52,7 +49,6 @@ export function AlbumCleanupModal({
     setErrorMsg('');
     setPlan(null);
     setApplyResult(null);
-    setRollbackResult(null);
     try {
       const res = await planAlbumCleanup(albumId);
       if (res.ok) {
@@ -90,7 +86,7 @@ export function AlbumCleanupModal({
         // driven by the engine's own "mutated" flag, never guessed here by
         // matching substrings in the error text. "stale_plan" is the only
         // kind that may ever be presented as "nothing changed";
-        // "partial_mutation" means some file(s) were already deleted
+        // "partial_mutation" means the library was already changed
         // before the failure and must be shown as a distinct, more urgent
         // state, never folded into the same reassuring copy.
         setErrorMsg(res.error || 'Apply failed.');
@@ -113,31 +109,10 @@ export function AlbumCleanupModal({
     }
   };
 
-  const handleRollback = async () => {
-    const opId = applyResult?.operation_id || plan?.operation_id;
-    if (!opId) return;
-    setRollbackLoading(true);
-    setErrorMsg('');
-    try {
-      const res = await rollbackAlbumCleanup(opId);
-      if (res.ok) {
-        setRollbackResult(res);
-      } else {
-        setErrorMsg(res.error || 'Rollback failed.');
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Rollback execution failed.';
-      setErrorMsg(msg);
-    } finally {
-      setRollbackLoading(false);
-    }
-  };
-
-  const txMeta = (plan?.transaction as Record<string, unknown> | undefined)?.metadata as Record<string, unknown> | undefined;
-  const stepsList = (txMeta?.steps as Array<Record<string, unknown>>) || [];
-  const reversibility = (txMeta?.reversibility as string) || (plan as Record<string, unknown> | null)?.reversibility as string || 'IRREVERSIBLE';
-  const isIrreversible = reversibility === 'IRREVERSIBLE';
-  const rollbackAvailable = Boolean(txMeta?.rollback_available);
+  // A plan that deletes files needs the typed DELETE ALBUM FILES approval,
+  // which lives in Library Changes; this modal only applies row-only plans.
+  const deletesFiles = plan?.delete_files === true;
+  const items = plan?.items ?? [];
 
   return (
     <Dialog className="relative z-50" open={open} onClose={onClose}>
@@ -148,12 +123,12 @@ export function AlbumCleanupModal({
             <div className="flex items-start justify-between gap-3 border-b border-graphite-800 pb-3">
               <div>
                 <DialogTitle className="text-lg font-semibold text-zinc-100">
-                  Delete Album Files &amp; Database Records
+                  Remove Album from Library
                 </DialogTitle>
                 <p className="mt-0.5 text-xs text-zinc-400">
-                  Review the engine's plan before confirming. This deletes every track file Beets has
-                  catalogued for this album and removes its database records -- it does not detect or
-                  remove duplicates selectively.
+                  Review the engine's plan before confirming. This removes the album and its track
+                  records from the Beets library. The audio files stay on disk -- nothing is deleted.
+                  It does not detect or remove duplicates selectively.
                 </p>
               </div>
               <Button size="small" variant="outlined" onClick={onClose}>
@@ -179,41 +154,43 @@ export function AlbumCleanupModal({
                   <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
                     <div>
                       <span className="text-zinc-500">Album:</span>{' '}
-                      <span className="font-medium text-zinc-200">{albumTitle}</span>
+                      <span className="font-medium text-zinc-200">{plan.album?.album || albumTitle}</span>
                     </div>
                     <div>
                       <span className="text-zinc-500">Artist:</span>{' '}
-                      <span className="font-medium text-zinc-200">{artistName}</span>
+                      <span className="font-medium text-zinc-200">{plan.album?.albumartist || artistName}</span>
                     </div>
                     <div>
                       <span className="text-zinc-500">Beets Album ID:</span>{' '}
                       <span className="font-mono text-zinc-300">{albumId}</span>
                     </div>
-                    {mbReleaseGroupId ? (
+                    {plan.album?.mb_releasegroupid || mbReleaseGroupId ? (
                       <div>
                         <span className="text-zinc-500">MB Release Group ID:</span>{' '}
-                        <span className="font-mono text-zinc-300">{mbReleaseGroupId}</span>
+                        <span className="font-mono text-zinc-300">{plan.album?.mb_releasegroupid || mbReleaseGroupId}</span>
                       </div>
                     ) : null}
-                    <div className="sm:col-span-2">
-                      <span className="text-zinc-500">Target Album Directory:</span>{' '}
-                      <span className="font-mono text-zinc-300 break-all">{plan.target_path}</span>
-                    </div>
                   </div>
                 </div>
 
-                {/* Reversibility Status Banner. Album Cleanup is always
-                    IRREVERSIBLE today (execute_album_cleanup_apply unlinks
-                    files and deletes DB rows directly, with no quarantine/
-                    backup step) -- there is deliberately no "Recoverable"
-                    branch here to describe. Reintroduce one only once a
-                    real, tested recovery model exists for this mutation
-                    family; a dead branch describing a capability that
-                    cannot occur is itself a way to accidentally lie later. */}
+                {/* Reversibility Status Banner, driven by the plan's own
+                    delete_files. planAlbumCleanup sends none, so plans are
+                    row-only (#184): Beets rows are removed, files stay on
+                    disk. Row removal has no automatic rollback. */}
+                {deletesFiles ? (
+                  <Alert severity="error">
+                    <strong className="font-semibold">This plan deletes files</strong> — Applying it
+                    would permanently delete the album&apos;s audio files from disk. It cannot be
+                    applied here. Approve it in Library Changes by typing DELETE ALBUM FILES, or close
+                    this dialog to leave the library unchanged.
+                  </Alert>
+                ) : (
+                  <>
                 <Alert severity="warning">
-                  <strong className="font-semibold">Irreversible</strong> — This will permanently
-                  delete every catalogued track file for this album and remove its database records.
-                  There is no rollback or quarantine for this operation.
+                  <strong className="font-semibold">Irreversible</strong> — This will remove the
+                  album and its track records from the Beets library. The audio files are kept on
+                  disk. There is no automatic rollback; to get the album back into the library,
+                  re-import its files.
                 </Alert>
 
                 {/* Before / After Diff */}
@@ -224,57 +201,52 @@ export function AlbumCleanupModal({
                   <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs">
                     <div className="rounded border border-rose-900/40 bg-rose-950/20 p-2 text-rose-200">
                       <div className="font-semibold text-rose-300 mb-1">Before Cleanup</div>
-                      <div>• {plan.file_count} track audio file(s) on disk</div>
                       <div>• 1 Beets album database record</div>
                       <div>• Track item DB rows for album_id {albumId}</div>
+                      <div>• Audio files on disk</div>
                     </div>
                     <div className="rounded border border-emerald-900/40 bg-emerald-950/20 p-2 text-emerald-200">
                       <div className="font-semibold text-emerald-300 mb-1">After Cleanup</div>
-                      <div>• Track files deleted from disk</div>
-                      <div>• Album & item DB rows deleted</div>
-                      <div>• Album directory removed only if nothing else remains in it</div>
+                      <div>• Album & item DB rows removed from the library</div>
+                      <div>• Audio files kept on disk, unchanged</div>
                     </div>
                   </div>
                   <p className="mt-2 text-[0.7rem] text-zinc-500">
-                    Only the track files Beets has catalogued for this album are deleted. Artwork,
-                    .cue/.log files, booklets, and any other non-catalogued files in the album
-                    directory are left in place -- if any remain, the directory itself is not removed.
+                    No files are deleted or moved. The album directory, its audio files, artwork,
+                    and any other files in it stay where they are.
                   </p>
                 </div>
+                  </>
+                )}
 
-                {/* Itemized Steps */}
+                {/* Tracks in the plan (the plan's item snapshot) */}
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/50">
                   <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                      Proposed Mutations ({stepsList.length} steps)
+                      Tracks to remove from the library ({items.length})
                     </h4>
-                    <Chip
-                      label={isIrreversible ? 'IRREVERSIBLE' : 'RECOVERABLE'}
-                      color={isIrreversible ? 'warning' : 'success'}
-                      size="small"
-                      variant="outlined"
-                    />
+                    <Chip label="IRREVERSIBLE" color="warning" size="small" variant="outlined" />
                   </div>
-                  <div className="max-h-60 overflow-y-auto p-2 space-y-1.5 text-xs font-mono">
-                    {stepsList.map((st, idx) => {
-                      const type = (st.type as string) || 'mutation';
-                      const src = (st.source as string) || (st.target as string) || `Album ID ${albumId}`;
-                      return (
-                        <div
-                          key={(st.step_id as string) || idx}
-                          className="flex items-start justify-between gap-2 rounded bg-graphite-950 p-2 border border-graphite-800/80"
-                        >
-                          <div className="min-w-0 flex-1 break-all">
-                            <span className="text-amber-300 uppercase font-semibold">[{type}]</span>{' '}
-                            <span className="text-zinc-300">{src}</span>
-                          </div>
-                          <span className="shrink-0 text-zinc-500">
-                            {(st.reversibility as string) || reversibility}
-                          </span>
+                  <ul className="max-h-60 overflow-y-auto p-2 space-y-1.5 text-xs">
+                    {items.length === 0 ? (
+                      <li className="p-2 text-zinc-400">
+                        Beets reported no tracks for this album. Only the album record will be removed.
+                      </li>
+                    ) : items.map((item, idx) => (
+                      <li
+                        key={item.id ?? idx}
+                        className="rounded bg-graphite-950 p-2 border border-graphite-800/80"
+                      >
+                        <div className="text-zinc-200">
+                          <span className="font-mono text-zinc-500">{trackLabel(item)}</span>{' '}
+                          {item.title || `Item ${item.id ?? '?'}`}
                         </div>
-                      );
-                    })}
-                  </div>
+                        {item.path ? (
+                          <div className="mt-0.5 font-mono text-zinc-500 break-all">{item.path}</div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
 
                 {/* Confirmation Box */}
@@ -290,13 +262,11 @@ export function AlbumCleanupModal({
                   <Button variant="outlined" onClick={onClose}>
                     Cancel
                   </Button>
-                  <Button
-                    variant="contained"
-                    color={isIrreversible ? 'warning' : 'primary'}
-                    onClick={handleApply}
-                  >
-                    Apply Cleanup
-                  </Button>
+                  {deletesFiles ? null : (
+                    <Button variant="contained" color="warning" onClick={handleApply}>
+                      Apply Cleanup
+                    </Button>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -322,11 +292,13 @@ export function AlbumCleanupModal({
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/50 p-3 text-xs space-y-1.5">
                   <div className="font-semibold text-zinc-200">Execution Summary:</div>
                   <div className="text-zinc-400">
-                    • Deleted file(s): {applyResult.deleted?.length || 0}
+                    • Track row(s) removed from the library: {applyResult.removed_item_ids?.length ?? 0}
                   </div>
-                  {applyResult.moved?.length ? (
-                    <div className="text-zinc-400">• Quarantined file(s): {applyResult.moved.length}</div>
-                  ) : null}
+                  {applyResult.deleted?.length ? (
+                    <div className="text-zinc-400">• Deleted file(s): {applyResult.deleted.length}</div>
+                  ) : (
+                    <div className="text-zinc-400">• Audio files kept on disk</div>
+                  )}
                   {applyResult.log?.length ? (
                     <details className="mt-2 rounded bg-graphite-950 p-2 text-[0.7rem] font-mono text-zinc-400">
                       <summary className="cursor-pointer text-zinc-300">Engine Execution Log</summary>
@@ -338,32 +310,9 @@ export function AlbumCleanupModal({
                 {/* Rollback Section */}
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/40 p-3 text-xs space-y-2">
                   <div className="font-semibold text-zinc-200">Rollback Status</div>
-                  {rollbackAvailable ? (
-                    <div className="space-y-2">
-                      <p className="text-zinc-400">
-                        This transaction is recoverable. You can restore quarantined files to their original location.
-                      </p>
-                      {rollbackResult ? (
-                        <Alert severity="info">
-                          Rollback executed successfully. Status: {String(rollbackResult.status || 'Rolled Back')}
-                        </Alert>
-                      ) : (
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          color="info"
-                          disabled={rollbackLoading}
-                          onClick={handleRollback}
-                        >
-                          {rollbackLoading ? 'Rolling back...' : 'Rollback Cleanup'}
-                        </Button>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-zinc-500">
-                      Rollback is unavailable for this transaction (contains irreversible file unlinks or DB deletions).
-                    </p>
-                  )}
+                  <p className="text-zinc-500">
+                    Rollback is unavailable for this transaction: removed library rows cannot be restored automatically. The audio files are still on disk -- re-import them to add the album back.
+                  </p>
                 </div>
 
                 <div className="flex justify-end gap-2 pt-2 border-t border-graphite-800">
@@ -402,7 +351,7 @@ export function AlbumCleanupModal({
 
             {/* Step: Partial -- distinct from Stale. The Web Manager only
                 ever sets this when the engine's "mutated" flag confirms at
-                least one file was already irreversibly deleted before the
+                least one library change was already made before the
                 failure (see error_kind === 'partial_mutation' in
                 handleApply). This must never be presented as "nothing
                 changed," and blindly offering "Generate New Plan" here
@@ -416,9 +365,9 @@ export function AlbumCleanupModal({
                   {errorMsg}
                 </Alert>
                 <p className="text-xs text-zinc-400">
-                  Some file(s) for this album were already deleted before the operation stopped. The
-                  album's current state on disk and in the database may no longer match what was shown
-                  in the review step. Close this dialog and check the album before deciding what to do
+                  The library was already partly changed before the operation stopped. The album's
+                  current state in the database may no longer match what was shown in the review step.
+                  This cleanup does not delete audio files. Close this dialog and check the album before deciding what to do
                   next -- do not assume a new plan reflects a clean starting point.
                 </p>
                 <div className="flex justify-end gap-2 pt-2 border-t border-graphite-800">
@@ -457,4 +406,9 @@ export function AlbumCleanupModal({
       </div>
     </Dialog>
   );
+}
+
+function trackLabel(item: AlbumCleanupPlanItem): string {
+  if (!item.track) return '';
+  return item.disc && item.disc > 1 ? `${item.disc}-${item.track}.` : `${item.track}.`;
 }

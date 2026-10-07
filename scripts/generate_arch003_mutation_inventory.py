@@ -497,6 +497,12 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "STAGING_ONLY", "", "reviewed-composite-workflows-playlist-staging"
         if file == "backend/web_manager_config_store.py":
             return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
+        if file == "backend/config_layers.py" and func in ("create_private_file", "replace_private_file"):
+            # Shared 0600 writer for config files: web-manager-data/.env, its
+            # backups and migration report, and the legacy Beets
+            # config.yaml.bak-legacy-plugin-migration backup
+            # (config_service._repair_legacy_beets_config). Never DB or media.
+            return "CONFIG_STATE", "", "private-config-file-helper"
         if file == "backend/config_layers.py":
             # One-time migration of web-manager-data/.env (the app's own saved
             # settings): backup, atomic rewrite, names-only report. Never

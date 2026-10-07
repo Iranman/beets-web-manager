@@ -19,6 +19,23 @@ import beetsplug.webmanager.operations as ops_mod
 STOCK_BEETS_IMAGE = "lscr.io/linuxserver/beets:latest"
 
 
+def _docker_with_retry(cmd, attempts=3, backoff=5):
+    """Run a docker command up to `attempts` times; return None on success, else the last stderr.
+
+    `cmd` is an argv list, or a callable returning one (re-evaluated per attempt).
+    """
+    err = ""
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(backoff * attempt)
+        argv = cmd() if callable(cmd) else cmd
+        res = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            return None
+        err = f"attempt {attempt + 1}/{attempts}: exit {res.returncode}: {res.stderr.strip()}"
+    return err
+
+
 def _create_synthetic_audio(file_path: str, title: str, artist: str, album: str):
     """Generate a minimal valid audio file with tags for importer testing."""
     import wave
@@ -356,33 +373,48 @@ webmanager:
                 except Exception:
                     pass
 
-            # 5. Pre-pull image and start stock Beets container bound strictly to loopback 127.0.0.1
-            subprocess.run(["docker", "pull", STOCK_BEETS_IMAGE], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # 5. Pre-pull image and start stock Beets container bound strictly to loopback 127.0.0.1.
+            # Registry pulls and loopback port picks can flake in CI (`docker run` exit 125), so both
+            # are retried a bounded number of times; the last failure's stderr goes into the assertion.
+            pull_err = _docker_with_retry(["docker", "pull", STOCK_BEETS_IMAGE])
+            cached = subprocess.run(["docker", "image", "inspect", STOCK_BEETS_IMAGE], capture_output=True).returncode == 0
+            if pull_err is not None and not cached:
+                self.fail(f"docker pull {STOCK_BEETS_IMAGE} failed after retries:\n{pull_err}")
 
             import socket
-            sock = socket.socket()
-            sock.bind(("127.0.0.1", 0))
-            host_port = sock.getsockname()[1]
-            sock.close()
 
             # Ensure urllib opener and environment permit requests to local acceptance test container
             _raw_urlopen = getattr(urllib.request, "_beets_original_urlopen", urllib.request.urlopen)
             orig_allowlist = os.environ.get("BEETS_OUTBOUND_ALLOWLIST")
+
+            def _run_stock_container():
+                nonlocal host_port
+                # A failed `docker run` can leave a created container holding the name.
+                subprocess.run(["docker", "rm", "-f", container_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                sock = socket.socket()
+                sock.bind(("127.0.0.1", 0))
+                host_port = sock.getsockname()[1]
+                sock.close()
+                return [
+                    "docker", "run", "-d",
+                    "--name", container_name,
+                    "-p", f"127.0.0.1:{host_port}:8337",
+                    "-v", f"{config_dir}:/config",
+                    "-v", f"{music_dir}:/music",
+                    "-v", f"{downloads_dir}:/downloads",
+                    "-e", "PUID=1000",
+                    "-e", "PGID=1000",
+                    STOCK_BEETS_IMAGE,
+                ]
+
+            host_port = None
+            run_err = _docker_with_retry(_run_stock_container)
+            if run_err is not None:
+                subprocess.run(["docker", "rm", "-f", container_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.fail(f"docker run {STOCK_BEETS_IMAGE} failed after retries:\n{run_err}")
             os.environ["BEETS_OUTBOUND_ALLOWLIST"] = f"127.0.0.1:{host_port},localhost:{host_port},beets:8338,127.0.0.1:8338"
-
-            run_cmd = [
-                "docker", "run", "-d",
-                "--name", container_name,
-                "-p", f"127.0.0.1:{host_port}:8337",
-                "-v", f"{config_dir}:/config",
-                "-v", f"{music_dir}:/music",
-                "-v", f"{downloads_dir}:/downloads",
-                "-e", "PUID=1000",
-                "-e", "PGID=1000",
-                STOCK_BEETS_IMAGE,
-            ]
-
-            subprocess.check_call(run_cmd)
 
             try:
                 base_url = f"http://127.0.0.1:{host_port}"
