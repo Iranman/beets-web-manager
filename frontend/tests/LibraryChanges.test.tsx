@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LibraryChanges from '../src/views/LibraryChanges';
-import { applyTransaction, approveTransaction, cancelTransaction, getTransaction, getTransactions } from '../src/api/client';
+import { applyTransaction, approveTransaction, cancelTransaction, getTransaction, getTransactions, rollbackTransaction } from '../src/api/client';
 import type { TransactionDetail } from '../src/api/types';
 
 vi.mock('../src/api/client', async (importActual) => ({
@@ -237,5 +237,106 @@ describe('LibraryChanges cancel/apply refusals', () => {
   it.each(['Pending', 'Preview', 'Approved'])('enables Cancel for %s', async (status) => {
     await renderWith(tx({}, status));
     expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('LibraryChanges rollback', () => {
+  const mockRollback = vi.mocked(rollbackTransaction);
+  const rollbackable = (status: string, metadata: Record<string, unknown> = {}) => ({
+    ...tx(metadata, status),
+    rollback: { available: true },
+  });
+  const button = () => screen.getByRole('button', { name: 'Rollback' }) as HTMLButtonElement;
+
+  beforeEach(() => {
+    mockRollback.mockReset();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  it.each([
+    ['Completed', {}],
+    ['Failed', { engine_result: { ok: false } }],
+    // Engine families retry rollback from Recovery Required (QA F1).
+    ['Recovery Required', { engine_result: { ok: true } }],
+    ['Partially Rolled Back', { engine_result: { ok: true } }],
+  ])('enables Rollback for %s %o', async (status, metadata) => {
+    await renderWith(rollbackable(status, metadata));
+    expect(button().disabled).toBe(false);
+  });
+
+  it.each([
+    ['Pending', {}], ['Preview', {}], ['Approved', {}], ['Running', {}], ['Cancelled', {}],
+    ['Failed', {}], ['Rolled Back', {}], ['Partially Rolled Back', {}], ['Recovery Required', {}],
+    ['Preview', { engine_result: { ok: true } }], ['Approved', { engine_result: { ok: true } }],
+    ['Cancelled', { engine_result: { ok: true } }], ['Rolled Back', { engine_result: { ok: true } }],
+    ['Running', { engine_result: { ok: true } }],
+  ])('disables Rollback for %s %o', async (status, metadata) => {
+    await renderWith(rollbackable(status, metadata));
+    expect(button().disabled).toBe(true);
+  });
+
+  it('disables Rollback for Completed when rollback is unavailable', async () => {
+    await renderWith(tx({}, 'Completed'));
+    expect(button().disabled).toBe(true);
+  });
+
+  it('shows a 409 refusal, does not claim success, and reloads the detail and list', async () => {
+    await renderWith(rollbackable('Completed'));
+    vi.mocked(getTransaction).mockClear();
+    vi.mocked(getTransactions).mockClear();
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: rollbackable('Running') });
+    const msg = 'Only a completed transaction can be rolled back (status is Running).';
+    mockRollback.mockRejectedValue(Object.assign(new Error(msg), {
+      body: { ok: false, mutated: false, status: 'Running', error: msg },
+      httpStatus: 409,
+    }));
+    fireEvent.click(button());
+    const banner = await screen.findByText(/Rollback refused: Only a completed transaction can be rolled back/);
+    expect(banner.textContent).toMatch(/Nothing was changed/);
+    expect(screen.queryByText('Rollback started.')).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    expect(getTransactions).toHaveBeenCalled();
+    await waitFor(() => expect(button().disabled).toBe(true));
+  });
+
+  it.each([
+    ['timeout', Object.assign(new Error('Request timed out.'), { isTimeout: true, httpStatus: 0 })],
+    ['503', Object.assign(new Error('Beets engine is unavailable.'), { body: { error: 'x' }, httpStatus: 503 })],
+  ])('rollback transport failure (%s) does not claim nothing changed', async (_label, err) => {
+    await renderWith(rollbackable('Completed'));
+    vi.mocked(getTransaction).mockClear();
+    mockRollback.mockRejectedValue(err);
+    fireEvent.click(button());
+    const banner = await screen.findByText(/Rollback failed/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+    expect(banner.textContent).toMatch(/outcome is unknown/);
+    expect(banner.textContent).toMatch(/Do not roll back again/);
+    expect(screen.queryByText('Rollback started.')).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+  });
+
+  it('reloads the detail when an engine rollback response has no transaction (QA F2)', async () => {
+    const recovering = rollbackable('Recovery Required', { engine_result: { ok: true } });
+    await renderWith(recovering);
+    vi.mocked(getTransaction).mockClear();
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: { ...recovering, status: 'Rolled Back' } });
+    mockRollback.mockResolvedValue({ ok: true } as unknown as Awaited<ReturnType<typeof rollbackTransaction>>);
+    fireEvent.click(button());
+    await screen.findByText('Rollback finished.');
+    expect(screen.queryByText('Rollback started.')).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    // The detail pane stays open and shows the reloaded state.
+    await waitFor(() => expect(button().disabled).toBe(true));
+  });
+
+  it('does nothing when the confirmation is declined', async () => {
+    await renderWith(rollbackable('Completed'));
+    vi.mocked(window.confirm).mockReturnValue(false);
+    fireEvent.click(button());
+    expect(mockRollback).not.toHaveBeenCalled();
   });
 });
