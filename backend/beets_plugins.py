@@ -362,10 +362,14 @@ REQUIRED_PLUGIN_NAMES: List[str] = [
     name for name, p in BEETS_PLUGIN_MANIFEST.items() if p.category == PluginCategory.REQUIRED
 ]
 
+# Plugins provisioning adds to config.yaml: the transport plus `musicbrainz`.
+# Since Beets 2.4 MusicBrainz is a plugin; without it in `plugins:` the
+# importer finds no candidates and a quiet import skips every album. Older
+# Beets, where it is built in, only logs "plugin musicbrainz not found".
 REQUIRED_CONFIG_PLUGINS: List[str] = [
     name for name, p in BEETS_PLUGIN_MANIFEST.items()
     if p.category == PluginCategory.REQUIRED and name != "musicbrainz"
-]
+] + ["musicbrainz"]
 
 # Feature plugins Web Manager recommends but never adds to an existing
 # config.yaml on its own (BI-5). Fresh installs still get them from
@@ -609,6 +613,10 @@ def provision_api_key_file(config_dir: Path) -> bool:
 _PLUGIN_MIGRATION_BACKUP_PREFIX = "config.yaml.bak-plugins-"
 
 
+def _strip_yaml_comment(value: str) -> str:
+    return re.sub(r"(^|\s)#.*$", "", value).strip()
+
+
 def parse_configured_plugins(config_text: str) -> List[str]:
     """Parse configured plugins from YAML text without losing order."""
     plugins: List[str] = []
@@ -616,17 +624,17 @@ def parse_configured_plugins(config_text: str) -> List[str]:
     if not match:
         return plugins
 
-    inline_val = match.group(1).strip()
-    if inline_val:
-        plugins.extend(inline_val.split())
-
-    list_block = match.group(2) or ""
-    for line in list_block.splitlines():
+    # Inline "a b c" or a flow list "[a, b]", block "- a" entries; quotes and
+    # trailing comments are not plugin names.
+    tokens = re.split(r"[\s,]+", _strip_yaml_comment(match.group(1)).strip("[]"))
+    for line in (match.group(2) or "").splitlines():
         stripped = line.strip()
         if stripped.startswith("-"):
-            token = stripped.lstrip("- \t").strip()
-            if token and token not in plugins:
-                plugins.append(token)
+            tokens.append(_strip_yaml_comment(stripped.lstrip("- \t")))
+    for token in tokens:
+        token = token.strip().strip("'\"")
+        if token and token not in plugins:
+            plugins.append(token)
 
     return plugins
 
@@ -1260,13 +1268,9 @@ def verify_plugin(
     commands_status: Dict[str, bool] = {}
     template_fields_status: Dict[str, bool] = {}
 
-    enabled = name in configured_plugins or name == "musicbrainz"  # MusicBrainz is core built-in
-    loaded = name in loaded_plugins or name == "musicbrainz"
-
-    # MusicBrainz is special: built into Beets core
-    if name == "musicbrainz":
-        enabled = True
-        loaded = True
+    # MusicBrainz is a plugin since Beets 2.4: reported like any other.
+    enabled = name in configured_plugins
+    loaded = name in loaded_plugins
 
     # 1. Binary Dependencies
     for b in plugin_def.binary_dependencies:

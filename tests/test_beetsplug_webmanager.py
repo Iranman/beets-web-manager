@@ -174,7 +174,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.7.0")
+        self.assertEqual(data["plugin_version"], "1.8.0")
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
         for key in ("allowed_roots", "import_roots", "library_directory", "fpcalc_available", "ffmpeg_available"):
@@ -187,7 +187,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.7.0")
+        self.assertEqual(PLUGIN_VERSION, "1.8.0")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(
@@ -267,20 +267,21 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertIsNone(resolve_safe_descendant(symlink_path, [self.downloads_dir]))
 
     def test_import_policy_validations(self):
-        """Verify autotag=true rejected, root-self import rejected, invalid duplicate_action rejected."""
+        """Verify search_ids without autotag rejected, root-self import rejected, invalid duplicate_action rejected."""
         auth = {"Authorization": f"Bearer {self.token}"}
         sample_album = os.path.join(self.downloads_dir, "album1")
         os.makedirs(sample_album, exist_ok=True)
         ops_mod.set_import_roots([self.downloads_dir])
 
-        # 1. autotag: True must be rejected with 400
+        # 1. search_ids without autotag must be rejected with 400 (plugin 1.8.0
+        #    accepts autotag; see test_plugin_import_autotag.py)
         res = self.client.post(
             "/webmanager/import",
             headers=auth,
-            json={"paths": [sample_album], "autotag": True},
+            json={"paths": [sample_album], "search_ids": ["a6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"]},
         )
         self.assertEqual(res.status_code, 400)
-        self.assertEqual(res.get_json()["error_code"], "AUTOTAG_NOT_ALLOWED")
+        self.assertEqual(res.get_json()["error_code"], "INVALID_SEARCH_IDS")
 
         # 2. Root-self import must be rejected with 400
         res = self.client.post(
