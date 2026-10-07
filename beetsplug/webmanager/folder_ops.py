@@ -12,15 +12,25 @@ filesystem step inside Beets, which owns every write to the library.
 
 Every path must lie strictly inside Beets' library ``directory`` with no
 symlink in any component. A step never touches a path that holds a library
-item: tracked files are relocated only by Beets' own ``item.move()`` /
-``album.move()`` (POST /webmanager/move), never here. Steps use Beets'
-filesystem helpers (``util.move``, ``util.prune_dirs``, ``util.mkdirall``)
-and run inside a library transaction; only ``rename_dir`` uses ``os.rename``,
-because Beets has no API to rename a directory that holds no library items.
+item, and a target is never a path Beets still references: tracked files
+are relocated only by Beets' own ``item.move()`` / ``album.move()`` (POST
+/webmanager/move), never here. Each step holds ``ops.mutation_lock`` and a
+library transaction, like every other mutation endpoint.
+
+Beets APIs are used where they are safe: ``util.move`` (no overwrite) and
+``util.mkdirall``. Two steps call the OS directly:
+
+* ``rename_dir`` uses ``os.rename``: Beets has no API to rename a directory
+  that holds no library items.
+* ``remove_empty_dir`` uses ``os.rmdir``, not ``util.prune_dirs``. In Beets
+  2.13/2.14 ``prune_dirs`` checks emptiness with ``os.listdir`` and then calls
+  ``shutil.rmtree``, so a file created between the two calls would be
+  deleted. ``os.rmdir`` removes only an empty directory, atomically.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 from typing import Any, Optional
 
@@ -83,6 +93,7 @@ def _step(lib, root: str, data: dict) -> dict:
         if not (os.path.isdir(source) if want_dir else os.path.isfile(source)):
             raise _Refused("source is missing or of the wrong type", "SOURCE_MISSING")
         _refuse_tracked(lib, source)
+        _refuse_tracked(lib, target)  # never re-create a path Beets still references
         _refuse_target(target)
         if want_dir:
             # Beets has no API to rename an untracked directory.
@@ -94,11 +105,14 @@ def _step(lib, root: str, data: dict) -> dict:
         path = contained_path(data.get("path"), root)
         if not os.path.isdir(path):
             raise _Refused("folder is missing", "SOURCE_MISSING")
-        if os.listdir(path):
+        if os.listdir(path):  # a clearer error only; os.rmdir is the real check
             raise _Refused("folder is not empty", "NOT_EMPTY")
-        util.prune_dirs(path, clutter=())  # no root: removes only this folder
-        if os.path.lexists(path):
-            raise _Refused("folder could not be removed", "REMOVE_FAILED", 500)
+        try:
+            os.rmdir(path)  # not util.prune_dirs: it rmtree()s after its own check
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                raise _Refused("folder is not empty", "NOT_EMPTY") from None
+            raise _Refused("folder could not be removed", "REMOVE_FAILED", 500) from None
         return {"op": op, "path": path}
     if op == "create_dir":
         path = contained_path(data.get("path"), root)
@@ -122,7 +136,7 @@ def run_folder_op():
     if early is not None:
         return early
     try:
-        with lib.transaction():
+        with ops.mutation_lock, lib.transaction():
             result = {"success": True, **_step(lib, root, data)}
     except _Refused as exc:
         ops.update_operation(op_id, "failed", error=exc.message, error_code=exc.code)

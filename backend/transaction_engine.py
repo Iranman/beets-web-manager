@@ -1951,20 +1951,54 @@ def _folder_adapter(adapter: Any = None) -> Any:
     return _beets_adapter.beets_adapter
 
 
+#: A step Beets may have done without confirming it (lost response, timeout,
+#: 202 still running). Its idempotency key is replayed to learn the outcome.
+FOLDER_OP_UNCONFIRMED = "FOLDER_OP_UNCONFIRMED"
+_FOLDER_STEP_ATTEMPTS = 3
+#: Operator text for a failed plugin step, by error code. Static on purpose:
+#: Beets' own reply text never reaches an API response.
+FOLDER_STEP_MESSAGES = {
+    "BEETS_NOT_FOUND": "the webmanager plugin needs 1.7.0; restart Beets after the plugin update",
+    "BEETS_UNREACHABLE": "Beets is unreachable",
+    FOLDER_OP_UNCONFIRMED: "Beets did not confirm the step; the transaction recorded it so rollback can undo it",
+    "NOT_EMPTY": "the folder is not empty",
+    "PATH_IS_TRACKED": "the path holds Beets library items; move them through Beets",
+    "TARGET_EXISTS": "the target already exists",
+    "TARGET_PARENT_MISSING": "the target's parent folder does not exist",
+    "SOURCE_MISSING": "the source is missing",
+    "SYMLINK_REJECTED": "a path component is a symlink",
+    "PATH_OUTSIDE_LIBRARY": "the path is outside the Beets library directory",
+    "REMOVE_FAILED": "Beets could not remove the folder",
+    "FOLDER_OP_FAILED": "Beets could not perform the step",
+    "LIBRARY_DIRECTORY_UNKNOWN": "the Beets library directory is not configured",
+}
+_FOLDER_STEP_RETRY_DELAY = 1.0
+
+
 def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]:
     """Run one folder step inside Beets (Web Manager mounts the library
     read-only). None when Beets confirmed it, else a short reason: an error
-    code, never raw upstream text."""
-    try:
-        res = adapter.folder_op(op, key, **paths)
-    except Exception as exc:
-        code = getattr(exc, "error_code", "") or type(exc).__name__
-        if code == "BEETS_NOT_FOUND":
-            return "BEETS_NOT_FOUND (the webmanager plugin needs 1.7.0; restart Beets after the plugin update)"
-        return str(code)
-    if isinstance(res, dict) and (res.get("success") is True or res.get("status") == "succeeded"):
-        return None
-    return "FOLDER_OP_UNCONFIRMED"
+    code, never raw upstream text. A reply that leaves the outcome unknown is
+    retried with the same idempotency key, which makes the plugin report the
+    first attempt's result instead of running the step twice; if it stays
+    unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``."""
+    for attempt in range(_FOLDER_STEP_ATTEMPTS):
+        if attempt:
+            time.sleep(_FOLDER_STEP_RETRY_DELAY)
+        try:
+            res = adapter.folder_op(op, key, **paths)
+        except Exception as exc:
+            code = getattr(exc, "error_code", "") or type(exc).__name__
+            if not getattr(exc, "status_code", None):  # no HTTP reply (connection error/timeout)
+                last = f"{FOLDER_OP_UNCONFIRMED} ({code})"  # no reply: Beets may have done it
+                continue
+            if code == "BEETS_NOT_FOUND":
+                return "BEETS_NOT_FOUND (the webmanager plugin needs 1.7.0; restart Beets after the plugin update)"
+            return str(code)
+        if isinstance(res, dict) and (res.get("success") is True or res.get("status") == "succeeded"):
+            return None
+        last = FOLDER_OP_UNCONFIRMED
+    return last
 
 
 def execute_folder_cleanup_apply(
@@ -2018,15 +2052,20 @@ def execute_folder_cleanup_apply(
         def _step(op: str, **paths: str) -> Optional[str]:
             return _folder_step(ad, f"{operation_id}:apply:{len(moved_records) + len(removed_dirs)}", op, **paths)
 
-        def _fail(msg: str, code: str) -> Dict[str, Any]:
+        def _fail(msg: str, code: str, step_error: Optional[str] = None) -> Dict[str, Any]:
             mutated = bool(moved_records or removed_dirs)
+            step_code = step_error.split(" ", 1)[0] if step_error else None
+            if step_code is not None and step_code not in FOLDER_STEP_MESSAGES:
+                step_code = "FOLDER_OP_FAILED"  # only allowlisted codes leave the engine
             store.append_log(operation_id, f"Apply failed: {msg}")
             store.update(operation_id, status="Failed", rollback={
                 "available": mutated,
                 "reason": "Rollback can restore recorded moves/directories." if mutated else "No mutation was performed."})
             return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated,
                     "operation_id": operation_id, "status": "Failed",
-                    "moved_records": list(moved_records), "removed_dirs": list(removed_dirs)}
+                    "moved_records": list(moved_records), "removed_dirs": list(removed_dirs),
+                    "step_error_code": step_code,
+                    "step_error_message": FOLDER_STEP_MESSAGES.get(step_code) if step_code else None}
 
         with _lock_resources(resource_keys):
             file_moves = meta.get("file_moves") or []
@@ -2063,8 +2102,11 @@ def execute_folder_cleanup_apply(
                 if tp.exists() or tp.is_symlink():
                     return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
                 err = _step("move_file", source=str(sp), target=str(tp))
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    moved_records.append({"source": str(sp), "target": str(tp), "kind": "file", "unconfirmed": True})
+                    _record(f"move {sp} -> {tp} not confirmed; recorded for rollback")
                 if err:
-                    return _fail(f"Move failed {sp} -> {tp}: {err}", "folder_cleanup_move_failed")
+                    return _fail(f"Move failed {sp} -> {tp}: {err}", "folder_cleanup_move_failed", err)
                 moved_records.append({"source": str(sp), "target": str(tp), "kind": "file"})
                 _record(f"moved {sp} -> {tp}")
 
@@ -2086,8 +2128,11 @@ def execute_folder_cleanup_apply(
                 if tp.exists() or tp.is_symlink():
                     return _fail(f"Rename target already exists: {tp}", "folder_cleanup_target_exists")
                 err = _step("rename_dir", source=str(sp), target=str(tp))
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    moved_records.append({"source": str(sp), "target": str(tp), "kind": "dir", "unconfirmed": True})
+                    _record(f"folder rename {sp} -> {tp} not confirmed; recorded for rollback")
                 if err:
-                    return _fail(f"Folder rename failed {sp} -> {tp}: {err}", "folder_cleanup_rename_failed")
+                    return _fail(f"Folder rename failed {sp} -> {tp}: {err}", "folder_cleanup_rename_failed", err)
                 moved_records.append({"source": str(sp), "target": str(tp), "kind": "dir"})
                 _record(f"renamed folder {sp} -> {tp}")
 
@@ -2118,8 +2163,11 @@ def execute_folder_cleanup_apply(
                     if current.get("dev") != expected.get("dev") or current.get("ino") != expected.get("ino"):
                         return _fail(f"Directory identity changed since plan: {dp}", "folder_cleanup_toctou_mismatch")
                 err = _step("remove_empty_dir", path=str(dp))
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    removed_dirs.append(str(dp))
+                    _record(f"removal of {dp} not confirmed; recorded for rollback")
                 if err:
-                    return _fail(f"Directory removal failed {dp}: {err}", "folder_cleanup_remove_failed")
+                    return _fail(f"Directory removal failed {dp}: {err}", "folder_cleanup_remove_failed", err)
                 removed_dirs.append(str(dp))
                 _record(f"removed empty folder {dp}")
 

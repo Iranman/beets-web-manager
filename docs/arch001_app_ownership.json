@@ -31801,10 +31801,10 @@
    "module": "routes_cleanup.py",
    "lines": [
     1369,
-    1551
+    1557
    ],
-   "size": 183,
-   "body_lines": 182,
+   "size": 189,
+   "body_lines": 188,
    "route": {
     "method": "POST",
     "path": "/api/clean/folder-placeholder/apply"
@@ -31826,8 +31826,8 @@
    "name": "apply_safe_folder_placeholder_renames_job",
    "module": "routes_cleanup.py",
    "lines": [
-    1555,
-    1677
+    1561,
+    1683
    ],
    "size": 123,
    "body_lines": 121,
@@ -31853,8 +31853,8 @@
    "name": "clean_album_folders_report",
    "module": "routes_cleanup.py",
    "lines": [
-    1681,
-    1693
+    1687,
+    1699
    ],
    "size": 13,
    "body_lines": 12,
@@ -31874,8 +31874,8 @@
    "name": "clean_album_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1697,
-    1735
+    1703,
+    1741
    ],
    "size": 39,
    "body_lines": 38,
@@ -31899,8 +31899,8 @@
    "name": "clean_album_folders_apply_safe",
    "module": "routes_cleanup.py",
    "lines": [
-    1739,
-    1769
+    1745,
+    1775
    ],
    "size": 31,
    "body_lines": 30,
@@ -31924,8 +31924,8 @@
    "name": "clean_root_folders_report",
    "module": "routes_cleanup.py",
    "lines": [
-    1773,
-    1785
+    1779,
+    1791
    ],
    "size": 13,
    "body_lines": 12,
@@ -31945,8 +31945,8 @@
    "name": "clean_root_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1789,
-    1824
+    1795,
+    1830
    ],
    "size": 36,
    "body_lines": 35,
@@ -31970,8 +31970,8 @@
    "name": "clean_root_folders_apply_safe",
    "module": "routes_cleanup.py",
    "lines": [
-    1828,
-    1857
+    1834,
+    1863
    ],
    "size": 30,
    "body_lines": 29,
@@ -31995,8 +31995,8 @@
    "name": "clean_album_folders_apply_issue",
    "module": "routes_cleanup.py",
    "lines": [
-    1861,
-    1935
+    1867,
+    1941
    ],
    "size": 75,
    "body_lines": 74,
@@ -32023,8 +32023,8 @@
    "name": "clean_artist_folders_scan",
    "module": "routes_cleanup.py",
    "lines": [
-    1939,
-    1975
+    1945,
+    1981
    ],
    "size": 37,
    "body_lines": 36,
@@ -32047,8 +32047,8 @@
    "name": "clean_artist_folders_merge",
    "module": "routes_cleanup.py",
    "lines": [
-    1979,
-    2000
+    1985,
+    2006
    ],
    "size": 22,
    "body_lines": 21,
@@ -32071,8 +32071,8 @@
    "name": "clean_artist_folders_stamp_mbid",
    "module": "routes_cleanup.py",
    "lines": [
-    2004,
-    2117
+    2010,
+    2123
    ],
    "size": 114,
    "body_lines": 105,
@@ -32100,8 +32100,8 @@
    "name": "_unattended_cleanup_status",
    "module": "routes_cleanup.py",
    "lines": [
-    2123,
-    2132
+    2129,
+    2138
    ],
    "size": 10,
    "body_lines": 9,
@@ -32124,8 +32124,8 @@
    "name": "dedup_unattended_cleanup_status",
    "module": "routes_cleanup.py",
    "lines": [
-    2136,
-    2138
+    2142,
+    2144
    ],
    "size": 3,
    "body_lines": 1,
@@ -32147,8 +32147,8 @@
    "name": "dedup_unattended_cleanup_set",
    "module": "routes_cleanup.py",
    "lines": [
-    2142,
-    2158
+    2148,
+    2164
    ],
    "size": 17,
    "body_lines": 14,
@@ -32172,8 +32172,8 @@
    "name": "dedup_reviewed_cleanup_plan",
    "module": "routes_cleanup.py",
    "lines": [
-    2162,
-    2190
+    2168,
+    2196
    ],
    "size": 29,
    "body_lines": 22,
@@ -32196,8 +32196,8 @@
    "name": "library_album_duplicate_analysis_last",
    "module": "routes_cleanup.py",
    "lines": [
-    2194,
-    2197
+    2200,
+    2203
    ],
    "size": 4,
    "body_lines": 2,
@@ -32217,8 +32217,8 @@
    "name": "library_album_duplicate_analysis_run",
    "module": "routes_cleanup.py",
    "lines": [
-    2201,
-    2208
+    2207,
+    2214
    ],
    "size": 8,
    "body_lines": 4,
@@ -32238,8 +32238,8 @@
    "name": "library_untracked_inventory_last",
    "module": "routes_cleanup.py",
    "lines": [
-    2212,
-    2215
+    2218,
+    2221
    ],
    "size": 4,
    "body_lines": 2,
@@ -32259,8 +32259,8 @@
    "name": "library_untracked_inventory_run",
    "module": "routes_cleanup.py",
    "lines": [
-    2219,
-    2226
+    2225,
+    2232
    ],
    "size": 8,
    "body_lines": 4,
@@ -32282,8 +32282,8 @@
    "name": "library_album_row_merge_plan",
    "module": "routes_cleanup.py",
    "lines": [
-    2230,
-    2242
+    2236,
+    2248
    ],
    "size": 13,
    "body_lines": 9,
@@ -32305,8 +32305,8 @@
    "name": "library_untracked_recovery_candidates",
    "module": "routes_cleanup.py",
    "lines": [
-    2246,
-    2255
+    2252,
+    2261
    ],
    "size": 10,
    "body_lines": 7,
@@ -32328,8 +32328,8 @@
    "name": "library_untracked_recovery_album_candidates",
    "module": "routes_cleanup.py",
    "lines": [
-    2259,
-    2268
+    2265,
+    2274
    ],
    "size": 10,
    "body_lines": 7,
@@ -32349,8 +32349,8 @@
    "name": "library_untracked_recovery_plan",
    "module": "routes_cleanup.py",
    "lines": [
-    2272,
-    2301
+    2278,
+    2307
    ],
    "size": 30,
    "body_lines": 23,
@@ -32372,8 +32372,8 @@
    "name": "dedup_maintenance_run",
    "module": "routes_cleanup.py",
    "lines": [
-    2305,
-    2316
+    2311,
+    2322
    ],
    "size": 12,
    "body_lines": 8,
