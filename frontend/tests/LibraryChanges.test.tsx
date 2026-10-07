@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LibraryChanges from '../src/views/LibraryChanges';
-import { approveTransaction, getTransaction, getTransactions } from '../src/api/client';
+import { applyTransaction, approveTransaction, cancelTransaction, getTransaction, getTransactions } from '../src/api/client';
 import type { TransactionDetail } from '../src/api/types';
 
 vi.mock('../src/api/client', async (importActual) => ({
@@ -124,5 +124,118 @@ describe('LibraryChanges approve', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await screen.findByText(/no longer in Preview/);
     expect(screen.queryByText('Transaction approved.')).toBeNull();
+  });
+});
+
+describe('LibraryChanges cancel/apply refusals', () => {
+  const mockCancel = vi.mocked(cancelTransaction);
+  const mockApply = vi.mocked(applyTransaction);
+  const onUnhandled = vi.fn();
+
+  beforeEach(() => {
+    mockCancel.mockReset();
+    mockApply.mockReset();
+    onUnhandled.mockReset();
+    process.on('unhandledRejection', onUnhandled);
+  });
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled);
+    cleanup();
+  });
+
+  it('shows a 409 not_cancellable refusal and reloads the transaction', async () => {
+    await renderWith(tx({}, 'Approved'));
+    vi.mocked(getTransaction).mockClear();
+    vi.mocked(getTransactions).mockClear();
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: tx({}, 'Running') });
+    mockCancel.mockRejectedValue(Object.assign(new Error('Transaction is Running and cannot be cancelled.'), {
+      body: { code: 'not_cancellable', error: 'Transaction is Running and cannot be cancelled.' },
+      httpStatus: 409,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await screen.findByText(/Cancel refused: Transaction is Running and cannot be cancelled\./);
+    expect(screen.queryByText('Transaction cancelled.')).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    expect(getTransactions).toHaveBeenCalled();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true));
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it('shows a failed apply and reloads the transaction', async () => {
+    await renderWith(tx({}, 'Approved'));
+    vi.mocked(getTransaction).mockClear();
+    mockApply.mockRejectedValue(apiError('not_approved', 409));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await screen.findByText(/Apply refused: not_approved\./);
+    expect(screen.queryByText(/Apply job started|Transaction applied/)).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it('does not add a second period to a reason that already ends with one', async () => {
+    await renderWith(tx({}, 'Approved'));
+    mockCancel.mockRejectedValue(Object.assign(new Error('Already cancelled.'), { body: { code: 'not_cancellable' }, httpStatus: 409 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const banner = await screen.findByText(/Cancel refused/);
+    expect(banner.textContent).toMatch(/Already cancelled\. Nothing was changed/);
+    expect(banner.textContent).not.toMatch(/\.\./);
+  });
+
+  // QA #211 F1: apply can fail after mutating; never claim nothing changed.
+  it('apply failing after mutating (verification_failed, mutated:true) does not claim nothing changed', async () => {
+    await renderWith(tx({ mutation_family: 'album_cleanup_v1' }, 'Approved'));
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: tx({}, 'Recovery Required') });
+    mockApply.mockRejectedValue(Object.assign(new Error('Album row still present after removal.'), {
+      body: { ok: false, code: 'verification_failed', mutated: true, error: 'Album row still present after removal.' },
+      httpStatus: 400,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const banner = await screen.findByText(/Apply (refused|failed)/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+    expect(banner.textContent).toMatch(/partly changed/);
+    expect(banner.textContent).toMatch(/Do not apply again/);
+    await screen.findAllByText('Recovery Required');
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['timeout', Object.assign(new Error('Request timed out.'), { isTimeout: true, httpStatus: 0 })],
+    ['503', Object.assign(new Error('Beets transport error; do not re-apply.'), { body: { error: 'x' }, httpStatus: 503 })],
+  ])('apply transport failure (%s) does not claim nothing changed', async (_label, err) => {
+    await renderWith(tx({}, 'Approved'));
+    mockApply.mockRejectedValue(err);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const banner = await screen.findByText(/Apply (refused|failed)/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+    expect(banner.textContent).toMatch(/outcome is unknown/);
+  });
+
+  it('cancel transport failure does not claim nothing changed', async () => {
+    await renderWith(tx({}, 'Approved'));
+    mockCancel.mockRejectedValue(Object.assign(new Error('Request timed out.'), { isTimeout: true, httpStatus: 0 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const banner = await screen.findByText(/Cancel refused/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+  });
+
+  it('apply refused with mutated:false says nothing changed', async () => {
+    await renderWith(tx({}, 'Approved'));
+    mockApply.mockRejectedValue(Object.assign(new Error('Plan is stale'), { body: { code: 'stale', mutated: false }, httpStatus: 400 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const banner = await screen.findByText(/Apply refused: Plan is stale\. Nothing was changed/);
+    expect(banner).toBeTruthy();
+  });
+
+  it.each(['Running', 'Completed', 'Failed', 'Cancelled', 'Rolled Back', 'Partially Rolled Back', 'Recovery Required'])(
+    'disables Cancel for %s',
+    async (status) => {
+      await renderWith(tx({}, status));
+      expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+    },
+  );
+
+  it.each(['Pending', 'Preview', 'Approved'])('enables Cancel for %s', async (status) => {
+    await renderWith(tx({}, status));
+    expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

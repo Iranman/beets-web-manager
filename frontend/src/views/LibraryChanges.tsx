@@ -25,7 +25,7 @@ import type {
   TransactionSummary,
 } from '../api/types';
 
-const STATUS_OPTIONS = ['all', 'Pending', 'Preview', 'Approved', 'Running', 'Completed', 'Cancelled', 'Failed', 'Rolled Back', 'Partially Rolled Back'];
+const STATUS_OPTIONS = ['all', 'Pending', 'Preview', 'Approved', 'Running', 'Completed', 'Cancelled', 'Failed', 'Rolled Back', 'Partially Rolled Back', 'Recovery Required'];
 const OPERATION_OPTIONS = [
   'all',
   'Import',
@@ -50,6 +50,10 @@ const OPERATION_OPTIONS = [
 
 const pageSize = 50;
 
+// Mirrors the backend's cancellable states (POST /api/transactions/<id>/cancel
+// returns 409 not_cancellable otherwise); the server stays the authority.
+const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
+
 // The phrase the backend requires (and verifies) before approving an
 // album-cleanup plan that deletes audio files. The UI only detects the plan
 // type to ask for it; the server stays the authority.
@@ -70,6 +74,26 @@ function approveErrorMessage(ex: unknown) {
   }
   const detail = ex instanceof Error ? ex.message : String(ex);
   return `Approval failed: ${detail}. Review the transaction status below before retrying.`;
+}
+
+// Only claim "nothing changed" when the response proves the request was
+// refused before any mutation. Apply can fail after mutating (mutated: true,
+// partial_mutation), or with an unknown outcome (5xx, timeout, network loss).
+function actionErrorMessage(verb: 'Cancel' | 'Apply', ex: unknown) {
+  const raw = ex instanceof Error ? ex.message : String(ex);
+  const reason = /[.!?]$/.test(raw) ? raw : `${raw}.`;
+  const status = (ex as { httpStatus?: number } | null)?.httpStatus;
+  const body = apiErrorBody(ex) as { code?: string; mutated?: boolean; partial_mutation?: boolean } | undefined;
+  if (verb === 'Apply' && (body?.mutated === true || body?.partial_mutation === true || body?.code === 'partial_mutation'
+    || status === undefined || status === 0 || status >= 500)) {
+    return `Apply failed: ${reason} The library may have been partly changed, or the outcome is unknown. Do not apply again. Check the transaction's current status below (for example Recovery Required) and follow its recovery guidance.`;
+  }
+  // A timed-out or 5xx cancel may still have landed, so only 404/409 (CAS
+  // refusals) or an explicit mutated:false prove nothing changed.
+  if (status === 404 || status === 409 || body?.mutated === false) {
+    return `${verb} refused: ${reason} Nothing was changed by this request. Review the transaction's current status below before acting.`;
+  }
+  return `${verb} refused: ${reason} Review the transaction's current status below before acting.`;
 }
 
 function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
@@ -303,20 +327,31 @@ export default function LibraryChanges() {
     if (failure) setError(failure);
   };
 
-  const doCancel = async () => {
+  // Same refusal handling as doApprove: show the server's reason, then reload
+  // the detail and rows so the user sees the transaction's real state.
+  const runAction = async (
+    verb: 'Cancel' | 'Apply',
+    request: (id: string) => Promise<{ transaction: TransactionDetail; job_id?: string }>,
+    success: (response: { job_id?: string }) => string,
+  ) => {
     if (!detail) return;
-    const response = await cancelTransaction(detail.id);
-    setDetail(response.transaction);
-    setMessage('Transaction cancelled.');
+    setError('');
+    setMessage('');
+    let failure = '';
+    try {
+      const response = await request(detail.id);
+      setDetail(response.transaction);
+      setMessage(success(response));
+    } catch (ex) {
+      failure = actionErrorMessage(verb, ex);
+      await loadDetail(detail.id);
+    }
     await loadRows();
+    // loadRows clears the error banner, so surface the refusal after it.
+    if (failure) setError(failure);
   };
-  const doApply = async () => {
-    if (!detail) return;
-    const response = await applyTransaction(detail.id);
-    setDetail(response.transaction);
-    setMessage(response.job_id ? `Apply job started: ${response.job_id}` : 'Transaction applied.');
-    await loadRows();
-  };
+  const doCancel = () => runAction('Cancel', cancelTransaction, () => 'Transaction cancelled.');
+  const doApply = () => runAction('Apply', applyTransaction, (r) => (r.job_id ? `Apply job started: ${r.job_id}` : 'Transaction applied.'));
 
   const doRollback = async () => {
     if (!detail) return;
@@ -433,7 +468,7 @@ export default function LibraryChanges() {
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
-                  <Button size="small" color="warning" variant="outlined" disabled={detail.status === 'Completed' || detail.status === 'Running'} onClick={() => void doCancel()}>Cancel</Button>
+                  <Button size="small" color="warning" variant="outlined" disabled={!CANCELLABLE_STATUSES.has(detail.status)} onClick={() => void doCancel()}>Cancel</Button>
                   <Button size="small" color="error" variant="outlined" disabled={!detail.rollback?.available || detail.status === 'Running'} onClick={() => void doRollback()}>Rollback</Button>
                 </div>
               </div>
