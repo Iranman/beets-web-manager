@@ -121,6 +121,21 @@ Intended direction (the target shape for every production mutation path):
 
 Current migration status: every Beets read and mutation path, including the composite Plan/Apply/Rollback workflows (merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, artwork, genre repair, mbsync-all, move-all), runs through `backend/composite_workflows.py` and `backend/beets_adapter.py`. The retired `backend/beets_client.py` control-agent client is deleted (ARCH-010, closed in v0.1.25). `backend/transaction_engine.py` now holds only the TransactionStore, folder cleanup and import-review cleanup; the engine-side families that opened the Beets SQLite library directly were removed (BA-7), and folder cleanup checks Beets references through the adapter.
 
+### Import contract
+
+Every import is Beets' own importer run inside stock Beets by the `webmanager` plugin's `POST /webmanager/import` (`BeetsAdapter.run_import`). Web Manager never tags, matches or places files itself during an import; it only chooses the source, the copy/move mode and, when a person confirmed one, the MusicBrainz Release, and then verifies the result over the read API.
+
+| Route | Composite | Beets equivalent |
+|---|---|---|
+| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback` = the request's `fallback` (`asis` default, or `skip`), `--search-id` = the optional `search_id` |
+| `POST /api/folders/import-with-id` | `plan_confirmed_import()` / `apply_confirmed_import()` | `beet import -q --search-id <mb_albumid>` with `quiet_fallback: skip` |
+| `POST /api/albums/reimport-disk` | same confirmed-import family | same; a folder inside the library is imported in place (no copy, no move) |
+
+- Copy or move: a preserved torrent source (see `DOWNLOADS_ROOT` / `TORRENT_SOURCE_ROOTS` / `ALLOW_TORRENT_SOURCE_MOVE` in `docs/CONFIGURATION.md`) is always copied. `/api/import` copies unless `move: true` (a move from a preserved source is refused with HTTP 400); import-with-id moves when `move: true` was requested and the source is not preserved, and always moves an app-staged partial-import subset; reimport-disk moves download sources that are not preserved.
+- Confirmed import verification: the Apply reads the albums carrying the planned Release ID before and after the import. Exactly one new album row must appear, and when a Release Group was confirmed its `mb_releasegroupid` must equal it. Zero rows means Beets skipped the folder (no confident match, or a duplicate with `duplicate_action: skip`) and the result is `not_imported`, which reimport-disk sends to review. Every outcome leaves the transaction Completed or Failed, never Preview.
+- Errors: plugin refusals map to stable codes (`autotag_not_allowed`, `path_not_allowed`, `source_not_found`, ...) with an operator message; the upstream body is never forwarded.
+- Plugin requirement: the plugin must accept `autotag: true` with `search_ids` and `quiet_fallback` and run Beets' quiet terminal import session. webmanager plugin 1.6.2 refuses `autotag` (`AUTOTAG_NOT_ALLOWED`), so with that plugin every import route fails cleanly with `autotag_not_allowed` (ARCH-024).
+
 ## Frontend Architecture
 
 - `frontend/src/app/*/page.tsx` files are thin route entries.

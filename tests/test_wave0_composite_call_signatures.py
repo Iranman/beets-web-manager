@@ -49,8 +49,6 @@ KNOWN_UNBOUND_CALLS = {
     ("backend/matching_service.py", "get_artist_folder_album_mbids"),
     # library-transaction (later wave): mutation flows that would be switched ON
     ("backend/import_reconciliation_service.py", "apply_artist_folder_reconcile"),
-    ("backend/import_service.py", "reimport_source"),
-    ("backend/import_service.py", "apply_confirmed_import"),
     # integrations-automation: playlist shims (also return fabricated ok)
     ("backend/playlist_service.py", "get_playlist_quality_candidates"),
     ("backend/playlist_service.py", "validate_playlist_staged_track"),

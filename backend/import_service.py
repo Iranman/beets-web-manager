@@ -350,75 +350,6 @@ def _start_reimport_disk_job_internal(aldir: str, mb_albumid: str,
     return data["job_id"]
 
 
-def _validate_import_source_evidence(evidence: Dict[str, Any], log: list, *, reject_downloads: bool = True) -> Dict[str, Any]:
-    """Same policy as _validate_import_source_audio(), but evaluated against
-    already-computed engine-side audio evidence instead of walking the
-    source locally (SEC-002 Wave 8 ARCH-003: reimport_disk()'s source lives
-    on the Beets engine, not the web manager, so audio properties must come
-    from composite_workflows.inspect_import_source(), not a local ffprobe/rglob
-    pass this container cannot perform).
-
-    Uses validate_audio_properties() directly -- the pure, already-existing
-    evidence-in/decision-out half of the same code _validate_audio_tree_preferences()
-    calls -- so the accept/reject policy itself is identical, not
-    reimplemented.
-
-    Only _validate_import_source_audio()'s other six call sites (unrelated
-    to Wave 8) still use the local-filesystem path; this function is used
-    by reimport_disk() only. Rejected-download handling
-    (_handle_rejected_audio_download, which deletes/quarantines the file)
-    still assumes local access and is not migrated here -- rejections are
-    the uncommon case for an already-organized reimport source, and
-    building an engine-side quarantine/delete capability for that edge case
-    is deferred, not silently dropped (see docs/TECHNICAL_DEBT.md)."""
-    prefs = _music_format_preferences()
-    canonical_path = _s(evidence.get("canonical_path"))
-    try:
-        root_is_library = _path_is_under(Path(canonical_path).resolve(strict=False), MUSIC_ROOT.resolve(strict=False))
-    except Exception:
-        root_is_library = False
-
-    accepted: List[Dict[str, Any]] = []
-    rejected: List[Dict[str, Any]] = []
-    for entry in evidence.get("audio_files") or []:
-        rel = _s(entry.get("relative_path"))
-        abs_path = str(Path(canonical_path) / rel) if rel else canonical_path
-        result = _validate_audio_properties(entry.get("properties") or {}, prefs)
-        row = {"path": abs_path, **result}
-        (accepted if result.get("ok") else rejected).append(row)
-
-    for row in accepted:
-        msg = row.get("message") or "Accepted: audio matches Music Format Preferences"
-        log.append(f"  [audio] {msg}")
-    if not rejected:
-        return {"ok": True, "accepted": accepted, "rejected": rejected, "total": len(accepted)}
-
-    handled_results: List[Dict[str, Any]] = []
-    for row in rejected:
-        msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
-        log.append(f"  [audio] {msg}: {Path(row.get('path') or '').name}")
-        if reject_downloads and not root_is_library and row.get("path"):
-            log.append("  [audio] Rejected-file quarantine/delete requires local access this route no longer has; leaving file in place for manual review.")
-    if root_is_library:
-        _mark_music_format_needs_replacement([
-            {
-                "path": row.get("path"),
-                "status": "Needs replacement",
-                "reason": "; ".join(row.get("reasons") or ["does not match Music Format Preferences"]),
-                "audio": row.get("properties") or {},
-                "queued_retry": True,
-            }
-            for row in rejected
-        ])
-        raise RuntimeError(
-            "Existing library audio does not match Music Format Preferences. "
-            "Current files were kept and marked Needs replacement."
-        )
-    raise RuntimeError(
-        _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
-    )
-
-
 def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
     """Remove a temporary download folder after a failed candidate.
 
@@ -586,7 +517,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         return {"ok": False, "error": "Import source rejected."}, 400
     # Only the engine's own canonical path is ever used from here on --
     # the raw client-supplied aldir is never reused after this point.
-    aldir = str(import_source_evidence["canonical_path"])
+    aldir = str(import_source_evidence["path"])
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)
@@ -1203,81 +1134,33 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # transaction.
             log.append("  Orphan DB-row pre-cleanup for unowned folders: not performed (not_supported)")
 
-        # Uses the engine-supplied evidence captured at request time (see
-        # import_source_evidence above), not a local scan -- this route's
-        # source lives on the Beets engine, not the web manager.
-        _validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)
-        log.append(f"[1/3] Importing & tagging '{Path(aldir).name}' in-place with MB {mb_albumid}…")
-        import_timed_out = False
-        import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_count", 0))
-        # SEC-002 Wave 8 final mutation binding: the actual Beets import now
-        # runs through the engine's reviewed reimport_source_atomic() (POST
-        # /imports/reimport), not a bare `_beet_run(... "import" ...)`. This
-        # binds the final mutation itself -- not just the earlier inspect
-        # step -- to a fresh, engine-side re-verification of the source
-        # signature and, where real deterministic evidence exists, album
-        # identity, immediately before any file is touched. See
-        # docs/TECHNICAL_DEBT.md ("SEC-002 Wave 8: production reimport
-        # binding") for the evidence-selection rationale and known limits.
-        expected_identity: Dict[str, Any] = {}
-        if existing_album_id:
-            # Strong, DB-backed evidence: the engine looks this row up
-            # itself and only objects if the source audio's own embedded
-            # tags actively conflict with it -- absence of embedded tags
-            # (the common case for a folder being repaired in place) is not
-            # itself treated as a conflict. See verify_deterministic_identity().
-            expected_identity["existing_album_id"] = existing_album_id
-        else:
-            # No prior DB row exists. mb_albumid (already resolved, and for
-            # existing-library/known folders already preflight-matched
-            # above) is the only concrete deterministic claim available for
-            # a brand-new folder. If the source has no embedded MusicBrainz
-            # tags to confirm it against -- the common case for freshly
-            # downloaded, not-yet-tagged audio -- the engine correctly
-            # returns review_required rather than importing on trust alone.
-            expected_identity["mb_albumid"] = mb_albumid
-
+        # Web Manager mounts the downloads root and (read-only) the library
+        # in the documented compose, so the audio policy reads the files here.
+        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
+        import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
+        # Beets' own importer does the work (beet import -q --search-id
+        # <mb_albumid>) through the confirmed-import family: Beets looks the
+        # Release up, applies it and places the files; a source Beets cannot
+        # confidently match is skipped by Beets and goes to review. A library
+        # folder is imported in place; a download source is moved unless it
+        # is a preserved torrent source, which is copied (D10).
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("cancelled")
-        try:
-            atomic_res = composite_workflows.reimport_source(
-                aldir,
-                expected_source_signature=import_source_evidence.get("source_signature"),
-                expected_deterministic_identity=expected_identity,
-                beets_options={
-                    "mb_albumid": mb_albumid,
-                    "duplicate_action": "keep" if existing_album_id else "remove",
-                },
-                timeout=import_timeout + 15.0,
-            )
-        except BeetsAuthError:
-            raise RuntimeError("Beets engine authentication failed.")
-        except BeetsUnavailableError:
-            raise RuntimeError("Beets engine is unavailable.")
-        except BeetsError:
-            raise RuntimeError("Beets import request failed.")
-
+        plan_res = composite_workflows.plan_confirmed_import({
+            "source_folder": aldir,
+            "existing_album_id": existing_album_id,
+            "mb_albumid": mb_albumid,
+            "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir),
+            "in_place": source_is_music_library,
+            "duplicate_action": "keep" if existing_album_id else "skip",
+        })
+        atomic_res = composite_workflows.apply_confirmed_import(
+            plan_res["operation_id"], timeout=import_timeout + 15.0)
         if not atomic_res.get("ok"):
-            err_code = atomic_res.get("error_code", "import_failed")
-            err_msg = str(atomic_res.get("message") or err_code)
-            if err_code == "import_failed" and "timed out" in err_msg.lower():
-                # Soft-timeout recovery, matching the previous behavior: the
-                # Beets CLI process may exceed its timeout while having
-                # still completed the actual mutation. The web manager has
-                # its own authoritative read access to the same Beets
-                # library DB, so check directly rather than treating this
-                # as a hard failure immediately.
-                import_timed_out = True
-                log.append(f"  ⚠ Beets import timed out — checking if files were processed")
-            elif err_code in ("review_required", "identity_mismatch", "stale_source",
-                               "identity_verification_failed"):
-                _review_reasons = {
-                    "review_required": "Could not verify this source's MusicBrainz identity with enough confidence to import automatically.",
-                    "identity_mismatch": "This source's embedded MusicBrainz identity conflicts with the requested target; refusing to import automatically.",
-                    "stale_source": "Source files changed after they were inspected; refusing to import a possibly different set of files.",
-                    "identity_verification_failed": "Could not verify this source's identity against the library database.",
-                }
-                review_reason = _review_reasons[err_code]
+            if atomic_res.get("code") == "not_imported":
+                review_reason = ("Beets could not confidently match this source to the selected "
+                                 "MusicBrainz release.")
                 _maybe_queue_review(
                     aldir,
                     {
@@ -1293,54 +1176,13 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     allow_existing=bool(existing_album_id),
                 )
                 raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
-            else:
-                raise RuntimeError(f"Beets import failed ({err_code}).")
-
-        # atomic_res never carries raw stdout/stderr (SEC-002 Wave 8
-        # sanitization). The previous "already in the library" phrase-
-        # detection cleanup relied on that text and, in the shipped
-        # topology, already had no local view of engine-owned download
-        # paths to act on regardless -- calling it with an empty string
-        # preserves its existing (already inert here) behavior.
-        _delete_if_already_in_library(aldir, "", log)
+            raise RuntimeError(atomic_res.get("error") or "Beets import failed.")
 
         # ── Find album in DB ───────────────────────────────────────────────────
         log.append("[2/3] Locating album in library…")
-        album_ids: list = []
         item_ids: list = []
-        strategy = ""
-
-        if not import_timed_out and atomic_res.get("ok"):
-            aid = atomic_res.get("album_id")
-            if aid and atomic_res.get("album_id_verified") and not atomic_res.get("album_lookup_failed"):
-                album_ids = [int(aid)]
-                strategy = "engine-verified mb_albumid"
-            else:
-                raise RuntimeError(
-                    "Beets import completed but the engine could not deterministically "
-                    "verify the resulting album; refusing to guess which library row it "
-                    "created."
-                )
-        else:
-            # Soft-timeout recovery: the mutation call itself reported a
-            # timeout, so fall back to a direct, deterministic lookup by
-            # mb_albumid via composite_workflows (the same authoritative key the
-            # engine's own atomic endpoint uses), never a heuristic path/name guess.
-            time.sleep(1)
-            try:
-                mb_albums = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
-                for malb in mb_albums:
-                    m_aid = int(malb.get("id") or 0)
-                    if m_aid:
-                        items = composite_workflows.find_all_items_by_album_id(m_aid)
-                        if items:
-                            album_ids = [m_aid]
-                            strategy = "post-timeout mb_albumid lookup"
-                            break
-            except Exception as ex:
-                log.append(f"  DB warning (post-timeout lookup): {ex}")
-            if not album_ids:
-                raise RuntimeError("import timed out and album was not found in the Beets DB")
+        album_ids = [int(atomic_res["album_id"])]
+        strategy = "Beets import verified by mb_albumid"
 
         log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
 
@@ -3500,7 +3342,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "mb_releasegroupid": selected_releasegroupid,
             "mb_release_group_resolved": resolved_releasegroupid,
             "mb_tracks": mb_identity.get("tracks") or [],
-            "use_move": use_move,
+            # The mode decided above: a preserved torrent source is copied.
+            "use_move": import_mode == "--move",
+            "duplicate_action": "keep" if existing_album_id else "skip",
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
@@ -3520,6 +3364,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         try:
             apply_res = composite_workflows.apply_confirmed_import(
                 plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
+                timeout=import_timeout + 15.0,
             )
         except (BeetsError, BeetsUnavailableError) as ex:
             diag = getattr(ex, "diagnostics", None) or {}
@@ -3530,7 +3375,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if diag.get("stderr_excerpt"):
                 log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
             raise
-        log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+        if not apply_res.get("ok"):
+            raise RuntimeError(apply_res.get("error") or "Beets import failed.")
+        log.append(f"[import] Beets import completed: {import_folder_path}")
         if apply_res.get("resumed"):
             log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")
         confirmed_import_album_id = int(apply_res.get("album_id") or 0)

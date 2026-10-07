@@ -654,8 +654,17 @@ class BeetsAdapter:
         set_fields: Optional[Dict[str, Any]] = None,
         is_async: bool = False,
         idempotency_key: Optional[str] = None,
+        search_ids: Optional[List[str]] = None,
+        quiet_fallback: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Execute non-interactive import inside Beets."""
+        """Execute a non-interactive import with Beets' own ImportSession.
+
+        ``search_ids`` and ``quiet_fallback`` are Beets' native
+        ``import.search_ids`` / ``import.quiet_fallback`` settings (the
+        ``--search-id`` flag and quiet-mode fallback). They are only sent
+        when given, so a plugin that does not know them never sees them.
+        """
         payload = {
             "paths": [paths] if isinstance(paths, str) else paths,
             "autotag": autotag,
@@ -669,13 +678,17 @@ class BeetsAdapter:
             "set_fields": set_fields or {},
             "async": is_async,
         }
+        if search_ids:
+            payload["search_ids"] = list(search_ids)
+        if quiet_fallback:
+            payload["quiet_fallback"] = quiet_fallback
         headers = {}
         if is_async:
             headers["Prefer"] = "respond-async"
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
 
-        return self._request("POST", "/webmanager/import", json_data=payload, headers=headers)
+        return self._request("POST", "/webmanager/import", json_data=payload, headers=headers, timeout=timeout)
 
     def modify(
         self,

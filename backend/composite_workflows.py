@@ -3103,15 +3103,52 @@ def rollback_import_review_cleanup(
     return res
 
 
+#: Error codes the webmanager plugin's POST /webmanager/import answers with,
+#: mapped to an operator-facing message. Nothing was imported in any of them.
+_IMPORT_REFUSALS = {
+    "AUTOTAG_NOT_ALLOWED": (
+        "The webmanager Beets plugin refuses imports that use Beets' own autotagger "
+        "(AUTOTAG_NOT_ALLOWED). Web Manager imports through Beets' importer and "
+        "MusicBrainz lookup, so this plugin version cannot import. Nothing was imported."),
+    "PATH_NOT_ALLOWED": (
+        "The import source is not inside one of the Beets plugin's import roots "
+        "(webmanager.import_roots, default /downloads). Nothing was imported."),
+    "SOURCE_NOT_FOUND": "Beets cannot see the import source folder. Nothing was imported.",
+    "INVALID_PATHS": "No import source folder was given. Nothing was imported.",
+    "INVALID_DUPLICATE_ACTION": "The import request was malformed. Nothing was imported.",
+}
+
+
+def _import_refused(ex: Exception) -> Dict[str, Any]:
+    """A clean ok=false result for a Beets import the plugin rejected or
+    could not run. Never carries the raw upstream body."""
+    code = _s(getattr(ex, "error_code", "") or "").upper()
+    if code in _IMPORT_REFUSALS:
+        return {"ok": False, "code": code.lower(), "mutated": False, "error": _IMPORT_REFUSALS[code]}
+    if isinstance(ex, (BeetsAdapterConnectionError, BeetsAdapterTimeoutError)):
+        return {"ok": False, "code": "beets_unavailable", "mutated": None,
+                "error": "Beets did not answer the import request; check the Beets container and the library."}
+    return {"ok": False, "code": (code or "import_failed").lower(), "mutated": None,
+            "error": "Beets reported that the import failed; see the Beets log for details."}
+
+
+_QUIET_FALLBACKS = ("skip", "asis")
+_CONFIRMED_DUPLICATE_ACTIONS = ("skip", "keep")
+
+
 def plan_confirmed_import(
     payload: Dict[str, Any],
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Record a confirmed import of one source folder as a chosen MusicBrainz
+    Release (``mb_albumid``; ``mb_releasegroupid`` when known). Nothing runs
+    until apply_confirmed_import()."""
     st = _get_store(store)
+    source = payload.get("source_folder") or payload.get("paths") or payload.get("path")
     tx = st.create(
         operation_type="Import",
         status="Preview",
-        summary=f"Confirmed non-interactive import for {payload.get('paths') or payload.get('path')}",
+        summary=f"Confirmed import of {source} as MusicBrainz release {payload.get('mb_albumid') or '?'}",
         metadata=payload,
     )
     return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **payload}
@@ -3121,20 +3158,77 @@ def apply_confirmed_import(
     operation_id: str,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    acceptance_failpoint: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
+    """Import the planned folder with Beets' own importer, pinned to the
+    confirmed Release: autotag on, ``search_ids=[mb_albumid]`` (``beet import
+    -q --search-id``), quiet fallback ``skip``. Beets looks the Release up on
+    MusicBrainz, applies it and places the files; Web Manager only verifies
+    the album row it produced. A source Beets would not confidently match is
+    skipped by Beets and reported as ``not_imported`` -- never imported as-is.
+
+    Copy unless the plan says ``use_move: True`` (the caller has already
+    applied the preserved-torrent-source rule) or ``in_place: True`` (a
+    folder already inside the library: neither copy nor move). ``acceptance_failpoint`` is
+    accepted for the old engine's acceptance harness and ignored: the
+    webmanager plugin has no failpoints. Every outcome leaves the transaction
+    Completed or Failed, never Preview."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     tx = st.get(operation_id)
-    meta = tx.get("metadata", {})
-    paths = meta.get("paths") or meta.get("path") or []
-    fields = meta.get("fields") or meta.get("set_fields") or {}
-    # LT-17: honour the caller's copy/move choice (it used to force move=True,
-    # so a "copy" import consumed its source).
-    use_move = meta.get("use_move", True) is not False
-    res = ad.run_import(paths=paths, autotag=False, copy=not use_move, move=use_move, write=True,
-                        set_fields=fields)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed", "result": res}
+    meta = tx.get("metadata") or {}
+    paths = meta.get("source_folder") or meta.get("paths") or meta.get("path") or []
+    release_id = _uuid_or_blank(meta.get("mb_albumid"))
+    planned_rg = _s(meta.get("mb_releasegroupid")).strip().lower()
+    in_place = meta.get("in_place") is True
+    use_move = meta.get("use_move") is True and not in_place
+    duplicate_action = _s(meta.get("duplicate_action") or "skip").lower()
+
+    def _fail(expected: str, code: str, error: str, mutated: Any = False) -> Dict[str, Any]:
+        st.transition(operation_id, expected, "Failed", logs=[f"Apply failed ({code}): {error}"])
+        return {"ok": False, "code": code, "operation_id": operation_id, "status": "Failed",
+                "mutated": mutated, "error": error}
+
+    if not paths or not release_id or (planned_rg and not _uuid_or_blank(planned_rg)) \
+            or duplicate_action not in _CONFIRMED_DUPLICATE_ACTIONS:
+        status = tx.get("status")
+        if status not in ("Preview", "Approved"):
+            return _apply_refused(st, operation_id)
+        return _fail(status, "invalid_plan",
+                     "The import plan needs a source folder and a valid MusicBrainz Release ID; nothing was imported.")
+    if _claim_apply(st, operation_id, metadata={"engine_result": {"mutation_started": True}}) is None:
+        return _apply_refused(st, operation_id)
+    try:
+        before = {int(a.get("id") or 0) for a in ad.find_all_albums_by_mb_albumid(release_id)}
+        ad.run_import(paths=paths, autotag=True, search_ids=[release_id], quiet_fallback="skip",
+                      duplicate_action=duplicate_action, copy=not (use_move or in_place), move=use_move, write=True,
+                      timeout=timeout)
+        new = [a for a in ad.find_all_albums_by_mb_albumid(release_id) if int(a.get("id") or 0) not in before]
+    except Exception as ex:  # any failure ends Failed, never a stuck Running/Preview row
+        refused = _import_refused(ex)
+        return _fail("Running", refused["code"], refused["error"], refused["mutated"])
+    if not new:
+        return _fail("Running", "not_imported",
+                     "Beets did not import this folder as the selected release (no confident match, "
+                     "or the release is already in the library). Nothing was imported; review the folder.")
+    if len(new) > 1:
+        return _fail("Running", "import_ambiguous",
+                     f"Beets created {len(new)} album rows for this release; review them before continuing.",
+                     mutated=True)
+    album = new[0]
+    album_id = int(album.get("id") or 0)
+    got_rg = _s(album.get("mb_releasegroupid")).strip().lower()
+    if planned_rg and got_rg != planned_rg:
+        return _fail("Running", "release_group_mismatch",
+                     f"Beets imported album {album_id} with a different Release Group than the one confirmed; "
+                     "review it before continuing.", mutated=True)
+    item_ids = [int(i.get("id")) for i in ad.find_all_items_by_album_id(album_id) if i.get("id") is not None]
+    st.transition(operation_id, "Running", "Completed",
+                  metadata={"engine_result": {"album_id": album_id, "item_ids": item_ids,
+                                              "mb_releasegroupid": got_rg}})
+    return {"ok": True, "operation_id": operation_id, "status": "Completed", "album_id": album_id,
+            "item_ids": item_ids, "album_id_verified": True, "mb_releasegroupid": got_rg}
 
 
 def rollback_import_folder(
@@ -3150,15 +3244,29 @@ def reimport_source(
     timeout: float = 300.0,
     adapter: Optional[BeetsAdapter] = None,
 ) -> Dict[str, Any]:
-    """Trigger native Beets import on a source path."""
+    """``beet import -q`` on a source folder through the webmanager plugin:
+    Beets' own importer and autotagger decide the match and place the files.
+
+    beets_options: ``copy`` (wins over ``move``), ``move`` (default False),
+    ``write`` (default True), ``quiet_fallback`` (``skip`` default, or
+    ``asis``) and ``search_id`` (a Release ID, Beets' ``--search-id``).
+    Returns ok=False with a clean error when the plugin refuses or fails."""
     ad = adapter or beets_adapter
     opts = beets_options or {}
-    return ad.run_import(
-        paths=path,
-        autotag=opts.get("autotag", True),
-        move=opts.get("move", True),
-        write=opts.get("write", True),
-    )
+    move = bool(opts.get("move")) and not opts.get("copy")
+    fallback = _s(opts.get("quiet_fallback") or "skip").strip().lower()
+    if fallback not in _QUIET_FALLBACKS:
+        return {"ok": False, "code": "invalid_fallback", "mutated": False,
+                "error": "quiet_fallback must be 'skip' or 'asis'."}
+    search_id = _s(opts.get("search_id")).strip()
+    try:
+        res = ad.run_import(paths=path, autotag=True, copy=not move, move=move,
+                            write=opts.get("write", True) is not False,
+                            search_ids=[search_id] if search_id else None,
+                            quiet_fallback=fallback, timeout=timeout)
+    except BeetsAdapterError as ex:
+        return _import_refused(ex)
+    return {"ok": True, "copy": not move, "move": move, "result": res}
 
 
 # -----------------------------------------------------------------------------

@@ -1549,11 +1549,16 @@ def start_import():
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
     path     = str(validated_path)
-    fallback = payload.get("fallback", "asis")   # asis | skip
+    fallback = _s(payload.get("fallback") or "asis").strip().lower()   # asis | skip (Beets quiet_fallback)
+    if fallback not in ("asis", "skip"):
+        return jsonify({"ok": False, "error": "fallback must be 'asis' or 'skip'"}), 400
     write    = payload.get("write", True)
     move     = payload.get("move", False)
     noincremental = payload.get("reimport", False)   # "reimport" key kept for JS compat
-    search_id     = payload.get("search_id", "").strip()
+    raw_search_id = _s(payload.get("search_id")).strip()
+    search_id     = _extract_mb_uuid(raw_search_id)   # Beets --search-id (a Release ID)
+    if raw_search_id and not search_id:
+        return jsonify({"ok": False, "error": "search_id must be a MusicBrainz Release ID or URL"}), 400
     # Auto-create directory so import always starts
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -1577,12 +1582,17 @@ def start_import():
 
     def _do(log, cancel_event=None):
         _validate_import_source_audio(path, log, reject_downloads=True)
-        beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source}
+        # Beets' own importer (beet import -q): a preserved torrent source is
+        # always copied; anything else is copied unless move was requested.
+        beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source or not move,
+                         "move": bool(move) and not preserve_torrent_source, "write": write}
         if search_id:
             beets_options["search_id"] = search_id
+        log.append(f"[import] Beets import ({'move' if beets_options['move'] else 'copy'}, "
+                   f"quiet fallback {fallback}{', search id ' + search_id if search_id else ''})")
         res = composite_workflows.reimport_source(path, beets_options=beets_options, timeout=300.0)
         if not res.get("ok"):
-            raise RuntimeError(f"Engine import failed: {res.get('error', 'reimport_source failed')}")
+            raise RuntimeError(res.get("error") or "Beets import failed.")
         combined = ""
         _delete_if_already_in_library(path, combined, log)
         _invalidate_lib_cache()

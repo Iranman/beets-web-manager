@@ -164,6 +164,17 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
 - Priority: P2. Status: Open.
 
+## ARCH-024 Imports Need Beets' Autotagger In The webmanager Plugin
+
+- Affected area: `beetsplug/webmanager/operations.py` (`run_import`), `backend/beets_plugins.py` (Beets plugin provisioning), `backend/import_service.py`.
+- Evidence:
+  - webmanager plugin 1.6.2 rejects `autotag: true` (`AUTOTAG_NOT_ALLOWED`) and always runs the importer with `autotag: no`, ignores `search_ids` and `quiet_fallback`, and uses the bare `ImportSession`, whose `choose_match` raises `NotImplementedError` once autotag is on. Web Manager now sends the Beets-native request (see "Import contract" in `ARCHITECTURE.md`), so every import route fails cleanly until the plugin accepts it.
+  - Verified against `lscr.io/linuxserver/beets:latest` (Beets 2.14.1): Beets loads MusicBrainz as a plugin, so `musicbrainz` must be in `plugins:` when a `plugins:` list exists. Without it Beets finds no candidates and every confirmed import is skipped (`not_imported`). `docs/CONFIGURATION.md` still says MusicBrainz needs no `plugins:` entry.
+  - import-with-id and reimport-disk still retag after the import (`_match_tracks_from_mb`, `plan_album_mb_track_repair`, `relocate_album`). Once Beets applies the confirmed Release itself these steps repeat its work and should be reduced to verification.
+  - A reimport-disk source inside the library needs the plugin to accept an in-place import (no copy, no move) from the library directory; today it is refused with `path_not_allowed`.
+- Desired state: the plugin runs Beets' quiet import with autotag, `search_ids` and `quiet_fallback`; provisioning enables `musicbrainz`; Web Manager only verifies.
+- Priority: P1 (no import works without it). Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
