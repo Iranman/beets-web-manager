@@ -174,7 +174,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.6.0")
+        self.assertEqual(data["plugin_version"], "1.6.1")
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
         for key in ("allowed_roots", "import_roots", "library_directory", "fpcalc_available", "ffmpeg_available"):
@@ -187,7 +187,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.6.0")
+        self.assertEqual(PLUGIN_VERSION, "1.6.1")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(
@@ -699,6 +699,43 @@ class WebManagerPhase3MutationTests(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.get_json()["result"]["processed_albums"], 0)
+
+
+class DerivedAllowedRootsTests(unittest.TestCase):
+    """S-5: a Beets ``directory`` of ``/`` or an ancestor of the config dir
+    must not become a mutation root (config.yaml / API key in scope)."""
+
+    def setUp(self):
+        ops_mod.set_import_roots(["/downloads"])
+        self.addCleanup(ops_mod.set_import_roots, None)
+        self.config_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.config_dir, True)
+
+    def _derived(self, directory):
+        with patch.object(ops_mod, "get_library_directory", return_value=directory),                 patch.object(ops_mod.beets_config, "config_dir", return_value=self.config_dir):
+            return ops_mod._derived_allowed_roots()
+
+    def test_root_and_config_ancestors_fall_back_to_defaults(self):
+        for directory in ("/", "/config", self.config_dir, os.path.dirname(self.config_dir)):
+            self.assertEqual(self._derived(directory), list(ops_mod.DEFAULT_ALLOWED_ROOTS), directory)
+
+    def test_import_roots_covering_config_dir_are_skipped(self):
+        music = os.path.join(self.config_dir + "-music", "lib")
+        for bad in (["/"], ["/config"], [self.config_dir], ["/downloads", os.path.dirname(self.config_dir)]):
+            ops_mod.set_import_roots(bad)
+            roots = self._derived(music)
+            self.assertEqual(roots[0], os.path.normpath(music), bad)
+            for root in roots:
+                self.assertFalse(ops_mod._covers_config_dir(root), (bad, roots))
+        ops_mod.set_import_roots(["/downloads", "/config"])
+        with self.assertLogs("beets.webmanager", level="WARNING") as logs:
+            self.assertEqual(self._derived(music), [os.path.normpath(music), "/downloads"])
+        self.assertIn("webmanager.allowed_roots", logs.output[0])
+        self.assertIn("/config", logs.output[0])
+
+    def test_normal_library_directory_is_used(self):
+        music = os.path.join(self.config_dir + "-music", "lib")
+        self.assertEqual(self._derived(music), [os.path.normpath(music), "/downloads"])
 
 
 if __name__ == "__main__":
