@@ -33231,10 +33231,10 @@
    "module": "routes_maintenance.py",
    "lines": [
     638,
-    657
+    664
    ],
-   "size": 20,
-   "body_lines": 10,
+   "size": 27,
+   "body_lines": 17,
    "route": {
     "method": "GET",
     "path": "/api/transactions"
@@ -33246,6 +33246,7 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
+    "_rollback_fields",
     "_sync_transactions_from_jobs",
     "_transaction_int_arg"
    ]
@@ -33254,11 +33255,11 @@
    "name": "api_transaction_detail",
    "module": "routes_maintenance.py",
    "lines": [
-    661,
-    677
+    668,
+    685
    ],
-   "size": 17,
-   "body_lines": 10,
+   "size": 18,
+   "body_lines": 11,
    "route": {
     "method": "GET",
     "path": "/api/transactions/<transaction_id>"
@@ -33270,6 +33271,7 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
+    "_rollback_fields",
     "_sync_transactions_from_jobs",
     "_transaction_int_arg"
    ]
@@ -33278,8 +33280,8 @@
    "name": "api_transaction_approve",
    "module": "routes_maintenance.py",
    "lines": [
-    681,
-    710
+    689,
+    718
    ],
    "size": 30,
    "body_lines": 21,
@@ -33299,8 +33301,8 @@
    "name": "api_transaction_cancel",
    "module": "routes_maintenance.py",
    "lines": [
-    714,
-    727
+    722,
+    735
    ],
    "size": 14,
    "body_lines": 11,
@@ -33320,11 +33322,11 @@
    "name": "_item_file_replacement_response",
    "module": "routes_maintenance.py",
    "lines": [
-    730,
-    746
+    738,
+    756
    ],
-   "size": 17,
-   "body_lines": 11,
+   "size": 19,
+   "body_lines": 13,
    "route": null,
    "mutation_capable": false,
    "domain": "REPLACEMENT",
@@ -33341,11 +33343,54 @@
    ]
   },
   {
+   "name": "rollback_eligibility",
+   "module": "routes_maintenance.py",
+   "lines": [
+    792,
+    830
+   ],
+   "size": 39,
+   "body_lines": 23,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_rollback_fields"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_rollback_fields",
+   "module": "routes_maintenance.py",
+   "lines": [
+    833,
+    837
+   ],
+   "size": 5,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "api_transaction_detail",
+    "api_transactions_list"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "rollback_eligibility"
+   ]
+  },
+  {
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    779,
-    801
+    841,
+    863
    ],
    "size": 23,
    "body_lines": 22,
@@ -33369,11 +33414,11 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    805,
-    962
+    867,
+    1034
    ],
-   "size": 158,
-   "body_lines": 157,
+   "size": 168,
+   "body_lines": 167,
    "route": {
     "method": "POST",
     "path": "/api/transactions/<transaction_id>/rollback"
@@ -33395,8 +33440,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    966,
-    975
+    1038,
+    1047
    ],
    "size": 10,
    "body_lines": 9,
@@ -33416,8 +33461,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    978,
-    983
+    1050,
+    1055
    ],
    "size": 6,
    "body_lines": 5,
