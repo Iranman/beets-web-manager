@@ -128,7 +128,9 @@ class ClaimRacesCancelTests(_RouteEnv):
         import backend.transaction_service as ts
         op = self._metadata_tx("Cancelled")
         for status in ("running", "failed", "success"):
-            with self.subTest(job=status), mock.patch.object(ts, "transactions", self.store),                     mock.patch.object(ts.jobs, "all", return_value=[self._job(op, status)]):
+            with (self.subTest(job=status),
+                  mock.patch.object(ts, "transactions", self.store),
+                  mock.patch.object(ts.jobs, "all", return_value=[self._job(op, status)])):
                 ts._sync_transactions_from_jobs()
             self.assertEqual(self.store.get(op)["status"], "Cancelled")
 
@@ -140,10 +142,56 @@ class ClaimRacesCancelTests(_RouteEnv):
     def test_metadata_job_start_failure_marks_failed(self):
         import backend.transaction_service as ts
         op = self._metadata_tx()
-        with mock.patch.object(ts, "transactions", self.store),                 mock.patch.object(ts.jobs, "start_python", side_effect=RuntimeError("boom")):
+        with (mock.patch.object(ts, "transactions", self.store),
+              mock.patch.object(ts.jobs, "start_python", side_effect=RuntimeError("boom"))):
             with self.assertRaises(RuntimeError):
                 ts._start_metadata_apply_transaction(op)
         self.assertEqual(self.store.get(op)["status"], "Failed")
+
+
+class HookJobCancelTests(_RouteEnv):
+    """QA-217-7: a hook-created transaction whose job the user cancels ends
+    Cancelled (real JobStore and hook; job sync no longer corrects it)."""
+
+    def _run(self, *, cancel, raise_):
+        import threading
+        import time
+        import backend.transaction_service as ts
+        from job_engine import JobStore
+        store_jobs = JobStore(self.data / "jobs")
+        go = threading.Event()
+
+        def body(log, cancel_event=None):
+            go.wait(5)
+            if raise_:
+                raise RuntimeError("body failed")
+            return {"ok": True}
+
+        with (mock.patch.object(ts, "jobs", store_jobs),
+              mock.patch.object(ts, "transactions", self.store)):
+            ts._install_transaction_job_hooks()
+            job = store_jobs.start_python(body, label="Library cleanup",
+                                          metadata={"transaction": {"operation_type": "Delete"}})
+            if cancel:
+                job.kill()  # the cancel button
+            go.set()
+            deadline = time.time() + 5
+            while job.status == "running" and time.time() < deadline:
+                time.sleep(0.01)
+            ts._sync_transactions_from_jobs()
+        return job.status, self.store.get(job.metadata["transaction_id"])["status"]
+
+    def test_cancel_then_return(self):
+        self.assertEqual(self._run(cancel=True, raise_=False), ("cancelled", "Cancelled"))
+
+    def test_cancel_then_raise(self):
+        self.assertEqual(self._run(cancel=True, raise_=True), ("cancelled", "Cancelled"))
+
+    def test_failure_without_cancel_stays_failed(self):
+        self.assertEqual(self._run(cancel=False, raise_=True), ("failed", "Failed"))
+
+    def test_success_without_cancel_completes(self):
+        self.assertEqual(self._run(cancel=False, raise_=False), ("success", "Completed"))
 
 
 class ApproveNeverResurrectsTests(_RouteEnv):

@@ -124,15 +124,23 @@ def _install_transaction_job_hooks() -> None:
             metadata_payload["transaction_id"] = tx_id
 
             def wrapped(log, cancel=None, update_state=None):
+                # The final status mirrors job_engine's own rule: a set cancel
+                # event (or a "cancelled" exception) makes the job cancelled,
+                # so the transaction is Cancelled too. Job sync no longer
+                # corrects a final status afterwards (QA-217-7).
+                def cancelled(ex=None):
+                    return bool(cancel is not None and cancel.is_set()) or \
+                        (ex is not None and str(ex).strip().lower() == "cancelled")
+
                 transactions.update(tx_id, status="Running")
                 try:
                     result = _call_job_fn(fn, log, cancel, update_state)
                 except Exception as ex:
-                    transactions.update(tx_id, status="Failed")
+                    transactions.update(tx_id, status="Cancelled" if cancelled(ex) else "Failed")
                     transactions.append_log(tx_id, f"ERROR: {ex}")
                     raise
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
-                transactions.update(tx_id, status=next_status)
+                transactions.update(tx_id, status="Cancelled" if cancelled() else next_status)
                 return result
         else:
             wrapped = fn
