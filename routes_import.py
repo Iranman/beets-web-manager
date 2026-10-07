@@ -120,8 +120,11 @@ def delete_import_review_folder():
 
     if not confirmed_wrong_library_folder and not missing_mbid_album_match:
         if _AI_PENDING_FILE.exists() and not _pending_review_matches(src_path, ""):
-            return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match.", "log": log}), 400
+            return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match."}), 400
 
+    # CodeQL #1388: the ValueError and the log carry executor and exception
+    # text (paths, raw errors). Both stay in the server log; the client gets
+    # one fixed message per refusal kind and no log.
     try:
         result = _delete_review_source_folder(
             src_path,
@@ -129,12 +132,15 @@ def delete_import_review_folder():
             confirmed_wrong_library_folder=confirmed_wrong_library_folder or missing_mbid_album_match,
             album_id=album_id if missing_mbid_album_match else 0,
         )
-        return jsonify({"ok": True, **result, "log": log})
+        _app_logger.info("delete_import_review_folder log for %r: %r", src_path, log)
+        return jsonify({"ok": True, **result})
     except ValueError as ex:
-        return jsonify({"ok": False, "error": str(ex), "log": log}), 400
+        _app_logger.warning("delete_import_review_folder refused for %r: %r; log: %r", src_path, ex, log)
+        return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(
+            {"error": str(ex)}, "Could not delete source folder.")}), 400
     except Exception as ex:
-        _app_logger.warning("delete_import_review_folder failed for %r: %s", src_path, type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not delete source folder.", "log": log}), 500
+        _app_logger.warning("delete_import_review_folder failed for %r: %s; log: %r", src_path, type(ex).__name__, log)
+        return jsonify({"ok": False, "error": "Could not delete source folder."}), 500
 
 
 # CodeQL #1365: the planner's error can be raw ValueError text with resolved
@@ -161,10 +167,18 @@ _IMPORT_REVIEW_PLAN_ERRORS = (
     ("Target path ", " is outside allowed root boundaries.", "Review folder or file is outside the allowed cleanup roots."),
     ("Source path ", " is outside allowed root boundaries.", "Review folder or file is outside the allowed cleanup roots."),
     ("Invalid review folder path.", "", "Invalid cleanup request."),
+    ("Invalid cleanup request.", "", "Invalid cleanup request."),
+    # Coded engine refusals, for callers that only see the text (the folder
+    # delete route gets a bare ValueError from _delete_review_source_folder).
+    ("Cleanup target ", "; refusing.", _IMPORT_REVIEW_PLAN_CODE_ERRORS["import_review_target_contains_library"]),
+    ("", " is inside the music library; deleting it needs the library-delete gate.",
+     _IMPORT_REVIEW_PLAN_CODE_ERRORS["import_review_library_delete_refused"]),
+    ("Allowed cleanup root ", "", _IMPORT_REVIEW_PLAN_CODE_ERRORS["import_review_unsafe_root"]),
 )
 
 
-def _import_review_cleanup_plan_error(plan_res: Dict[str, Any]) -> str:
+def _import_review_cleanup_plan_error(plan_res: Dict[str, Any],
+                                      default: str = "Failed to create file cleanup plan.") -> str:
     by_code = _IMPORT_REVIEW_PLAN_CODE_ERRORS.get(str(plan_res.get("code") or ""))
     if by_code:
         return by_code
@@ -172,7 +186,7 @@ def _import_review_cleanup_plan_error(plan_res: Dict[str, Any]) -> str:
     for prefix, suffix, message in _IMPORT_REVIEW_PLAN_ERRORS:
         if text.startswith(prefix) and text.endswith(suffix):
             return message
-    return "Failed to create file cleanup plan."
+    return default
 
 
 @app.post("/api/import/review-files/cleanup")
