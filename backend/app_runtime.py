@@ -303,14 +303,19 @@ SLSKD_URL     = os.environ.get("SLSKD_URL",     "http://slskd:5030")
 DOWNLOADS_ROOT = DOWNLOADS_CONTAINER_ROOT
 
 
+# DOWNLOADS_ROOT as an allowlist entry: empty when it is "/" or overlaps the
+# library, so a misconfiguration fails closed (the setup check blocks on it).
+DOWNLOADS_ALLOWED_ROOTS = _config_layers.safe_roots("DOWNLOADS_ROOT", [DOWNLOADS_ROOT], _MUSIC_ROOT_SETTING)
+
+
 DEFAULT_TORRENT_SOURCE_ROOTS = str(DOWNLOADS_ROOT)
 
 
-TORRENT_SOURCE_ROOTS = tuple(
-    Path(value.strip())
+TORRENT_SOURCE_ROOTS = _config_layers.safe_roots("TORRENT_SOURCE_ROOTS", (
+    value.strip()
     for value in os.environ.get("TORRENT_SOURCE_ROOTS", DEFAULT_TORRENT_SOURCE_ROOTS).split(",")
     if value.strip()
-)
+), _MUSIC_ROOT_SETTING)
 
 
 TORRENT_SOURCE_MOVE_ALLOWED = _env_flag("ALLOW_TORRENT_SOURCE_MOVE", False)
@@ -357,14 +362,14 @@ QBIT_FILTER = (
 QBIT_PATH_ALIASES = os.environ.get("QBIT_PATH_ALIASES", "")
 
 
-QBIT_REPAIR_ALLOWED_ROOTS = tuple(
-    Path(value.strip())
+QBIT_REPAIR_ALLOWED_ROOTS = _config_layers.safe_roots("QBIT_REPAIR_ALLOWED_ROOTS", (
+    value.strip()
     for value in os.environ.get(
         "QBIT_REPAIR_ALLOWED_ROOTS",
         str(DOWNLOADS_ROOT),
     ).split(",")
     if value.strip()
-)
+), _MUSIC_ROOT_SETTING)
 
 
 YTDLP_COOKIE_FILE = os.environ.get("YTDLP_COOKIE_FILE", "").strip()

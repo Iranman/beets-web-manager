@@ -307,6 +307,42 @@ def downloads_root(environ: Optional[Dict[str, str]] = None) -> str:
     return container_path("DOWNLOADS_ROOT", "/downloads", environ=environ)
 
 
+UNSAFE_DOWNLOADS_ROOT_MESSAGE = (
+    "DOWNLOADS_ROOT is the filesystem root or overlaps the music library (MUSIC_ROOT), so it is "
+    "not used for any download, import or cleanup operation. Set DOWNLOADS_ROOT to a separate "
+    "downloads mount that is neither inside nor around the library."
+)
+
+
+def unsafe_root_reason(root, music_root_path) -> str:
+    """Why a configured download/staging root must not authorize file
+    operations, or "" when it may: the filesystem root, or a root that
+    overlaps the music library (equal to it, inside it, or containing it)."""
+    try:
+        rp = Path(os.path.realpath(str(root)))
+        mp = Path(os.path.realpath(str(music_root_path)))
+    except (TypeError, ValueError):
+        return "it is not a valid path"
+    if rp == Path(rp.anchor):
+        return "it is the filesystem root"
+    if rp == mp or mp in rp.parents or rp in mp.parents:
+        return "it overlaps the music library"
+    return ""
+
+
+def safe_roots(name: str, roots: Iterable, music_root_path) -> Tuple[Path, ...]:
+    """``roots`` without the unsafe ones (fail closed); each dropped root is
+    logged as an error naming the setting."""
+    kept: List[Path] = []
+    for root in roots:
+        reason = unsafe_root_reason(root, music_root_path)
+        if reason:
+            log.error("%s entry %s is ignored: %s.", name, root, reason)
+        elif Path(root) not in kept:
+            kept.append(Path(root))
+    return tuple(kept)
+
+
 def beets_config_file(environ: Optional[Dict[str, str]] = None) -> str:
     return container_path("BEETS_CONFIG", "/config/config.yaml", environ=environ)
 

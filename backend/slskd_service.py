@@ -933,19 +933,14 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             return str(f.parent), filtered
         return "", []
 
+    # Security F1: only the configured download roots, never their parent,
+    # "/" or fixed paths; an unsafe DOWNLOADS_ROOT drops out (fail closed).
+    from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, _path_is_under
     roots: List[Path] = []
     user_root = DOWNLOADS_ROOT / username
-    for raw in (
-        expected,
-        user_root,
-        DOWNLOADS_ROOT,
-        DOWNLOADS_ROOT.parent,
-        "/data/downloads",
-        "/downloads",
-        "/download",
-        "/tmp",
-    ):
-        _root_add(roots, raw)
+    for raw in (expected, user_root, *DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS):
+        if raw and any(_path_is_under(Path(str(raw)), base) for base in (*DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS)):
+            _root_add(roots, raw)
 
     folder, files = _scan_direct_album_dirs()
     if files:
@@ -966,8 +961,9 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             static_hint_logged = True
         hint_roots = roots[:]
         for hp in hint_paths:
-            _root_add(hint_roots, hp)
-            _root_add(hint_roots, hp.parent)
+            for candidate in (hp, hp.parent):
+                if any(_path_is_under(candidate, base) for base in roots):
+                    _root_add(hint_roots, candidate)
         folder, files = _scan_exact(hint_roots)
         if files:
             return folder, files
@@ -986,7 +982,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
 
     log.append(
         "  [slskd] Could not locate completed queued files. "
-        "Checked transfer hints, expected dir, /data/torrents/music, /data/downloads, /downloads, /download, /tmp."
+        f"Checked transfer hints, expected dir, {DOWNLOADS_ROOT} and the torrent source roots."
     )
     return str(expected), []
 

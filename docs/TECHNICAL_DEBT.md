@@ -32,7 +32,12 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Wave 5 (IMPLEMENTED): `JobStore.start_python` refuses a job whose explicit `metadata["dedupe_key"]` matches a running job (`DuplicateJobError`, HTTP 409 `job_already_running`). The guard is opt-in because labels and metadata often omit the input that makes two starts different; only Move All and MBSync All opt in. The transaction hook checks and starts under the store lock, so a refused start records no transaction. A job returning `{"ok": false}` ends `failed` (and its hook-created transaction `Failed`); a thread start failure no longer leaves a job running; "clear done" keeps `recovery_required` records.
 - Remaining (why this is not Closed):
   - Resume is still each workflow's own: Clean All and playlist download resume from their own checkpoint files, AI batch from its state store. The contract makes the position visible in the job record; it does not resume a job. A restart still leaves the job `recovery_required` for the operator.
-  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, mbsync-all, move-all, folder and root repairs, Release-Group relinks, resolver jobs). The wave 5 duplicate-start guard is per process and covers only jobs with a `dedupe_key`; the rest rely on their own in-process guards, and across processes on `recovery_required` alone.
+  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, mbsync-all, move-all, folder and root repairs, Release-Group relinks, resolver jobs). Duplicate starts are guarded unevenly, and only in process:
+    - Move All and MBSync All: the wave 5 `dedupe_key` guard (409 `job_already_running`).
+    - Clean All: the maintenance-runner `workflow:` lock (`backend/job_contract.py`).
+    - Duplicate maintenance and dedup scan/review/cleanup: `_running_job_of_type`.
+    - Album rename, artwork, metadata, genre and import starters: no guard. A second start runs; the two are serialized only by the webmanager plugin's global `mutation_lock` (`beetsplug/webmanager/operations.py`) and are safe only because repeating them is idempotent.
+    - Across processes, all of them rely on `recovery_required` alone.
   - Bounded retries are per workflow, not a contract feature.
 - Priority: P1. Status: Open (narrowed).
 

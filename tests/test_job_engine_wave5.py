@@ -216,7 +216,8 @@ class NoAdHocThreadTests(unittest.TestCase):
         log = []
         with mock.patch.object(plex, "_plex_settings", return_value={"url": "http://plex", "token": "t"}),                 mock.patch.object(plex, "_plex_find_music_section", side_effect=TimeoutError("timed out")):
             self.assertFalse(plex._trigger_plex_refresh(log, workflow="manual"))
-        self.assertIn("timed out", log[-1])
+        self.assertIn("Refresh failed; continuing without it", log[-1])
+        self.assertNotIn("timed out", log[-1])  # detail goes to the server log only
 
     def test_ytdlp_metadata_extraction_starts_no_thread(self):
         import inspect
