@@ -13,11 +13,60 @@ def _s(value) -> str:
     return str(value)
 
 
+def _has_control_char(text: str) -> bool:
+    return any(c < " " or c == "\x7f" for c in text)
+
+
+def safe_peer_username(value) -> str:
+    """The peer username when it is usable as one path segment, else "".
+
+    slskd saves under DOWNLOADS_ROOT/<username>/..., and the username comes
+    from the peer: "/", "..", "a/../../srv" must never become a path, "C:"
+    must not make a Windows drive-relative join, and control characters
+    must not forge job-log lines (#248).
+    """
+    name = _s(value)
+    if not name or name in (".", "..") or any(c in name for c in "/\\:") or _has_control_char(name):
+        return ""
+    return name
+
+
+_DRIVE_SEGMENT = re.compile(r"^[A-Za-z]:")
+
+
 def _remote_path(value) -> Path:
-    raw = _s(value).replace("\\", "/")
-    if len(raw) > 2 and raw[1] == ":":
-        raw = raw[2:]
-    return Path(raw.lstrip("/"))
+    """A peer-supplied remote path as a relative path that cannot climb.
+
+    Splits on both separators and drops every empty, ".", ".." or drive
+    ("C:", anywhere in the path) segment and every segment holding a control
+    character (#248): "..\\srv\\x\\01.flac" becomes srv/x/01.flac.
+    """
+    return Path(*[
+        p for p in re.split(r"[\\/]", _s(value))
+        if p not in ("", ".", "..") and not _DRIVE_SEGMENT.match(p) and not _has_control_char(p)
+    ])
+
+
+def within_roots(path, allowed_roots) -> bool:
+    """True when ``path`` resolves under one of ``allowed_roots``.
+
+    An empty allowlist allows nothing, so an unsafe DOWNLOADS_ROOT (dropped
+    from DOWNLOADS_ALLOWED_ROOTS) makes every scan and delete a no-op.
+    """
+    try:
+        resolved = Path(path).resolve(strict=False)
+        return any(resolved.is_relative_to(Path(base).resolve(strict=False)) for base in allowed_roots or ())
+    except Exception:
+        return False
+
+
+def peer_download_dir(downloads_root: Path, username: str, remote_dir) -> Path:
+    """Where slskd saves a peer's remote dir: <downloads_root>/<username>/<remote_dir>.
+
+    Callers pass a username accepted by ``safe_peer_username`` and must still
+    check the result with ``within_roots`` (symlinks) before using it.
+    """
+    return Path(downloads_root) / username / _remote_path(remote_dir)
 
 
 def compact_key(value: str) -> str:
@@ -147,10 +196,18 @@ def build_album_candidates(responses: Sequence[Dict[str, Any]],
 
 
 def slskd_download_candidate_roots(downloads_root: Path, username: str,
-                                   remote_files: Iterable) -> List[Path]:
-    """Return likely local roots for queued SLSKD remote files."""
+                                   remote_files: Iterable,
+                                   allowed_roots: Iterable) -> List[Path]:
+    """Return likely local roots for queued SLSKD remote files.
+
+    Only roots that resolve under ``allowed_roots``; none for an unsafe
+    username or an empty allowlist (#248).
+    """
     root = Path(downloads_root)
     roots: List[Path] = []
+    username = safe_peer_username(username)
+    if not username:
+        return roots
 
     def add(raw) -> None:
         if not raw:
@@ -170,14 +227,20 @@ def slskd_download_candidate_roots(downloads_root: Path, username: str,
         add(root / username / parent.name)
         add(root / parent)
         add(root / parent.name)
-    return roots
+    allowed = tuple(allowed_roots or ())
+    return [path for path in roots if within_roots(path, allowed)]
 
 
 def cleanup_failed_candidate_files(downloads_root: Path, username: str,
                                    remote_files: Sequence,
                                    audio_exts: Iterable[str],
-                                   log: list) -> int:
-    """Remove only queued audio files from a failed SLSKD candidate."""
+                                   log: list,
+                                   allowed_roots: Iterable) -> int:
+    """Remove only queued audio files from a failed SLSKD candidate.
+
+    Never outside ``allowed_roots`` (#248): a peer-chosen username or remote
+    path must not turn a failed candidate into a library delete.
+    """
     audio_ext_set = {str(ext).lower() for ext in audio_exts}
     queued_names = {
         _remote_path(name).name.lower()
@@ -190,7 +253,8 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
     root = Path(downloads_root)
     removed = 0
     touched_dirs: set[Path] = set()
-    for candidate_root in slskd_download_candidate_roots(root, username, remote_files):
+    allowed = tuple(allowed_roots or ())
+    for candidate_root in slskd_download_candidate_roots(root, username, remote_files, allowed):
         try:
             if candidate_root.is_file():
                 files = [candidate_root]
@@ -205,6 +269,8 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
             if path.name.lower() not in queued_names:
                 continue
             if path.suffix.lower() not in audio_ext_set:
+                continue
+            if not within_roots(path, allowed):
                 continue
             try:
                 path.unlink(missing_ok=True)
