@@ -879,8 +879,22 @@ def api_transaction_rollback(transaction_id):
             "rollback_available": False,
         }), 409
 
-    # Pre-mark status before launching background job to prevent status-overwrite races
-    transactions.update(transaction_id, status="Running")
+    # Claim Completed -> Running (CAS) before the job starts (#219, ARCH-019).
+    # Only an applied transaction may be rolled back: a Preview, Approved or
+    # Cancelled one never wrote anything, so "restoring" its captured values
+    # would itself be a library write. Failed qualifies only with an engine
+    # apply record (metadata.engine_result, the same proof claim_approved
+    # uses); these local families record none, so a Failed one is refused.
+    status = tx.get("status")
+    source = "Failed" if status == "Failed" and (tx.get("metadata") or {}).get("engine_result") else "Completed"
+    if transactions.transition(transaction_id, source, "Running") is None:
+        status = transactions.get(transaction_id).get("status")
+        return jsonify({
+            "ok": False,
+            "error": f"Only a completed transaction can be rolled back (status is {status}).",
+            "mutated": False,
+            "status": status,
+        }), 409
 
     def _do(log, cancel_event=None):
         ok_count = 0
@@ -917,11 +931,18 @@ def api_transaction_rollback(transaction_id):
             transactions.append_log(transaction_id, f"ERROR: rollback failed: {ex}")
             raise
 
-    job = jobs.start_python(
-        _do,
-        label=f"Rollback transaction {transaction_id}",
-        metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
-    )
+    try:
+        job = jobs.start_python(
+            _do,
+            label=f"Rollback transaction {transaction_id}",
+            metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
+        )
+    except Exception as ex:
+        # Nothing ran: hand the claim back so the rollback can be retried
+        # (SEC-223-2). The global handler returns a fixed 500.
+        transactions.transition(transaction_id, "Running", source)
+        transactions.append_log(transaction_id, "The rollback job could not be started; nothing was restored.")
+        raise RuntimeError("The rollback job could not be started.") from ex
     transactions.update(transaction_id, metadata={"rollback_job_id": job.job_id})
     return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})
 
