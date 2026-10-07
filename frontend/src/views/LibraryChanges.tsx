@@ -53,13 +53,15 @@ const pageSize = 50;
 // Mirrors the backend's cancellable states (POST /api/transactions/<id>/cancel
 // returns 409 not_cancellable otherwise); the server stays the authority.
 const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
-// Mirrors the server's rollback gate (POST /api/transactions/<id>/rollback):
-// only an applied transaction can be rolled back -- Completed, or Failed with
-// an engine apply record. The server still enforces it; this hides a button
-// that would always be refused.
+// Mirrors the server's rollback gates (POST /api/transactions/<id>/rollback):
+// only an applied transaction can be rolled back -- Completed, or any other
+// non-terminal-for-rollback status with an engine apply record (engine
+// families accept e.g. Recovery Required for a retry). The server still
+// enforces it; this hides a button that would always be refused.
+const NO_ROLLBACK_STATUSES = new Set(['Running', 'Rolled Back', 'Pending', 'Preview', 'Approved', 'Cancelled']);
 function canRollback(tx: TransactionDetail) {
-  if (!tx.rollback?.available) return false;
-  return tx.status === 'Completed' || (tx.status === 'Failed' && Boolean(tx.metadata?.engine_result));
+  if (!tx.rollback?.available || NO_ROLLBACK_STATUSES.has(tx.status)) return false;
+  return tx.status === 'Completed' || Boolean(tx.metadata?.engine_result);
 }
 
 // The phrase the backend requires (and verifies) before approving an
@@ -340,7 +342,7 @@ export default function LibraryChanges() {
   // the detail and rows so the user sees the transaction's real state.
   const runAction = async (
     verb: 'Cancel' | 'Apply' | 'Rollback',
-    request: (id: string) => Promise<{ transaction: TransactionDetail; job_id?: string }>,
+    request: (id: string) => Promise<{ transaction?: TransactionDetail; job_id?: string }>,
     success: (response: { job_id?: string }) => string,
   ) => {
     if (!detail) return;
@@ -349,7 +351,9 @@ export default function LibraryChanges() {
     let failure = '';
     try {
       const response = await request(detail.id);
-      setDetail(response.transaction);
+      // Engine-backed families answer without a `transaction` key; reload it.
+      if (response.transaction) setDetail(response.transaction);
+      else await loadDetail(detail.id);
       setMessage(success(response));
     } catch (ex) {
       failure = actionErrorMessage(verb, ex);
@@ -364,7 +368,7 @@ export default function LibraryChanges() {
 
   const doRollback = () => {
     if (!window.confirm('Rollback this transaction? Review the rollback availability before continuing.')) return;
-    void runAction('Rollback', rollbackTransaction, () => 'Rollback started.');
+    void runAction('Rollback', rollbackTransaction, (r) => (r.job_id ? `Rollback job started: ${r.job_id}` : 'Rollback finished.'));
   };
 
   return (

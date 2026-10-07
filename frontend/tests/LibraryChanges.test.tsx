@@ -260,6 +260,9 @@ describe('LibraryChanges rollback', () => {
   it.each([
     ['Completed', {}],
     ['Failed', { engine_result: { ok: false } }],
+    // Engine families retry rollback from Recovery Required (QA F1).
+    ['Recovery Required', { engine_result: { ok: true } }],
+    ['Partially Rolled Back', { engine_result: { ok: true } }],
   ])('enables Rollback for %s %o', async (status, metadata) => {
     await renderWith(rollbackable(status, metadata));
     expect(button().disabled).toBe(false);
@@ -268,6 +271,9 @@ describe('LibraryChanges rollback', () => {
   it.each([
     ['Pending', {}], ['Preview', {}], ['Approved', {}], ['Running', {}], ['Cancelled', {}],
     ['Failed', {}], ['Rolled Back', {}], ['Partially Rolled Back', {}], ['Recovery Required', {}],
+    ['Preview', { engine_result: { ok: true } }], ['Approved', { engine_result: { ok: true } }],
+    ['Cancelled', { engine_result: { ok: true } }], ['Rolled Back', { engine_result: { ok: true } }],
+    ['Running', { engine_result: { ok: true } }],
   ])('disables Rollback for %s %o', async (status, metadata) => {
     await renderWith(rollbackable(status, metadata));
     expect(button().disabled).toBe(true);
@@ -311,6 +317,20 @@ describe('LibraryChanges rollback', () => {
     expect(banner.textContent).toMatch(/Do not roll back again/);
     expect(screen.queryByText('Rollback started.')).toBeNull();
     expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+  });
+
+  it('reloads the detail when an engine rollback response has no transaction (QA F2)', async () => {
+    const recovering = rollbackable('Recovery Required', { engine_result: { ok: true } });
+    await renderWith(recovering);
+    vi.mocked(getTransaction).mockClear();
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: { ...recovering, status: 'Rolled Back' } });
+    mockRollback.mockResolvedValue({ ok: true } as unknown as Awaited<ReturnType<typeof rollbackTransaction>>);
+    fireEvent.click(button());
+    await screen.findByText('Rollback finished.');
+    expect(screen.queryByText('Rollback started.')).toBeNull();
+    expect(getTransaction).toHaveBeenCalledWith('tx-1', { limit: 100 });
+    // The detail pane stays open and shows the reloaded state.
+    await waitFor(() => expect(button().disabled).toBe(true));
   });
 
   it('does nothing when the confirmation is declined', async () => {
