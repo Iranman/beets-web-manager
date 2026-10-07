@@ -185,5 +185,58 @@ class TimeoutValueTests(unittest.TestCase):
             self.assertNotIn("must be a positive number", proc.stderr, raw)
 
 
+class FailClosedRedactionTests(unittest.TestCase):
+    """d41b993 F1: userinfo the parser did not see is never echoed."""
+
+    def test_unparsed_userinfo_is_redacted(self):
+        for raw in ("http://u:p/w@beets:8337", "http://u:p?w@beets:8337", "http://u:p#w@beets:8337",
+                    "u:pw@beets:8337", "http:/u:pw@beets", "//u:pw@beets:8337"):
+            out = cl.redact_url_userinfo(raw)
+            self.assertNotIn("pw", out.replace("<redacted-url>", ""), raw)
+            self.assertNotIn("u:p", out, raw)
+
+
+@unittest.skipUnless(POSIX, "symlinks and modes are POSIX-only here")
+class LegacyBackupTighteningTests(_Tmp):
+    """d41b993 F4: an old 0644 legacy backup is tightened; a symlink is not followed."""
+
+    def _cfg(self):
+        cfg = self.root / "config.yaml"
+        cfg.write_text("plugins: plexsync fetchart\n", encoding="utf-8")
+        return cfg
+
+    def test_existing_regular_backup_is_tightened_and_kept(self):
+        from backend import config_service
+        cfg = self._cfg()
+        old = self.root / "config.yaml.bak-legacy-plugin-migration"
+        old.write_text("ORIGINAL", encoding="utf-8")
+        os.chmod(old, 0o644)
+        config_service._repair_legacy_beets_config(str(cfg))
+        self.assertEqual(old.read_text(encoding="utf-8"), "ORIGINAL")
+        self.assertEqual(_mode(old), 0o600)
+
+    def test_symlinked_backup_target_is_not_chmodded(self):
+        from backend import config_service
+        cfg = self._cfg()
+        os.chmod(self.victim, 0o644)
+        (self.root / "config.yaml.bak-legacy-plugin-migration").symlink_to(self.victim)
+        config_service._repair_legacy_beets_config(str(cfg))
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "VICTIM")
+        self.assertEqual(_mode(self.victim), 0o644)
+
+
+@unittest.skipUnless(POSIX, "modes are POSIX-only")
+class FchmodTests(_Tmp):
+    """d41b993 F5: mode comes from the fd; path chmod is not needed."""
+
+    def test_replace_is_0600_without_path_chmod(self):
+        env = self.root / ".env"
+        env.write_text("A=1\n", encoding="utf-8")
+        os.chmod(env, 0o644)
+        with mock.patch("os.chmod", side_effect=AssertionError("path chmod used")):
+            cl.replace_private_file(env, "A=2\n")
+        self.assertEqual(_mode(env), 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()
