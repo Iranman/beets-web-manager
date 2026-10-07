@@ -48,6 +48,7 @@ def _load_evidence_namespace():
         "AUDIO_EXT": {".flac", ".mp3", ".m4a"},
         "DOWNLOADS_ROOT": Path("/data/torrents/music"),
         "PLAYLIST_DOWNLOAD_ROOT": Path("/data/playlists"),
+        "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS": (Path("/data/playlists"),),
         "_DOWNLOADS_ROOTS": ["/data/torrents", "/data/downloads", "/tmp", tempfile.gettempdir()],
         "TORRENT_SOURCE_ROOTS": [],
         "QBIT_REPAIR_ALLOWED_ROOTS": [],

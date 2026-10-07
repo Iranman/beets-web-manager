@@ -10,6 +10,7 @@ every hostile vector aims at and that must survive.
 import itertools
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -282,6 +283,35 @@ class DownloadedFileSearchContainmentTests(unittest.TestCase):
             text = "\n".join(log)
             self.assertIn("Gave up waiting for queued files", text)
             self.assertIn("Could not locate completed queued files", text)
+
+    def _find_cancelled(self, event):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = _Tree(tmp)
+            started = _apply((
+                *tree.patches(),
+                mock.patch.object(slskd, "_slskd_req", return_value=[]),
+                mock.patch.object(slskd.time, "sleep", side_effect=AssertionError("slept despite cancel_event")),
+            ))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "^cancelled$"):
+                    slskd._find_slskd_downloaded_files(
+                        "peer", ["Music\\Album\\01.flac"], str(tree.downloads / "peer"), [],
+                        cancel_event=event)
+            finally:
+                for p in started:
+                    p.stop()
+
+    def test_cancel_before_wait_stops_immediately(self):
+        event = threading.Event()
+        event.set()
+        self._find_cancelled(event)
+
+    def test_cancel_during_wait_stops_promptly(self):
+        event = mock.Mock()
+        event.is_set.return_value = False
+        event.wait.return_value = True  # set while waiting
+        self._find_cancelled(event)
+        event.wait.assert_called_once_with(3)
 
 
 class SearchAndQueueContainmentTests(unittest.TestCase):

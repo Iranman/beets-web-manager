@@ -7,7 +7,7 @@ import os, re
 import urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, TORRENT_SOURCE_ROOTS, _s
+from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, _s
 from backend.config_layers import safe_roots
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under
 
@@ -98,7 +98,9 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
     # reconfiguring one would silently widen or narrow the other. Import
     # review's own TORRENT_SOURCE_ROOTS already covers the same download-area
     # territory for this feature's own purposes, independently configurable.
-    roots = [DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS)
+    # #251: the validated roots only, never the raw DOWNLOADS_ROOT or
+    # PLAYLIST_DOWNLOAD_ROOT setting.
+    roots = list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS) + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS)
     # Fail closed: "/" or a root overlapping the library would let a cleanup
     # plan delete library files (security F2). The library is added only
     # explicitly, below.
@@ -240,8 +242,12 @@ def _path_origin_hint(folder_path: str) -> Dict[str, Any]:
         resolved, err = _resolve_import_review_source_path(raw, allow_music=True, require_exists=False)
         if err or not resolved:
             return {"source_folder": raw}
-        playlist_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
-        if _path_is_under(resolved, playlist_root):
+        # #251: label only paths under a validated playlist root.
+        playlist_root = next((
+            root.resolve(strict=False) for root in PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
+            if _path_is_under(resolved, root.resolve(strict=False))
+        ), None)
+        if playlist_root is not None:
             rel_name = ""
             try:
                 parts = resolved.relative_to(playlist_root).parts
@@ -255,8 +261,8 @@ def _path_origin_hint(folder_path: str) -> Dict[str, Any]:
                 "source_folder": raw,
                 "created_by_workflow": "playlist_import",
             }
-        downloads_root = DOWNLOADS_ROOT.resolve(strict=False)
-        if _path_is_under(resolved, downloads_root):
+        # #251: label only paths under a validated downloads root.
+        if any(_path_is_under(resolved, Path(root).resolve(strict=False)) for root in _DOWNLOADS_ROOTS):
             return {
                 "origin_type": "downloads",
                 "origin_label": "Downloads",
