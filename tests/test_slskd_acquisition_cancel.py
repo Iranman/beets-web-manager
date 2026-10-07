@@ -144,5 +144,42 @@ class PlaylistCancelDuringSlskd(unittest.TestCase):
         self.assertEqual(state["failed"], 0)
 
 
+    def test_source_failure_without_cancel_still_fails_over(self):
+        """QA #271: without a cancel, a source error is still recorded as a
+        source failure, the next source is tried, then the next track."""
+        import backend.playlist_service as ps
+        event = threading.Event()
+        calls = []
+
+        def slskd_track(artist, title, *_a, cancel_event=None, **_k):
+            calls.append(("slskd", title))
+            raise RuntimeError("No Soulseek results")
+
+        def ytdlp(*_a, **_k):
+            calls.append(("ytdlp", _a[5][0]["title"]))
+            raise RuntimeError("yt-dlp failed")
+
+        seen = []
+        real_set = ps._playlist_set_track_status
+
+        def record(state, trk, status, **kw):
+            seen.append((trk["title"], status, kw.get("message", "")))
+            return real_set(state, trk, status, **kw)
+
+        state = {"done": 0, "failed": 0, "log": []}
+        tracks = [{"artist": "A", "title": "One"}, {"artist": "A", "title": "Two"}]
+        with mock.patch.object(ps, "_playlist_ensure_staging_dirs"),                 mock.patch.object(ps, "_playlist_key", return_value="p"),                 mock.patch.object(ps, "_playlist_save_job_state"),                 mock.patch.object(ps.composite_workflows, "list_playlist_staged_files",
+                                  return_value={"ok": True, "files": []}),                 mock.patch.object(ps, "_playlist_reusable_download_files", return_value=[]),                 mock.patch.object(ps, "_playlist_review_required_count_from_state", return_value=0),                 mock.patch.object(ps, "_playlist_set_track_status", side_effect=record),                 mock.patch.object(ps, "_playlist_slskd_download_track", side_effect=slskd_track),                 mock.patch.object(ps, "_ytdlp_missing_tracks_download", side_effect=ytdlp):
+            result = ps._playlist_download_missing_tracks(
+                tracks, Path(tempfile.gettempdir()), state, lambda _line: None,
+                ["slskd", "ytdlp"], cancel_event=event)
+        self.assertEqual(calls, [("slskd", "One"), ("ytdlp", "One"), ("slskd", "Two"), ("ytdlp", "Two")])
+        self.assertIn(("One", "source_failed", "No Soulseek results"), seen)
+        self.assertIn(("One", "source_failed", "yt-dlp failed"), seen)
+        self.assertEqual(result["failed"], 2)
+        statuses = {v["title"]: v["status"] for v in state["track_statuses"].values()}
+        self.assertEqual(statuses, {"One": "failed", "Two": "failed"})
+
+
 if __name__ == "__main__":
     unittest.main()
