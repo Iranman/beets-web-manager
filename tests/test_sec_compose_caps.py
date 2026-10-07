@@ -51,6 +51,15 @@ class EntrypointReadOnlyRootTests(unittest.TestCase):
         self.assertNotIn('chown -R "$RUN_AS" /web-manager-data /config', ENTRYPOINT)
         self.assertIn('$5 == "/config"', ENTRYPOINT)
 
+    def test_owned_private_tree_is_not_walked(self):
+        # #282: root without DAC_READ_SEARCH cannot list the app's 0700
+        # tree, so the recursive chown must be skipped once it is ours.
+        self.assertIn("""[ "$(stat -c '%u:%g' "$1")" = "$PUID:$PGID" ]""", ENTRYPOINT)
+        self.assertIn("own_tree /web-manager-data", ENTRYPOINT)
+        self.assertIn("own_tree /config", ENTRYPOINT)
+        workflow = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
+        self.assertIn("docker/acceptance/hardened_restart.sh", workflow)
+
     def test_media_mount_chown_is_not_recursive(self):
         self.assertIn('chown "$RUN_AS" /music /downloads', ENTRYPOINT)
         self.assertNotIn("chown -R \"$RUN_AS\" /music", ENTRYPOINT)
