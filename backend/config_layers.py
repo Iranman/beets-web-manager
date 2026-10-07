@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -319,18 +320,39 @@ def beets_web_url(environ: Optional[Dict[str, str]] = None) -> str:
     return (env.get("BEETS_WEB_URL", "") or "").strip() or DEFAULT_BEETS_WEB_URL
 
 
+def url_has_userinfo(url: str) -> bool:
+    """True when ``url`` carries (or would be read as carrying) userinfo:
+    any "@", also percent-encoded (%40) or a compatibility form such as the
+    fullwidth U+FF20 that NFKC normalization turns into "@" (#208)."""
+    return "@" in unicodedata.normalize("NFKC", urllib.parse.unquote(url or ""))
+
+
 def redact_url_userinfo(url: str) -> str:
     """``url`` without ``user:pass@``, query or fragment, for display/logs."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return "<invalid-url>"
-    if "@" in url and ("@" not in parts.netloc or not parts.scheme or not parts.netloc):
+    if url_has_userinfo(url) and ("@" not in parts.netloc or not parts.scheme or not parts.netloc):
         # Unencoded / ? # in a password, no scheme, or "http:/u:p@h": the
         # parser did not see the userinfo, so fail closed.
         return "<redacted-url>"
     netloc = parts.netloc.rpartition("@")[2]
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+# Beets config.yaml keys whose values are secrets. The single list shared by
+# the config editor's redaction (config_service) and the setup preview diff
+# masker (beets_plugins). Includes the secret keys Beets and its bundled
+# plugins mark ``redact=True``; identifiers Beets also redacts (user,
+# username, userid, client_id, prefix, google_engine) are left out because
+# the editor refuses to save a redacted placeholder.
+SECRET_CONFIG_KEYS = frozenset({
+    "apikey", "api_key", "api_token", "apisecret", "auth_token", "token", "user_token",
+    "pass", "password", "passphrase", "pwd", "secret", "client_secret",
+    "access_token", "refresh_token", "fanarttv_key", "genius_api_key",
+    "google_key", "lastfm_key",
+})
 
 
 # ── Private (mode 0600) files ────────────────────────────────────────────────

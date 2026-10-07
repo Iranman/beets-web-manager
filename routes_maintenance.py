@@ -654,6 +654,13 @@ def api_transactions_list():
         query=str(request.args.get("q") or ""),
         job=str(request.args.get("job") or ""),
     )
+    for row in rows:
+        # A list row omits rollback.operations; judge from the full record.
+        try:
+            full = transactions.get(row["id"], limit=1)
+        except KeyError:
+            continue
+        row.setdefault("rollback", {}).update(_rollback_fields(full))
     return jsonify({"ok": True, "transactions": rows, "total": total})
 
 
@@ -672,6 +679,7 @@ def api_transaction_detail(transaction_id):
             offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
             limit=_transaction_int_arg("limit", 100, 1, 1000),
         )
+        tx.setdefault("rollback", {}).update(_rollback_fields(tx))
         return jsonify({"ok": True, "transaction": tx})
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
@@ -742,6 +750,8 @@ def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None)
             body, status = controlled_rollback_error(
                 exc, transaction_id, lock_before_write=rollback_family in _ROLLBACK_LOCKS_BEFORE_WRITE)
         return jsonify(body), status
+    if rollback_family is not None and not res.get("ok") and res.get("status") == "Recovery Required":
+        res = {**res, "mutated": True}  # #228 F3: it ran, then failed verification
     status_code = 200 if res.get("ok") else (409 if res.get("code") in ("not_approved", "already_applied") else 400)
     return jsonify(res), status_code
 
@@ -773,6 +783,58 @@ _ROLLBACK_LOCKS_BEFORE_WRITE = frozenset({
     album_row_merge.ALBUM_ROW_MERGE_FAMILY, untracked_recovery.ATTACH_FAMILY,
     untracked_recovery.QUARANTINE_FAMILY, untracked_recovery.ATTACH_ALBUM_FAMILY,
 })
+
+
+#: Operation types the local (non-engine) rollback below can restore.
+_LOCAL_ROLLBACK_OPS = frozenset({"metadata_restore", "recording_id_restore"})
+
+
+def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
+    """Would POST /api/transactions/<id>/rollback accept ``tx`` now? (#228)
+
+    Mirrors, without changing, the gate that route and the engine rollback
+    executors apply, so the UI reads it instead of copying it:
+
+    * engine family (``_ENGINE_FAMILIES``): needs ``metadata.engine_result``
+      and any status but Rolled Back; album cleanup has no rollback;
+    * local family: needs ``rollback.available`` with only metadata /
+      Recording ID restore operations, and status Completed, or Failed with
+      ``metadata.engine_result``.
+
+    Returns ``{"allowed": bool, "code": str, "reason": str}``; ``code`` is
+    ``"allowed"`` and ``reason`` empty when allowed.
+    ``tests/test_rollback_eligibility_228.py`` checks it against the route.
+    """
+    meta = tx.get("metadata") or {}
+    status = tx.get("status")
+
+    def refused(code: str, reason: str) -> Dict[str, Any]:
+        return {"allowed": False, "code": code, "reason": reason}
+
+    if meta.get("mutation_family") in _ENGINE_FAMILIES:
+        if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
+            return refused("not_supported", "Album cleanup has no rollback.")
+        if not meta.get("engine_result"):
+            return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
+        if status == "Rolled Back":
+            return refused("already_rolled_back", "This transaction is already rolled back.")
+        return {"allowed": True, "code": "allowed", "reason": ""}
+    rollback = tx.get("rollback") or {}
+    operations = rollback.get("operations") or []
+    if not rollback.get("available") or not operations:
+        return refused("unavailable", rollback.get("reason") or "Rollback unavailable.")
+    if any(op.get("type") not in _LOCAL_ROLLBACK_OPS for op in operations):
+        return refused("unsupported_operation", "Rollback unavailable for one or more recorded operation types.")
+    if status == "Completed" or (status == "Failed" and meta.get("engine_result")):
+        return {"allowed": True, "code": "allowed", "reason": ""}
+    return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
+
+
+def _rollback_fields(tx: Dict[str, Any]) -> Dict[str, Any]:
+    """``rollback.allowed`` / ``allowed_code`` / ``allowed_reason`` for a
+    response; ``rollback.available`` and ``rollback.reason`` stay as stored."""
+    verdict = rollback_eligibility(tx)
+    return {"allowed": verdict["allowed"], "allowed_code": verdict["code"], "allowed_reason": verdict["reason"]}
 
 
 @app.post("/api/transactions/<transaction_id>/apply")
@@ -807,6 +869,16 @@ def api_transaction_rollback(transaction_id):
     try:
         tx = transactions.get(transaction_id)
     except KeyError:
+        # #228 F5: in production this branch is unreachable.
+        # composite_workflows.get_transaction() reads the same store as
+        # ``transactions`` (both use BEETS_TRANSACTION_DIR), so a transaction
+        # missing above is missing there too and this answers 404. Composite
+        # families that ARE in the store (for example import_review_cleanup_v1)
+        # take the local path below and are refused there; rollback_eligibility()
+        # reports them as not allowed. Only tests that give the engine a separate
+        # store reach this dispatch. Kept until the transaction owner decides
+        # whether those families get rollback through this route.
+        #
         # SEC-002 Wave 17 final review: dispatch to the correct
         # family-specific rollback executor rather than always trying the
         # Import Review one -- that was exactly the "generic rollback

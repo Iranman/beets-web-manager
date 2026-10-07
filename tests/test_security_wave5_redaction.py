@@ -19,42 +19,36 @@ DISCOGS = "discogs-test-token-0123"
 
 
 class BeetsAdapterUserinfoRedactionTests(unittest.TestCase):
-    def _fail(self, exc, call):
-        adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")
-        with mock.patch.object(ba.urllib.request, "urlopen", side_effect=exc), \
-                self.assertLogs("beets.adapter", level="WARNING") as logs:
-            with self.assertRaises(ba.BeetsAdapterError) as ctx:
-                call(adapter)
-        return str(ctx.exception), "\n".join(logs.output)
-
+    # A userinfo BEETS_WEB_URL is now refused before any request (#208 root
+    # cause, see tests/test_beets_web_url_userinfo.py).
     def test_connection_and_timeout_errors_never_carry_userinfo(self):
-        cases = [
-            (urllib.error.URLError("refused"), lambda a: a.get_stats()),
-            (TimeoutError("timed out"), lambda a: a.get_stats()),
-            (OSError("unreachable"), lambda a: a.get_stats()),
-            (urllib.error.URLError("refused"), lambda a: a.open_item_file(1)),
-            (TimeoutError("timed out"), lambda a: a.open_album_art(1)),
-        ]
-        for exc, call in cases:
-            message, logged = self._fail(exc, call)
-            self.assertNotIn(SECRET, message)
-            self.assertNotIn(SECRET, logged)
-            self.assertIn("beets:8337", message)
-
-    def test_requests_still_use_the_credentialed_url(self):
         adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")
-        self.assertIn(SECRET, adapter._build_url("/stats"))
+        for call in (lambda a: a.get_stats(), lambda a: a.open_item_file(1), lambda a: a.open_album_art(1)):
+            with mock.patch.object(ba.urllib.request, "urlopen", side_effect=urllib.error.URLError("x")) as urlopen, \
+                    self.assertLogs("beets.adapter", level="DEBUG") as logs:
+                ba.log.debug("capture")  # assertLogs needs one record
+                with self.assertRaises(ba.BeetsAdapterError) as ctx:
+                    call(adapter)
+            urlopen.assert_not_called()
+            self.assertNotIn(SECRET, str(ctx.exception))
+            self.assertNotIn(SECRET, "\n".join(logs.output))
+
+    def test_requests_never_use_the_credentialed_url(self):
+        adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")
+        self.assertNotIn(SECRET, adapter._build_url("/stats"))
 
     def test_malformed_json_error_is_redacted(self):
         resp = mock.MagicMock()
         resp.__enter__.return_value = resp
         resp.headers = {"Content-Type": "application/json"}
         resp.read.return_value = b"{not json"
-        adapter = ba.BeetsAdapter(base_url=f"http://u:{SECRET}@beets:8337")
+        # Plain URL: a userinfo URL is refused before this branch (#208).
+        adapter = ba.BeetsAdapter(base_url="http://beets:8337")
         with mock.patch.object(ba.urllib.request, "urlopen", return_value=resp):
             with self.assertRaises(ba.BeetsAdapterError) as ctx:
                 adapter.get_stats()
-        self.assertNotIn(SECRET, str(ctx.exception))
+        self.assertEqual(ctx.exception.error_code, "MALFORMED_RESPONSE")
+        self.assertNotIn("not json", str(ctx.exception))
 
 
 class AiTrackReviewErrorBodyTests(unittest.TestCase):
