@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from backend import config_layers
 from typing import Any, Dict, List, Optional
-from backend.app_runtime import AUDIO_EXT, SLSKD_URL, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
+from backend.app_runtime import AUDIO_EXT, SLSKD_URL, TORRENT_SOURCE_ROOTS, _path_is_under, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
 from backend.slskd import build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl
 
 # BA-12: where slskd and other download clients write, from DOWNLOADS_ROOT
@@ -947,14 +947,8 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
 
     roots: List[Path] = []
     user_root = DOWNLOADS_ROOT / username
-    for raw in (
-        expected,
-        user_root,
-        DOWNLOADS_ROOT,
-        "/downloads",
-        "/download",
-        "/tmp",
-    ):
+    # Only the download folders: never /tmp or other shared system paths.
+    for raw in (expected, user_root, DOWNLOADS_ROOT, *TORRENT_SOURCE_ROOTS):
         _root_add(roots, raw)
 
     folder, files = _scan_direct_album_dirs()
@@ -976,8 +970,10 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             static_hint_logged = True
         hint_roots = roots[:]
         for hp in hint_paths:
-            _root_add(hint_roots, hp)
-            _root_add(hint_roots, hp.parent)
+            # A transfer hint is provider data: use it only inside a known root.
+            for cand in (hp, hp.parent):
+                if any(_path_is_under(cand, root) for root in roots):
+                    _root_add(hint_roots, cand)
         folder, files = _scan_exact(hint_roots)
         if files:
             return folder, files
@@ -996,7 +992,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
 
     log.append(
         "  [slskd] Could not locate completed queued files. "
-        f"Checked transfer hints, expected dir, {DOWNLOADS_ROOT}, /downloads, /download, /tmp."
+        f"Checked transfer hints, expected dir, {DOWNLOADS_ROOT} and the torrent source roots."
     )
     return str(expected), []
 

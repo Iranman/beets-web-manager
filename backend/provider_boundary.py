@@ -39,6 +39,7 @@ from __future__ import annotations
 import datetime
 import email.utils
 import enum
+import http.client
 import os
 import re
 import socket
@@ -122,9 +123,23 @@ class ProviderError(Exception):
     """Raised inside a provider call to report a classified failure."""
 
     def __init__(self, outcome: ProviderOutcome, message: str = "", *, status_code: Optional[int] = None,
-                 retry_after: Optional[float] = None):
+                 retry_after: Optional[float] = None, provider: str = ""):
         super().__init__(redact(message))
         self.outcome, self.status_code, self.retry_after = outcome, status_code, retry_after
+        self.provider = provider  # a POLICIES key when known; names the provider in API errors
+
+
+# Fixed, user-facing provider names (API error text never carries exception text).
+PROVIDER_DISPLAY_NAMES = {
+    "musicbrainz": "MusicBrainz", "acoustid": "AcoustID", "discogs": "Discogs", "plex": "Plex",
+    "lidarr": "Lidarr", "slskd": "slskd", "spotify": "Spotify", "listenbrainz": "ListenBrainz",
+    "artwork": "The artwork source", "ai": "The AI provider",
+}
+
+
+def unavailable_message(exc: BaseException) -> str:
+    name = PROVIDER_DISPLAY_NAMES.get(getattr(exc, "provider", ""), "An external provider")
+    return f"{name} is unavailable; try again later"
 
 
 def _retry_after(headers: Any) -> Optional[float]:
@@ -141,7 +156,7 @@ def _retry_after(headers: Any) -> Optional[float]:
         pass
     try:
         when = email.utils.parsedate_to_datetime(str(raw))
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError, OverflowError):
         return None
     if when is None:
         return None
@@ -341,6 +356,11 @@ def _after_failure(provider: str, policy: ProviderPolicy, exc: BaseException, *,
     return True
 
 
+# What a failing provider or transport raises (see classify_exception);
+# ValueError covers a malformed body (json.JSONDecodeError).
+_PROVIDER_FAILURES = (ProviderError, OSError, http.client.HTTPException, OutboundPolicyError, ValueError)
+
+
 @contextmanager
 def _yielding(provider: str, response: Any, attempts: int) -> Iterator[Any]:
     """Yield the response; record the outcome only once the caller's block
@@ -356,7 +376,9 @@ def _yielding(provider: str, response: Any, attempts: int) -> Iterator[Any]:
             yield response
     except GeneratorExit:
         raise
-    except BaseException as exc:
+    except _PROVIDER_FAILURES as exc:
+        # Only provider/transport failures count against the provider; a
+        # bug in the caller's block (KeyError, ...) re-raises unrecorded.
         err = classify_exception(exc)
         _record(provider, err.outcome, attempts=attempts, status_code=err.status_code or status,
                 message=f"response body: {err}")

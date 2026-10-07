@@ -251,7 +251,7 @@ def _mb_unavailable(ex: BaseException) -> Optional[provider_boundary.ProviderErr
     err = provider_boundary.classify_exception(ex)
     if err.outcome == provider_boundary.ProviderOutcome.REJECTED and err.status_code is not None:
         return None
-    return provider_boundary.ProviderError(err.outcome, f"MusicBrainz unavailable ({err})",
+    return provider_boundary.ProviderError(err.outcome, f"MusicBrainz unavailable ({err})", provider="musicbrainz",
                                            status_code=err.status_code, retry_after=err.retry_after)
 
 

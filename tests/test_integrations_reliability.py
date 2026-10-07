@@ -542,7 +542,140 @@ class AcquisitionQueueIdentityTests(unittest.TestCase):
         self.assertEqual(acq._acq_release_group_url(""), "")
 
 
-# -- download root: BA-12 -------------------------------------------------------------
+# -- routes during a MusicBrainz outage (QA F-1/F-2), boundary follow-ups (F-3, sec F1) --
+
+def _patch_all(target, **attrs):
+    return mock.patch.multiple(target, **attrs)
+
+
+class _RouteCase(_BoundaryCase):
+    def setUp(self):
+        super().setUp()
+        from tests._app_family import patch_app_family
+        for patcher in (patch_app_family("app", "_security_auth_disabled", return_value=True),
+                        mock.patch.object(urllib.request, "urlopen", side_effect=http_error(503))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = app_module.app.test_client()
+
+    def assertUnavailable(self, res):
+        self.assertEqual(res.status_code, 503)
+        body = res.get_json()
+        self.assertEqual(body, {"ok": False, "error": "MusicBrainz is unavailable; try again later",
+                                "unavailable": True})
+
+
+class MusicBrainzOutageRouteTests(_RouteCase):
+    def test_mb_candidate_routes_are_503_not_500(self):
+        import routes_library
+        lib = mock.Mock()
+        lib.get_item.return_value = mock.Mock(title="Song", artist="Artist", albumartist="")
+        lib.get_album.return_value = mock.Mock(album="Album", albumartist="Artist", mb_albumid="")
+        with mock.patch.object(routes_library, "lib", lib):
+            self.assertUnavailable(self.client.get("/api/items/1/mb-candidates"))
+            self.assertUnavailable(self.client.get("/api/albums/1/mb-candidates"))
+
+    def test_folder_ai_suggest_keeps_the_specific_reason(self):
+        import backend.ai_service as ai_service
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        evidence = {"audio_files": [], "folder_track_count": 0, "nested_audio_count": 0,
+                    "guessed_artist": "Artist", "guessed_album": "Album", "guessed_year": "",
+                    "track_lines": [], "filenames": []}
+        with _patch_all(ai_service, _ai_api_key=mock.Mock(return_value=""),
+                        _build_folder_evidence=mock.Mock(return_value=evidence),
+                        _resolve_import_review_source_path=mock.Mock(return_value=(Path(tmp.name), None)),
+                        _acoustid_multi_file=mock.Mock(return_value={}),
+                        _acoustid_lookup_cached=mock.Mock(return_value=[]),
+                        _discogs_release_fallback_candidate=mock.Mock(return_value={})):
+            res = self.client.post("/api/folders/ai-suggest", json={"path": tmp.name})
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertTrue(body["musicbrainz_unavailable"])
+        self.assertTrue(body["suggestion"]["reason"].startswith("MusicBrainz lookup failed"))
+
+    def test_track_ai_suggest_keeps_acoustid_evidence(self):
+        import routes_library
+        lib = mock.Mock()
+        lib.get_item.return_value = mock.Mock(
+            title="Song", artist="Artist", album="Album", albumartist="Artist", year=2001, track=1,
+            path=b"/music/a/song.flac", length=200.0, genre="", label="", mb_trackid="", mb_albumid="",
+            mb_releasegroupid="")
+        acoustid = [{"mb_trackid": REL, "title": "Song", "artist": "Artist", "album": "Album",
+                     "year": "2001", "score": 97, "source": "acoustid", "country": ""}]
+        with _patch_all(routes_library, lib=lib, _ai_api_key=mock.Mock(return_value=""),
+                        _item_ai_abs_path=mock.Mock(return_value="/music/a/song.flac"),
+                        _acoustid_lookup_cached=mock.Mock(return_value=acoustid),
+                        _discogs_track_search=mock.Mock(return_value=[])):
+            res = self.client.post("/api/items/1/ai-suggest", json={})
+        body = res.get_json()
+        self.assertTrue(body["ok"], body)
+        self.assertTrue(body["musicbrainz_unavailable"])
+        self.assertEqual(body["acoustid_candidates"], acoustid)
+        self.assertIn(REL, [c.get("mb_trackid") for c in body["mb_candidates"]])
+
+    def test_playlist_suggestions_keep_beets_suggestions(self):
+        import routes_playlist
+        track = {"artist": "Artist", "title": "Song"}
+        index = {"by_title": {ps._norm("Song"): [{"id": 4, "artist": "Artist", "title": "Song", "album": "A"}]}}
+        with _patch_all(routes_playlist, _playlist_saved_playlist_exists=mock.Mock(return_value=True),
+                        _playlist_library_index=mock.Mock(return_value=index),
+                        _playlist_detail_payload=mock.Mock(return_value={"missing": [track, dict(track)]})), \
+                mock.patch.object(ps, "_match_track", return_value=None):
+            res = self.client.get("/api/playlists/Mix/suggestions")
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertTrue(body["musicbrainz_unavailable"])
+        self.assertEqual([r["best"]["source"] for r in body["rows"]], ["beets-title", "beets-title"])
+        # the outage is detected once; later tracks do not ask MusicBrainz again
+        self.assertEqual(urllib.request.urlopen.call_count, pb.POLICIES["musicbrainz"].max_attempts)
+
+
+class BoundaryFollowUpTests(_BoundaryCase):
+    def test_overflowing_retry_after_date_keeps_the_http_error(self):  # security F1
+        headers = {"Retry-After": "Wed, 21 Oct 99999999999999999999 07:28:00 GMT"}
+        self.assertIsNone(pb._retry_after(headers))
+        with mock.patch.object(urllib.request, "urlopen", side_effect=http_error(503, headers)):
+            with self.assertRaises(urllib.error.HTTPError):
+                with pb.opened("lidarr", "https://provider.test/x", timeout=5):
+                    pass
+
+    def test_a_bug_in_the_callers_block_is_not_a_provider_failure(self):  # QA F-3
+        with mock.patch.object(urllib.request, "urlopen", side_effect=[_Resp(b"{}")]):
+            with self.assertRaises(KeyError):
+                with pb.opened("plex", "https://provider.test/x", timeout=5) as r:
+                    json.loads(r.read())["missing"]
+        row = pb.provider_health().get("plex") or {}
+        self.assertEqual(row.get("failures", 0), 0)
+
+    def test_a_malformed_body_is_still_a_provider_failure(self):
+        with mock.patch.object(urllib.request, "urlopen", side_effect=[_Resp(b"<html>")]):
+            with self.assertRaises(ValueError):
+                with pb.opened("plex", "https://provider.test/x", timeout=5) as r:
+                    json.loads(r.read())
+        self.assertEqual(pb.provider_health()["plex"]["failures"], 1)
+
+
+class LidarrRouteHelperTests(_BoundaryCase):  # QA F-5
+    def _message(self, effects):
+        import routes_lidarr
+        with mock.patch.object(routes_lidarr, "LIDARR_KEY", "k"), \
+                mock.patch.object(routes_lidarr, "LIDARR_URL", "http://lidarr.test:8686"), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=effects):
+            try:
+                routes_lidarr._lidarr_request_json("/api/v1/album")
+            except Exception as exc:  # noqa: BLE001 -- the helper under test maps it
+                return routes_lidarr._http_error_message(exc)
+        self.fail("no error raised")
+
+    def test_failure_modes(self):
+        self.assertEqual(self._message([http_error(401)]), ("Lidarr rejected the API key", 502))
+        self.assertEqual(self._message([http_error(429)] * 2), ("Lidarr returned HTTP 429", 502))
+        self.assertEqual(self._message([socket.timeout("slow")] * 2), ("Could not reach Lidarr", 502))
+        self.assertEqual(self._message([_Resp(b"<html>")]), ("Lidarr returned an unexpected response", 502))
+
+
+# -- download root: BA-12-------------------------------------------------------------
 
 class DownloadRootTests(unittest.TestCase):
     def test_plex_and_slskd_use_the_configured_download_root(self):
@@ -557,6 +690,15 @@ class DownloadRootTests(unittest.TestCase):
                 self.assertNotIn("/data/torrents", source)
                 self.assertNotIn("/data/downloads", source)
                 self.assertNotIn("DOWNLOADS_ROOT.parent", source)  # "/" under the /downloads default
+
+    def test_slskd_never_searches_shared_system_folders(self):
+        # The completed-file search waits on slskd in a loop (#235 bounds it),
+        # so the root list is checked at source level.
+        source = Path(slskd.__file__).read_text(encoding="utf-8")
+        for literal in ('"/tmp"', '"/download"', '"/downloads"'):
+            self.assertNotIn(literal, source)
+        self.assertIn("for raw in (expected, user_root, DOWNLOADS_ROOT, *TORRENT_SOURCE_ROOTS):", source)
+        self.assertIn("if any(_path_is_under(cand, root) for root in roots):", source)
 
 
 if __name__ == "__main__":
