@@ -18,6 +18,7 @@ from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
 from backend.transaction_service import _start_metadata_apply_transaction, _sync_transactions_from_jobs
+from backend.cleanup_service import album_cleanup_apply_response
 from backend.playlist_service import playlist_sync_status_payload
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 
@@ -764,7 +765,13 @@ _ENGINE_FAMILIES = {
 def api_transaction_apply(transaction_id):
     try:
         tx = transactions.get(transaction_id)
-        engine_family = _ENGINE_FAMILIES.get((tx.get("metadata") or {}).get("mutation_family"))
+        family = (tx.get("metadata") or {}).get("mutation_family")
+        if family == composite_workflows.ALBUM_CLEANUP_FAMILY:
+            # Same classification and controlled errors as
+            # /api/albums/cleanup/apply (PR #204 QA F-B).
+            body, status = album_cleanup_apply_response(transaction_id)
+            return jsonify(body), status
+        engine_family = _ENGINE_FAMILIES.get(family)
         if engine_family:
             return _item_file_replacement_response(engine_family[0], transaction_id)
         if tx.get("operation_type") == "Metadata Update":

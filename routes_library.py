@@ -26,7 +26,7 @@ from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_in
 from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROOT, EDITABLE_FIELDS, METADATA_CACHE_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, UNMATCHED_DRAFT_ROOT, _ANSI_RE, _DISC_CACHE_TTL, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_is_under, _redact_security_text, _s, _safe_path_component, jobs, transactions
 from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
-from backend.cleanup_service import _classify_album_cleanup_apply_failure, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
+from backend.cleanup_service import album_cleanup_apply_response, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
 from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_duplicate_resolver_plan
 from backend.import_reconciliation_service import _run_artist_folder_reconcile_for_alias_merge
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
@@ -2325,37 +2325,11 @@ def apply_album_cleanup_route():
                             "error": "The cleanup plan changed state before it could be approved; "
                                      "nothing was changed."}), 409
 
-    try:
-        res = composite_workflows.apply_album_cleanup(op_id)
-        if not res.get("ok"):
-            kind, message = _classify_album_cleanup_apply_failure(res)
-            return jsonify({
-                "ok": False,
-                "error": message,
-                # error_kind is the authoritative UI signal -- the frontend
-                # must not re-derive this by matching substrings in "error"
-                # itself. "stale_plan" is the only kind that may ever be
-                # presented as "nothing was changed"; it is only ever
-                # chosen when the engine's own "mutated" flag (see
-                # execute_album_cleanup_apply) confirms no destructive step
-                # ran before this failure.
-                "error_kind": kind,
-                "mutated": bool(res.get("mutated")),
-                "log": res.get("log", []),
-            }), 400
-        return jsonify(res), 200
-    except BeetsUnavailableError as ex:
-        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}", "error_kind": "other", "mutated": False}), 503
-    except BeetsError as ex:
-        # A raised BeetsError means the engine's HTTP response body couldn't
-        # be parsed into a normal {"ok": False, ...} result (see
-        # BeetsClient._request), so there is no "mutated" signal available
-        # here at all -- do not guess. Report the operation as refused
-        # without claiming to know whether anything changed.
-        return jsonify({"ok": False, "error": str(ex), "error_kind": "other"}), 400
-    except Exception as ex:
-        _app_logger.exception("apply_album_cleanup_route failed for op_id=%s", op_id)
-        return jsonify({"ok": False, "error": "Album cleanup apply failed", "error_kind": "other"}), 500
+    # error_kind is the authoritative UI signal -- the frontend must not
+    # re-derive it from the "error" text. Shared with the generic
+    # /api/transactions/<id>/apply route.
+    body, status = album_cleanup_apply_response(op_id)
+    return jsonify(body), status
 
 
 @app.get("/api/album-art-url")

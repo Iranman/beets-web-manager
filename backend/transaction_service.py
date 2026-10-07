@@ -124,15 +124,23 @@ def _install_transaction_job_hooks() -> None:
             metadata_payload["transaction_id"] = tx_id
 
             def wrapped(log, cancel=None, update_state=None):
+                # The final status mirrors job_engine's own rule: a set cancel
+                # event (or a "cancelled" exception) makes the job cancelled,
+                # so the transaction is Cancelled too. Job sync no longer
+                # corrects a final status afterwards (QA-217-7).
+                def cancelled(ex=None):
+                    return bool(cancel is not None and cancel.is_set()) or \
+                        (ex is not None and str(ex).strip().lower() == "cancelled")
+
                 transactions.update(tx_id, status="Running")
                 try:
                     result = _call_job_fn(fn, log, cancel, update_state)
                 except Exception as ex:
-                    transactions.update(tx_id, status="Failed")
+                    transactions.update(tx_id, status="Cancelled" if cancelled(ex) else "Failed")
                     transactions.append_log(tx_id, f"ERROR: {ex}")
                     raise
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
-                transactions.update(tx_id, status=next_status)
+                transactions.update(tx_id, status="Cancelled" if cancelled() else next_status)
                 return result
         else:
             wrapped = fn
@@ -218,13 +226,14 @@ def _start_metadata_apply_transaction(transaction_id: str):
         raise ValueError("Metadata transaction is missing item id.")
     fields = _metadata_transaction_pending_fields(tx)
     if not fields:
-        transactions.update(transaction_id, status="Completed", dry_run=False, counts={"items": 0, "changes": 0})
+        if transactions.transition(transaction_id, "Approved", "Completed", dry_run=False,
+                                   counts={"items": 0, "changes": 0}) is None:
+            raise ValueError("The transaction is no longer Approved; nothing was applied.")
         return None
     changed_fields = [str(v) for v in (metadata.get("changed_fields") or list(fields.keys()))]
     parts = [f"{k}={v}" for k, v in fields.items()]
 
     def _do(log, cancel_event=None):
-        transactions.update(transaction_id, status="Running", dry_run=False)
         try:
             result = composite_workflows.update_item_metadata(item_id, fields)
             _require_attach_stage_success(result, "metadata update")
@@ -236,11 +245,20 @@ def _start_metadata_apply_transaction(transaction_id: str):
             transactions.append_log(transaction_id, f"ERROR: {ex}")
             raise
 
-    job = jobs.start_python(
-        _do,
-        label=f"Apply metadata transaction {transaction_id}",
-        metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
-    )
+    # Claim before the job exists (#206 F3, #217): a cancel that landed after
+    # the status check above wins (409, nothing started), and a job-status
+    # sync can no longer race the claim.
+    if transactions.transition(transaction_id, "Approved", "Running", dry_run=False) is None:
+        raise ValueError("The transaction is no longer Approved; nothing was applied.")
+    try:
+        job = jobs.start_python(
+            _do,
+            label=f"Apply metadata transaction {transaction_id}",
+            metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
+        )
+    except Exception:
+        transactions.update(transaction_id, status="Failed", logs=["The apply job could not be started."])
+        raise
     transactions.attach_job(transaction_id, job.job_id)
     return job
 

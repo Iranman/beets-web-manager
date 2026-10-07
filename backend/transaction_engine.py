@@ -336,6 +336,10 @@ def _summarize_result(result: Any) -> Any:
     return {"type": type(result).__name__, "value": str(result)[:240]}
 
 
+_ROOT_LOCKS: Dict[str, Any] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
 class TransactionStore:
     def __init__(self, root: Optional[str] = None):
         base = (
@@ -344,7 +348,13 @@ class TransactionStore:
             or f"{os.environ.get('WEB_MANAGER_DATA_DIR', '/web-manager-data')}/transactions"
         )
         self.root = Path(base)
-        self._lock = threading.RLock()
+        # One lock per directory, shared by every store instance on it, so
+        # transition() is a real compare-and-set even when a route's store
+        # (app_runtime.transactions) and an apply path's store
+        # (composite_workflows.get_default_store()) are distinct objects.
+        # In-process only: the web app is one waitress process (threads).
+        with _ROOT_LOCKS_GUARD:
+            self._lock = _ROOT_LOCKS.setdefault(os.path.abspath(str(base)), threading.RLock())
 
     def _ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -619,7 +629,13 @@ class TransactionStore:
             updates["result_summary"] = result_summary
         if getattr(job, "log", None):
             updates["logs"] = list(getattr(job, "log"))[-500:]
-        return self.update(transaction_id, **updates)
+        with self._lock:
+            # Job state only advances a transaction that is already Running
+            # (claimed before its job started). It never claims an Approved
+            # one, nor rewrites Cancelled or another final status (#217).
+            if self._read(transaction_id).get("status") != "Running":
+                updates.pop("status")
+            return self.update(transaction_id, **updates)
 
     def rollback(self, transaction_id: str) -> Dict[str, Any]:
         with self._lock:

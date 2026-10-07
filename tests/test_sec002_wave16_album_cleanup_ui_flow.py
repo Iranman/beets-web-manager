@@ -556,7 +556,12 @@ class Wave16AstStructuralTests(unittest.TestCase):
     #   _classify_album_cleanup_apply_failure -- pure error-text
     #     classification (see its definition just below these routes),
     #     no I/O of any kind.
-    ALLOWED_LOCAL_CALLS = {"jsonify", "int", "str", "bool", "_s", "_classify_album_cleanup_apply_failure"}
+    #   album_cleanup_apply_response -- (backend/cleanup_service.py) calls
+    #     composite_workflows.apply_album_cleanup, the canonical mutation
+    #     entry this route already used, plus the classifier above; no
+    #     direct filesystem/DB call of its own.
+    ALLOWED_LOCAL_CALLS = {"jsonify", "int", "str", "bool", "_s", "_classify_album_cleanup_apply_failure",
+                           "album_cleanup_apply_response"}
 
     def setUp(self):
         app_path = flask_app.__file__
