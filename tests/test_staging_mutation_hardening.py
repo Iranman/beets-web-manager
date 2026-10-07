@@ -93,6 +93,40 @@ class MusicRootAncestorTests(_Env):
         self.assertTrue((music / "01.flac").exists())
 
 
+class StagingTextContainmentTests(_Env):
+    """CodeQL #1373: containment is decided on normalized text before any
+    filesystem call, component-wise (no sibling-prefix match)."""
+
+    def test_traversal_out_of_staging_refused(self):
+        (self.music / "a.flac").write_bytes(b"a")
+        (self.dl / "x").mkdir()  # so the kernel can walk x/.. and the path exists
+        escape =str(self.dl / "x" / ".." / ".." / "music" / "a.flac")
+        self.assertIsNone(cw._staging_contained_text(escape))
+        self.assertFalse(cw._is_safe_staging_path(escape))
+        with self.assertRaises(ValueError):
+            cw.delete_staging_file(escape)
+        self.assertTrue((self.music / "a.flac").exists())
+
+    def test_sibling_prefix_refused(self):
+        sibling = self.root / (self.dl.name + "2")
+        sibling.mkdir()
+        (sibling / "a.flac").write_bytes(b"a")
+        self.assertIsNone(cw._staging_contained_text(str(sibling / "a.flac")))
+        self.assertFalse(cw._is_safe_staging_path(sibling / "a.flac"))
+        self.assertFalse(cw._is_safe_staging_path(sibling))
+        with self.assertRaises(ValueError):
+            cw.delete_staging_file(str(sibling / "a.flac"))
+        self.assertTrue((sibling / "a.flac").exists())
+
+    def test_inside_and_root_still_accepted(self):
+        inner = self.dl / "Album" / "01.flac"
+        inner.parent.mkdir()
+        inner.write_bytes(b"a")
+        self.assertTrue(cw._is_safe_staging_path(inner))
+        self.assertTrue(cw._is_safe_staging_path(self.dl / "Album" / "x" / ".." / "01.flac"))
+        self.assertTrue(cw._is_safe_staging_path(self.dl))
+
+
 class ImportReviewFamilyTests(_Env):
     """#182 item 4: the family is checked before the Preview -> Approved CAS."""
 

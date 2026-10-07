@@ -260,10 +260,30 @@ def _music_root() -> Path:
     return Path(music_root()).resolve()
 
 
+def _staging_contained_text(path: Union[str, Path]) -> Optional[str]:
+    """The normalized absolute text of ``path`` if it is a staging root or
+    lies under one (component-wise: ``root + os.sep`` prefix, so
+    ``/downloads2`` is not under ``/downloads``), else None. No filesystem
+    access happens before this check (CodeQL #1373). Roots are resolved; an
+    accepted path is compared as text, which matches its resolved form
+    because _is_safe_staging_path also refuses any symlinked component."""
+    norm = os.path.normpath(os.path.abspath(str(path)))
+    for stg in _get_staging_roots():
+        root_text = str(stg)
+        if norm == root_text:
+            return root_text
+        if norm.startswith(os.path.join(root_text, "")):
+            return norm
+    return None
+
+
 def _is_safe_staging_path(path: Union[str, Path]) -> bool:
+    contained = _staging_contained_text(path)
+    if contained is None:
+        return False
     if _has_symlink_component(path):
         return False
-    p = Path(path).resolve()
+    p = Path(contained).resolve()
     music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
     # Must NOT be the music root, inside it, or an ancestor of it (#182)
     try:

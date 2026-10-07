@@ -1706,7 +1706,12 @@ def validate_path_under_allowed_roots(
     if not cand_text.startswith(os.path.normpath(os.path.abspath(os.fspath(selected_root)))):
         return None
     try:
-        return Path(cand_text).resolve(strict=False)
+        resolved = Path(cand_text).resolve(strict=False)
+        # normpath collapses ".." before symlinks are followed, so with
+        # reject_symlinks=False the value returned can differ from the one
+        # _path_under checked; prove the returned value is contained too.
+        resolved.relative_to(selected_root.resolve(strict=False))
+        return resolved
     except Exception:
         return None
 

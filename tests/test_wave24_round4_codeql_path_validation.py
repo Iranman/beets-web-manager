@@ -87,6 +87,19 @@ class TestValidatePathUnderAllowedRootsPrimitive(unittest.TestCase):
         result = validate_path_under_allowed_roots(candidate, [self.music_root])
         self.assertIsNone(result)
 
+    def test_returned_value_is_contained_without_symlink_rejection(self):
+        """#249 review note: normpath collapses ".." before symlinks are
+        followed. With reject_symlinks=False, music/a/hop/../evil resolves
+        inside the root (hop -> a/sub/deep), but its lexical form music/a/evil
+        is a link out of the root. The returned value must never be that."""
+        a = self.music_root / "a"
+        (a / "sub" / "deep").mkdir(parents=True)
+        os.symlink(str(a / "sub" / "deep"), str(a / "hop"), target_is_directory=True)
+        os.symlink(str(self.other_root), str(a / "evil"), target_is_directory=True)
+        candidate = Path(str(a / "hop") + os.sep + ".." + os.sep + "evil")
+        result = validate_path_under_allowed_roots(candidate, [self.music_root], reject_symlinks=False)
+        self.assertIsNone(result)
+
     def test_nonexistent_leaf_under_root_accepted(self):
         candidate = self.music_root / "Artist" / "Album" / "does_not_exist.jpg"
         result = validate_path_under_allowed_roots(candidate, [self.music_root])
