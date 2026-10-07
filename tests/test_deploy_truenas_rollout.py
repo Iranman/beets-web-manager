@@ -20,14 +20,19 @@ Every test that expects failure asserts on the actual rejection reason
 (via stderr), not just a non-zero exit code, so a check silently changing
 meaning wouldn't still pass.
 """
+import hashlib
+import http.server
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -640,7 +645,9 @@ docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
 require_compose_pull_flag() {{ return 0; }}
-# Token handling only: the recreate + proof step has its own end-to-end tests.
+# Token handling only: the recreate + proof step and backup verification
+# (BackupManifestTests) have their own end-to-end tests.
+verify_backup_manifest() {{ return 0; }}
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
@@ -686,7 +693,9 @@ docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
 require_compose_pull_flag() {{ return 0; }}
-# Token handling only: the recreate + proof step has its own end-to-end tests.
+# Token handling only: the recreate + proof step and backup verification
+# (BackupManifestTests) have their own end-to-end tests.
+verify_backup_manifest() {{ return 0; }}
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
@@ -724,7 +733,9 @@ docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
 require_compose_pull_flag() {{ return 0; }}
-# Token handling only: the recreate + proof step has its own end-to-end tests.
+# Token handling only: the recreate + proof step and backup verification
+# (BackupManifestTests) have their own end-to-end tests.
+verify_backup_manifest() {{ return 0; }}
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
@@ -1413,6 +1424,10 @@ class RollbackProofTests(VersionedStackFixture):
     def test_rollback_without_previous_image_record_refuses(self):
         self.deploy()
         os.remove(os.path.join(self.backup_dir(), "previous-image.txt"))
+        # Drop it from the manifest too (else backup verification refuses first).
+        manifest = Path(self.backup_dir(), "state-manifest.txt")
+        manifest.write_text("".join(ln for ln in manifest.read_text(encoding="utf-8").splitlines(True)
+                                    if not ln.startswith("previous-image.txt ")), encoding="utf-8")
         res = self.run_script("--rollback", self.backup_dir())
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("cannot prove a rollback", res.stderr)
@@ -1483,6 +1498,227 @@ class RollbackProofTests(VersionedStackFixture):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("'docker compose stop beets-web-manager' failed", res.stderr)
         self.assertNotIn("Rollback complete", res.stderr)
+
+
+class BackupManifestTests(VersionedStackFixture):
+    """#178: --rollback verifies the backup against its checksum manifest
+    before anything is stopped or changed; a backup without one (older
+    script) needs --allow-legacy-backup."""
+
+    def _rollback_refused_untouched(self, code, *args):
+        state_before = Path(self.state_path).read_text(encoding="utf-8")
+        compose_before = Path(self.compose_file).read_text(encoding="utf-8")
+        env_before = Path(self.webmgr_dir, ".env").read_text(encoding="utf-8")
+        res = self.run_script("--rollback", self.backup_dir(), *args)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(f"Reason code:           {code}", res.stdout + res.stderr)
+        self.assertIn("nothing was stopped or changed", res.stderr)
+        self.assertEqual(Path(self.state_path).read_text(encoding="utf-8"), state_before, "a container was touched")
+        self.assertEqual(Path(self.compose_file).read_text(encoding="utf-8"), compose_before)
+        self.assertEqual(Path(self.webmgr_dir, ".env").read_text(encoding="utf-8"), env_before)
+        return res
+
+    def test_backup_lists_a_checksum_for_every_file_it_restores_from(self):
+        self.deploy()
+        text = Path(self.backup_dir(), "state-manifest.txt").read_text(encoding="utf-8")
+        self.assertEqual(text.splitlines()[0], "manifest_version=2")
+        for rel in ("docker-compose.yml.bak", ".env.bak", "auth_token.bak", "previous-image.txt",
+                    "web-manager-data/.env", "web-manager-data/transactions/t1.json",
+                    "beets-config/config.yaml", "beets-config/beetsplug/webmanager/version.py"):
+            self.assertRegex(text, rf"(?m)^{re.escape(rel)} sha256=[0-9a-f]{{64}}$")
+
+    def test_rollback_refuses_a_backup_without_a_manifest(self):
+        self.deploy()
+        os.remove(os.path.join(self.backup_dir(), "state-manifest.txt"))
+        res = self._rollback_refused_untouched("backup_manifest_missing")
+        self.assertIn("--allow-legacy-backup", res.stderr)
+
+    def test_rollback_refuses_an_old_script_manifest_without_checksums(self):
+        self.deploy()
+        Path(self.backup_dir(), "state-manifest.txt").write_text(
+            "web-manager-data/.env sha256=" + "0" * 64 + "\n", encoding="utf-8")
+        self._rollback_refused_untouched("backup_manifest_missing")
+
+    def test_allow_legacy_backup_rolls_back_with_a_warning(self):
+        self.deploy()
+        os.remove(os.path.join(self.backup_dir(), "state-manifest.txt"))
+        res = self.run_script("--rollback", self.backup_dir(), "--allow-legacy-backup")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("UNVERIFIED BACKUP", res.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+
+    def test_rollback_refuses_a_changed_backup_file(self):
+        self.deploy()
+        Path(self.backup_dir(), "web-manager-data", ".env").write_text("AI_MODEL=tampered\n", encoding="utf-8")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn("web-manager-data/.env (missing or changed)", res.stderr)
+
+    def test_rollback_refuses_a_file_added_to_the_backup(self):
+        self.deploy()
+        Path(self.backup_dir(), "web-manager-data", "transactions", "planted.json").write_text("{}", encoding="utf-8")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn("web-manager-data/transactions/planted.json (not in the manifest)", res.stderr)
+
+    def test_rollback_refuses_manifest_paths_outside_the_backup(self):
+        self.deploy()
+        outside = Path(self.tmp, "outside.txt")
+        outside.write_text("x", encoding="utf-8")
+        sha = hashlib.sha256(b"x").hexdigest()
+        rel_up = os.path.relpath(outside, self.backup_dir()).replace(os.sep, "/")
+        with open(os.path.join(self.backup_dir(), "state-manifest.txt"), "a", encoding="utf-8", newline="\n") as f:
+            f.write(f"{rel_up} sha256={sha}\n{outside.as_posix()} sha256={sha}\n sha256={sha}\n")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn(f"{rel_up} (not a path inside the backup)", res.stderr)
+        self.assertIn(f"{outside.as_posix()} (not a path inside the backup)", res.stderr)
+        self.assertIn("<empty path> (not a path inside the backup)", res.stderr)
+
+    def _fail_deploy_inside_state_backup(self):
+        """A deploy that dies while copying state, after the web manager was
+        stopped: an unreadable transaction record makes `cp` fail."""
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-0 file")
+        bad = Path(self.webmgr_dir, "transactions", "t2.json")
+        bad.write_text("{}", encoding="utf-8")
+        os.chmod(bad, 0)
+        try:
+            res = self.run_script(env=self.env())
+        finally:
+            os.chmod(bad, 0o600)
+        self.assertNotEqual(res.returncode, 0)
+        return res
+
+    def test_a_deploy_that_fails_inside_the_state_backup_leaves_a_rollbackable_backup(self):
+        # QA F1 on #241: this backup used to be refused as "modified".
+        res = self._fail_deploy_inside_state_backup()
+        self.assertIn("Failed stage:          backup-state", res.stderr)
+        self.assertIn("the backup is incomplete", res.stderr)
+        self.assertIn("incomplete_backup_stage=backup-state",
+                      Path(self.backup_dir(), "state-manifest.txt").read_text(encoding="utf-8"))
+        rb = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(rb.returncode, 0, rb.stderr)
+        self.assertNotIn("backup_manifest", rb.stdout + rb.stderr)
+        self.assertIn("INCOMPLETE BACKUP", rb.stderr)
+        self.assertIn("failed during backup-state", rb.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+
+    def test_an_incomplete_backup_that_was_changed_afterwards_is_still_refused(self):
+        self._fail_deploy_inside_state_backup()
+        Path(self.backup_dir(), "docker-compose.yml.bak").write_text("services: {}\n", encoding="utf-8")
+        self._rollback_refused_untouched("backup_manifest_mismatch")
+
+    # S-9 on #241: a deploy that fails mid-copy must not leave a backup whose
+    # rollback replaces live files with partial copies.
+    def _live_snapshot(self):
+        out = {}
+        for dp, dns, fns in os.walk(self.stack_dir):
+            dns[:] = [d for d in dns if d != "_backups" and not d.startswith(".rollback-stage")]
+            for fn in fns:
+                p = os.path.join(dp, fn)
+                out[os.path.relpath(p, self.stack_dir)] = hashlib.sha256(Path(p).read_bytes()).hexdigest()
+        return out
+
+    def _cp_shim_truncating(self, dst_glob, nbytes):
+        """A `cp` that writes only <nbytes> of the source to a backup
+        destination matching <dst_glob> and fails, like a full disk."""
+        shim = Path(self.fakebin, "cp")
+        shim.write_text('#!/usr/bin/env bash\nlast="${@: -1}"\n'
+                        f'case "$last" in {dst_glob}) head -c {nbytes} "${{@: -2:1}}" > "$last"; exit 1;; esac\n'
+                        'exec /bin/cp "$@"\n', encoding="utf-8", newline="\n")
+        os.chmod(shim, 0o755)
+        return shim
+
+    def _incomplete_rollback_leaves_live_state(self, prepare, cleanup):
+        prepare()
+        try:
+            res = self.run_script(env=self.env())
+        finally:
+            cleanup()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("the backup is incomplete", res.stderr)
+        before = self._live_snapshot()  # the failed deploy changed nothing live
+        rb = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(rb.returncode, 0, rb.stderr)
+        self.assertIn("INCOMPLETE BACKUP", rb.stderr)
+        self.assertIn("are NOT restored", rb.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+        after = self._live_snapshot()
+        self.assertEqual(sorted(set(before) - set(after)), [], "a live file was moved away")
+        self.assertEqual(sorted(k for k in before if before[k] != after.get(k)), [],
+                         "a live file was replaced from the incomplete backup")
+        self.assertEqual(list(Path(self.backup_dir()).rglob("*.part")), [])
+        return rb
+
+    def test_truncated_state_file_copy_is_not_restored(self):
+        Path(self.webmgr_dir, ".flask_secret_key").write_text("flask-key-before-0123456789", encoding="utf-8")
+        shim = self._cp_shim_truncating("*_backups*/web-manager-data/.flask_secret_key*", 3)
+        self._incomplete_rollback_leaves_live_state(lambda: None, shim.unlink)
+        self.assertFalse(Path(self.backup_dir(), "web-manager-data", ".flask_secret_key").exists(),
+                         "a partial copy kept its final name")
+
+    def test_truncated_beets_config_copy_is_not_restored(self):
+        config = "directory: /music\nplugins: web webmanager\n"
+        Path(self.engine_dir, "config.yaml").write_text(config, encoding="utf-8")
+        shim = self._cp_shim_truncating("*_backups*/beets-config/config.yaml*", 5)
+        self._incomplete_rollback_leaves_live_state(lambda: None, shim.unlink)
+        self.assertFalse(Path(self.backup_dir(), "beets-config", "config.yaml").exists())
+        self.assertEqual(Path(self.engine_dir, "config.yaml").read_text(encoding="utf-8"), config)
+
+    def test_partial_beetsplug_copy_is_not_restored(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-0 file")
+        extra = Path(self.plugin_dir, "zz_extra.py")
+        extra.write_text("X = 1\n", encoding="utf-8")
+        self._incomplete_rollback_leaves_live_state(lambda: os.chmod(extra, 0), lambda: os.chmod(extra, 0o600))
+        self.assertFalse(Path(self.backup_dir(), "beets-config", "beetsplug").exists())
+        self.assertEqual(extra.read_text(encoding="utf-8"), "X = 1\n")
+
+    def test_a_tampered_incomplete_backup_state_file_is_refused(self):
+        self._fail_deploy_inside_state_backup()
+        Path(self.backup_dir(), "web-manager-data", ".env").write_text("AI_MODEL=tampered\n", encoding="utf-8")
+        self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertEqual(Path(self.webmgr_dir, ".env").read_text(encoding="utf-8"), "AI_MODEL=before-deploy\n")
+
+    def test_image_labels_record_must_be_listed(self):
+        self.deploy()
+        manifest = Path(self.backup_dir(), "state-manifest.txt")
+        self.assertTrue(Path(self.backup_dir(), "previous-image-labels.json").exists())
+        manifest.write_text("".join(ln for ln in manifest.read_text(encoding="utf-8").splitlines(True)
+                                    if not ln.startswith("previous-image-labels.json ")), encoding="utf-8")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn("previous-image-labels.json (not in the manifest)", res.stderr)
+
+    def test_deploy_with_stale_db_token_migration_and_plugin_restart_rolls_back(self):
+        # From QA on #241: every later backup write is recorded too.
+        make_sqlite_db(os.path.join(self.webmgr_dir, "musiclibrary.blb"), items=2, albums=1)
+        legacy = os.path.join(self.tmp, "legacy-config")
+        os.makedirs(legacy)
+        os.remove(os.path.join(self.webmgr_dir, ".auth_token"))
+        Path(legacy, ".auth_token").write_text("legacy-tok", encoding="utf-8")
+        st = self.load_state()
+        st["containers"]["cid-webmgr"]["Mounts"].append({"Destination": "/config", "Source": legacy})
+        self.save_state(st)
+        self.set_provisioned_plugin("1.3.0")  # engine reports 1.2.0 -> plugin restart path
+        res = self.run_script(env=self.env())
+        bd = self.backup_dir()
+        text = Path(bd, "state-manifest.txt").read_text(encoding="utf-8")
+        self.assertIn("stale-database/musiclibrary.blb sha256=", text, res.stderr)
+        self.assertIn("migrated_token_sha256", Path(bd, "token-metadata.txt").read_text(encoding="utf-8"))
+        rb = self.run_script("--rollback", bd, env=self.env(RESTORE_STALE_DB=1))
+        self.assertNotIn("backup_manifest", rb.stdout + rb.stderr, rb.stderr)
+        self.assertIn("Verified", rb.stderr)
+
+    def test_second_rollback_from_the_same_backup_still_verifies(self):
+        self.deploy()
+        first = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotIn("backup_manifest", second.stdout + second.stderr)
+
+    def test_allow_legacy_backup_does_not_skip_verification_of_a_manifest(self):
+        self.deploy()
+        Path(self.backup_dir(), "docker-compose.yml.bak").write_text("services: {}\n", encoding="utf-8")
+        self._rollback_refused_untouched("backup_manifest_mismatch", "--allow-legacy-backup")
 
 
 class LatestTagStackFixture(EndToEndFixture):
@@ -2031,6 +2267,184 @@ class RollbackCopyRaceTests(RolloutScriptTestBase):
         self.assertIn("was replaced while the rollback ran", res.stderr)
         self.assertEqual(os.listdir(victim_dir), [], "the rollback wrote into a swapped staging folder")
         self.assertEqual(Path(engine, "beetsplug", "webmanager", "version.py").read_text(encoding="utf-8"), "v = 2\n")
+
+    def test_transactions_folder_flipped_to_a_link_gets_no_staging_folder(self):
+        # #221 R2: a racer flips transactions/ itself to a link to another
+        # folder just while the staging folder is made, then flips it back.
+        # No staging folder may be made, or left, in the link's target.
+        victim_dir = os.path.join(self.tmp, "host-dir")
+        os.makedirs(victim_dir)
+        txn = os.path.join(self.tmp, "data", "transactions")
+        os.makedirs(txn)
+        src = os.path.join(self.tmp, "txn_a.json")
+        Path(src).write_text("{}", encoding="utf-8")
+        res = self.run_snippet(
+            f'mktemp() {{ case "$*" in *.rollback-stage.*) ;; *) command mktemp "$@"; return;; esac\n'
+            f'  local d rc=0; command mv "{txn}" "{txn}.away"; command ln -s "{victim_dir}" "{txn}"\n'
+            f'  d="$(command mktemp "$@")" || rc=$?\n'
+            f'  command rm "{txn}"; command mv "{txn}.away" "{txn}"\n'
+            f'  [[ "$rc" -eq 0 ]] && printf "%s\\n" "$d"; return "$rc"; }}\n'
+            f'if copy_regular_file "{src}" "{txn}/txn_a.json"; then echo COPIED; else echo REFUSED; fi'
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(os.listdir(victim_dir), [], "a staging folder was made or left through the flipped link")
+        self.assertEqual([n for n in os.listdir(txn) if n.startswith(".rollback-stage.")], [])
+        if "COPIED" in res.stdout:
+            self.assertEqual(Path(txn, "txn_a.json").read_text(encoding="utf-8"), "{}")
+
+
+class AuthTokenNotOnArgvTests(RolloutScriptTestBase):
+    """#221 S6: the Web Manager token must never be on curl's command line
+    (any local user can read it in the process list). It goes in a 0600
+    header file that is gone once curl returns."""
+
+    TOKEN = "tok-SECRET-0123456789abcdef"
+
+    def _run(self, call, content=None, symlink=False, expect_rc=0):
+        token = os.path.join(self.tmp, "auth_token")
+        target = os.path.join(self.tmp, "real_token") if symlink else token
+        Path(target).write_text(self.TOKEN + "\n" if content is None else content, encoding="utf-8")
+        if symlink:
+            os.symlink(target, token)
+        log = os.path.join(self.tmp, "curl.log")
+        Path(log).touch()
+        # A curl stand-in that records its argv and, for -H @file, the file's
+        # mode and content while curl "runs".
+        res = self.run_snippet(
+            f'ACTIVE_AUTH_TOKEN_PATH="{token}"\n'
+            f'curl() {{ printf "ARGV %s\\n" "$*" >> "{log}"; local a; for a in "$@"; do case "$a" in '
+            f'@*) printf "HDR %s %s %s\\n" "${{a#@}}" "$(stat -c %a "${{a#@}}")" "$(cat "${{a#@}}")" >> "{log}";; esac; done; '
+            f'echo 200; }}\n'
+            + call
+        )
+        self.assertEqual(res.returncode, expect_rc, res.stderr)
+        self.stderr = res.stderr
+        return Path(log).read_text(encoding="utf-8").splitlines()
+
+    def _assert_no_token_sent(self, lines):
+        self.assertEqual([ln for ln in lines if ln.startswith("HDR ")], [])
+        self.assertFalse(any(self.TOKEN in ln for ln in lines))
+        self.assertNotIn(self.TOKEN, self.stderr)
+
+    @unittest.skipIf(os.name == "nt", "needs POSIX symlinks")
+    def test_symlinked_token_is_not_sent(self):
+        lines = self._run("fetch_setup_status >/dev/null", symlink=True)
+        self._assert_no_token_sent(lines)
+        self.assertIn("sending no Authorization header", self.stderr)
+
+    def test_multi_line_token_is_not_sent(self):
+        # An LF inside the token would add a header of the caller's choosing.
+        lines = self._run("fetch_setup_status >/dev/null",
+                          content=self.TOKEN + "\nX-Injected: yes\n")
+        self._assert_no_token_sent(lines)
+        self.assertFalse(any("X-Injected" in ln for ln in lines))
+        self.assertIn("sending no Authorization header", self.stderr)
+
+    def test_short_token_is_not_sent(self):
+        lines = self._run("fetch_setup_status >/dev/null", content="short\n")
+        self.assertEqual([ln for ln in lines if ln.startswith("HDR ")], [])
+
+    def test_redirect_following_is_refused(self):
+        lines = self._run("rc=0; curl_auth -sSL http://127.0.0.1:9/x || rc=$?; exit $rc", expect_rc=2)
+        self.assertEqual(lines, [], "curl must not run when asked to follow redirects")
+        self.assertIn("refuses to follow redirects", self.stderr)
+
+    def test_every_redirect_option_form_is_refused(self):
+        # S-10 on #241: a bare -L and clusters such as -Ls used to get through.
+        for opt in ("-L", "-Ls", "-sL", "-fL", "-sSfL", "--location", "--location-trusted"):
+            with self.subTest(opt=opt):
+                lines = self._run(f"rc=0; curl_auth {opt} http://127.0.0.1:9/x || rc=$?; exit $rc", expect_rc=2)
+                self.assertEqual(lines, [], f"curl ran with {opt}")
+                self.assertIn("refuses to follow redirects", self.stderr)
+
+    def _assert_header_file_only(self, lines):
+        argv = [ln for ln in lines if ln.startswith("ARGV ")]
+        hdrs = [ln.split(" ", 3) for ln in lines if ln.startswith("HDR ")]
+        self.assertTrue(argv)
+        for ln in argv:
+            self.assertNotIn(self.TOKEN, ln, "the token was passed on curl's command line")
+        self.assertEqual(len(hdrs), len(argv), "every authenticated call must use a header file")
+        for _, path, mode, content in hdrs:
+            self.assertEqual(content, f"Authorization: Bearer {self.TOKEN}")
+            if os.name != "nt":
+                self.assertEqual(mode, "600")
+            self.assertFalse(os.path.exists(path), "the header file was left behind")
+
+    def test_authenticated_probe_uses_a_private_header_file(self):
+        self._assert_header_file_only(self._run("probe_endpoint /api/setup/status 1 >/dev/null"))
+
+    def test_setup_status_fetch_uses_a_private_header_file(self):
+        self._assert_header_file_only(self._run("fetch_setup_status >/dev/null"))
+
+    def test_unauthenticated_probe_sends_no_token(self):
+        lines = self._run("probe_endpoint /api/health 0 >/dev/null")
+        self.assertEqual([ln for ln in lines if ln.startswith("HDR ")], [])
+        self.assertFalse(any(self.TOKEN in ln for ln in lines))
+
+    def test_no_bearer_header_is_built_on_a_command_line(self):
+        self.assertNotIn('-H "Authorization', SCRIPT_SOURCE)
+        self.assertNotIn("tok_arg", SCRIPT_SOURCE)
+
+
+class _SlowStatusHandler(http.server.BaseHTTPRequestHandler):
+    seen = []
+
+    def do_GET(self):
+        _SlowStatusHandler.seen.append(self.headers.get("Authorization"))
+        time.sleep(1.5)  # keep curl running while /proc is scanned
+        body = b'{"status":"ready","blocking_reasons":[]}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@unittest.skipUnless(shutil.which("curl") and os.path.isdir("/proc"), "needs a real curl and /proc")
+class RealCurlTokenTests(RolloutScriptTestBase):
+    """From QA on #241: with the real curl, no process's command line ever
+    holds the token, the server still gets it, and no header file is left."""
+
+    TOKEN = "qa-SECRET-token-9f8e7d6c5b4a"
+
+    def test_token_never_in_any_cmdline_with_real_curl(self):
+        _SlowStatusHandler.seen = []
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowStatusHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        token = os.path.join(self.tmp, "auth_token")
+        Path(token).write_text(self.TOKEN + "\n", encoding="utf-8")
+        hits, stop = [], threading.Event()
+
+        def scan():
+            while not stop.is_set():
+                for pid in os.listdir("/proc"):
+                    if pid.isdigit():
+                        try:
+                            data = Path("/proc", pid, "cmdline").read_bytes()
+                        except OSError:
+                            continue
+                        if self.TOKEN.encode() in data:
+                            hits.append(data)
+        scanner = threading.Thread(target=scan, daemon=True)
+        scanner.start()
+        os.remove(os.path.join(self.fakebin, "curl"))  # use the real curl
+        tmpdir = os.path.join(self.tmp, "hdrtmp")
+        os.makedirs(tmpdir)
+        env = self.base_env(TMPDIR=tmpdir)
+        res = self.run_snippet(
+            f'ACTIVE_AUTH_TOKEN_PATH="{token}"\nENDPOINT_BASE_URL="http://127.0.0.1:{srv.server_port}"\n'
+            'fetch_setup_status\nprobe_endpoint /api/x 1\n'
+            'curl_auth -sS --max-time 10 "${ENDPOINT_BASE_URL}/api/library?limit=1"\n',
+            env=env)
+        stop.set()
+        scanner.join()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(hits, [])
+        self.assertEqual(_SlowStatusHandler.seen, [f"Bearer {self.TOKEN}"] * 3)
+        self.assertEqual(os.listdir(tmpdir), [], "a header file was left behind")
 
 
 @unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")
