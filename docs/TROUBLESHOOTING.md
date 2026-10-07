@@ -81,6 +81,12 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **Cause**: from plugin 1.6.0, Beets reports whether the `fpcalc` binary is on its own `PATH`. The `chroma` plugin can load without it, but fingerprinting then fails.
 * **Fix**: use the stock LinuxServer Beets image, which ships `fpcalc`, or install chromaprint in your Beets image. Web Manager itself never needs `fpcalc`.
 
+### 11. Web Manager stops at startup with "cannot take ownership of /web-manager-data" after a `PUID`/`PGID` change
+* **Cause**: Web Manager keeps `/web-manager-data` private (mode 0700, owned by `PUID`:`PGID`). The hardened Compose files (`docker-compose.full.yml`, `examples/docker-compose.external-beets.yml`) drop all capabilities except `CHOWN`, `SETUID` and `SETGID`. Without the capability to read other users' folders, the startup step cannot read a private folder that still belongs to the old `PUID`:`PGID`, so it cannot give the folder to the new IDs. `docker-compose.yml` keeps the default capabilities and is not affected.
+* **Fix**: give the folder to the new IDs once, then start the container again. Use your new `PUID`/`PGID` values in place of `1001:1001` below.
+  * Bind mount (a host folder): `sudo chown -R 1001:1001 /path/to/web-manager-data`
+  * Named volume: `docker run --rm -v <volume-name>:/d alpine chown -R 1001:1001 /d`
+
 ---
 
 ## Operational Diagnostics

@@ -71,7 +71,7 @@ The shipped Compose files use the literal image `ghcr.io/iranman/beets-web-manag
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PUID`, `PGID` | `1000` | User and group the container runs as. |
+| `PUID`, `PGID` | `1000` | User and group the container runs as. With the hardened Compose files, changing them needs a one-time `chown` of the data folder; see [Troubleshooting §11](TROUBLESHOOTING.md#11-web-manager-stops-at-startup-with-cannot-take-ownership-of-web-manager-data-after-a-puidpgid-change). |
 | `TZ` | `UTC` | Time zone. |
 | `WEBCONTROL_PORT` | `8337` | In `ports:` it is the published host port. Inside the container the app always listens on 8337, which the shipped healthcheck expects. |
 
