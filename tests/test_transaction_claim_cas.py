@@ -54,6 +54,9 @@ class ClaimRacesCancelTests(_RouteEnv):
             resp = self.client.post(f"/api/transactions/{op}/apply")
         self.assertTrue(cancels[0].get_json()["ok"])
         self.assertEqual(resp.status_code, 409, resp.get_json())
+        # QA-217-3: the refusal names the status the cancel left behind.
+        self.assertEqual(resp.get_json()["error"], "This transaction is no longer Approved (now Cancelled).")
+        self.assertEqual(resp.get_json()["error_kind"], "other")
         self.assertEqual(ad.destructive_calls(), [])
         self.assertEqual(self.store.get(op)["status"], "Cancelled")
 

@@ -508,11 +508,15 @@ def album_cleanup_apply_response(operation_id: str) -> Tuple[Dict[str, Any], int
         return {**body, "code": "apply_failed", "error": "Album cleanup apply failed."}, 500
     if res.get("ok"):
         return res, 200
-    kind, message = _classify_album_cleanup_apply_failure(res)
+    refused = res.get("code") in ("not_approved", "already_applied")
+    # A state refusal (cancelled, claimed, applied) is reported as is: its
+    # text names the status and must not be read as a stale plan. Otherwise
     # error_kind is the authoritative UI signal; "stale_plan" (the only kind
     # ever shown as "nothing was changed") comes only from the engine's own
     # "mutated" flag (see _classify_album_cleanup_apply_failure).
-    status = 409 if res.get("code") in ("not_approved", "already_applied") else 400
+    kind, message = ("other", res.get("error") or "Apply refused.") if refused \
+        else _classify_album_cleanup_apply_failure(res)
+    status = 409 if refused else 400
     return {"ok": False, "code": res.get("code"), "error": message, "error_kind": kind,
             "mutated": bool(res.get("mutated")), "log": res.get("log", [])}, status
 

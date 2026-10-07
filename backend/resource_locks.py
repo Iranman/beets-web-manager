@@ -302,6 +302,18 @@ def claim_approved(store, operation_id: str) -> Optional[Dict[str, Any]]:
     return store.transition(operation_id, "Approved", "Running")
 
 
+def claim_refusal(store, operation_id: str) -> str:
+    """The message for a failed claim_approved, read once after the CAS lost
+    (QA-217-3): a cancel and a second apply look different to the caller."""
+    try:
+        status = store.get(operation_id).get("status")
+    except KeyError:
+        return "Transaction not found."
+    if status == "Approved":
+        return "This transaction was already applied."
+    return f"This transaction is no longer Approved (now {status})."
+
+
 def approve_preview(store, operation_id: str, approved_by: str) -> Optional[Dict[str, Any]]:
     """Compare-and-set Preview -> Approved (#206 F4). An already-Approved
     transaction passes unchanged; any other status (Cancelled, Failed,

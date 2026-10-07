@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import backend.album_duplicate_analysis as album_duplicate_analysis
 from backend.beets_adapter import BeetsAdapter, beets_adapter
 from backend.composite_workflows import _decode_path, _get_store, _s
-from backend.resource_locks import approve_preview, attempt_owner, claim_approved, locks as resource_locks
+from backend.resource_locks import approve_preview, attempt_owner, claim_approved, claim_refusal, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
 ALBUM_ROW_MERGE_FAMILY = "album_row_merge_v1"
@@ -242,7 +242,7 @@ def apply_album_row_merge(operation_id: str, *, adapter: Optional[BeetsAdapter] 
                                                            sorted([meta["target_album_id"]] + meta["source_album_ids"])]
     with resource_locks().hold(keys, attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
-            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
         albums_before = int((ad.get_stats() or {}).get("albums") or 0)
         st.update(operation_id, status="Running", metadata={"engine_request": {"merge_id": merge_id_for(operation_id),
                                                                                "albums_before": albums_before}})

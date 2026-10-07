@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from backend.beets_adapter import BeetsAdapter, beets_adapter
 from backend.composite_workflows import _decode_path, _get_store, _s
-from backend.resource_locks import attempt_owner, claim_approved, locks as resource_locks
+from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
 ATTACH_FAMILY = "untracked_attach_v1"
@@ -424,7 +424,7 @@ def apply_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
     keys = _lock_keys(meta)
     with resource_locks().hold(keys, attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
-            return {"ok": False, "code": "not_approved", "error": "Another attempt already claimed this transaction."}
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
         stats = ad.get_stats() or {}
         items_before = int(stats.get("items") or 0)
         st.update(operation_id, status="Running",
