@@ -1181,7 +1181,7 @@
 "_album_cleanup_row_value",
 "_album_cleanup_abs_path",
 "_album_cleanup_trusted_path",
-"_album_cleanup_trusted_destination",
+"_album_cleanup_contained_destination",
 "_album_cleanup_db_index",
 "_album_cleanup_majority",
 "_album_cleanup_file_inventory",

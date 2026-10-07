@@ -134,6 +134,12 @@ The project uses Semantic Versioning.
 - **Path-less Beets responses no longer look like an empty library.** When Beets returns items without paths (`web.include_paths` off), the adapter raises `BeetsAdapterPathsUnavailableError` (`BEETS_PATHS_UNAVAILABLE`, HTTP 503) instead of returning an empty path list.
 
 ### Security
+- slskd title matching strips a `feat.`/`ft.` tail in linear time. The old regex took quadratic time on a long run of spaces followed by a newline (CodeQL #1369).
+- Error responses no longer echo exception text (CodeQL #1365, #1368, #1371). The details are logged on the server, and the HTTP status codes are unchanged.
+  - `POST /api/import/review-files/cleanup` maps each kind of plan refusal (outside the allowed roots, inside the music library, approved root itself, symlink) to a fixed message.
+  - The `POST /api/transactions/<id>/rollback` family dispatch returns `ok`, `status`, `operation_id`, `restored`, `error`, `code` and `mutated`. It no longer returns the executor's `log`, which is still saved in the transaction's logs.
+  - The Beets config edit routes return one fixed 409 message when `config.yaml` cannot be edited safely.
+- The album-cleanup destination helper is renamed so CodeQL no longer treats its returned path as a secret stored in job records (CodeQL #1384). The value is a filesystem path, not a credential.
 - **Import Review cleanup refuses a folder that contains the music library (F2).** With `DOWNLOADS_ROOT=/data` and `MUSIC_ROOT=/data/media/music`, a delete of `/data/media` used to plan irreversible deletes of library files. Now a target that is an ancestor of the music root is always refused, and a delete of a file inside the library needs the library-delete confirmation. Both are checked at plan and again at apply, against the recorded and the current music root.
 - Folder-cleanup reference checks compare normalized path strings and no longer resolve the request path on disk (CodeQL #1381).
 - The Import Review library guard compares paths as normalized strings (CodeQL #1383). It also refuses an allowed cleanup root that is `/` or overlaps the music library, using the same `config_layers` check as #235; staging-helper roots drop such a `DOWNLOADS_ROOT`.

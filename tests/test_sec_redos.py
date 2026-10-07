@@ -59,6 +59,7 @@ _O_SCENE = re.compile(r"\s*-\s*")
 _O_BRACKET = re.compile(r"\s*[\(\[]([^()\[\]]+)[\)\]]\s*$")
 _O_DASH = re.compile(r"\s+[-–—]\s+(.+)$")
 _O_SLSKD_SPLIT = re.compile(r"\s+-\s+")
+_O_SLSKD_FEAT_TAIL = re.compile(r"\b(?:feat|ft)\.?\s+.*$", re.I)  # CodeQL #1369
 _O_SLSKD_BRACKET = re.compile(
     r"\s*[\(\[]\s*(?:feat\.?|ft\.?|with|prod\.?|produced\s+by|remix|edit|version|bonus|clean|explicit).*?[\)\]]\s*",
     re.I,
@@ -105,6 +106,7 @@ _PAIRS = [
     ("slskd_split", _O_SLSKD_SPLIT.split,
      lambda s: split_ws_led(s, slskd_service._DASH_SEP_CORE_RE, need_ws=True)),
     ("slskd_bracket", lambda s: _O_SLSKD_BRACKET.sub(" ", s), strip_bracket_credits),
+    ("slskd_feat_tail", lambda s: _O_SLSKD_FEAT_TAIL.sub("", s), slskd_service._strip_feat_tail),
     ("playlist_primary_artist", _o_primary_artist, playlist_service._playlist_primary_artist_name),
 ]
 
@@ -121,6 +123,7 @@ _CORPUS = [
     "01 - Artist - Title.flac", "Artist - Title", "  ft. x", "[with y]", "Ⅰn mono", "İn mono", "ın mono", "a ſ ft. b",
     "a (produced\n by x) b", "a (produced\n\n by x\n) b", "a (prod\n by x) b", "Song (PRODUCED\tBY X)",
     "Jay-Z / Kanye West", "A featuring B / C", "A Feat. B", "A feat.B", "afeat b", "A  FT  B", "/x", "A /", "A\nfeat\nB",
+    "feat  \n\nx", "x feat y\n", "feat x\n\n", "feat x\ny", "a ft. \n", "feat. ft x\nfeat y", "feat\t", "ft..x ft x",
 ]
 
 _ALPHABET = " \t\n 　 -–—()[]/,+&.aAfeatwithxndmoiıİſprodcubyg"
@@ -178,6 +181,11 @@ class HelperTimingTests(_ReDoSCase):
     def test_repeated_open_feat(self):
         self.assert_linear_and_fast(strip_bracket_credits, lambda n: "(ft." * (n // 4))
         self.assert_linear_and_fast(strip_bracket_credits, lambda n: "(" + " " * n + "feat")
+
+    def test_feat_tail_whitespace_then_newline(self):
+        # CodeQL #1369: "feat" + a long space run + an embedded newline was O(n^2).
+        self.assert_linear_and_fast(slskd_service._strip_feat_tail, lambda n: "feat" + " " * n + "\nx\ny")
+        self.assert_linear_and_fast(slskd_service._strip_feat_tail, lambda n: "feat " * (n // 5) + "\nx\ny")
 
     def test_dash_then_whitespace(self):
         make = lambda n: " - " + "  " * (n // 2)  # noqa: E731

@@ -137,6 +137,29 @@ def delete_import_review_folder():
         return jsonify({"ok": False, "error": "Could not delete source folder.", "log": log}), 500
 
 
+# CodeQL #1365: the planner's error can be raw ValueError text with resolved
+# paths. Answer one fixed message per refusal kind (checked in this order);
+# the original text is logged server-side.
+_IMPORT_REVIEW_PLAN_ERRORS = (
+    ("required", "Review path is required."),
+    ("unsafe encoded", "Path contains unsafe encoded characters."),
+    ("Symlinks", "Symlinks are not permitted."),
+    ("is refused", "An allowed cleanup root is unsafe; check the downloads root configuration."),
+    ("approved root", "Cannot clean up an approved root folder itself."),
+    ("music library", "Review folder is inside the music library."),
+    ("outside", "Review folder or file is outside the allowed cleanup roots."),
+    ("Invalid", "Invalid cleanup request."),
+)
+
+
+def _import_review_cleanup_plan_error(error: Any) -> str:
+    text = str(error or "")
+    for needle, message in _IMPORT_REVIEW_PLAN_ERRORS:
+        if needle in text:
+            return message
+    return "Failed to create file cleanup plan."
+
+
 @app.post("/api/import/review-files/cleanup")
 def cleanup_import_review_files():
     payload = request.get_json(silent=True) or {}
@@ -167,7 +190,9 @@ def cleanup_import_review_files():
     try:
         plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
         if not plan_res.get("ok"):
-            return jsonify({"ok": False, "error": plan_res.get("error", "Failed to create file cleanup plan."), "log": log}), 400
+            _app_logger.warning("cleanup_import_review_files plan refused for %r: %s", folder_path, plan_res.get("error"))
+            return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(plan_res.get("error")),
+                            "log": log}), 400
 
         op_id = plan_res.get("operation_id")
         # The operator's explicit cleanup request is the approval; apply

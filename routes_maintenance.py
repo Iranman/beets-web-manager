@@ -863,6 +863,22 @@ def api_transaction_apply(transaction_id):
     return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})
 
 
+def _rollback_dispatch_body(res: Dict[str, Any]) -> Dict[str, Any]:
+    """CodeQL #1368: the executors' free-text ``log`` embeds raw exception
+    text, so only these structured fields are returned. The log stays in the
+    transaction's persisted ``logs`` (GET /api/transactions/<id>)."""
+    body = {
+        "ok": bool(res.get("ok")),
+        "status": res.get("status"),
+        "operation_id": res.get("operation_id"),
+        "restored": res.get("restored"),
+        "error": res.get("error"),
+        "code": res.get("code"),
+        "mutated": res.get("mutated"),
+    }
+    return {key: value for key, value in body.items() if value is not None}
+
+
 @app.post("/api/transactions/<transaction_id>/rollback")
 def api_transaction_rollback(transaction_id):
     _sync_transactions_from_jobs()
@@ -935,7 +951,7 @@ def api_transaction_rollback(transaction_id):
             else:
                 return jsonify({"ok": False, "error": "Transaction not found"}), 404
             status_code = 200 if res.get("ok") else 400
-            return jsonify(res), status_code
+            return jsonify(_rollback_dispatch_body(res)), status_code
         except BeetsUnavailableError as exc:
             return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
         except BeetsError as exc:
