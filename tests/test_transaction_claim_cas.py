@@ -57,26 +57,90 @@ class ClaimRacesCancelTests(_RouteEnv):
         self.assertEqual(ad.destructive_calls(), [])
         self.assertEqual(self.store.get(op)["status"], "Cancelled")
 
-    def test_metadata_update_job_applies_nothing_after_cancel(self):
+    def _metadata_tx(self, status="Approved"):
+        return self.store.create(operation_type="Metadata Update", status=status,
+                                 metadata={"item_id": 3, "pending_fields": {"title": "New"}})["id"]
+
+    @staticmethod
+    def _job(tx_id, status="running"):
+        return mock.Mock(job_id="job1", status=status, result=None, log=[],
+                         metadata={"transaction_id": tx_id, "type": "metadata-update"})
+
+    def _metadata_env(self, started):
         import backend.transaction_service as ts
-        tx = self.store.create(operation_type="Metadata Update", status="Approved",
-                               metadata={"item_id": 3, "pending_fields": {"title": "New"}})
-        started = {}
 
         def start_python(fn, label="", metadata=None):
             started["fn"] = fn
-            return mock.Mock(job_id="job1")
+            started["job"] = self._job(metadata["transaction_id"])
+            return started["job"]
 
-        with mock.patch.object(ts, "transactions", self.store), \
-                mock.patch.object(ts.jobs, "start_python", side_effect=start_python), \
-                mock.patch.object(ts.composite_workflows, "update_item_metadata") as write:
-            ts._start_metadata_apply_transaction(tx["id"])
-            # The cancel lands after the route's status check, before the job runs.
-            self.assertTrue(self.client.post(f"/api/transactions/{tx['id']}/cancel").get_json()["ok"])
+        jobs_all = lambda: [started["job"]] if "job" in started else []  # noqa: E731
+        return ts, [mock.patch.object(ts, "transactions", self.store),
+                    mock.patch.object(ts.jobs, "start_python", side_effect=start_python),
+                    mock.patch.object(ts.jobs, "all", side_effect=jobs_all),
+                    mock.patch.object(ts, "_invalidate_lib_cache"),
+                    mock.patch.object(ts.composite_workflows, "update_item_metadata", return_value={"ok": True})]
+
+    def _start(self, patches):
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_metadata_update_survives_job_sync_before_body(self):
+        """#217 SEC-217-1: a status poll between job start and the job body
+        must not make the job refuse its own claimed transaction."""
+        op, started = self._metadata_tx(), {}
+        ts, patches = self._metadata_env(started)
+        self._start(patches)
+        ts._start_metadata_apply_transaction(op)
+        ts._sync_transactions_from_jobs()  # GET /api/transactions poll
+        started["fn"]([])
+        ts.composite_workflows.update_item_metadata.assert_called_once()
+        self.assertEqual(self.store.get(op)["status"], "Completed")
+
+    def test_metadata_update_cancel_before_claim_wins(self):
+        op, started = self._metadata_tx(), {}
+        ts, patches = self._metadata_env(started)
+        self._start(patches)
+        cancels = []
+        real_get = self.store.get
+
+        def get(tid, *a, **kw):
+            tx = real_get(tid, *a, **kw)
+            if not cancels and any(f.function == "_start_metadata_apply_transaction" for f in inspect.stack(0)):
+                cancels.append(self.client.post(f"/api/transactions/{tid}/cancel"))
+            return tx
+
+        with mock.patch.object(self.store, "get", side_effect=get):
+            with self.assertRaises(ValueError):
+                ts._start_metadata_apply_transaction(op)
+        self.assertTrue(cancels[0].get_json()["ok"])
+        ts.jobs.start_python.assert_not_called()
+        ts.composite_workflows.update_item_metadata.assert_not_called()
+        self.assertEqual(self.store.get(op)["status"], "Cancelled")
+
+    def test_job_sync_never_overwrites_cancelled(self):
+        """#217 SEC-217-2: a job linked to a transaction that lost the race
+        never turns Cancelled into Running or Failed."""
+        import backend.transaction_service as ts
+        op = self._metadata_tx("Cancelled")
+        for status in ("running", "failed", "success"):
+            with self.subTest(job=status), mock.patch.object(ts, "transactions", self.store),                     mock.patch.object(ts.jobs, "all", return_value=[self._job(op, status)]):
+                ts._sync_transactions_from_jobs()
+            self.assertEqual(self.store.get(op)["status"], "Cancelled")
+
+    def test_job_sync_still_finishes_a_running_transaction(self):
+        op = self._metadata_tx("Running")
+        self.store.update_from_job(op, self._job(op, "failed"))
+        self.assertEqual(self.store.get(op)["status"], "Failed")
+
+    def test_metadata_job_start_failure_marks_failed(self):
+        import backend.transaction_service as ts
+        op = self._metadata_tx()
+        with mock.patch.object(ts, "transactions", self.store),                 mock.patch.object(ts.jobs, "start_python", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                started["fn"]([])
-        write.assert_not_called()
-        self.assertEqual(self.store.get(tx["id"])["status"], "Cancelled")
+                ts._start_metadata_apply_transaction(op)
+        self.assertEqual(self.store.get(op)["status"], "Failed")
 
 
 class ApproveNeverResurrectsTests(_RouteEnv):

@@ -629,7 +629,13 @@ class TransactionStore:
             updates["result_summary"] = result_summary
         if getattr(job, "log", None):
             updates["logs"] = list(getattr(job, "log"))[-500:]
-        return self.update(transaction_id, **updates)
+        with self._lock:
+            # Job state only advances a transaction that is already Running
+            # (claimed before its job started). It never claims an Approved
+            # one, nor rewrites Cancelled or another final status (#217).
+            if self._read(transaction_id).get("status") != "Running":
+                updates.pop("status")
+            return self.update(transaction_id, **updates)
 
     def rollback(self, transaction_id: str) -> Dict[str, Any]:
         with self._lock:

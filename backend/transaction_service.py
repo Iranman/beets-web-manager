@@ -226,10 +226,6 @@ def _start_metadata_apply_transaction(transaction_id: str):
     parts = [f"{k}={v}" for k, v in fields.items()]
 
     def _do(log, cancel_event=None):
-        # Compare-and-set (#206 F3): a cancel that landed after the route's
-        # status check wins; the job then applies nothing.
-        if transactions.transition(transaction_id, "Approved", "Running", dry_run=False) is None:
-            raise RuntimeError("The transaction is no longer Approved (cancelled?); nothing was applied.")
         try:
             result = composite_workflows.update_item_metadata(item_id, fields)
             _require_attach_stage_success(result, "metadata update")
@@ -241,11 +237,20 @@ def _start_metadata_apply_transaction(transaction_id: str):
             transactions.append_log(transaction_id, f"ERROR: {ex}")
             raise
 
-    job = jobs.start_python(
-        _do,
-        label=f"Apply metadata transaction {transaction_id}",
-        metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
-    )
+    # Claim before the job exists (#206 F3, #217): a cancel that landed after
+    # the status check above wins (409, nothing started), and a job-status
+    # sync can no longer race the claim.
+    if transactions.transition(transaction_id, "Approved", "Running", dry_run=False) is None:
+        raise ValueError("The transaction is no longer Approved; nothing was applied.")
+    try:
+        job = jobs.start_python(
+            _do,
+            label=f"Apply metadata transaction {transaction_id}",
+            metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
+        )
+    except Exception:
+        transactions.update(transaction_id, status="Failed", logs=["The apply job could not be started."])
+        raise
     transactions.attach_job(transaction_id, job.job_id)
     return job
 
