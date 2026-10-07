@@ -17,10 +17,10 @@ from backend.audio_preferences import load_music_format_preferences as _load_mus
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
-from backend.title_normalize import dash_suffix_group, trailing_bracket_group
+from backend.title_normalize import dash_suffix_group, split_ws_led, trailing_bracket_group
 from backend.library_cache import library_cache
 from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
-from backend.slskd_service import SLSKD_API_KEY, _download_method_list, _find_slskd_downloaded_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
+from backend.slskd_service import SLSKD_API_KEY, _DASH_SEP_CORE_RE, _download_method_list, _find_slskd_downloaded_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
 from backend.matching_service import _MB_VARIOUS_ARTISTS_ID, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _invalidate_lib_cache, _playlist_artist_credit_info
 from backend.app_runtime import jobs
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
@@ -274,14 +274,15 @@ def _playlist_download_text_candidates(path_value: str) -> Dict[str, List[str]]:
         r"^\s*(?:\d{3}|\d{1,2}\s*-\s*\d{1,3})\s+(.+)$",
         stem,
     )
-    parts = [p.strip() for p in re.split(r"\s+-\s+", stripped) if p.strip()]
+    # #186 (ReDoS): split_ws_led == re.split(r"\s+-\s+") in linear time.
+    parts = [p.strip() for p in split_ws_led(stripped, _DASH_SEP_CORE_RE, need_ws=True) if p.strip()]
     if request_prefixed and len(parts) >= 2:
         # The first segment came from our yt-dlp requested-title prefix.
         # Treat only the source-provided tail as match evidence.
         source_tail = " - ".join(parts[1:])
         for text in (source_tail, _slskd_title_guess_from_name(source_tail)):
             _add_split_variants(text)
-        parts = [p.strip() for p in re.split(r"\s+-\s+", source_tail) if p.strip()]
+        parts = [p.strip() for p in split_ws_led(source_tail, _DASH_SEP_CORE_RE, need_ws=True) if p.strip()]
     else:
         for text in (stem, stripped, guessed):
             _add_split_variants(text)
@@ -611,12 +612,18 @@ def _playlist_channel_artist_aliases() -> Dict[str, str]:
     return aliases
 
 
+_PLAYLIST_FEAT_SEP_CORE_RE = re.compile(r"(?:feat\.?|ft\.?|featuring)\s+", re.I)
+
+
 def _playlist_primary_artist_name(artist: Any) -> str:
     text = _s(artist).strip()
     if not text:
         return ""
-    text = re.split(r"\s*/\s*", text, maxsplit=1)[0].strip()
-    text = re.split(r"\s+(?:feat\.?|ft\.?|featuring)\s+", text, maxsplit=1, flags=re.I)[0].strip()
+    # #186 (ReDoS): linear equivalents of re.split(r"\s*/\s*", maxsplit=1)[0]
+    # and re.split(r"\s+(?:feat\.?|ft\.?|featuring)\s+", maxsplit=1, flags=re.I)[0];
+    # the result is stripped, so the whitespace before "/" needs no handling.
+    text = text.split("/", 1)[0].strip()
+    text = split_ws_led(text, _PLAYLIST_FEAT_SEP_CORE_RE, need_ws=True)[0].strip()
     return text or _s(artist).strip()
 
 
