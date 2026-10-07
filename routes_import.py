@@ -138,13 +138,21 @@ def delete_import_review_folder():
 
 
 # CodeQL #1365: the planner's error can be raw ValueError text with resolved
-# paths. Answer one fixed message per refusal kind (checked in this order);
-# the original text is logged server-side.
+# paths. Answer one fixed message per refusal kind; the original text is
+# logged server-side. The planner's structured ``code`` wins; refusals that
+# carry none are told apart by their engine-fixed wording, in this order.
+_IMPORT_REVIEW_PLAN_CODE_ERRORS = {
+    "import_review_target_contains_library":
+        "The cleanup folder contains the music library; choose a folder below the downloads root instead.",
+    "import_review_library_delete_refused":
+        "A selected file is inside the music library; deleting it needs the explicit library-delete confirmation.",
+    "import_review_unsafe_root": "An allowed cleanup root is unsafe; check the downloads root configuration.",
+    "invalid_request": "Invalid cleanup request.",
+}
 _IMPORT_REVIEW_PLAN_ERRORS = (
     ("required", "Review path is required."),
     ("unsafe encoded", "Path contains unsafe encoded characters."),
     ("Symlinks", "Symlinks are not permitted."),
-    ("is refused", "An allowed cleanup root is unsafe; check the downloads root configuration."),
     ("approved root", "Cannot clean up an approved root folder itself."),
     ("music library", "Review folder is inside the music library."),
     ("outside", "Review folder or file is outside the allowed cleanup roots."),
@@ -152,8 +160,11 @@ _IMPORT_REVIEW_PLAN_ERRORS = (
 )
 
 
-def _import_review_cleanup_plan_error(error: Any) -> str:
-    text = str(error or "")
+def _import_review_cleanup_plan_error(plan_res: Dict[str, Any]) -> str:
+    by_code = _IMPORT_REVIEW_PLAN_CODE_ERRORS.get(str(plan_res.get("code") or ""))
+    if by_code:
+        return by_code
+    text = str(plan_res.get("error") or "")
     for needle, message in _IMPORT_REVIEW_PLAN_ERRORS:
         if needle in text:
             return message
@@ -191,7 +202,8 @@ def cleanup_import_review_files():
         plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
         if not plan_res.get("ok"):
             _app_logger.warning("cleanup_import_review_files plan refused for %r: %s", folder_path, plan_res.get("error"))
-            return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(plan_res.get("error")),
+            return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(plan_res),
+                            "code": plan_res.get("code"),
                             "log": log}), 400
 
         op_id = plan_res.get("operation_id")

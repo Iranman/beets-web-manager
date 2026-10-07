@@ -876,6 +876,13 @@ def _rollback_dispatch_body(res: Dict[str, Any]) -> Dict[str, Any]:
         "code": res.get("code"),
         "mutated": res.get("mutated"),
     }
+    # Integer counts from _finish_rollback; free-text rollback_problems stays
+    # in the transaction metadata, like the log.
+    rollback_ok, rollback_failed = res.get("rollback_ok"), res.get("rollback_failed")
+    if isinstance(rollback_ok, int):
+        body["rollback_ok"] = int(rollback_ok)
+    if isinstance(rollback_failed, int):
+        body["rollback_failed"] = int(rollback_failed)
     return {key: value for key, value in body.items() if value is not None}
 
 

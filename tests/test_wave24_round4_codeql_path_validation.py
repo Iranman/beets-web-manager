@@ -100,6 +100,14 @@ class TestValidatePathUnderAllowedRootsPrimitive(unittest.TestCase):
         result = validate_path_under_allowed_roots(candidate, [self.music_root], reject_symlinks=False)
         self.assertIsNone(result)
 
+    def test_symlink_then_dotdot_refused_by_default(self):
+        """#265 QA class: root/link/../x is root/x lexically but root/a/x on
+        disk; the default reject_symlinks=True walk keeps ``..`` and sees link."""
+        (self.music_root / "a" / "b").mkdir(parents=True)
+        os.symlink(str(self.music_root / "a" / "b"), str(self.music_root / "link"), target_is_directory=True)
+        candidate = Path(str(self.music_root / "link") + os.sep + ".." + os.sep + "x.jpg")
+        self.assertIsNone(validate_path_under_allowed_roots(candidate, [self.music_root]))
+
     def test_nonexistent_leaf_under_root_accepted(self):
         candidate = self.music_root / "Artist" / "Album" / "does_not_exist.jpg"
         result = validate_path_under_allowed_roots(candidate, [self.music_root])

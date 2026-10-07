@@ -100,7 +100,7 @@ class StagingTextContainmentTests(_Env):
     def test_traversal_out_of_staging_refused(self):
         (self.music / "a.flac").write_bytes(b"a")
         (self.dl / "x").mkdir()  # so the kernel can walk x/.. and the path exists
-        escape =str(self.dl / "x" / ".." / ".." / "music" / "a.flac")
+        escape = str(self.dl / "x" / ".." / ".." / "music" / "a.flac")
         self.assertIsNone(cw._staging_contained_text(escape))
         self.assertFalse(cw._is_safe_staging_path(escape))
         with self.assertRaises(ValueError):
@@ -125,6 +125,30 @@ class StagingTextContainmentTests(_Env):
         self.assertTrue(cw._is_safe_staging_path(inner))
         self.assertTrue(cw._is_safe_staging_path(self.dl / "Album" / "x" / ".." / "01.flac"))
         self.assertTrue(cw._is_safe_staging_path(self.dl))
+
+    @unittest.skipUnless(CAN_SYMLINK, "symlinks unavailable")
+    def test_symlink_then_dotdot_escape_refused(self):
+        """#265 QA: in ``dl/link/..`` the kernel follows ``link`` before
+        ``..``, so text normalization must not hide the symlink."""
+        sub = self.root / "outside" / "sub"
+        sub.mkdir(parents=True)
+        (sub.parent / "a.flac").write_bytes(b"a")
+        os.symlink(sub, self.dl / "link", target_is_directory=True)
+        src = self.dl / "src.flac"
+        src.write_bytes(b"s")
+        base = str(self.dl / "link") + os.sep + ".."
+        for escape in (base, base + os.sep + "a.flac"):
+            with self.subTest(escape=escape):
+                self.assertFalse(cw._is_safe_staging_path(escape))
+                self.assertFalse(cw.inspect_import_source(escape)["ok"])
+                self.assertFalse(cw.inspect_playlist_staged_track("k", "t", escape)["ok"])
+                self.assertFalse(cw.validate_playlist_staged_track("k", "t", escape)["valid"])
+                with self.assertRaises(ValueError):
+                    cw.delete_staging_file(escape)
+        with self.assertRaises(ValueError):
+            cw.create_hardlink(str(src), base + os.sep + "planted.flac")
+        self.assertFalse((sub.parent / "planted.flac").exists())
+        self.assertTrue((sub.parent / "a.flac").exists())
 
 
 class ImportReviewFamilyTests(_Env):

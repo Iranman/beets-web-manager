@@ -172,6 +172,25 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
         self.assertNotIn("/private/x", json.dumps(data))
         self.assertEqual(data["error"], "Review folder or file is outside the allowed cleanup roots.")
 
+    def test_cleanup_plan_refusals_get_distinct_fixed_messages(self):
+        """#265 QA: each refusal kind keeps its own actionable message; the
+        planner's ``code`` wins over its free text."""
+        import routes_import
+        cases = [
+            {"code": "import_review_target_contains_library", "error": "Cleanup target /x contains the music library /m"},
+            {"code": "import_review_library_delete_refused", "error": "/m/a.flac is inside the music library"},
+            {"code": "import_review_unsafe_root", "error": "/ is unsafe"},
+            {"error": "Review folder path /m/x is inside music library."},
+            {"error": "Target path /x is outside allowed root boundaries."},
+            {"error": "Cannot clean up approved root folder /d"},
+            {"error": "Symlinks are not permitted: /d/l"},
+            {"error": "something unexpected at /secret"},
+        ]
+        messages = [routes_import._import_review_cleanup_plan_error(c) for c in cases]
+        self.assertEqual(len(set(messages)), len(messages), messages)
+        for message in messages:
+            self.assertNotIn("/", message)
+
     def test_transaction_rollback_dispatch_never_returns_executor_log(self):
         """CodeQL #1368: the rollback executor's log embeds raw exception
         text; the dispatch response carries only structured fields."""
