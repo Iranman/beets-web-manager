@@ -560,7 +560,10 @@ class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
             self.assertEqual(response.status_code, 409)
             error = response.get_json()["error"]
             self.assertIn("Beets config directory", error)
-            # F8: the browser-facing message never names BEETSDIR.
+            # F8 / SEC-237-1: one constant message, never a path.
+            from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE
+            self.assertEqual(error, CONFIG_PATH_ERROR_MESSAGE)
+            self.assertNotIn("/", error)
             self.assertNotIn(str(self.config_dir), error)
             self.assertNotIn(self.config_dir.name, error)
         self.assertEqual(self.outside.read_text(encoding="utf-8"), outside_before)
@@ -884,7 +887,10 @@ class ConfigPathStatusTests(_TempConfigMixin, unittest.TestCase):
     def test_setup_status_warns_and_blocks_on_refused_path(self):
         body = self._get("/api/setup/status", self.outside).get_json()
         warning = next(w for w in body["warnings"] if w["id"] == "beets_config_path_invalid")
+        from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE
+        self.assertEqual(warning["message"], CONFIG_PATH_ERROR_MESSAGE)
         self.assertNotIn(str(self.config_dir), warning["message"])
+        self.assertIn(CONFIG_PATH_ERROR_MESSAGE, body["blocking_reasons"])
         self.assertTrue(any("Beets config directory" in b for b in body["blocking_reasons"]), body["blocking_reasons"])
 
     def test_setup_status_has_no_path_warning_for_contained_config(self):

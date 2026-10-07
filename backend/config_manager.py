@@ -59,6 +59,14 @@ def compute_revision(content: str) -> str:
 DEFAULT_CONFIG_DIR = "/config"
 
 
+# The one browser-facing text for a refused BEETS_CONFIG (SEC-237-1): a
+# constant, never str(exc), so no path or exception detail reaches a response.
+CONFIG_PATH_ERROR_MESSAGE = (
+    "BEETS_CONFIG must be an absolute path to a file directly inside the Beets config "
+    "directory (BEETSDIR); refusing to read or write another file."
+)
+
+
 class ConfigPathError(ConfigError):
     """The configured Beets config location is unusable (relative, or outside
     the Beets config directory). Fails closed instead of reading or writing

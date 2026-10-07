@@ -814,6 +814,7 @@
    "desired_owner": "backend/auth_service.py",
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
+    "_ai_review_album_track_candidates",
     "_fetch_artwork_after_retag",
     "_handle_unexpected_error",
     "_log_controlled_failure",
@@ -830,7 +831,7 @@
     "playlist_create",
     "playlist_delete"
    ],
-   "caller_count": 15,
+   "caller_count": 16,
    "dependencies": [
     "_redact_secret_assignment_match",
     "_s"
@@ -5978,10 +5979,10 @@
    "module": "backend/artwork_service.py",
    "lines": [
     816,
-    837
+    836
    ],
-   "size": 22,
-   "body_lines": 19,
+   "size": 21,
+   "body_lines": 18,
    "route": null,
    "mutation_capable": false,
    "domain": "ARTWORK",
@@ -5999,8 +6000,8 @@
    "name": "_album_art_ext_for_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    840,
-    854
+    839,
+    853
    ],
    "size": 15,
    "body_lines": 13,
@@ -6017,8 +6018,8 @@
    "name": "_validate_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    874,
-    913
+    873,
+    912
    ],
    "size": 40,
    "body_lines": 39,
@@ -6039,8 +6040,8 @@
    "name": "_download_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    916,
-    932
+    915,
+    931
    ],
    "size": 17,
    "body_lines": 16,
@@ -6061,8 +6062,8 @@
    "name": "_album_art_path_text",
    "module": "backend/artwork_service.py",
    "lines": [
-    935,
-    936
+    934,
+    935
    ],
    "size": 2,
    "body_lines": 1,
@@ -6083,8 +6084,8 @@
    "name": "_album_art_album_id",
    "module": "backend/artwork_service.py",
    "lines": [
-    939,
-    943
+    938,
+    942
    ],
    "size": 5,
    "body_lines": 4,
@@ -6103,8 +6104,8 @@
    "name": "_resolve_album_art_request_album",
    "module": "backend/artwork_service.py",
    "lines": [
-    946,
-    980
+    945,
+    979
    ],
    "size": 35,
    "body_lines": 34,
@@ -6128,8 +6129,8 @@
    "name": "_album_art_expected_release_group",
    "module": "backend/artwork_service.py",
    "lines": [
-    983,
-    984
+    982,
+    983
    ],
    "size": 2,
    "body_lines": 1,
@@ -6153,8 +6154,8 @@
    "name": "_replace_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    987,
-    1005
+    986,
+    1004
    ],
    "size": 19,
    "body_lines": 16,
@@ -6177,8 +6178,8 @@
    "name": "_replace_album_art_from_url",
    "module": "backend/artwork_service.py",
    "lines": [
-    1008,
-    1018
+    1007,
+    1017
    ],
    "size": 11,
    "body_lines": 8,
@@ -6201,8 +6202,8 @@
    "name": "_save_art_to_disk",
    "module": "backend/artwork_service.py",
    "lines": [
-    1021,
-    1034
+    1020,
+    1033
    ],
    "size": 14,
    "body_lines": 11,
@@ -6225,8 +6226,8 @@
    "name": "_fetch_artwork_after_retag",
    "module": "backend/artwork_service.py",
    "lines": [
-    1037,
-    1092
+    1036,
+    1091
    ],
    "size": 56,
    "body_lines": 40,
@@ -6249,8 +6250,8 @@
    "name": "_get_album_item_dir",
    "module": "backend/artwork_service.py",
    "lines": [
-    1095,
-    1113
+    1094,
+    1112
    ],
    "size": 19,
    "body_lines": 17,
@@ -7603,10 +7604,10 @@
    "module": "backend/matching_service.py",
    "lines": [
     1263,
-    1362
+    1365
    ],
-   "size": 100,
-   "body_lines": 96,
+   "size": 103,
+   "body_lines": 99,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -7619,6 +7620,7 @@
    "dependencies": [
     "_ai_api_key",
     "_ai_model_and_endpoint",
+    "_redact_security_text",
     "_s"
    ]
   },
@@ -7626,8 +7628,8 @@
    "name": "_scan_album_track_integrity",
    "module": "backend/matching_service.py",
    "lines": [
-    1370,
-    1576
+    1373,
+    1579
    ],
    "size": 207,
    "body_lines": 202,
@@ -7654,8 +7656,8 @@
    "name": "_album_mb_match_plan",
    "module": "backend/matching_service.py",
    "lines": [
-    1579,
-    1654
+    1582,
+    1657
    ],
    "size": 76,
    "body_lines": 74,
@@ -7681,8 +7683,8 @@
    "name": "_album_mb_completeness",
    "module": "backend/matching_service.py",
    "lines": [
-    1657,
-    1762
+    1660,
+    1765
    ],
    "size": 106,
    "body_lines": 104,
@@ -7713,8 +7715,8 @@
    "name": "_remove_album_track_items",
    "module": "backend/matching_service.py",
    "lines": [
-    1765,
-    1810
+    1768,
+    1813
    ],
    "size": 46,
    "body_lines": 32,
@@ -7739,8 +7741,8 @@
    "name": "_artist_folder_name_without_mbid",
    "module": "backend/matching_service.py",
    "lines": [
-    1819,
-    1820
+    1822,
+    1823
    ],
    "size": 2,
    "body_lines": 1,
@@ -7769,8 +7771,8 @@
    "name": "_stamp_folder_for_item_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1823,
-    1850
+    1826,
+    1853
    ],
    "size": 28,
    "body_lines": 22,
@@ -7791,8 +7793,8 @@
    "name": "_stamp_artist_folder_album_mbid_counts",
    "module": "backend/matching_service.py",
    "lines": [
-    1853,
-    1894
+    1856,
+    1897
    ],
    "size": 42,
    "body_lines": 37,
@@ -7815,8 +7817,8 @@
    "name": "_playlist_artist_credit_info",
    "module": "backend/matching_service.py",
    "lines": [
-    1900,
-    1926
+    1903,
+    1929
    ],
    "size": 27,
    "body_lines": 26,
@@ -7867,10 +7869,10 @@
    "module": "backend/musicbrainz_service.py",
    "lines": [
     28,
-    77
+    76
    ],
-   "size": 50,
-   "body_lines": 47,
+   "size": 49,
+   "body_lines": 46,
    "route": null,
    "mutation_capable": false,
    "domain": "MUSICBRAINZ",
@@ -7887,8 +7889,8 @@
    "name": "_discogs_release_fallback_candidate",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    80,
-    102
+    79,
+    101
    ],
    "size": 23,
    "body_lines": 12,
@@ -7910,11 +7912,11 @@
    "name": "_discogs_artist_discography",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    105,
-    182
+    104,
+    184
    ],
-   "size": 78,
-   "body_lines": 75,
+   "size": 81,
+   "body_lines": 78,
    "route": null,
    "mutation_capable": false,
    "domain": "MUSICBRAINZ",
@@ -7936,8 +7938,8 @@
    "name": "_artist_album_index",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    185,
-    239
+    187,
+    241
    ],
    "size": 55,
    "body_lines": 53,
@@ -7963,8 +7965,8 @@
    "name": "_discogs_artist_score",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    242,
-    252
+    244,
+    254
    ],
    "size": 11,
    "body_lines": 9,
@@ -7985,8 +7987,8 @@
    "name": "_mb_release_track_count",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    255,
-    265
+    257,
+    267
    ],
    "size": 11,
    "body_lines": 9,
@@ -8008,8 +8010,8 @@
    "name": "_mb_release_has_tracks",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    268,
-    270
+    270,
+    272
    ],
    "size": 3,
    "body_lines": 1,
@@ -8030,8 +8032,8 @@
    "name": "_folder_track_search_titles",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    273,
-    339
+    275,
+    341
    ],
    "size": 67,
    "body_lines": 64,
@@ -8057,8 +8059,8 @@
    "name": "_musicbrainz_transient_error",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    342,
-    367
+    344,
+    369
    ],
    "size": 26,
    "body_lines": 25,
@@ -8077,8 +8079,8 @@
    "name": "_mb_release_search_by_folder_tracks",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    370,
-    464
+    372,
+    466
    ],
    "size": 95,
    "body_lines": 89,
@@ -8102,8 +8104,8 @@
    "name": "_release_art_download",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    467,
-    507
+    469,
+    509
    ],
    "size": 41,
    "body_lines": 40,
@@ -8124,11 +8126,11 @@
    "name": "_fetch_release_group_art_discogs",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    510,
-    530
+    512,
+    531
    ],
-   "size": 21,
-   "body_lines": 19,
+   "size": 20,
+   "body_lines": 18,
    "route": null,
    "mutation_capable": false,
    "domain": "MUSICBRAINZ",
@@ -8144,8 +8146,8 @@
    "name": "_ensure_release_group_art",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    533,
-    555
+    534,
+    556
    ],
    "size": 23,
    "body_lines": 18,
@@ -8170,8 +8172,8 @@
    "name": "_library_album_ids_for_musicbrainz",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    558,
-    578
+    559,
+    579
    ],
    "size": 21,
    "body_lines": 20,
@@ -8194,8 +8196,8 @@
    "name": "_parse_manual_musicbrainz_identifier",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    589,
-    604
+    590,
+    605
    ],
    "size": 16,
    "body_lines": 15,
@@ -8216,8 +8218,8 @@
    "name": "_prefer_album_mb_release",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    607,
-    641
+    608,
+    642
    ],
    "size": 35,
    "body_lines": 30,
@@ -8240,8 +8242,8 @@
    "name": "_artist_folder_key",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    646,
-    654
+    647,
+    655
    ],
    "size": 9,
    "body_lines": 7,
@@ -8265,8 +8267,8 @@
    "name": "_mb_artist_search_one",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    660,
-    721
+    661,
+    722
    ],
    "size": 62,
    "body_lines": 57,
@@ -8290,8 +8292,8 @@
    "name": "_mb_artist_lookup_by_id",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    724,
-    751
+    725,
+    752
    ],
    "size": 28,
    "body_lines": 26,
@@ -8312,8 +8314,8 @@
    "name": "_mb_canonical_for_artist_entries",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    754,
-    790
+    755,
+    791
    ],
    "size": 37,
    "body_lines": 36,
@@ -8335,8 +8337,8 @@
    "name": "_clean_malformed_release_group_stamps",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    793,
-    794
+    794,
+    795
    ],
    "size": 2,
    "body_lines": 1,
@@ -8358,8 +8360,8 @@
    "name": "_folder_cleanup_known_release_group_id",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    797,
-    810
+    798,
+    811
    ],
    "size": 14,
    "body_lines": 13,
@@ -8381,8 +8383,8 @@
    "name": "_folder_cleanup_release_group_from_name",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    813,
-    818
+    814,
+    819
    ],
    "size": 6,
    "body_lines": 5,
@@ -8404,8 +8406,8 @@
    "name": "_album_cleanup_valid_rgid",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    821,
-    823
+    822,
+    824
    ],
    "size": 3,
    "body_lines": 2,
@@ -8430,8 +8432,8 @@
    "name": "_album_cleanup_embedded_musicbrainz_tags",
    "module": "backend/musicbrainz_service.py",
    "lines": [
-    826,
-    867
+    827,
+    868
    ],
    "size": 42,
    "body_lines": 41,

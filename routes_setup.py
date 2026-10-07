@@ -1967,12 +1967,13 @@ def _checked_beets_config_path() -> Tuple[Path, str]:
     """BEETS_CONFIG through the same BEETSDIR containment check that
     provisioning and the config editors use (#222 QA F2), so status and
     provisioning agree. On refusal: the raw path (for local mount checks
-    only) and the ConfigPathError message; otherwise an empty message."""
-    from backend.config_manager import ConfigPathError, get_config_path
+    only) and a fixed user-facing message; otherwise an empty message.
+    The message is a constant, never str(exc) (SEC-237-1)."""
+    from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE, ConfigPathError, get_config_path
     try:
         return get_config_path(), ""
-    except ConfigPathError as exc:
-        return Path(config_layers.beets_config_file()), str(exc)
+    except ConfigPathError:
+        return Path(config_layers.beets_config_file()), CONFIG_PATH_ERROR_MESSAGE
 
 
 def _local_paths_report(config_path: Path) -> Dict[str, Any]:
@@ -4008,14 +4009,14 @@ def plugins_provision():
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
-    from backend.config_manager import ConfigPathError, get_config_path
+    from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE, ConfigPathError, get_config_path
     try:
         # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
         beets_config_path = get_config_path()
         from backend.beets_plugins import provision_and_verify
         result = provision_and_verify(beets_config_path.parent, config_file=beets_config_path)
     except ConfigPathError as exc:
-        return jsonify({"ok": False, "all_required_healthy": False, "error": str(exc)}), exc.status_code
+        return jsonify({"ok": False, "all_required_healthy": False, "error": CONFIG_PATH_ERROR_MESSAGE}), exc.status_code
     except Exception as exc:
         app.logger.error("plugins_provision failed: %s", exc, exc_info=True)
         return jsonify({
@@ -4060,10 +4061,12 @@ def plugins_verify():
 
 def _beets_config_edit_error(exc: Exception, operation: str):
     from backend.beets_plugins import BeetsConfigEditError
-    from backend.config_manager import ConfigError
+    from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE, ConfigError, ConfigPathError
+    if isinstance(exc, ConfigPathError):
+        # Path-policy refusal (BEETS_CONFIG outside BEETSDIR); fixed text.
+        return jsonify({"ok": False, "error": CONFIG_PATH_ERROR_MESSAGE}), exc.status_code
     if isinstance(exc, ConfigError):
-        # Path-policy refusal (BEETS_CONFIG outside BEETSDIR); our own message.
-        return jsonify({"ok": False, "error": str(exc)}), exc.status_code
+        return jsonify({"ok": False, "error": "Beets config update failed."}), exc.status_code
     if isinstance(exc, ValueError):
         return jsonify({"ok": False, "error": "Unsupported plugin selection."}), 400
     if isinstance(exc, BeetsConfigEditError):
