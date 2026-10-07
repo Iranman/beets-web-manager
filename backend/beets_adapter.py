@@ -5,6 +5,7 @@ Communicates over HTTP with the stock LinuxServer Beets container:
 - Authenticated mutations via beetsplug.webmanager (/webmanager/*)
 """
 
+import http.client
 import os
 from pathlib import Path
 import json
@@ -28,6 +29,24 @@ except ImportError:
 log = logging.getLogger("beets.adapter")
 
 DEFAULT_BEETS_WEB_URL = "http://beets:8337"
+
+# #208: a BEETS_WEB_URL with userinfo (user:pass@) never worked -- urllib
+# sends no Basic header and parses "u:pw@host" as the host -- and the
+# /webmanager routes authenticate with the Bearer key anyway. Such a URL is
+# refused (fail closed); the message never echoes the credentials.
+BEETS_WEB_URL_USERINFO_CODE = "beets_web_url_userinfo"
+BEETS_WEB_URL_USERINFO_MESSAGE = (
+    "BEETS_WEB_URL contains a user name or password (user:pass@host). Web Manager does not "
+    "send URL credentials to Beets; remove them from BEETS_WEB_URL (for example "
+    "http://beets:8337) and restart Web Manager."
+)
+
+
+def beets_web_url_has_userinfo(url: str) -> bool:
+    """True for a URL that carries userinfo. Any "@" counts: a base URL has
+    no other use for it, and a password holding "/" or "?" hides the "@"
+    from urlsplit's netloc."""
+    return "@" in (url or "")
 
 
 class BeetsAdapterError(Exception):
@@ -219,10 +238,16 @@ class BeetsAdapter:
             or (os.environ.get("BEETS_WEB_URL") or "").strip()
             or DEFAULT_BEETS_WEB_URL
         )
-        self.base_url = raw_url.rstrip("/")
-        # #208: BEETS_WEB_URL may carry user:pass@. Requests use base_url;
-        # every log line and error message uses this redacted form.
-        self._display_url = redact_url_userinfo(self.base_url)
+        raw_url = raw_url.rstrip("/")
+        # #208: every log line and error message uses this redacted form.
+        self._display_url = redact_url_userinfo(raw_url)
+        # A userinfo URL is refused here, at construction: no request is ever
+        # sent with it and base_url (also used by get_item_file_url /
+        # get_album_art_url) never holds the credentials. The module-level
+        # adapter is built at import, so this is a refused state rather than
+        # an exception that would stop Web Manager (and its setup page).
+        self.config_error_code = BEETS_WEB_URL_USERINFO_CODE if beets_web_url_has_userinfo(raw_url) else ""
+        self.base_url = self._display_url if self.config_error_code else raw_url
         self._api_key = api_key or os.environ.get("BEETS_WEBMANAGER_API_KEY")
         self._api_key_file = (
             api_key_file
@@ -268,6 +293,12 @@ class BeetsAdapter:
                 log.debug("Could not read API key from %s: %s", p, ex)
         return ""
 
+    def _refuse_if_misconfigured(self) -> None:
+        if self.config_error_code:
+            raise BeetsAdapterConnectionError(
+                BEETS_WEB_URL_USERINFO_MESSAGE, error_code=self.config_error_code.upper()
+            )
+
     def _build_url(self, path: str) -> str:
         if not path.startswith("/"):
             path = "/" + path
@@ -282,6 +313,7 @@ class BeetsAdapter:
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
     ) -> Any:
+        self._refuse_if_misconfigured()
         url = self._build_url(path)
         if params:
             query_string = urllib.parse.urlencode(
@@ -382,6 +414,13 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
+        except (http.client.HTTPException, ValueError) as ex:
+            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
+            # log or raise str(ex); it can hold part of the URL.
+            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, type(ex).__name__)
+            raise BeetsAdapterConnectionError(
+                f"Cannot connect to Beets server at {self._display_url}"
+            ) from None
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
             log.warning("Beets connection error at %s (%s): %s", self._display_url, path, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
@@ -486,6 +525,7 @@ class BeetsAdapter:
 
     def open_item_file(self, item_id: int):
         """Open raw HTTP response stream for an item audio file."""
+        self._refuse_if_misconfigured()
         url = self._build_url(f"/item/{int(item_id)}/file")
         req = urllib.request.Request(url)
         try:
@@ -515,6 +555,13 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
+        except (http.client.HTTPException, ValueError) as ex:
+            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
+            # log or raise str(ex); it can hold part of the URL.
+            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, type(ex).__name__)
+            raise BeetsAdapterConnectionError(
+                f"Cannot connect to Beets server at {self._display_url}"
+            ) from None
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
             log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
@@ -527,6 +574,7 @@ class BeetsAdapter:
 
     def open_album_art(self, album_id: int):
         """Open raw HTTP response stream for an album cover art."""
+        self._refuse_if_misconfigured()
         url = self._build_url(f"/album/{int(album_id)}/art")
         req = urllib.request.Request(url)
         try:
@@ -556,6 +604,13 @@ class BeetsAdapter:
             raise BeetsAdapterConnectionError(
                 f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
+        except (http.client.HTTPException, ValueError) as ex:
+            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
+            # log or raise str(ex); it can hold part of the URL.
+            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, type(ex).__name__)
+            raise BeetsAdapterConnectionError(
+                f"Cannot connect to Beets server at {self._display_url}"
+            ) from None
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
             log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():

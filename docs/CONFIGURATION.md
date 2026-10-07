@@ -96,7 +96,7 @@ Only these keys may be saved from the System page, and only these keys are loade
 
 | Variable | Applies | Meaning |
 |---|---|---|
-| `BEETS_WEB_URL` | restart | Stock Beets `web`/`webmanager` URL. The default is `http://beets:8337` everywhere. `docker-compose.yml` forwards `${BEETS_WEB_URL:-http://beets:8337}`, so set it in the Compose `.env` for an external Beets. Keep `BEETS_OUTBOUND_ALLOWLIST` in step: it must contain the URL's host:port. |
+| `BEETS_WEB_URL` | restart | Stock Beets `web`/`webmanager` URL. The default is `http://beets:8337` everywhere. `docker-compose.yml` forwards `${BEETS_WEB_URL:-http://beets:8337}`, so set it in the Compose `.env` for an external Beets. Keep `BEETS_OUTBOUND_ALLOWLIST` in step: it must contain the URL's host:port. Do not put a user name or password in it (`user:pass@host`): Web Manager authenticates to the `webmanager` plugin with its bearer key and never sends URL credentials, so such a URL is refused (setup reason `beets_web_url_userinfo`) and no request is made. |
 | `BEETS_WEBMANAGER_API_KEY` | restart | Integration plugin bearer key. Normally read from `/config/.webmanager_api_key`. Set it only when Web Manager does not mount the Beets `/config` (external Beets). |
 | `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
 | `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |

@@ -2863,7 +2863,16 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             entry["category"] = "service" if key in _SERVICE_INTEGRATION_KEYS else "beets_plugin"
 
     blocking = []
-    if not beets_reachable:
+    # #208: a BEETS_WEB_URL with user:pass@ is refused by the adapter (it
+    # never authenticated). Checked from the setting itself; the message
+    # never echoes the credentials.
+    from backend.beets_adapter import (
+        BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo,
+    )
+    beets_web_url_userinfo = beets_web_url_has_userinfo(config_layers.beets_web_url())
+    if beets_web_url_userinfo:
+        blocking.append(BEETS_WEB_URL_USERINFO_MESSAGE)
+    elif not beets_reachable:
         # One primary reason while stock Beets is unreachable; everything
         # that depends on it (plugins, fpcalc, compatibility) is unknown,
         # not failed.
@@ -2906,6 +2915,12 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         if beets_reachable
         else ([], [])
     )
+    if beets_web_url_userinfo:
+        warnings.insert(0, {
+            "id": BEETS_WEB_URL_USERINFO_CODE,
+            "severity": "warning",
+            "message": BEETS_WEB_URL_USERINFO_MESSAGE,
+        })
 
     ready = not blocking
     demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
