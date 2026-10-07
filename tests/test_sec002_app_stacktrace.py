@@ -172,6 +172,55 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
         self.assertNotIn("/private/x", json.dumps(data))
         self.assertEqual(data["error"], "Review folder or file is outside the allowed cleanup roots.")
 
+    def _delete_review_folder(self, effect):
+        """POST /api/import/review-folder/delete with _delete_review_source_folder
+        replaced by ``effect(src, log, **kw)``."""
+        import routes_import
+        with app_module.app.test_request_context(
+            "/api/import/review-folder/delete", method="POST",
+            json={"path": "/data/downloads/Some Album", "confirmed_wrong_library_folder": True},
+        ), mock.patch.object(routes_import, "_library_no_mb_album_matches_folder", return_value=False,
+        ), mock.patch.object(routes_import, "_delete_review_source_folder", side_effect=effect):
+            response = routes_import.delete_import_review_folder()
+        body, status = response if isinstance(response, tuple) else (response, response.status_code)
+        return body.get_json(), status
+
+    def test_review_folder_delete_never_returns_exception_text_or_log(self):
+        """CodeQL #1388: neither the ValueError text nor log entries built from
+        executor/exception text reach the response."""
+        def refuse(text):
+            def effect(src, log, **kw):
+                log.append("  Pending Review cleanup warning: LEAK_LOG /private/log-path")
+                raise ValueError(text)
+            return effect
+        cases = [
+            ("Target path /private/LEAK_MARKER is outside allowed root boundaries.",
+             "Review folder or file is outside the allowed cleanup roots."),
+            ("Cleanup target /d/LEAK_MARKER contains the music library /d/m; refusing.",
+             "The cleanup folder contains the music library; choose a folder below the downloads root instead."),
+            ("Traceback LEAK_MARKER /private/x (status Failed, operation tx-1)", "Could not delete source folder."),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                data, status = self._delete_review_folder(refuse(text))
+                self.assertEqual(status, 400)
+                self.assertEqual(data, {"ok": False, "error": expected})
+
+        def succeed(src, log, **kw):
+            log.append("  Pending Review cleanup warning: LEAK_LOG /private/log-path")
+            return {"operation_id": "tx", "deleted": [], "quarantined": [], "files_removed": 0, "status": "Completed"}
+        data, status = self._delete_review_folder(succeed)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertNotIn("LEAK_LOG", json.dumps(data))
+        self.assertNotIn("log", data)
+
+        def crash(src, log, **kw):
+            log.append("  LEAK_LOG /private/log-path")
+            raise OSError("LEAK_MARKER /private/x")
+        data, status = self._delete_review_folder(crash)
+        self.assertEqual((status, data), (500, {"ok": False, "error": "Could not delete source folder."}))
+
     def test_cleanup_plan_refusals_get_distinct_fixed_messages(self):
         """#265 QA: each refusal kind keeps its own actionable message; the
         planner's ``code`` wins over its free text."""
