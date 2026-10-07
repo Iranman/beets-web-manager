@@ -119,9 +119,15 @@ def _install_transaction_job_hooks() -> None:
 
     def start_python_with_transaction(fn, label="", metadata=None):
         metadata_payload = dict(metadata or {})
-        existing = jobs.find_duplicate(label, metadata_payload)
-        if existing is not None:  # refuse before a transaction is recorded (BA-6)
-            raise DuplicateJobError(existing)
+        # The duplicate check, the transaction and the start happen under one
+        # store lock, so a refused start never records a transaction (QA F3).
+        with jobs.start_guard(metadata_payload):
+            existing = jobs.find_duplicate(metadata_payload)
+            if existing is not None:  # refuse before a transaction is recorded (BA-6)
+                raise DuplicateJobError(existing)
+            return _start_with_transaction(fn, label, metadata_payload)
+
+    def _start_with_transaction(fn, label, metadata_payload):
         tx = _transaction_create_for_job(label, metadata_payload)
         tx_id = tx.get("id") if tx else ""
         if tx_id:

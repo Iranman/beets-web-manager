@@ -48,8 +48,12 @@ class FailedResultTests(unittest.TestCase):
         self.assertEqual(job.status, "cancelled")
 
 
+MOVE_ALL = {"type": "move-all", "dedupe_key": "library:move-all"}
+
+
 class DuplicateStartTests(unittest.TestCase):
-    """BA-6: an identical mutating job cannot start while one runs."""
+    """BA-6: a job that declares a dedupe_key cannot start while one with the
+    same key runs. Jobs without a key are never refused (QA F1)."""
 
     def setUp(self):
         self.go = threading.Event()
@@ -59,30 +63,30 @@ class DuplicateStartTests(unittest.TestCase):
     def _blocking(self, log):
         self.go.wait(5)
 
-    def test_identical_mutating_job_is_refused(self):
-        first = self.store.start_python(self._blocking, label="Move all", metadata={"type": "move-all"})
+    def test_same_dedupe_key_is_refused(self):
+        first = self.store.start_python(self._blocking, label="Move all", metadata=MOVE_ALL)
         with self.assertRaises(DuplicateJobError) as ctx:
-            self.store.start_python(self._blocking, label="Move all", metadata={"type": "move-all"})
+            self.store.start_python(self._blocking, label="Move all", metadata=dict(MOVE_ALL))
         self.assertIs(ctx.exception.job, first)
         self.assertEqual(len(self.store.all()), 1)
 
-    def test_label_only_mutating_job_is_refused(self):
-        self.store.start_python(self._blocking, label="Clean orphaned library items")
-        with self.assertRaises(DuplicateJobError):
-            self.store.start_python(self._blocking, label="Clean orphaned library items")
-
-    def test_different_subject_or_read_only_may_run_together(self):
-        self.store.start_python(self._blocking, label="Fix art", metadata={"type": "art", "album_id": 1})
-        self.store.start_python(self._blocking, label="Fix art", metadata={"type": "art", "album_id": 2})
-        self.store.start_python(self._blocking, label="Scan", metadata={"type": "dedup-scan"})
-        self.store.start_python(self._blocking, label="Scan", metadata={"type": "dedup-scan"})
+    def test_jobs_without_a_dedupe_key_are_never_refused(self):
+        self.store.start_python(self._blocking, label="Import: CD1")
+        self.store.start_python(self._blocking, label="Import: CD1")
+        self.store.start_python(self._blocking, label="Fix art", metadata={"type": "art"})
+        self.store.start_python(self._blocking, label="Fix art", metadata={"type": "art"})
         self.assertEqual(len(self.store.all()), 4)
+
+    def test_different_dedupe_keys_run_together(self):
+        self.store.start_python(self._blocking, label="x", metadata={"dedupe_key": "a"})
+        self.store.start_python(self._blocking, label="x", metadata={"dedupe_key": "b"})
+        self.assertEqual(len(self.store.all()), 2)
 
     def test_finished_job_does_not_block_a_new_start(self):
         self.go.set()
-        first = self.store.start_python(self._blocking, label="Move all")
+        first = self.store.start_python(self._blocking, label="Move all", metadata=MOVE_ALL)
         _wait(first)
-        self.store.start_python(self._blocking, label="Move all")
+        self.store.start_python(self._blocking, label="Move all", metadata=MOVE_ALL)
         self.assertEqual(len(self.store.all()), 2)
 
 
@@ -153,11 +157,38 @@ class TransactionHookTests(_RouteEnv):
         jobs = self._hooked()
         go = threading.Event()
         self.addCleanup(go.set)
-        meta = {"transaction": {"operation_type": "Delete"}}
+        meta = {"transaction": {"operation_type": "Delete"}, "dedupe_key": "k"}
         jobs.start_python(lambda log: go.wait(5), label="Library cleanup", metadata=meta)
         with self.assertRaises(DuplicateJobError):
             jobs.start_python(lambda log: go.wait(5), label="Library cleanup", metadata=meta)
         self.assertEqual(self.store.list()[1], 1)
+
+    def test_racing_duplicate_starts_record_one_transaction(self):
+        # QA F3: 16 racing starts used to write 15 spurious Failed transactions.
+        jobs = self._hooked()
+        go = threading.Event()
+        self.addCleanup(go.set)
+        meta = {"transaction": {"operation_type": "Delete"}, "dedupe_key": "k"}
+        barrier = threading.Barrier(16)
+        refused = []
+
+        def start():
+            barrier.wait()
+            try:
+                jobs.start_python(lambda log: go.wait(5), label="Library cleanup", metadata=meta)
+            except DuplicateJobError:
+                refused.append(1)
+
+        threads = [threading.Thread(target=start) for _ in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(len(refused), 15)
+        self.assertEqual(len(jobs.all()), 1)
+        txs, total = self.store.list()
+        self.assertEqual(total, 1)
+        self.assertEqual(txs[0]["status"], "Running")
 
     def test_duplicate_maps_to_409(self):
         import app as app_module
@@ -217,3 +248,70 @@ class DownloadsRootTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+REMOVE_BATCH_URL = "/api/clean/album-tracks/remove-batch"
+SCAN_URL = "/api/clean/album-tracks/scan"
+
+
+class DistinctJobsThroughRoutesTests(_RouteEnv):
+    """QA F1: legitimate distinct jobs started through the real routes are
+    never refused; only the opted-in library-wide jobs are."""
+
+    def setUp(self):
+        super().setUp()
+        import backend.transaction_service as ts
+        import routes_import
+        self.jobs = routes_import.jobs
+        before = set(self.jobs._jobs)
+        # Jobs stay "running": their threads never start.
+        for p in (mock.patch.object(threading.Thread, "start"),
+                  mock.patch.object(ts, "transactions", self.store)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(lambda: [self.jobs._jobs.pop(j, None) for j in set(self.jobs._jobs) - before])
+
+    def _post_ok(self, url, body=None):
+        resp = self.client.post(url, json=body or {})
+        self.assertEqual(resp.status_code, 200, (url, resp.get_json()))
+        self.assertTrue(resp.get_json()["ok"], resp.get_json())
+        return resp.get_json()["job_id"]
+
+    def test_imports_of_same_named_folders_both_start(self):
+        import routes_import
+        a, b = self.media("Artist A/CD1/01.flac"), self.media("Artist B/CD1/01.flac")
+        with mock.patch.object(routes_import, "_resolve_import_source_path", lambda raw: (Path(raw), None)), \
+                mock.patch.object(routes_import, "_preserve_torrent_source_path", lambda path: False):
+            self._post_ok("/api/import", {"path": str(Path(a).parent)})
+            self._post_ok("/api/import", {"path": str(Path(b).parent)})
+
+    def test_remove_bad_tracks_batches_both_start(self):
+        one = {"groups": [{"album_id": 1, "item_ids": [10]}]}
+        two = {"groups": [{"album_id": 2, "item_ids": [20]}]}
+        self._post_ok(REMOVE_BATCH_URL, one)
+        self._post_ok(REMOVE_BATCH_URL, two)
+        self._post_ok(REMOVE_BATCH_URL, dict(one, dry_run=False, confirm=True))
+
+    def test_clean_album_tracks_scans_both_start(self):
+        import routes_cleanup
+        rows = [{"id": 1, "albumartist": "A", "album": "B"}]
+        with mock.patch.object(routes_cleanup.composite_workflows, "find_albums_with_mbid", return_value=rows):
+            self._post_ok(SCAN_URL, {"limit": 10})
+            self._post_ok(SCAN_URL, {"limit": 75})
+
+    def test_fix_genre_on_same_named_albums_both_start(self):
+        import routes_library
+        album = mock.Mock(albumartist="Artist", album="Greatest Hits", year=2000)
+        with mock.patch.object(routes_library, "lib") as lib:
+            lib.get_album.return_value = album
+            self._post_ok("/api/albums/1/fix-genre")
+            self._post_ok("/api/albums/2/fix-genre")
+
+    def test_second_move_all_is_refused_without_a_transaction(self):
+        first = self._post_ok("/api/library/move-all")
+        _, before = self.store.list()
+        resp = self.client.post("/api/library/move-all")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["code"], "job_already_running")
+        self.assertEqual(resp.get_json()["job_id"], first)
+        self.assertEqual(self.store.list()[1], before)

@@ -22,6 +22,7 @@ Engine-backed mutations are additionally protected by their transaction's
 idempotency key; see backend/transaction_recovery.py for how a transaction
 left Running by a restart is finished from engine evidence, never replayed.
 """
+import contextlib
 import json
 import os
 import threading
@@ -272,7 +273,7 @@ def reports_failure(result: Any) -> bool:
 
 
 class DuplicateJobError(RuntimeError):
-    """An identical mutating job is already running (BA-6, ARCH-004)."""
+    """A job with the same ``dedupe_key`` is already running (BA-6, ARCH-004)."""
 
     def __init__(self, job: "PythonJob"):
         super().__init__(f"This job is already running ({job.label or job.job_id}); "
@@ -280,14 +281,14 @@ class DuplicateJobError(RuntimeError):
         self.job = job
 
 
-def _duplicate_key(label: str, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Identity of a mutating job request: its label plus its metadata
-    (minus the per-start transaction id). ``None`` for read-only jobs, which
-    may run side by side."""
-    if is_read_only_job(metadata):
-        return None
-    meta = {k: v for k, v in (metadata or {}).items() if k != "transaction_id"}
-    return json.dumps([label, meta], sort_keys=True, default=str)
+def dedupe_key(metadata: Optional[Dict[str, Any]]) -> str:
+    """The caller's explicit ``metadata["dedupe_key"]``, or "" for no guard.
+
+    Opt-in on purpose: a label or metadata often leaves out the input that
+    makes two starts different (a folder path, an album set, dry run), so
+    an implicit key refused legitimate jobs. A caller opts in only when its
+    key names the whole input, e.g. a library-wide job with no parameters."""
+    return str((metadata or {}).get("dedupe_key") or "")
 
 
 def is_read_only_job(metadata: Optional[Dict[str, Any]]) -> bool:
@@ -315,7 +316,7 @@ class JobStore:
 
     def __init__(self, persistence_dir: Optional[Union[str, Path]] = None):
         self._jobs: Dict[str, "PythonJob"] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # re-entered via start_guard()
         self._write_lock = threading.Lock()
         self.root: Optional[Path] = Path(persistence_dir) if persistence_dir else None
         self.recovered: List[Dict[str, Any]] = []
@@ -394,21 +395,26 @@ class JobStore:
                     job.save(force=True)
 
     # -- API ------------------------------------------------------------------
-    def find_duplicate(self, label="", metadata=None) -> Optional["PythonJob"]:
-        """The running job an identical mutating start would duplicate."""
-        key = _duplicate_key(label, metadata)
-        if key is None:
+    def find_duplicate(self, metadata=None) -> Optional["PythonJob"]:
+        """The running job with the same ``dedupe_key``, if any."""
+        key = dedupe_key(metadata)
+        if not key:
             return None
         for job in list(self._jobs.values()):
-            if job.status == "running" and _duplicate_key(job.label, job.metadata) == key:
+            if job.status == "running" and dedupe_key(job.metadata) == key:
                 return job
         return None
 
+    def start_guard(self, metadata=None):
+        """Hold across a caller's own duplicate check and the start it guards,
+        so two racing starts cannot both pass the check (QA F3)."""
+        return self._lock if dedupe_key(metadata) else contextlib.nullcontext()
+
     def start_python(self, fn, label="", metadata=None) -> PythonJob:
-        """Start ``fn`` as a job. Raises DuplicateJobError when an identical
-        mutating job (same label and metadata) is still running."""
+        """Start ``fn`` as a job. Raises DuplicateJobError when a job with the
+        same explicit ``metadata["dedupe_key"]`` is still running."""
         with self._lock:
-            existing = self.find_duplicate(label, metadata)
+            existing = self.find_duplicate(metadata)
             if existing is not None:
                 raise DuplicateJobError(existing)
             jid  = uuid.uuid4().hex
