@@ -55,7 +55,7 @@ def _playlist_resolve_item_path(path_value: Any) -> Path:
         except Exception:
             pass
         # Unauthorized absolute input (e.g. /etc/passwd, or a real file
-        # under an unrelated root such as /data/media/music2) must not be
+        # under an unrelated root such as MUSIC_ROOT + "2") must not be
         # silently reinterpreted as MUSIC_ROOT / path.name -- that invents
         # a new, different, plausible-looking library path from attacker
         # input instead of rejecting it (SEC-002 Wave 9 final review).
@@ -173,7 +173,7 @@ def _plex_split_roots(value: str) -> List[str]:
 def _plex_music_roots(settings: Optional[Dict[str, str]] = None) -> List[str]:
     settings = settings or _plex_settings()
     roots = _plex_split_roots(settings.get("plex_music_roots") or "")
-    for root in list(PLAYLIST_PATH_ROOT_ALIASES) + [str(MUSIC_ROOT), "/data/media/music", "/music"]:
+    for root in list(PLAYLIST_PATH_ROOT_ALIASES) + [str(MUSIC_ROOT), "/music"]:
         normalized = _s(root).strip().replace("\\", "/").rstrip("/")
         if normalized and normalized not in roots:
             roots.append(normalized)
@@ -299,7 +299,7 @@ def _plex_translate_beets_path(path_value: Any,
     except Exception:
         resolved_path = None
 
-    beets_roots = [_plex_beets_music_root(settings), str(MUSIC_ROOT), "/data/media/music"]
+    beets_roots = [_plex_beets_music_root(settings), str(MUSIC_ROOT)]
     rel = ""
     for candidate in list(candidates):
         rel = _plex_relative_path(candidate, beets_roots)
@@ -604,7 +604,7 @@ def _plex_beets_path_candidates(path_value: Any,
         resolved = None
 
     rel = ""
-    roots = [_plex_beets_music_root(settings), str(MUSIC_ROOT), "/data/media/music"]
+    roots = [_plex_beets_music_root(settings), str(MUSIC_ROOT)]
     for root in roots:
         root_norm = _s(root).replace("\\", "/").rstrip("/")
         for value in list(candidates):
@@ -1332,7 +1332,6 @@ def _playlist_path_keys(path_value: str) -> set:
 
     root_candidates = {
         str(MUSIC_ROOT).replace("\\", "/").rstrip("/").casefold(),
-        "/data/media/music",
     }
     for alias in PLAYLIST_PATH_ROOT_ALIASES:
         root_candidates.add(alias.casefold())
