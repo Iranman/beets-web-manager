@@ -53,7 +53,6 @@ class ImportReviewProbeTests(unittest.TestCase):
     def _patched(self):
         import backend.serializers as ser
         patches = (
-            mock.patch.object(ser, "DOWNLOADS_ROOT", self.data),
             mock.patch.object(ser, "MUSIC_ROOT", self.music),
             mock.patch.object(ser, "_DOWNLOADS_ROOTS", [str(self.data)]),
             mock.patch.object(ser, "TORRENT_SOURCE_ROOTS", (self.data,)),

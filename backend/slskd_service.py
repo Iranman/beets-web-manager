@@ -658,7 +658,8 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
                                  artist: str = "", album: str = "",
                                  track_count: int = 0,
                                  transfer_hints: Optional[List[Any]] = None,
-                                 wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> tuple:
+                                 wanted_tracks: Optional[List[Dict[str, Any]]] = None,
+                                 cancel_event: Optional[Any] = None) -> tuple:
     """Find downloaded SLSKD files by exact queued filenames.
 
     Never falls back to arbitrary recent files because that can import an
@@ -899,6 +900,9 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
     logged_wait = False
     static_hint_logged = False
     while time.time() < deadline:
+        # #251: the wait honours the job's cancel request (as BA-16 does).
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
         hint_paths = _transfer_hint_paths()
         if hint_paths and not static_hint_logged:
             preview = ", ".join(str(p) for p in hint_paths[:3])
@@ -916,7 +920,10 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
         if not logged_wait:
             log.append("  [slskd] Completed transfers not visible yet; waiting for final file move...")
             logged_wait = True
-        time.sleep(3)
+        if cancel_event is None:
+            time.sleep(3)
+        elif cancel_event.wait(3):
+            raise RuntimeError("cancelled")
 
     # #251: bounded; the caller treats "no files" as a failed candidate.
     log.append("  [slskd] Gave up waiting for queued files to appear after 90s.")
@@ -1160,8 +1167,4 @@ def _slskd_fallback_methods(requested: str = "") -> List[str]:
 
 
 def _strip_track_filename_id_suffix(value: Any) -> str:
-    try:
-        return _canonical_strip_track_filename_id_suffix(value)
-    except NameError:
-        from backend.matching import strip_track_filename_id_suffix as _fallback_strip
-        return _fallback_strip(value)
+    return _canonical_strip_track_filename_id_suffix(value)

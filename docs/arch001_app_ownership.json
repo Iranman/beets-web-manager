@@ -3165,9 +3165,9 @@
    "module": "backend/serializers.py",
    "lines": [
     93,
-    121
+    122
    ],
-   "size": 29,
+   "size": 30,
    "body_lines": 21,
    "route": null,
    "mutation_capable": true,
@@ -3185,8 +3185,8 @@
    "name": "_resolve_import_review_source_path",
    "module": "backend/serializers.py",
    "lines": [
-    124,
-    170
+    125,
+    171
    ],
    "size": 47,
    "body_lines": 39,
@@ -3230,8 +3230,8 @@
    "name": "_normalize_review_origin_type",
    "module": "backend/serializers.py",
    "lines": [
-    207,
-    232
+    208,
+    233
    ],
    "size": 26,
    "body_lines": 25,
@@ -3256,8 +3256,8 @@
    "name": "_path_origin_hint",
    "module": "backend/serializers.py",
    "lines": [
-    235,
-    268
+    236,
+    269
    ],
    "size": 34,
    "body_lines": 33,
@@ -3280,8 +3280,8 @@
    "name": "_review_origin_payload",
    "module": "backend/serializers.py",
    "lines": [
-    271,
-    331
+    272,
+    332
    ],
    "size": 61,
    "body_lines": 57,
@@ -3306,8 +3306,8 @@
    "name": "_compact_mb_candidate",
    "module": "backend/serializers.py",
    "lines": [
-    334,
-    365
+    335,
+    366
    ],
    "size": 32,
    "body_lines": 31,
@@ -3326,8 +3326,8 @@
    "name": "_leaked_db_paths_summary",
    "module": "backend/serializers.py",
    "lines": [
-    368,
-    386
+    369,
+    387
    ],
    "size": 19,
    "body_lines": 16,
@@ -3347,8 +3347,8 @@
    "name": "json_route_result",
    "module": "backend/serializers.py",
    "lines": [
-    389,
-    395
+    390,
+    396
    ],
    "size": 7,
    "body_lines": 2,
@@ -3375,8 +3375,8 @@
    "name": "_config_error_response",
    "module": "backend/serializers.py",
    "lines": [
-    426,
-    428
+    427,
+    429
    ],
    "size": 3,
    "body_lines": 2,
@@ -6792,10 +6792,10 @@
    "module": "backend/slskd_service.py",
    "lines": [
     656,
-    927
+    934
    ],
-   "size": 272,
-   "body_lines": 260,
+   "size": 279,
+   "body_lines": 266,
    "route": null,
    "mutation_capable": true,
    "domain": "SLSKD",
@@ -6817,8 +6817,8 @@
    "name": "_slskd_wait_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    930,
-    1116
+    937,
+    1123
    ],
    "size": 187,
    "body_lines": 184,
@@ -6842,8 +6842,8 @@
    "name": "_normalise_download_method",
    "module": "backend/slskd_service.py",
    "lines": [
-    1135,
-    1138
+    1142,
+    1145
    ],
    "size": 4,
    "body_lines": 3,
@@ -6884,8 +6884,8 @@
    "name": "_download_method_list",
    "module": "backend/slskd_service.py",
    "lines": [
-    1141,
-    1147
+    1148,
+    1154
    ],
    "size": 7,
    "body_lines": 6,
@@ -6909,8 +6909,8 @@
    "name": "_slskd_fallback_methods",
    "module": "backend/slskd_service.py",
    "lines": [
-    1150,
-    1159
+    1157,
+    1166
    ],
    "size": 10,
    "body_lines": 9,
@@ -6932,11 +6932,11 @@
    "name": "_strip_track_filename_id_suffix",
    "module": "backend/slskd_service.py",
    "lines": [
-    1162,
-    1167
+    1169,
+    1170
    ],
-   "size": 6,
-   "body_lines": 5,
+   "size": 2,
+   "body_lines": 1,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
