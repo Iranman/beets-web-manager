@@ -1437,7 +1437,10 @@ run_prune_backups() {
 # service was stopped, so this is checked before anything changes.
 require_compose_pull_flag() {
   STAGE="compose-version-check"
-  if ! docker compose up --help 2>/dev/null | grep -q -- '--pull'; then
+  # Capture first: piping into `grep -q` can SIGPIPE docker under pipefail.
+  local up_help
+  up_help="$(docker compose up --help 2>/dev/null)" || up_help=""
+  if [[ "$up_help" != *"--pull"* ]]; then
     REASON_CODE="compose_too_old"
     die "this Docker Compose ($(docker compose version --short 2>/dev/null || echo unknown version)) does not support 'up --pull'; Docker Compose v2.22 or later is required. Nothing was changed -- update Docker Compose, then re-run."
   fi
