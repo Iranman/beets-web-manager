@@ -84,9 +84,24 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
             mbid = "11111111-2222-3333-4444-555555555555"
             with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir), \
                  patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800):
-                app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"]})
+                app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"], "release_artist": "X"})
                 cached = app_module._mb_release_tracklist_read_disk(mbid, __import__("time").time())
-        self.assertEqual(cached, {"tracks": ["a"]})
+                app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"]})
+                stale = app_module._mb_release_tracklist_read_disk(mbid, __import__("time").time())
+        self.assertEqual(cached, {"tracks": ["a"], "release_artist": "X"})
+        # Pre-artist-credits entries are refetched, not served.
+        self.assertIsNone(stale)
+
+    def test_musicbrainz_lookups_use_valid_includes(self):
+        import inspect
+        import helpers_mb
+        from backend import matching_service
+        src = inspect.getsource(helpers_mb) + inspect.getsource(matching_service)
+        # label-info is not a WS2 include (MusicBrainz answers 400); labels is.
+        self.assertNotIn("label-info&", src)
+        self.assertNotIn("+label-info", src)
+        self.assertIn("?inc=recordings+release-groups+artist-credits&fmt=json",
+                      inspect.getsource(matching_service._fetch_mb_release_tracklist))
 
 
 if __name__ == "__main__":

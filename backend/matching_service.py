@@ -1134,7 +1134,10 @@ def _mb_release_tracklist_read_disk(mb_albumid: str, now: float) -> Optional[Dic
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         payload = cached.get("payload")
         ts = float(cached.get("ts") or 0)
-        if isinstance(payload, dict) and (now - ts) < _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL:
+        # Entries without release_artist were fetched without artist-credits
+        # (before that inc was added) and are refetched.
+        if (isinstance(payload, dict) and payload.get("release_artist")
+                and (now - ts) < _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL):
             return copy.deepcopy(payload)
     except Exception:
         pass
@@ -1177,7 +1180,7 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
             }
         return disk_cached
     mb_url = (f"https://musicbrainz.org/ws/2/release/{mb_albumid}"
-              "?inc=recordings+release-groups&fmt=json")
+              "?inc=recordings+release-groups+artist-credits&fmt=json")
     req = _ur.Request(
         mb_url,
         headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}

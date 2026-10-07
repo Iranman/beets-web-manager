@@ -147,7 +147,7 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
     only valid album context.
     """
     url = (f"https://musicbrainz.org/ws/2/recording/{mb_trackid}"
-           "?inc=releases+release-groups+artist-credits+media+genres+label-info&fmt=json")
+           "?inc=releases+release-groups+artist-credits+media+genres&fmt=json")
     req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
     try:
         with provider_boundary.opened("musicbrainz", req, timeout=10) as r:
@@ -534,7 +534,7 @@ def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         url = (f"https://musicbrainz.org/ws/2/release/{mb_id}"
-               "?inc=artist-credits+media+label-info+release-groups&fmt=json")
+               "?inc=artist-credits+media+labels+release-groups&fmt=json")
         req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
         with provider_boundary.opened("musicbrainz", req, timeout=15) as r:
             rel = json.loads(r.read())
