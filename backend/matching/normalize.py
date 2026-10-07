@@ -434,9 +434,10 @@ def track_path_prefixes(path: Any) -> List[str]:
     if not raw_path:
         return []
     for marker in (
-        "/data/media/music/",
-        "/data/torrents/music/",
-        "/data/downloads/music/",
+        # Layout suffixes, not roots: "/media/music/" also matches any
+        # "<prefix>/media/music/" path and splits it at the same place.
+        "/media/music/",
+        "/torrents/music/",
         "/downloads/music/",
         "/download/music/",
     ):
