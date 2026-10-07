@@ -176,7 +176,7 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
             response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(self.inline.error)
-        update.assert_called_once_with(123, {"mb_albumid": VALID_RELEASE_ID})
+        update.assert_called_once_with(123, {"mb_albumid": VALID_RELEASE_ID}, release_selected_by_operator=True)
         plan.assert_not_called()
         relocate.assert_not_called()
         APP._invalidate_lib_cache.assert_not_called()
@@ -305,7 +305,7 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         # existing tag-write/relocate stage -- three total
         # update_album_metadata-family calls: the mb_albumid stamp and
         # the force_write_tags call.
-        update.assert_any_call(123, {"mb_albumid": VALID_RELEASE_ID})
+        update.assert_any_call(123, {"mb_albumid": VALID_RELEASE_ID}, release_selected_by_operator=True)
         update.assert_any_call(123, {}, force_write_tags=True)
         relocate.assert_called_once_with(123, mode="rename")
         self.assertNotEqual(relocate.call_args.args[0], 999)

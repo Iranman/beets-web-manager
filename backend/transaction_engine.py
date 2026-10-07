@@ -877,6 +877,26 @@ class TransactionStore:
         return True, None
 
 
+def _import_review_library_refusal(target: Path, delete_sources: List[str], music_roots: List[Path],
+                                   library_delete_allowed: bool) -> Optional[Dict[str, Any]]:
+    """Security F2 (#235 review): a cleanup target that CONTAINS the music
+    library is always refused, and an irreversible delete of a file inside
+    the library needs the explicit library-delete gate. Checked at plan and
+    again at apply."""
+    for root in music_roots:
+        if target in root.parents:
+            return {"ok": False, "code": "import_review_target_contains_library", "mutated": False,
+                    "error": f"Cleanup target {target} contains the music library {root}; refusing."}
+        if library_delete_allowed:
+            continue
+        for src in delete_sources:
+            p = Path(src).resolve(strict=False)
+            if p == root or root in p.parents:
+                return {"ok": False, "code": "import_review_library_delete_refused", "mutated": False,
+                        "error": f"{p} is inside the music library; deleting it needs the library-delete gate."}
+    return None
+
+
 def execute_import_review_cleanup_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
@@ -929,11 +949,15 @@ def execute_import_review_cleanup_plan(
     # resolves MUSIC_ROOT for allowed_roots) passes it explicitly instead
     # of this function reaching into sys.modules["app"] or re-deriving it
     # from os.environ on its own.
-    music_root_cand = music_root or os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_DIR") or "/music"
-    music_root_path = Path(music_root_cand).resolve(strict=False)
+    from backend.config_layers import music_root as _configured_music_root
+    music_root_path = Path(music_root or _configured_music_root()).resolve(strict=False)
+    library_delete_allowed = confirmed_wrong_library_folder or album_id > 0
 
-    if (resolved_target == music_root_path or music_root_path in resolved_target.parents) and not confirmed_wrong_library_folder and album_id <= 0:
+    if (resolved_target == music_root_path or music_root_path in resolved_target.parents) and not library_delete_allowed:
         return {"ok": False, "error": f"Review folder path {resolved_target} is inside music library."}
+    refusal = _import_review_library_refusal(resolved_target, [], [music_root_path], library_delete_allowed)
+    if refusal:
+        return refusal
 
     expected_states: Dict[str, Any] = {}
     sources: List[str] = []
@@ -1063,6 +1087,12 @@ def execute_import_review_cleanup_plan(
                     })
                     step_idx += 1
 
+    refusal = _import_review_library_refusal(
+        resolved_target, [s["source"] for s in steps if s["type"] == "delete_file"], [music_root_path],
+        library_delete_allowed)
+    if refusal:
+        return refusal
+
     payload_with_skipped = {**payload, "skipped": skipped}
     is_recoverable = action in {"quarantine_rejected", "quarantine_duplicate"}
 
@@ -1079,6 +1109,7 @@ def execute_import_review_cleanup_plan(
         # Attach mutation_family, steps, and rollback_available to transaction metadata
         tx_meta = tx.get("metadata") or {}
         tx_meta["mutation_family"] = "import_review_cleanup_v1"
+        tx_meta["music_root"] = str(music_root_path)
         tx_meta["steps"] = steps
         tx_meta["rollback_available"] = is_recoverable
         store.update(op_id, metadata=tx_meta)
@@ -1156,6 +1187,25 @@ def _execute_import_review_cleanup_apply_locked(
     action = str(payload.get("action") or "delete").strip().lower()
     expected_states = meta.get("expected_states") or {}
     steps = meta.get("steps") or []
+
+    # F2: re-check at apply against the recorded AND the current music root.
+    from backend.config_layers import music_root as _configured_music_root
+    try:
+        gate_album_id = int(payload.get("album_id") or 0)
+    except (TypeError, ValueError):
+        gate_album_id = 0
+    library_delete_allowed = bool(
+        payload.get("confirmed_wrong_library_folder") or payload.get("allow_library_delete")) or gate_album_id > 0
+    roots = {Path(_configured_music_root()).resolve(strict=False)}
+    if meta.get("music_root"):
+        roots.add(Path(meta["music_root"]).resolve(strict=False))
+    refusal = _import_review_library_refusal(
+        Path(meta.get("target_path", "")).resolve(strict=False),
+        [s.get("source", "") for s in steps if s.get("type") == "delete_file"
+         and s.get("status") not in ("completed", "irreversible_completed")],
+        sorted(roots), library_delete_allowed)
+    if refusal:
+        return refusal
 
     log: List[str] = []
     deleted: List[str] = []

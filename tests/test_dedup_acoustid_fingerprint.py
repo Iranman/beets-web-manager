@@ -104,7 +104,7 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         # instead of silently commingling two different artists.
         self.assertIn("def _artist_folder_fingerprint_confirms(", self.app_source)
         fn_idx = self.app_source.index("def _artist_folder_fingerprint_confirms(")
-        fn_body = self.app_source[fn_idx: fn_idx + 1600]
+        fn_body = self.app_source[fn_idx: fn_idx + 2400]
         self.assertIn("_acoustid_lookup_cached(str(p))", fn_body)
         self.assertIn("_playlist_artist_name_score(canonical_name, c_artist)", fn_body)
 

@@ -228,7 +228,8 @@ class TestCompositeWorkflows(unittest.TestCase):
         sub_dir = Path(self.tmpdir.name) / "empty_dir"
         sub_dir.mkdir()
         self.mock_adapter.list_item_paths.return_value = []
-        with patch.dict("os.environ", {"MUSIC_ROOT": self.tmpdir.name}),              patch("backend.composite_workflows.beets_adapter", self.mock_adapter):
+        with patch.dict("os.environ", {"MUSIC_ROOT": self.tmpdir.name}), \
+             patch("backend.composite_workflows.beets_adapter", self.mock_adapter):
             plan_res = plan_folder_cleanup({"source": str(sub_dir), "action": "remove_empty"}, store=self.store)
             self.assertTrue(plan_res["ok"], plan_res)
             apply_res = apply_folder_cleanup(plan_res["operation_id"], store=self.store)

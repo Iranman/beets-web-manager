@@ -2211,7 +2211,7 @@ def match_album(aid):
 
         # 2 ── set mb_albumid on both items AND the album record
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
-        metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+        metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
         _require_attach_stage_success(metadata_result, "match album metadata update")
         meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
         log.append(f"  albums.mb_albumid set to {mb_albumid}")
@@ -4317,7 +4317,7 @@ def apply_album_duplicate_resolver(aid):
                     # route already uses.
                     stamp_mbid = _s(plan.get("mb_albumid") or "")
                     if stamp_mbid:
-                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
+                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid}, release_selected_by_operator=True)
                         if not stamp_res.get("ok"):
                             log.append(f"  WARN: could not stamp target album mb_albumid: {stamp_res.get('error')}")
 

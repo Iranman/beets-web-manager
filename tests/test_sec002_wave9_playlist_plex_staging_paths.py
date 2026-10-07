@@ -530,7 +530,7 @@ class Wave9StableIdentityAndEngineOwnershipTests(unittest.TestCase):
     def test_beets_client_engine_delete_track_ipc(self):
         client = app_module.composite_workflows
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp, "BEETS_IMPORT_ROOTS": tmp}):
+            with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": tmp, "DOWNLOADS_ROOT": tmp}):
                 # S1/F1: real staged tracks live under <data>/playlist_staging;
                 # the data-dir root itself (tokens, databases) is protected.
                 stg = Path(tmp) / "playlist_staging" / "test--key123"

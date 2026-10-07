@@ -88,7 +88,7 @@ class CacheOnlyFingerprintTests(unittest.TestCase):
                 _path, key = acoustid_service._audio_cache_file_identity(str(audio))
                 entry = Path(td) / "cache" / key[:2] / f"{key}.json"
                 entry.parent.mkdir(parents=True)
-                entry.write_text(json.dumps([{"mb_trackid": REC.upper()}]), encoding="utf-8")
+                entry.write_text(json.dumps([{"mb_trackid": REC.upper(), "score": 95}]), encoding="utf-8")
                 self.assertEqual(acoustid_service._acoustid_cached_fingerprint_ids(str(audio)), [REC])
             lookup.assert_not_called()
 

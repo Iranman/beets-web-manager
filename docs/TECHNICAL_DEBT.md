@@ -47,6 +47,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `backend/import_review_decision.py` decides bucket, blocked/ready, block reason, next action, action label and selected source files; `POST /api/import-review/decision` serves it; the apply path asks it for the verdict and fails closed.
   - The page's decision rules (`shouldShowBlockedBucket`, `applyBlockReason`, `targetPreviewBlockReason` and the rest) moved verbatim into `frontend/src/features/importReview/importReviewDecision.ts`; the page defines none of them.
   - One shared fixture (`frontend/tests/fixtures/import_review_decision_cases.json`, 45 cases) is checked by both `tests/test_import_review_decision.py` and `frontend/tests/importReviewDecision.test.tsx`.
+- #228 (IMPLEMENTED): transaction rollback eligibility is computed by the backend (`rollback.allowed`, `allowed_code`, `allowed_reason` on the transaction list and detail). The Library Changes page still uses its own `canRollback` copy until the frontend switches to it. Composite families stored locally (import review cleanup, folder cleanup, library cleanup and the other `composite_workflows` families) report `allowed: false`: the generic route's composite dispatch only runs for a transaction missing from the store, which cannot happen in production because both read `BEETS_TRANSACTION_DIR`.
 - Why this stays Open:
   - The page still evaluates the mirror locally for filters, counts and button state (contract-tested, but not served by the backend on every render).
   - The selected-match state those rules read (`confidence_level`, `auto_fix_eligible`, `is_importable`) is still assembled in the page from suggestion and preflight responses.
@@ -149,6 +150,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `routes_maintenance`'s generic rollback cannot reach the composite metadata and MusicBrainz rollbacks: they record no `rollback.operations`.
   - `update_album_metadata(aid, {}, force_write_tags=True)` plans nothing, so it writes no tags.
   - The frontend relink caller must send `mbAlbumId` or `mbReleaseGroupId`. Without one, the endpoint now refuses with `relink_identity_required`.
+  - Composite refusal transitions pass `logs=[...]`, which replaces the earlier log lines instead of appending (album metadata and MusicBrainz track repair refusals).
+  - `_restore_rows` restores with `move=True` even when the apply did not move files.
+  - A folder cleanup that fails part-way records no `engine_result`, so it cannot be rolled back through the route.
+  - Folder reference checks compare Beets-reported item paths only; an album `artpath` under the folder is not checked.
+  - `backend/app_runtime.py` still hard-codes `DOWNLOADS_ROOT = Path("/data/torrents/music")` instead of `config_layers.downloads_root()` (BA-12 remainder).
 - Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
 - Priority: P2. Status: Open.
 

@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, _MB_RELEASE_TRACKLIST_CACHE, _MB_RELEASE_TRACKLIST_CACHE_DIR, _MB_RELEASE_TRACKLIST_CACHE_LOCK, _MB_RELEASE_TRACKLIST_CACHE_TTL, _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _is_valid_mb_uuid, _s, _ur
-from backend.app_runtime import _path_is_under, _safe_inventory_error_message
+from backend.app_runtime import _path_is_under, _redact_security_text, _safe_inventory_error_message
 from backend.album_match import build_album_match_plan
 from backend.mb_alignment import summarize_mb_track_alignment
 from backend.matching_contract import build_album_matching_decision
@@ -1352,14 +1352,17 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
         decisions = parsed.get("decisions", []) if isinstance(parsed, dict) else []
         return {"status": "used", "decisions": decisions}
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+        # IA-15: provider error bodies can echo (partial) API keys; report the
+        # status only and never read the body into logs or the job result.
+        exc.close()
         if log is not None:
-            log.append(f"  AI review failed: OpenAI {exc.code}: {body[:180]}")
-        return {"status": "error", "error": f"OpenAI {exc.code}: {body[:180]}"}
+            log.append(f"  AI review failed: AI provider HTTP {exc.code}")
+        return {"status": "error", "error": f"AI provider HTTP {exc.code}"}
     except Exception as ex:
+        safe = _redact_security_text(ex)
         if log is not None:
-            log.append(f"  AI review failed: {ex}")
-        return {"status": "error", "error": str(ex)}
+            log.append(f"  AI review failed: {safe}")
+        return {"status": "error", "error": safe}
 
 
 #: MI-4: the only evidence that may propose removing a track from an album is a
