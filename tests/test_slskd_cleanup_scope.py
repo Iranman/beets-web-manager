@@ -37,8 +37,8 @@ class CleanupScopeTests(unittest.TestCase):
             own_full = _touch(dl / "peer" / "Music" / "Album" / "01.flac")
             own_flat = _touch(dl / "peer" / "Album" / "02.flac")
             other_flat = _touch(dl / "Album" / "01.flac", b"other")
-            other_nested = _touch(dl / "Music" / "Album" / "02.flac", b"other")
-            other_peer = _touch(dl / "otherpeer" / "Album" / "01.flac", b"other")
+            other_nested = _touch(dl / "Music" / "Album" / "02.flac")
+            other_peer = _touch(dl / "otherpeer" / "Album" / "01.flac")
 
             removed, log = self._run(dl, [r"Music\Album\01.flac", r"Music\Album\02.flac"])
 
