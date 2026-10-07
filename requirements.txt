@@ -6,7 +6,7 @@ waitress==3.0.2
 # Additional metadata & integration libraries
 pylast==7.1.0
 typing_extensions==4.16.0
-deezer-python==2.1.0
+deezer-python==7.4.0
 pylistenbrainz==0.5.1
 Pillow==12.3.0
 beautifulsoup4==4.12.3
