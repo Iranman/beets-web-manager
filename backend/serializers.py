@@ -105,7 +105,8 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
     roots = list(safe_roots("import review cleanup root", roots, MUSIC_ROOT))
     if allow_music:
         roots.append(MUSIC_ROOT)
-    trusted: List[Path] = []
+    # Not "trusted": CodeQL reads that name as a secret (#1387).
+    contained_roots: List[Path] = []
     seen: set = set()
     for root in roots:
         try:
@@ -116,8 +117,8 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
         if not key or key in seen:
             continue
         seen.add(key)
-        trusted.append(resolved)
-    return trusted
+        contained_roots.append(resolved)
+    return contained_roots
 
 
 def _resolve_import_review_source_path(

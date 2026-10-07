@@ -3145,10 +3145,10 @@
    "module": "backend/serializers.py",
    "lines": [
     93,
-    120
+    121
    ],
-   "size": 28,
-   "body_lines": 20,
+   "size": 29,
+   "body_lines": 21,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT_REVIEW",
@@ -3165,8 +3165,8 @@
    "name": "_resolve_import_review_source_path",
    "module": "backend/serializers.py",
    "lines": [
-    123,
-    169
+    124,
+    170
    ],
    "size": 47,
    "body_lines": 39,
@@ -3210,8 +3210,8 @@
    "name": "_normalize_review_origin_type",
    "module": "backend/serializers.py",
    "lines": [
-    206,
-    231
+    207,
+    232
    ],
    "size": 26,
    "body_lines": 25,
@@ -3236,8 +3236,8 @@
    "name": "_path_origin_hint",
    "module": "backend/serializers.py",
    "lines": [
-    234,
-    267
+    235,
+    268
    ],
    "size": 34,
    "body_lines": 33,
@@ -3260,8 +3260,8 @@
    "name": "_review_origin_payload",
    "module": "backend/serializers.py",
    "lines": [
-    270,
-    330
+    271,
+    331
    ],
    "size": 61,
    "body_lines": 57,
@@ -3286,8 +3286,8 @@
    "name": "_compact_mb_candidate",
    "module": "backend/serializers.py",
    "lines": [
-    333,
-    364
+    334,
+    365
    ],
    "size": 32,
    "body_lines": 31,
@@ -3306,8 +3306,8 @@
    "name": "_leaked_db_paths_summary",
    "module": "backend/serializers.py",
    "lines": [
-    367,
-    385
+    368,
+    386
    ],
    "size": 19,
    "body_lines": 16,
@@ -3327,8 +3327,8 @@
    "name": "json_route_result",
    "module": "backend/serializers.py",
    "lines": [
-    388,
-    394
+    389,
+    395
    ],
    "size": 7,
    "body_lines": 2,
@@ -3355,8 +3355,8 @@
    "name": "_config_error_response",
    "module": "backend/serializers.py",
    "lines": [
-    425,
-    427
+    426,
+    428
    ],
    "size": 3,
    "body_lines": 2,
