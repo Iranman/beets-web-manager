@@ -10,6 +10,7 @@ import backend.job_contract as job_contract
 from backend.matching import evaluate_release_group_candidate
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from backend.app_runtime import PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PLAYLIST_AUTO_SYNC_ENABLED, PLAYLIST_AUTO_SYNC_INTERVAL, PLAYLIST_DOWNLOAD_BATCH_SIZE, PLAYLIST_DOWNLOAD_METHODS, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_EXPORTS_DIR, PLAYLIST_JOB_STATE_DIR, PLAYLIST_MANIFESTS_DIR, PLAYLIST_MEMBERSHIP_DIR, PLAYLIST_MIN_DOWNLOAD_SECONDS, PLAYLIST_PIPELINE_STATES, PLAYLIST_STATE_ROOT, PLEX_API_TIMEOUT, PLEX_PLAYLIST_CHUNK_SIZE, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_UNMATCHED_REPLACE, PLEX_SYNC_MIN_MATCH_RATIO, _MB_UUID_RE, _s, _up, _ur, _ytdlp_ready
 from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _spotiflac_missing_tracks_download, _ytdlp_js_runtime_options, _ytdlp_missing_tracks_download, _ytdlp_remote_components, _ytdlp_source_extractor_args
 from backend.app_runtime import _norm, _path_is_under, _redact_security_text, _safe_path_component
@@ -1417,6 +1418,20 @@ def _playlist_resolve_operation_key(playlist_key: Any = "",
     return ""
 
 
+_UNSAFE_PLAYLIST_DOWNLOAD_ROOT_MESSAGE = (
+    "PLAYLIST_DOWNLOAD_ROOT is the filesystem root or overlaps the music library (MUSIC_ROOT), "
+    "so playlist downloads are disabled. Set it to a folder outside the library."
+)
+
+
+def _playlist_download_root() -> Path:
+    """PLAYLIST_DOWNLOAD_ROOT for staging, or RuntimeError when the root was
+    dropped as unsafe ("/" or overlapping the library; #269 QA)."""
+    if not PLAYLIST_DOWNLOAD_ALLOWED_ROOTS:
+        raise RuntimeError(_UNSAFE_PLAYLIST_DOWNLOAD_ROOT_MESSAGE)
+    return PLAYLIST_DOWNLOAD_ROOT
+
+
 def get_playlist_staging_root(playlist: Any) -> Path:
     """Stable per-playlist staging root; never includes job/run IDs."""
     if isinstance(playlist, dict):
@@ -1427,7 +1442,7 @@ def get_playlist_staging_root(playlist: Any) -> Path:
         name = playlist
     get_key = _playlist_key
     key = get_key(_s(name), manifest) if get_key else _playlist_slug(_clean_playlist_name(_s(name)))
-    return PLAYLIST_DOWNLOAD_ROOT / key
+    return _playlist_download_root() / key
 
 
 def _playlist_staging_root_arg(name: str, playlist_id: Optional[str] = None) -> Any:
@@ -7134,11 +7149,11 @@ def _playlist_delete_staged_track_file(name: str,
     # (SEC-002 Wave 9 final review: cross-playlist staged-deletion gap).
     # Authorization is scoped to this playlist's own staging root only.
     library_root = MUSIC_ROOT.resolve(strict=False)
-    staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    staging_root = _playlist_download_root().resolve(strict=False)
     playlist_key = _playlist_existing_key(clean_name)
     if not playlist_key:
         raise RuntimeError("Playlist identity is unavailable; cannot delete staged track")
-    playlist_staging = (PLAYLIST_DOWNLOAD_ROOT / playlist_key).resolve(strict=False)
+    playlist_staging = (_playlist_download_root() / playlist_key).resolve(strict=False)
 
     is_in_library = False
     try:

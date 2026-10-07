@@ -49,7 +49,7 @@ class DownloadDestContainment(unittest.TestCase):
     def test_dot_segments_are_refused_before_any_job(self):
         import backend.acquisition_service as acq
         for artist, album in (("..", ".."), ("..", "music"), (".", ".."), (" .. ", "x"),
-                              ("x", " . "), ("...", "x"), ("x", ". ."), ("x", "..")):
+                              ("x", " . "), ("x", "..")):
             with self.subTest(artist=artist, album=album):
                 body, jobs, dest = self._start(artist, album, year="1999")
                 self.assertFalse(body["ok"])
@@ -67,10 +67,61 @@ class DownloadDestContainment(unittest.TestCase):
                 self.assertTrue(body.get("ok", True), body)
                 self.assertEqual(Path(dest), self.root / safe(artist) / f"{safe(album)} (1999)")
 
+    def test_dot_only_titles_other_than_dot_dot_are_kept(self):
+        # QA #269: "..." and ". . ." are real titles, not traversal.
+        for artist, album in (("...", "x"), ("x", "...."), ("x", ". . .")):
+            with self.subTest(artist=artist, album=album):
+                body, _jobs, dest = self._start(artist, album)
+                self.assertTrue(body.get("ok", True), body)
+                self.assertEqual(Path(dest), self.root / artist / album)
+
+    def test_symlinked_artist_folder_out_of_root_gets_escape_message(self):
+        import backend.acquisition_service as acq
+        with tempfile.TemporaryDirectory() as tmp:
+            root, outside = Path(tmp, "root"), Path(tmp, "outside")
+            root.mkdir()
+            outside.mkdir()
+            try:
+                (root / "A").symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks not available")
+            with self.assertRaises(ValueError) as ctx:
+                acq._download_dest_under(root, "A", "B")
+            self.assertEqual(str(ctx.exception), acq._DOWNLOAD_ESCAPE_ERROR)
+
     def test_year_cannot_add_path_components(self):
         body, _jobs, dest = self._start("A", "B", year="1/../../..")
         self.assertTrue(body.get("ok", True), body)
         self.assertEqual(Path(dest).parent, self.root / "A")
+
+    def test_missing_track_folder_stays_inside_the_root(self):
+        """QA #269: the missing-track folder (_direct_dest_dir) is contained too."""
+        import backend.acquisition_service as acq
+        import backend.app_runtime as rt
+        seen = []
+
+        def fake_missing(_artist, _album, _year, dest_dir, log, *_a, **_kw):
+            seen.append(dest_dir)
+            raise _Stop()
+
+        for artist, album, year in (("./..", "../", ".."), ("A", "B", "1/../../..")):
+            with self.subTest(artist=artist, album=album, year=year), \
+                    mock.patch.object(rt, "DOWNLOADS_ALLOWED_ROOTS", (self.root,)), \
+                    mock.patch.object(acq, "jobs") as jobs, \
+                    mock.patch.object(acq, "_ytdlp_missing_tracks_download", side_effect=fake_missing):
+                del seen[:]
+                body, _ = acq.start_album_download({
+                    "artist": artist, "album": album, "year": year, "method": "ytdlp",
+                    "auto_import": False, "missing_tracks": [{"title": "T", "track": 1}]})
+                self.assertTrue(body.get("ok", True), body)
+                try:
+                    jobs.start_python.call_args[0][0]([], None)
+                except Exception:
+                    pass
+                self.assertEqual(len(seen), 1)
+                dest = Path(os.path.normpath(seen[0]))
+                self.assertEqual(dest.parent.parent, self.root)
+                self.assertIn(" missing ", dest.name)
 
     def test_dest_must_be_strictly_inside_the_root(self):
         import backend.acquisition_service as acq
@@ -138,6 +189,20 @@ class PlaylistRootsValidated(unittest.TestCase):
                 self.assertTrue(lib._app_managed_download_path(pl / "k" / "downloads"))
             with mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()):
                 self.assertFalse(lib._app_managed_download_path(pl / "k" / "downloads"))
+
+    def test_unsafe_playlist_root_is_never_a_staging_folder(self):
+        # QA #269: staging and staged-track deletion used the raw root.
+        import backend.playlist_service as ps
+        pl = self.root / "playlists"
+        with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ROOT", pl):
+            with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (pl,)):
+                self.assertEqual(ps._playlist_downloads_dir("Mix").parent.parent, pl)
+            with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()):
+                for call in (lambda: ps._playlist_downloads_dir("Mix"),
+                             lambda: ps.get_playlist_staging_root("Mix")):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        call()
+                    self.assertIn("PLAYLIST_DOWNLOAD_ROOT", str(ctx.exception))
 
 
 def _import_roots(env_overrides):

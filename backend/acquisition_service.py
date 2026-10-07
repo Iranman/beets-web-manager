@@ -70,13 +70,17 @@ def _download_method_job_label(method: Any) -> str:
 
 
 _DOWNLOAD_FOLDER_ERROR = "Artist and album must be usable folder names."
+_DOWNLOAD_ESCAPE_ERROR = "The download folder would resolve outside the downloads root."
 
 
 def _download_folder_segment(value: Any) -> str:
-    """``value`` as one folder name (separators and reserved characters become
-    "_"), or "" when nothing but dots and whitespace is left ("", ".", "..")."""
-    text = re.sub(r'[\\/:*?"<>|]', '_', str(value)).strip()
-    return text if text.replace(".", "").strip() else ""
+    """``value`` as one folder name (separators, reserved characters and "$"
+    become "_"), or "" for "", "." and "..". Other dot names ("...") are real
+    titles; _download_dest_under's realpath check still contains them.
+    "$" goes because downloaders expand "$VAR" in paths (#269 F-2);
+    "%" stays ("100% Pure") and is escaped where a template is built."""
+    text = re.sub(r'[\\/:*?"<>|$]', '_', str(value)).strip()
+    return "" if text in (".", "..") else text
 
 
 def _download_dest_under(root: Path, *segments: str) -> Path:
@@ -85,7 +89,8 @@ def _download_dest_under(root: Path, *segments: str) -> Path:
         raise ValueError(_DOWNLOAD_FOLDER_ERROR)
     dest = root.joinpath(*segments)
     if Path(os.path.realpath(str(root))) not in Path(os.path.realpath(str(dest))).parents:
-        raise ValueError(_DOWNLOAD_FOLDER_ERROR)
+        # e.g. an existing artist folder that is a symlink out of the root.
+        raise ValueError(_DOWNLOAD_ESCAPE_ERROR)
     return dest
 
 

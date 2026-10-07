@@ -282,7 +282,9 @@ PLAYLIST_DOWNLOAD_BATCH_SIZE = _env_int("PLAYLIST_DOWNLOAD_BATCH_SIZE", 0, minim
 PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,spotiflac,ytdlp,soundcloud")
 
 
-PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
+# Absolute only (config_layers.container_path): an empty or relative value
+# falls back to the default instead of meaning the working directory (#269 F-3).
+PLAYLIST_DOWNLOAD_ROOT = Path(_config_layers.container_path(
     "PLAYLIST_DOWNLOAD_ROOT",
     str(DOWNLOADS_CONTAINER_ROOT / "music" / "Playlist Downloads"),
 ))
