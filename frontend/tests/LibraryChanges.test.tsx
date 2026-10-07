@@ -172,6 +172,52 @@ describe('LibraryChanges cancel/apply refusals', () => {
     expect(onUnhandled).not.toHaveBeenCalled();
   });
 
+  it('does not add a second period to a reason that already ends with one', async () => {
+    await renderWith(tx({}, 'Approved'));
+    mockCancel.mockRejectedValue(Object.assign(new Error('Already cancelled.'), { body: { code: 'not_cancellable' }, httpStatus: 409 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const banner = await screen.findByText(/Cancel refused/);
+    expect(banner.textContent).toMatch(/Already cancelled\. Nothing was changed/);
+    expect(banner.textContent).not.toMatch(/\.\./);
+  });
+
+  // QA #211 F1: apply can fail after mutating; never claim nothing changed.
+  it('apply failing after mutating (verification_failed, mutated:true) does not claim nothing changed', async () => {
+    await renderWith(tx({ mutation_family: 'album_cleanup_v1' }, 'Approved'));
+    vi.mocked(getTransaction).mockResolvedValue({ ok: true, transaction: tx({}, 'Recovery Required') });
+    mockApply.mockRejectedValue(Object.assign(new Error('Album row still present after removal.'), {
+      body: { ok: false, code: 'verification_failed', mutated: true, error: 'Album row still present after removal.' },
+      httpStatus: 400,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const banner = await screen.findByText(/Apply (refused|failed)/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+    expect(banner.textContent).toMatch(/partly changed/);
+    expect(banner.textContent).toMatch(/Do not apply again/);
+    await screen.findAllByText('Recovery Required');
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['timeout', Object.assign(new Error('Request timed out.'), { isTimeout: true, httpStatus: 0 })],
+    ['503', Object.assign(new Error('Beets transport error; do not re-apply.'), { body: { error: 'x' }, httpStatus: 503 })],
+  ])('apply transport failure (%s) does not claim nothing changed', async (_label, err) => {
+    await renderWith(tx({}, 'Approved'));
+    mockApply.mockRejectedValue(err);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const banner = await screen.findByText(/Apply (refused|failed)/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+    expect(banner.textContent).toMatch(/outcome is unknown/);
+  });
+
+  it('apply refused with mutated:false says nothing changed', async () => {
+    await renderWith(tx({}, 'Approved'));
+    mockApply.mockRejectedValue(Object.assign(new Error('Plan is stale'), { body: { code: 'stale', mutated: false }, httpStatus: 400 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const banner = await screen.findByText(/Apply refused: Plan is stale\. Nothing was changed/);
+    expect(banner).toBeTruthy();
+  });
+
   it.each(['Running', 'Completed', 'Failed', 'Cancelled', 'Rolled Back', 'Partially Rolled Back', 'Recovery Required'])(
     'disables Cancel for %s',
     async (status) => {

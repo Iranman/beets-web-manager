@@ -76,6 +76,24 @@ function approveErrorMessage(ex: unknown) {
   return `Approval failed: ${detail}. Review the transaction status below before retrying.`;
 }
 
+// Only claim "nothing changed" when the response proves the request was
+// refused before any mutation. Apply can fail after mutating (mutated: true,
+// partial_mutation), or with an unknown outcome (5xx, timeout, network loss).
+function actionErrorMessage(verb: 'Cancel' | 'Apply', ex: unknown) {
+  const raw = ex instanceof Error ? ex.message : String(ex);
+  const reason = /[.!?]$/.test(raw) ? raw : `${raw}.`;
+  const status = (ex as { httpStatus?: number } | null)?.httpStatus;
+  const body = apiErrorBody(ex) as { code?: string; mutated?: boolean; partial_mutation?: boolean } | undefined;
+  if (verb === 'Apply' && (body?.mutated === true || body?.partial_mutation === true || body?.code === 'partial_mutation'
+    || status === undefined || status === 0 || status >= 500)) {
+    return `Apply failed: ${reason} The library may have been partly changed, or the outcome is unknown. Do not apply again. Check the transaction's current status below (for example Recovery Required) and follow its recovery guidance.`;
+  }
+  if (verb === 'Cancel' || status === 404 || status === 409 || body?.mutated === false) {
+    return `${verb} refused: ${reason} Nothing was changed by this request. Review the transaction's current status below before acting.`;
+  }
+  return `${verb} refused: ${reason} Review the transaction's current status below before acting.`;
+}
+
 function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
   open: boolean;
   busy: boolean;
@@ -323,8 +341,7 @@ export default function LibraryChanges() {
       setDetail(response.transaction);
       setMessage(success(response));
     } catch (ex) {
-      const reason = ex instanceof Error ? ex.message : String(ex);
-      failure = `${verb} refused: ${reason}. Nothing was changed by this request. Review the transaction's current status below before acting.`;
+      failure = actionErrorMessage(verb, ex);
       await loadDetail(detail.id);
     }
     await loadRows();
