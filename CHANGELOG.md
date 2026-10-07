@@ -173,6 +173,7 @@ The project uses Semantic Versioning.
 - `POST /api/setup/beets-config/include-paths`, `GET /api/setup/plugins/recommended` (preview with a diff) and `POST /api/setup/plugins/recommended/apply`. The writes require CSRF, take a timestamped backup and report `restart_required`.
 
 ### Changed
+- Python dependencies: `pylast` 7.1.0 to 7.2.0, `beautifulsoup4` 4.12.3 to 4.15.0, `deezer-python` 2.1.0 to 7.4.0. Web Manager only checks that these import (plugin health); it calls none of their APIs, and the stock Beets `deezer` plugin uses `requests`, not `deezer-python`. `deezer-python` 7 now pulls in `httpx`.
 - `test_real_stock_docker_container_acceptance` retries `docker pull` and `docker run` (3 attempts each, with backoff and a fresh loopback port per run) and puts the last `docker` stderr in the failure message. CI failed twice with `docker run` exit 125 from a registry flake. A failure that persists after the retries still fails the test.
 - Dependabot groups `react`, `react-dom`, `@types/react` and `@types/react-dom` into one PR, and ignores odd (non-LTS) `node` image majors.
 - Test and CI Beets pins move from `beets==2.13.1` to `beets==2.14.1` (`requirements-dev.txt`, `unit-tests.yml`, `security.yml`, `BEETS_TEST_FIXTURE_VERSION` in `docker-build.yml`), matching `lscr.io/linuxserver/beets:latest` (2.14.1-ls355). Supersedes Dependabot #195, which bumped only `requirements-dev.txt`.
@@ -184,6 +185,7 @@ The project uses Semantic Versioning.
 - `PLAYLIST_DIR`, `BEETS_SQLITE_TIMEOUT` and `WEB_MANAGER_PATH` are removed from the settings catalog; nothing used them. `BEETS_LIBRARY` is marked deprecated and read-only.
 - The built-in fallback settings template no longer lists unrelated variables (`DIGARR_INITIAL_PASSWORD`, `POSTGRES_PASSWORD`, `BEETS_UID`, `BEETS_GID`).
 - Docs: `ARCHITECTURE.md`, `DEVELOPMENT.md` and `CONFIGURATION.md` no longer describe the deleted `backend/beets_client.py` as present or ARCH-010 as open.
+- Frontend dependencies: `react`/`react-dom` 19.3.0 with `@types/react`/`@types/react-dom` 19.3.0, `@mui/material` 9.4.0, `jsdom` 30.1.1, `typescript-eslint` 8.71.1, `@types/node` 26.6.4. No code changes were needed.
 
 
 ## v0.1.49 - 2026-10-04
