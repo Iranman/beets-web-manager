@@ -61,8 +61,9 @@ Values on the Docker host, used only to build the volume list in `docker-compose
 | `MUSIC_PATH` | `./music` | Host library folder mounted at `/music` (read-only in Web Manager). The older name `MUSIC_LIBRARY_PATH` is accepted as a fallback. |
 | `DOWNLOADS_PATH` | `./downloads` | Host downloads/staging folder mounted at `/downloads`. The older name `DOWNLOAD_PATH` is accepted as a fallback. |
 | `WEB_MANAGER_DATA_PATH` | `./web-manager` | Host folder mounted at `/web-manager-data`. The older name `BEETS_WEB_MANAGER_DATA_PATH` is accepted as a fallback. |
-| `BEETS_WEB_MANAGER_VERSION` | `stable` | Web Manager image tag (`docker-compose.yml`, `docker-compose.full.yml`): `stable`, `latest`, an exact version such as `0.1.49` (pinned, safest for rollback), or `edge`. |
 | `BEETS_WEB_BIND_ADDRESS` | `127.0.0.1` | Published bind address (`docker-compose.full.yml`, `docker-compose.dev.yml`). |
+
+The shipped Compose files use the literal image `ghcr.io/iranman/beets-web-manager:latest`. To pin a release, replace `latest` with an exact version such as `0.1.49`.
 
 `docker-compose.yml` and `docker-compose.dev.yml` accept the older names through nested defaults, for example `${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}`.
 

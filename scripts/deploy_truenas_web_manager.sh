@@ -72,7 +72,20 @@ ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
 # run_dry_run()/run_deploy() only. --rollback never needs a version -- it
 # restores whatever image reference the backup recorded.
 VERSION="${VERSION:-}"
-EXPECTED_IMAGE="ghcr.io/iranman/beets-web-manager:${VERSION}"
+IMAGE_REPO="ghcr.io/iranman/beets-web-manager"
+EXPECTED_IMAGE="${IMAGE_REPO}:${VERSION}"
+# The shipped Compose files use the literal moving tag below. The script
+# never edits it: it pulls that tag, proves the pulled image's version label
+# is VERSION before anything changes, and records the previous image ID and
+# registry digest so --rollback can re-tag it locally.
+LATEST_IMAGE="${IMAGE_REPO}:latest"
+# Set by verify_compose_image(): "latest" (the literal :latest tag),
+# "pinned" (an exact :VERSION tag) or "variable" (${BEETS_WEB_MANAGER_VERSION}).
+IMAGE_LAYOUT=""
+# The image reference the Compose file resolves to, and the image ID that
+# was pulled and verified for it before the recreate.
+DEPLOY_REF=""
+DEPLOY_IMAGE_ID=""
 # Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>)
 # to pin the exact org.opencontainers.image.revision label. Strongly recommended
 # for pinned production rollouts. When unset, revision-label check is skipped
@@ -153,6 +166,10 @@ done
 # Logging / error trap
 # ---------------------------------------------------------------------------
 STAGE="init"
+# Stable, machine-readable code for a failure, printed in the failure block
+# next to the human message (set just before the matching die). Codes are
+# listed in docs/TRUENAS_ROLLOUT.md; never rename one -- add a new code.
+REASON_CODE=""
 BACKUP_DIR=""
 PREVIOUS_IMAGE_ID=""
 
@@ -174,6 +191,7 @@ report_failure() {
       echo "==================== ROLLOUT FAILED ===================="
     fi
     echo "Failed stage:          ${STAGE}"
+    [[ -z "$REASON_CODE" ]] || echo "Reason code:           ${REASON_CODE}"
     echo "Backup directory:      ${BACKUP_DIR:-<none created yet>}"
     echo "Previous image ID:     ${PREVIOUS_IMAGE_ID:-<unknown/not reached>}"
     echo "Current container status:"
@@ -184,6 +202,8 @@ report_failure() {
     echo "Rollback command:"
     if [[ "$DRY_RUN" -eq 1 || "$MODE" == "dry-run" ]]; then
       echo "  (Dry-run only: no production mutation occurred; no rollback is required.)"
+    elif [[ "$MODE" == "rollback" ]]; then
+      echo "  (the rollback itself failed -- fix the cause above, then re-run: $0 --rollback ${ROLLBACK_DIR})"
     elif [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" && -f "$BACKUP_DIR/docker-compose.yml.bak" ]]; then
       echo "  $0 --rollback ${BACKUP_DIR}"
     else
@@ -194,8 +214,35 @@ report_failure() {
   return "$ec"
 }
 
+# Latest layout: the image :latest named before this run pulled it. Until
+# the recreate, a refusal, failure or dry run points :latest back at it, so
+# a later plain 'docker compose up -d' cannot drift onto an image this run
+# pulled but did not deploy.
+PRE_PULL_LATEST_ID=""
+RETAG_LATEST_PENDING=0
+record_pre_pull_latest_tag() {
+  [[ "$IMAGE_LAYOUT" == "latest" ]] || return 0
+  PRE_PULL_LATEST_ID="$(docker image inspect "$LATEST_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
+  RETAG_LATEST_PENDING=1
+}
+restore_pre_pull_latest_tag() {
+  [[ "${RETAG_LATEST_PENDING:-0}" -eq 1 ]] || return 0
+  RETAG_LATEST_PENDING=0
+  local now
+  now="$(docker image inspect "$LATEST_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
+  [[ "$now" != "$PRE_PULL_LATEST_ID" ]] || return 0
+  if [[ -z "$PRE_PULL_LATEST_ID" ]]; then
+    warn "${LATEST_IMAGE} was not on this host before this run; it now names ${now}, which was NOT deployed"
+  elif docker tag "$PRE_PULL_LATEST_ID" "$LATEST_IMAGE" >/dev/null 2>&1; then
+    log "Re-tagged ${LATEST_IMAGE} back to ${PRE_PULL_LATEST_ID} (the image it named before this run); ${now} was not deployed."
+  else
+    warn "could not re-tag ${LATEST_IMAGE} back to ${PRE_PULL_LATEST_ID} -- a plain 'docker compose up -d' would now start ${now}"
+  fi
+}
+
 die() {
   printf '[%s] FATAL (%s): %s\n' "$(date -u +%H:%M:%S)" "$STAGE" "$*" >&2
+  restore_pre_pull_latest_tag
   restart_engine_if_stopped
   report_failure 1
   exit 1
@@ -204,6 +251,7 @@ die() {
 on_error() {
   local ec=$?
   [[ "$ec" -eq 0 ]] && return 0
+  restore_pre_pull_latest_tag
   restart_engine_if_stopped
   report_failure "$ec"
   exit "$ec"
@@ -514,14 +562,28 @@ discover_and_verify_mounts() {
 # ---------------------------------------------------------------------------
 # Phase A.2 -- Compose / image verification (read-only)
 # ---------------------------------------------------------------------------
+# True when an `image:` line (not a comment) interpolates the version variable.
+compose_image_line_uses_version_variable() {
+  grep -Eq '^[[:space:]]*image:[^#]*BEETS_WEB_MANAGER_VERSION' "$COMPOSE_FILE"
+}
+
 verify_compose_image() {
   STAGE="compose-image-verification"
   local resolved_image
+  # Only a Compose file that uses ${BEETS_WEB_MANAGER_VERSION} reads this.
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
   resolved_image="$(compose_service_image "$SERVICE")"
   [[ -n "$resolved_image" ]] || die "compose service '${SERVICE}' has no image defined in ${COMPOSE_FILE}"
-  [[ "$resolved_image" == "$EXPECTED_IMAGE" ]] || die "compose service '${SERVICE}' resolves to '${resolved_image}', expected '${EXPECTED_IMAGE}' (check .env BEETS_WEB_MANAGER_VERSION and this script's VERSION)"
-  log "Compose service '${SERVICE}' resolves to expected image: ${resolved_image}"
+  if [[ "$resolved_image" == "$LATEST_IMAGE" ]]; then
+    IMAGE_LAYOUT="latest"
+  elif [[ "$resolved_image" == "$EXPECTED_IMAGE" ]]; then
+    if compose_image_line_uses_version_variable; then IMAGE_LAYOUT="variable"; else IMAGE_LAYOUT="pinned"; fi
+  else
+    REASON_CODE="compose_image_mismatch"
+    die "compose service '${SERVICE}' resolves to '${resolved_image}', expected '${LATEST_IMAGE}' (the shipped layout) or '${EXPECTED_IMAGE}' (pinned to this script's VERSION). This script never edits the image line; change it yourself or deploy the version it pins."
+  fi
+  DEPLOY_REF="$resolved_image"
+  log "Compose service '${SERVICE}' resolves to ${resolved_image} (layout: ${IMAGE_LAYOUT})"
 }
 
 # ---------------------------------------------------------------------------
@@ -801,9 +863,16 @@ except Exception:
 # (e.g. a new "Cannot write to downloads/staging path" blocking reason).
 # The status and blocking_reasons are recorded before anything changes and
 # compared after the recreate; a NEW blocking reason fails the deploy.
+#
+# Reasons are compared by their stable machine-readable codes when both the
+# previous and the new version report them (`blocking_reason_codes`, a list
+# parallel to `blocking_reasons`), so rewording a message never changes the
+# gate. When either side has no codes (a version from before they existed)
+# the comparison falls back to the exact message text and says so.
 SETUP_STATUS_BEFORE=""
 
-# Prints {"http": "<code>", "status": "...", "blocking_reasons": [...]}.
+# Prints {"http": "<code>", "status": "...", "blocking_reasons": [...],
+# "blocking_reason_codes": [...] or null}.
 fetch_setup_status() {
   local tok_arg=() body http
   if [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
@@ -821,11 +890,20 @@ try:
     data = json.load(open(path, encoding="utf-8"))
 except Exception:
     data = {}
-reasons = data.get("blocking_reasons") if isinstance(data, dict) else None
+if not isinstance(data, dict):
+    data = {}
+reasons = data.get("blocking_reasons")
+reasons = [str(r) for r in reasons] if isinstance(reasons, list) else []
+codes = data.get("blocking_reason_codes")
+# Codes are usable only as a list of non-empty strings parallel to the messages.
+if not (isinstance(codes, list) and len(codes) == len(reasons)
+        and all(isinstance(c, str) and c for c in codes)):
+    codes = None
 print(json.dumps({
     "http": http,
-    "status": str(data.get("status", "")) if isinstance(data, dict) else "",
-    "blocking_reasons": [str(r) for r in reasons] if isinstance(reasons, list) else [],
+    "status": "".join(c if c.isprintable() else "\\u%04x" % ord(c) for c in str(data.get("status", ""))),
+    "blocking_reasons": reasons,
+    "blocking_reason_codes": codes,
 }))
 PYEOF
   rm -f "$body"
@@ -834,7 +912,7 @@ PYEOF
 record_setup_status_before() {
   STAGE="setup-status-before"
   SETUP_STATUS_BEFORE="$(fetch_setup_status)"
-  log "Setup status before: $(snapshot_field "$SETUP_STATUS_BEFORE" status) http=$(snapshot_field "$SETUP_STATUS_BEFORE" http) blocking_reasons=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["blocking_reasons"]))' "$SETUP_STATUS_BEFORE")"
+  log "Setup status before: $(snapshot_field "$SETUP_STATUS_BEFORE" status) http=$(snapshot_field "$SETUP_STATUS_BEFORE" http) blocking_reasons=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["blocking_reasons"]))' "$SETUP_STATUS_BEFORE") blocking_reason_codes=$(_py -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]).get("blocking_reason_codes")))' "$SETUP_STATUS_BEFORE")"
   if [[ "$(snapshot_field "$SETUP_STATUS_BEFORE" http)" != "200" ]]; then
     warn "could not read /api/setup/status before the deploy -- after the deploy ANY blocking reason will fail it"
   fi
@@ -844,26 +922,58 @@ record_setup_status_before() {
 # before (or any blocking reason, if "before" could not be read).
 assert_no_new_setup_blocking_reasons() {
   STAGE="setup-status-after"
-  local after new before_json="${SETUP_STATUS_BEFORE}"
+  local after new by before_json="${SETUP_STATUS_BEFORE}"
   [[ -n "$before_json" ]] || before_json='{}'
   after="$(fetch_setup_status)"
-  [[ "$(snapshot_field "$after" http)" == "200" ]] || die "/api/setup/status did not answer 200 after the deploy (http=$(snapshot_field "$after" http)). Roll back with: $0 --rollback ${BACKUP_DIR}"
+  if [[ "$(snapshot_field "$after" http)" != "200" ]]; then
+    REASON_CODE="setup_status_unavailable"
+    die "/api/setup/status did not answer 200 after the deploy (http=$(snapshot_field "$after" http)). Roll back with: $0 --rollback ${BACKUP_DIR}"
+  fi
+  # First output line: what the reasons were compared by ("code" or
+  # "message"). Then one "<message><TAB><code>" line per NEW reason.
   new="$(_py - "$before_json" "$after" <<'PYEOF'
 import json, sys
 before = json.loads(sys.argv[1] or "{}")
 after = json.loads(sys.argv[2])
-known = set(before.get("blocking_reasons") or []) if before.get("http") == "200" else set()
-for reason in after.get("blocking_reasons") or []:
-    if reason not in known:
-        print(reason)
+before_ok = before.get("http") == "200"
+messages = after.get("blocking_reasons") or []
+after_codes = after.get("blocking_reason_codes")
+before_codes = before.get("blocking_reason_codes")
+if after_codes is not None and (before_codes is not None or not before_ok):
+    by, keys, known = "code", after_codes, set(before_codes or []) if before_ok else set()
+else:
+    by, keys = "message", messages
+    known = set(before.get("blocking_reasons") or []) if before_ok else set()
+# The server's text goes into the operator's log: control characters
+# (newlines, tabs, ANSI escapes) are escaped so a line cannot be forged and
+# the message/code pairing on each line holds.
+def esc(text):
+    return "".join(c if c.isprintable() else "\\u%04x" % ord(c) for c in str(text))
+print(by)
+for i, key in enumerate(keys):
+    if key not in known:
+        code = after_codes[i] if after_codes is not None else ""
+        print(f"{esc(messages[i])}\t{esc(code)}")
 PYEOF
 )"
+  by="${new%%$'\n'*}"
+  new="${new#"$by"}"
+  new="${new#$'\n'}"
   log "Setup status after: $(snapshot_field "$after" status)"
+  if [[ "$by" == "code" ]]; then
+    log "Setup blocking reasons compared by reason code."
+  else
+    log "Setup blocking reasons compared by exact message text: the previous or the new version does not report blocking_reason_codes."
+  fi
   if [[ -n "$new" ]]; then
-    local r
+    local r msg code
     while IFS= read -r r; do
-      [[ -n "$r" ]] && warn "NEW setup blocking reason after deploy: ${r}"
+      [[ -n "$r" ]] || continue
+      msg="${r%$'\t'*}"
+      code="${r##*$'\t'}"
+      warn "NEW setup blocking reason after deploy: ${msg} (reason_code=${code:-none})"
     done <<< "$new"
+    REASON_CODE="setup_new_blocking_reason"
     die "the deploy introduced new setup blocking reason(s) (listed above). The new version is running but not ready; fix the cause, or roll back with: $0 --rollback ${BACKUP_DIR}"
   fi
   log "No new setup blocking reasons."
@@ -1021,11 +1131,14 @@ json.dump(data, sys.stdout, indent=1)
 # planted in either place must never redirect a root-owned copy to or from
 # an arbitrary host path, so every copy below goes through these helpers.
 
-# copy_regular_file <src> <dst>: copies a regular, non-link file. Refuses a
-# symlinked source or a symlinked destination folder; a destination that is
-# itself a symlink is removed (the link only, never its target) first.
+# copy_regular_file <src> <dst> [mode]: copies a regular, non-link file.
+# Refuses a symlinked source or a symlinked destination folder. The copy is
+# never written to <dst> by name (a link could be planted there between a
+# check and the copy): it goes to a private staging folder next to <dst>,
+# is re-checked and (optionally) chmod-ed there, then renamed over <dst>.
+# rename(2) replaces a link at <dst> instead of writing through it.
 copy_regular_file() {
-  local src="$1" dst="$2"
+  local src="$1" dst="$2" mode="${3:-}"
   if [[ -L "$src" || ! -f "$src" ]]; then
     warn "not copying ${src}: it is a symbolic link or not a regular file"
     return 1
@@ -1034,10 +1147,47 @@ copy_regular_file() {
     warn "not copying to ${dst}: its folder is a symbolic link"
     return 1
   fi
-  if [[ -L "$dst" ]]; then
-    rm -f -- "$dst"
+  place_by_rename "$src" "$dst" "$mode"
+}
+
+# pinned_cd <dir>: cd into a folder this run just created and fail unless
+# its real path is exactly <dir> (which callers build from a canonical root,
+# never resolved again) and this run owns it. That refuses a swapped name and
+# a link anywhere between the root and the folder. The target folders are
+# writable by the containers' user, who can rename entries in them; once the
+# cwd is the folder itself, later renames no longer matter, so callers work
+# on ./ and ../ paths after this.
+pinned_cd() {
+  cd -- "$1" 2>/dev/null && [[ "$(pwd -P)" == "$1" && -O . ]]
+}
+
+# place_by_rename <src> <dst> [mode]: copy <src> (file or folder) without
+# following links into a fresh 0700 staging folder in <dst>'s folder (same
+# filesystem), entered with pinned_cd so a swapped stage cannot redirect
+# the copy; refuse the copy if it is or holds anything but regular files
+# and folders, then `mv -T` it onto exactly <dst>. Returns 1 (with a
+# warning) instead of copying when any step fails.
+# <dst>'s folder must be given as a canonical path (callers build it from
+# canon_path roots); it is not resolved again, so a link planted anywhere on
+# the way makes pinned_cd refuse. The final rename is ./item -> ../<name>
+# from inside the pinned stage, so it lands next to the stage whatever
+# happened to the path since.
+place_by_rename() {
+  local src="$1" dst="$2" mode="${3:-}" stage name rc=1
+  src="$(canon_path "$(dirname -- "$src")")/$(basename -- "$src")"
+  name="$(basename -- "$dst")"
+  stage="$(mktemp -d "$(dirname -- "$dst")/.rollback-stage.XXXXXX")" || return 1
+  if ( pinned_cd "$stage" \
+      && cp -RPp -- "$src" ./item \
+      && [[ -z "$(find ./item ! -type f ! -type d -print -quit)" ]] \
+      && { [[ -z "$mode" ]] || chmod "$mode" ./item; } \
+      && mv -fT -- ./item "../${name}" ); then
+    rc=0
+  else
+    warn "${src} was not copied to ${dst}: the copy failed, its staging folder was replaced, or it is or contains a link or special file"
   fi
-  cp -p -- "$src" "$dst"
+  rm -rf -- "$stage"
+  return "$rc"
 }
 
 # tree_has_symlink <dir>: true if <dir> is a symlink or contains one.
@@ -1114,7 +1264,7 @@ restore_state_files() {
   for f in "${WEBMGR_STATE_FILES[@]}"; do
     if [[ -f "$ROLLBACK_DIR/web-manager-data/${f}" ]]; then
       if [[ -f "${data_src}/${f}" && ! -L "${data_src}/${f}" ]]; then
-        cp -p -- "${data_src}/${f}" "$pre/web-manager-data/${f}"
+        cp -Pp -- "${data_src}/${f}" "$pre/web-manager-data/${f}"
       fi
       if copy_regular_file "$ROLLBACK_DIR/web-manager-data/${f}" "${data_src}/${f}"; then
         log "Restored web-manager-data/${f}"
@@ -1132,20 +1282,26 @@ restore_state_files() {
   elif [[ -d "$ROLLBACK_DIR/web-manager-data/transactions" ]]; then
     mkdir -p "${data_src}/transactions"
     # Audit trail: add back missing records only; never overwrite or delete.
+    # The transaction store keeps its records flat (<id>.json), so only
+    # top-level *.json files are restored: a nested path would be resolved
+    # through folders a container could replace with a link meanwhile.
     local added=0 src rel
+    if [[ -n "$(find "$ROLLBACK_DIR/web-manager-data/transactions" -mindepth 2 -print -quit)" ]]; then
+      warn "web-manager-data/transactions/ in the backup has subfolders -- only its top-level *.json records are restored"
+    fi
     while IFS= read -r -d '' src; do
-      rel="${src#"$ROLLBACK_DIR/web-manager-data/transactions/"}"
+      rel="${src##*/}"
       if [[ ! -e "${data_src}/transactions/${rel}" && ! -L "${data_src}/transactions/${rel}" ]]; then
-        mkdir -p "$(dirname "${data_src}/transactions/${rel}")"
-        cp -p -- "$src" "${data_src}/transactions/${rel}"
-        added=$((added + 1))
+        if copy_regular_file "$src" "${data_src}/transactions/${rel}"; then
+          added=$((added + 1))
+        fi
       fi
-    done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -type f -print0)
+    done < <(find "$ROLLBACK_DIR/web-manager-data/transactions" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print0)
     log "transactions/: ${added} missing record(s) restored; records written after the deploy were kept."
   fi
   if [[ -f "$ROLLBACK_DIR/beets-config/config.yaml" ]]; then
     if [[ -f "${engine_src}/config.yaml" && ! -L "${engine_src}/config.yaml" ]]; then
-      cp -p -- "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
+      cp -Pp -- "${engine_src}/config.yaml" "$pre/beets-config/config.yaml"
     fi
     if copy_regular_file "$ROLLBACK_DIR/beets-config/config.yaml" "${engine_src}/config.yaml"; then
       log "Restored Beets config.yaml (takes effect at the engine's next start)."
@@ -1159,18 +1315,35 @@ restore_state_files() {
     else
       # Exact restore: files the new version added must not survive the
       # rollback (a stale module can shadow or break the old plugin). The
-      # current contents are kept under pre-rollback/ first, then cleared.
-      # Neither tree contains a link (checked above) and find -delete never
-      # follows links, so nothing outside beetsplug/ can be touched.
-      if [[ -d "${engine_src}/beetsplug" ]]; then
-        cp -RPp -- "${engine_src}/beetsplug" "$pre/beets-config/beetsplug"
-        [[ -n "$engine_src" && -d "$engine_src/beetsplug" && ! -L "$engine_src/beetsplug" ]] \
-          || die "Beets beetsplug/ is not a plain folder any more (became a symbolic link?) -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder"
-        find "${engine_src}/beetsplug" -mindepth 1 -delete
-      else
-        mkdir -p "${engine_src}/beetsplug"
-      fi
-      cp -RPp -- "$ROLLBACK_DIR/beets-config/beetsplug/." "${engine_src}/beetsplug/"
+      # backed-up tree is copied (links never followed) into a private
+      # staging folder inside the Beets config folder and checked there; the
+      # current beetsplug/ is kept under pre-rollback/, renamed out of the
+      # way and the staged copy renamed in. Nothing is copied into or
+      # deleted from beetsplug/ by path, so a link planted inside it during
+      # the rollback cannot redirect a write.
+      local stage bp="${engine_src}/beetsplug" src_bp pre_abs rc=0
+      src_bp="$(canon_path "$ROLLBACK_DIR/beets-config")/beetsplug"
+      pre_abs="$(canon_path "$pre")"
+      stage="$(mktemp -d "${engine_src}/.rollback-stage.XXXXXX")"
+      # Exit codes: 2 = the staging folder was replaced, 3 = the backup holds
+      # a link or special file, 4 = beetsplug/ is no longer a plain folder.
+      ( pinned_cd "$stage" || exit 2
+        cp -RPp -- "$src_bp" ./new || exit 1
+        [[ -z "$(find ./new ! -type f ! -type d -print -quit)" ]] || exit 3
+        if [[ -e "$bp" || -L "$bp" ]]; then
+          [[ -d "$bp" && ! -L "$bp" ]] || exit 4
+          cp -RPp -- "$bp" "$pre_abs/beets-config/beetsplug" || exit 1
+          mv -fT -- "$bp" ./old || exit 1
+        fi
+        mv -fT -- ./new "$bp" ) || rc=$?
+      rm -rf -- "$stage"
+      case "$rc" in
+        0) ;;
+        2) die "the staging folder ${stage} was replaced while the rollback ran -- plugin files were NOT restored; check what else writes to ${engine_src}" ;;
+        3) die "the backed-up beetsplug/ contains a link or special file -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking it" ;;
+        4) die "Beets beetsplug/ is not a plain folder any more (became a symbolic link?) -- plugin files were NOT restored; restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand after checking the folder" ;;
+        *) die "restoring Beets beetsplug/ failed -- check ${bp} and restore ${ROLLBACK_DIR}/beets-config/beetsplug/ by hand" ;;
+      esac
       log "Restored Beets beetsplug/ exactly as backed up (current contents kept in ${pre}/beets-config/beetsplug/)."
     fi
   fi
@@ -1193,6 +1366,11 @@ restore_env_version_line() {
   fi
   if [[ ! -f "$env_file" ]]; then
     [[ -z "$prev_line" ]] || warn "backup .env had BEETS_WEB_MANAGER_VERSION but ${env_file} no longer exists -- not recreating it"
+    return 0
+  fi
+  if [[ -z "$prev_line" ]] && ! compose_image_line_uses_version_variable; then
+    # The Compose file does not use the variable (literal :latest or a
+    # pinned tag): the .env is not part of the image choice; leave it alone.
     return 0
   fi
   if ! [[ "$prev_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?$ ]]; then
@@ -1254,10 +1432,25 @@ run_prune_backups() {
 # ---------------------------------------------------------------------------
 # Phase B -- Dry-run entry point
 # ---------------------------------------------------------------------------
+# Recreate and rollback run `up --pull never` (Docker Compose v2.22+). An
+# older Compose rejects the flag, which would fail the recreate after the
+# service was stopped, so this is checked before anything changes.
+require_compose_pull_flag() {
+  STAGE="compose-version-check"
+  # Capture first: piping into `grep -q` can SIGPIPE docker under pipefail.
+  local up_help
+  up_help="$(docker compose up --help 2>/dev/null)" || up_help=""
+  if [[ "$up_help" != *"--pull"* ]]; then
+    REASON_CODE="compose_too_old"
+    die "this Docker Compose ($(docker compose version --short 2>/dev/null || echo unknown version)) does not support 'up --pull'; Docker Compose v2.22 or later is required. Nothing was changed -- update Docker Compose, then re-run."
+  fi
+}
+
 run_dry_run() {
   log "=== DRY RUN: no containers will be stopped/recreated, no files moved, no tokens copied, no Compose changes ==="
   validate_version
   resolve_compose_file
+  require_compose_pull_flag
   discover_and_verify_mounts
   verify_compose_image
   verify_authoritative_database
@@ -1266,8 +1459,11 @@ run_dry_run() {
   plan_backup_dir
   log "Pulling image for label verification only (no recreate)..."
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
+  record_pre_pull_latest_tag
   _compose pull "$SERVICE" >&2 || warn "image pull failed in dry-run (network/registry issue) -- label verification skipped"
   verify_image_labels_if_present || true
+  restore_pre_pull_latest_tag
+  [[ "$IMAGE_LAYOUT" != "latest" ]] || log "Compose uses ${LATEST_IMAGE}: the real run deploys it only if its version label is ${VERSION} (checked above)."
   if docker inspect --format '{{.State.Status}}' "$WEBMGR_CID" >/dev/null 2>&1; then
     verify_endpoints "dry-run" || warn "endpoint verification reported issues (see above) -- not fatal in dry-run"
     record_setup_status_before
@@ -1278,19 +1474,42 @@ run_dry_run() {
   log "=== DRY RUN COMPLETE: all checks passed. Nothing in the stack was changed (the image may have been pulled into the local image store; probe bodies went to temp files). ==="
 }
 
+# Verifies the labels of the image DEPLOY_REF points at locally and records
+# its ID in DEPLOY_IMAGE_ID (the recreate must land on exactly that image).
 verify_image_labels_if_present() {
   local img_id revision version
-  img_id="$(docker image inspect "$EXPECTED_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
-  [[ -n "$img_id" ]] || { warn "image ${EXPECTED_IMAGE} not present locally"; return 1; }
-  revision="$(docker image inspect "$EXPECTED_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
-  version="$(docker image inspect "$EXPECTED_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
-  [[ "$version" == "$VERSION" ]] || die "image org.opencontainers.image.version label is '${version}', expected '${VERSION}'"
+  img_id="$(docker image inspect "$DEPLOY_REF" --format '{{.Id}}' 2>/dev/null || true)"
+  [[ -n "$img_id" ]] || { warn "image ${DEPLOY_REF} not present locally"; return 1; }
+  revision="$(docker image inspect "$DEPLOY_REF" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  version="$(docker image inspect "$DEPLOY_REF" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  if [[ "$version" != "$VERSION" ]]; then
+    if [[ "$IMAGE_LAYOUT" == "latest" ]]; then
+      REASON_CODE="latest_image_not_requested_version"
+      die "${LATEST_IMAGE} carries version '${version}', not '${VERSION}' -- ${VERSION} is not published as latest yet, or a newer release is. Nothing in the stack was changed. Retry once :latest is ${VERSION}, or deploy the version :latest carries."
+    fi
+    REASON_CODE="image_version_label_mismatch"
+    die "image org.opencontainers.image.version label is '${version}', expected '${VERSION}'"
+  fi
   if [[ -n "$EXPECTED_REVISION" ]]; then
-    [[ "$revision" == "$EXPECTED_REVISION" ]] || die "image org.opencontainers.image.revision label is '${revision}', expected '${EXPECTED_REVISION}'"
+    if [[ "$revision" != "$EXPECTED_REVISION" ]]; then
+      REASON_CODE="image_revision_label_mismatch"
+      die "image org.opencontainers.image.revision label is '${revision}', expected '${EXPECTED_REVISION}'"
+    fi
   else
     warn "EXPECTED_REVISION not set -- skipping the exact revision-label pin (relying on the version label '${version}' alone). Set EXPECTED_REVISION=<release commit sha> once it's known for a fully pinned deployment."
   fi
-  log "Image labels verified: version=${version} revision=${revision:-<none>}"
+  DEPLOY_IMAGE_ID="$img_id"
+  log "Image labels verified: ${DEPLOY_REF} version=${version} revision=${revision:-<none>} id=${img_id}"
+}
+
+# Pull and verify BEFORE anything in the stack changes: a :latest tag that
+# does not carry VERSION must stop the rollout with production untouched.
+pull_and_verify_image() {
+  STAGE="image-pull-verification"
+  record_pre_pull_latest_tag
+  log "Pulling ${DEPLOY_REF}..."
+  _compose pull "$SERVICE"
+  verify_image_labels_if_present || die "image ${DEPLOY_REF} is not present after the pull"
 }
 
 # ---------------------------------------------------------------------------
@@ -1319,9 +1538,20 @@ create_backup_dir() {
   PREVIOUS_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID" 2>/dev/null || echo "")"
   local previous_image_ref
   previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$WEBMGR_CID" 2>/dev/null || echo "")"
+  # The registry digest lets --rollback pull the previous image back by
+  # digest if it was pruned after a moving tag (:latest) left it untagged.
+  local previous_repo_digest=""
+  previous_repo_digest="$(docker image inspect "$PREVIOUS_IMAGE_ID" --format '{{json .RepoDigests}}' 2>/dev/null | _py -c '
+import json, sys
+try:
+    digests = json.load(sys.stdin) or []
+except Exception:
+    digests = []
+print(next((d for d in digests if d.startswith(sys.argv[1] + "@sha256:")), ""))' "$IMAGE_REPO" || true)"
   {
     echo "previous_image_id=${PREVIOUS_IMAGE_ID}"
     echo "previous_image_ref=${previous_image_ref}"
+    echo "previous_image_repo_digest=${previous_repo_digest}"
   } > "$BACKUP_DIR/previous-image.txt"
   docker inspect "$PREVIOUS_IMAGE_ID" --format '{{json .Config.Labels}}' > "$BACKUP_DIR/previous-image-labels.json" 2>/dev/null || true
 
@@ -1445,9 +1675,14 @@ migrate_token_if_needed() {
 deploy_image() {
   STAGE="image-deployment"
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
-  log "Pulling ${EXPECTED_IMAGE}..."
-  _compose pull "$SERVICE"
-  verify_image_labels_if_present
+  # Pulled and verified in pre-flight. A moving tag must still point at that
+  # exact image now; it is not pulled again.
+  local tag_id
+  tag_id="$(docker image inspect "$DEPLOY_REF" --format '{{.Id}}' 2>/dev/null || true)"
+  if [[ "$tag_id" != "$DEPLOY_IMAGE_ID" ]]; then
+    REASON_CODE="image_tag_moved"
+    die "${DEPLOY_REF} now points at ${tag_id:-nothing}, not the verified image ${DEPLOY_IMAGE_ID} -- refusing to recreate on an unverified image"
+  fi
 
   local other_services other_before other_after
   other_services="$(compose_config_json | _py -c "
@@ -1457,8 +1692,11 @@ print('\n'.join(s for s in data.get('services', {}) if s != '$SERVICE'))
 ")"
   other_before="$(for s in $other_services; do printf '%s=%s\n' "$s" "$(_compose ps -q "$s" 2>/dev/null || true)"; done)"
 
+  RETAG_LATEST_PENDING=0  # from here on, --rollback is the way back
   log "Recreating ${SERVICE} only (--no-deps --force-recreate)..."
-  _compose up -d --no-deps --force-recreate "$SERVICE"
+  # --pull never: `up` must not fetch a tag that moved after verification
+  # (a `pull_policy: always` in the Compose file, or a concurrent pull).
+  _compose up -d --no-deps --pull never --force-recreate "$SERVICE"
 
   other_after="$(for s in $other_services; do printf '%s=%s\n' "$s" "$(_compose ps -q "$s" 2>/dev/null || true)"; done)"
   [[ "$other_before" == "$other_after" ]] || die "a service other than '${SERVICE}' changed container ID during recreate -- this must never happen: before=[${other_before}] after=[${other_after}]"
@@ -1467,16 +1705,17 @@ print('\n'.join(s for s in data.get('services', {}) if s != '$SERVICE'))
   local configured_image running_image_id
   configured_image="$(docker inspect --format '{{.Config.Image}}' "$WEBMGR_CID")"
   running_image_id="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID")"
-  local expected_image_id
-  expected_image_id="$(docker image inspect "$EXPECTED_IMAGE" --format '{{.Id}}')"
-  [[ "$configured_image" == "$EXPECTED_IMAGE" ]] || die "recreated container's configured image is '${configured_image}', expected '${EXPECTED_IMAGE}'"
-  [[ "$running_image_id" == "$expected_image_id" ]] || die "recreated container's running image ID does not match the pulled ${EXPECTED_IMAGE} image ID"
+  if [[ "$configured_image" != "$DEPLOY_REF" || "$running_image_id" != "$DEPLOY_IMAGE_ID" ]]; then
+    REASON_CODE="recreated_image_unverified"
+    _compose stop "$SERVICE" >&2 || warn "could not stop ${SERVICE} -- stop it by hand"
+    die "recreated ${SERVICE} runs '${configured_image}' (${running_image_id}), not the pulled and verified ${DEPLOY_REF} (${DEPLOY_IMAGE_ID}) -- ${SERVICE} was stopped so the unverified image does not keep running. Roll back with: $0 --rollback ${BACKUP_DIR}"
+  fi
 
   log "Waiting up to ${HEALTH_TIMEOUT_SECONDS}s for ${SERVICE} to become healthy..."
   if ! wait_for_health "$WEBMGR_CID" "$HEALTH_TIMEOUT_SECONDS"; then
     die "container did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s"
   fi
-  log "${SERVICE} is healthy on image ${EXPECTED_IMAGE} (id=${running_image_id})."
+  log "${SERVICE} is healthy on image ${DEPLOY_REF} (version ${VERSION}, id=${running_image_id})."
 }
 
 assert_authoritative_db_unchanged() {
@@ -1545,6 +1784,10 @@ verify_post_deploy() {
 # version is actually healthy -- never persist a version that didn't verify.
 persist_deployed_version() {
   STAGE="persist-version"
+  if [[ "$IMAGE_LAYOUT" == "latest" ]]; then
+    log "Compose uses ${LATEST_IMAGE}: nothing is written to .env or the Compose file. A later 'docker compose pull' moves to whatever :latest is then."
+    return 0
+  fi
   local env_file
   env_file="$(dirname "$COMPOSE_FILE")/.env"
   [[ -f "$env_file" ]] || { warn "no .env file at ${env_file} -- BEETS_WEB_MANAGER_VERSION not persisted (in-process export for this run only)"; return 0; }
@@ -1685,6 +1928,7 @@ run_deploy() {
   log "=== Beets Web Manager ${VERSION} guarded rollout starting ==="
   validate_version
   resolve_compose_file
+  require_compose_pull_flag
   discover_and_verify_mounts
   verify_compose_image
   verify_authoritative_database
@@ -1692,6 +1936,7 @@ run_deploy() {
   inspect_auth_token
   record_setup_status_before
   plan_backup_dir
+  pull_and_verify_image
   log "=== All pre-flight safety checks passed. Beginning mutating actions. ==="
 
   create_backup_dir
@@ -1715,6 +1960,7 @@ run_rollback() {
   [[ -f "$ROLLBACK_DIR/docker-compose.yml.bak" ]] || die "rollback directory is missing docker-compose.yml.bak -- not a valid backup from this script"
 
   resolve_compose_file
+  require_compose_pull_flag
   discover_and_verify_mounts
 
   log "Stopping ${SERVICE} for rollback..."
@@ -1750,13 +1996,13 @@ run_rollback() {
         if [[ -n "$p_sha" && "$current_sha" != "$p_sha" ]]; then
           warn "current token differs from recorded pre-rollout value (${p_sha}) -- NOT restoring automatically; restore ${ROLLBACK_DIR}/auth_token.bak manually if needed"
         else
-          cp "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH"
-          chmod 600 "$TOKEN_PATH"
+          copy_regular_file "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH" 600 \
+            || die "the pre-rollout token was NOT restored to ${TOKEN_PATH}; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking the path"
           log "Restored pre-rollout persistent token."
         fi
       elif [[ -f "$ROLLBACK_DIR/auth_token.bak" && ! -f "$TOKEN_PATH" ]]; then
-        cp "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH"
-        chmod 600 "$TOKEN_PATH"
+        copy_regular_file "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH" 600 \
+          || die "the pre-rollout token was NOT restored to ${TOKEN_PATH}; restore ${ROLLBACK_DIR}/auth_token.bak by hand after checking the path"
         log "Restored pre-rollout persistent token (file was missing)."
       fi
     elif [[ "$p_existed" == "0" && "$migration_performed" == "1" ]]; then
@@ -1826,6 +2072,35 @@ print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previo
   # Resolve from the files on disk only, never from this shell's environment.
   unset BEETS_WEB_MANAGER_VERSION
 
+  # A moving tag (:latest) now names the newer image. Point the local tag
+  # back at the recorded previous image (pulled back by its registry digest
+  # if it was pruned), so the recreate below and any later plain
+  # 'docker compose up -d' use it. The Compose file and .env are not edited.
+  local tag_id previous_repo_digest=""
+  previous_repo_digest="$(grep '^previous_image_repo_digest=' "$ROLLBACK_DIR/previous-image.txt" | cut -d= -f2- || true)"
+  tag_id="$(docker image inspect "$previous_image_ref" --format '{{.Id}}' 2>/dev/null || true)"
+  if [[ "$tag_id" != "$previous_image_id" ]]; then
+    if ! docker image inspect "$previous_image_id" --format '{{.Id}}' >/dev/null 2>&1; then
+      [[ -n "$previous_repo_digest" ]] || die "the previous image ${previous_image_id} is no longer on this host and the backup has no registry digest for it -- cannot roll back automatically"
+      log "Previous image is no longer local; pulling it back by digest ${previous_repo_digest}..."
+      docker pull "$previous_repo_digest" >&2 || die "pulling the previous image by digest (${previous_repo_digest}) failed"
+      [[ "$(docker image inspect "$previous_repo_digest" --format '{{.Id}}' 2>/dev/null || true)" == "$previous_image_id" ]] \
+        || die "the image pulled by digest ${previous_repo_digest} is not the recorded previous image ${previous_image_id}"
+    fi
+    docker tag "$previous_image_id" "$previous_image_ref"
+    log "Re-tagged ${previous_image_ref} to the previous image ${previous_image_id} (it pointed at ${tag_id:-nothing}). A later 'docker compose pull' moves it forward again."
+  fi
+  # The old container may have been created from another ref (pinned or
+  # variable layout) than the Compose file now names (the shipped literal
+  # :latest). That :latest still names the newer image; point it back too.
+  local compose_ref
+  compose_ref="$(compose_service_image "$SERVICE")"
+  if [[ "$compose_ref" == "$LATEST_IMAGE" && "$compose_ref" != "$previous_image_ref" \
+        && "$(docker image inspect "$compose_ref" --format '{{.Id}}' 2>/dev/null || true)" != "$previous_image_id" ]]; then
+    docker tag "$previous_image_id" "$compose_ref"
+    log "Re-tagged ${compose_ref} (what the Compose file names) to the previous image ${previous_image_id} as well."
+  fi
+
   local override
   # Next to the Compose file (removed again below): the docker CLI must be
   # able to open it by that path, which is not true for every temp dir
@@ -1833,7 +2108,7 @@ print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previo
   override="$(mktemp "$(dirname "$COMPOSE_FILE")/.rollback-override.XXXXXX")"
   printf 'services:\n  %s:\n    image: "%s"\n' "$SERVICE" "$previous_image_ref" > "$override"
   log "Recreating ${SERVICE} on previous image reference: ${previous_image_ref}"
-  if ! docker compose -f "$COMPOSE_FILE" -f "$override" up -d --no-deps --force-recreate "$SERVICE" >&2; then
+  if ! docker compose -f "$COMPOSE_FILE" -f "$override" up -d --no-deps --pull never --force-recreate "$SERVICE" >&2; then
     rm -f "$override"
     die "recreating ${SERVICE} on ${previous_image_ref} failed (output above)"
   fi
@@ -1841,18 +2116,24 @@ print(labels.get("org.opencontainers.image.version", ""))' "$ROLLBACK_DIR/previo
 
   STAGE="rollback-verification"
   WEBMGR_CID="$(resolve_container_id "$SERVICE")"
-  wait_for_health "$WEBMGR_CID" "$HEALTH_TIMEOUT_SECONDS" || die "container did not become healthy after rollback"
-
   local running_id configured resolved
   running_id="$(docker inspect --format '{{.Image}}' "$WEBMGR_CID")"
   configured="$(docker inspect --format '{{.Config.Image}}' "$WEBMGR_CID")"
-  [[ "$running_id" == "$previous_image_id" ]] || die "after rollback ${SERVICE} runs image ${running_id}, expected the previous image ${previous_image_id} (${previous_image_ref})"
-  [[ "$configured" == "$previous_image_ref" ]] || die "after rollback ${SERVICE} is configured with '${configured}', expected '${previous_image_ref}'"
+  if [[ "$running_id" != "$previous_image_id" || "$configured" != "$previous_image_ref" ]]; then
+    REASON_CODE="recreated_image_unverified"
+    docker compose -f "$COMPOSE_FILE" stop "$SERVICE" >&2 || warn "could not stop ${SERVICE} -- stop it by hand"
+    die "after rollback ${SERVICE} runs '${configured}' (${running_id}), expected the previous image ${previous_image_ref} (${previous_image_id}) -- ${SERVICE} was stopped so that image does not keep running"
+  fi
+  wait_for_health "$WEBMGR_CID" "$HEALTH_TIMEOUT_SECONDS" || die "container did not become healthy after rollback"
   log "Running image verified: ${configured} (${running_id})"
 
+  # Durable means: what a plain 'docker compose up -d' resolves to names the
+  # previous image (by ID; the ref itself may differ, e.g. :0.1.2 vs :latest).
+  local resolved_id
   resolved="$(compose_service_image "$SERVICE")"
-  [[ "$resolved" == "$previous_image_ref" ]] || die "the restored Compose file and .env resolve ${SERVICE} to '${resolved}', not '${previous_image_ref}' -- the next plain 'docker compose up -d' would leave the rolled-back version. Fix BEETS_WEB_MANAGER_VERSION / the image line in $(dirname "$COMPOSE_FILE")"
-  log "A plain 'docker compose up -d' resolves ${SERVICE} to ${resolved} (rollback is durable)."
+  resolved_id="$(docker image inspect "$resolved" --format '{{.Id}}' 2>/dev/null || true)"
+  [[ "$resolved_id" == "$previous_image_id" ]] || die "the restored Compose file and .env resolve ${SERVICE} to '${resolved}' (${resolved_id:-not on this host}), not the previous image ${previous_image_id} (${previous_image_ref}) -- the next plain 'docker compose up -d' would leave the rolled-back version. Fix BEETS_WEB_MANAGER_VERSION / the image line in $(dirname "$COMPOSE_FILE")"
+  log "A plain 'docker compose up -d' resolves ${SERVICE} to ${resolved} = ${resolved_id} (rollback is durable)."
 
   if [[ -n "$previous_version" ]]; then
     local live_version="" i

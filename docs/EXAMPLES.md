@@ -29,7 +29,7 @@ services:
         condition: service_healthy
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:latest
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -62,7 +62,7 @@ When connecting Beets Web Manager to an existing, separately-managed stock Beets
 ```yaml
 services:
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:latest
     container_name: beets-web-manager
     restart: unless-stopped
     ports:
@@ -132,25 +132,12 @@ docker compose -f docker-compose.dev.yml up -d --build
 
 ---
 
-## 4. Image Release Channels
+## 4. Image Tag
 
-Configure `BEETS_WEB_MANAGER_VERSION` in `.env` to select the desired release channel:
+The shipped Compose files use `image: ghcr.io/iranman/beets-web-manager:latest`, the newest release. Update with:
 
-```env
-# Recommended production channel
-BEETS_WEB_MANAGER_VERSION=stable
-
-# Conventional newest stable release
-BEETS_WEB_MANAGER_VERSION=latest
-
-# Exact version for predictable deployment and rollback
-BEETS_WEB_MANAGER_VERSION=0.1.18
-
-# Development builds from main; not recommended for production
-BEETS_WEB_MANAGER_VERSION=edge
+```bash
+docker compose pull beets-web-manager && docker compose up -d beets-web-manager
 ```
 
-`stable` is the recommended default channel for production deployments. Specifying an exact version (e.g., `0.1.18`) is the safest choice for environments requiring fully pinned, predictable upgrades and rollbacks.
-
-> [!NOTE]
-> Prerelease tags (e.g., `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never update the production `stable` or `latest` channels.
+To pin a release, or roll back to one, replace `latest` in the `image:` line with an exact version such as `0.1.49` (`ghcr.io/iranman/beets-web-manager:0.1.49`).

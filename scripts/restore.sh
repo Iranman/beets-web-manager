@@ -16,6 +16,16 @@
 #
 # Nothing is deleted: every file the restore replaces is first moved to
 # <folder>/.pre-restore-<timestamp>/ inside the same folder.
+#
+# The archive is copied into a private temporary folder (mode 0700, owned by
+# the user running the restore) and is listed, verified and extracted only
+# there. Each restored file or folder is copied, without following links,
+# into a private staging folder inside its target folder and then renamed
+# into place, so a link planted in the target folder is never written
+# through. If anything appears at a restored path while the restore runs,
+# the restore stops (see "Backup and restore safety" in docs/TRUENAS_ROLLOUT.md).
+# A restored file keeps the owner of the file it replaces (else the owner of
+# its folder), so the containers' PUID/PGID can still read it. Needs GNU mv.
 set -euo pipefail
 
 BEETS_CONFIG_DIR="${BEETS_CONFIG_DIR:-./beets}"
@@ -23,7 +33,7 @@ WEB_MANAGER_DATA_DIR="${WEB_MANAGER_DATA_DIR:-./web-manager}"
 ASSUME_YES=0
 BACKUP_FILE=""
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -40,26 +50,39 @@ done
 [ -n "${BACKUP_FILE}" ] || { usage >&2; exit 1; }
 [ -f "${BACKUP_FILE}" ] || fail "backup file not found: ${BACKUP_FILE}"
 
+# Everything below reads only a private copy of the archive, so the archive
+# that is checked is the archive that is extracted, even if the original is
+# replaced while the restore runs.
+umask 077
+TMP_DIR="$(mktemp -d)"
+STAGES=()
+cleanup() { rm -rf "${TMP_DIR}" ${STAGES[@]+"${STAGES[@]}"}; }
+trap cleanup EXIT
+if [ ! -d "${TMP_DIR}" ] || [ -L "${TMP_DIR}" ] || [ ! -O "${TMP_DIR}" ]; then
+  fail "could not create a private temporary folder"
+fi
+chmod 700 "${TMP_DIR}"
+ARCHIVE="${TMP_DIR}/backup.tar.gz"
+cp -- "${BACKUP_FILE}" "${ARCHIVE}"
+mkdir "${TMP_DIR}/x"
+
 # Refuse archives with absolute paths or '..' components before extracting.
-if tar -tzf "${BACKUP_FILE}" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+if tar -tzf "${ARCHIVE}" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
   fail "the archive contains absolute or '..' paths -- refusing to extract it"
 fi
 # backup.sh writes only regular files and folders. A symbolic link, hard link
 # or device entry could point a later copy at a file outside the restore
 # target, so such archives are refused before anything is extracted.
-if tar -tvzf "${BACKUP_FILE}" | cut -c1 | grep -qv '^[-d]$'; then
+if tar -tvzf "${ARCHIVE}" | cut -c1 | grep -qv '^[-d]$'; then
   fail "the archive contains links or special files -- refusing to extract it"
 fi
 
-umask 077
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
-tar --no-same-owner --no-same-permissions -xzf "${BACKUP_FILE}" -C "${TMP_DIR}"
+tar --no-same-owner --no-same-permissions -xzf "${ARCHIVE}" -C "${TMP_DIR}/x"
 # Belt and braces: whatever tar produced, only regular files and folders may be copied.
-if [ -n "$(find "${TMP_DIR}" ! -type f ! -type d -print -quit)" ]; then
+if [ -n "$(find "${TMP_DIR}/x" ! -type f ! -type d -print -quit)" ]; then
   fail "the extracted archive contains links or special files -- refusing to restore it"
 fi
-EXTRACTED="$(find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+EXTRACTED="$(find "${TMP_DIR}/x" -mindepth 1 -maxdepth 1 -type d | head -n1)"
 [ -n "${EXTRACTED}" ] || fail "could not find backup contents inside ${BACKUP_FILE}"
 
 # Layout written by backup.sh since it began including Web Manager state;
@@ -123,41 +146,101 @@ fi
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 
-# move_aside <dir> <relative path>: keep the current file/dir before replacing it.
+# Every rename below is `mv -T` (GNU coreutils): it renames onto exactly the
+# path given and replaces a link planted there instead of moving into the
+# folder it points at. Without it the restore cannot be made safe, so it stops.
+touch "${TMP_DIR}/mvt-a"
+mv -T -- "${TMP_DIR}/mvt-a" "${TMP_DIR}/mvt-b" 2>/dev/null \
+  || fail "this system's mv does not support -T (GNU coreutils) -- the restore needs it to rename files safely; run it on a Linux host"
+rm -f -- "${TMP_DIR}/mvt-b"
+
+# pinned_cd <dir>: cd into a folder this run just created and refuse it if
+# its name was swapped (for a link or another folder) in the meantime. The
+# target folders may be writable by the containers' user, who can rename
+# entries in them; once the cwd is the folder itself, later renames of its
+# name no longer matter, so everything after this works on ./ paths.
+pinned_cd() {
+  local want="$1" parent
+  parent="$(cd -- "$(dirname -- "${want}")" && pwd -P)" || fail "${want} vanished while the restore was running -- stopped"
+  cd -- "${want}" 2>/dev/null && [ "$(pwd -P)" = "${parent}/$(basename -- "${want}")" ] && [ -O . ] \
+    || fail "${want} was replaced while the restore was running -- stopped"
+}
+
+# move_aside <dir> <name>: keep the current <dir>/<name> under
+# <dir>/.pre-restore-<stamp>/ before it is replaced, and print its owner
+# (uid:gid) so the restored copy can be given the same one. The keep folder
+# is created by this run (mkdir refuses an existing one) with umask 077.
+# Call it as $(move_aside ...): it changes directory.
 move_aside() {
-  local dir="$1" rel="$2" keep="$1/.pre-restore-${STAMP}"
-  if [ -e "${dir}/${rel}" ]; then
-    mkdir -p "$(dirname "${keep}/${rel}")"
-    mv "${dir}/${rel}" "${keep}/${rel}"
+  local dir rel="$2" keep
+  dir="$(cd -- "$1" && pwd -P)" || fail "cannot open $1"
+  keep="${dir}/.pre-restore-${STAMP}"
+  if [ -e "${dir}/${rel}" ] || [ -L "${dir}/${rel}" ]; then
+    if [ ! -d "${keep}" ] || [ -L "${keep}" ] || [ ! -O "${keep}" ]; then
+      mkdir "${keep}" || fail "${keep} already exists and was not created by this restore -- stopped"
+    fi
+    pinned_cd "${keep}"
+    mv -T -- "${dir}/${rel}" "./${rel}" || fail "could not move ${dir}/${rel} aside -- stopped"
+    if [ ! -L "./${rel}" ]; then stat -c '%u:%g' -- "./${rel}"; fi
   fi
+}
+
+# place <src> <dir> <name> [mode] [owner]: restore one file or folder as
+# <dir>/<name>. It is copied without following links into a private 0700
+# staging folder inside <dir> (same filesystem, so the last step is a
+# rename), entered by pinned_cd so a swapped stage cannot redirect the copy,
+# re-checked, given [owner] (default: the owner of <dir>; only when running
+# as root) and [mode], then renamed onto exactly <dir>/<name>. Anything that
+# appeared at <dir>/<name> after move_aside stops the restore.
+place() {
+  local src="$1" dir name="$3" mode="${4:-}" owner="${5:-}" stage
+  dir="$(cd -- "$2" && pwd -P)" || fail "cannot open $2"
+  [ -n "${owner}" ] || owner="$(stat -c '%u:%g' -- "${dir}")"
+  stage="$(mktemp -d "${dir}/.restore-stage.XXXXXX")"
+  STAGES+=("${stage}")
+  (
+    pinned_cd "${stage}"
+    cp -RPp -- "${src}" ./item || fail "could not copy ${src} -- ${dir}/${name} was not restored"
+    if [ -n "$(find ./item ! -type f ! -type d -print -quit)" ]; then
+      fail "${src} is or contains a link or special file -- ${dir}/${name} was not restored"
+    fi
+    if [ "$(id -u)" = 0 ]; then chown -R -- "${owner}" ./item || fail "could not set the owner of ${dir}/${name}"; fi
+    if [ -n "${mode}" ]; then chmod "${mode}" ./item || fail "could not set the mode of ${dir}/${name}"; fi
+    if [ -e "${dir}/${name}" ] || [ -L "${dir}/${name}" ]; then
+      fail "${dir}/${name} appeared while the restore was running -- it was left as is and the restore stopped; check what else writes to ${dir}.
+  Files restored so far stay in place; what they replaced is in ${dir}/.pre-restore-${STAMP}/."
+    fi
+    mv -T -- ./item "${dir}/${name}" || fail "could not rename the restored copy onto ${dir}/${name}"
+  ) || exit 1
+  rmdir -- "${stage}" 2>/dev/null || true
 }
 
 mkdir -p "${BEETS_CONFIG_DIR}"
 if [ -f "${SRC_BEETS}/musiclibrary.blb" ]; then
   # The -wal/-shm of the current database belong to it, not to the restored copy.
-  for f in musiclibrary.blb musiclibrary.blb-wal musiclibrary.blb-shm; do move_aside "${BEETS_CONFIG_DIR}" "$f"; done
-  cp -p "${SRC_BEETS}/musiclibrary.blb" "${BEETS_CONFIG_DIR}/musiclibrary.blb"
+  owner="$(move_aside "${BEETS_CONFIG_DIR}" musiclibrary.blb)"
+  for f in musiclibrary.blb-wal musiclibrary.blb-shm; do ( move_aside "${BEETS_CONFIG_DIR}" "$f" >/dev/null ) || exit 1; done
+  place "${SRC_BEETS}/musiclibrary.blb" "${BEETS_CONFIG_DIR}" musiclibrary.blb "" "${owner}"
   # Older backups also carried -wal/-shm copies.
   for f in musiclibrary.blb-wal musiclibrary.blb-shm; do
-    if [ -f "${SRC_BEETS}/$f" ]; then cp -p "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}/$f"; fi
+    if [ -f "${SRC_BEETS}/$f" ]; then place "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}" "$f" "" "${owner}"; fi
   done
 fi
 for f in config.yaml .webmanager_api_key; do
   if [ -f "${SRC_BEETS}/$f" ]; then
-    move_aside "${BEETS_CONFIG_DIR}" "$f"
-    cp -p "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}/$f"
-    chmod 600 "${BEETS_CONFIG_DIR}/$f"  # config.yaml and the plugin key hold credentials
+    owner="$(move_aside "${BEETS_CONFIG_DIR}" "$f")"
+    place "${SRC_BEETS}/$f" "${BEETS_CONFIG_DIR}" "$f" 600 "${owner}"  # config.yaml and the plugin key hold credentials
   fi
 done
 if [ -d "${SRC_BEETS}/beetsplug" ]; then
-  move_aside "${BEETS_CONFIG_DIR}" beetsplug
-  cp -RPp "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}/beetsplug"
+  owner="$(move_aside "${BEETS_CONFIG_DIR}" beetsplug)"
+  place "${SRC_BEETS}/beetsplug" "${BEETS_CONFIG_DIR}" beetsplug "" "${owner}"
 fi
 if [ -d "${SRC_BEETS}/state" ]; then
   for f in "${SRC_BEETS}/state/"*.json; do
     [ -f "$f" ] || continue
-    move_aside "${BEETS_CONFIG_DIR}" "$(basename "$f")"
-    cp -p "$f" "${BEETS_CONFIG_DIR}/"
+    owner="$(move_aside "${BEETS_CONFIG_DIR}" "$(basename "$f")")"
+    place "$f" "${BEETS_CONFIG_DIR}" "$(basename "$f")" "" "${owner}"
   done
 fi
 
@@ -166,8 +249,8 @@ if [ -n "${SRC_WM}" ] && [ -d "${SRC_WM}" ]; then
   for entry in "${SRC_WM}"/* "${SRC_WM}"/.[!.]*; do
     [ -e "${entry}" ] || continue
     name="$(basename "${entry}")"
-    move_aside "${WEB_MANAGER_DATA_DIR}" "${name}"
-    cp -RPp "${entry}" "${WEB_MANAGER_DATA_DIR}/${name}"
+    owner="$(move_aside "${WEB_MANAGER_DATA_DIR}" "${name}")"
+    place "${entry}" "${WEB_MANAGER_DATA_DIR}" "${name}" "" "${owner}"
   done
 fi
 

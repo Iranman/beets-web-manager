@@ -80,10 +80,11 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
             pass
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_script(self, script, *args, method=None, check=True):
+    def run_script(self, script, *args, method=None, check=True, env_extra=None):
         env = dict(os.environ)
         if method:
             env["BWM_BACKUP_FORCE_METHOD"] = method
+        env.update(env_extra or {})
         res = subprocess.run([BASH, str(script), *args], cwd=self.tmp, env=env,
                              capture_output=True, text=True, timeout=120)
         if check:
@@ -365,6 +366,133 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 command not installed")
     def test_backup_into_a_folder_with_a_quote_uses_python_instead_of_sqlite3(self):
         self._backup_into_quoted_folder("sqlite3")
+
+    # --- check-then-use (TOCTOU) races during a restore (#177) -------------
+
+    def _shim(self, name, body):
+        """Put a wrapper for command `name` first on PATH; it runs `body`
+        (bash), then the real command. Returns env entries for run_script."""
+        real = shutil.which(name)
+        self.assertIsNotNone(real, name)
+        fakebin = os.path.join(self.tmp, "fakebin")
+        os.makedirs(fakebin, exist_ok=True)
+        path = os.path.join(fakebin, name)
+        with open(path, "w", newline="\n") as f:
+            f.write(f'#!/usr/bin/env bash\n{body}\nexec "{real}" "$@"\n')
+        os.chmod(path, 0o755)
+        return {"PATH": fakebin + os.pathsep + os.environ["PATH"]}
+
+    def _closed_live(self):
+        archive = self.backup("python")
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        return archive
+
+    def test_restore_refuses_a_staging_folder_swapped_for_a_link(self):
+        archive = self._closed_live()
+        victim = os.path.join(self.tmp, "host-file")
+        Path(victim).write_text("host-only-content", encoding="utf-8")
+        atk = os.path.join(self.tmp, "atk")
+        os.makedirs(atk)
+        os.symlink(victim, os.path.join(atk, "item"))
+        # A racer that can rename entries in the target folder swaps the
+        # fresh staging folder for a link to its own folder, whose "item"
+        # links to a host file.
+        env = self._shim("mktemp", f'case "$*" in *.restore-stage.*) d="$("{shutil.which("mktemp")}" "$@")"; '
+                                   f'mv "$d" "$d.away"; ln -s "{atk}" "$d"; echo "$d"; exit 0;; esac')
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False, env_extra=env)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("was replaced while the restore was running", res.stderr)
+        self.assertEqual(Path(victim).read_text(encoding="utf-8"), "host-only-content",
+                         "the restore copied through a swapped staging folder")
+        self.assertEqual(os.listdir(atk), ["item"])
+
+    def test_restore_refuses_a_keep_folder_swapped_for_a_link(self):
+        archive = self._closed_live()
+        victim_dir = os.path.join(self.tmp, "host-dir")
+        os.makedirs(victim_dir)
+        env = self._shim("mkdir", f'case "$*" in *.pre-restore-*) "{shutil.which("mkdir")}" "$@" || exit 1; '
+                                  f'k="${{@: -1}}"; mv "$k" "$k.away"; ln -s "{victim_dir}" "$k"; exit 0;; esac')
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False, env_extra=env)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("was replaced while the restore was running", res.stderr)
+        self.assertEqual(os.listdir(victim_dir), [], "a replaced file was moved through a swapped keep folder")
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "chown needs root")
+    def test_restored_files_keep_the_owner_of_what_they_replace(self):
+        archive = self._closed_live()
+        cfg = os.path.join(self.beets, "config.yaml")
+        os.chown(cfg, 1234, 1235)
+        os.chown(self.wm, 1000, 1001)
+        new_names = [n for n in os.listdir(self.wm) if os.path.isfile(os.path.join(self.wm, n))]
+        for name in new_names:
+            os.remove(os.path.join(self.wm, name))
+        self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm, "--yes", archive)
+        st = os.stat(cfg)
+        self.assertEqual((st.st_uid, st.st_gid), (1234, 1235), "config.yaml must keep its owner (PUID/PGID)")
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        restored = [n for n in new_names if os.path.exists(os.path.join(self.wm, n))]  # files in the backup
+        self.assertTrue(restored)
+        for name in restored:
+            st = os.stat(os.path.join(self.wm, name))
+            self.assertEqual((st.st_uid, st.st_gid), (1000, 1001), f"{name}: new files get the folder's owner")
+
+    def test_restore_never_writes_through_a_link_planted_during_the_restore(self):
+        archive = self.backup("python")
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        victim = os.path.join(self.tmp, "host-file")
+        Path(victim).write_text("host-only-content", encoding="utf-8")
+        os.chmod(victim, 0o644)
+        planted = os.path.join(self.beets, "config.yaml")
+        # Another writer swaps config.yaml for a link to a host file right
+        # before every copy -- the window between move_aside and the copy.
+        env = self._shim("cp", f'rm -f "{planted}"; ln -s "{victim}" "{planted}"')
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False, env_extra=env)
+        self.assertEqual(Path(victim).read_text(encoding="utf-8"), "host-only-content",
+                         "the restore wrote through a planted link")
+        self.assertEqual(stat.S_IMODE(os.stat(victim).st_mode), 0o644, "chmod followed a planted link")
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("appeared while the restore was running", res.stderr)
+        self.assertFalse([n for n in os.listdir(self.beets) if n.startswith(".restore-stage.")],
+                         "staging folders are removed")
+
+    def test_restore_extracts_the_same_archive_it_checked(self):
+        first = self.backup("python")
+        Path(self.wm, ".env").write_text("AI_MODEL=second-backup\n", encoding="utf-8")
+        out2 = os.path.join(self.tmp, "backups2")
+        self.run_script(BACKUP, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                        "--out", out2, method="python")
+        (second,) = [os.path.join(out2, n) for n in os.listdir(out2) if n.endswith(".tar.gz")]
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        Path(self.wm, ".env").write_text("AI_MODEL=current\n", encoding="utf-8")
+        # The archive file is replaced between the checks and the extraction.
+        env = self._shim("tar", f'case " $* " in *" -xzf "*) cp "{second}" "{first}" ;; esac')
+        self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                        "--yes", first, env_extra=env)
+        self.assertEqual(Path(self.wm, ".env").read_text(encoding="utf-8"), "AI_MODEL=x\n",
+                         "restore must extract the archive it listed and verified, not a swapped file")
+
+    def test_restore_refuses_a_pre_restore_folder_it_did_not_create(self):
+        archive = self.backup("python")
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        # Plant links for every stamp the restore could use in the next minute.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for sec in range(60):
+            stamp = (now + datetime.timedelta(seconds=sec)).strftime("%Y%m%d-%H%M%S")
+            os.symlink(elsewhere, os.path.join(self.wm, f".pre-restore-{stamp}"))
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", archive, check=False)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("was not created by this restore", res.stderr)
+        self.assertEqual(os.listdir(elsewhere), [], "nothing may be moved through a planted keep folder")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fake `docker` CLI used only by tests/test_deploy_truenas_rollout.py.
 
-Emulates just enough of `docker inspect`, `docker image inspect`, and
+Emulates just enough of `docker inspect`, `docker image inspect`,
+`docker pull` (by digest), `docker tag`, and
 `docker compose {ps,config,pull,up,stop,start,restart}`, and `docker exec`
 (the engine's semantic snapshot) -- reading/writing a JSON
 "world state" file (path from FAKE_DOCKER_STATE) -- to drive
@@ -80,6 +81,50 @@ def _lookup_container_or_image(target, state):
     return None
 
 
+def _find_image(state, target):
+    """An image by reference (tag or ref@digest) or by ID."""
+    if target in state["images"]:
+        return state["images"][target]
+    for img in state["images"].values():
+        if img.get("Id") == target:
+            return img
+    return None
+
+
+def _store_image(state, ref, entry):
+    """Point `ref` at `entry`, keeping the image it pointed at before
+    reachable by ID (an untagged, "dangling" image, as after a real pull)."""
+    old = state["images"].get(ref)
+    if old and old.get("Id") != entry.get("Id"):
+        state["images"][old["Id"]] = old
+    state["images"][ref] = json.loads(json.dumps(entry))
+
+
+def cmd_pull(args, state):
+    """`docker pull <repo@sha256:...>`: served from state["registry"]."""
+    ref = args[-1]
+    entry = (state.get("registry") or {}).get(ref)
+    if entry is None:
+        print(f"Error response from daemon: manifest unknown: {ref}", file=sys.stderr)
+        return 1
+    _store_image(state, ref, entry)
+    state.setdefault("pulled_by_digest", []).append(ref)
+    _save(state)
+    return 0
+
+
+def cmd_tag(args, state):
+    src, dst = args[0], args[1]
+    img = _find_image(state, src)
+    if img is None:
+        print(f"Error response from daemon: No such image: {src}", file=sys.stderr)
+        return 1
+    _store_image(state, dst, img)
+    state.setdefault("tagged", []).append([src, dst])
+    _save(state)
+    return 0
+
+
 def cmd_inspect(args, state):
     fmt = None
     targets = []
@@ -113,7 +158,7 @@ def cmd_image_inspect(args, state):
         else:
             target = args[i]
             i += 1
-    img = state["images"].get(target)
+    img = _find_image(state, target)
     if img is None:
         print(f"Error: No such image: {target}", file=sys.stderr)
         return 1
@@ -168,14 +213,15 @@ def _resolved_services(state, files):
         services[svc] = {"image": cont["Config"]["Image"]}
     # The base Compose file only matters where it interpolates the version
     # variable (literal images keep the running container's image, which is
-    # what the existing "wrong compose image" tests rely on).
+    # what the existing "wrong compose image" tests rely on), unless
+    # state["compose_literal_images"] asks for literal images to be honored.
     if files:
         try:
             base = open(files[0], encoding="utf-8").read()
         except OSError:
             base = ""
         for svc, image in _parse_service_images(base).items():
-            if svc in services and _VERSION_VAR_RE.search(image):
+            if svc in services and (_VERSION_VAR_RE.search(image) or state.get("compose_literal_images")):
                 services[svc]["image"] = _interpolate_version(image, files[0])
     for f in files[1:]:
         try:
@@ -229,19 +275,46 @@ def cmd_compose(args, state):
         if state.get("pull_should_fail"):
             print("fake_docker: simulated pull failure", file=sys.stderr)
             return 1
+        # A tag published in state["registry"] moves to the registry's image.
+        svc = rest[-1]
+        ref = _resolved_services(state, files).get(svc, {}).get("image", "")
+        entry = (state.get("registry") or {}).get(ref)
+        if entry is not None:
+            _store_image(state, ref, entry)
+            state.setdefault("pulled", []).append(ref)
+            _save(state)
+        return 0
+
+    if sub == "up" and "--help" in rest:
+        # state["compose_no_pull_flag"]: a Compose older than v2.22.
+        flags = "" if state.get("compose_no_pull_flag") else "      --pull string   Pull image before running\n"
+        print("Usage:  docker compose up [OPTIONS] [SERVICE...]\n\nOptions:\n  -d, --detach\n"
+              + flags + "      --force-recreate\n")
         return 0
 
     if sub == "up":
+        if state.get("compose_no_pull_flag") and "--pull" in rest:
+            print("unknown flag: --pull", file=sys.stderr)
+            return 1
         svc = rest[-1]
         if state.get("up_should_fail"):
             print("fake_docker: simulated up failure", file=sys.stderr)
             return 1
         services = _resolved_services(state, files)
         resolved_image = services.get(svc, {}).get("image", "")
+        state.setdefault("up_args", []).append(rest)
+        # state["registry_at_up"]: a tag that moves when `up` pulls (a
+        # `pull_policy: always`, or a concurrent pull), unless --pull never
+        # (state["up_ignores_pull_never"] models a pull that lands anyway).
+        pull_never = ("--pull" in rest and rest[rest.index("--pull") + 1] == "never"
+                      and not state.get("up_ignores_pull_never"))
+        moved = (state.get("registry_at_up") or {}).get(resolved_image)
+        if moved is not None and not pull_never:
+            _store_image(state, resolved_image, moved)
         cid = state["service_containers"][svc]
         cont = state["containers"][cid]
         cont["Config"]["Image"] = resolved_image
-        image_entry = state["images"].get(resolved_image)
+        image_entry = _find_image(state, resolved_image)
         cont["Image"] = image_entry["Id"] if image_entry else "sha256:unknownimage"
         if state.get("never_healthy"):
             cont["State"] = {"Status": "running"}
@@ -337,6 +410,10 @@ def main():
         return cmd_inspect(argv[1:], state)
     if argv[0] == "exec":
         return cmd_exec(argv[1:], state)
+    if argv[0] == "pull":
+        return cmd_pull(argv[1:], state)
+    if argv[0] == "tag":
+        return cmd_tag(argv[1:], state)
     if argv[0] == "image" and len(argv) > 1 and argv[1] == "inspect":
         return cmd_image_inspect(argv[2:], state)
     print(f"fake_docker: unsupported command: {argv}", file=sys.stderr)
