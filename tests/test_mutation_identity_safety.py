@@ -209,6 +209,23 @@ class OperatorReleaseAndCodeqlTests(_IdentityEnv):
             refs = cw._library_refs_under(os.path.join(str(self.music), "A"), adapter=ad)
         self.assertEqual([r["id"] for r in refs], [1])
 
+    def test_library_refs_with_symlinked_music_root(self):
+        """F-243-2: MUSIC_ROOT is a link; the folder is given through it.
+        Realpath-absolute, relative and link-absolute item paths all match."""
+        link = os.path.join(os.path.dirname(str(self.music)), "musiclink")
+        try:
+            os.symlink(str(self.music), link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        real = os.path.realpath(str(self.music))
+        for stored in (os.path.join(real, "A", "01.flac"), os.path.join("A", "01.flac"),
+                       os.path.join(link, "A", "01.flac")):
+            ad = FakeAdapter()
+            ad.items = {1: {"id": 1, "path": stored}}
+            with mock.patch.dict(os.environ, {"MUSIC_ROOT": link}):
+                refs = cw._library_refs_under(os.path.join(link, "A"), adapter=ad)
+            self.assertEqual([r["id"] for r in refs], [1], stored)
+
     def test_staging_roots_follow_downloads_root(self):
         dl = os.path.join(str(self.music), "..", "dl-root")
         with mock.patch.dict(os.environ, {"DOWNLOADS_ROOT": dl, "BEETS_IMPORT_ROOTS": "/elsewhere"}):
@@ -259,6 +276,16 @@ class FolderCleanupTests(_Env):
         with mock.patch.dict(os.environ, {"BEETS_LIBRARY_DB": ""}):
             plan = cw.plan_folder_cleanup({"action": "remove_empty", "source": str(src)}, store=self.store)
         self.assertEqual(plan.get("code"), "folder_cleanup_not_empty", plan)
+
+    def test_engine_folder_cleanup_uses_configured_music_root_alias(self):
+        """F-243-4: MUSIC_ROOT unset, deprecated alias set -> same root."""
+        src = self.music / "AliasEmpty"
+        src.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("MUSIC_ROOT", "BEETS_MUSIC_DIR")}
+        env["MUSIC_LIBRARY_PATH"] = str(self.music)
+        with mock.patch.dict(os.environ, env, clear=True):
+            plan = te.create_folder_cleanup_plan(self.store, {"action": "remove_empty", "source": str(src)}, db_path="")
+        self.assertTrue(plan.get("ok"), plan)
 
     def test_engine_apply_of_cancelled_plan_changes_nothing(self):
         src = self.music / "Empty"

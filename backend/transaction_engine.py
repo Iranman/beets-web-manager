@@ -907,23 +907,39 @@ class TransactionStore:
         return True, None
 
 
-def _import_review_library_refusal(target: Path, delete_sources: List[str], music_roots: List[Path],
+def _cfg_music_root() -> str:
+    """MUSIC_ROOT with its documented aliases (``config_layers``)."""
+    from backend.config_layers import music_root
+    return music_root()
+
+
+def _import_review_library_refusal(target: Any, delete_sources: List[str], music_roots: List[Any],
                                    library_delete_allowed: bool) -> Optional[Dict[str, Any]]:
     """Security F2 (#235 review): a cleanup target that CONTAINS the music
     library is always refused, and an irreversible delete of a file inside
     the library needs the explicit library-delete gate. Checked at plan and
-    again at apply."""
+    again at apply.
+
+    String-only containment (normpath prefix, CodeQL #1383): the target and
+    sources were resolved and contained at plan time. Each configured music
+    root is compared both as written and as its realpath, so a symlinked
+    MUSIC_ROOT is still recognized."""
+    forms: List[str] = []
     for root in music_roots:
-        if target in root.parents:
+        for form in (os.path.normpath(str(root)), os.path.realpath(str(root))):
+            if form not in forms:
+                forms.append(form)
+    tgt = os.path.normpath(str(target))
+    for root in forms:
+        if root != tgt and (tgt == os.path.dirname(tgt) or _normpath_within_roots(root, [Path(tgt)])):
             return {"ok": False, "code": "import_review_target_contains_library", "mutated": False,
-                    "error": f"Cleanup target {target} contains the music library {root}; refusing."}
-        if library_delete_allowed:
-            continue
-        for src in delete_sources:
-            p = Path(src).resolve(strict=False)
-            if p == root or root in p.parents:
-                return {"ok": False, "code": "import_review_library_delete_refused", "mutated": False,
-                        "error": f"{p} is inside the music library; deleting it needs the library-delete gate."}
+                    "error": f"Cleanup target {tgt} contains the music library {root}; refusing."}
+    if library_delete_allowed:
+        return None
+    for src in delete_sources:
+        if _normpath_within_roots(str(src), [Path(r) for r in forms]):
+            return {"ok": False, "code": "import_review_library_delete_refused", "mutated": False,
+                    "error": f"{os.path.normpath(str(src))} is inside the music library; deleting it needs the library-delete gate."}
     return None
 
 
@@ -982,6 +998,17 @@ def execute_import_review_cleanup_plan(
     from backend.config_layers import music_root as _configured_music_root
     music_root_path = Path(music_root or _configured_music_root()).resolve(strict=False)
     library_delete_allowed = confirmed_wrong_library_folder or album_id > 0
+
+    # Defense in depth for #235: an allowed root that is "/" or overlaps the
+    # library is refused; the library root itself only behind the gate.
+    from backend.config_layers import unsafe_root_reason
+    for r in resolved_roots:
+        if library_delete_allowed and os.path.realpath(str(r)) == os.path.realpath(str(music_root_path)):
+            continue
+        reason = unsafe_root_reason(r, music_root_path)
+        if reason:
+            return {"ok": False, "code": "import_review_unsafe_root", "mutated": False,
+                    "error": f"Allowed cleanup root {r} is refused: {reason}."}
 
     if (resolved_target == music_root_path or music_root_path in resolved_target.parents) and not library_delete_allowed:
         return {"ok": False, "error": f"Review folder path {resolved_target} is inside music library."}
@@ -1226,14 +1253,12 @@ def _execute_import_review_cleanup_apply_locked(
         gate_album_id = 0
     library_delete_allowed = bool(
         payload.get("confirmed_wrong_library_folder") or payload.get("allow_library_delete")) or gate_album_id > 0
-    roots = {Path(_configured_music_root()).resolve(strict=False)}
-    if meta.get("music_root"):
-        roots.add(Path(meta["music_root"]).resolve(strict=False))
+    roots = [_configured_music_root()] + ([str(meta["music_root"])] if meta.get("music_root") else [])
     refusal = _import_review_library_refusal(
-        Path(meta.get("target_path", "")).resolve(strict=False),
+        str(meta.get("target_path", "")),
         [s.get("source", "") for s in steps if s.get("type") == "delete_file"
          and s.get("status") not in ("completed", "irreversible_completed")],
-        sorted(roots), library_delete_allowed)
+        roots, library_delete_allowed)
     if refusal:
         return refusal
 
@@ -11001,7 +11026,7 @@ def create_folder_cleanup_plan(
     if not src_folder:
         return {"ok": False, "error": "source folder required", "code": "folder_cleanup_invalid_payload"}
 
-    allowed_roots = _cleanup_normalize_roots(music_allowed_roots, [str(os.environ.get("MUSIC_ROOT", "/music"))])
+    allowed_roots = _cleanup_normalize_roots(music_allowed_roots, [_cfg_music_root()])
     src_display = _cleanup_resolve_path(Path(src_folder))
     if not _normpath_within_roots(src_folder, allowed_roots):
         return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
@@ -11174,7 +11199,7 @@ def execute_folder_cleanup_apply(
             return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "idempotent": True}
 
         resource_keys = meta.get("resource_keys") or []
-        allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [str(os.environ.get("MUSIC_ROOT", "/music"))])
+        allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [_cfg_music_root()])
         lib_db = db_path or ""  # BA-7: never read from the environment
 
         def _fail(msg: str, code: str) -> Dict[str, Any]:
@@ -11336,7 +11361,7 @@ def rollback_folder_cleanup(
             return {"ok": False, "error": "Transaction is already rolled back.", "code": "folder_cleanup_already_rolled_back"}
 
         resource_keys = meta.get("resource_keys") or []
-        allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [str(os.environ.get("MUSIC_ROOT", "/music"))])
+        allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [_cfg_music_root()])
         with _lock_resources(resource_keys):
             moved_records = meta.get("moved_records") or []
             files_restored = 0

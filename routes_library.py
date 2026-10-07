@@ -3731,7 +3731,7 @@ def library_move_all():
         _trigger_plex_refresh(log)
         log.append("✓ Done." if rc == 0 else "⚠ Finished with some errors (see above).")
 
-    job = jobs.start_python(_do, label="Move all library files", metadata={"type": "move-all"})
+    job = jobs.start_python(_do, label="Move all library files", metadata={"type": "move-all", "dedupe_key": "library:move-all"})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -3847,7 +3847,7 @@ def library_mbsync_all():
         _invalidate_lib_cache()
         log.append("✓ beet mbsync complete." if rc == 0 else "⚠ mbsync finished with some errors (see above).")
 
-    job = jobs.start_python(_do, label="MBSync all library tracks", metadata={"type": "mbsync-all"})
+    job = jobs.start_python(_do, label="MBSync all library tracks", metadata={"type": "mbsync-all", "dedupe_key": "library:mbsync-all"})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 

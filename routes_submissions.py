@@ -10,7 +10,6 @@ import json
 import os
 import re
 import shutil
-import threading
 import time
 import urllib.request
 import uuid
@@ -27,7 +26,6 @@ from app import (  # noqa: E402
     DISCOGS_TOKEN,
     DOWNLOADS_ROOT,
     MUSIC_ROOT,
-    _ANSI_RE,
     _MB_UUID_RE,
     _artist_folder_key,
     _build_folder_evidence,
@@ -74,14 +72,6 @@ def _acoustid_key() -> str:
         or os.environ.get("ACOUSTID_API_KEY", "").strip()
         or os.environ.get("ACOUSTID_KEY", "").strip()
     )
-
-
-def _append_clean_output(log, stdout: str = "", stderr: str = "") -> str:
-    output = _ANSI_RE.sub("", ((stdout or "") + (stderr or "")).strip())
-    for line in output.splitlines():
-        if line.strip():
-            log.append(line)
-    return output
 
 
 def _start_acoustid_submit_job(item_ids: List[int], label: str):
@@ -1153,34 +1143,22 @@ def _extract_ytdlp_info(url: str) -> Dict[str, Any]:
         "js_runtimes": _ytdlp_js_runtime_options(),
         "remote_components": _ytdlp_remote_components(),
     }
-    result: Dict[str, Any] = {}
-    errors: Dict[str, Any] = {}
-
-    def _run():
-        try:
-            with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [url])) as ydl:
-                # process=False skips format-selection entirely (we only want
-                # metadata, never a downloadable stream), so a site requiring a
-                # JS/PO-token challenge for format resolution doesn't block
-                # metadata extraction with "Requested format is not available".
-                info = ydl.extract_info(url, download=False, process=False)
-                if isinstance(info, dict) and info.get("_type") not in ("playlist", "multi_video"):
-                    info = ydl.sanitize_info(info)
-                result["info"] = info
-        except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
-            errors["error"] = str(ex)
-
-    worker = threading.Thread(target=_run, daemon=True)
-    worker.start()
-    worker.join(timeout=_REFERENCE_URL_TIMEOUT + 10)
-    if worker.is_alive():
-        raise TimeoutError("Metadata extraction timed out.")
-    if errors.get("error"):
-        message = errors["error"]
+    # Inline (BA-16): socket_timeout bounds every network read, so no worker
+    # thread is left running after the request has given up on it.
+    try:
+        with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [url])) as ydl:
+            # process=False skips format-selection entirely (we only want
+            # metadata, never a downloadable stream), so a site requiring a
+            # JS/PO-token challenge for format resolution doesn't block
+            # metadata extraction with "Requested format is not available".
+            info = ydl.extract_info(url, download=False, process=False)
+            if isinstance(info, dict) and info.get("_type") not in ("playlist", "multi_video"):
+                info = ydl.sanitize_info(info)
+    except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
+        message = str(ex)
         if "unsupported url" in message.lower() or "no suitable extractor" in message.lower():
-            raise _YtdlpUnsupportedUrlError(message)
-        raise RuntimeError(message)
-    info = result.get("info")
+            raise _YtdlpUnsupportedUrlError(message) from ex
+        raise RuntimeError(message) from ex
     if not isinstance(info, dict):
         raise RuntimeError("yt-dlp returned no data for that URL.")
     return info

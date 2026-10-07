@@ -7,7 +7,7 @@ import hashlib, json, os, re, shutil, sqlite3, time, traceback, unicodedata, uui
 from backend.matching import track_filename_has_source_id_suffix as _canonical_track_filename_has_source_id_suffix
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from backend.app_runtime import _app_logger, ALBUM_FOLDER_CLEANUP_LAST_FILE, AUDIO_EXT, DOWNLOADS_ROOT, METADATA_CACHE_ROOT, MUSIC_ROOT, RGID_RESOLUTION_STATE_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _s
+from backend.app_runtime import _app_logger, ALBUM_FOLDER_CLEANUP_LAST_FILE, AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, METADATA_CACHE_ROOT, MUSIC_ROOT, RGID_RESOLUTION_STATE_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _s
 from backend.app_runtime import _redact_security_text
 from backend.app_runtime import _normalize_name, _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _path_under, _safe_path_component, _same_resolved_path
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
@@ -618,11 +618,12 @@ FOLDER_CLEAN_AUDIO_EXTS = set(AUDIO_EXTS) | set(AUDIO_EXT) | {".mp3", ".flac"}
 # SEC-13: only the configured library and download roots. /tmp and the
 # hardcoded /data/downloads and /download paths were removed: a no-audio
 # folder sweep must never range over the container's temp space or a path
-# no setting controls. DOWNLOAD_PATH is the documented downloads mount.
+# no setting controls. The downloads root comes from config_layers
+# (DOWNLOADS_ROOT, deprecated alias DOWNLOAD_PATH) and is left out when it is
+# "/" or overlaps the library.
 FOLDER_CLEAN_ROOTS = [
     MUSIC_ROOT,
-    DOWNLOADS_ROOT,
-    Path(os.environ.get("DOWNLOAD_PATH", "").strip() or "/downloads"),
+    *DOWNLOADS_ALLOWED_ROOTS,
 ]
 
 

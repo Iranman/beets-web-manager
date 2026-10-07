@@ -202,8 +202,10 @@ def _get_staging_roots() -> List[Path]:
     downloads root (``config_layers.downloads_root``) plus
     ``<data dir>/playlist_staging``. The data directory itself is NOT a
     staging root -- it holds transactions.db, caches and backups (S1/F1)."""
-    from backend.config_layers import downloads_root
-    return [Path(downloads_root()).resolve(), (_data_dir() / "playlist_staging").resolve()]
+    from backend.config_layers import downloads_root, music_root, safe_roots
+    # #235: a downloads root that is "/" or overlaps the library is dropped.
+    return [Path(r).resolve() for r in safe_roots("DOWNLOADS_ROOT", [downloads_root()], music_root())] + [
+        (_data_dir() / "playlist_staging").resolve()]
 
 
 _PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".blb")
@@ -1417,9 +1419,19 @@ def _library_refs_under(folder: Any, adapter: Optional[BeetsAdapter] = None) -> 
     with art but no items under the folder is not seen).
 
     A pure string comparison of normalized absolute paths: nothing here
-    touches the filesystem with the caller's path (CodeQL #1381)."""
+    touches the filesystem with the caller's path (CodeQL #1381). Paths
+    under the configured MUSIC_ROOT as written are rewritten onto its
+    realpath (F-243-2), so a symlinked MUSIC_ROOT matches however Beets
+    stores the item path (relative items are already built on the realpath)."""
+    from backend.config_layers import music_root
+    written = os.path.abspath(os.path.normpath(music_root()))
+    real = os.path.realpath(music_root())
+
     def norm(p: Any) -> str:
-        return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+        n = os.path.abspath(os.path.normpath(str(p)))
+        if n == written or n.startswith(written.rstrip(os.sep) + os.sep):
+            n = real + n[len(written):]
+        return os.path.normcase(n)
 
     target = norm(_decode_path(folder))
     prefix = target.rstrip(os.sep) + os.sep

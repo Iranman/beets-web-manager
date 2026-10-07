@@ -52,6 +52,7 @@ def _load_evidence_namespace():
         "TORRENT_SOURCE_ROOTS": [],
         "QBIT_REPAIR_ALLOWED_ROOTS": [],
         "MUSIC_ROOT": Path("/music"),
+        "safe_roots": __import__("backend.config_layers", fromlist=["x"]).safe_roots,
         "_s": lambda value: (
             value.decode("utf-8", errors="replace")
             if isinstance(value, bytes)
