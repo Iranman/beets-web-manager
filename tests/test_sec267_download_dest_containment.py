@@ -194,7 +194,8 @@ class PlaylistRootsValidated(unittest.TestCase):
         # QA #269: staging and staged-track deletion used the raw root.
         import backend.playlist_service as ps
         pl = self.root / "playlists"
-        with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ROOT", pl):
+        with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ROOT", pl), \
+                mock.patch.object(ps, "_playlist_key", lambda *_a, **_k: "k"):
             with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (pl,)):
                 self.assertEqual(ps._playlist_downloads_dir("Mix").parent.parent, pl)
             with mock.patch.object(ps, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()):

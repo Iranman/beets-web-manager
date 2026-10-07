@@ -17,8 +17,8 @@ import yt_dlp
 
 import backend.ytdlp_service as yts
 
-_SECRET_ENV = "BWM_SEC269_PROBE"
-_SECRET_VALUE = "probe-value-that-must-not-appear"
+_PROBE_ENV = "BWM_SEC269_PROBE"
+_PROBE_VALUE = "probe-value-that-must-not-appear"
 _INFO = {"id": "abc", "title": "t", "ext": "mp3", "extractor": "youtube", "webpage_url": "u"}
 
 
@@ -53,7 +53,7 @@ def _captured_outtmpls(call):
             mock.patch.object(yts, "_ytdlp_apply_source_network_options"), \
             mock.patch.object(yts, "_ytdlp_source_extractor_args", return_value=None), \
             mock.patch.object(yts, "_ytdlp_client_profiles_for_source", return_value=[("web", None)]), \
-            mock.patch.dict(os.environ, {_SECRET_ENV: _SECRET_VALUE}):
+            mock.patch.dict(os.environ, {_PROBE_ENV: _PROBE_VALUE}):
         try:
             call()
         except RuntimeError:  # "no audio files downloaded": expected with the stub
@@ -62,7 +62,7 @@ def _captured_outtmpls(call):
 
 
 def _expand(outtmpl, **info):
-    with mock.patch.dict(os.environ, {_SECRET_ENV: _SECRET_VALUE}), \
+    with mock.patch.dict(os.environ, {_PROBE_ENV: _PROBE_VALUE}), \
             yt_dlp.YoutubeDL({"outtmpl": outtmpl, "quiet": True}) as ydl:
         return Path(os.path.normpath(ydl.prepare_filename(dict(_INFO, **info))))
 
@@ -112,14 +112,14 @@ class YtdlpTemplateCannotEscapeRoot(unittest.TestCase):
                 self.assertEqual(final.parent, Path(dest))
 
     def test_env_var_in_artist_or_album_never_expands(self):
-        for artist, album in ((f"${_SECRET_ENV}", "x"), ("x", f"${{{_SECRET_ENV}}}"),
-                              (f"$${_SECRET_ENV}", "x")):
+        for artist, album in ((f"${_PROBE_ENV}", "x"), ("x", f"${{{_PROBE_ENV}}}"),
+                              (f"$${_PROBE_ENV}", "x")):
             with self.subTest(artist=artist, album=album):
                 body, dest = self._dest(artist, album)
                 self.assertIsNotNone(dest, body)
                 self.assertNotIn("$", dest)
                 final = self._album_final(dest)
-                self.assertNotIn(_SECRET_VALUE, str(final))
+                self.assertNotIn(_PROBE_VALUE, str(final))
                 self.assertEqual(final.parent, Path(dest))
 
     def test_percent_folder_name_round_trips(self):
@@ -129,23 +129,23 @@ class YtdlpTemplateCannotEscapeRoot(unittest.TestCase):
         self.assertEqual(final, Path(dest) / "t.mp3")
 
     def test_outtmpl_builder_refuses_dollar_and_relative_folder(self):
-        for bad in (str(self.root / f"${_SECRET_ENV}"), "relative/dir", "~"):
+        for bad in (str(self.root / f"${_PROBE_ENV}"), "relative/dir", "~"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 yts._ytdlp_outtmpl(bad, "%(title)s.%(ext)s")
         with self.assertRaises(ValueError):
-            yts._ytdlp_outtmpl(str(self.root), "%(title)s", f"${_SECRET_ENV} - ")
+            yts._ytdlp_outtmpl(str(self.root), "%(title)s", f"${_PROBE_ENV} - ")
 
     def test_remote_playlist_track_title_is_inert(self):
         # Playlist downloads pass a remote track title as the per-track prefix.
         dest = str(self.root / "playlist" / "downloads")
-        for title in ("%(id&..)s", f"${_SECRET_ENV}", f"${{{_SECRET_ENV}}}", "50%( x", "../../up"):
+        for title in ("%(id&..)s", f"${_PROBE_ENV}", f"${{{_PROBE_ENV}}}", "50%( x", "../../up"):
             with self.subTest(title=title):
                 tmpls = _captured_outtmpls(lambda: yts._ytdlp_missing_tracks_download(
                     "Artist", "", "", dest, [], [{"title": title}], source="ytdlp"))
                 self.assertTrue(tmpls, "track download never reached yt-dlp")
                 final = _expand(tmpls[0])
                 self.assertEqual(final.parent, Path(dest), f"{title!r} -> {final}")
-                self.assertNotIn(_SECRET_VALUE, str(final))
+                self.assertNotIn(_PROBE_VALUE, str(final))
                 self.assertTrue(final.name.startswith("001 "), final.name)
 
 
