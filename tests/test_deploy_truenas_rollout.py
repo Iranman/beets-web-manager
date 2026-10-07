@@ -639,6 +639,7 @@ _compose() {{ return 0; }}
 docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
+require_compose_pull_flag() {{ return 0; }}
 # Token handling only: the recreate + proof step has its own end-to-end tests.
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
@@ -684,6 +685,7 @@ _compose() {{ return 0; }}
 docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
+require_compose_pull_flag() {{ return 0; }}
 # Token handling only: the recreate + proof step has its own end-to-end tests.
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
@@ -721,6 +723,7 @@ _compose() {{ return 0; }}
 docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
+require_compose_pull_flag() {{ return 0; }}
 # Token handling only: the recreate + proof step has its own end-to-end tests.
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
@@ -1624,6 +1627,27 @@ class LatestTagDeployTests(LatestTagStackFixture):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("layout: pinned", res.stderr)
 
+    # --- NB1: `up --pull never` needs Docker Compose v2.22+ ---------------
+
+    def test_deploy_on_a_compose_without_up_pull_is_refused_before_any_change(self):
+        st = self.load_state()
+        st["compose_no_pull_flag"] = True
+        self.save_state(st)
+        for args in ((), ("--dry-run",)):
+            res = self.run_script(*args)
+            self.assertNotEqual(res.returncode, 0, args)
+            self.assertIn("Reason code:           compose_too_old", res.stderr)
+            self.assertIn("Failed stage:          compose-version-check", res.stderr)
+        st = self.load_state()
+        cont = self.webmgr()
+        self.assertEqual((cont["Image"], cont["State"]["Status"]), ("sha256:oldimageid", "running"))
+        self.assertEqual(st["images"][self.LATEST]["Id"], "sha256:oldimageid", "nothing pulled")
+        self.assertNotIn("pulled", st)
+        self.assertNotIn("tagged", st)
+        self.assertNotIn("up_args", st)
+        self.assertEqual(self.backup_dirs(), [])
+        self.assert_compose_and_env_untouched()
+
     # --- N1: a pulled but undeployed :latest must not stay the local tag ---
 
     def test_refused_deploy_points_local_latest_back_at_the_previous_image(self):
@@ -1723,6 +1747,24 @@ class LatestTagRollbackTests(LatestTagStackFixture):
         self.assertNotEqual(res.returncode, 0)
         self.assertNotIn("nothing to roll back", res.stderr)
         self.assertIn("the rollback itself failed", res.stderr)
+
+    def test_rollback_on_a_compose_without_up_pull_fails_before_stopping_anything(self):
+        bdir = self.deploy()
+        st = self.load_state()
+        st["compose_no_pull_flag"] = True
+        st.pop("tagged", None)
+        st.pop("up_args", None)
+        self.save_state(st)
+        res = self.run_script("--rollback", bdir)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           compose_too_old", res.stderr)
+        st = self.load_state()
+        cont = self.webmgr()
+        self.assertEqual((cont["Image"], cont["State"]["Status"]), ("sha256:goodimageid", "running"),
+                         "the service must not be stopped by a rollback that cannot recreate it")
+        self.assertNotIn("tagged", st)
+        self.assertNotIn("up_args", st)
+        self.assert_compose_and_env_untouched()
 
     def test_rollback_pulls_a_pruned_previous_image_back_by_digest(self):
         bdir = self.deploy()

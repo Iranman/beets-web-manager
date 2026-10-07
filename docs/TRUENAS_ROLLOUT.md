@@ -301,6 +301,7 @@ meaning gets a new code.
 | --- | --- | --- |
 | `setup_status_unavailable` | `setup-status-after` | `/api/setup/status` did not answer 200 after the recreate |
 | `setup_new_blocking_reason` | `setup-status-after` | the new version reports a blocking reason that was not there before |
+| `compose_too_old` | `compose-version-check` | `docker compose up --help` does not list `--pull` (Docker Compose older than v2.22); checked before anything changes, in the deploy, the dry run and `--rollback` |
 | `compose_image_mismatch` | `compose-image-verification` | the Compose file names neither `:latest` nor `:<VERSION>` |
 | `latest_image_not_requested_version` | `image-pull-verification` | the pulled `:latest` image's version label is not `VERSION` |
 | `image_version_label_mismatch` | `image-pull-verification` | the pulled `:<VERSION>` image's version label is not `VERSION` |

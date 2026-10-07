@@ -1432,10 +1432,22 @@ run_prune_backups() {
 # ---------------------------------------------------------------------------
 # Phase B -- Dry-run entry point
 # ---------------------------------------------------------------------------
+# Recreate and rollback run `up --pull never` (Docker Compose v2.22+). An
+# older Compose rejects the flag, which would fail the recreate after the
+# service was stopped, so this is checked before anything changes.
+require_compose_pull_flag() {
+  STAGE="compose-version-check"
+  if ! docker compose up --help 2>/dev/null | grep -q -- '--pull'; then
+    REASON_CODE="compose_too_old"
+    die "this Docker Compose ($(docker compose version --short 2>/dev/null || echo unknown version)) does not support 'up --pull'; Docker Compose v2.22 or later is required. Nothing was changed -- update Docker Compose, then re-run."
+  fi
+}
+
 run_dry_run() {
   log "=== DRY RUN: no containers will be stopped/recreated, no files moved, no tokens copied, no Compose changes ==="
   validate_version
   resolve_compose_file
+  require_compose_pull_flag
   discover_and_verify_mounts
   verify_compose_image
   verify_authoritative_database
@@ -1913,6 +1925,7 @@ run_deploy() {
   log "=== Beets Web Manager ${VERSION} guarded rollout starting ==="
   validate_version
   resolve_compose_file
+  require_compose_pull_flag
   discover_and_verify_mounts
   verify_compose_image
   verify_authoritative_database
@@ -1944,6 +1957,7 @@ run_rollback() {
   [[ -f "$ROLLBACK_DIR/docker-compose.yml.bak" ]] || die "rollback directory is missing docker-compose.yml.bak -- not a valid backup from this script"
 
   resolve_compose_file
+  require_compose_pull_flag
   discover_and_verify_mounts
 
   log "Stopping ${SERVICE} for rollback..."

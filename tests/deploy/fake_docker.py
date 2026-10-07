@@ -285,7 +285,17 @@ def cmd_compose(args, state):
             _save(state)
         return 0
 
+    if sub == "up" and "--help" in rest:
+        # state["compose_no_pull_flag"]: a Compose older than v2.22.
+        flags = "" if state.get("compose_no_pull_flag") else "      --pull string   Pull image before running\n"
+        print("Usage:  docker compose up [OPTIONS] [SERVICE...]\n\nOptions:\n  -d, --detach\n"
+              + flags + "      --force-recreate\n")
+        return 0
+
     if sub == "up":
+        if state.get("compose_no_pull_flag") and "--pull" in rest:
+            print("unknown flag: --pull", file=sys.stderr)
+            return 1
         svc = rest[-1]
         if state.get("up_should_fail"):
             print("fake_docker: simulated up failure", file=sys.stderr)
