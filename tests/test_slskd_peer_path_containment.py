@@ -8,6 +8,7 @@ every hostile vector aims at and that must survive.
 """
 
 import itertools
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ from unittest import mock
 
 import backend.app_runtime as rt
 import backend.slskd_service as slskd
-from backend.slskd import _remote_path, safe_peer_username
+from backend.slskd import _remote_path, cleanup_failed_candidate_files, safe_peer_username
 
 
 class _Tree:
@@ -92,6 +93,47 @@ class PeerPathValidationTests(unittest.TestCase):
         )
         self.assertEqual(_remote_path("C:\\x\\.\\..\\y//z.flac"), Path("x", "y", "z.flac"))
         self.assertEqual(_remote_path("/../.."), Path("."))
+
+    def test_remote_path_drops_drive_segments_anywhere(self):
+        # Security F2: "C:" mid-path would be a drive-relative join on Windows.
+        self.assertEqual(_remote_path("Music\\C:\\Album\\d:x\\01.flac"), Path("Music", "Album", "01.flac"))
+
+    def test_remote_path_drops_control_character_segments(self):
+        self.assertEqual(_remote_path("Music\\a\nb\\Album\x7f\\01.flac"), Path("Music", "01.flac"))
+
+    def test_drive_and_control_character_usernames_are_refused(self):
+        # Security F1 (log-line forging) and F2 (drive-relative join).
+        for name in ("C:", "c:x", "a:b", "a\nb", "a\rb", "a\x1bb", "a\x7fb", "a\tb"):
+            with self.subTest(name=repr(name)):
+                self.assertEqual(safe_peer_username(name), "")
+
+
+class SymlinkContainmentTests(unittest.TestCase):
+    """Security review of PR #259: a symlink under downloads that points into
+    the library is never followed to a delete."""
+
+    def test_symlinks_into_library_are_never_followed_to_a_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dl, lib = base / "downloads", base / "music"
+            (lib / "Album").mkdir(parents=True)
+            (dl / "peer" / "Real").mkdir(parents=True)
+            dir_victim = lib / "Album" / "01.flac"
+            file_victim = lib / "Album" / "02.flac"
+            dir_victim.write_bytes(b"x")
+            file_victim.write_bytes(b"x")
+            try:
+                os.symlink(lib / "Album", dl / "peer" / "Album", target_is_directory=True)
+                os.symlink(file_victim, dl / "peer" / "Real" / "02.flac")
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not permitted on this host")
+
+            removed = cleanup_failed_candidate_files(
+                dl, "peer", ["Album/01.flac", "Real/02.flac"], [".flac"], [], [dl])
+
+            self.assertEqual(removed, 0)
+            self.assertTrue(dir_victim.exists())
+            self.assertTrue(file_victim.exists())
 
 
 class FailedCandidateCleanupContainmentTests(unittest.TestCase):
@@ -215,6 +257,21 @@ class DownloadedFileSearchContainmentTests(unittest.TestCase):
             (folder, files), _spy, _log = self._find(tree, "DJ Böb", remote, expected)
             self.assertEqual(Path(folder), local)
             self.assertEqual([f.name for f in files], ["01 Sóng.flac"])
+
+    def test_benign_slskd_default_layout_is_found(self):
+        # slskd's own layout: <downloads>/<remote parent dir name>/<file>, no
+        # username folder; Windows remote path from a peer with a space.
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = _Tree(tmp)
+            remote = r"D:\Shares\Rips\Artist - Album (2001)\01 - Intro.flac"
+            local = tree.downloads / "Artist - Album (2001)"
+            local.mkdir(parents=True)
+            (local / "01 - Intro.flac").write_bytes(b"x")
+            expected = str(slskd._slskd_peer_download_dir(
+                tree.downloads, "some peer", r"D:\Shares\Rips\Artist - Album (2001)"))
+            (folder, files), _spy, _log = self._find(tree, "some peer", remote, expected)
+            self.assertEqual(Path(folder), local)
+            self.assertEqual([f.name for f in files], ["01 - Intro.flac"])
 
     def test_wait_for_files_ends_at_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:

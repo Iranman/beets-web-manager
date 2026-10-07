@@ -13,28 +13,38 @@ def _s(value) -> str:
     return str(value)
 
 
+def _has_control_char(text: str) -> bool:
+    return any(c < " " or c == "\x7f" for c in text)
+
+
 def safe_peer_username(value) -> str:
     """The peer username when it is usable as one path segment, else "".
 
     slskd saves under DOWNLOADS_ROOT/<username>/..., and the username comes
-    from the peer: "/", "..", "a/../../srv" must never become a path (#248).
+    from the peer: "/", "..", "a/../../srv" must never become a path, "C:"
+    must not make a Windows drive-relative join, and control characters
+    must not forge job-log lines (#248).
     """
     name = _s(value)
-    if not name or name in (".", "..") or any(c in name for c in ("/", "\\", "\0")):
+    if not name or name in (".", "..") or any(c in name for c in "/\\:") or _has_control_char(name):
         return ""
     return name
+
+
+_DRIVE_SEGMENT = re.compile(r"^[A-Za-z]:")
 
 
 def _remote_path(value) -> Path:
     """A peer-supplied remote path as a relative path that cannot climb.
 
-    Splits on both separators and drops a drive letter and every empty, "."
-    and ".." segment (#248): "..\\srv\\x\\01.flac" becomes srv/x/01.flac.
+    Splits on both separators and drops every empty, ".", ".." or drive
+    ("C:", anywhere in the path) segment and every segment holding a control
+    character (#248): "..\\srv\\x\\01.flac" becomes srv/x/01.flac.
     """
-    raw = _s(value)
-    if len(raw) > 2 and raw[1] == ":":
-        raw = raw[2:]
-    return Path(*[p for p in re.split(r"[\\/]", raw) if p not in ("", ".", "..") and "\0" not in p])
+    return Path(*[
+        p for p in re.split(r"[\\/]", _s(value))
+        if p not in ("", ".", "..") and not _DRIVE_SEGMENT.match(p) and not _has_control_char(p)
+    ])
 
 
 def within_roots(path, allowed_roots) -> bool:
