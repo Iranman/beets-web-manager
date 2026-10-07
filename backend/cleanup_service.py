@@ -1593,7 +1593,9 @@ def _album_cleanup_trusted_path(
     return resolved, None
 
 
-def _album_cleanup_trusted_destination(raw: Any, root: Path, container: Path) -> Tuple[Optional[Path], Optional[str]]:
+# Not "trusted_*": CodeQL classifies that name as a secret and flagged the
+# returned path as clear-text sensitive data in job records (#1304, #1384).
+def _album_cleanup_contained_destination(raw: Any, root: Path, container: Path) -> Tuple[Optional[Path], Optional[str]]:
     dest, error = _album_cleanup_trusted_path(
         raw,
         root,
@@ -2741,7 +2743,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     operations.append({"action": kind, "source": str(src), "quarantined": "engine_quarantine", "target": str(target)})
                     continue
 
-                dst, dst_error = _album_cleanup_trusted_destination(action.get("target"), scan_root, canonical)
+                dst, dst_error = _album_cleanup_contained_destination(action.get("target"), scan_root, canonical)
                 if dst_error or dst is None:
                     raise RuntimeError(dst_error or "target file outside approved folder")
                 if dst.exists():

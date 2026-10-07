@@ -93,6 +93,90 @@ class MusicRootAncestorTests(_Env):
         self.assertTrue((music / "01.flac").exists())
 
 
+class StagingTextContainmentTests(_Env):
+    """CodeQL #1373: containment is decided on normalized text before any
+    filesystem call, component-wise (no sibling-prefix match)."""
+
+    def test_traversal_out_of_staging_refused(self):
+        (self.music / "a.flac").write_bytes(b"a")
+        (self.dl / "x").mkdir()  # so the kernel can walk x/.. and the path exists
+        escape = str(self.dl / "x" / ".." / ".." / "music" / "a.flac")
+        self.assertIsNone(cw._staging_contained_text(escape))
+        self.assertFalse(cw._is_safe_staging_path(escape))
+        with self.assertRaises(ValueError):
+            cw.delete_staging_file(escape)
+        self.assertTrue((self.music / "a.flac").exists())
+
+    def test_sibling_prefix_refused(self):
+        sibling = self.root / (self.dl.name + "2")
+        sibling.mkdir()
+        (sibling / "a.flac").write_bytes(b"a")
+        self.assertIsNone(cw._staging_contained_text(str(sibling / "a.flac")))
+        self.assertFalse(cw._is_safe_staging_path(sibling / "a.flac"))
+        self.assertFalse(cw._is_safe_staging_path(sibling))
+        with self.assertRaises(ValueError):
+            cw.delete_staging_file(str(sibling / "a.flac"))
+        self.assertTrue((sibling / "a.flac").exists())
+
+    def test_inside_and_root_still_accepted(self):
+        inner = self.dl / "Album" / "01.flac"
+        inner.parent.mkdir()
+        inner.write_bytes(b"a")
+        self.assertTrue(cw._is_safe_staging_path(inner))
+        self.assertTrue(cw._is_safe_staging_path(self.dl / "Album" / "x" / ".." / "01.flac"))
+        self.assertTrue(cw._is_safe_staging_path(self.dl))
+
+    @unittest.skipUnless(CAN_SYMLINK, "symlinks unavailable")
+    def test_symlink_then_dotdot_escape_refused(self):
+        """#265 QA: in ``dl/link/..`` the kernel follows ``link`` before
+        ``..``, so text normalization must not hide the symlink."""
+        sub = self.root / "outside" / "sub"
+        sub.mkdir(parents=True)
+        (sub.parent / "a.flac").write_bytes(b"a")
+        os.symlink(sub, self.dl / "link", target_is_directory=True)
+        src = self.dl / "src.flac"
+        src.write_bytes(b"s")
+        base = str(self.dl / "link") + os.sep + ".."
+        for escape in (base, base + os.sep + "a.flac"):
+            with self.subTest(escape=escape):
+                self.assertFalse(cw._is_safe_staging_path(escape))
+                self.assertFalse(cw.inspect_import_source(escape)["ok"])
+                self.assertFalse(cw.inspect_playlist_staged_track("k", "t", escape)["ok"])
+                self.assertFalse(cw.validate_playlist_staged_track("k", "t", escape)["valid"])
+                with self.assertRaises(ValueError):
+                    cw.delete_staging_file(escape)
+        with self.assertRaises(ValueError):
+            cw.create_hardlink(str(src), base + os.sep + "planted.flac")
+        self.assertFalse((sub.parent / "planted.flac").exists())
+        self.assertTrue((sub.parent / "a.flac").exists())
+
+    @unittest.skipUnless(CAN_SYMLINK, "symlinks unavailable")
+    def test_symlink_behind_missing_or_file_dotdot_refused(self):
+        """#265 QA round 4: lstat of ``dl/nx/../link`` fails (nx missing or a
+        file), yet resolve() applies ``..`` lexically and follows ``link``.
+        Main refused the first two. The third (``link`` only in a normalized
+        prefix, not in the normalized whole) also passed main's check."""
+        real = self.dl / "real" / "deep"
+        real.mkdir(parents=True)
+        os.symlink(real, self.dl / "link", target_is_directory=True)
+        (self.dl / "file.flac").write_bytes(b"f")
+        src = self.dl / "src.flac"
+        src.write_bytes(b"s")
+        sep = os.sep
+        dl = str(self.dl)
+        for hidden in (dl + sep + "nx" + sep + ".." + sep + "link",
+                       dl + sep + "file.flac" + sep + ".." + sep + "link",
+                       dl + sep + "nx" + sep + ".." + sep + "link" + sep + ".." + sep + "f.flac"):
+            with self.subTest(hidden=hidden):
+                self.assertFalse(cw._is_safe_staging_path(hidden))
+                self.assertFalse(cw._is_safe_staging_path(hidden + sep + "v.flac"))
+                self.assertFalse(cw.inspect_import_source(hidden)["ok"])
+                with self.assertRaises(ValueError):
+                    cw.create_hardlink(str(src), hidden + sep + "new.flac")
+        self.assertEqual(sorted(os.listdir(real)), [])
+        self.assertFalse((self.dl / "real" / "f.flac").exists())
+
+
 class ImportReviewFamilyTests(_Env):
     """#182 item 4: the family is checked before the Preview -> Approved CAS."""
 
