@@ -18,7 +18,7 @@ from backend.cleanup_service import _album_cleanup_file_info, _album_cleanup_qua
 from backend.app_runtime import _path_is_under, _path_under, _redact_security_text, _safe_inventory_error_message, _safe_path_component, _split_beets_multi, _split_collab_credit, _split_mbid_values
 from backend.import_guard import release_track_matches_missing_target as _guard_release_track_matches_missing_target
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
-from helpers_mb import _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release, _resolve_mb_release_id, _fetch_mb_release_candidate
+from helpers_mb import _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release, _resolve_mb_release_id, _fetch_mb_release_candidate, _mb_release_group_candidates
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsBadRequestError, BeetsNotFoundError
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
@@ -390,6 +390,38 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             log.append(line)
         return ""
 
+    def _accept_from_release_group(rgid: str, first: str) -> str:
+        """Explicit release group (#260): return only a release of ``rgid``.
+
+        Tries the ranked release, then every other release in the group.
+        Never falls back to a free search, which could pick another group."""
+        accepted = _source_accepts_release(first, "Resolved release-group candidate")
+        if accepted:
+            return accepted
+        others = [
+            c for c in _mb_release_group_candidates(rgid, log)
+            if c.get("mb_albumid") and c["mb_albumid"] != first
+        ]
+        if rank_track_count:
+            others.sort(key=lambda c: abs(int(c.get("track_count") or 0) - rank_track_count))
+        # ponytail: one tracklist fetch per release; very large groups are slow (MB rate limit).
+        for cand in others:
+            accepted = _source_accepts_release(
+                cand["mb_albumid"], "Release-group alternative release")
+            if accepted:
+                return accepted
+        if allow_provided_release_override:
+            log.append(
+                "  Manual MusicBrainz release-group override requested; using "
+                "the resolved release despite the folder tracklist mismatch."
+            )
+            return first
+        log.append(
+            f"  REFUSED: no release in the requested release-group {rgid} matches the "
+            "folder tracklist; not searching other release groups. Manual Review is required."
+        )
+        return ""
+
     if mb_input:
         input_uuid_match = re.search(
             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -404,22 +436,15 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                 track_count=rank_track_count,
             )
             if rg_resolved:
-                accepted = _source_accepts_release(
-                    rg_resolved, "Resolved release-group candidate")
-                if accepted:
-                    return accepted
-                if allow_provided_release_override:
-                    log.append(
-                        "  Manual MusicBrainz release-group override requested; using "
-                        "the resolved release despite the folder tracklist mismatch."
-                    )
-                    return rg_resolved
-                log.append("  Searching for a replacement MusicBrainz release from folder tracks…")
-            else:
-                log.append(
-                    f"  WARN: release-group {input_uuid_match.group(0).lower()} "
-                    "did not resolve to a release with tracks"
-                )
+                return _accept_from_release_group(
+                    input_uuid_match.group(0).lower(), rg_resolved)
+            # Fail closed: an explicit release group never falls back to a
+            # free search that could return another group (#260).
+            log.append(
+                f"  WARN: release-group {input_uuid_match.group(0).lower()} "
+                "did not resolve to a release with tracks"
+            )
+            return ""
 
         resolved = _resolve_mb_release_id(mb_input, log) or ""
         if resolved and _mb_release_has_tracks(resolved):
@@ -437,16 +462,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             rg_resolved = _resolve_release_group_to_release(
                 resolved, log, year=year, track_count=track_count)
             if rg_resolved:
-                accepted = _source_accepts_release(rg_resolved, "Resolved release-group candidate")
-                if accepted:
-                    return accepted
-                if allow_provided_release_override:
-                    log.append(
-                        "  Manual MusicBrainz release-group override requested; using "
-                        "the resolved release despite the folder tracklist mismatch."
-                    )
-                    return rg_resolved
-                log.append("  Searching for a replacement MusicBrainz release from folder tracks…")
+                return _accept_from_release_group(resolved, rg_resolved)
             log.append(f"  WARN: {resolved} did not resolve to a release with tracks")
 
     log.append("  Searching MusicBrainz for a release ID…")

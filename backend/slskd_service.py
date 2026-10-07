@@ -12,7 +12,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from backend.app_runtime import _app_logger, _redact_security_text, AUDIO_EXT, DOWNLOADS_ROOT, SLSKD_URL, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
-from backend.slskd import build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl
+from backend.slskd import build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl, peer_download_dir as _slskd_peer_download_dir, safe_peer_username as _slskd_safe_peer_username, within_roots as _slskd_within_roots
+import backend.app_runtime as _app_runtime
 
 # ── ARCH-001 extracted code ──
 
@@ -442,6 +443,12 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
     candidates, skipped = _slskd_build_album_candidates(
         responses, artist, album, year, track_count, AUDIO_EXT, skip_candidates
     )
+    # #248: the username becomes a local path segment; refuse the peer
+    # rather than let "/", ".." or "a/../srv" pick the directory.
+    usable = [c for c in candidates if _slskd_safe_peer_username(c["username"])]
+    if len(usable) != len(candidates):
+        log.append(f"  [slskd] Refused {len(candidates) - len(usable)} candidate(s) with an unsafe peer username.")
+        candidates = usable
 
     if not candidates:
         if skipped:
@@ -477,7 +484,7 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
                 + (f" (top counts: {counts})" if counts else "")
             )
 
-    username = best_resp.get("username", "")
+    username = best["username"]
     log.append(f"  [slskd] Best peer: @{username} — {len(best_afiles)} file(s) from '{best_dir_remote}' (score {best_score})")
 
     queue_afiles = best_afiles
@@ -543,7 +550,7 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
             best_dir_remote = best["dir"]
             best_afiles = best["files"]
             best_resp = best["resp"]
-            username = best_resp.get("username", "")
+            username = best["username"]
             log.append(
                 f"  [slskd] Switched to @{username or '?'} for missing-track score: "
                 f"{best_wanted_count}/{len(wanted_tracks)} requested track(s), "
@@ -586,19 +593,16 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
         raise RuntimeError("Failed to queue any downloads from slskd")
     log.append(f"  [slskd] Queued {len(queued)} file(s)")
 
-    # Compute expected local directory from the remote best_dir path
-    # slskd saves to: DOWNLOADS_ROOT / username / remote_dir (with drive letter stripped)
-    rdir = best_dir_remote.replace("\\", "/")
-    if len(rdir) > 2 and rdir[1] == ":":
-        rdir = rdir[2:]
-    rdir = rdir.lstrip("/")
-    expected_dir = str(DOWNLOADS_ROOT / username / rdir)
+    # slskd saves to DOWNLOADS_ROOT / username / remote_dir (#248: normalised).
+    expected_dir = str(_slskd_peer_download_dir(DOWNLOADS_ROOT, username, best_dir_remote))
     return username, queued, expected_dir, best_dir_remote
 
 
 def _slskd_download_candidate_roots(username: str, remote_files: list) -> List[Path]:
     """Return likely local roots for queued SLSKD remote files."""
-    return _slskd_download_candidate_roots_impl(DOWNLOADS_ROOT, username, remote_files)
+    return _slskd_download_candidate_roots_impl(
+        DOWNLOADS_ROOT, username, remote_files, _app_runtime.DOWNLOADS_ALLOWED_ROOTS
+    )
 
 
 def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list) -> None:
@@ -626,7 +630,7 @@ def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list)
 def _slskd_cleanup_failed_candidate_files(username: str, remote_files: list, log: list) -> None:
     """Remove only queued audio files from a failed SLSKD candidate under downloads."""
     _slskd_cleanup_failed_candidate_files_impl(
-        DOWNLOADS_ROOT, username, remote_files, AUDIO_EXT, log
+        DOWNLOADS_ROOT, username, remote_files, AUDIO_EXT, log, _app_runtime.DOWNLOADS_ALLOWED_ROOTS
     )
 
 
@@ -754,13 +758,6 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
         return int(m.group(1)) if m else 0
 
     expected_nums = {n for n in (_track_num(x) for x in queued_names) if n}
-    album_norm = re.sub(r'[^a-z0-9]', '', album.lower())
-    artist_norm = re.sub(r'[^a-z0-9]', '', artist.lower())
-    queued_stem_norms = {
-        re.sub(r'[^a-z0-9]', '', Path(name).stem.lower())
-        for name in queued_names
-        if name
-    }
 
     def _safe_dir_name(value: str) -> str:
         return re.sub(r'[\\/:*?"<>|]', '_', str(value or "")).strip()
@@ -830,7 +827,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             album,
             _safe_dir_name(album),
         ):
-            if name:
+            if name and _slskd_within_roots(DOWNLOADS_ROOT / name, _app_runtime.DOWNLOADS_ALLOWED_ROOTS):
                 _root_add(guesses, DOWNLOADS_ROOT / name)
         for folder in guesses:
             if not folder.is_dir():
@@ -859,104 +856,18 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             return str(folder), filtered
         return "", []
 
-    def _scan_album_folder_fallback(roots: List[Path]) -> tuple:
-        if not album_norm:
-            return "", []
-        min_files = _min_expected_files()
-        best = None
-        for root in roots:
-            try:
-                if not root.is_dir():
-                    continue
-                for folder in [root] + [p for p in root.rglob("*") if p.is_dir()]:
-                    f_norm = re.sub(r'[^a-z0-9]', '', str(folder).lower())
-                    if album_norm not in f_norm:
-                        continue
-                    if artist_norm and artist_norm not in f_norm:
-                        # Album title alone is often enough, but prefer artist hits.
-                        artist_hit = False
-                    else:
-                        artist_hit = True
-                    files = _folder_audio_files(folder)
-                    queued_matches = [f for f in files if f.name.lower() in queued_names]
-                    if len(queued_matches) >= min_files:
-                        candidate_files = sorted(queued_matches, key=lambda p: p.name.lower())
-                    else:
-                        candidate_files = files
-                    if len(files) < min_files:
-                        continue
-                    nums = {n for n in (_track_num(f.name) for f in files) if n}
-                    overlap = len(nums & expected_nums) if expected_nums else 0
-                    if expected_nums and overlap < min(len(expected_nums), min_files):
-                        continue
-                    score = (1000 if artist_hit else 0) + len(candidate_files) * 10 + overlap
-                    if best is None or score > best[0]:
-                        best = (score, folder, candidate_files)
-            except Exception as ex:
-                log.append(f"  [slskd] WARN: album-folder search failed under {root}: {ex}")
-                continue
-        if best:
-            _, folder, files = best
-            filtered = _wanted_filtered_files(folder, files, "album folder fallback")
-            if not filtered:
-                return "", []
-            log.append(f"  [slskd] Located album folder fallback: {len(filtered)} queued file(s) at {folder}")
-            return str(folder), filtered
-        return "", []
-
-    def _scan_single_track_fallback(roots: List[Path]) -> tuple:
-        if len(queued_names) != 1 or (track_count and track_count != 1):
-            return "", []
-        if not album_norm and not queued_stem_norms:
-            return "", []
-        newest_allowed = time.time() - (2 * 60 * 60)
-        best = None
-        for root in roots:
-            try:
-                if not root.is_dir():
-                    continue
-                files = [
-                    f for f in root.rglob("*")
-                    if f.is_file() and f.suffix.lower() in audio_exts
-                ]
-            except Exception as ex:
-                log.append(f"  [slskd] WARN: single-track search failed under {root}: {ex}")
-                continue
-            for f in files:
-                try:
-                    if f.stat().st_mtime < newest_allowed:
-                        continue
-                except Exception:
-                    continue
-                hay = re.sub(r'[^a-z0-9]', '', f"{f.parent} {f.stem}".lower())
-                title_hit = bool(album_norm and album_norm in hay)
-                if not title_hit:
-                    title_hit = any(stem and (stem in hay or hay in stem) for stem in queued_stem_norms)
-                if not title_hit:
-                    continue
-                artist_hit = bool(artist_norm and artist_norm in hay)
-                if artist_norm and not artist_hit and not any(stem and artist_norm in stem for stem in queued_stem_norms):
-                    continue
-                score = (1000 if artist_hit else 0) + int(f.stat().st_mtime - newest_allowed)
-                if best is None or score > best[0]:
-                    best = (score, f)
-        if best:
-            f = best[1]
-            filtered = _wanted_filtered_files(f.parent, [f], "single-track fallback")
-            if not filtered:
-                return "", []
-            log.append(f"  [slskd] Located recent single-track fallback at {f.parent}: {f.name}")
-            return str(f.parent), filtered
-        return "", []
-
     # Security F1: only the configured download roots, never their parent,
     # "/" or fixed paths; an unsafe DOWNLOADS_ROOT drops out (fail closed).
-    from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, _path_is_under
+    # #248: the peer-derived roots must resolve under DOWNLOADS_ALLOWED_ROOTS.
+    download_roots = _app_runtime.DOWNLOADS_ALLOWED_ROOTS
+    static_roots = (*download_roots, *_app_runtime.TORRENT_SOURCE_ROOTS)
     roots: List[Path] = []
-    user_root = DOWNLOADS_ROOT / username
-    for raw in (expected, user_root, *DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS):
-        if raw and any(_path_is_under(Path(str(raw)), base) for base in (*DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS)):
+    peer = _slskd_safe_peer_username(username)
+    for raw in (expected, DOWNLOADS_ROOT / peer if peer else None):
+        if raw and _slskd_within_roots(raw, download_roots):
             _root_add(roots, raw)
+    for raw in static_roots:
+        _root_add(roots, raw)
 
     folder, files = _scan_direct_album_dirs()
     if files:
@@ -968,7 +879,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
     deadline = time.time() + 90
     logged_wait = False
     static_hint_logged = False
-    while True:
+    while time.time() < deadline:
         hint_paths = _transfer_hint_paths()
         if hint_paths and not static_hint_logged:
             preview = ", ".join(str(p) for p in hint_paths[:3])
@@ -978,7 +889,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
         hint_roots = roots[:]
         for hp in hint_paths:
             for candidate in (hp, hp.parent):
-                if any(_path_is_under(candidate, base) for base in roots):
+                if _slskd_within_roots(candidate, static_roots):
                     _root_add(hint_roots, candidate)
         folder, files = _scan_exact(hint_roots)
         if files:
@@ -988,14 +899,8 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             logged_wait = True
         time.sleep(3)
 
-    folder, files = _scan_album_folder_fallback(roots)
-    if files:
-        return folder, files
-
-    folder, files = _scan_single_track_fallback(roots)
-    if files:
-        return folder, files
-
+    # #251: bounded; the caller treats "no files" as a failed candidate.
+    log.append("  [slskd] Gave up waiting for queued files to appear after 90s.")
     log.append(
         "  [slskd] Could not locate completed queued files. "
         f"Checked transfer hints, expected dir, {DOWNLOADS_ROOT} and the torrent source roots."
@@ -1027,36 +932,6 @@ def _slskd_wait_downloads(username: str, remote_files: list, log: list,
         except Exception:
             return 0
 
-    def _remote_parent(remote_name: str) -> Path:
-        raw = _s(remote_name).replace("\\", "/")
-        if len(raw) > 2 and raw[1] == ":":
-            raw = raw[2:]
-        raw = raw.lstrip("/")
-        return Path(raw).parent
-
-    def _download_roots_for_pending() -> List[Path]:
-        roots: List[Path] = []
-
-        def _add(raw) -> None:
-            if not raw:
-                return
-            try:
-                p = Path(str(raw))
-            except Exception:
-                return
-            if p not in roots:
-                roots.append(p)
-
-        for remote in remote_files:
-            parent = _remote_parent(remote)
-            if str(parent) in ("", "."):
-                continue
-            _add(DOWNLOADS_ROOT / username / parent)
-            _add(DOWNLOADS_ROOT / username / parent.name)
-            _add(DOWNLOADS_ROOT / parent)
-            _add(DOWNLOADS_ROOT / parent.name)
-        return roots
-
     def _already_on_disk() -> set:
         if not pending:
             return set()
@@ -1067,7 +942,7 @@ def _slskd_wait_downloads(username: str, remote_files: list, log: list,
             return set()
 
         found: set = set()
-        for root in _download_roots_for_pending():
+        for root in _slskd_download_candidate_roots(username, remote_files):
             try:
                 if root.is_file():
                     files = [root]
@@ -1218,11 +1093,8 @@ def _slskd_wait_downloads(username: str, remote_files: list, log: list,
         )
 
     # Re-compute local dir from first file
-    first = list(remote_files)[0].replace("\\", "/")
-    if len(first) > 2 and first[1] == ":":
-        first = first[2:]
-    first = first.lstrip("/")
-    return str(DOWNLOADS_ROOT / username / Path(first).parent), completed_snapshots
+    first = _slskd_peer_download_dir(DOWNLOADS_ROOT, username, list(remote_files)[0]).parent
+    return str(first), completed_snapshots
 
 
 _DOWNLOAD_METHOD_ALIASES = {
