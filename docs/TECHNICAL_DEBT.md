@@ -129,15 +129,15 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 
 ## ARCH-022 S1 Mutation Containment Leftovers (PR #174)
 
-- Affected area: `backend/composite_workflows.py`, `backend/import_service.py`, `backend/playlist_service.py`, the transaction Approve UI.
+- Affected area: `backend/composite_workflows.py`, `backend/import_service.py`, `backend/playlist_service.py`, `backend/transaction_engine.py`, `routes_maintenance.py`.
 - Evidence: the Wave 0 S1 containment fixes closed the unsafe paths by refusing or narrowing them. These gaps remain:
   - The import template pre-rename and the import Step 0b orphan pre-cleanup log `not_supported`. They need an in-library rename and a rows-only cleanup through the engine.
-  - `safe_rename_library_folder` asks the engine's folder-cleanup plan to refuse folders the Beets DB still references. That check is skipped when `BEETS_LIBRARY_DB` is unset (fails open); it should go through the adapter instead of the DB file.
+  - `safe_rename_library_folder` asks the engine's folder-cleanup plan (`create_folder_cleanup_plan`) to refuse folders the Beets DB still references. `_library_cleanup_db_refs_beneath_folder` returns no references when `BEETS_LIBRARY_DB` is unset or the file is missing (fails open), and otherwise opens the Beets SQLite file directly. It should ask the adapter instead.
   - `apply_folder_cleanup` marks any plan Completed and only handles `remove_empty` with a bare `rmdir`; it has no approval check, claim or audit of what it did.
   - Playlist media cleanup is rows-only by design: files stay, and rollback is `not_supported` (the files can be re-imported). An engine-owned quarantine would make it restorable.
   - `playlist_service._playlist_normalize_staged_file` moves staged downloads with `shutil.move` outside the staging helpers (staging-only, never `MUSIC_ROOT`).
-  - The generic Approve button sends no body, so an album-cleanup plan that deletes files (needs `confirm_delete_files: "DELETE ALBUM FILES"`) cannot be approved from the UI.
-- Desired state: each of these runs through the canonical preview/approve/apply/audit workflow, with a UI confirmation for file deletion.
+  - Approving an `album_cleanup_v1` plan with `delete_files` works from the UI since #174: Library Changes opens a dialog that stays disabled until `DELETE ALBUM FILES` is typed and sends `confirm_delete_files`. Applying it through `POST /api/transactions/<id>/apply` still returns 409, because `album_cleanup_v1` is not in `routes_maintenance._ENGINE_FAMILIES` (#187 F-4).
+- Desired state: each of these runs through the canonical preview/approve/apply/audit workflow.
 - Priority: P2. Status: Open.
 
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)

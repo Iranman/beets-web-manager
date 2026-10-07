@@ -54,7 +54,19 @@ _DEFAULT_MAX_REDIRECTS = int(os.environ.get("BEETS_OUTBOUND_MAX_REDIRECTS", "5")
 # every redirect hop, and the whole body read). The per-operation timeout
 # above only bounds a single socket wait, so a server dripping one byte per
 # few seconds could otherwise hold a worker for hours (SEC-7).
-_DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS", "60") or "60")
+def _total_timeout_setting() -> float:
+    raw = os.environ.get("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS", "") or "60"
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not (0 < value < float("inf")):  # also rejects nan
+        LOG.warning("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS must be a positive number; using 60.")
+        return 60.0
+    return value
+
+
+_DEFAULT_TOTAL_TIMEOUT = _total_timeout_setting()
 _READ_CHUNK = 64 * 1024
 _ORIGINAL_URLOPEN_ATTR = "_beets_original_urlopen"
 _INSTALLED_ATTR = "_beets_secure_urlopen_installed"
