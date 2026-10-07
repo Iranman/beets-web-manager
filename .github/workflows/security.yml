@@ -38,7 +38,7 @@ jobs:
         # `beets` is genuinely importable -- CI-test-only, not part of the
         # Web Manager image's own requirements.txt. Pinned to the same
         # version requirements-dev.txt uses for local test fixtures.
-        run: pip install beets==2.13.1
+        run: pip install beets==2.14.1
 
       - name: Set a fake CI-only web auth token
         # See unit-tests.yml for why this is a $GITHUB_ENV append rather
