@@ -478,6 +478,37 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
     return "other", raw_error
 
 
+def controlled_apply_error(ex: BaseException, operation_id: str, *,
+                           refused: str = "The engine refused the operation.",
+                           busy: str = "Another operation is using these library items; nothing was changed. "
+                                       "Try again shortly.",
+                           failed: str = "The operation failed.") -> Tuple[Dict[str, Any], int]:
+    """Map an exception raised by a transaction apply (or rollback) executor
+    to a controlled (JSON body, HTTP status) -- shared by every engine family
+    on the generic /api/transactions/<id>/apply route (#220).
+
+    Beets unavailable -> 503, engine refusal -> 400, a held lock or lock
+    timeout on a still-Approved transaction -> 409 ``resource_busy``,
+    anything else -> a fixed 500. The body never carries exception text (it
+    can carry paths or raw engine bodies); ``mutated: False`` is reported
+    only when the transaction is provably untouched (still Approved, so the
+    executor never claimed it)."""
+    try:
+        untouched = composite_workflows.get_default_store().get(operation_id).get("status") == "Approved"
+    except Exception:
+        untouched = False
+    body: Dict[str, Any] = {"ok": False, **({"mutated": False} if untouched else {})}
+    if isinstance(ex, BeetsUnavailableError):
+        return {**body, "code": getattr(ex, "error_code", "") or "beets_unavailable",
+                "error": "Beets engine is unavailable."}, 503
+    if isinstance(ex, BeetsError):
+        return {**body, "code": getattr(ex, "error_code", "") or "beets_error", "error": refused}, 400
+    if isinstance(ex, (ResourceLockConflictError, TimeoutError)) and untouched:
+        return {**body, "code": "resource_busy", "error": busy}, 409
+    _app_logger.exception("transaction %s failed (%s)", operation_id, type(ex).__name__)
+    return {**body, "code": "apply_failed", "error": failed}, 500
+
+
 def album_cleanup_apply_response(operation_id: str) -> Tuple[Dict[str, Any], int]:
     """Apply an Approved album cleanup and map the outcome to (JSON body,
     HTTP status) for both apply routes (/api/albums/cleanup/apply and the
@@ -490,22 +521,12 @@ def album_cleanup_apply_response(operation_id: str) -> Tuple[Dict[str, Any], int
     try:
         res = composite_workflows.apply_album_cleanup(operation_id)
     except Exception as ex:
-        try:
-            untouched = composite_workflows.get_default_store().get(operation_id).get("status") == "Approved"
-        except Exception:
-            untouched = False
-        body: Dict[str, Any] = {"ok": False, "error_kind": "other", **({"mutated": False} if untouched else {})}
-        if isinstance(ex, BeetsUnavailableError):
-            return {**body, "code": getattr(ex, "error_code", "") or "beets_unavailable",
-                    "error": "Beets engine is unavailable."}, 503
-        if isinstance(ex, BeetsError):
-            return {**body, "code": getattr(ex, "error_code", "") or "beets_error",
-                    "error": "The engine refused the album cleanup."}, 400
-        if isinstance(ex, (ResourceLockConflictError, TimeoutError)) and untouched:
-            return {**body, "code": "resource_busy",
-                    "error": "Another operation is using this album; nothing was changed. Try again shortly."}, 409
-        _app_logger.exception("album cleanup apply failed (%s)", type(ex).__name__)
-        return {**body, "code": "apply_failed", "error": "Album cleanup apply failed."}, 500
+        body, status = controlled_apply_error(
+            ex, operation_id,
+            refused="The engine refused the album cleanup.",
+            busy="Another operation is using this album; nothing was changed. Try again shortly.",
+            failed="Album cleanup apply failed.")
+        return {**body, "error_kind": "other"}, status
     if res.get("ok"):
         return res, 200
     refused = res.get("code") in ("not_approved", "already_applied")

@@ -8823,14 +8823,35 @@
    "dependencies": []
   },
   {
-   "name": "album_cleanup_apply_response",
+   "name": "controlled_apply_error",
    "module": "backend/cleanup_service.py",
    "lines": [
     481,
-    521
+    509
    ],
-   "size": 41,
-   "body_lines": 32,
+   "size": 29,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_item_file_replacement_response",
+    "album_cleanup_apply_response"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "album_cleanup_apply_response",
+   "module": "backend/cleanup_service.py",
+   "lines": [
+    512,
+    542
+   ],
+   "size": 31,
+   "body_lines": 22,
    "route": null,
    "mutation_capable": true,
    "domain": "CLEANUP",
@@ -8842,15 +8863,16 @@
    ],
    "caller_count": 2,
    "dependencies": [
-    "_classify_album_cleanup_apply_failure"
+    "_classify_album_cleanup_apply_failure",
+    "controlled_apply_error"
    ]
   },
   {
    "name": "_artist_alias_key",
    "module": "backend/cleanup_service.py",
    "lines": [
-    524,
-    525
+    545,
+    546
    ],
    "size": 2,
    "body_lines": 1,
@@ -8875,8 +8897,8 @@
    "name": "_cleanup_artist_alias_source_dirs",
    "module": "backend/cleanup_service.py",
    "lines": [
-    528,
-    548
+    549,
+    569
    ],
    "size": 21,
    "body_lines": 19,
@@ -8898,8 +8920,8 @@
    "name": "_resolved_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    567,
-    571
+    588,
+    592
    ],
    "size": 5,
    "body_lines": 4,
@@ -8921,8 +8943,8 @@
    "name": "_folder_clean_root",
    "module": "backend/cleanup_service.py",
    "lines": [
-    574,
-    592
+    595,
+    613
    ],
    "size": 19,
    "body_lines": 8,
@@ -8946,8 +8968,8 @@
    "name": "_is_top_level_music_artist_folder",
    "module": "backend/cleanup_service.py",
    "lines": [
-    595,
-    598
+    616,
+    619
    ],
    "size": 4,
    "body_lines": 3,
@@ -8968,8 +8990,8 @@
    "name": "_scan_no_audio_folder_candidates",
    "module": "backend/cleanup_service.py",
    "lines": [
-    601,
-    727
+    622,
+    748
    ],
    "size": 127,
    "body_lines": 125,
@@ -8993,8 +9015,8 @@
    "name": "_no_audio_tree_still_safe",
    "module": "backend/cleanup_service.py",
    "lines": [
-    730,
-    740
+    751,
+    761
    ],
    "size": 11,
    "body_lines": 8,
@@ -9013,8 +9035,8 @@
    "name": "_delete_no_audio_folders",
    "module": "backend/cleanup_service.py",
    "lines": [
-    743,
-    839
+    764,
+    860
    ],
    "size": 97,
    "body_lines": 88,
@@ -9040,8 +9062,8 @@
    "name": "_load_rgid_resolutions",
    "module": "backend/cleanup_service.py",
    "lines": [
-    842,
-    856
+    863,
+    877
    ],
    "size": 15,
    "body_lines": 8,
@@ -9063,8 +9085,8 @@
    "name": "_save_rgid_resolutions",
    "module": "backend/cleanup_service.py",
    "lines": [
-    859,
-    869
+    880,
+    890
    ],
    "size": 11,
    "body_lines": 10,
@@ -9084,8 +9106,8 @@
    "name": "_set_rgid_resolution",
    "module": "backend/cleanup_service.py",
    "lines": [
-    872,
-    884
+    893,
+    905
    ],
    "size": 13,
    "body_lines": 11,
@@ -9108,8 +9130,8 @@
    "name": "_clear_rgid_resolution",
    "module": "backend/cleanup_service.py",
    "lines": [
-    887,
-    892
+    908,
+    913
    ],
    "size": 6,
    "body_lines": 5,
@@ -9133,8 +9155,8 @@
    "name": "_clean_remove_orphaned_items",
    "module": "backend/cleanup_service.py",
    "lines": [
-    895,
-    947
+    916,
+    968
    ],
    "size": 53,
    "body_lines": 45,
@@ -9158,8 +9180,8 @@
    "name": "_clean_remove_empty_albums",
    "module": "backend/cleanup_service.py",
    "lines": [
-    950,
-    1011
+    971,
+    1032
    ],
    "size": 62,
    "body_lines": 59,
@@ -9182,8 +9204,8 @@
    "name": "_folder_cleanup_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1014,
-    1028
+    1035,
+    1049
    ],
    "size": 15,
    "body_lines": 14,
@@ -9208,8 +9230,8 @@
    "name": "_folder_cleanup_is_approved_root",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1031,
-    1040
+    1052,
+    1061
    ],
    "size": 10,
    "body_lines": 4,
@@ -9229,8 +9251,8 @@
    "name": "_folder_cleanup_file_inventory",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1043,
-    1061
+    1064,
+    1082
    ],
    "size": 19,
    "body_lines": 18,
@@ -9250,8 +9272,8 @@
    "name": "_folder_cleanup_is_empty",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1064,
-    1073
+    1085,
+    1094
    ],
    "size": 10,
    "body_lines": 9,
@@ -9270,8 +9292,8 @@
    "name": "_folder_cleanup_db_items",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1076,
-    1120
+    1097,
+    1141
    ],
    "size": 45,
    "body_lines": 44,
@@ -9297,8 +9319,8 @@
    "name": "_folder_cleanup_compare_files",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1123,
-    1177
+    1144,
+    1198
    ],
    "size": 55,
    "body_lines": 54,
@@ -9320,8 +9342,8 @@
    "name": "_folder_cleanup_token",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1180,
-    1182
+    1201,
+    1203
    ],
    "size": 3,
    "body_lines": 2,
@@ -9341,8 +9363,8 @@
    "name": "_canonical_folder_name",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1185,
-    1196
+    1206,
+    1217
    ],
    "size": 12,
    "body_lines": 7,
@@ -9361,8 +9383,8 @@
    "name": "_folder_cleanup_review_for",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1199,
-    1312
+    1220,
+    1333
    ],
    "size": 114,
    "body_lines": 113,
@@ -9390,8 +9412,8 @@
    "name": "_folder_cleanup_merge_preview",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1315,
-    1358
+    1336,
+    1379
    ],
    "size": 44,
    "body_lines": 43,
@@ -9416,8 +9438,8 @@
    "name": "_album_cleanup_save_report",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1381,
-    1391
+    1402,
+    1412
    ],
    "size": 11,
    "body_lines": 10,
@@ -9439,8 +9461,8 @@
    "name": "_album_cleanup_running_job",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1394,
-    1402
+    1415,
+    1423
    ],
    "size": 9,
    "body_lines": 8,
@@ -9463,8 +9485,8 @@
    "name": "_album_cleanup_safe_component",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1405,
-    1408
+    1426,
+    1429
    ],
    "size": 4,
    "body_lines": 3,
@@ -9485,8 +9507,8 @@
    "name": "_album_cleanup_norm_text",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1411,
-    1415
+    1432,
+    1436
    ],
    "size": 5,
    "body_lines": 4,
@@ -9509,8 +9531,8 @@
    "name": "_album_cleanup_parse_folder_name",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1418,
-    1449
+    1439,
+    1470
    ],
    "size": 32,
    "body_lines": 31,
@@ -9531,8 +9553,8 @@
    "name": "_album_cleanup_canonical_name",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1452,
-    1462
+    1473,
+    1483
    ],
    "size": 11,
    "body_lines": 10,
@@ -9554,8 +9576,8 @@
    "name": "_album_cleanup_row_value",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1465,
-    1471
+    1486,
+    1492
    ],
    "size": 7,
    "body_lines": 6,
@@ -9574,8 +9596,8 @@
    "name": "_album_cleanup_abs_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1474,
-    1482
+    1495,
+    1503
    ],
    "size": 9,
    "body_lines": 8,
@@ -9596,8 +9618,8 @@
    "name": "_album_cleanup_trusted_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1485,
-    1530
+    1506,
+    1551
    ],
    "size": 46,
    "body_lines": 37,
@@ -9624,8 +9646,8 @@
    "name": "_album_cleanup_trusted_destination",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1533,
-    1552
+    1554,
+    1573
    ],
    "size": 20,
    "body_lines": 19,
@@ -9648,8 +9670,8 @@
    "name": "_album_cleanup_db_index",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1555,
-    1603
+    1576,
+    1624
    ],
    "size": 49,
    "body_lines": 48,
@@ -9673,8 +9695,8 @@
    "name": "_album_cleanup_majority",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1606,
-    1619
+    1627,
+    1640
    ],
    "size": 14,
    "body_lines": 13,
@@ -9696,8 +9718,8 @@
    "name": "_album_cleanup_file_inventory",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1622,
-    1643
+    1643,
+    1664
    ],
    "size": 22,
    "body_lines": 21,
@@ -9717,8 +9739,8 @@
    "name": "_album_cleanup_file_hash",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1646,
-    1666
+    1667,
+    1687
    ],
    "size": 21,
    "body_lines": 20,
@@ -9739,8 +9761,8 @@
    "name": "_album_cleanup_verified_same_file",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1669,
-    1676
+    1690,
+    1697
    ],
    "size": 8,
    "body_lines": 7,
@@ -9764,8 +9786,8 @@
    "name": "_album_cleanup_safe_artwork_relative",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1679,
-    1695
+    1700,
+    1716
    ],
    "size": 17,
    "body_lines": 16,
@@ -9788,8 +9810,8 @@
    "name": "_album_cleanup_merge_plan",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1698,
-    1801
+    1719,
+    1822
    ],
    "size": 104,
    "body_lines": 103,
@@ -9815,8 +9837,8 @@
    "name": "_album_cleanup_folder_record",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1804,
-    1875
+    1825,
+    1896
    ],
    "size": 72,
    "body_lines": 71,
@@ -9843,8 +9865,8 @@
    "name": "_album_cleanup_issue_id",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1878,
-    1880
+    1899,
+    1901
    ],
    "size": 3,
    "body_lines": 2,
@@ -9865,8 +9887,8 @@
    "name": "_album_cleanup_artwork_to_move",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1883,
-    1884
+    1904,
+    1905
    ],
    "size": 2,
    "body_lines": 1,
@@ -9885,8 +9907,8 @@
    "name": "_album_cleanup_source_audio_count",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1887,
-    1892
+    1908,
+    1913
    ],
    "size": 6,
    "body_lines": 5,
@@ -9906,8 +9928,8 @@
    "name": "_album_cleanup_canonical_candidates",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1895,
-    1915
+    1916,
+    1936
    ],
    "size": 21,
    "body_lines": 20,
@@ -9930,8 +9952,8 @@
    "name": "_album_cleanup_existing_canonical_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1918,
-    1928
+    1939,
+    1949
    ],
    "size": 11,
    "body_lines": 10,
@@ -9952,8 +9974,8 @@
    "name": "_album_cleanup_safe_reason",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1931,
-    1941
+    1952,
+    1962
    ],
    "size": 11,
    "body_lines": 10,
@@ -9972,8 +9994,8 @@
    "name": "_album_cleanup_classification_reason",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1944,
-    1967
+    1965,
+    1988
    ],
    "size": 24,
    "body_lines": 22,
@@ -9994,8 +10016,8 @@
    "name": "_album_cleanup_build_issue",
    "module": "backend/cleanup_service.py",
    "lines": [
-    1970,
-    2105
+    1991,
+    2126
    ],
    "size": 136,
    "body_lines": 135,
@@ -10025,8 +10047,8 @@
    "name": "_album_folder_cleanup_plan",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2108,
-    2278
+    2129,
+    2299
    ],
    "size": 171,
    "body_lines": 168,
@@ -10053,8 +10075,8 @@
    "name": "_album_cleanup_quality_tuple",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2281,
-    2290
+    2302,
+    2311
    ],
    "size": 10,
    "body_lines": 9,
@@ -10075,8 +10097,8 @@
    "name": "_album_cleanup_remove_empty_tree",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2293,
-    2332
+    2314,
+    2353
    ],
    "size": 40,
    "body_lines": 39,
@@ -10097,8 +10119,8 @@
    "name": "_album_cleanup_file_info",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2335,
-    2348
+    2356,
+    2369
    ],
    "size": 14,
    "body_lines": 13,
@@ -10119,8 +10141,8 @@
    "name": "_album_cleanup_apply_plan",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2351,
-    2486
+    2372,
+    2507
    ],
    "size": 136,
    "body_lines": 135,
@@ -10148,8 +10170,8 @@
    "name": "_album_cleanup_issue_identity_blockers",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2489,
-    2502
+    2510,
+    2523
    ],
    "size": 14,
    "body_lines": 13,
@@ -10171,8 +10193,8 @@
    "name": "_album_cleanup_item_id_for_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2505,
-    2520
+    2526,
+    2541
    ],
    "size": 16,
    "body_lines": 5,
@@ -10191,8 +10213,8 @@
    "name": "_album_cleanup_apply_issue",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2523,
-    2825
+    2544,
+    2846
    ],
    "size": 303,
    "body_lines": 299,
@@ -10223,8 +10245,8 @@
    "name": "_album_folder_cleanup_apply_safe",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2834,
-    2966
+    2855,
+    2987
    ],
    "size": 133,
    "body_lines": 120,
@@ -28054,10 +28076,10 @@
    "module": "backend/transaction_service.py",
    "lines": [
     217,
-    263
+    265
    ],
-   "size": 47,
-   "body_lines": 46,
+   "size": 49,
+   "body_lines": 48,
    "route": null,
    "mutation_capable": true,
    "domain": "TRANSACTIONS",
@@ -33254,7 +33276,7 @@
     741
    ],
    "size": 12,
-   "body_lines": 8,
+   "body_lines": 7,
    "route": null,
    "mutation_capable": false,
    "domain": "REPLACEMENT",
@@ -33265,7 +33287,9 @@
     "api_transaction_rollback"
    ],
    "caller_count": 2,
-   "dependencies": []
+   "dependencies": [
+    "controlled_apply_error"
+   ]
   },
   {
    "name": "api_transaction_apply",
