@@ -528,7 +528,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         )
                         aldir, transfer_hints = _slskd_wait_downloads(
                             username, queued, log, timeout=600, cancel_event=cancel_event)
-                        time.sleep(3)
+                        if cancel_event is None:
+                            time.sleep(3)
+                        elif cancel_event.wait(3):
+                            raise RuntimeError("cancelled")
                         aldir, afiles = _find_slskd_downloaded_files(
                             username, queued, expected or aldir, log,
                             artist=artist, album=album, track_count=download_expected_count,

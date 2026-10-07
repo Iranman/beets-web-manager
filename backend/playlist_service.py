@@ -4177,11 +4177,16 @@ def _playlist_download_missing_tracks(
                 else:
                     continue
             except Exception as ex:
+                if _cancelled():
+                    # #251: a cancel is not a source failure; the track stays
+                    # missing so the checkpoint resumes it.
+                    _playlist_set_track_status(
+                        state, trk, "missing", method=method, message="stopped before download finished")
+                    log(f"  {_download_method_label(method)} stopped: job cancelled")
+                    break
                 _playlist_set_track_status(
                     state, trk, "source_failed", method=method, message=str(ex))
                 log(f"  {_download_method_label(method)} failed: {ex}")
-                if _cancelled():
-                    break
                 continue
 
             if not new_files:

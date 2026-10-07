@@ -14,16 +14,18 @@ import backend.slskd_service as slskd
 
 
 class _CancelOnWait(threading.Event):
-    """The user presses Cancel while the job waits."""
+    """The user presses Cancel during the ``fire_on``-th wait."""
 
-    def __init__(self):
+    def __init__(self, fire_on=1):
         super().__init__()
         self.waits = 0
+        self.fire_on = fire_on
 
     def wait(self, timeout=None):
         self.waits += 1
-        self.set()
-        return True
+        if self.waits >= self.fire_on:
+            self.set()
+        return self.is_set()
 
 
 class AcquisitionCancelDuringSlskd(unittest.TestCase):
@@ -37,7 +39,8 @@ class AcquisitionCancelDuringSlskd(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         downloads = Path(tmp.name).resolve()
-        event = _CancelOnWait()
+        # "search": the settle wait passes, the file-search wait is cancelled.
+        event = _CancelOnWait(fire_on=2 if stage == "search" else 1)
         patches = [
             mock.patch.object(rt, "DOWNLOADS_ALLOWED_ROOTS", (downloads,)),
             mock.patch.object(rt, "TORRENT_SOURCE_ROOTS", ()),
@@ -80,10 +83,10 @@ class AcquisitionCancelDuringSlskd(unittest.TestCase):
 
     def test_cancel_during_file_search(self):
         event, started = self._run("search")
-        self.assertEqual(event.waits, 1)
+        self.assertEqual(event.waits, 2)  # the settle wait, then the search wait
         started[4].assert_called_once()
         started[7].assert_called_once()
-        self.assertEqual(self.sleeps, [3])  # only the acquisition's settle delay
+        self.assertEqual(self.sleeps, [])
 
 
 
@@ -109,6 +112,36 @@ class PlaylistCancelDuringSlskd(unittest.TestCase):
                 ["slskd", "ytdlp"], cancel_event=event)
         self.assertEqual(calls, ["One"])
         self.assertEqual(result["failed"], 0)
+
+    def test_cancelled_track_is_not_recorded_as_failed(self):
+        """QA #271: with the real status writer, the in-flight track is left
+        missing (resumable), not saved as failed/"cancelled"."""
+        import backend.playlist_service as ps
+        event = threading.Event()
+
+        def slskd_track(*_a, cancel_event=None, **_k):
+            event.set()
+            raise RuntimeError("cancelled")
+
+        state = {"done": 0, "failed": 0, "log": []}
+        tracks = [{"artist": "A", "title": "One"}, {"artist": "A", "title": "Two"}]
+        with mock.patch.object(ps, "_playlist_ensure_staging_dirs"), \
+                mock.patch.object(ps, "_playlist_key", return_value="p"), \
+                mock.patch.object(ps, "_playlist_save_job_state"), \
+                mock.patch.object(ps.composite_workflows, "list_playlist_staged_files",
+                                  return_value={"ok": True, "files": []}), \
+                mock.patch.object(ps, "_playlist_reusable_download_files", return_value=[]), \
+                mock.patch.object(ps, "_playlist_review_required_count_from_state", return_value=0), \
+                mock.patch.object(ps, "_playlist_slskd_download_track", side_effect=slskd_track), \
+                mock.patch.object(ps, "_ytdlp_missing_tracks_download",
+                                  side_effect=AssertionError("fell back after cancel")):
+            ps._playlist_download_missing_tracks(
+                tracks, Path(tempfile.gettempdir()), state, lambda _line: None,
+                ["slskd", "ytdlp"], cancel_event=event)
+        statuses = {k: v["status"] for k, v in state["track_statuses"].items()}
+        self.assertNotIn("failed", statuses.values(), statuses)
+        self.assertIn("missing", statuses.values(), statuses)
+        self.assertEqual(state["failed"], 0)
 
 
 if __name__ == "__main__":
