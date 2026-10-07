@@ -337,6 +337,11 @@ export interface TransactionConfidence {
 export interface TransactionRollback {
   available: boolean;
   reason?: string;
+  // Server-computed: would POST /api/transactions/<id>/rollback accept it now
+  // (#228). Optional because older backends do not send it.
+  allowed?: boolean;
+  allowed_code?: string;
+  allowed_reason?: string;
 }
 
 export interface TransactionCounts {
