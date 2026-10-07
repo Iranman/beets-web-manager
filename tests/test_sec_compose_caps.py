@@ -53,8 +53,14 @@ class EntrypointReadOnlyRootTests(unittest.TestCase):
 
     def test_owned_private_tree_is_not_walked(self):
         # #282: root without DAC_READ_SEARCH cannot list the app's 0700
-        # tree, so the recursive chown must be skipped once it is ours.
+        # tree, so a failed walk is tolerated only when the tree was already
+        # ours; the walk itself always runs so default-capability starts still
+        # repair stray root-owned files.
         self.assertIn("""[ "$(stat -c '%u:%g' "$1")" = "$PUID:$PGID" ]""", ENTRYPOINT)
+        self.assertIn('if ! err="$(chown -R "$RUN_AS" "$1" 2>&1)"; then', ENTRYPOINT)
+        self.assertIn('[ "$owned" = 1 ] && return 0', ENTRYPOINT)
+        own_tree_body = ENTRYPOINT.split("own_tree() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(own_tree_body.index("chown -R"), own_tree_body.index("return 0"))
         self.assertIn("own_tree /web-manager-data", ENTRYPOINT)
         self.assertIn("own_tree /config", ENTRYPOINT)
         workflow = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")

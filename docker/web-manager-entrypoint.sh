@@ -68,13 +68,20 @@ fi
 # #282: the app keeps its data tree private (0700, PUID-owned). Under the
 # hardened settings (cap_drop ALL + CHOWN) root has no DAC_READ_SEARCH, so it
 # cannot even list such a tree and `chown -R` aborted every second boot. A
-# tree whose top level is already PUID:PGID is the app's own; leave it alone.
-# Only a fresh (e.g. root-owned) mount or a PUID/PGID change gets the walk.
+# tree whose top level was already PUID:PGID before the walk is the app's own,
+# so a walk that cannot read it is expected there and is not an error.
+# The walk still always runs: with default capabilities it repairs stray
+# root-owned files (from `docker exec`, `sudo cp`, a root restore).
 own_tree() {
+    local owned=0 err
     if [ "$(stat -c '%u:%g' "$1")" = "$PUID:$PGID" ]; then
-        return 0
+        owned=1
     fi
-    if ! chown -R "$RUN_AS" "$1"; then
+    if ! err="$(chown -R "$RUN_AS" "$1" 2>&1)"; then
+        # Hardened + already ours: chown's "cannot read directory" is
+        # expected on every boot, so keep it out of the logs.
+        [ "$owned" = 1 ] && return 0
+        echo "$err" >&2
         echo "ERROR: cannot take ownership of $1 for $PUID:$PGID. If PUID/PGID changed under the hardened (cap_drop: ALL) settings, root cannot read the old private tree: run 'chown -R $PUID:$PGID' on the host directory once, then start again." >&2
         exit 1
     fi
