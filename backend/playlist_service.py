@@ -4058,6 +4058,7 @@ def _playlist_download_missing_tracks(
     state: Dict[str, Any],
     log,
     methods_raw: Any = "",
+    cancel_event=None,
 ) -> Dict[str, int]:
     # Historical staged paths are untrusted metadata. Resume reconciliation
     methods = _playlist_download_methods(methods_raw)
@@ -4140,7 +4141,7 @@ def _playlist_download_missing_tracks(
                 log(f"  trying {_download_method_label(method)}")
                 if method == "slskd":
                     new_files = _playlist_slskd_download_track(
-                        artist, title, dl_dir, log, state["log"])
+                        artist, title, dl_dir, log, state["log"], cancel_event=cancel_event)
                 elif method == "spotiflac":
                     _spotiflac_missing_tracks_download(
                         artist, "", "", str(dl_dir), state["log"], wanted)
@@ -4694,7 +4695,8 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         f"{len(deferred_tracks)} remain queued"
                     )
                 round_result = _playlist_download_missing_tracks(
-                    batch_tracks, round_dl_dir, state, _log, download_methods)
+                    batch_tracks, round_dl_dir, state, _log, download_methods,
+                    cancel_event=cancel_event)
                 verified_downloaded = int(round_result.get("downloaded") or 0)
                 review_downloaded = int(round_result.get("review_required") or 0)
                 failed_downloads = int(round_result.get("failed") or 0)
@@ -6046,7 +6048,8 @@ def _playlist_copy_source_files(files: Iterable[Path], dest_dir: Path,
 
 def _playlist_slskd_download_track(artist: str, title: str,
                                    dl_dir: Path, log,
-                                   raw_log: Optional[List[str]] = None) -> List[str]:
+                                   raw_log: Optional[List[str]] = None,
+                                   cancel_event=None) -> List[str]:
     if not SLSKD_API_KEY:
         raise RuntimeError("SLSKD API key is not configured")
     wanted = [{"title": title}]
@@ -6054,7 +6057,8 @@ def _playlist_slskd_download_track(artist: str, title: str,
     try:
         username, queued, expected, _remote_dir = _slskd_search_and_queue(
             artist, title, "", inner_log, track_count=0, wanted_tracks=wanted,
-            busy_retries=int(os.environ.get("PLAYLIST_SLSKD_BUSY_RETRIES", "3") or "3"))
+            busy_retries=int(os.environ.get("PLAYLIST_SLSKD_BUSY_RETRIES", "3") or "3"),
+            cancel_event=cancel_event)
         aldir, transfer_hints = _slskd_wait_downloads(
             username, queued, inner_log,
             timeout=int(os.environ.get("PLAYLIST_SLSKD_TIMEOUT", "90") or "90")

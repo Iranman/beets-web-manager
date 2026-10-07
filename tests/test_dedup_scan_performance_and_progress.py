@@ -157,7 +157,6 @@ class DedupScanPerformanceAndProgressTests(unittest.TestCase):
                  patch.object(dedup_service, "_maintenance_same_file_hash", return_value=True), \
                  patch.object(dedup_service, "_acoustid_fingerprint_match", return_value=(None, [], [])):
 
-                start_time = time.time()
                 res, status_code = dedup_service.start_dedup_scan({
                     "path": str(music_root),
                     "tracked_only": True,
@@ -168,18 +167,18 @@ class DedupScanPerformanceAndProgressTests(unittest.TestCase):
                 job = jobs.get(job_id)
                 self.assertIsNotNone(job)
 
-                # Wait for job completion
+                # Wait for job completion. No wall-clock assertion (BA-19):
+                # the "loads data once" property is the call count below, and
+                # a slow CI host must not fail it.
                 t0 = time.time()
-                while job.finished_at is None and time.time() - t0 < 10.0:
+                while job.finished_at is None and time.time() - t0 < 120.0:
                     time.sleep(0.01)
-                elapsed = time.time() - start_time
+                self.assertIsNotNone(job.finished_at, "scan did not finish")
 
             # Assert: lib.items called ONLY ONCE at startup, NEVER per-file
             self.assertEqual(mock_lib.items_call_count, 1, "lib.items must only be called once at scan startup")
             self.assertEqual(mock_lib.items_call_args, [[]])
 
-            # Assert: 3000 items scanned extremely fast (pure in-memory index)
-            self.assertLess(elapsed, 10.0, f"3000-item scan took {elapsed:.2f}s, expected < 10s")
             self.assertEqual(job.status, "success")
             self.assertEqual(job.returncode, 0)
 

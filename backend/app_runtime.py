@@ -55,9 +55,6 @@ def _s(v: Any) -> str:
     return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v or "")
 
 
-_BOOT_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
-
-
 _BOOT_ENV_BLOCKED_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
 
 
@@ -123,9 +120,6 @@ _YTDLP_RUNTIME_BIN_DIR = Path(os.environ.get("YTDLP_RUNTIME_BIN_DIR", "/config/y
 
 
 _YTDLP_AUTH_SMOKE_TTL = int(os.environ.get("YTDLP_AUTH_SMOKE_TTL", "300") or "300")
-
-
-_YTDLP_JS_RUNTIME_PROBE_TIMEOUT = float(os.environ.get("YTDLP_JS_RUNTIME_PROBE_TIMEOUT", "15") or "15")
 
 
 _ytdlp_auth_smoke_lock = threading.Lock()
@@ -253,9 +247,6 @@ PLAYLIST_EXPORTS_DIR = PLAYLIST_STATE_ROOT / "exports"
 PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
 
 
-PLAYLIST_INDEX_PATH = PLAYLIST_STATE_ROOT / "index.json"
-
-
 from backend import config_layers as _config_layers  # noqa: E402  (leaf module, no backend imports)
 
 # Container-side roots (backend.config_layers): absolute paths inside this
@@ -293,7 +284,7 @@ PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,s
 
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
-    "/downloads/music/Playlist Downloads" if os.path.exists("/downloads") else "/data/torrents/music/Playlist Downloads",
+    str(DOWNLOADS_CONTAINER_ROOT / "music" / "Playlist Downloads"),
 ))
 
 
@@ -307,17 +298,24 @@ PLAYLIST_PIPELINE_STATES = {
 SLSKD_URL     = os.environ.get("SLSKD_URL",     "http://slskd:5030")
 
 
-DOWNLOADS_ROOT = Path("/data/torrents/music")
+# The downloads/staging mount (DOWNLOADS_ROOT, default /downloads; see
+# docs/CONFIGURATION.md) -- the same path the setup check tests.
+DOWNLOADS_ROOT = DOWNLOADS_CONTAINER_ROOT
 
 
-DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
+# DOWNLOADS_ROOT as an allowlist entry: empty when it is "/" or overlaps the
+# library, so a misconfiguration fails closed (the setup check blocks on it).
+DOWNLOADS_ALLOWED_ROOTS = _config_layers.safe_roots("DOWNLOADS_ROOT", [DOWNLOADS_ROOT], _MUSIC_ROOT_SETTING)
 
 
-TORRENT_SOURCE_ROOTS = tuple(
-    Path(value.strip())
+DEFAULT_TORRENT_SOURCE_ROOTS = str(DOWNLOADS_ROOT)
+
+
+TORRENT_SOURCE_ROOTS = _config_layers.safe_roots("TORRENT_SOURCE_ROOTS", (
+    value.strip()
     for value in os.environ.get("TORRENT_SOURCE_ROOTS", DEFAULT_TORRENT_SOURCE_ROOTS).split(",")
     if value.strip()
-)
+), _MUSIC_ROOT_SETTING)
 
 
 TORRENT_SOURCE_MOVE_ALLOWED = _env_flag("ALLOW_TORRENT_SOURCE_MOVE", False)
@@ -361,20 +359,17 @@ QBIT_FILTER = (
 )
 
 
-QBIT_PATH_ALIASES = os.environ.get(
-    "QBIT_PATH_ALIASES",
-    "/downloads=/data/torrents,/download=/data/torrents,/data/downloads=/data/torrents",
-)
+QBIT_PATH_ALIASES = os.environ.get("QBIT_PATH_ALIASES", "")
 
 
-QBIT_REPAIR_ALLOWED_ROOTS = tuple(
-    Path(value.strip())
+QBIT_REPAIR_ALLOWED_ROOTS = _config_layers.safe_roots("QBIT_REPAIR_ALLOWED_ROOTS", (
+    value.strip()
     for value in os.environ.get(
         "QBIT_REPAIR_ALLOWED_ROOTS",
-        ",".join([str(DOWNLOADS_ROOT), str(DOWNLOADS_ROOT.parent), "/data/downloads"]),
+        str(DOWNLOADS_ROOT),
     ).split(",")
     if value.strip()
-)
+), _MUSIC_ROOT_SETTING)
 
 
 YTDLP_COOKIE_FILE = os.environ.get("YTDLP_COOKIE_FILE", "").strip()
@@ -615,16 +610,7 @@ _ARTIST_FOLDER_PATH_TEMPLATE = "$albumartist%if{$mb_albumartistid, ($mb_albumart
 _DEFAULT_ALBUM_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$albumartist - $album - %right{00$track,2} - $title"
 
 
-_ALBUMTYPE_SINGLE_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/%if{$year,%left{$year,4} - }$album [Single]/%right{00$track,2} - $title"
-
-
 _SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$artist - $album - %right{00$track,2} - $title ($disc)%if{$mb_artistid,{$mb_artistid$}}"
-
-
-_SQLITE_WAL_CONFIGURED: set = set()
-
-
-_SQLITE_WAL_LOCK = threading.Lock()
 
 
 def _sqlite_is_locked_error(exc: BaseException) -> bool:
@@ -666,21 +652,6 @@ EDITABLE_FIELDS = [
     ("mb_albumid",  "MB Album ID"),
     ("mb_artistid", "MB Artist ID"),
 ]
-
-
-def _is_musl_linux() -> bool:
-    if platform.system().lower() != "linux":
-        return False
-    if any(Path("/lib").glob("ld-musl-*.so.1")):
-        return True
-    try:
-        ldd = shutil.which("ldd")
-        if ldd:
-            r = subprocess.run([ldd, "--version"], timeout=5, capture_output=True, text=True)
-            return "musl" in ((r.stdout or "") + (r.stderr or "")).lower()
-    except Exception:
-        pass
-    return False
 
 
 _SECRET_ASSIGNMENT_RE = re.compile(

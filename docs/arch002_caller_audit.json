@@ -9,6 +9,10 @@
       "SAFE_SPECIALIZED_EVIDENCE",
       "AcoustID evidence helper (ordered fingerprint recording IDs); produces evidence, decides nothing."
     ],
+    "backend/acoustid_service.py::_acoustid_verify_match": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Playlist fingerprint status label (confirmed/mismatch/unverified) from the canonical AcoustID top tier (ACOUSTID_MIN_SCORE floor, 3-point window); non-destructive, authorizes nothing (MI-13)."
+    ],
     "app.py::_ai_auto_import_allowed": [
       "COMPATIBILITY_WRAPPER",
       "AI-confidence gate that can only narrow: requires preflight.ok, which requires canonical matching_decision.action_allowed."

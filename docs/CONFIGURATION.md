@@ -40,7 +40,7 @@ A password hash is not a reusable API secret and is never returned by any API re
 Despite the filename, this file has nothing to do with `docker compose --env-file` or a `.env` sitting next to `docker-compose.yml`. It is application-owned runtime state, loaded by the web-manager process itself, that:
 
 - only supplies a value when the process's actual environment variable is blank (see precedence above);
-- is what `POST /api/setup/env` (the System page's environment editor) writes to;
+- is what `POST /api/setup/env` (the System page's environment editor) writes to (`GET /api/setup/env` shows every `*_URL` setting without `user:pass@`; saving that redacted URL back keeps the stored value, so re-saving the same plain URL does not remove credentials from a setting such as `PLEX_URL`: clear the field and save, then enter the URL again, or change the URL; `BEETS_WEB_URL` is the exception, where saving the plain URL replaces the stored one);
 - takes effect for the *currently running* web-manager process without a container recreation;
 - never affects the separate `beets` engine container;
 - cannot override a non-blank Docker-supplied environment value, by design.
@@ -84,7 +84,7 @@ Absolute paths inside the Web Manager container. They must match the mount targe
 | Variable | Default | Meaning |
 |---|---|---|
 | `MUSIC_ROOT` | `/music` | Library mount inside Web Manager. Deprecated aliases: `MUSIC_LIBRARY_PATH`, `BEETS_MUSIC_DIR`. |
-| `DOWNLOADS_ROOT` | `/downloads` | Downloads/staging mount inside Web Manager. The setup "downloads" check tests this path. Deprecated alias: `DOWNLOAD_PATH`. |
+| `DOWNLOADS_ROOT` | `/downloads` | Downloads/staging mount inside Web Manager. The setup "downloads" check tests this path, and the app uses it as its downloads root. It is also the default for `TORRENT_SOURCE_ROOTS` and `QBIT_REPAIR_ALLOWED_ROOTS`; `PLAYLIST_DOWNLOAD_ROOT` defaults to `DOWNLOADS_ROOT/music/Playlist Downloads`. Because `TORRENT_SOURCE_ROOTS` defaults to it, a folder under it that the app did not create is a preserved torrent source (move imports are refused and imports copy, unless `ALLOW_TORRENT_SOURCE_MOVE=1`), and app-managed download folders under it are eligible for the "already in library" source cleanup. It must not be `/` or overlap `MUSIC_ROOT` (equal, inside or containing it): such a value is left out of every download, import and cleanup allowlist and blocks setup. The same rule drops matching `TORRENT_SOURCE_ROOTS` and `QBIT_REPAIR_ALLOWED_ROOTS` entries. Deprecated alias: `DOWNLOAD_PATH`. |
 | `BEETS_CONFIG` | `/config/config.yaml` | Beets `config.yaml` inside the container. The config editor reads and writes only this file. It refuses a relative path or a file outside the Beets config directory (`BEETSDIR`, default `/config`). |
 | `WEB_MANAGER_DATA_DIR` | `/web-manager-data` | Web Manager's own durable state. |
 | `BEETS_TRANSACTION_DIR` | `/web-manager-data/transactions` | Transaction and audit records. |
@@ -96,7 +96,7 @@ Only these keys may be saved from the System page, and only these keys are loade
 
 | Variable | Applies | Meaning |
 |---|---|---|
-| `BEETS_WEB_URL` | restart | Stock Beets `web`/`webmanager` URL. The default is `http://beets:8337` everywhere. `docker-compose.yml` forwards `${BEETS_WEB_URL:-http://beets:8337}`, so set it in the Compose `.env` for an external Beets. Keep `BEETS_OUTBOUND_ALLOWLIST` in step: it must contain the URL's host:port. |
+| `BEETS_WEB_URL` | restart | Stock Beets `web`/`webmanager` URL. The default is `http://beets:8337` everywhere. `docker-compose.yml` forwards `${BEETS_WEB_URL:-http://beets:8337}`, so set it in the Compose `.env` for an external Beets. Keep `BEETS_OUTBOUND_ALLOWLIST` in step: it must contain the URL's host:port. Do not put a user name or password in it (`user:pass@host`): Web Manager authenticates to the `webmanager` plugin with its bearer key and never sends URL credentials, so such a URL is refused (setup reason `beets_web_url_userinfo`) and no request is made. A `%40` or fullwidth `＠` counts as `@`. |
 | `BEETS_WEBMANAGER_API_KEY` | restart | Integration plugin bearer key. Normally read from `/config/.webmanager_api_key`. Set it only when Web Manager does not mount the Beets `/config` (external Beets). |
 | `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
 | `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |
@@ -169,7 +169,7 @@ From plugin 1.6.0, `/webmanager/status` reports Beets' own view of the library:
 The roots are configured in `config.yaml`:
 
 - `webmanager.import_roots` (default `[/downloads]`): directories the plugin accepts imports from.
-- `webmanager.allowed_roots`: directories the plugin may move or remove files in. When unset or empty, it is derived from Beets: the library `directory:` plus `import_roots`. Set it only if you need something different. The `BEETS_ALLOWED_ROOTS` environment variable on the `beets` container (comma-separated) overrides it.
+- `webmanager.allowed_roots`: directories the plugin may move or remove files in. When unset or empty, it is derived from Beets: the library `directory:` plus `import_roots`. A derived root that is `/`, the Beets config directory, one of its parents or a directory inside it is skipped (logged once in the Beets log); if `directory:` itself is skipped, the plugin falls back to its default roots. Set it only if you need something different. The `BEETS_ALLOWED_ROOTS` environment variable on the `beets` container (comma-separated) overrides it.
 
 Setup compares these with Web Manager's own mounts. It changes nothing, but it warns when:
 

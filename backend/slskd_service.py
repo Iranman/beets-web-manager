@@ -10,14 +10,9 @@ from backend.matching import strip_track_filename_id_suffix as _canonical_strip_
 from backend.title_normalize import split_ws_led, strip_bracket_credits
 from collections import Counter, defaultdict
 from pathlib import Path
-from backend import config_layers
 from typing import Any, Dict, List, Optional
-from backend.app_runtime import AUDIO_EXT, SLSKD_URL, TORRENT_SOURCE_ROOTS, _path_is_under, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
+from backend.app_runtime import _app_logger, _redact_security_text, AUDIO_EXT, DOWNLOADS_ROOT, SLSKD_URL, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
 from backend.slskd import build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl
-
-# BA-12: where slskd and other download clients write, from DOWNLOADS_ROOT
-# (alias DOWNLOAD_PATH, default /downloads); never a maintainer path.
-DOWNLOADS_ROOT = Path(config_layers.downloads_root())
 
 # ── ARCH-001 extracted code ──
 
@@ -307,7 +302,8 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
                              log: list, track_count: int = 0,
                              wanted_tracks: Optional[List[Dict[str, Any]]] = None,
                              skip_candidates: Optional[set] = None,
-                             busy_retries: int = 24):
+                             busy_retries: int = 24,
+                             cancel_event: Optional[Any] = None):
     """
     Search slskd for artist/album, pick best response, queue downloads.
     Returns (username, [queued_remote_filenames], expected_local_dir).
@@ -348,7 +344,11 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
                 log.append("  [slskd] Search is busy; waiting for the current SLSKD operation to finish...")
             elif attempt % 3 == 0:
                 log.append(f"  [slskd] Still waiting for SLSKD search slot ({attempt}/{busy_retries})...")
-            time.sleep(10)
+            # BA-16: the busy wait honours the job's cancel request.
+            if cancel_event is None:
+                time.sleep(10)
+            elif cancel_event.wait(10):
+                raise RuntimeError("cancelled")
 
     # 2. Poll until we have real response rows, not just a response count.
     #    slskd can expose responseCount before the response objects are
@@ -402,8 +402,11 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
             break
     if poll_error is not None and not resp_count:
         # IA-06: an outage, timeout or 401 while polling is not "no results".
-        log.append(f"  [slskd] Search polling failed: {poll_error}")
-        raise RuntimeError(f"slskd unavailable while searching for '{search_text}': {poll_error}") from poll_error
+        # The job log and error can reach a route: fixed text; detail goes to
+        # the server log only (security N2).
+        _app_logger.warning("slskd search polling failed: %s", _redact_security_text(poll_error))
+        log.append("  [slskd] Search polling failed: slskd is unavailable.")
+        raise RuntimeError("slskd is unavailable; the search could not be completed.") from poll_error
     log.append(f"  [slskd] {resp_count} response(s) returned")
     if not resp_count:
         raise RuntimeError(f"No Soulseek results for '{search_text}'")
@@ -427,7 +430,8 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
         log.append(f"  [slskd] Using {len(_inline_responses)} cached inline responses")
         responses = _inline_responses
     if not responses and fetch_error is not None:
-        raise RuntimeError(f"slskd unavailable while reading search responses: {fetch_error}") from fetch_error
+        _app_logger.warning("slskd search responses failed: %s", _redact_security_text(fetch_error))
+        raise RuntimeError("slskd is unavailable; search results could not be read.") from fetch_error
     if not responses:
         raise RuntimeError(
             f"Got {resp_count} matches but responses list is empty "
@@ -945,11 +949,14 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             return str(f.parent), filtered
         return "", []
 
+    # Security F1: only the configured download roots, never their parent,
+    # "/" or fixed paths; an unsafe DOWNLOADS_ROOT drops out (fail closed).
+    from backend.app_runtime import DOWNLOADS_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, _path_is_under
     roots: List[Path] = []
     user_root = DOWNLOADS_ROOT / username
-    # Only the download folders: never /tmp or other shared system paths.
-    for raw in (expected, user_root, DOWNLOADS_ROOT, *TORRENT_SOURCE_ROOTS):
-        _root_add(roots, raw)
+    for raw in (expected, user_root, *DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS):
+        if raw and any(_path_is_under(Path(str(raw)), base) for base in (*DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS)):
+            _root_add(roots, raw)
 
     folder, files = _scan_direct_album_dirs()
     if files:
@@ -970,10 +977,9 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             static_hint_logged = True
         hint_roots = roots[:]
         for hp in hint_paths:
-            # A transfer hint is provider data: use it only inside a known root.
-            for cand in (hp, hp.parent):
-                if any(_path_is_under(cand, root) for root in roots):
-                    _root_add(hint_roots, cand)
+            for candidate in (hp, hp.parent):
+                if any(_path_is_under(candidate, base) for base in roots):
+                    _root_add(hint_roots, candidate)
         folder, files = _scan_exact(hint_roots)
         if files:
             return folder, files

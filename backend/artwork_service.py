@@ -170,7 +170,7 @@ def _fetch_artist_image(artist_name: str) -> str:
 
     if not DISCOGS_TOKEN:
         return ""
-    q = _up.urlencode({"q": artist_name, "type": "artist", "per_page": 3, "page": 1, "token": DISCOGS_TOKEN})
+    q = _up.urlencode({"q": artist_name, "type": "artist", "per_page": 3, "page": 1})
     headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
     try:
         req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
@@ -822,7 +822,6 @@ def _fetch_album_art(artist: str, album: str) -> str:
         "q":       f"{artist} {album}".strip(),
         "type":    "release",
         "per_page": 3, "page": 1,
-        "token":   DISCOGS_TOKEN,
     })
     headers = {"User-Agent": "BeetsWebControl/1.0",
                "Authorization": f"Discogs token={DISCOGS_TOKEN}"}

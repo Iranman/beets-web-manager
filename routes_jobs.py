@@ -4,6 +4,7 @@ import time
 from flask import jsonify, request
 
 import backend.provider_boundary as provider_boundary
+from job_engine import DuplicateJobError
 
 # Imported after app.py has already defined app and jobs (circular-but-OK pattern)
 from app import app, jobs, _ai_batch_find_state, _ai_batch_reconcile_state, _AI_BATCH_TERMINAL_STATUSES  # noqa: E402
@@ -37,6 +38,14 @@ def _present_job_row(job, *, include_log=False, include_result=True):
                 "folders_attention": state.get("folders_attention"),
             })
     return row
+
+
+@app.errorhandler(DuplicateJobError)
+def _duplicate_job(exc):
+    """Any route that starts a job: an identical mutating job is already
+    running (BA-6). Nothing was started; the running job's id is returned."""
+    return jsonify({"ok": False, "code": "job_already_running", "error": str(exc),
+                    "job_id": exc.job.job_id}), 409
 
 
 @app.get("/api/jobs")

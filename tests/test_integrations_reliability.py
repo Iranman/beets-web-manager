@@ -217,6 +217,12 @@ class PlexRequestTests(_BoundaryCase):
                 plex_service._plex_request("/playlists/9/items", {"uri": "u"}, method="PUT")
         self.assertEqual(urlopen.call_count, 1)
 
+    def test_attempts_one_sends_one_request(self):  # #235 calls attempts=1
+        with mock.patch.object(urllib.request, "urlopen", side_effect=socket.timeout("slow")) as urlopen:
+            with self.assertRaises(socket.timeout):
+                plex_service._plex_request("/library/sections/1/refresh", timeout=10, attempts=1)
+        self.assertEqual(urlopen.call_count, 1)
+
     def test_a_get_is_retried_within_the_policy_only(self):
         with mock.patch.object(urllib.request, "urlopen", side_effect=socket.timeout("slow")) as urlopen:
             with self.assertRaises(socket.timeout):
@@ -416,6 +422,8 @@ class SlskdTests(_BoundaryCase):
                 message = self._search_with_poll_error(error)
                 self.assertIn("unavailable", message)
                 self.assertNotIn("No Soulseek results", message)
+                # security N2: fixed text, never the exception detail
+                self.assertEqual(message, "slskd is unavailable; the search could not be completed.")
 
     def test_a_real_empty_search_is_still_no_results(self):
         def req(method, path, body=None):
@@ -678,27 +686,27 @@ class LidarrRouteHelperTests(_BoundaryCase):  # QA F-5
 # -- download root: BA-12-------------------------------------------------------------
 
 class DownloadRootTests(unittest.TestCase):
-    def test_plex_and_slskd_use_the_configured_download_root(self):
-        # config_layers.downloads_root() (DOWNLOADS_ROOT / DOWNLOAD_PATH / /downloads)
-        # is covered by tests/test_config_layers.py; here: these modules use it.
-        from backend import config_layers
-        expected = Path(config_layers.downloads_root())
+    def test_plex_and_slskd_use_the_single_download_root(self):
+        # app_runtime.DOWNLOADS_ROOT is the one source of truth (#235);
+        # tests/test_downloads_root_safety.py covers how it is resolved.
+        from backend import app_runtime
         for module in (slskd, plex_service):
             with self.subTest(module=module.__name__):
-                self.assertEqual(module.DOWNLOADS_ROOT, expected)
+                self.assertIs(module.DOWNLOADS_ROOT, app_runtime.DOWNLOADS_ROOT)
                 source = Path(module.__file__).read_text(encoding="utf-8")
                 self.assertNotIn("/data/torrents", source)
                 self.assertNotIn("/data/downloads", source)
                 self.assertNotIn("DOWNLOADS_ROOT.parent", source)  # "/" under the /downloads default
+                self.assertNotIn("config_layers.downloads_root()", source)  # no module-level shadow
 
     def test_slskd_never_searches_shared_system_folders(self):
-        # The completed-file search waits on slskd in a loop (#235 bounds it),
-        # so the root list is checked at source level.
+        # The completed-file search waits on slskd in a loop, so the root
+        # list is checked at source level.
         source = Path(slskd.__file__).read_text(encoding="utf-8")
         for literal in ('"/tmp"', '"/download"', '"/downloads"'):
             self.assertNotIn(literal, source)
-        self.assertIn("for raw in (expected, user_root, DOWNLOADS_ROOT, *TORRENT_SOURCE_ROOTS):", source)
-        self.assertIn("if any(_path_is_under(cand, root) for root in roots):", source)
+        self.assertIn("for raw in (expected, user_root, *DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS):", source)
+        self.assertIn("if any(_path_is_under(candidate, base) for base in roots):", source)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,12 @@ def _load_routes_setup_against_stub_app(test_case=None):
     module = importlib.import_module("routes_setup")
     if test_case is not None:
         test_case.addCleanup(_restore_stubbed_modules, snapshot)
+        # Status routes now apply the BEETSDIR containment check (#222), so
+        # start from the shipped container pair, not a BEETSDIR another test
+        # module left in os.environ. Tests patch their own values on top.
+        env = mock.patch.dict(os.environ, {"BEETSDIR": "/config", "BEETS_CONFIG": "/config/config.yaml"})
+        env.start()
+        test_case.addCleanup(env.stop)
     return stub.app, module
 
 
@@ -1059,7 +1065,7 @@ class RoutesSetupConfigLayerTests(unittest.TestCase):
 
     def _ok_paths(self):
         ok = {"path": "/x", "exists": True, "is_dir": True, "readable": True, "writable": True, "ok": True}
-        return {"config": dict(ok), "music_library": dict(ok), "downloads": dict(ok),
+        return {"config": dict(ok), "music_library": dict(ok), "downloads": dict(ok, path="/y"),
                 "beets_config": dict(ok, is_dir=False, is_file=True)}
 
     def test_beets_unavailable_is_the_single_primary_reason(self):
