@@ -89,7 +89,7 @@ class SlskdHelperTests(unittest.TestCase):
                 r"(Hosted_By_DJ_Drama)-MIXTAPE-2011-WEB\01-2_chainz-intro.mp3"
             )
 
-            roots = slskd_download_candidate_roots(downloads, "seymourkitty", [remote])
+            roots = slskd_download_candidate_roots(downloads, "seymourkitty", [remote], [downloads])
 
             self.assertEqual(
                 roots[0],
@@ -245,6 +245,7 @@ class SlskdHelperTests(unittest.TestCase):
                 remote_files,
                 AUDIO_EXTS,
                 log,
+                [downloads],
             )
 
             self.assertEqual(removed, 2)

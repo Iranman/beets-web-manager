@@ -705,8 +705,10 @@ class DownloadRootTests(unittest.TestCase):
         source = Path(slskd.__file__).read_text(encoding="utf-8")
         for literal in ('"/tmp"', '"/download"', '"/downloads"'):
             self.assertNotIn(literal, source)
-        self.assertIn("for raw in (expected, user_root, *DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS):", source)
-        self.assertIn("if any(_path_is_under(candidate, base) for base in roots):", source)
+        # #248: peer roots gated on the download allowlist, hints on the
+        # static roots only (behaviour: test_slskd_peer_path_containment).
+        self.assertIn("if raw and _slskd_within_roots(raw, download_roots):", source)
+        self.assertIn("if _slskd_within_roots(candidate, static_roots):", source)
 
 
 if __name__ == "__main__":
