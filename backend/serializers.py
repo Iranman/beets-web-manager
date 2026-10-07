@@ -43,7 +43,7 @@ def _json_from_flask_response(resp) -> Dict[str, Any]:
         return {}
 
 
-_DOWNLOADS_ROOTS = ["/data/torrents", "/data/downloads", "/tmp"]
+_DOWNLOADS_ROOTS = [str(DOWNLOADS_ROOT), "/tmp"]
 
 
 def _import_review_path_text_error(raw: Any, *, allow_relative: bool = False) -> Optional[str]:

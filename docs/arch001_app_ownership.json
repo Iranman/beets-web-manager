@@ -514,8 +514,8 @@
    "name": "_decode_boot_env_value",
    "module": "backend/app_runtime.py",
    "lines": [
-    64,
-    76
+    61,
+    73
    ],
    "size": 13,
    "body_lines": 12,
@@ -534,8 +534,8 @@
    "name": "_setup_env_file_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    79,
-    80
+    76,
+    77
    ],
    "size": 2,
    "body_lines": 1,
@@ -554,8 +554,8 @@
    "name": "_load_persisted_setup_env_at_boot",
    "module": "backend/app_runtime.py",
    "lines": [
-    83,
-    100
+    80,
+    97
    ],
    "size": 18,
    "body_lines": 9,
@@ -575,8 +575,8 @@
    "name": "_config_file_first_line",
    "module": "backend/app_runtime.py",
    "lines": [
-    140,
-    146
+    134,
+    140
    ],
    "size": 7,
    "body_lines": 6,
@@ -593,8 +593,8 @@
    "name": "_env_flag",
    "module": "backend/app_runtime.py",
    "lines": [
-    149,
-    153
+    143,
+    147
    ],
    "size": 5,
    "body_lines": 4,
@@ -611,8 +611,8 @@
    "name": "_env_int",
    "module": "backend/app_runtime.py",
    "lines": [
-    156,
-    165
+    150,
+    159
    ],
    "size": 10,
    "body_lines": 9,
@@ -633,8 +633,8 @@
    "name": "_env_float",
    "module": "backend/app_runtime.py",
    "lines": [
-    168,
-    177
+    162,
+    171
    ],
    "size": 10,
    "body_lines": 9,
@@ -651,8 +651,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    479,
-    480
+    469,
+    470
    ],
    "size": 2,
    "body_lines": 1,
@@ -675,8 +675,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    573,
-    580
+    563,
+    570
    ],
    "size": 8,
    "body_lines": 6,
@@ -705,8 +705,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    589,
-    609
+    579,
+    599
    ],
    "size": 21,
    "body_lines": 19,
@@ -725,8 +725,8 @@
    "name": "_sqlite_is_locked_error",
    "module": "backend/app_runtime.py",
    "lines": [
-    630,
-    634
+    611,
+    615
    ],
    "size": 5,
    "body_lines": 4,
@@ -745,8 +745,8 @@
    "name": "_sqlite_write_retry",
    "module": "backend/app_runtime.py",
    "lines": [
-    637,
-    647
+    618,
+    628
    ],
    "size": 11,
    "body_lines": 10,
@@ -762,29 +762,11 @@
    ]
   },
   {
-   "name": "_is_musl_linux",
-   "module": "backend/app_runtime.py",
-   "lines": [
-    671,
-    683
-   ],
-   "size": 13,
-   "body_lines": 12,
-   "route": null,
-   "mutation_capable": false,
-   "domain": "CORE",
-   "desired_owner": "backend/app_runtime.py",
-   "migration_status": "EXTRACTED",
-   "callers": [],
-   "caller_count": 0,
-   "dependencies": []
-  },
-  {
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    698,
-    701
+    664,
+    667
    ],
    "size": 4,
    "body_lines": 3,
@@ -803,8 +785,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    718,
-    722
+    684,
+    688
    ],
    "size": 5,
    "body_lines": 4,
@@ -840,8 +822,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    725,
-    735
+    691,
+    701
    ],
    "size": 11,
    "body_lines": 10,
@@ -863,8 +845,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    738,
-    743
+    704,
+    709
    ],
    "size": 6,
    "body_lines": 5,
@@ -907,8 +889,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    746,
-    757
+    712,
+    723
    ],
    "size": 12,
    "body_lines": 10,
@@ -935,8 +917,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    760,
-    777
+    726,
+    743
    ],
    "size": 18,
    "body_lines": 11,
@@ -958,8 +940,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    780,
-    787
+    746,
+    753
    ],
    "size": 8,
    "body_lines": 7,
@@ -982,8 +964,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    790,
-    804
+    756,
+    770
    ],
    "size": 15,
    "body_lines": 14,
@@ -1011,8 +993,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    834,
-    837
+    800,
+    803
    ],
    "size": 4,
    "body_lines": 3,
@@ -1036,8 +1018,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    840,
-    850
+    806,
+    816
    ],
    "size": 11,
    "body_lines": 10,
@@ -1072,8 +1054,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    853,
-    867
+    819,
+    833
    ],
    "size": 15,
    "body_lines": 14,
@@ -1098,8 +1080,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    870,
-    874
+    836,
+    840
    ],
    "size": 5,
    "body_lines": 4,
@@ -1120,8 +1102,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    877,
-    896
+    843,
+    862
    ],
    "size": 20,
    "body_lines": 11,
@@ -1142,8 +1124,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    899,
-    908
+    865,
+    874
    ],
    "size": 10,
    "body_lines": 7,
@@ -1166,8 +1148,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    911,
-    920
+    877,
+    886
    ],
    "size": 10,
    "body_lines": 7,
@@ -1188,8 +1170,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    923,
-    933
+    889,
+    899
    ],
    "size": 11,
    "body_lines": 7,
@@ -1210,8 +1192,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    938,
-    939
+    904,
+    905
    ],
    "size": 2,
    "body_lines": 1,
@@ -1254,8 +1236,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    944,
-    952
+    910,
+    918
    ],
    "size": 9,
    "body_lines": 2,
@@ -1272,8 +1254,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    968,
-    973
+    934,
+    939
    ],
    "size": 6,
    "body_lines": 3,
@@ -1290,8 +1272,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    986,
-    988
+    952,
+    954
    ],
    "size": 3,
    "body_lines": 2,
@@ -1308,8 +1290,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    991,
-    994
+    957,
+    960
    ],
    "size": 4,
    "body_lines": 3,
@@ -3968,10 +3950,10 @@
    "module": "backend/plex_service.py",
    "lines": [
     537,
-    574
+    559
    ],
-   "size": 38,
-   "body_lines": 36,
+   "size": 23,
+   "body_lines": 21,
    "route": null,
    "mutation_capable": false,
    "domain": "PLEX",
@@ -4009,8 +3991,8 @@
    "name": "_plex_is_final_library_path",
    "module": "backend/plex_service.py",
    "lines": [
-    577,
-    598
+    562,
+    583
    ],
    "size": 22,
    "body_lines": 21,
@@ -4037,8 +4019,8 @@
    "name": "_plex_beets_path_candidates",
    "module": "backend/plex_service.py",
    "lines": [
-    601,
-    639
+    586,
+    624
    ],
    "size": 39,
    "body_lines": 37,
@@ -4064,8 +4046,8 @@
    "name": "_plex_path_keys_for_beets_item",
    "module": "backend/plex_service.py",
    "lines": [
-    642,
-    647
+    627,
+    632
    ],
    "size": 6,
    "body_lines": 4,
@@ -4087,8 +4069,8 @@
    "name": "_plex_path_keys_for_plex_file",
    "module": "backend/plex_service.py",
    "lines": [
-    650,
-    662
+    635,
+    647
    ],
    "size": 13,
    "body_lines": 11,
@@ -4112,8 +4094,8 @@
    "name": "_plex_track_part_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    665,
-    672
+    650,
+    657
    ],
    "size": 8,
    "body_lines": 7,
@@ -4136,8 +4118,8 @@
    "name": "_plex_duration_seconds",
    "module": "backend/plex_service.py",
    "lines": [
-    675,
-    684
+    660,
+    669
    ],
    "size": 10,
    "body_lines": 9,
@@ -4157,8 +4139,8 @@
    "name": "_plex_track_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    687,
-    695
+    672,
+    680
    ],
    "size": 9,
    "body_lines": 8,
@@ -4180,8 +4162,8 @@
    "name": "_plex_item_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    698,
-    699
+    683,
+    684
    ],
    "size": 2,
    "body_lines": 1,
@@ -4203,8 +4185,8 @@
    "name": "_plex_duration_values",
    "module": "backend/plex_service.py",
    "lines": [
-    702,
-    704
+    687,
+    689
    ],
    "size": 3,
    "body_lines": 2,
@@ -4226,8 +4208,8 @@
    "name": "_plex_track_mbids",
    "module": "backend/plex_service.py",
    "lines": [
-    707,
-    712
+    692,
+    697
    ],
    "size": 6,
    "body_lines": 5,
@@ -4248,8 +4230,8 @@
    "name": "_plex_item_lookup_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    715,
-    734
+    700,
+    719
    ],
    "size": 20,
    "body_lines": 19,
@@ -4273,8 +4255,8 @@
    "name": "_plex_track_lookup_rows",
    "module": "backend/plex_service.py",
    "lines": [
-    737,
-    759
+    722,
+    744
    ],
    "size": 23,
    "body_lines": 22,
@@ -4300,8 +4282,8 @@
    "name": "_plex_find_track",
    "module": "backend/plex_service.py",
    "lines": [
-    762,
-    773
+    747,
+    758
    ],
    "size": 12,
    "body_lines": 10,
@@ -4323,8 +4305,8 @@
    "name": "_plex_section_track_index",
    "module": "backend/plex_service.py",
    "lines": [
-    776,
-    944
+    761,
+    929
    ],
    "size": 169,
    "body_lines": 167,
@@ -4361,8 +4343,8 @@
    "name": "_plex_section_track_lookup",
    "module": "backend/plex_service.py",
    "lines": [
-    947,
-    949
+    932,
+    934
    ],
    "size": 3,
    "body_lines": 1,
@@ -4381,8 +4363,8 @@
    "name": "_plex_request_with_wall_timeout",
    "module": "backend/plex_service.py",
    "lines": [
-    952,
-    972
+    937,
+    957
    ],
    "size": 21,
    "body_lines": 16,
@@ -4403,8 +4385,8 @@
    "name": "_plex_unique_index_value",
    "module": "backend/plex_service.py",
    "lines": [
-    975,
-    979
+    960,
+    964
    ],
    "size": 5,
    "body_lines": 4,
@@ -4423,8 +4405,8 @@
    "name": "_plex_pending_match_reason",
    "module": "backend/plex_service.py",
    "lines": [
-    982,
-    1009
+    967,
+    994
    ],
    "size": 28,
    "body_lines": 24,
@@ -4448,8 +4430,8 @@
    "name": "_plex_pending_match_row",
    "module": "backend/plex_service.py",
    "lines": [
-    1012,
-    1028
+    997,
+    1013
    ],
    "size": 17,
    "body_lines": 13,
@@ -4472,8 +4454,8 @@
    "name": "_plex_track_keys_for_items",
    "module": "backend/plex_service.py",
    "lines": [
-    1031,
-    1321
+    1016,
+    1306
    ],
    "size": 291,
    "body_lines": 288,
@@ -4515,8 +4497,8 @@
    "name": "_playlist_path_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    1324,
-    1362
+    1309,
+    1347
    ],
    "size": 39,
    "body_lines": 38,
@@ -4541,8 +4523,8 @@
    "name": "_plex_track_file",
    "module": "backend/plex_service.py",
    "lines": [
-    1365,
-    1367
+    1350,
+    1352
    ],
    "size": 3,
    "body_lines": 2,
@@ -4563,8 +4545,8 @@
    "name": "_plex_status_payload",
    "module": "backend/plex_service.py",
    "lines": [
-    1370,
-    1407
+    1355,
+    1392
    ],
    "size": 38,
    "body_lines": 37,
@@ -4589,8 +4571,8 @@
    "name": "_playlist_status_id",
    "module": "backend/plex_service.py",
    "lines": [
-    1410,
-    1413
+    1395,
+    1398
    ],
    "size": 4,
    "body_lines": 3,
@@ -6561,10 +6543,10 @@
    "module": "backend/slskd_service.py",
    "lines": [
     302,
-    575
+    580
    ],
-   "size": 274,
-   "body_lines": 264,
+   "size": 279,
+   "body_lines": 268,
    "route": null,
    "mutation_capable": true,
    "domain": "SLSKD",
@@ -6587,8 +6569,8 @@
    "name": "_slskd_download_candidate_roots",
    "module": "backend/slskd_service.py",
    "lines": [
-    578,
-    580
+    583,
+    585
    ],
    "size": 3,
    "body_lines": 1,
@@ -6605,8 +6587,8 @@
    "name": "_slskd_cancel_queued_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    583,
-    602
+    588,
+    607
    ],
    "size": 20,
    "body_lines": 18,
@@ -6628,8 +6610,8 @@
    "name": "_slskd_cleanup_failed_candidate_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    605,
-    609
+    610,
+    614
    ],
    "size": 5,
    "body_lines": 3,
@@ -6648,8 +6630,8 @@
    "name": "_find_slskd_downloaded_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    612,
-    986
+    617,
+    991
    ],
    "size": 375,
    "body_lines": 363,
@@ -6674,8 +6656,8 @@
    "name": "_slskd_wait_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    989,
-    1208
+    994,
+    1213
    ],
    "size": 220,
    "body_lines": 217,
@@ -6698,8 +6680,8 @@
    "name": "_normalise_download_method",
    "module": "backend/slskd_service.py",
    "lines": [
-    1227,
-    1230
+    1232,
+    1235
    ],
    "size": 4,
    "body_lines": 3,
@@ -6740,8 +6722,8 @@
    "name": "_download_method_list",
    "module": "backend/slskd_service.py",
    "lines": [
-    1233,
-    1239
+    1238,
+    1244
    ],
    "size": 7,
    "body_lines": 6,
@@ -6765,8 +6747,8 @@
    "name": "_slskd_fallback_methods",
    "module": "backend/slskd_service.py",
    "lines": [
-    1242,
-    1251
+    1247,
+    1256
    ],
    "size": 10,
    "body_lines": 9,
@@ -6788,8 +6770,8 @@
    "name": "_strip_track_filename_id_suffix",
    "module": "backend/slskd_service.py",
    "lines": [
-    1254,
-    1259
+    1259,
+    1264
    ],
    "size": 6,
    "body_lines": 5,
@@ -27992,8 +27974,8 @@
    "name": "_transaction_operation_from_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    29,
-    68
+    30,
+    69
    ],
    "size": 40,
    "body_lines": 39,
@@ -28012,8 +27994,8 @@
    "name": "_transaction_create_for_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    71,
-    111
+    72,
+    112
    ],
    "size": 41,
    "body_lines": 40,
@@ -28035,11 +28017,11 @@
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    114,
-    153
+    115,
+    164
    ],
-   "size": 40,
-   "body_lines": 39,
+   "size": 50,
+   "body_lines": 49,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -28056,8 +28038,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    156,
-    165
+    167,
+    176
    ],
    "size": 10,
    "body_lines": 9,
@@ -28078,8 +28060,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    170,
-    181
+    181,
+    192
    ],
    "size": 12,
    "body_lines": 11,
@@ -28100,8 +28082,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    184,
-    214
+    195,
+    225
    ],
    "size": 31,
    "body_lines": 30,
@@ -28123,8 +28105,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    217,
-    265
+    228,
+    276
    ],
    "size": 49,
    "body_lines": 48,

@@ -303,7 +303,8 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
                              log: list, track_count: int = 0,
                              wanted_tracks: Optional[List[Dict[str, Any]]] = None,
                              skip_candidates: Optional[set] = None,
-                             busy_retries: int = 24):
+                             busy_retries: int = 24,
+                             cancel_event: Optional[Any] = None):
     """
     Search slskd for artist/album, pick best response, queue downloads.
     Returns (username, [queued_remote_filenames], expected_local_dir).
@@ -344,7 +345,11 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
                 log.append("  [slskd] Search is busy; waiting for the current SLSKD operation to finish...")
             elif attempt % 3 == 0:
                 log.append(f"  [slskd] Still waiting for SLSKD search slot ({attempt}/{busy_retries})...")
-            time.sleep(10)
+            # BA-16: the busy wait honours the job's cancel request.
+            if cancel_event is None:
+                time.sleep(10)
+            elif cancel_event.wait(10):
+                raise RuntimeError("cancelled")
 
     # 2. Poll until we have real response rows, not just a response count.
     #    slskd can expose responseCount before the response objects are

@@ -181,6 +181,11 @@ class PythonJob:
                 self.result = ret
             if self._cancel.is_set():
                 self.returncode = -1
+            elif reports_failure(ret):
+                # BA-3: a job that returns {"ok": False, ...} failed, even
+                # though it did not raise.
+                self.returncode = 1
+                self.log.append(f"ERROR: {str(ret.get('error') or 'the job reported a failed result')[:300]}")
             else:
                 self.returncode = 0
         except Exception as exc:
@@ -259,6 +264,30 @@ class PythonJob:
         if status in TERMINAL_STATUSES:
             job._terminal = status
         return job
+
+
+def reports_failure(result: Any) -> bool:
+    """True for the failure shape jobs and services return: ``{"ok": False}``."""
+    return isinstance(result, dict) and result.get("ok") is False
+
+
+class DuplicateJobError(RuntimeError):
+    """An identical mutating job is already running (BA-6, ARCH-004)."""
+
+    def __init__(self, job: "PythonJob"):
+        super().__init__(f"This job is already running ({job.label or job.job_id}); "
+                         "wait for it to finish before starting it again.")
+        self.job = job
+
+
+def _duplicate_key(label: str, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Identity of a mutating job request: its label plus its metadata
+    (minus the per-start transaction id). ``None`` for read-only jobs, which
+    may run side by side."""
+    if is_read_only_job(metadata):
+        return None
+    meta = {k: v for k, v in (metadata or {}).items() if k != "transaction_id"}
+    return json.dumps([label, meta], sort_keys=True, default=str)
 
 
 def is_read_only_job(metadata: Optional[Dict[str, Any]]) -> bool:
@@ -365,14 +394,37 @@ class JobStore:
                     job.save(force=True)
 
     # -- API ------------------------------------------------------------------
+    def find_duplicate(self, label="", metadata=None) -> Optional["PythonJob"]:
+        """The running job an identical mutating start would duplicate."""
+        key = _duplicate_key(label, metadata)
+        if key is None:
+            return None
+        for job in list(self._jobs.values()):
+            if job.status == "running" and _duplicate_key(job.label, job.metadata) == key:
+                return job
+        return None
+
     def start_python(self, fn, label="", metadata=None) -> PythonJob:
+        """Start ``fn`` as a job. Raises DuplicateJobError when an identical
+        mutating job (same label and metadata) is still running."""
         with self._lock:
+            existing = self.find_duplicate(label, metadata)
+            if existing is not None:
+                raise DuplicateJobError(existing)
             jid  = uuid.uuid4().hex
             job  = PythonJob(jid, fn, label, persist=self._write if self.root else None, start=False)
             if metadata:
                 job.metadata = metadata
             self._jobs[jid] = job
-        threading.Thread(target=job._run, daemon=True).start()
+        try:
+            threading.Thread(target=job._run, daemon=True).start()
+        except BaseException as exc:
+            # #229: a job whose thread never started must not show as running.
+            job.returncode = 1
+            job.finished_at = time.time()
+            job.log.append(f"ERROR: the job could not be started: {exc}")
+            job.save(force=True)
+            raise
         return job
 
     def get(self, jid) -> Optional["PythonJob"]:
@@ -382,9 +434,12 @@ class JobStore:
         return sorted(list(self._jobs.values()), key=lambda j: j.created_at, reverse=True)
 
     def clear_finished(self):
+        """Manual "clear done". Keeps running jobs and ``recovery_required``
+        records, which the operator still has to resolve (BA-10)."""
+        keep = ("running", "recovery_required")
         with self._lock:
-            removed = [k for k, v in self._jobs.items() if v.status != "running"]
-            self._jobs = {k: v for k, v in self._jobs.items() if v.status == "running"}
+            removed = [k for k, v in self._jobs.items() if v.status not in keep]
+            self._jobs = {k: v for k, v in self._jobs.items() if v.status in keep}
         for jid in removed:
             self._delete(jid)
 
