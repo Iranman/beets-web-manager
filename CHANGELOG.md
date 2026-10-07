@@ -36,6 +36,7 @@ The project uses Semantic Versioning.
 - Internal playlist media cleanup (after a playlist import or library-wide removal) now removes Beets rows only and keeps the files; it needs an Approved transaction and runs once.
 
 ### Fixed
+- **Library Changes shows refused Cancel and Apply requests.** A 400, 404 or 409 from cancel or apply (for example `not_cancellable` on a Running transaction) used to fail silently. The page now shows the server's reason and reloads the transaction and the list. If Apply fails after changing files, or with an unknown outcome (server error or timeout), the page says the library may be partly changed and tells you not to apply again. Cancel is enabled only for Pending, Preview and Approved transactions.
 - A non-numeric or non-positive `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` no longer stops Web Manager from starting. It logs a warning and uses 60 seconds (#186).
 - **Approved album cleanups apply through the generic route (#187 F-4).** `POST /api/transactions/<id>/apply` returned 409 for an approved `album_cleanup_v1` plan. It now runs the album cleanup apply. Rollback through the generic route reports `not_supported`, because album removal has no rollback.
 - **Row-only album cleanup failures no longer claim files were deleted.** When a row-only album cleanup (files kept) failed after it had started, the error said files "were already deleted". It now says library rows were partly changed and no audio files were removed. Plans that delete files keep the previous warning.
