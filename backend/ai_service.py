@@ -983,23 +983,30 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     # surface as "MusicBrainz lookup failed: ..." instead of being silently
     # indistinguishable from a genuine no-candidates result.
     mb_search_log: List[str] = []
-    mb_candidates = _mb_release_search(guessed_album, guessed_artist, limit=8,
-                                       year=guessed_year, track_count=folder_track_count,
-                                       artist_mbid=guessed_artist_mbid, log=mb_search_log)
-    if not mb_candidates and guessed_artist:
-        mb_candidates = _mb_release_search(guessed_album, "", limit=8,
+    mb_unavailable = False
+    try:
+        mb_candidates = _mb_release_search(guessed_album, guessed_artist, limit=8,
                                            year=guessed_year, track_count=folder_track_count,
                                            artist_mbid=guessed_artist_mbid, log=mb_search_log)
-    if not mb_candidates and guessed_album:
-        short = " ".join(guessed_album.split()[:3])
-        mb_candidates = _mb_release_search(short, guessed_artist, limit=8,
-                                           year=guessed_year, track_count=folder_track_count,
-                                           artist_mbid=guessed_artist_mbid, log=mb_search_log)
-    if not mb_candidates:
-        # Last resort: search MB by track titles extracted from the audio files.
-        # Useful when folder/tag names are badly mangled but track metadata is intact.
-        mb_candidates = _mb_release_search_by_folder_tracks(
-            folder_path, artist=guessed_artist, log=mb_search_log, limit=8)
+        if not mb_candidates and guessed_artist:
+            mb_candidates = _mb_release_search(guessed_album, "", limit=8,
+                                               year=guessed_year, track_count=folder_track_count,
+                                               artist_mbid=guessed_artist_mbid, log=mb_search_log)
+        if not mb_candidates and guessed_album:
+            short = " ".join(guessed_album.split()[:3])
+            mb_candidates = _mb_release_search(short, guessed_artist, limit=8,
+                                               year=guessed_year, track_count=folder_track_count,
+                                               artist_mbid=guessed_artist_mbid, log=mb_search_log)
+        if not mb_candidates:
+            # Last resort: search MB by track titles extracted from the audio files.
+            # Useful when folder/tag names are badly mangled but track metadata is intact.
+            mb_candidates = _mb_release_search_by_folder_tracks(
+                folder_path, artist=guessed_artist, log=mb_search_log, limit=8)
+    except provider_boundary.ProviderError as exc:
+        # An outage is not "no candidates": keep going with AcoustID/Discogs
+        # evidence and report the lookup failure below.
+        mb_unavailable, mb_candidates = True, []
+        mb_search_log.append(f"WARN: MusicBrainz lookup failed: {exc}")
     discogs_fallback: Dict[str, Any] = {}
     if not mb_candidates:
         # MusicBrainz text search exhausted every variant it knows; Discogs'
@@ -1012,7 +1019,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             )
             retry_artist = _s(discogs_fallback.get("artist")) or guessed_artist
             retry_album = _s(discogs_fallback.get("album")) or guessed_album
-            if retry_artist != guessed_artist or retry_album != guessed_album:
+            if not mb_unavailable and (retry_artist != guessed_artist or retry_album != guessed_album):
                 mb_candidates = _mb_release_search(retry_album, retry_artist, limit=8,
                                                    year=guessed_year, track_count=folder_track_count,
                                                    artist_mbid=guessed_artist_mbid, log=mb_search_log)
@@ -1156,6 +1163,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "acoustid_candidates": acoustid_cands,
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
+            "musicbrainz_unavailable": mb_unavailable,
         }
 
     # ── build prompt sections ─────────────────────────────────────────────────

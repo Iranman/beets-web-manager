@@ -156,6 +156,8 @@ docker compose restart beets   # load a new webmanager plugin version, if the re
 
 Read the release's Upgrade Notes in [`CHANGELOG.md`](../CHANGELOG.md) before upgrading. The full upgrade, verification and rollback steps are in the README's [Upgrades](../README.md#upgrades) section.
 
+Backups are not signed: the checksums in a backup's `MANIFEST.txt` detect damage, not tampering. Keep backups in a folder owned by root that no container can write to or mount. `restore.sh` refuses a backup without `MANIFEST.txt`. An old-layout archive (Beets files at the top level, made by a `backup.sh` from before manifests existed) can still be restored, unverified, with `--allow-legacy-backup`. A current-layout archive without `MANIFEST.txt` is always refused.
+
 ---
 
 ## Health Checks

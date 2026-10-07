@@ -124,7 +124,8 @@ class SpotifyFetchErrorSafeMessageTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused to 10.0.0.5")):
             with self.assertRaises(app_module._SpotifyFetchError) as ctx:
                 app_module._fetch_spotify_playlist_tracks("playlist123", "client-id", "client-secret")
-        self.assertEqual(str(ctx.exception), "Spotify authentication failed.")
+        # IA-19: still a fixed message, now naming the real cause.
+        self.assertEqual(str(ctx.exception), "Spotify is unavailable; try again later.")
         self.assertNotIn("10.0.0.5", str(ctx.exception))
 
 

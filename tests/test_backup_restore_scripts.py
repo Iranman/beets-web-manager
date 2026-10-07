@@ -298,6 +298,44 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
             os.remove(os.path.join(top, "MANIFEST.txt"))
         self._assert_restore_refused_untouched(self._rewrite_archive(archive, drop), "no MANIFEST.txt")
 
+    def _old_layout_archive(self):
+        """An archive in the layout backup.sh wrote before manifests: the
+        Beets files at the top level, no web-manager-data/, no MANIFEST.txt."""
+        archive = self.backup("python")
+
+        def to_old_layout(top):
+            os.remove(os.path.join(top, "MANIFEST.txt"))
+            shutil.rmtree(os.path.join(top, "web-manager-data"))
+            for name in os.listdir(os.path.join(top, "beets")):
+                os.rename(os.path.join(top, "beets", name), os.path.join(top, name))
+            os.rmdir(os.path.join(top, "beets"))
+        return self._rewrite_archive(archive, to_old_layout)
+
+    def test_restore_refuses_an_old_backup_without_a_manifest(self):
+        # #178: the old layout was restored unverified -- a downgrade path.
+        self._assert_restore_refused_untouched(self._old_layout_archive(), "backup_manifest_missing")
+
+    def test_allow_legacy_backup_restores_an_old_backup_with_a_warning(self):
+        archive = self._old_layout_archive()
+        self.live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.live.close()
+        Path(self.beets, "config.yaml").write_text("changed: true\n", encoding="utf-8")
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", "--allow-legacy-backup", archive)
+        self.assertIn("UNVERIFIED BACKUP", res.stderr)
+        self.assertNotEqual(Path(self.beets, "config.yaml").read_text(encoding="utf-8"), "changed: true\n")
+
+    def test_allow_legacy_backup_does_not_skip_a_new_layout_without_a_manifest(self):
+        archive = self.backup("python")
+
+        def drop(top):
+            os.remove(os.path.join(top, "MANIFEST.txt"))
+        rewritten = self._rewrite_archive(archive, drop)
+        res = self.run_script(RESTORE, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                              "--yes", "--allow-legacy-backup", rewritten, check=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("backup_manifest_missing", res.stderr)
+
     def test_backup_with_a_nested_manifest_file_restores(self):
         nested = Path(self.beets, "beetsplug", "webmanager", "MANIFEST.txt")
         nested.write_text("plugin notes\n", encoding="utf-8")

@@ -2373,6 +2373,15 @@ def plan_album_metadata(
     if refusal:
         return refusal
     payload["updates"], payload["item_updates"] = album_updates, per_item
+    # Music-identity F-2: an operator-selected move to another Release Group
+    # is recorded, so the audit shows it and the caller can log it.
+    old_rg = _uuid_or_blank(album.get("mb_releasegroupid"))
+    new_rg = _uuid_or_blank(album_updates.get("mb_releasegroupid"))
+    summary = f"Metadata update for album {aid}"
+    if old_rg and new_rg and old_rg != new_rg:
+        payload["release_group_change"] = {"from": old_rg, "to": new_rg,
+                                           "operator_selected": bool(payload.get("release_selected_by_operator"))}
+        summary += f" (Release Group {old_rg} -> {new_rg}, operator-selected)"
     before: Dict[str, Any] = {"album": {"id": aid, "fields": _restorable(album, album_updates)}, "items": []}
     for iid, fields in per_item.items():
         item = ad.get_item(int(iid))
@@ -2382,7 +2391,7 @@ def plan_album_metadata(
     tx = st.create(
         operation_type="Metadata Update",
         status="Preview",
-        summary=f"Metadata update for album {aid}",
+        summary=summary,
         rollback_available=True,
         rollback_reason="Restores the album and track values captured before the update.",
         metadata={**payload, "before_state": before, "mutation_family": ALBUM_METADATA_FAMILY},
@@ -2508,6 +2517,8 @@ def update_album_metadata(
         "album_fields_changed": plan_res.get("album_fields_changed", 0),
         "items_changed": plan_res.get("items_changed", 0),
         "operation_id": op_id,
+        **({"release_group_change": plan_res["release_group_change"]}
+           if plan_res.get("release_group_change") else {}),
     }
 
 

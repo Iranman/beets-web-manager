@@ -36,7 +36,10 @@ error handling is unchanged. What it adds, uniformly for every provider:
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import enum
+import http.client
 import os
 import re
 import socket
@@ -120,17 +123,46 @@ class ProviderError(Exception):
     """Raised inside a provider call to report a classified failure."""
 
     def __init__(self, outcome: ProviderOutcome, message: str = "", *, status_code: Optional[int] = None,
-                 retry_after: Optional[float] = None):
+                 retry_after: Optional[float] = None, provider: str = ""):
         super().__init__(redact(message))
         self.outcome, self.status_code, self.retry_after = outcome, status_code, retry_after
+        self.provider = provider  # a POLICIES key when known; names the provider in API errors
+
+
+# Fixed, user-facing provider names (API error text never carries exception text).
+PROVIDER_DISPLAY_NAMES = {
+    "musicbrainz": "MusicBrainz", "acoustid": "AcoustID", "discogs": "Discogs", "plex": "Plex",
+    "lidarr": "Lidarr", "slskd": "slskd", "spotify": "Spotify", "listenbrainz": "ListenBrainz",
+    "artwork": "The artwork source", "ai": "The AI provider",
+}
+
+
+def unavailable_message(exc: BaseException) -> str:
+    name = PROVIDER_DISPLAY_NAMES.get(getattr(exc, "provider", ""), "An external provider")
+    return f"{name} is unavailable; try again later"
 
 
 def _retry_after(headers: Any) -> Optional[float]:
+    """Retry-After as seconds: delta-seconds or an HTTP-date (RFC 9110)."""
     try:
         raw = headers.get("Retry-After") if headers is not None else None
-        return max(0.0, float(raw)) if raw not in (None, "") else None
-    except (TypeError, ValueError):
+    except Exception:
         return None
+    if raw in (None, ""):
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(str(raw))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
 
 
 def classify_http(code: int, headers: Any = None) -> ProviderOutcome:
@@ -251,6 +283,17 @@ def policy_for(provider: str) -> ProviderPolicy:
     return policy
 
 
+def _provider_answered(outcome: ProviderOutcome, status_code: Optional[int]) -> bool:
+    """True when the provider itself answered: an answer, or a 4xx refusal
+    of this particular request (a MusicBrainz 404, an AcoustID 400). Those
+    say nothing about the provider's health. A REJECTED with no status code
+    (TLS failure, outbound-policy block) is ours to fix and counts as a
+    failure."""
+    if outcome in ANSWERS:
+        return True
+    return outcome == ProviderOutcome.REJECTED and status_code is not None
+
+
 def _record(provider: str, outcome: ProviderOutcome, *, attempts: int, status_code: Optional[int] = None,
             message: str = "") -> None:
     now = time.time()
@@ -261,7 +304,7 @@ def _record(provider: str, outcome: ProviderOutcome, *, attempts: int, status_co
         row["retries"] += max(0, attempts - 1)
         row.update(last_outcome=outcome.value, last_status_code=status_code, last_attempts=attempts,
                    last_message=redact(message))
-        if outcome == ProviderOutcome.CONFIRMED:
+        if _provider_answered(outcome, status_code):
             row["last_success_at"] = now
         else:
             row["failures"] += 1
@@ -313,16 +356,35 @@ def _after_failure(provider: str, policy: ProviderPolicy, exc: BaseException, *,
     return True
 
 
+# What a failing provider or transport raises (see classify_exception);
+# ValueError covers a malformed body (json.JSONDecodeError).
+_PROVIDER_FAILURES = (ProviderError, OSError, http.client.HTTPException, OutboundPolicyError, ValueError)
+
+
 @contextmanager
 def _yielding(provider: str, response: Any, attempts: int) -> Iterator[Any]:
-    _record(provider, ProviderOutcome.CONFIRMED, attempts=attempts,
-            status_code=getattr(response, "status", None))
+    """Yield the response; record the outcome only once the caller's block
+    is done, so a body that fails mid-read (IncompleteRead, timeout,
+    oversize, malformed) is recorded as the failure it is, not as CONFIRMED.
+    The body is streamed by the caller, so such a failure is not retried."""
+    status = getattr(response, "status", None)
     try:
         if hasattr(response, "__enter__"):
             with response as entered:
                 yield entered
         else:
             yield response
+    except GeneratorExit:
+        raise
+    except _PROVIDER_FAILURES as exc:
+        # Only provider/transport failures count against the provider; a
+        # bug in the caller's block (KeyError, ...) re-raises unrecorded.
+        err = classify_exception(exc)
+        _record(provider, err.outcome, attempts=attempts, status_code=err.status_code or status,
+                message=f"response body: {err}")
+        raise
+    else:
+        _record(provider, ProviderOutcome.CONFIRMED, attempts=attempts, status_code=status)
     finally:
         close = getattr(response, "close", None)
         if callable(close) and not hasattr(response, "__enter__"):

@@ -79,8 +79,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     album       = (data.get("album")       or "").strip()
     year        = str(data.get("year")     or "").strip()
     track_count = int(data.get("track_count") or 0)
-    mb_albumid  = (data.get("mb_albumid")  or "").strip()
-    method      = _normalise_download_method(data.get("method") or "slskd")
+    # A release group (e.g. a Lidarr wanted row) is passed as such and
+    # resolved to a concrete release below -- never used as a release ID.
+    mb_albumid  = ((data.get("mb_albumid") or "").strip()
+                   or _acq_release_group_url(data.get("mb_releasegroupid")))
+    method     = _normalise_download_method(data.get("method") or "slskd")
     auto_import = bool(data.get("auto_import", True))
     forced_albumartist = _artist_folder_name_without_mbid(data.get("albumartist") or artist).strip()
     raw_fallback_method = data.get("fallback_method")
@@ -835,11 +838,23 @@ def _acq_release_text_key(artist: Any, album: Any, year: Any = "") -> str:
     ])
 
 
-def _acq_release_identity(artist: Any, album: Any, year: Any, mbid: Any) -> str:
+def _acq_release_identity(artist: Any, album: Any, year: Any, mbid: Any, rgid: Any = "") -> str:
+    """Queue identity: the release group (canonical) when known, else the
+    release, else text. A Lidarr wanted row only ever has a release group."""
+    clean_rgid = _s(rgid).strip().lower()
+    if clean_rgid:
+        return f"rg:{clean_rgid}"
     clean_mbid = _s(mbid).strip().lower()
     if clean_mbid:
         return f"mb:{clean_mbid}"
     return f"title:{_acq_release_text_key(artist, album, year)}"
+
+
+def _acq_release_group_url(rgid: Any) -> str:
+    """A release-group reference the download path resolves to a concrete
+    release (``_resolve_album_release_for_import``); never a release ID."""
+    clean = _s(rgid).strip().lower()
+    return f"https://musicbrainz.org/release-group/{clean}" if clean else ""
 
 
 def _acq_album_has_no_track_rows(album: Dict[str, Any]) -> bool:
@@ -1017,7 +1032,27 @@ def _acq_local_issue(album: Dict[str, Any], health: Dict[str, Any]) -> str:
     return _s(health.get("label") or "Needs acquisition")
 
 
+_LIDARR_WANTED_MAX_PAGES = 200  # 20,000 wanted albums; a paging bug must not loop forever
+
+
+def _lidarr_wanted_error(exc: BaseException) -> str:
+    """A fixed, user-facing reason (IA-08); never the provider's body."""
+    err = provider_boundary.classify_exception(exc)
+    if err.outcome == provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR:
+        return "Lidarr rejected the API key"
+    if err.outcome == provider_boundary.ProviderOutcome.RATE_LIMITED:
+        return "Lidarr is rate limiting requests"
+    if isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)):
+        return "Lidarr returned an unexpected response"
+    if err.status_code is not None and err.status_code < 500:
+        return f"Lidarr refused the request (HTTP {err.status_code})"
+    return "Could not reach Lidarr"
+
+
 def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
+    """Every wanted/missing album, or ([], reason) -- never a partial list
+    presented as complete. ``foreignAlbumId`` is a MusicBrainz release
+    group, so it is reported as ``mb_releasegroupid`` (IA-07)."""
     if not LIDARR_KEY:
         return [], "LIDARR_API_KEY not configured"
     results: List[Dict[str, Any]] = []
@@ -1031,33 +1066,48 @@ def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
             req = _ur.Request(url, headers={"X-Api-Key": LIDARR_KEY})
             with provider_boundary.opened("lidarr", req, timeout=10) as r:
                 data = json.loads(r.read())
+            if not isinstance(data, dict) or not isinstance(data.get("records", []), list):
+                raise ValueError("unexpected wanted/missing payload")
             records = data.get("records", [])
             for rec in records:
-                artist_obj = rec.get("artist") or {}
-                mbid = _s(rec.get("foreignAlbumId") or "")
+                if not isinstance(rec, dict):
+                    continue
+                artist_obj = rec.get("artist") if isinstance(rec.get("artist"), dict) else {}
+                rgid = _s(rec.get("foreignAlbumId") or "").strip().lower()
+                if rgid and not _MB_UUID_RE.match(rgid):
+                    rgid = ""
+                try:
+                    lidarr_id = int(rec.get("id") or 0)
+                except (TypeError, ValueError):
+                    lidarr_id = 0
                 results.append({
-                    "artist": artist_obj.get("artistName", ""),
-                    "album": rec.get("title", ""),
+                    "artist": _s(artist_obj.get("artistName") or ""),
+                    "album": _s(rec.get("title") or ""),
                     "year": _s(rec.get("releaseDate") or "")[:4],
-                    "type": rec.get("albumType", ""),
-                    "lidarr_id": rec.get("id", 0),
-                    "mb_albumid": mbid,
-                    "mb_url": f"https://musicbrainz.org/release-group/{mbid}" if mbid else "",
-                    "monitored": rec.get("monitored", True),
+                    "type": _s(rec.get("albumType") or ""),
+                    "lidarr_id": lidarr_id,
+                    "mb_albumid": "",
+                    "mb_releasegroupid": rgid,
+                    "mb_url": _acq_release_group_url(rgid),
+                    "monitored": rec.get("monitored", True) is not False,
                 })
             if len(records) < 100:
                 break
             page += 1
+            if page > _LIDARR_WANTED_MAX_PAGES:
+                raise ValueError("wanted/missing paging did not end")
         return results, ""
     except Exception as exc:
-        _app_logger.warning("Lidarr wanted-list fetch failed: %s", type(exc).__name__)
-        return [], "Could not reach Lidarr"
+        reason = _lidarr_wanted_error(exc)
+        _app_logger.warning("Lidarr wanted-list fetch failed: %s (%s)", reason, type(exc).__name__)
+        return [], reason
 
 
 def _acq_item_mbid(item: Dict[str, Any]) -> str:
     local = item.get("local") or {}
     wanted = item.get("wanted") or {}
-    return _s(item.get("mbid") or local.get("mb_albumid") or wanted.get("mb_albumid") or "")
+    return _s(item.get("mbid") or local.get("mb_albumid")
+              or _acq_release_group_url(wanted.get("mb_releasegroupid")) or "")
 
 
 def _acq_can_import_disk(item: Dict[str, Any]) -> bool:
@@ -1122,9 +1172,24 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
     complete_local_by_identity: Dict[str, Dict[str, Any]] = {}
     complete_local_by_text: Dict[str, Dict[str, Any]] = {}
 
+    def _text_key(artist: Any, album: Any) -> str:
+        # IA-07: no year. Lidarr's year is the release group's first release;
+        # the local year is the edition's. Only used when either side has no
+        # release group ID.
+        return _acq_release_text_key(artist, album)
+
+    def _text_fallback(table: Dict[str, Dict[str, Any]], key: str, rgid: str) -> Optional[Dict[str, Any]]:
+        found = table.get(key)
+        if not found:
+            return None
+        found_rgid = _s(found.get("mb_releasegroupid")
+                        or (found.get("local") or {}).get("mb_releasegroupid") or "").strip().lower()
+        # Two different release groups that share a title are different albums.
+        return None if (rgid and found_rgid and found_rgid != rgid) else found
+
     def _add(item: Dict[str, Any]) -> None:
         by_identity[item["key"]] = item
-        by_text[_acq_release_text_key(item.get("artist"), item.get("album"), item.get("year"))] = item
+        by_text[_text_key(item.get("artist"), item.get("album"))] = item
 
     for artist in library_payload.get("artists") or []:
         for album in artist.get("albums") or []:
@@ -1132,8 +1197,9 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
             album_name = _s(album.get("album") or "Untitled album")
             year = _acq_display_year(album.get("year"))
             health = _acq_health(album)
-            identity_key = _acq_release_identity(artist_name, album_name, year, album.get("mb_albumid") or "")
-            text_key = _acq_release_text_key(artist_name, album_name, year)
+            identity_key = _acq_release_identity(artist_name, album_name, year, album.get("mb_albumid") or "",
+                                                 album.get("mb_releasegroupid") or "")
+            text_key = _text_key(artist_name, album_name)
             if not _acq_needs_acquisition(album, health):
                 if _acq_locally_satisfies_wanted(album, health):
                     complete_local_by_identity[identity_key] = album
@@ -1146,6 +1212,7 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
                 "expected_track_count": _acq_expected_track_count(album),
                 "albumtype": _s(album.get("albumtype") or ""),
                 "mb_albumid": _s(album.get("mb_albumid") or ""),
+                "mb_releasegroupid": _s(album.get("mb_releasegroupid") or "").strip().lower(),
                 "health": health,
             }
             item = {
@@ -1167,17 +1234,18 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
         artist_name = _s(wanted.get("artist") or "Unknown artist")
         album_name = _s(wanted.get("album") or "Untitled album")
         year = _acq_display_year(wanted.get("year"))
-        identity = _acq_release_identity(artist_name, album_name, year, wanted.get("mb_albumid") or "")
-        fallback = _acq_release_text_key(artist_name, album_name, year)
-        existing = by_identity.get(identity) or by_text.get(fallback)
+        rgid = _s(wanted.get("mb_releasegroupid") or "").strip().lower()
+        identity = _acq_release_identity(artist_name, album_name, year, "", rgid)
+        fallback = _text_key(artist_name, album_name)
+        existing = by_identity.get(identity) or _text_fallback(by_text, fallback, rgid)
         if existing:
             existing["wanted"] = wanted
-            existing["mbid"] = existing.get("mbid") or _s(wanted.get("mb_albumid") or "")
+            existing["mbid"] = existing.get("mbid") or _acq_release_group_url(rgid)
             if "lidarr" not in existing["sources"]:
                 existing["sources"].append("lidarr")
             existing["actions"] = _acq_action_flags(existing)
             continue
-        if complete_local_by_identity.get(identity) or complete_local_by_text.get(fallback):
+        if complete_local_by_identity.get(identity) or _text_fallback(complete_local_by_text, fallback, rgid):
             continue
         item = {
             "key": identity,
@@ -1185,7 +1253,7 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
             "artist": artist_name,
             "album": album_name,
             "year": year,
-            "mbid": _s(wanted.get("mb_albumid") or ""),
+            "mbid": _acq_release_group_url(rgid),
             "issue": "Wanted in Lidarr" if wanted.get("monitored", True) else "Unmonitored in Lidarr",
             "local": None,
             "wanted": wanted,
