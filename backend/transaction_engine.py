@@ -1699,8 +1699,15 @@ def validate_path_under_allowed_roots(
         return None
     if reject_symlinks and _path_has_symlink_under(cand, selected_root):
         return None
+    # Inline textual containment on the exact value that reaches the sink
+    # (CodeQL py/path-injection barrier, alert #1385); _path_under above is
+    # the resolve()-based check that also collapses symlinks.
+    cand_text = os.path.normpath(os.path.abspath(os.fspath(cand)))
+    root_text = os.path.normpath(os.path.abspath(os.fspath(selected_root)))
+    if cand_text != root_text and not cand_text.startswith(root_text.rstrip(os.sep) + os.sep):
+        return None
     try:
-        return cand.resolve(strict=False)
+        return Path(cand_text).resolve(strict=False)
     except Exception:
         return None
 
