@@ -566,7 +566,7 @@ def plan_artist_folder_reconcile(
         status="Preview",
         summary=f"Reconcile {len(album_ids)} albums for artist '{canonical_name}'",
         changes=changes,
-        rollback_available=True,
+        rollback_available=False,  # #228: no rollback.operations and no engine family
         metadata={
             "canonical_name": canonical_name,
             "album_ids": album_ids,
@@ -1952,7 +1952,7 @@ def plan_album_mb_track_repair(
         status="Preview",
         summary=f"Repair MB track metadata for album {aid} ({album.get('album')})",
         changes=changes,
-        rollback_available=True,
+        rollback_available=False,  # #228: no rollback.operations and no engine family
         metadata={"album_id": aid, "before_state": before_state, "payload": payload},
     )
 
