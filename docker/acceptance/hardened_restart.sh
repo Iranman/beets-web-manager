@@ -6,6 +6,8 @@
 # from a root-owned data directory, as a fresh host mount would be.
 # A last case boots with default capabilities (as docker-compose.yml runs
 # it) and checks that a stray root-owned file in an owned tree is repaired.
+# D6: every stop/restart must forward SIGTERM to the app (no tini FATAL, no
+# SIGKILL after the stop timeout) under both capability sets.
 #
 # Usage: docker/acceptance/hardened_restart.sh [image] [bind-mount-dir]
 # Uses the real examples/docker-compose.external-beets.yml service
@@ -15,7 +17,7 @@ set -euo pipefail
 IMAGE="${1:-beets-web-manager:ci}"
 BIND_DIR="${2:-}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PROJECT="bwm-sec-hardened"
+PROJECT="${BWM_ACCEPT_PROJECT:-bwm-sec-hardened}"
 VOLUME="${PROJECT}-data"
 OVERRIDE="$(mktemp)"
 export BEETS_WEB_URL=http://beets.ci.invalid:8337
@@ -54,6 +56,31 @@ wait_healthy() {
     return 1
 }
 
+STOP_TIMEOUT=20
+
+# $1 = label, $2 = container id, then the stop/restart command to time.
+assert_graceful() {
+    local label="$1" cid="$2" start elapsed code
+    shift 2
+    start="$(date +%s)"
+    "$@" >/dev/null
+    elapsed=$(( $(date +%s) - start ))
+    if docker logs "$cid" 2>&1 | grep -q 'FATAL tini'; then
+        echo "::error::$label: tini failed to forward the stop signal" >&2
+        docker logs --tail 20 "$cid" >&2 || true
+        exit 1
+    fi
+    if [ "$elapsed" -ge "$STOP_TIMEOUT" ]; then
+        echo "::error::$label: app did not exit on SIGTERM within ${STOP_TIMEOUT}s (${elapsed}s)" >&2
+        exit 1
+    fi
+    code="$(docker inspect -f '{{.State.ExitCode}}' "$cid")"
+    if [ "$code" = 137 ]; then
+        echo "::error::$label: app was SIGKILLed (exit 137)" >&2
+        exit 1
+    fi
+}
+
 # $1 = label, $2 = volume source (named volume or host path)
 run_case() {
     cat >"$OVERRIDE" <<EOF
@@ -72,7 +99,7 @@ EOF
         echo "== $1: boot $boot"
         if [ "$boot" = 3 ]; then
             # Plain restart of the same container, not just recreate.
-            compose restart beets-web-manager >/dev/null
+            assert_graceful "$1: restart" "$cid" compose restart -t "$STOP_TIMEOUT" beets-web-manager
         else
             compose up -d --force-recreate >/dev/null
         fi
@@ -88,6 +115,7 @@ EOF
                 || { echo "::error::$1: data dir not 0700 1000:1000 after first boot" >&2; exit 1; }
         fi
     done
+    assert_graceful "$1: stop" "$cid" compose stop -t "$STOP_TIMEOUT" beets-web-manager
     compose down >/dev/null
 }
 
@@ -117,6 +145,7 @@ docker rm -f "${PROJECT}-default" >/dev/null
 MSYS_NO_PATHCONV=1 docker run --rm -v "$VOLUME:/d" alpine chown 0:0 /d/.auth_token
 echo "== default capabilities: boot with root-owned .auth_token"
 default_boot
+assert_graceful "default capabilities: stop" "${PROJECT}-default" docker stop -t "$STOP_TIMEOUT" "${PROJECT}-default"
 docker rm -f "${PROJECT}-default" >/dev/null
 MSYS_NO_PATHCONV=1 docker run --rm -v "$VOLUME:/d" alpine stat -c '%u:%g' /d/.auth_token | grep -qx '1000:1000'     || { echo "::error::root-owned .auth_token was not repaired" >&2; exit 1; }
 echo "hardened restart check: OK"
