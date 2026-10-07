@@ -135,7 +135,7 @@ def delete_import_review_folder():
         _app_logger.info("delete_import_review_folder log for %r: %r", src_path, log)
         return jsonify({"ok": True, **result})
     except ValueError as ex:
-        _app_logger.warning("delete_import_review_folder refused for %r: %s; log: %r", src_path, ex, log)
+        _app_logger.warning("delete_import_review_folder refused for %r: %r; log: %r", src_path, ex, log)
         return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(
             {"error": str(ex)}, "Could not delete source folder.")}), 400
     except Exception as ex:
