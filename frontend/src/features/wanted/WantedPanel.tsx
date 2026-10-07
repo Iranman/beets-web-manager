@@ -75,14 +75,20 @@ function groupByArtist(albums: LidarrWantedAlbum[]) {
     .sort((a, b) => a.artist.localeCompare(b.artist));
 }
 
+/** The album's MusicBrainz release group ID (canonical identity). The Lidarr
+ * status row carries it in `mb_albumid` (Lidarr foreignAlbumId). */
+function releaseGroupId(wanted: LidarrWantedAlbum, status?: LidarrArtistAlbum) {
+  return (wanted.mb_releasegroupid || status?.mb_albumid || '').trim().toLowerCase();
+}
+
 function matchLidarrAlbum(wanted: LidarrWantedAlbum, lookup: LidarrArtistAlbum[] | null) {
   if (!lookup?.length) return undefined;
-  const wantedMbid = wanted.mb_albumid?.trim().toLowerCase();
+  const wantedRgid = releaseGroupId(wanted);
   const wantedTitle = titleKey(wanted.album);
 
   return (
     lookup.find((album) => album.lidarr_id === wanted.lidarr_id) ??
-    lookup.find((album) => wantedMbid && album.mb_albumid?.trim().toLowerCase() === wantedMbid) ??
+    lookup.find((album) => wantedRgid && album.mb_albumid?.trim().toLowerCase() === wantedRgid) ??
     lookup.find((album) => titleKey(album.title) === wantedTitle) ??
     lookup.find((album) => {
       const key = titleKey(album.title);
@@ -116,7 +122,7 @@ function actionBody(action: WantedAction | null) {
   if (!action) return '';
   const target = `${action.album.artist} - ${action.status?.title || action.album.album}`;
   if (action.kind === 'import') {
-    return `${target} will be imported into Beets from the Lidarr album folder using the selected MusicBrainz ID.`;
+    return `${target} will be imported into Beets from the Lidarr album folder. Beets resolves the album's MusicBrainz release group to a matching release.`;
   }
   const source = action.kind === 'slskd' ? 'slskd' : downloadMethodLabel(action.kind);
   return `${target} will be searched with ${source}, downloaded, then imported and tagged by Beets.`;
@@ -189,9 +195,9 @@ function WantedRow({
   const { job, error: jobError } = useJobPoll(jobId);
 
   const running = Boolean(jobId && (!job || job.status === 'running'));
-  const mbid = status?.mb_albumid || album.mb_albumid || '';
+  const rgid = releaseGroupId(album, status);
   const path = status?.aldir || status?.disk_path || '';
-  const readyToImport = Boolean(status && status.percent >= 100 && path && mbid);
+  const readyToImport = Boolean(status && status.percent >= 100 && path && rgid);
   const latest = lastLogLine(job?.log);
 
   useEffect(() => {
@@ -205,14 +211,13 @@ function WantedRow({
     setActionError('');
     setNotice('');
     try {
-      const actionMbid = status?.mb_albumid || album.mb_albumid || '';
       const payload: DownloadAlbumPayload = {
         artist: album.artist,
         albumartist: album.artist,
         album: status?.title || album.album,
         year: status?.year || album.year || '',
         track_count: status?.total_track_count || 0,
-        mb_albumid: actionMbid,
+        mb_releasegroupid: rgid,
         method,
         auto_import: true,
       };
@@ -232,13 +237,15 @@ function WantedRow({
     setNotice('');
     try {
       const actionStatus = action.status;
-      const actionMbid = actionStatus?.mb_albumid || action.album.mb_albumid || '';
+      const actionRgid = releaseGroupId(action.album, actionStatus);
       const aldir = actionStatus?.aldir || actionStatus?.disk_path || '';
       if (!aldir) throw new Error('Lidarr did not provide a disk path for this album.');
-      if (!actionMbid) throw new Error('A MusicBrainz release ID is required before importing.');
+      if (!actionRgid) throw new Error('A MusicBrainz release group ID is required before importing.');
       const started = await reimportDisk({
         aldir,
-        mb_albumid: actionMbid,
+        // reimport-disk reads only mb_albumid; it resolves a release-group URL
+        // to a concrete release instead of treating the ID as a Release.
+        mb_albumid: `https://musicbrainz.org/release-group/${actionRgid}`,
         albumartist: action.album.artist,
       });
       setJobId(started.job_id);
@@ -280,12 +287,12 @@ function WantedRow({
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
             {status ? <span>{status.track_file_count}/{status.total_track_count || 0} tracks</span> : null}
-            {mbid ? <span className="font-mono">{mbid}</span> : <span>No MusicBrainz ID</span>}
+            {rgid ? <span className="font-mono" title="MusicBrainz release group ID">{rgid}</span> : <span>No MusicBrainz release group ID</span>}
             {path ? <span className="max-w-xl truncate font-mono">{path}</span> : null}
           </div>
           {album.mb_url ? (
             <a className="text-xs text-red-400 hover:text-red-300" href={album.mb_url} rel="noreferrer" target="_blank">
-              MusicBrainz
+              MusicBrainz release group
             </a>
           ) : null}
         </div>
@@ -456,7 +463,7 @@ function ArtistWantedGroup({
             ) : null}
             {albums.map((album) => (
               <WantedRow
-                key={`${album.lidarr_id}-${album.mb_albumid || album.album}`}
+                key={`${album.lidarr_id}-${album.mb_releasegroupid || album.album}`}
                 album={album}
                 lookupLoaded={lookupLoaded}
                 onLoadStatus={loadStatus}
