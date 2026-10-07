@@ -2213,6 +2213,9 @@ def match_album(aid):
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
         metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
         _require_attach_stage_success(metadata_result, "match album metadata update")
+        rg_change = metadata_result.get("release_group_change") if isinstance(metadata_result, dict) else None
+        if rg_change:
+            log.append(f"  Release Group changed {rg_change.get('from')} -> {rg_change.get('to')} (operator-selected Release)")
         meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
         log.append(f"  albums.mb_albumid set to {mb_albumid}")
 

@@ -2748,6 +2748,18 @@ def create_album_mb_track_repair_plan(
                 conflicts_requiring_review.append(repair_spec)
                 changes.append(change_row)
                 continue
+            confirmed_rid = str((fp.get("candidate") or {}).get("mb_trackid") or "").strip().lower()
+            if confirmed_rid != str(target_mbid or "").strip().lower():
+                # Music-identity F-3: the fingerprint confirmed a different
+                # track of this release than the one alignment chose.
+                change_row["status"] = "requires_review"
+                change_row["review_reason"] = (
+                    "AcoustID confirmed a different recording on this release than the "
+                    "tracklist alignment chose; the Recording ID is not written."
+                )
+                conflicts_requiring_review.append(repair_spec)
+                changes.append(change_row)
+                continue
             change_row["status"] = "planned"
             tracks_to_repair.append(repair_spec)
         changes.append(change_row)
