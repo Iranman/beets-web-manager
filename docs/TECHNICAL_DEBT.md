@@ -172,7 +172,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Verified against `lscr.io/linuxserver/beets:latest` (Beets 2.14.1): Beets loads MusicBrainz as a plugin, so `musicbrainz` must be in `plugins:` when a `plugins:` list exists. Without it Beets finds no candidates and every confirmed import is skipped (`not_imported`). `docs/CONFIGURATION.md` still says MusicBrainz needs no `plugins:` entry.
   - import-with-id and reimport-disk still retag after the import (`_match_tracks_from_mb`, `plan_album_mb_track_repair`, `relocate_album`). Once Beets applies the confirmed Release itself these steps repeat its work and should be reduced to verification.
   - A reimport-disk source inside the library needs the plugin to accept an in-place import (no copy, no move) from the library directory; today it is refused with `path_not_allowed`.
-- Desired state: the plugin runs Beets' quiet import with autotag, `search_ids` and `quiet_fallback`; provisioning enables `musicbrainz`; Web Manager only verifies.
+- Desired state: the plugin runs Beets' quiet import with autotag, `search_ids` and `quiet_fallback`, and returns the paths of the tasks Beets skipped as `skipped_paths`, so `/api/import` can name every folder left in place; provisioning enables `musicbrainz`; Web Manager only verifies.
 - Priority: P1 (no import works without it). Status: Open.
 
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)

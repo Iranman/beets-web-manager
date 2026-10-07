@@ -1541,6 +1541,9 @@ def start_ai_batch_import():
     return _start_ai_batch_job(scan_path, recover_batch_job_id=recover_batch_job_id)
 
 
+IMPORT_NOT_MATCHED_STATUS = "not matched; left in place for review"
+
+
 @app.post("/api/import")
 def start_import():
     payload  = request.get_json(silent=True) or {}
@@ -1549,7 +1552,10 @@ def start_import():
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
     path     = str(validated_path)
-    fallback = _s(payload.get("fallback") or "asis").strip().lower()   # asis | skip (Beets quiet_fallback)
+    # Beets quiet_fallback: skip by default, so an album Beets cannot match is
+    # left in place for review; asis (import with existing tags, no release
+    # group) only when the caller asks for it.
+    fallback = _s(payload.get("fallback") or "skip").strip().lower()
     if fallback not in ("asis", "skip"):
         return jsonify({"ok": False, "error": "fallback must be 'asis' or 'skip'"}), 400
     write    = payload.get("write", True)
@@ -1593,9 +1599,16 @@ def start_import():
         res = composite_workflows.reimport_source(path, beets_options=beets_options, timeout=300.0)
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Beets import failed.")
-        combined = ""
-        _delete_if_already_in_library(path, combined, log)
+        _delete_if_already_in_library(path, "", log)
         _invalidate_lib_cache()
+        not_matched = [{"path": p, "status": IMPORT_NOT_MATCHED_STATUS} for p in res.get("not_matched") or []]
+        for row in not_matched:
+            log.append(f"[import] {row['path']}: {IMPORT_NOT_MATCHED_STATUS}")
+        if not res.get("not_matched_known", True):
+            log.append("[import] Beets did not report which folders it skipped; "
+                       f"check {path} for folders left in place.")
+        return {"albums_imported": res.get("albums_imported"), "quiet_fallback": fallback,
+                "not_matched": not_matched, "not_matched_known": res.get("not_matched_known", True)}
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})

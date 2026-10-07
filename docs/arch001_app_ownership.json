@@ -33335,11 +33335,11 @@
    "name": "start_import",
    "module": "routes_import.py",
    "lines": [
-    1545,
-    1601
+    1548,
+    1614
    ],
-   "size": 57,
-   "body_lines": 56,
+   "size": 67,
+   "body_lines": 66,
    "route": {
     "method": "POST",
     "path": "/api/import"
@@ -33364,8 +33364,8 @@
    "name": "import_preflight",
    "module": "routes_import.py",
    "lines": [
-    1605,
-    1710
+    1618,
+    1723
    ],
    "size": 106,
    "body_lines": 105,
@@ -33390,8 +33390,8 @@
    "name": "_ai_batch_reconnect_response",
    "module": "routes_import.py",
    "lines": [
-    1713,
-    1788
+    1726,
+    1801
    ],
    "size": 76,
    "body_lines": 45,
@@ -33417,8 +33417,8 @@
    "name": "_start_ai_batch_job",
    "module": "routes_import.py",
    "lines": [
-    1791,
-    1953
+    1804,
+    1966
    ],
    "size": 163,
    "body_lines": 149,

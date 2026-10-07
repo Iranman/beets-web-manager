@@ -127,14 +127,15 @@ Every import is Beets' own importer run inside stock Beets by the `webmanager` p
 
 | Route | Composite | Beets equivalent |
 |---|---|---|
-| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback` = the request's `fallback` (`asis` default, or `skip`), `--search-id` = the optional `search_id` |
+| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback` = the request's `fallback` (`skip` default; `asis` only when the caller sends it), `--search-id` = the optional `search_id` |
 | `POST /api/folders/import-with-id` | `plan_confirmed_import()` / `apply_confirmed_import()` | `beet import -q --search-id <mb_albumid>` with `quiet_fallback: skip` |
 | `POST /api/albums/reimport-disk` | same confirmed-import family | same; a folder inside the library is imported in place (no copy, no move) |
 
 - Copy or move: a preserved torrent source (see `DOWNLOADS_ROOT` / `TORRENT_SOURCE_ROOTS` / `ALLOW_TORRENT_SOURCE_MOVE` in `docs/CONFIGURATION.md`) is always copied. `/api/import` copies unless `move: true` (a move from a preserved source is refused with HTTP 400); import-with-id moves when `move: true` was requested and the source is not preserved, and always moves an app-staged partial-import subset; reimport-disk moves download sources that are not preserved.
 - Confirmed import verification: the Apply reads the albums carrying the planned Release ID before and after the import. Exactly one new album row must appear, and when a Release Group was confirmed its `mb_releasegroupid` must equal it. Zero rows means Beets skipped the folder (no confident match, or a duplicate with `duplicate_action: skip`) and the result is `not_imported`, which reimport-disk sends to review. Every outcome leaves the transaction Completed or Failed, never Preview.
+- Unmatched albums: `skip` is the default on every route, because `asis` imports an album Beets cannot match with its existing tags and no `mb_releasegroupid`. Ambiguous identity goes to review instead, so whatever Beets skipped stays in place. The `/api/import` job result lists it under `not_matched` as "not matched; left in place for review". The list comes from the plugin's `skipped_paths` when the plugin reports it. Otherwise the whole source is listed when no album was added, and `not_matched_known: false` flags a partial import whose skipped folders the plugin did not name.
 - Errors: plugin refusals map to stable codes (`autotag_not_allowed`, `path_not_allowed`, `source_not_found`, ...) with an operator message; the upstream body is never forwarded.
-- Plugin requirement: the plugin must accept `autotag: true` with `search_ids` and `quiet_fallback` and run Beets' quiet terminal import session. webmanager plugin 1.6.2 refuses `autotag` (`AUTOTAG_NOT_ALLOWED`), so with that plugin every import route fails cleanly with `autotag_not_allowed` (ARCH-024).
+- Plugin requirement: the plugin must accept `autotag: true` with `search_ids` and `quiet_fallback`, report the folders Beets skipped as `skipped_paths`, and run Beets' quiet terminal import session. webmanager plugin 1.6.2 refuses `autotag` (`AUTOTAG_NOT_ALLOWED`), so with that plugin every import route fails cleanly with `autotag_not_allowed` (ARCH-024).
 
 ## Frontend Architecture
 

@@ -3238,6 +3238,13 @@ def rollback_import_folder(
     return _rollback_noop(operation_id, store)
 
 
+def _album_count(ad: BeetsAdapter) -> Optional[int]:
+    try:
+        return int(ad.get_stats().get("albums"))
+    except Exception:
+        return None
+
+
 def reimport_source(
     path: str,
     beets_options: Optional[Dict[str, Any]] = None,
@@ -3248,9 +3255,16 @@ def reimport_source(
     Beets' own importer and autotagger decide the match and place the files.
 
     beets_options: ``copy`` (wins over ``move``), ``move`` (default False),
-    ``write`` (default True), ``quiet_fallback`` (``skip`` default, or
-    ``asis``) and ``search_id`` (a Release ID, Beets' ``--search-id``).
-    Returns ok=False with a clean error when the plugin refuses or fails."""
+    ``write`` (default True), ``quiet_fallback`` (``skip`` default; ``asis``
+    only when the caller asks, since it imports unmatched albums without a
+    release group) and ``search_id`` (a Release ID, Beets' ``--search-id``).
+
+    Returns ok=False with a clean error when the plugin refuses or fails.
+    On success ``not_matched`` lists what Beets skipped (left in place for
+    review): the plugin's ``skipped_paths`` when it reports them, else the
+    whole source when no album was added. ``not_matched_known`` is False
+    when albums were added but the plugin did not say which folders it
+    skipped."""
     ad = adapter or beets_adapter
     opts = beets_options or {}
     move = bool(opts.get("move")) and not opts.get("copy")
@@ -3259,6 +3273,7 @@ def reimport_source(
         return {"ok": False, "code": "invalid_fallback", "mutated": False,
                 "error": "quiet_fallback must be 'skip' or 'asis'."}
     search_id = _s(opts.get("search_id")).strip()
+    before = _album_count(ad)
     try:
         res = ad.run_import(paths=path, autotag=True, copy=not move, move=move,
                             write=opts.get("write", True) is not False,
@@ -3266,7 +3281,19 @@ def reimport_source(
                             quiet_fallback=fallback, timeout=timeout)
     except BeetsAdapterError as ex:
         return _import_refused(ex)
-    return {"ok": True, "copy": not move, "move": move, "result": res}
+    after = _album_count(ad)
+    added = after - before if before is not None and after is not None else None
+    reported = res.get("skipped_paths") if isinstance(res, dict) else None
+    if isinstance(reported, list):
+        not_matched, known = [_s(x) for x in reported if _s(x)], True
+    elif added == 0:
+        not_matched, known = [path], True
+    else:
+        # ponytail: plugin 1.6.x does not report per-folder outcome; ARCH-024 adds skipped_paths.
+        not_matched, known = [], False
+    return {"ok": True, "copy": not move, "move": move, "quiet_fallback": fallback,
+            "albums_imported": added, "not_matched": not_matched,
+            "not_matched_known": known, "result": res}
 
 
 # -----------------------------------------------------------------------------

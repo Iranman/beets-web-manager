@@ -142,6 +142,29 @@ class ReimportSourceTests(unittest.TestCase):
         self.assertEqual(cw.reimport_source("/d/A", {}, adapter=ad)["code"], "path_not_allowed")
 
 
+    def test_skipped_albums_are_reported_never_dropped(self):
+        def ad_with(albums, result):
+            ad = mock.MagicMock()
+            ad.get_stats.side_effect = [{"albums": n} for n in albums]
+            ad.run_import.return_value = result
+            return ad
+        # The plugin names the folders Beets skipped.
+        res = cw.reimport_source("/downloads/A", {}, adapter=ad_with([0, 1], {"skipped_paths": ["/downloads/A/B"]}))
+        self.assertEqual((res["albums_imported"], res["not_matched"], res["not_matched_known"]),
+                         (1, ["/downloads/A/B"], True))
+        # Nothing was added: the whole source is left in place for review.
+        res = cw.reimport_source("/downloads/A", {}, adapter=ad_with([3, 3], {"success": True}))
+        self.assertEqual((res["not_matched"], res["not_matched_known"]), (["/downloads/A"], True))
+        # Some added, plugin silent about skips: flagged as unknown, not claimed complete.
+        res = cw.reimport_source("/downloads/A", {}, adapter=ad_with([3, 4], {"success": True}))
+        self.assertEqual((res["not_matched"], res["not_matched_known"]), ([], False))
+
+    def test_default_fallback_is_skip(self):
+        ad = mock.MagicMock()
+        cw.reimport_source("/downloads/A", {}, adapter=ad)
+        self.assertEqual(ad.run_import.call_args.kwargs["quiet_fallback"], "skip")
+
+
 class AdapterPayloadTests(unittest.TestCase):
     def test_native_options_only_sent_when_given(self):
         ad = BeetsAdapter(base_url="http://beets:8337")
@@ -166,13 +189,14 @@ class ApiImportRouteTests(unittest.TestCase):
 
     def _post(self, preserved, **payload):
         def run_now(fn, label=""):
-            fn(self.logs)
+            self.job_result = fn(self.logs)
             return types.SimpleNamespace(job_id="j1")
         captured = {}
 
         def fake_reimport(path, beets_options=None, timeout=0):
             captured.update(beets_options)
-            return {"ok": True}
+            return {"ok": True, "albums_imported": 1, "not_matched": ["/downloads/A/Unmatched"],
+                    "not_matched_known": True}
         src = os.path.join(self.tmp.name, "A")
         with mock.patch.object(routes_import, "_resolve_import_source_path", return_value=(src, None)), \
              mock.patch.object(routes_import, "_preserve_torrent_source_path", return_value=preserved), \
@@ -187,6 +211,16 @@ class ApiImportRouteTests(unittest.TestCase):
         res, opts = self._post(True)
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual((opts["copy"], opts["move"]), (True, False))
+
+    def test_fallback_defaults_to_skip_and_asis_only_on_request(self):
+        res, opts = self._post(False)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(opts["quiet_fallback"], "skip")
+        self.assertEqual(self.job_result["not_matched"],
+                         [{"path": "/downloads/A/Unmatched", "status": "not matched; left in place for review"}])
+        self.assertTrue(any("not matched; left in place for review" in line for line in self.logs))
+        _, opts = self._post(False, fallback="asis")
+        self.assertEqual(opts["quiet_fallback"], "asis")
 
     def test_preserved_torrent_source_move_is_refused(self):
         res, opts = self._post(True, move=True)
