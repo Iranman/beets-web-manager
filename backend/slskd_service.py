@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from backend.app_runtime import _app_logger, _redact_security_text, AUDIO_EXT, DOWNLOADS_ROOT, SLSKD_URL, _MISSING_TRACK_FILE_MATCH_SCORE, _MISSING_TRACK_TITLE_FUZZY_SCORE, _s, _up, _ur
-from backend.slskd import build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl, peer_download_dir as _slskd_peer_download_dir, safe_peer_username as _slskd_safe_peer_username, within_roots as _slskd_within_roots
+from backend.slskd import QueuedRemote as _SlskdQueuedRemote, build_album_candidates as _slskd_build_album_candidates, cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl, file_remote_name as _slskd_file_remote_name, file_size as _slskd_file_size, slskd_download_candidate_roots as _slskd_download_candidate_roots_impl, peer_download_dir as _slskd_peer_download_dir, safe_peer_username as _slskd_safe_peer_username, within_roots as _slskd_within_roots
 import backend.app_runtime as _app_runtime
 
 # ── ARCH-001 extracted code ──
@@ -598,21 +598,25 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
             )
 
     # 5. Queue downloads — API expects an array of QueueDownloadRequest objects
+    # #277: each entry carries its queued size and queue time so a failed
+    # candidate's cleanup can prove a file in slskd's shared layout is its own.
     queued = []
+    queued_at = time.time()
     for f in queue_afiles:
         remote_name = _slskd_file_remote_name(f, best_resp)
         try:
             _slskd_req("POST",
                        f"transfers/downloads/{_up.quote(username, safe='')}",
                        [{"filename": remote_name, "size": _slskd_file_size(f)}])
-            queued.append(remote_name)
+            queued.append(_SlskdQueuedRemote(remote_name, _slskd_file_size(f), queued_at))
         except Exception as ex:
             log.append(f"  [slskd] WARN: queue failed for {remote_name or '?'}: {ex}")
     if not queued:
         raise RuntimeError("Failed to queue any downloads from slskd")
     log.append(f"  [slskd] Queued {len(queued)} file(s)")
 
-    # slskd saves to DOWNLOADS_ROOT / username / remote_dir (#248: normalised).
+    # The peer-folder guess (#248: normalised). slskd's default layout is
+    # DOWNLOADS_ROOT / <remote folder name>; the finder searches both.
     expected_dir = str(_slskd_peer_download_dir(DOWNLOADS_ROOT, username, best_dir_remote))
     return username, queued, expected_dir, best_dir_remote
 
