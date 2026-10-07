@@ -3,7 +3,7 @@
 # ---- Frontend build stage --------------------------------------------------
 # Base images are pinned by digest (SEC-9); Dependabot (docker ecosystem)
 # proposes digest bumps. The tag is kept for readability.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS frontend
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS frontend
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci
