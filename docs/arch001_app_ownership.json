@@ -7934,11 +7934,33 @@
    ]
   },
   {
-   "name": "_stamp_artist_folder_album_mbid_counts",
+   "name": "_artist_folder_album_rows",
    "module": "backend/matching_service.py",
    "lines": [
     1857,
-    1898
+    1865
+   ],
+   "size": 9,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_stamp_artist_folder_album_mbid_counts"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "items"
+   ]
+  },
+  {
+   "name": "_stamp_artist_folder_album_mbid_counts",
+   "module": "backend/matching_service.py",
+   "lines": [
+    1868,
+    1909
    ],
    "size": 42,
    "body_lines": 37,
@@ -7952,6 +7974,7 @@
    ],
    "caller_count": 1,
    "dependencies": [
+    "_artist_folder_album_rows",
     "_s",
     "_safe_inventory_error_message",
     "_stamp_folder_for_item_path"
@@ -7961,8 +7984,8 @@
    "name": "_playlist_artist_credit_info",
    "module": "backend/matching_service.py",
    "lines": [
-    1904,
-    1930
+    1915,
+    1941
    ],
    "size": 27,
    "body_lines": 26,
@@ -10271,10 +10294,10 @@
    "module": "backend/cleanup_service.py",
    "lines": [
     2358,
-    2397
+    2403
    ],
-   "size": 40,
-   "body_lines": 39,
+   "size": 46,
+   "body_lines": 45,
    "route": null,
    "mutation_capable": true,
    "domain": "CLEANUP",
@@ -10292,8 +10315,8 @@
    "name": "_album_cleanup_file_info",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2400,
-    2413
+    2406,
+    2419
    ],
    "size": 14,
    "body_lines": 13,
@@ -10314,8 +10337,8 @@
    "name": "_album_cleanup_apply_plan",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2416,
-    2551
+    2422,
+    2557
    ],
    "size": 136,
    "body_lines": 135,
@@ -10343,8 +10366,8 @@
    "name": "_album_cleanup_issue_identity_blockers",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2554,
-    2567
+    2560,
+    2573
    ],
    "size": 14,
    "body_lines": 13,
@@ -10366,8 +10389,8 @@
    "name": "_album_cleanup_item_id_for_path",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2570,
-    2585
+    2576,
+    2591
    ],
    "size": 16,
    "body_lines": 5,
@@ -10386,11 +10409,11 @@
    "name": "_album_cleanup_apply_issue",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2588,
-    2890
+    2594,
+    2899
    ],
-   "size": 303,
-   "body_lines": 299,
+   "size": 306,
+   "body_lines": 302,
    "route": null,
    "mutation_capable": true,
    "domain": "CLEANUP",
@@ -10418,8 +10441,8 @@
    "name": "_album_folder_cleanup_apply_safe",
    "module": "backend/cleanup_service.py",
    "lines": [
-    2899,
-    3031
+    2908,
+    3040
    ],
    "size": 133,
    "body_lines": 120,
@@ -29174,6 +29197,7 @@
     "_album_source_folder",
     "_art_repair_attach_last_run",
     "_art_repair_build_report",
+    "_artist_folder_album_rows",
     "_build_acquisition_queue_payload",
     "_create_playlist_outputs",
     "_discogs_artist_discography",
@@ -29186,10 +29210,9 @@
     "_pending_review_matches",
     "_pending_review_path_set",
     "_playlist_m3u_items",
-    "_plex_playlist_items",
-    "_plex_track_keys_for_items"
+    "_plex_playlist_items"
    ],
-   "caller_count": 41,
+   "caller_count": 42,
    "dependencies": [
     "item_dict"
    ]
@@ -33750,28 +33773,29 @@
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    792,
-    830
+    797,
+    845
    ],
-   "size": 39,
-   "body_lines": 23,
+   "size": 49,
+   "body_lines": 31,
    "route": null,
    "mutation_capable": false,
-   "domain": "UNCLASSIFIED",
-   "desired_owner": "UNCLASSIFIED",
-   "migration_status": "EXTRACTED_SHARED",
+   "domain": "TRANSACTIONS",
+   "desired_owner": "backend/transaction_service.py",
+   "migration_status": "EXTRACTED",
    "callers": [
-    "_rollback_fields"
+    "_rollback_fields",
+    "api_transaction_rollback"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": []
   },
   {
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    833,
-    837
+    848,
+    852
    ],
    "size": 5,
    "body_lines": 2,
@@ -33793,8 +33817,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    841,
-    863
+    856,
+    878
    ],
    "size": 23,
    "body_lines": 22,
@@ -33818,8 +33842,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    866,
-    886
+    881,
+    901
    ],
    "size": 21,
    "body_lines": 17,
@@ -33838,11 +33862,11 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    890,
-    1057
+    905,
+    1082
    ],
-   "size": 168,
-   "body_lines": 167,
+   "size": 178,
+   "body_lines": 177,
    "route": {
     "method": "POST",
     "path": "/api/transactions/<transaction_id>/rollback"
@@ -33858,15 +33882,16 @@
     "_rollback_dispatch_body",
     "_run_item_metadata_restore",
     "_run_item_recording_id_restore",
-    "_sync_transactions_from_jobs"
+    "_sync_transactions_from_jobs",
+    "rollback_eligibility"
    ]
   },
   {
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1061,
-    1070
+    1086,
+    1095
    ],
    "size": 10,
    "body_lines": 9,
@@ -33886,8 +33911,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1073,
-    1078
+    1098,
+    1103
    ],
    "size": 6,
    "body_lines": 5,
@@ -34504,7 +34529,8 @@
   "react_assets": "BOOTSTRAP",
   "react_next_static": "BOOTSTRAP",
   "favicon": "BOOTSTRAP",
-  "react_spa_fallback": "BOOTSTRAP"
+  "react_spa_fallback": "BOOTSTRAP",
+  "rollback_eligibility": "TRANSACTIONS"
  },
  "summary": {
   "BOOTSTRAP": {

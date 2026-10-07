@@ -785,6 +785,11 @@ _ROLLBACK_LOCKS_BEFORE_WRITE = frozenset({
 })
 
 
+#: Folder cleanup: rollback goes to its engine executor, apply stays on the
+#: folder cleanup / Clean All paths (they approve the preview themselves).
+FOLDER_CLEANUP_FAMILY = "folder_cleanup_v1"
+
+
 #: Operation types the local (non-engine) rollback below can restore.
 _LOCAL_ROLLBACK_OPS = frozenset({"metadata_restore", "recording_id_restore"})
 
@@ -795,6 +800,8 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     Mirrors, without changing, the gate that route and the engine rollback
     executors apply, so the UI reads it instead of copying it:
 
+    * folder cleanup: needs ``metadata.engine_result`` and status Completed
+      or Failed (a part-way apply);
     * engine family (``_ENGINE_FAMILIES``): needs ``metadata.engine_result``
       and any status but Rolled Back; album cleanup has no rollback;
     * local family: needs ``rollback.available`` with only metadata /
@@ -811,6 +818,14 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     def refused(code: str, reason: str) -> Dict[str, Any]:
         return {"allowed": False, "code": code, "reason": reason}
 
+    if meta.get("mutation_family") == FOLDER_CLEANUP_FAMILY:
+        if not meta.get("engine_result"):
+            return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
+        if status == "Rolled Back":
+            return refused("already_rolled_back", "This transaction is already rolled back.")
+        if status not in ("Completed", "Failed"):
+            return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
+        return {"allowed": True, "code": "allowed", "reason": ""}
     if meta.get("mutation_family") in _ENGINE_FAMILIES:
         if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
             return refused("not_supported", "Album cleanup has no rollback.")
@@ -966,6 +981,16 @@ def api_transaction_rollback(transaction_id):
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
     family = (tx.get("metadata") or {}).get("mutation_family")
+    if family == FOLDER_CLEANUP_FAMILY:
+        # Its apply/rollback steps run in Beets through the plugin; the
+        # engine claims Completed/Failed -> Running (CAS) first (D3). An
+        # unapplied one is refused before any claim, so it is never left Running.
+        verdict = rollback_eligibility(tx)
+        if not verdict["allowed"]:
+            return jsonify({"ok": False, "code": verdict["code"], "error": verdict["reason"],
+                            "status": tx.get("status"), "mutated": False, "rollback_available": False}), 409
+        return _item_file_replacement_response(composite_workflows.rollback_folder_cleanup, transaction_id,
+                                               rollback_family=family)
     engine_family = _ENGINE_FAMILIES.get(family)
     if engine_family:
         return _item_file_replacement_response(engine_family[1], transaction_id, rollback_family=family)

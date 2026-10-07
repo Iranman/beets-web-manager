@@ -2366,6 +2366,7 @@ def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
         candidates = [folder]
 
     removed = 0
+    planned = 0
     seen: set = set()
     for candidate in candidates:
         key = _s(candidate)
@@ -2382,18 +2383,23 @@ def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
         op_id = _s(plan_res.get("operation_id")).strip()
         if not op_id:
             continue
+        planned += 1
+        # D2: an apply failure is a failure of the run, never a "skip": the
+        # transaction is Failed and the caller's job must not end success.
         try:
             apply_res = composite_workflows.apply_folder_cleanup(op_id)
         except (BeetsUnavailableError, BeetsError) as ex:
-            log.append(f"  SKIP empty-folder cleanup; engine apply failed for {candidate}: {ex}")
-            continue
-        if apply_res.get("ok") and apply_res.get("mutated"):
-            removed_dirs = apply_res.get("removed_dirs") or [key]
-            removed += len(removed_dirs)
-            for removed_dir in removed_dirs:
-                log.append(f"  Removed empty album folder via engine: {removed_dir}")
-    if removed == 0:
-        log.append("  SKIP empty-folder candidate that is not empty.")
+            log.append(f"  ERROR empty-folder cleanup failed for {candidate} (transaction {op_id}): {ex}")
+            raise RuntimeError(f"Empty-folder cleanup failed for {candidate} (transaction {op_id})") from ex
+        if not apply_res.get("ok"):
+            error = apply_res.get("error") or apply_res.get("code") or "apply failed"
+            log.append(f"  ERROR empty-folder cleanup failed for {candidate} (transaction {op_id}): {error}")
+            raise RuntimeError(f"Empty-folder cleanup failed for {candidate} (transaction {op_id}): {error}")
+        for removed_dir in apply_res.get("removed_dirs") or []:
+            removed += 1
+            log.append(f"  Removed empty album folder via engine: {removed_dir}")
+    if planned == 0:
+        log.append(f"  SKIP {folder}: not empty, or still referenced by Beets.")
     return removed
 
 
@@ -2855,9 +2861,12 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 break
             try:
                 apply_res = composite_workflows.apply_folder_cleanup(op_id)
-            except (BeetsUnavailableError, BeetsError):
+            except (BeetsUnavailableError, BeetsError) as ex:
+                issue_errors.append(f"empty folder removal failed: {current} (transaction {op_id}): {type(ex).__name__}")
                 break
             if not apply_res.get("ok"):
+                issue_errors.append(f"empty folder removal failed: {current} (transaction {op_id}): "
+                                    f"{apply_res.get('code') or 'apply failed'}")
                 break
             log.append(f"  Removed empty folder (engine controlled): {current}")
             summary["folders_deleted"] += 1

@@ -101,7 +101,6 @@ _ENGINE_FUNCTION_FAMILY = {
 }
 
 _ENGINE_INFRA_FUNCTIONS = {
-    "_safe_rename": "TRANSACTION_STATE",
     "_write_file_audio_tags": "ENGINE_NATIVE_BEETS",
     "_safe_artist_folder_name": "TRANSACTION_STATE",
     "TransactionStore._write": "TRANSACTION_STATE",

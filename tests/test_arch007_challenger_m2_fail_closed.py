@@ -196,7 +196,7 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
     def test_stamp_artist_folder_album_mbid_counts_no_sqlite_fallback(self):
         """_stamp_artist_folder_album_mbid_counts returns error string on failure without SQLite."""
-        with mock.patch("app.composite_workflows.get_artist_folder_album_mbids") as mock_mbids:
+        with mock.patch("backend.matching_service._artist_folder_album_rows") as mock_mbids:
             mock_mbids.side_effect = BeetsUnavailableError("Engine offline")
 
             id_sets, totals, err = _stamp_artist_folder_album_mbid_counts(

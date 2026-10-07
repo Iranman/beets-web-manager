@@ -159,7 +159,8 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - The frontend relink caller must send `mbAlbumId` or `mbReleaseGroupId`. Without one, the endpoint now refuses with `relink_identity_required`.
   - Composite refusal transitions pass `logs=[...]`, which replaces the earlier log lines instead of appending (album metadata and MusicBrainz track repair refusals).
   - `_restore_rows` restores with `move=True` even when the apply did not move files. This must be fixed before composite rollback is advertised broadly (QA #243 F-5).
-  - A folder cleanup that fails part-way records no `engine_result`, so it cannot be rolled back through the route.
+  - (RESOLVED) A folder cleanup that failed part-way recorded no `engine_result`. Each step is now recorded as it completes, and the generic route rolls back a Completed or Failed `folder_cleanup_v1`. A Partially Rolled Back folder cleanup still needs manual recovery.
+  - Folder cleanup paths are sent to Beets unchanged, so Web Manager and Beets must mount the library at the same path (the shipped Compose files use `/music` in both).
   - Folder reference checks compare Beets-reported item paths only; an album `artpath` under the folder is not checked.
 - Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
 - Priority: P2. Status: Open.

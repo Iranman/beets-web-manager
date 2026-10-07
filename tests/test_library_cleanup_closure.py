@@ -6,6 +6,10 @@ from unittest import mock
 
 from backend import transaction_engine
 from backend.beets_adapter import BeetsUnavailableError
+try:
+    from _folder_ops_local import patch_local_folder_ops
+except ImportError:  # pragma: no cover
+    from tests._folder_ops_local import patch_local_folder_ops
 try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
     from _app_ast_cache import app_family_source  # noqa: E402
 except ImportError:  # pragma: no cover
@@ -31,6 +35,7 @@ class LibraryCleanupTransactionTests(unittest.TestCase):
         self.quarantine_dir = self.root / "quarantine"
         self.quarantine_dir.mkdir()
         self.store = transaction_engine.TransactionStore(str(self.root / "transactions"))
+        patch_local_folder_ops(self, self.music_dir)
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -44,6 +49,7 @@ class LibraryCleanupTransactionTests(unittest.TestCase):
             music_allowed_roots=[str(self.music_dir)],
         )
         self.assertTrue(plan.get("ok"), msg=plan)
+        self.store.transition(plan["operation_id"], "Preview", "Approved")
         (empty_dir / "surprise.txt").write_text("unexpected", encoding="utf-8")
         apply = transaction_engine.execute_folder_cleanup_apply(
             self.store,
@@ -63,6 +69,7 @@ class LibraryCleanupTransactionTests(unittest.TestCase):
             {"action": "remove_empty", "source": str(empty_dir)},
             music_allowed_roots=[str(self.music_dir)],
         )
+        self.store.transition(plan["operation_id"], "Preview", "Approved")
         apply = transaction_engine.execute_folder_cleanup_apply(
             self.store,
             plan["operation_id"],

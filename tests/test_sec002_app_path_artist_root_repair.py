@@ -215,7 +215,7 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.assertFalse(data["ok"])
 
     def test_stamp_mbid_dry_run_accepts_music_root(self):
-        with mock.patch.object(app_module.composite_workflows, "get_artist_folder_album_mbids", return_value=[]):
+        with mock.patch("backend.matching_service._artist_folder_album_rows", return_value=[]):
             resp = self._post(
                 "/api/clean/artist-folders/stamp-mbid",
                 {"root": str(self.music), "dry_run": True},

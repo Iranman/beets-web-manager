@@ -849,6 +849,13 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/untracked/rollback", json_data={"record_id": str(record_id or "")},
                              headers=headers)
 
+    def folder_op(self, op: str, idempotency_key: str, **paths: str) -> Dict[str, Any]:
+        """One folder_cleanup_v1 step inside Beets (plugin 1.7.0): ``move_file``
+        or ``rename_dir`` (source, target), ``remove_empty_dir`` or
+        ``create_dir`` (path). Web Manager mounts the library read-only."""
+        return self._request("POST", "/webmanager/folder-op", json_data={"op": op, **paths},
+                             headers={"Idempotency-Key": idempotency_key})
+
     def get_untracked_record(self, record_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/webmanager/untracked/{record_id}")
 
