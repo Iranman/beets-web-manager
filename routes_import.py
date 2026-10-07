@@ -137,6 +137,44 @@ def delete_import_review_folder():
         return jsonify({"ok": False, "error": "Could not delete source folder.", "log": log}), 500
 
 
+# CodeQL #1365: the planner's error can be raw ValueError text with resolved
+# paths. Answer one fixed message per refusal kind; the original text is
+# logged server-side. The planner's structured ``code`` wins; refusals that
+# carry none are told apart by their engine-fixed wording, in this order.
+_IMPORT_REVIEW_PLAN_CODE_ERRORS = {
+    "import_review_target_contains_library":
+        "The cleanup folder contains the music library; choose a folder below the downloads root instead.",
+    "import_review_library_delete_refused":
+        "A selected file is inside the music library; deleting it needs the explicit library-delete confirmation.",
+    "import_review_unsafe_root": "An allowed cleanup root is unsafe; check the downloads root configuration.",
+    "invalid_request": "Invalid cleanup request.",
+}
+# (prefix, suffix, message): matched against the engine's fixed wording at
+# both ends, so a user path embedded in the middle never changes the kind.
+_IMPORT_REVIEW_PLAN_ERRORS = (
+    ("Review path is required.", "", "Review path is required."),
+    ("A folder or file path is required.", "", "Review path is required."),
+    ("Path contains unsafe encoded characters.", "", "Path contains unsafe encoded characters."),
+    ("Symlinks are not permitted: ", "", "Symlinks are not permitted."),
+    ("Cannot delete approved root ", " itself.", "Cannot clean up an approved root folder itself."),
+    ("Review folder path ", " is inside music library.", "Review folder is inside the music library."),
+    ("Target path ", " is outside allowed root boundaries.", "Review folder or file is outside the allowed cleanup roots."),
+    ("Source path ", " is outside allowed root boundaries.", "Review folder or file is outside the allowed cleanup roots."),
+    ("Invalid review folder path.", "", "Invalid cleanup request."),
+)
+
+
+def _import_review_cleanup_plan_error(plan_res: Dict[str, Any]) -> str:
+    by_code = _IMPORT_REVIEW_PLAN_CODE_ERRORS.get(str(plan_res.get("code") or ""))
+    if by_code:
+        return by_code
+    text = str(plan_res.get("error") or "")
+    for prefix, suffix, message in _IMPORT_REVIEW_PLAN_ERRORS:
+        if text.startswith(prefix) and text.endswith(suffix):
+            return message
+    return "Failed to create file cleanup plan."
+
+
 @app.post("/api/import/review-files/cleanup")
 def cleanup_import_review_files():
     payload = request.get_json(silent=True) or {}
@@ -167,7 +205,10 @@ def cleanup_import_review_files():
     try:
         plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
         if not plan_res.get("ok"):
-            return jsonify({"ok": False, "error": plan_res.get("error", "Failed to create file cleanup plan."), "log": log}), 400
+            _app_logger.warning("cleanup_import_review_files plan refused for %r: %s", folder_path, plan_res.get("error"))
+            return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(plan_res),
+                            "code": plan_res.get("code"),
+                            "log": log}), 400
 
         op_id = plan_res.get("operation_id")
         # The operator's explicit cleanup request is the approval; apply

@@ -153,6 +153,76 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
         self.assertNotIn("Traceback", json.dumps(data))
 
+    def test_cleanup_import_review_files_plan_error_is_fixed_text(self):
+        """CodeQL #1365: a planner refusal (raw ValueError text) maps to fixed text."""
+        leak = "Target path /private/x/LEAK_MARKER Traceback is outside allowed root boundaries."
+        with app_module.app.test_request_context(
+            "/api/import/review-files/cleanup", method="POST",
+            data=json.dumps({"path": "/data/downloads/Some Album", "review_item_id": "x", "files": ["a.flac"]}),
+            content_type="application/json",
+        ), patch_app_family(app_module, "_pending_review_matches", return_value=True,
+        ), mock.patch.object(
+            app_module.composite_workflows, "plan_import_review_cleanup",
+            return_value={"ok": False, "error": leak},
+        ):
+            response = app_module.cleanup_import_review_files()
+        data = response[0].get_json()
+        self.assertEqual(response[1], 400)
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("/private/x", json.dumps(data))
+        self.assertEqual(data["error"], "Review folder or file is outside the allowed cleanup roots.")
+
+    def test_cleanup_plan_refusals_get_distinct_fixed_messages(self):
+        """#265 QA: each refusal kind keeps its own actionable message; the
+        planner's ``code`` wins over its free text."""
+        import routes_import
+        cases = [
+            {"code": "import_review_target_contains_library", "error": "Cleanup target /x contains the music library /m"},
+            {"code": "import_review_library_delete_refused", "error": "/m/a.flac is inside the music library"},
+            {"code": "import_review_unsafe_root", "error": "/ is unsafe"},
+            {"error": "Review folder path /m/x is inside music library."},
+            {"error": "Target path /x is outside allowed root boundaries."},
+            {"error": "Cannot delete approved root /d itself."},
+            {"error": "Symlinks are not permitted: /d/l"},
+            {"error": "something unexpected at /secret"},
+        ]
+        messages = [routes_import._import_review_cleanup_plan_error(c) for c in cases]
+        self.assertEqual(len(set(messages)), len(messages), messages)
+        for message in messages:
+            self.assertNotIn("/", message)
+
+    def test_cleanup_plan_error_kind_ignores_user_path_text(self):
+        """#265 QA: a user path inside the engine text cannot change the kind."""
+        import routes_import
+        f = routes_import._import_review_cleanup_plan_error
+        self.assertEqual(f({"error": "Symlinks are not permitted: /dl/required"}), "Symlinks are not permitted.")
+        self.assertEqual(f({"error": "Target path /dl/Symlinks music library is outside allowed root boundaries."}),
+                         "Review folder or file is outside the allowed cleanup roots.")
+        self.assertEqual(f({"error": "Review folder path /m/outside/Invalid is inside music library."}),
+                         "Review folder is inside the music library.")
+        self.assertEqual(f({"error": "/dl/Symlinks are not permitted: required"}), "Failed to create file cleanup plan.")
+
+    def test_transaction_rollback_dispatch_never_returns_executor_log(self):
+        """CodeQL #1368: the rollback executor's log embeds raw exception
+        text; the dispatch response carries only structured fields."""
+        missing = mock.Mock()
+        missing.get.side_effect = KeyError("tx")
+        detail = {"transaction": {"metadata": {"mutation_family": "import_review_cleanup_v1"}}}
+        executor = {"ok": True, "status": "Rolled Back", "operation_id": "tx", "restored": ["/d/a.flac"],
+                    "log": ["Failed to restore /q/a -> /d/a: LEAK_MARKER Traceback"]}
+        with app_module.app.test_request_context("/api/transactions/tx/rollback", method="POST"), \
+                patch_app_family(app_module, "transactions", missing), \
+                patch_app_family(app_module, "_sync_transactions_from_jobs", lambda: None), \
+                mock.patch.object(app_module.composite_workflows, "get_transaction", return_value=detail), \
+                mock.patch.object(app_module.composite_workflows, "rollback_import_review_cleanup",
+                                  return_value=executor):
+            response = app_module.api_transaction_rollback("tx")
+        data = response[0].get_json()
+        self.assertEqual(response[1], 200)
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("log", data)
+        self.assertEqual(data, {"ok": True, "status": "Rolled Back", "operation_id": "tx", "restored": ["/d/a.flac"]})
+
     def test_library_full_paginated_unavailable_is_sanitized(self):
         leak = "Beets Control Agent unreachable at 10.0.0.5:8338 (connection refused)"
         with app_module.app.test_request_context("/api/library?limit=50"), mock.patch.object(

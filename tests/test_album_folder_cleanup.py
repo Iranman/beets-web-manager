@@ -169,7 +169,7 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "_album_cleanup_issue_identity_blockers",
         "_album_cleanup_apply_issue",
         "_album_cleanup_trusted_path",
-        "_album_cleanup_trusted_destination",
+        "_album_cleanup_contained_destination",
         "_album_cleanup_trash_path",
         "_album_cleanup_remove_empty_dirs",
         "_album_cleanup_remove_empty_tree",

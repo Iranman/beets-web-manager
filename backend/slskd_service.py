@@ -101,12 +101,31 @@ def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:
 
 # SEC-5 (ReDoS): the leading \s+ of r"\s+-\s+" is applied by split_ws_led.
 _DASH_SEP_CORE_RE = re.compile(r"-\s+")
+_FEAT_START_RE = re.compile(r"\b(?:feat|ft)\.?\s", re.IGNORECASE)
+_WS_RUN_RE = re.compile(r"\s*")
+
+
+def _strip_feat_tail(text: str) -> str:
+    """Linear equivalent of re.sub(r"\\b(?:feat|ft)\\.?\\s+.*$", "", text, flags=re.I).
+
+    CodeQL #1369: that regex is O(n^2) on a whitespace run followed by an
+    embedded newline (\\s+ and .* both re-scan it). Here each candidate's
+    whitespace run is scanned once; the tail then qualifies when it holds no
+    newline other than a final one, exactly as ``.*$`` requires.
+    """
+    body_end = len(text) - 1 if text.endswith("\n") else len(text)
+    last_newline = text.rfind("\n", 0, body_end)
+    for m in _FEAT_START_RE.finditer(text):
+        tail = _WS_RUN_RE.match(text, m.end()).end()
+        if tail > last_newline:
+            return text[:m.start()] + text[max(tail, body_end):]
+    return text
 
 
 def _slskd_title_norm(value: str) -> str:
     # SEC-5 (ReDoS): cap free text (1024 chars) before the regexes below.
     text = _strip_track_filename_id_suffix(_s(value)[:1024]).casefold().replace("&", " and ")
-    text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
+    text = _strip_feat_tail(text)
     text = strip_bracket_credits(text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())

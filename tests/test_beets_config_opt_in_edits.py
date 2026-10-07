@@ -14,6 +14,7 @@ Covers:
 Every edit here is to a temporary config.yaml; nothing touches a real Beets
 config or library.
 """
+import json
 import os
 import stat
 import tempfile
@@ -605,6 +606,25 @@ class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
         response = self.client.post("/api/setup/beets-config/include-paths")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), text)
+        # CodeQL #1371: fixed text, never the exception message.
+        self.assertEqual(response.get_json()["error"], self.module._BEETS_CONFIG_EDIT_REFUSED)
+
+    def test_config_edit_refusal_never_echoes_exception_text(self):
+        from backend.beets_plugins import BeetsConfigEditError
+        leak = BeetsConfigEditError("LEAK_MARKER Traceback /private/cfg/config.yaml")
+        targets = (
+            ("ensure_web_include_paths", lambda: self.client.post("/api/setup/beets-config/include-paths")),
+            ("preview_recommended_plugins", lambda: self.client.get("/api/setup/plugins/recommended")),
+            ("apply_recommended_plugins",
+             lambda: self.client.post("/api/setup/plugins/recommended/apply", json={"plugins": ["fetchart"]})),
+        )
+        for name, call in targets:
+            with self.subTest(route=name), mock.patch(f"backend.beets_plugins.{name}", side_effect=leak):
+                response = call()
+                self.assertEqual(response.status_code, 409)
+                body = json.dumps(response.get_json())
+                self.assertNotIn("LEAK_MARKER", body)
+                self.assertNotIn("/private/cfg", body)
 
     def test_preview_route(self):
         response = self.client.get("/api/setup/plugins/recommended")

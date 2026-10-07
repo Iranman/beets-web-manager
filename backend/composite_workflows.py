@@ -244,14 +244,23 @@ def _is_within_music_root(path: Union[str, Path]) -> bool:
 
 def _has_symlink_component(path: Union[str, Path]) -> bool:
     """True if the path itself or any existing parent is a symlink. Relative
-    paths are absolutized first so every real parent is checked (S1/F4)."""
-    p = Path(os.path.abspath(str(path)))
-    for candidate in [p, *p.parents]:
-        try:
-            if candidate.is_symlink():
+    paths are absolutized first so every real parent is checked (S1/F4).
+
+    Every lexical prefix is checked twice (#265 QA): as written, because the
+    kernel follows ``link`` in ``root/link/..`` before applying ``..``; and
+    normalized, because resolve() applies ``..`` lexically after a missing or
+    non-directory component, so ``root/nx/../link`` follows ``link`` though
+    lstat of the written form fails."""
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(os.getcwd()) / p
+    for prefix in [p, *p.parents]:
+        for candidate in (prefix, Path(os.path.normpath(str(prefix)))):
+            try:
+                if candidate.is_symlink():
+                    return True
+            except OSError:
                 return True
-        except OSError:
-            return True
     return False
 
 
@@ -260,10 +269,30 @@ def _music_root() -> Path:
     return Path(music_root()).resolve()
 
 
+def _staging_contained_text(path: Union[str, Path]) -> Optional[str]:
+    """The normalized absolute text of ``path`` if it is a staging root or
+    lies under one (component-wise: ``root + os.sep`` prefix, so
+    ``/downloads2`` is not under ``/downloads``), else None. No filesystem
+    access happens before this check (CodeQL #1373). Roots are resolved; an
+    accepted path is compared as text, which matches its resolved form
+    because _is_safe_staging_path also refuses any symlinked component."""
+    norm = os.path.normpath(os.path.abspath(str(path)))
+    for stg in _get_staging_roots():
+        root_text = str(stg)
+        if norm == root_text:
+            return root_text
+        if norm.startswith(os.path.join(root_text, "")):
+            return norm
+    return None
+
+
 def _is_safe_staging_path(path: Union[str, Path]) -> bool:
+    contained = _staging_contained_text(path)
+    if contained is None:
+        return False
     if _has_symlink_component(path):
         return False
-    p = Path(path).resolve()
+    p = Path(contained).resolve()
     music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
     # Must NOT be the music root, inside it, or an ancestor of it (#182)
     try:
