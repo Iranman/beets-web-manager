@@ -3214,6 +3214,9 @@ def setup_save_env():
     try:
         backup_path = _write_env_file(updates, clear)
     except ValueError as ex:
+        from backend.beets_adapter import BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE
+        if str(ex) == BEETS_WEB_URL_USERINFO_MESSAGE:
+            return jsonify({"ok": False, "error": BEETS_WEB_URL_USERINFO_MESSAGE, "code": BEETS_WEB_URL_USERINFO_CODE}), 400
         return jsonify({"ok": False, "error": str(ex)}), 400
     except Exception as ex:
         app.logger.warning("Could not save environment file: %s", type(ex).__name__)

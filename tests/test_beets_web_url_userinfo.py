@@ -21,14 +21,14 @@ try:
 except ImportError:  # pragma: no cover
     from tests.test_routes_setup import _load_routes_setup_against_stub_app
 
-SECRET = "Sup3rSecretPw"
+CANARY = "zz-canary-208"  # non-secret marker; must never appear in output
 USERINFO_URLS = (
-    f"http://u:{SECRET}@beets:8337",          # with port
-    f"http://u:{SECRET}@beets",               # no port (was InvalidURL)
-    "http://u:Sup3r%40SecretPw@beets:8337",   # percent-encoded password
-    f"http://u:{SECRET}/x@beets:8337",        # "/" hides the "@" from urlsplit
-    f"http://u:{SECRET}\uff20beets:8337",     # fullwidth @ (NFKC -> "@")
-    f"http://u%3A{SECRET}%40beets:8337",      # whole userinfo percent-encoded
+    f"http://u:{CANARY}@beets:8337",          # with port
+    f"http://u:{CANARY}@beets",               # no port (was InvalidURL)
+    "http://u:zz%40canary-208@beets:8337",   # percent-encoded userinfo
+    f"http://u:{CANARY}/x@beets:8337",        # "/" hides the "@" from urlsplit
+    f"http://u:{CANARY}\uff20beets:8337",     # fullwidth @ (NFKC -> "@")
+    f"http://u%3A{CANARY}%40beets:8337",      # whole userinfo percent-encoded
 )
 
 
@@ -61,8 +61,8 @@ class UserinfoUrlRefusedTests(unittest.TestCase):
         self.addCleanup(root.setLevel, old_level)
 
     def _assert_clean(self, text):
-        self.assertNotIn(SECRET, text)
-        self.assertNotIn("Sup3r", text)
+        self.assertNotIn(CANARY, text)
+        self.assertNotIn("canary-208", text)
 
     def test_construction_refuses_userinfo_url_and_never_sends_it(self):
         for url in USERINFO_URLS:
@@ -82,7 +82,7 @@ class UserinfoUrlRefusedTests(unittest.TestCase):
         self._assert_clean("\n".join(self.logs.lines))
 
     def test_userinfo_url_from_environment_is_refused(self):
-        with mock.patch.dict(os.environ, {"BEETS_WEB_URL": f"http://u:{SECRET}@beets"}):
+        with mock.patch.dict(os.environ, {"BEETS_WEB_URL": f"http://u:{CANARY}@beets"}):
             adapter = ba.BeetsAdapter()
         self.assertEqual(adapter.config_error_code, ba.BEETS_WEB_URL_USERINFO_CODE)
         with self.assertRaises(ba.BeetsAdapterConnectionError) as ctx:
@@ -108,9 +108,9 @@ class HttpClientExceptionTests(unittest.TestCase):
     def test_exception_text_is_never_logged_or_raised(self):
         adapter = ba.BeetsAdapter(base_url="http://beets:8337")
         errors = (
-            http.client.InvalidURL(f"nonnumeric port: '{SECRET}@beets'"),
-            http.client.IncompleteRead(SECRET.encode()),
-            ValueError(f"unknown url type: {SECRET}"),
+            http.client.InvalidURL(f"nonnumeric port: '{CANARY}@beets'"),
+            http.client.IncompleteRead(CANARY.encode()),
+            ValueError(f"unknown url type: {CANARY}"),
         )
         for exc in errors:
             for call in _calls():
@@ -118,9 +118,9 @@ class HttpClientExceptionTests(unittest.TestCase):
                         self.assertLogs("beets.adapter", level="WARNING") as logs:
                     with self.assertRaises(ba.BeetsAdapterConnectionError) as ctx:
                         call(adapter)
-                self.assertNotIn(SECRET, str(ctx.exception))
+                self.assertNotIn(CANARY, str(ctx.exception))
                 self.assertIn("http://beets:8337", str(ctx.exception))
-                self.assertNotIn(SECRET, "\n".join(logs.output))
+                self.assertNotIn(CANARY, "\n".join(logs.output))
                 self.assertIsNone(ctx.exception.__cause__)
                 self.assertTrue(ctx.exception.__suppress_context__)
 
@@ -132,21 +132,21 @@ class RequestConstructionTests(unittest.TestCase):
     def test_request_construction_error_is_wrapped(self):
         adapter = ba.BeetsAdapter(base_url="http://beets:8337")
         for call in _calls():
-            with mock.patch.object(ba.urllib.request, "Request", side_effect=ValueError(f"bad netloc {SECRET}")), \
+            with mock.patch.object(ba.urllib.request, "Request", side_effect=ValueError(f"bad netloc {CANARY}")), \
                     self.assertLogs("beets.adapter", level="WARNING") as logs:
                 with self.assertRaises(ba.BeetsAdapterConnectionError) as ctx:
                     call(adapter)
-            self.assertNotIn(SECRET, str(ctx.exception))
-            self.assertNotIn(SECRET, "\n".join(logs.output))
+            self.assertNotIn(CANARY, str(ctx.exception))
+            self.assertNotIn(CANARY, "\n".join(logs.output))
 
 
 class SetupEnvUrlRedactionTests(unittest.TestCase):
     """#183 F1: GET /api/setup/env never returns user:pass@ of a URL setting,
     and saving the form back does not overwrite the stored value."""
 
-    PLEX = f"http://u:{SECRET}@plex:32400"
-    AI = f"https://u:{SECRET}@ai.example/v1"
-    LIDARR = f"http://u:{SECRET}\uff20lidarr:8686"
+    PLEX = f"http://u:{CANARY}@plex:32400"
+    AI = f"https://u:{CANARY}@ai.example/v1"
+    LIDARR = f"http://u:{CANARY}\uff20lidarr:8686"
 
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
@@ -156,7 +156,7 @@ class SetupEnvUrlRedactionTests(unittest.TestCase):
         self.env_file = Path(tmp.name) / ".env"
         self.env_file.write_text(
             f"PLEX_URL={self.PLEX}\nAI_BASE_URL={self.AI}\nLIDARR_URL={self.LIDARR}\n"
-            f"BEETS_WEB_URL=http://u:{SECRET}@saved:8337\n",
+            f"BEETS_WEB_URL=http://u:{CANARY}@saved:8337\n",
             encoding="utf-8",
         )
         self.module._SETUP_ENV_FILE = self.env_file
@@ -167,12 +167,12 @@ class SetupEnvUrlRedactionTests(unittest.TestCase):
             os.environ.pop(var, None)
         # Environment overrides a different saved value: status_message
         # used to quote the saved one.
-        os.environ["BEETS_WEB_URL"] = f"http://u:{SECRET}@env:8337"
+        os.environ["BEETS_WEB_URL"] = f"http://u:{CANARY}@env:8337"
 
     def _variables(self):
         response = self.client.get("/api/setup/env")
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(SECRET, response.get_data(as_text=True))
+        self.assertNotIn(CANARY, response.get_data(as_text=True))
         return {v["name"]: v for v in response.get_json()["variables"]}
 
     def test_url_settings_are_returned_without_userinfo(self):
@@ -189,7 +189,7 @@ class SetupEnvUrlRedactionTests(unittest.TestCase):
         echo = {name: variables[name]["value"] for name in ("PLEX_URL", "AI_BASE_URL", "LIDARR_URL")}
         response = self.client.post("/api/setup/env", json={"variables": echo})
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        self.assertNotIn(SECRET, response.get_data(as_text=True))
+        self.assertNotIn(CANARY, response.get_data(as_text=True))
         text = self.env_file.read_text(encoding="utf-8")
         self.assertIn(f"PLEX_URL={self.PLEX}", text)
         self.assertIn(f"AI_BASE_URL={self.AI}", text)
@@ -205,9 +205,10 @@ class SetupEnvUrlRedactionTests(unittest.TestCase):
         for url in USERINFO_URLS:
             response = self.client.post("/api/setup/env", json={"variables": {"BEETS_WEB_URL": url}})
             self.assertEqual(response.status_code, 400, url)
-            self.assertNotIn(SECRET, response.get_data(as_text=True))
+            self.assertNotIn(CANARY, response.get_data(as_text=True))
             self.assertEqual(response.get_json()["error"], ba.BEETS_WEB_URL_USERINFO_MESSAGE)
-        self.assertIn(f"BEETS_WEB_URL=http://u:{SECRET}@saved:8337", self.env_file.read_text(encoding="utf-8"))
+            self.assertEqual(response.get_json()["code"], ba.BEETS_WEB_URL_USERINFO_CODE)
+        self.assertIn(f"BEETS_WEB_URL=http://u:{CANARY}@saved:8337", self.env_file.read_text(encoding="utf-8"))
 
     def test_saving_plain_beets_web_url_removes_the_credentials(self):
         # BEETS_WEB_URL is exempt from the keep-stored rule: the plain URL is
@@ -216,7 +217,7 @@ class SetupEnvUrlRedactionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         text = self.env_file.read_text(encoding="utf-8")
         self.assertIn("BEETS_WEB_URL=http://saved:8337", text)
-        self.assertNotIn(SECRET + "@saved", text)
+        self.assertNotIn(CANARY + "@saved", text)
 
 
 class SetupSettingsUserinfoTests(unittest.TestCase):
@@ -236,9 +237,9 @@ class SetupSettingsUserinfoTests(unittest.TestCase):
         for url in USERINFO_URLS:
             response = self.client.post("/api/setup/settings", json={"BEETS_WEB_URL": url})
             self.assertEqual(response.status_code, 400, url)
-            self.assertNotIn(SECRET, response.get_data(as_text=True))
+            self.assertNotIn(CANARY, response.get_data(as_text=True))
             self.assertEqual(response.get_json()["code"], ba.BEETS_WEB_URL_USERINFO_CODE)
-        self.assertNotIn(SECRET, self.client.get("/api/setup/settings").get_data(as_text=True))
+        self.assertNotIn(CANARY, self.client.get("/api/setup/settings").get_data(as_text=True))
 
     def test_plain_beets_web_url_is_saved(self):
         response = self.client.post("/api/setup/settings", json={"BEETS_WEB_URL": "http://beets:8337"})
@@ -263,8 +264,8 @@ class SetupStatusUserinfoTests(unittest.TestCase):
         for url in USERINFO_URLS:
             response = self._status(url)
             text = response.get_data(as_text=True)
-            self.assertNotIn(SECRET, text, url)
-            self.assertNotIn("Sup3r", text, url)
+            self.assertNotIn(CANARY, text, url)
+            self.assertNotIn("canary-208", text, url)
             body = response.get_json()
             self.assertIn(ba.BEETS_WEB_URL_USERINFO_MESSAGE, body["blocking_reasons"])
             ids = [w["id"] for w in body.get("warnings", [])]

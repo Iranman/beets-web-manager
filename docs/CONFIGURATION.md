@@ -40,7 +40,7 @@ A password hash is not a reusable API secret and is never returned by any API re
 Despite the filename, this file has nothing to do with `docker compose --env-file` or a `.env` sitting next to `docker-compose.yml`. It is application-owned runtime state, loaded by the web-manager process itself, that:
 
 - only supplies a value when the process's actual environment variable is blank (see precedence above);
-- is what `POST /api/setup/env` (the System page's environment editor) writes to (`GET /api/setup/env` shows every `*_URL` setting without `user:pass@`; saving that redacted URL back keeps the stored value);
+- is what `POST /api/setup/env` (the System page's environment editor) writes to (`GET /api/setup/env` shows every `*_URL` setting without `user:pass@`; saving that redacted URL back keeps the stored value, so re-saving the same plain URL does not remove credentials from a setting such as `PLEX_URL`: clear the field and save, then enter the URL again, or change the URL; `BEETS_WEB_URL` is the exception, where saving the plain URL replaces the stored one);
 - takes effect for the *currently running* web-manager process without a container recreation;
 - never affects the separate `beets` engine container;
 - cannot override a non-blank Docker-supplied environment value, by design.
