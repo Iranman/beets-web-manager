@@ -238,46 +238,39 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
                                    allowed_roots: Iterable) -> int:
     """Remove only queued audio files from a failed SLSKD candidate.
 
-    Never outside ``allowed_roots`` (#248): a peer-chosen username or remote
-    path must not turn a failed candidate into a library delete.
+    Deletes only the exact paths this transfer can occupy inside the peer's
+    own folder: <root>/<username>/<remote path> and
+    <root>/<username>/<remote dir name>/<file name>. It never searches
+    <root>/<album> or matches by base name (#277): a same-named file there
+    can belong to another download. Never outside ``allowed_roots`` (#248).
     """
     audio_ext_set = {str(ext).lower() for ext in audio_exts}
-    queued_names = {
-        _remote_path(name).name.lower()
-        for name in remote_files or []
-        if _s(name).strip()
-    }
-    if not queued_names:
-        return 0
-
     root = Path(downloads_root)
+    username = safe_peer_username(username)
+    if not username:
+        return 0
+    peer_root = root / username
+    targets: List[Path] = []
+    for remote in remote_files or []:
+        rel = _remote_path(remote)
+        if not rel.name or rel.suffix.lower() not in audio_ext_set:
+            continue
+        for path in (peer_root / rel, peer_root / rel.parent.name / rel.name):
+            if path not in targets:
+                targets.append(path)
+
     removed = 0
     touched_dirs: set[Path] = set()
     allowed = tuple(allowed_roots or ())
-    for candidate_root in slskd_download_candidate_roots(root, username, remote_files, allowed):
+    for path in targets:
         try:
-            if candidate_root.is_file():
-                files = [candidate_root]
-            elif candidate_root.is_dir():
-                files = [p for p in candidate_root.rglob("*") if p.is_file()]
-            else:
+            if not within_roots(path, allowed) or not path.is_file():
                 continue
+            path.unlink(missing_ok=True)
+            removed += 1
+            touched_dirs.add(path.parent)
         except Exception:
-            continue
-
-        for path in files:
-            if path.name.lower() not in queued_names:
-                continue
-            if path.suffix.lower() not in audio_ext_set:
-                continue
-            if not within_roots(path, allowed):
-                continue
-            try:
-                path.unlink(missing_ok=True)
-                removed += 1
-                touched_dirs.add(path.parent)
-            except Exception:
-                pass
+            pass
 
     for start in sorted(touched_dirs, key=lambda p: len(str(p)), reverse=True):
         cur = start
