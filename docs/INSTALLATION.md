@@ -156,6 +156,8 @@ docker compose restart beets   # load a new webmanager plugin version, if the re
 
 Read the release's Upgrade Notes in [`CHANGELOG.md`](../CHANGELOG.md) before upgrading. The full upgrade, verification and rollback steps are in the README's [Upgrades](../README.md#upgrades) section.
 
+Backups are not signed: the checksums in a backup's `MANIFEST.txt` detect damage, not tampering. Keep backups in a folder owned by root that no container can write to or mount. `restore.sh` refuses a backup without `MANIFEST.txt` (made by an older `backup.sh`) unless you pass `--allow-legacy-backup`.
+
 ---
 
 ## Health Checks

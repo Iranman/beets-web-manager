@@ -33,3 +33,15 @@ updates:
       # short-lived "Current" releases that never become LTS.
       - dependency-name: node
         versions: [">= 25, < 26", ">= 27, < 28", ">= 29, < 30", ">= 31, < 32"]
+  # The `docker` ecosystem reads Dockerfiles only; this one bumps the
+  # digest-pinned third-party images in the compose files (e.g. the
+  # bgutil-provider sidecar).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    ignore:
+      # Deliberately tracked by their `:latest` tag (project decision).
+      - dependency-name: ghcr.io/iranman/beets-web-manager
+      - dependency-name: lscr.io/linuxserver/beets

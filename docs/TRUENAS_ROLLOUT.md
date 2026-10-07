@@ -184,7 +184,7 @@ the first half passes:
 | `auth_token.bak`, `token-metadata.txt` | the web auth token and its checksum metadata | guarded token restore |
 | `web-manager-data/` | `.env` (Settings), `.browser_username`, `.browser_password`, `.flask_secret_key`, `.setup_complete`, `.browser_setup_state`, `transactions/` | restored (see Rollback) |
 | `beets-config/` | Beets `config.yaml` and `beetsplug/` | restored |
-| `state-manifest.txt` | sha256 / file counts of the two folders above | presence check |
+| `state-manifest.txt` | `manifest_version=2`, then a sha256 for every file in the backup | verified before anything changes |
 | `setup-status-before.json` | status and blocking reasons before the deploy | diagnostics |
 | `authoritative-db-metadata.txt` | DB path, size, live main-file hash, counts | diagnostics |
 | `container-inspect-before.json`, `resolved-compose-config.json` | `docker inspect` and `docker compose config` with every environment **value redacted** except a short allowlist of non-secret keys (`PUID`, `TZ`, `BEETS_WEB_URL`, ...); key names are kept | diagnostics only |
@@ -235,9 +235,12 @@ Each of `/api/health`, `/api/setup/status`, `/api/library?limit=1`,
 response size are logged for every attempt -- slow responses are reported,
 never hidden. `pagination.total` from `/api/library?limit=1` is compared
 against the authoritative item count recorded in step 1 (never
-hard-coded). Token values are read into a shell variable only for the
-`Authorization` header and immediately `unset`; never written to stdout,
-logs, or shell history.
+hard-coded). The token is never put on a command line, where any local user
+could read it in the process list: the `Authorization` header is written
+(by the shell builtin `printf`) to a private `mktemp` file (mode 0600),
+passed to curl as `-H @file`, and the file is removed as soon as curl
+returns. The token is never written to stdout, logs, or shell history.
+This needs curl 7.55 or newer.
 
 ## Rollback
 
@@ -245,6 +248,16 @@ logs, or shell history.
 STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh --rollback "$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS"
 ```
 
+0. **Verifies the backup** before anything is stopped or changed. Every
+   file listed in `state-manifest.txt` must match its sha256, and every file
+   the rollback restores from (`web-manager-data/`, `beets-config/`,
+   `stale-database/`, the Compose/`.env`/token/image records) must be
+   listed. Otherwise it stops with `backup_manifest_mismatch`. A backup made
+   by an older version of this script has no checksum list and is refused
+   with `backup_manifest_missing`, unless you add `--allow-legacy-backup`:
+   then it is restored unverified, with an `UNVERIFIED BACKUP` warning.
+   `scripts/restore.sh` applies the same rule to archives without
+   `MANIFEST.txt` (same reason code and flag).
 1. Stops only `beets-web-manager` and restores the prior Compose file.
 2. Restores or removes the persistent token according to the token
    migration metadata and recorded checksums.
@@ -307,6 +320,8 @@ meaning gets a new code.
 | `image_version_label_mismatch` | `image-pull-verification` | the pulled `:<VERSION>` image's version label is not `VERSION` |
 | `image_revision_label_mismatch` | `image-pull-verification` | the revision label is not `EXPECTED_REVISION` |
 | `image_tag_moved` | `image-deployment` | the tag no longer points at the image verified in pre-flight |
+| `backup_manifest_missing` | `backup-verification` | `--rollback`: the backup has no checksum manifest (older script) and `--allow-legacy-backup` was not given; nothing was stopped or changed |
+| `backup_manifest_mismatch` | `backup-verification` | `--rollback`: a backup file is missing, changed or not listed in `state-manifest.txt`; nothing was stopped or changed |
 | `recreated_image_unverified` | `image-deployment` / `rollback-recreate` | the recreated container runs another image than the verified (or recorded previous) one; it was stopped |
 
 ### Backup and restore safety
@@ -334,7 +349,11 @@ through its final path:
   tools `cd` into the folder, check that `pwd -P` is still the folder they
   created and that they own it, and then copy, chmod and rename only
   through `./` paths: the working directory is the folder itself, so a
-  later rename of its name cannot redirect anything;
+  later rename of its name cannot redirect anything. The rollback also
+  creates and removes the staging folder from inside the target folder
+  after the same `pwd -P` check, so a target folder (for example
+  `transactions/`) swapped for a link never gets a staging folder made or
+  left in the link's target;
 - every rename is GNU `mv -T`; `restore.sh` refuses to run on a system
   whose `mv` lacks `-T`;
 - a file restored by `restore.sh` keeps the owner (uid:gid) of the file it
@@ -347,6 +366,16 @@ through its final path:
 Someone who can rename entries in the target folder itself can still
 replace files there after the restore; the tools only guarantee that they
 never write through such a change.
+
+**Backups are not signed.** `MANIFEST.txt` in a `scripts/backup.sh` archive
+(and `state-manifest.txt` in a rollout backup) lists sha256 checksums that
+detect damage, but nothing authenticates them: anyone who can write the
+backup can change a file and its checksum together. The manifest proves
+integrity, not authenticity, and the backup location is therefore a trust
+root. Both tools refuse a backup without a manifest unless
+`--allow-legacy-backup` is given (see Rollback). Keep backup folders owned by root, not writable by
+the containers or their `PUID`/`PGID` user, and never mounted into a
+container.
 
 ## Backup retention (opt-in)
 

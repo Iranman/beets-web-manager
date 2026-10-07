@@ -33,7 +33,9 @@
 # Usage:
 #   /bin/bash scripts/deploy_truenas_web_manager.sh              # real rollout
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --dry-run     # inspect only
-#   /bin/bash scripts/deploy_truenas_web_manager.sh --rollback DIR
+#   /bin/bash scripts/deploy_truenas_web_manager.sh --rollback DIR [--allow-legacy-backup]
+#       (a backup without a checksum manifest -- made by an older version
+#        of this script -- is refused unless --allow-legacy-backup is given)
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --offline-db-identity
 #       (stops the Beets engine briefly, hashes the settled database file,
 #        restarts it and re-verifies; BASELINE_DB_SHA256=<hex> to compare)
@@ -110,6 +112,7 @@ RESTORE_STALE_DB="${RESTORE_STALE_DB:-0}"
 
 MODE="deploy"
 ROLLBACK_DIR=""
+ALLOW_LEGACY_BACKUP=0
 DRY_RUN=0
 PRUNE_DAYS=""
 
@@ -149,6 +152,10 @@ while [[ $# -gt 0 ]]; do
       ROLLBACK_DIR="${2:-}"
       [[ -n "$ROLLBACK_DIR" ]] || { echo "FATAL: --rollback requires a backup directory path" >&2; exit 1; }
       shift 2
+      ;;
+    --allow-legacy-backup)
+      ALLOW_LEGACY_BACKUP=1
+      shift
       ;;
     -h|--help)
       # Print the leading comment block (everything up to `set -Eeuo`).
@@ -267,6 +274,23 @@ restart_engine_if_stopped() {
   docker compose -f "$COMPOSE_FILE" start "$ENGINE_SERVICE" >&2 || true
 }
 trap on_error ERR
+
+# curl_auth <curl args...>: curl with the Web Manager token sent from a
+# private header file (mktemp creates it 0600), never on curl's command
+# line, where any local user can read it in the process list. The file is
+# removed as soon as curl returns, whatever its result.
+# ponytail: a run killed by a signal while curl runs leaves the 0600 file
+# in $TMPDIR; add a signal trap if that ever matters.
+curl_auth() {
+  [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]] || { curl "$@"; return; }
+  local hdr rc=0
+  hdr="$(mktemp)" || return 1
+  # printf is a builtin, so the token is never on any process's argv.
+  printf 'Authorization: Bearer %s\n' "$(<"$ACTIVE_AUTH_TOKEN_PATH")" > "$hdr" || rc=1
+  [[ "$rc" -ne 0 ]] || curl -H "@${hdr}" "$@" || rc=$?
+  rm -f -- "$hdr"
+  return "$rc"
+}
 
 # STACK_DIR is required for every mode that reaches this point: --help
 # exits inside the arg-parsing loop above, before here, so it never hits
@@ -768,17 +792,12 @@ plan_backup_dir() {
 # ---------------------------------------------------------------------------
 probe_endpoint() {
   # probe_endpoint <path> <auth: 0|1> -- prints "status|elapsed_ms|bytes"
-  local path="$1" auth="$2" tok_arg=()
-  if [[ "$auth" -eq 1 && -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
-    local tok
-    tok="$(cat "$ACTIVE_AUTH_TOKEN_PATH")"
-    tok_arg=(-H "Authorization: Bearer ${tok}")
-    unset tok
-  fi
+  local path="$1" auth="$2" curl_cmd=curl
+  [[ "$auth" -ne 1 ]] || curl_cmd=curl_auth
   local start end status size out body
   body="$(mktemp)"
   start="$(_py -c 'import time; print(time.monotonic())')"
-  out="$(curl -sS -o "$body" -w '%{http_code}' --max-time 10 "${tok_arg[@]}" "${ENDPOINT_BASE_URL}${path}" 2>/dev/null || echo "000")"
+  out="$("$curl_cmd" -sS -o "$body" -w '%{http_code}' --max-time 10 "${ENDPOINT_BASE_URL}${path}" 2>/dev/null || echo "000")"
   end="$(_py -c 'import time; print(time.monotonic())')"
   status="$out"
   size="$(file_size "$body" 2>/dev/null || echo 0)"
@@ -813,11 +832,9 @@ verify_endpoints() {
 
   # Pagination contract check against the authoritative item count recorded
   # earlier -- never hard-coded.
-  local tok pagination_json total returned
+  local pagination_json total returned
   if [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
-    tok="$(cat "$ACTIVE_AUTH_TOKEN_PATH")"
-    pagination_json="$(curl -sS --max-time 10 -H "Authorization: Bearer ${tok}" "${ENDPOINT_BASE_URL}/api/library?limit=1" 2>/dev/null || true)"
-    unset tok
+    pagination_json="$(curl_auth -sS --max-time 10 "${ENDPOINT_BASE_URL}/api/library?limit=1" 2>/dev/null || true)"
     total="$(_py -c "
 import json, sys
 try:
@@ -874,15 +891,9 @@ SETUP_STATUS_BEFORE=""
 # Prints {"http": "<code>", "status": "...", "blocking_reasons": [...],
 # "blocking_reason_codes": [...] or null}.
 fetch_setup_status() {
-  local tok_arg=() body http
-  if [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
-    local tok
-    tok="$(cat "$ACTIVE_AUTH_TOKEN_PATH")"
-    tok_arg=(-H "Authorization: Bearer ${tok}")
-    unset tok
-  fi
+  local body http
   body="$(mktemp)"
-  http="$(curl -sS -o "$body" -w '%{http_code}' --max-time 15 "${tok_arg[@]}" "${ENDPOINT_BASE_URL}/api/setup/status" 2>/dev/null || echo "000")"
+  http="$(curl_auth -sS -o "$body" -w '%{http_code}' --max-time 15 "${ENDPOINT_BASE_URL}/api/setup/status" 2>/dev/null || echo "000")"
   _py - "$body" "$http" <<'PYEOF'
 import json, sys
 path, http = sys.argv[1], sys.argv[2]
@@ -1173,21 +1184,28 @@ pinned_cd() {
 # from inside the pinned stage, so it lands next to the stage whatever
 # happened to the path since.
 place_by_rename() {
-  local src="$1" dst="$2" mode="${3:-}" stage name rc=1
+  local src="$1" dst="$2" mode="${3:-}" parent name
   src="$(canon_path "$(dirname -- "$src")")/$(basename -- "$src")"
+  parent="$(dirname -- "$dst")"
   name="$(basename -- "$dst")"
-  stage="$(mktemp -d "$(dirname -- "$dst")/.rollback-stage.XXXXXX")" || return 1
-  if ( pinned_cd "$stage" \
-      && cp -RPp -- "$src" ./item \
-      && [[ -z "$(find ./item ! -type f ! -type d -print -quit)" ]] \
-      && { [[ -z "$mode" ]] || chmod "$mode" ./item; } \
-      && mv -fT -- ./item "../${name}" ); then
-    rc=0
-  else
-    warn "${src} was not copied to ${dst}: the copy failed, its staging folder was replaced, or it is or contains a link or special file"
+  # The stage is created and removed relative to <dst>'s folder, entered
+  # first and checked to be exactly that path: a folder swapped for a link
+  # before this point is refused, and one swapped after it no longer
+  # matters, so no stage is ever made or left outside the real folder.
+  if ( cd -- "$parent" 2>/dev/null && [[ "$(pwd -P)" == "$parent" ]] || exit 1
+       stage="$(mktemp -d ./.rollback-stage.XXXXXX)" || exit 1
+       rc=1
+       ( cd -- "$stage" 2>/dev/null && [[ "$(pwd -P)" == "${parent}/${stage#./}" && -O . ]] \
+           && cp -RPp -- "$src" ./item \
+           && [[ -z "$(find ./item ! -type f ! -type d -print -quit)" ]] \
+           && { [[ -z "$mode" ]] || chmod "$mode" ./item; } \
+           && mv -fT -- ./item "../${name}" ) && rc=0
+       rm -rf -- "$stage"
+       exit "$rc" ); then
+    return 0
   fi
-  rm -rf -- "$stage"
-  return "$rc"
+  warn "${src} was not copied to ${dst}: the copy failed, its folder or staging folder was replaced, or it is or contains a link or special file"
+  return 1
 }
 
 # tree_has_symlink <dir>: true if <dir> is a symlink or contains one.
@@ -1197,13 +1215,82 @@ tree_has_symlink() {
   [[ -n "$(find "$1" -type l -print -quit)" ]]
 }
 
+# state-manifest.txt lists "<path> sha256=<hex>" for every file in the
+# backup (the copies themselves, so a rollback can check them), written by
+# manifest_record; a later line for the same path supersedes an earlier one.
+# Backups whose manifest lacks this version line come from an older script
+# and hold no full checksum list (#178). The manifest detects damage and
+# edits by anyone who cannot also rewrite it; it is not signed, so the
+# backup folder itself must stay writable by root only.
+STATE_MANIFEST_VERSION="manifest_version=2"
+
+manifest_record() {
+  local rel
+  for rel in "$@"; do
+    echo "${rel} sha256=$(sha256_file "$BACKUP_DIR/${rel}")" >> "$BACKUP_DIR/state-manifest.txt"
+  done
+}
+
+# manifest_record_all: record every file now in the backup.
+manifest_record_all() {
+  local rel
+  while IFS= read -r -d '' rel; do
+    manifest_record "${rel#./}"
+  done < <(cd "$BACKUP_DIR" && find . -type f ! -path ./state-manifest.txt -print0)
+}
+
+# verify_backup_manifest: run by --rollback before anything is stopped or
+# changed. Every file the manifest lists must match it, and every file the
+# rollback can restore from must be listed. A backup without a manifest is
+# refused unless --allow-legacy-backup was given.
+verify_backup_manifest() {
+  STAGE="backup-verification"
+  local manifest="$ROLLBACK_DIR/state-manifest.txt" line rel bad=""
+  if [[ -L "$manifest" ]] || ! grep -qx "$STATE_MANIFEST_VERSION" "$manifest" 2>/dev/null; then
+    if [[ "$ALLOW_LEGACY_BACKUP" -eq 1 ]]; then
+      warn "UNVERIFIED BACKUP: ${ROLLBACK_DIR} has no checksum manifest (made by an older version of this script), so its files cannot be checked for damage or changes -- restoring it anyway because --allow-legacy-backup was given"
+      return 0
+    fi
+    REASON_CODE="backup_manifest_missing"
+    die "${ROLLBACK_DIR} has no checksum manifest (made by an older version of this script), so its files cannot be verified -- nothing was stopped or changed. If you trust this backup, re-run with --allow-legacy-backup"
+  fi
+  local -A want=()
+  while IFS= read -r line; do
+    [[ "$line" == *" sha256="* ]] || continue
+    want["${line% sha256=*}"]="${line##* sha256=}"
+  done < "$manifest"
+  for rel in "${!want[@]}"; do
+    if [[ -L "$ROLLBACK_DIR/${rel}" || ! -f "$ROLLBACK_DIR/${rel}" ]] \
+        || [[ "$(sha256_file "$ROLLBACK_DIR/${rel}")" != "${want[$rel]}" ]]; then
+      bad+="  ${rel} (missing or changed)"$'\n'
+    fi
+  done
+  # Everything the rollback reads must be listed (links and special files never are).
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    [[ -n "${want["$rel"]+x}" ]] || bad+="  ${rel} (not in the manifest)"$'\n'
+  done < <(cd "$ROLLBACK_DIR" && {
+    find ./web-manager-data ./beets-config ./stale-database ! -type d -print0 2>/dev/null || true
+    for rel in docker-compose.yml.bak .env.bak auth_token.bak token-metadata.txt previous-image.txt; do
+      [[ ! -e "$rel" && ! -L "$rel" ]] || printf './%s\0' "$rel"
+    done
+  })
+  if [[ -n "$bad" ]]; then
+    printf '%s' "$bad" >&2
+    REASON_CODE="backup_manifest_mismatch"
+    die "${ROLLBACK_DIR} does not match its checksum manifest (files listed above) -- the backup is damaged or was modified; nothing was stopped or changed"
+  fi
+  log "Verified ${#want[@]} backup file checksum(s) against ${manifest}."
+  STAGE="rollback"
+}
+
 backup_state_files() {
   local data_src engine_src
   data_src="$(canon_path "$WEBMGR_DATA_SRC")"
   engine_src="$(canon_path "$ENGINE_CONFIG_SRC")"
   mkdir -p "$BACKUP_DIR/web-manager-data" "$BACKUP_DIR/beets-config"
   local f d manifest="$BACKUP_DIR/state-manifest.txt"
-  : > "$manifest"
+  [[ -f "$manifest" ]] || echo "$STATE_MANIFEST_VERSION" > "$manifest"
   for f in "${WEBMGR_STATE_FILES[@]}"; do
     if [[ -L "${data_src}/${f}" ]]; then
       warn "web-manager-data/${f} is a symbolic link -- not backed up"
@@ -1243,6 +1330,7 @@ backup_state_files() {
     find "$BACKUP_DIR/beets-config/beetsplug" -type l -delete
     echo "beets-config/beetsplug/ files=$(find "${engine_src}/beetsplug" -type f | wc -l | tr -d ' ')" >> "$manifest"
   fi
+  manifest_record_all
   # Owner-only, whatever umask/ACLs the host applies.
   chmod -R go-rwx "$BACKUP_DIR"
   find "$BACKUP_DIR" -type f -exec chmod 600 {} +
@@ -1591,6 +1679,11 @@ print(next((d for d in digests if d.startswith(sys.argv[1] + "@sha256:")), ""))'
 
   [[ -n "$SETUP_STATUS_BEFORE" ]] && printf '%s\n' "$SETUP_STATUS_BEFORE" > "$BACKUP_DIR/setup-status-before.json"
   find "$BACKUP_DIR" -type f -exec chmod 600 {} +
+  # Checksum manifest from the start, so a run that fails before the state
+  # backup still leaves a backup --rollback accepts.
+  echo "$STATE_MANIFEST_VERSION" > "$BACKUP_DIR/state-manifest.txt"
+  chmod 600 "$BACKUP_DIR/state-manifest.txt"
+  manifest_record_all
 
   log "Backup created at ${BACKUP_DIR}"
 }
@@ -1629,6 +1722,10 @@ archive_stale_database() {
   [[ -f "$STALE_DB_PATH" ]]  && mv "$STALE_DB_PATH" "$BACKUP_DIR/stale-database/${DB_FILENAME}"
   [[ -f "$STALE_WAL_PATH" ]] && mv "$STALE_WAL_PATH" "$BACKUP_DIR/stale-database/${WAL_FILENAME}"
   [[ -f "$STALE_SHM_PATH" ]] && mv "$STALE_SHM_PATH" "$BACKUP_DIR/stale-database/${SHM_FILENAME}"
+  local f
+  for f in "$DB_FILENAME" "$WAL_FILENAME" "$SHM_FILENAME"; do
+    [[ ! -f "$BACKUP_DIR/stale-database/${f}" ]] || manifest_record "stale-database/${f}"
+  done
   log "Stale database archived to ${BACKUP_DIR}/stale-database/ (moved, not deleted)."
 }
 
@@ -1669,6 +1766,7 @@ migrate_token_if_needed() {
     echo "token_migration_performed=1"
     echo "migrated_token_sha256=${dst_sha}"
   } >> "$BACKUP_DIR/token-metadata.txt" 2>/dev/null || true
+  manifest_record token-metadata.txt
   log "Legacy token migrated to ${TOKEN_PATH} (checksum verified, contents never printed)."
 }
 
@@ -1958,6 +2056,7 @@ run_rollback() {
   STAGE="rollback"
   [[ -d "$ROLLBACK_DIR" ]] || die "rollback directory does not exist: ${ROLLBACK_DIR}"
   [[ -f "$ROLLBACK_DIR/docker-compose.yml.bak" ]] || die "rollback directory is missing docker-compose.yml.bak -- not a valid backup from this script"
+  verify_backup_manifest
 
   resolve_compose_file
   require_compose_pull_flag

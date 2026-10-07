@@ -640,7 +640,9 @@ docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
 require_compose_pull_flag() {{ return 0; }}
-# Token handling only: the recreate + proof step has its own end-to-end tests.
+# Token handling only: the recreate + proof step and backup verification
+# (BackupManifestTests) have their own end-to-end tests.
+verify_backup_manifest() {{ return 0; }}
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
@@ -686,7 +688,9 @@ docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
 require_compose_pull_flag() {{ return 0; }}
-# Token handling only: the recreate + proof step has its own end-to-end tests.
+# Token handling only: the recreate + proof step and backup verification
+# (BackupManifestTests) have their own end-to-end tests.
+verify_backup_manifest() {{ return 0; }}
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
@@ -724,7 +728,9 @@ docker() {{ echo "healthy"; }}
 resolve_container_id() {{ echo "cid-mock"; }}
 discover_and_verify_mounts() {{ return 0; }}
 require_compose_pull_flag() {{ return 0; }}
-# Token handling only: the recreate + proof step has its own end-to-end tests.
+# Token handling only: the recreate + proof step and backup verification
+# (BackupManifestTests) have their own end-to-end tests.
+verify_backup_manifest() {{ return 0; }}
 rollback_recreate_and_verify() {{ return 0; }}
 STACK_DIR="{self.tmp}"
 COMPOSE_FILE="{compose_file}"
@@ -1413,6 +1419,10 @@ class RollbackProofTests(VersionedStackFixture):
     def test_rollback_without_previous_image_record_refuses(self):
         self.deploy()
         os.remove(os.path.join(self.backup_dir(), "previous-image.txt"))
+        # Drop it from the manifest too (else backup verification refuses first).
+        manifest = Path(self.backup_dir(), "state-manifest.txt")
+        manifest.write_text("".join(ln for ln in manifest.read_text(encoding="utf-8").splitlines(True)
+                                    if not ln.startswith("previous-image.txt ")), encoding="utf-8")
         res = self.run_script("--rollback", self.backup_dir())
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("cannot prove a rollback", res.stderr)
@@ -1483,6 +1493,71 @@ class RollbackProofTests(VersionedStackFixture):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("'docker compose stop beets-web-manager' failed", res.stderr)
         self.assertNotIn("Rollback complete", res.stderr)
+
+
+class BackupManifestTests(VersionedStackFixture):
+    """#178: --rollback verifies the backup against its checksum manifest
+    before anything is stopped or changed; a backup without one (older
+    script) needs --allow-legacy-backup."""
+
+    def _rollback_refused_untouched(self, code, *args):
+        state_before = Path(self.state_path).read_text(encoding="utf-8")
+        compose_before = Path(self.compose_file).read_text(encoding="utf-8")
+        env_before = Path(self.webmgr_dir, ".env").read_text(encoding="utf-8")
+        res = self.run_script("--rollback", self.backup_dir(), *args)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(f"Reason code:           {code}", res.stdout + res.stderr)
+        self.assertIn("nothing was stopped or changed", res.stderr)
+        self.assertEqual(Path(self.state_path).read_text(encoding="utf-8"), state_before, "a container was touched")
+        self.assertEqual(Path(self.compose_file).read_text(encoding="utf-8"), compose_before)
+        self.assertEqual(Path(self.webmgr_dir, ".env").read_text(encoding="utf-8"), env_before)
+        return res
+
+    def test_backup_lists_a_checksum_for_every_file_it_restores_from(self):
+        self.deploy()
+        text = Path(self.backup_dir(), "state-manifest.txt").read_text(encoding="utf-8")
+        self.assertEqual(text.splitlines()[0], "manifest_version=2")
+        for rel in ("docker-compose.yml.bak", ".env.bak", "auth_token.bak", "previous-image.txt",
+                    "web-manager-data/.env", "web-manager-data/transactions/t1.json",
+                    "beets-config/config.yaml", "beets-config/beetsplug/webmanager/version.py"):
+            self.assertRegex(text, rf"(?m)^{re.escape(rel)} sha256=[0-9a-f]{{64}}$")
+
+    def test_rollback_refuses_a_backup_without_a_manifest(self):
+        self.deploy()
+        os.remove(os.path.join(self.backup_dir(), "state-manifest.txt"))
+        res = self._rollback_refused_untouched("backup_manifest_missing")
+        self.assertIn("--allow-legacy-backup", res.stderr)
+
+    def test_rollback_refuses_an_old_script_manifest_without_checksums(self):
+        self.deploy()
+        Path(self.backup_dir(), "state-manifest.txt").write_text(
+            "web-manager-data/.env sha256=" + "0" * 64 + "\n", encoding="utf-8")
+        self._rollback_refused_untouched("backup_manifest_missing")
+
+    def test_allow_legacy_backup_rolls_back_with_a_warning(self):
+        self.deploy()
+        os.remove(os.path.join(self.backup_dir(), "state-manifest.txt"))
+        res = self.run_script("--rollback", self.backup_dir(), "--allow-legacy-backup")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("UNVERIFIED BACKUP", res.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+
+    def test_rollback_refuses_a_changed_backup_file(self):
+        self.deploy()
+        Path(self.backup_dir(), "web-manager-data", ".env").write_text("AI_MODEL=tampered\n", encoding="utf-8")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn("web-manager-data/.env (missing or changed)", res.stderr)
+
+    def test_rollback_refuses_a_file_added_to_the_backup(self):
+        self.deploy()
+        Path(self.backup_dir(), "web-manager-data", "transactions", "planted.json").write_text("{}", encoding="utf-8")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn("web-manager-data/transactions/planted.json (not in the manifest)", res.stderr)
+
+    def test_allow_legacy_backup_does_not_skip_verification_of_a_manifest(self):
+        self.deploy()
+        Path(self.backup_dir(), "docker-compose.yml.bak").write_text("services: {}\n", encoding="utf-8")
+        self._rollback_refused_untouched("backup_manifest_mismatch", "--allow-legacy-backup")
 
 
 class LatestTagStackFixture(EndToEndFixture):
@@ -2031,6 +2106,82 @@ class RollbackCopyRaceTests(RolloutScriptTestBase):
         self.assertIn("was replaced while the rollback ran", res.stderr)
         self.assertEqual(os.listdir(victim_dir), [], "the rollback wrote into a swapped staging folder")
         self.assertEqual(Path(engine, "beetsplug", "webmanager", "version.py").read_text(encoding="utf-8"), "v = 2\n")
+
+    def test_transactions_folder_flipped_to_a_link_gets_no_staging_folder(self):
+        # #221 R2: a racer flips transactions/ itself to a link to another
+        # folder just while the staging folder is made, then flips it back.
+        # No staging folder may be made, or left, in the link's target.
+        victim_dir = os.path.join(self.tmp, "host-dir")
+        os.makedirs(victim_dir)
+        txn = os.path.join(self.tmp, "data", "transactions")
+        os.makedirs(txn)
+        src = os.path.join(self.tmp, "txn_a.json")
+        Path(src).write_text("{}", encoding="utf-8")
+        res = self.run_snippet(
+            f'mktemp() {{ case "$*" in *.rollback-stage.*) ;; *) command mktemp "$@"; return;; esac\n'
+            f'  local d rc=0; command mv "{txn}" "{txn}.away"; command ln -s "{victim_dir}" "{txn}"\n'
+            f'  d="$(command mktemp "$@")" || rc=$?\n'
+            f'  command rm "{txn}"; command mv "{txn}.away" "{txn}"\n'
+            f'  [[ "$rc" -eq 0 ]] && printf "%s\\n" "$d"; return "$rc"; }}\n'
+            f'if copy_regular_file "{src}" "{txn}/txn_a.json"; then echo COPIED; else echo REFUSED; fi'
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(os.listdir(victim_dir), [], "a staging folder was made or left through the flipped link")
+        self.assertEqual([n for n in os.listdir(txn) if n.startswith(".rollback-stage.")], [])
+        if "COPIED" in res.stdout:
+            self.assertEqual(Path(txn, "txn_a.json").read_text(encoding="utf-8"), "{}")
+
+
+class AuthTokenNotOnArgvTests(RolloutScriptTestBase):
+    """#221 S6: the Web Manager token must never be on curl's command line
+    (any local user can read it in the process list). It goes in a 0600
+    header file that is gone once curl returns."""
+
+    TOKEN = "tok-SECRET-0123456789abcdef"
+
+    def _run(self, call):
+        token = os.path.join(self.tmp, "auth_token")
+        Path(token).write_text(self.TOKEN + "\n", encoding="utf-8")
+        log = os.path.join(self.tmp, "curl.log")
+        # A curl stand-in that records its argv and, for -H @file, the file's
+        # mode and content while curl "runs".
+        res = self.run_snippet(
+            f'ACTIVE_AUTH_TOKEN_PATH="{token}"\n'
+            f'curl() {{ printf "ARGV %s\\n" "$*" >> "{log}"; local a; for a in "$@"; do case "$a" in '
+            f'@*) printf "HDR %s %s %s\\n" "${{a#@}}" "$(stat -c %a "${{a#@}}")" "$(cat "${{a#@}}")" >> "{log}";; esac; done; '
+            f'echo 200; }}\n'
+            + call
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return Path(log).read_text(encoding="utf-8").splitlines()
+
+    def _assert_header_file_only(self, lines):
+        argv = [ln for ln in lines if ln.startswith("ARGV ")]
+        hdrs = [ln.split(" ", 3) for ln in lines if ln.startswith("HDR ")]
+        self.assertTrue(argv)
+        for ln in argv:
+            self.assertNotIn(self.TOKEN, ln, "the token was passed on curl's command line")
+        self.assertEqual(len(hdrs), len(argv), "every authenticated call must use a header file")
+        for _, path, mode, content in hdrs:
+            self.assertEqual(content, f"Authorization: Bearer {self.TOKEN}")
+            if os.name != "nt":
+                self.assertEqual(mode, "600")
+            self.assertFalse(os.path.exists(path), "the header file was left behind")
+
+    def test_authenticated_probe_uses_a_private_header_file(self):
+        self._assert_header_file_only(self._run("probe_endpoint /api/setup/status 1 >/dev/null"))
+
+    def test_setup_status_fetch_uses_a_private_header_file(self):
+        self._assert_header_file_only(self._run("fetch_setup_status >/dev/null"))
+
+    def test_unauthenticated_probe_sends_no_token(self):
+        lines = self._run("probe_endpoint /api/health 0 >/dev/null")
+        self.assertEqual([ln for ln in lines if ln.startswith("HDR ")], [])
+        self.assertFalse(any(self.TOKEN in ln for ln in lines))
+
+    def test_no_bearer_header_is_built_on_a_command_line(self):
+        self.assertNotIn('-H "Authorization', SCRIPT_SOURCE)
+        self.assertNotIn("tok_arg", SCRIPT_SOURCE)
 
 
 @unittest.skipIf(os.name == "nt", "symbolic links need a POSIX host")

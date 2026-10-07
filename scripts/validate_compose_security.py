@@ -164,6 +164,27 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
                 errors.append(f"{label} image has no tag or digest: {image}")
 
 
+_PROJECT_SERVICES = ("beets", "beets-web-manager")
+
+
+def _check_third_party_images(text: str, label: str, errors: list[str]) -> None:
+    """Every service other than beets/beets-web-manager (e.g. the
+    bgutil-provider sidecar) runs a third-party image: it must be pinned by
+    digest so a moved tag can never change what runs. Services built from
+    source here (`build:`) are not third-party images and are skipped."""
+    section = re.search(r"^services:\n(?P<body>.*?)(?=^\S|\Z)", text, re.M | re.S)
+    if not section:
+        return
+    services = section.group("body")
+    for name in re.findall(r"^  ([A-Za-z0-9_.-]+):", services, re.M):
+        if name in _PROJECT_SERVICES:
+            continue
+        block = _service_block(services, name)
+        if _has_build_block(block):
+            continue
+        _check_image_digest_semantics(f"{label}: {name}", _image_line(block), False, errors)
+
+
 def _check_no_hardcoded_lan_allowlist(text: str, source_label: str, errors: list[str]) -> None:
     """BEETS_OUTBOUND_ALLOWLIST documents (and, only in the web-manager
     process, enforces) which LAN/internal hosts are reachable. It must never
@@ -357,10 +378,13 @@ def main() -> int:
     for path in (STANDALONE_COMPOSE, FULL_COMPOSE, ROOT / "docker-compose.dev.yml", ENV_EXAMPLE):
         if path.exists():
             _check_no_owner_specific_paths(_read(path), path.name, errors)
+            if path is not ENV_EXAMPLE:
+                _check_third_party_images(_read(path), path.name, errors)
     examples_dir = ROOT / "examples"
     if examples_dir.is_dir():
         for path in sorted(examples_dir.glob("*.yml")):
             _check_no_owner_specific_paths(_read(path), f"examples/{path.name}", errors)
+            _check_third_party_images(_read(path), f"examples/{path.name}", errors)
 
     result = {"ok": not errors, "errors": errors, "warnings": warnings}
     print(json.dumps(result, indent=2, sort_keys=True))
