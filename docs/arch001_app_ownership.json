@@ -6702,10 +6702,10 @@
    "module": "backend/slskd_service.py",
    "lines": [
     321,
-    617
+    621
    ],
-   "size": 297,
-   "body_lines": 286,
+   "size": 301,
+   "body_lines": 290,
    "route": null,
    "mutation_capable": false,
    "domain": "SLSKD",
@@ -6729,8 +6729,8 @@
    "name": "_slskd_download_candidate_roots",
    "module": "backend/slskd_service.py",
    "lines": [
-    620,
-    624
+    624,
+    628
    ],
    "size": 5,
    "body_lines": 3,
@@ -6749,8 +6749,8 @@
    "name": "_slskd_cancel_queued_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    627,
-    646
+    631,
+    650
    ],
    "size": 20,
    "body_lines": 18,
@@ -6772,8 +6772,8 @@
    "name": "_slskd_cleanup_failed_candidate_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    649,
-    653
+    653,
+    657
    ],
    "size": 5,
    "body_lines": 3,
@@ -6792,8 +6792,8 @@
    "name": "_find_slskd_downloaded_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    656,
-    934
+    660,
+    938
    ],
    "size": 279,
    "body_lines": 266,
@@ -6818,8 +6818,8 @@
    "name": "_slskd_wait_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    937,
-    1127
+    941,
+    1131
    ],
    "size": 191,
    "body_lines": 188,
@@ -6843,8 +6843,8 @@
    "name": "_normalise_download_method",
    "module": "backend/slskd_service.py",
    "lines": [
-    1146,
-    1149
+    1150,
+    1153
    ],
    "size": 4,
    "body_lines": 3,
@@ -6885,8 +6885,8 @@
    "name": "_download_method_list",
    "module": "backend/slskd_service.py",
    "lines": [
-    1152,
-    1158
+    1156,
+    1162
    ],
    "size": 7,
    "body_lines": 6,
@@ -6910,8 +6910,8 @@
    "name": "_slskd_fallback_methods",
    "module": "backend/slskd_service.py",
    "lines": [
-    1161,
-    1170
+    1165,
+    1174
    ],
    "size": 10,
    "body_lines": 9,
@@ -6933,8 +6933,8 @@
    "name": "_strip_track_filename_id_suffix",
    "module": "backend/slskd_service.py",
    "lines": [
-    1173,
-    1178
+    1177,
+    1182
    ],
    "size": 6,
    "body_lines": 5,

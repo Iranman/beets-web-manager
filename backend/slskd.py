@@ -61,10 +61,14 @@ def within_roots(path, allowed_roots) -> bool:
 
 
 def peer_download_dir(downloads_root: Path, username: str, remote_dir) -> Path:
-    """Where slskd saves a peer's remote dir: <downloads_root>/<username>/<remote_dir>.
+    """The peer-folder layout: <downloads_root>/<username>/<remote_dir>.
 
-    Callers pass a username accepted by ``safe_peer_username`` and must still
-    check the result with ``within_roots`` (symlinks) before using it.
+    This is not slskd's default. By default slskd saves completed files to
+    <downloads>/<remote folder name>/<file> (Destination.Subdirectory
+    "${SOURCE_DIRECTORY}"), with no username folder; the finder also
+    searches that layout. Callers pass a username accepted by
+    ``safe_peer_username`` and must still check the result with
+    ``within_roots`` (symlinks) before using it.
     """
     return Path(downloads_root) / username / _remote_path(remote_dir)
 
@@ -231,6 +235,65 @@ def slskd_download_candidate_roots(downloads_root: Path, username: str,
     return [path for path in roots if within_roots(path, allowed)]
 
 
+class QueuedRemote(str):
+    """A queued remote filename that carries the evidence cleanup needs (#277).
+
+    ``size`` is the byte size queued with slskd and ``queued_at`` the epoch
+    time just before queueing. It is a ``str`` so every caller that treats
+    queued files as names keeps working, and list copies keep the evidence.
+    """
+
+    size: int = 0
+    queued_at: float = 0.0
+
+    def __new__(cls, name, size=0, queued_at=0.0):
+        obj = super().__new__(cls, _s(name))
+        obj.size = file_size({"size": size})
+        obj.queued_at = float(queued_at or 0)
+        return obj
+
+
+# .NET DateTime ticks (100 ns since 0001-01-01) at the Unix epoch.
+_DOTNET_UNIX_EPOCH_TICKS = 621355968000000000
+
+
+def _proven_from_transfer(path: Path, remote) -> bool:
+    """True when ``path`` has the queued size and was written at or after
+    the queue time. Missing evidence is never proof."""
+    size = getattr(remote, "size", 0)
+    queued_at = getattr(remote, "queued_at", 0.0)
+    if size <= 0 or queued_at <= 0:
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return st.st_size == size and st.st_mtime >= queued_at
+
+
+def _renamed_copies(directory: Path, name: str, queued_at: float) -> List[Path]:
+    """Files slskd renamed on collision for ``name`` after ``queued_at``.
+
+    With Destination.Exists "rename" (the default) slskd's FileService.MoveFile
+    saves <stem>_<DateTime.UtcNow.Ticks><ext> when <stem><ext> exists.
+    """
+    if queued_at <= 0:
+        return []
+    stem, ext = Path(name).stem, Path(name).suffix
+    pattern = re.compile(re.escape(stem) + r"_(\d{1,20})" + re.escape(ext))
+    min_ticks = int(queued_at * 10_000_000) + _DOTNET_UNIX_EPOCH_TICKS
+    try:
+        entries = list(directory.iterdir()) if directory.is_dir() else []
+    except OSError:
+        return []
+    out = []
+    for entry in entries:
+        m = pattern.fullmatch(entry.name)
+        if m and int(m.group(1)) >= min_ticks:
+            out.append(entry)
+    return out
+
+
 def cleanup_failed_candidate_files(downloads_root: Path, username: str,
                                    remote_files: Sequence,
                                    audio_exts: Iterable[str],
@@ -238,31 +301,58 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
                                    allowed_roots: Iterable) -> int:
     """Remove only queued audio files from a failed SLSKD candidate.
 
-    Deletes only the exact paths this transfer can occupy inside the peer's
-    own folder: <root>/<username>/<remote path> and
-    <root>/<username>/<remote dir name>/<file name>. It never searches
-    <root>/<album> or matches by base name (#277): a same-named file there
-    can belong to another download. Never outside ``allowed_roots`` (#248).
+    Never searches by base name (#277). Candidate paths per queued file:
+
+    - <root>/<peer>/<remote path> and <root>/<peer>/<remote folder>/<file>
+      (peer-folder layouts): removed.
+    - <root>/<remote folder>/<file> (slskd's default layout) and slskd's
+      rename-on-collision copies <stem>_<ticks><ext> in any of these
+      folders: removed only when ``_proven_from_transfer`` (queued size and
+      mtime at or after the queue time). A same-named file without that
+      proof is left and logged.
+
+    Never outside ``allowed_roots`` (#248).
     """
     audio_ext_set = {str(ext).lower() for ext in audio_exts}
     root = Path(downloads_root)
     username = safe_peer_username(username)
     if not username:
         return 0
+    allowed = tuple(allowed_roots or ())
     peer_root = root / username
+
+    def rel(path: Path) -> str:
+        try:
+            return str(path.relative_to(root))
+        except ValueError:
+            return path.name
+
     targets: List[Path] = []
+    left: List[Path] = []
     for remote in remote_files or []:
-        rel = _remote_path(remote)
-        if not rel.name or rel.suffix.lower() not in audio_ext_set:
+        rp = _remote_path(remote)
+        if not rp.name or rp.suffix.lower() not in audio_ext_set:
             continue
-        for path in (peer_root / rel, peer_root / rel.parent.name / rel.name):
-            if path not in targets:
-                targets.append(path)
+        peer_dirs = (peer_root / rp.parent, peer_root / rp.parent.name)
+        flat_dir = root / rp.parent.name
+        for d in peer_dirs:
+            targets.append(d / rp.name)
+        flat = flat_dir / rp.name
+        if flat not in targets and within_roots(flat, allowed) and flat.is_file():
+            if _proven_from_transfer(flat, remote):
+                targets.append(flat)
+            else:
+                left.append(flat)
+        for d in dict.fromkeys((*peer_dirs, flat_dir)):
+            if not within_roots(d, allowed):
+                continue
+            for copy in _renamed_copies(d, rp.name, getattr(remote, "queued_at", 0.0)):
+                if _proven_from_transfer(copy, remote):
+                    targets.append(copy)
 
     removed = 0
     touched_dirs: set[Path] = set()
-    allowed = tuple(allowed_roots or ())
-    for path in targets:
+    for path in dict.fromkeys(targets):
         try:
             if not within_roots(path, allowed) or not path.is_file():
                 continue
@@ -271,6 +361,8 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
             touched_dirs.add(path.parent)
         except Exception:
             pass
+    for path in dict.fromkeys(left):
+        log.append(f"  [slskd] Left {rel(path)!r}: no proof it belongs to the failed candidate.")
 
     for start in sorted(touched_dirs, key=lambda p: len(str(p)), reverse=True):
         cur = start
