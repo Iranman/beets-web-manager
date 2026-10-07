@@ -182,6 +182,8 @@ PREVIOUS_IMAGE_ID=""
 
 log()  { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 warn() { printf '[%s] WARNING: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+# fd 9 keeps the run's stderr for helpers whose callers silence fd 2.
+exec 9>&2
 
 _FAILURE_REPORTED=0
 
@@ -297,17 +299,52 @@ trap on_error ERR
 # curl_auth <curl args...>: curl with the Web Manager token sent from a
 # private header file (mktemp creates it 0600), never on curl's command
 # line, where any local user can read it in the process list. The file is
-# removed as soon as curl returns, whatever its result.
-# ponytail: a run killed by a signal while curl runs leaves the 0600 file
-# in $TMPDIR; add a signal trap if that ever matters.
+# removed as soon as curl returns, or when the run is interrupted.
+# The token is read without following a symlink, must come from a regular
+# file and must match the token alphabet, which also rules out a newline
+# that would inject extra headers. Otherwise no Authorization header is
+# sent. Redirects are refused so the token cannot follow a Location to
+# another host. Warnings go to fd 9 (the run's stderr) because every
+# caller silences fd 2.
 curl_auth() {
-  [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]] || { curl "$@"; return; }
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --location|--location-trusted|-[!-]*L*)
+        printf '[%s] WARNING: curl_auth refuses to follow redirects (%s).\n' "$(date -u +%H:%M:%S)" "$a" >&9
+        return 2 ;;
+    esac
+  done
+  [[ -n "$ACTIVE_AUTH_TOKEN_PATH" ]] || { curl "$@"; return; }
+  local tok
+  tok="$(python3 -c '
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        sys.exit(1)
+    sys.stdout.write(f.read(1024).decode("ascii", "replace").rstrip("\r\n"))
+' "$ACTIVE_AUTH_TOKEN_PATH" 2>/dev/null)" || tok=""
+  if [[ ! "$tok" =~ ^[A-Za-z0-9_-]{16,512}$ ]]; then
+    printf '[%s] WARNING: the Web Manager token at %s is missing, not a regular file, or not a valid token; sending no Authorization header.\n' \
+      "$(date -u +%H:%M:%S)" "$ACTIVE_AUTH_TOKEN_PATH" >&9
+    curl "$@"
+    return
+  fi
   local hdr rc=0
   hdr="$(mktemp)" || return 1
+  # shellcheck disable=SC2064  # expand $hdr now: it is local to this call
+  trap "rm -f -- '$hdr'" EXIT
+  # shellcheck disable=SC2064
+  trap "rm -f -- '$hdr'; exit 143" INT TERM
   # printf is a builtin, so the token is never on any process's argv.
-  printf 'Authorization: Bearer %s\n' "$(<"$ACTIVE_AUTH_TOKEN_PATH")" > "$hdr" || rc=1
+  printf 'Authorization: Bearer %s\n' "$tok" > "$hdr" || rc=1
   [[ "$rc" -ne 0 ]] || curl -H "@${hdr}" "$@" || rc=$?
   rm -f -- "$hdr"
+  trap - EXIT INT TERM
   return "$rc"
 }
 
@@ -1276,7 +1313,13 @@ verify_backup_manifest() {
   local -A want=()
   while IFS= read -r line; do
     [[ "$line" == *" sha256="* ]] || continue
-    want["${line% sha256=*}"]="${line##* sha256=}"
+    rel="${line% sha256=*}"
+    # Only paths inside the backup folder: never empty, absolute or "..".
+    if [[ -z "$rel" || "$rel" == /* || "/${rel}/" == */../* ]]; then
+      bad+="  ${rel:-<empty path>} (not a path inside the backup)"$'\n'
+      continue
+    fi
+    want["$rel"]="${line##* sha256=}"
   done < "$manifest"
   for rel in "${!want[@]}"; do
     if [[ -L "$ROLLBACK_DIR/${rel}" || ! -f "$ROLLBACK_DIR/${rel}" ]] \

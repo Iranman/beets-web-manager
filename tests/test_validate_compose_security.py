@@ -84,6 +84,25 @@ class ThirdPartyImageTests(unittest.TestCase):
         vcs._check_third_party_images("services:\n  sidecar:\n    restart: always\n", "x.yml", errors)
         self.assertEqual(errors, ["x.yml: sidecar image is missing"])
 
+    def test_project_images_match_by_exact_repository(self):
+        # A repository that merely contains a project name is third-party.
+        for image in ("ghcr.io/iranman/other-tool:1.0", "evil.example/linuxserver/beets:1.0",
+                      "ghcr.io/iranman/beets-web-manager-fork:1.0"):
+            errors = []
+            vcs._check_third_party_images(f"services:\n  sidecar:\n    image: {image}\n", "x.yml", errors)
+            self.assertEqual(errors, [f"x.yml: sidecar image is not digest-pinned: {image}"])
+
+    def test_variable_third_party_image_fails_even_with_a_pinned_default(self):
+        image = "${SIDECAR_IMAGE:-foo:1.0@sha256:" + "a" * 64 + "}"
+        errors = []
+        vcs._check_third_party_images(f"services:\n  sidecar:\n    image: {image}\n", "x.yml", errors)
+        self.assertEqual(errors, [f"x.yml: sidecar third-party image must be a literal reference, not a variable: {image}"])
+
+    def test_unreadable_services_section_fails(self):
+        errors = []
+        vcs._check_third_party_images("services: {sidecar: {image: 'foo:1.0'}}\n", "x.yml", errors)
+        self.assertEqual(errors, ["x.yml: has a services: section but no service could be read from it"])
+
 
 if __name__ == "__main__":
     unittest.main()

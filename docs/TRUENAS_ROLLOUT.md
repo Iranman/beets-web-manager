@@ -239,8 +239,13 @@ hard-coded). The token is never put on a command line, where any local user
 could read it in the process list: the `Authorization` header is written
 (by the shell builtin `printf`) to a private `mktemp` file (mode 0600),
 passed to curl as `-H @file`, and the file is removed as soon as curl
-returns. The token is never written to stdout, logs, or shell history.
-This needs curl 7.55 or newer.
+returns (or when the run is interrupted). The token is never written to
+stdout, logs, or shell history. This needs curl 7.55 or newer. The token
+file is read without following a symbolic link and must be a regular file
+holding 16 to 512 characters from `A-Z a-z 0-9 _ -`; anything else (a
+link, several lines, other characters) is not sent. The script then warns,
+without printing the value, and calls the endpoints unauthenticated. These
+calls never follow redirects, so the token cannot be sent to another host.
 
 ## Rollback
 
@@ -252,7 +257,8 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    file listed in `state-manifest.txt` must match its sha256, and every file
    the rollback restores from (`web-manager-data/`, `beets-config/`,
    `stale-database/`, the Compose/`.env`/token/image records) must be
-   listed. Otherwise it stops with `backup_manifest_mismatch`. A backup made
+   listed, and no listed path may be empty, absolute or contain `..`.
+   Otherwise it stops with `backup_manifest_mismatch`. A backup made
    by an older version of this script has no checksum list and is refused
    with `backup_manifest_missing`, unless you add `--allow-legacy-backup`:
    then it is restored unverified, with an `UNVERIFIED BACKUP` warning.
@@ -327,7 +333,7 @@ meaning gets a new code.
 | `image_revision_label_mismatch` | `image-pull-verification` | the revision label is not `EXPECTED_REVISION` |
 | `image_tag_moved` | `image-deployment` | the tag no longer points at the image verified in pre-flight |
 | `backup_manifest_missing` | `backup-verification` | `--rollback`: the backup has no checksum manifest (older script) and `--allow-legacy-backup` was not given; nothing was stopped or changed |
-| `backup_manifest_mismatch` | `backup-verification` | `--rollback`: a backup file is missing, changed or not listed in `state-manifest.txt`; nothing was stopped or changed |
+| `backup_manifest_mismatch` | `backup-verification` | `--rollback`: a backup file is missing, changed or not listed in `state-manifest.txt`, or a listed path is outside the backup; nothing was stopped or changed |
 | `recreated_image_unverified` | `image-deployment` / `rollback-recreate` | the recreated container runs another image than the verified (or recorded previous) one; it was stopped |
 
 ### Backup and restore safety

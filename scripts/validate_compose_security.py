@@ -126,6 +126,17 @@ def _image_lacks_tag_or_digest(image: str) -> bool:
     return ":" not in last_component
 
 
+_PROJECT_IMAGE_REPOS = frozenset({"ghcr.io/iranman/beets-web-manager", "lscr.io/linuxserver/beets"})
+
+
+def _image_repo(image: str) -> str:
+    """Repository part of an image reference: no digest, no tag."""
+    ref = str(image or "").strip().strip("\"'").split("@", 1)[0]
+    head, _, last = ref.rpartition("/")
+    last = last.split(":", 1)[0]
+    return f"{head}/{last}".lower() if head else last.lower()
+
+
 def _check_image_digest_semantics(label: str, image: str, has_build: bool, errors: list[str], *, allow_latest: bool = False) -> None:
     if not image:
         errors.append(f"{label} image is missing")
@@ -152,13 +163,17 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
                 "unpinned, or set to a moving `latest` tag"
             )
     else:
-        # Project GHCR images use versioning/release channel variables (e.g. ${BEETS_WEB_MANAGER_VERSION:-stable})
-        is_project_image = "ghcr.io/iranman/" in image or "BEETS_WEB_MANAGER_VERSION" in image or "linuxserver/beets" in image
-        if is_project_image:
+        # Project images may carry a tag variable (e.g. ${BEETS_WEB_MANAGER_VERSION:-stable}),
+        # but only after their exact repository name.
+        if _image_repo(image) in _PROJECT_IMAGE_REPOS:
             if _image_lacks_tag_or_digest(image):
                 errors.append(f"{label} image has no tag: {image}")
         else:
-            if "@sha256:" not in image:
+            if "${" in image:
+                # A variable could swap in any image at deploy time, and a
+                # ${VAR:-img@sha256:...} default only pins the fallback.
+                errors.append(f"{label} third-party image must be a literal reference, not a variable: {image}")
+            elif "@sha256:" not in image:
                 errors.append(f"{label} image is not digest-pinned: {image}")
             if _image_lacks_tag_or_digest(image):
                 errors.append(f"{label} image has no tag or digest: {image}")
@@ -172,7 +187,10 @@ def _check_third_party_images(text: str, label: str, errors: list[str]) -> None:
     bgutil-provider sidecar) runs a third-party image: it must be pinned by
     digest so a moved tag can never change what runs. Services built from
     source here (`build:`) are not third-party images and are skipped."""
-    for name, block in _services(text).items():
+    services = _services(text)
+    if not services and re.search(r"(?m)^services:", text):
+        errors.append(f"{label}: has a services: section but no service could be read from it")
+    for name, block in services.items():
         if name in _PROJECT_SERVICES or _has_build_block(block):
             continue
         _check_image_digest_semantics(f"{label}: {name}", _image_line(block), False, errors)

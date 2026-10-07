@@ -20,6 +20,7 @@ Every test that expects failure asserts on the actual rejection reason
 (via stderr), not just a non-zero exit code, so a check silently changing
 meaning wouldn't still pass.
 """
+import hashlib
 import http.server
 import json
 import os
@@ -1558,6 +1559,19 @@ class BackupManifestTests(VersionedStackFixture):
         res = self._rollback_refused_untouched("backup_manifest_mismatch")
         self.assertIn("web-manager-data/transactions/planted.json (not in the manifest)", res.stderr)
 
+    def test_rollback_refuses_manifest_paths_outside_the_backup(self):
+        self.deploy()
+        outside = Path(self.tmp, "outside.txt")
+        outside.write_text("x", encoding="utf-8")
+        sha = hashlib.sha256(b"x").hexdigest()
+        rel_up = os.path.relpath(outside, self.backup_dir()).replace(os.sep, "/")
+        with open(os.path.join(self.backup_dir(), "state-manifest.txt"), "a", encoding="utf-8", newline="\n") as f:
+            f.write(f"{rel_up} sha256={sha}\n{outside.as_posix()} sha256={sha}\n sha256={sha}\n")
+        res = self._rollback_refused_untouched("backup_manifest_mismatch")
+        self.assertIn(f"{rel_up} (not a path inside the backup)", res.stderr)
+        self.assertIn(f"{outside.as_posix()} (not a path inside the backup)", res.stderr)
+        self.assertIn("<empty path> (not a path inside the backup)", res.stderr)
+
     def _fail_deploy_inside_state_backup(self):
         """A deploy that dies while copying state, after the web manager was
         stopped: an unreadable transaction record makes `cp` fail."""
@@ -2214,10 +2228,14 @@ class AuthTokenNotOnArgvTests(RolloutScriptTestBase):
 
     TOKEN = "tok-SECRET-0123456789abcdef"
 
-    def _run(self, call):
+    def _run(self, call, content=None, symlink=False, expect_rc=0):
         token = os.path.join(self.tmp, "auth_token")
-        Path(token).write_text(self.TOKEN + "\n", encoding="utf-8")
+        target = os.path.join(self.tmp, "real_token") if symlink else token
+        Path(target).write_text(self.TOKEN + "\n" if content is None else content, encoding="utf-8")
+        if symlink:
+            os.symlink(target, token)
         log = os.path.join(self.tmp, "curl.log")
+        Path(log).touch()
         # A curl stand-in that records its argv and, for -H @file, the file's
         # mode and content while curl "runs".
         res = self.run_snippet(
@@ -2227,8 +2245,37 @@ class AuthTokenNotOnArgvTests(RolloutScriptTestBase):
             f'echo 200; }}\n'
             + call
         )
-        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.returncode, expect_rc, res.stderr)
+        self.stderr = res.stderr
         return Path(log).read_text(encoding="utf-8").splitlines()
+
+    def _assert_no_token_sent(self, lines):
+        self.assertEqual([ln for ln in lines if ln.startswith("HDR ")], [])
+        self.assertFalse(any(self.TOKEN in ln for ln in lines))
+        self.assertNotIn(self.TOKEN, self.stderr)
+
+    @unittest.skipIf(os.name == "nt", "needs POSIX symlinks")
+    def test_symlinked_token_is_not_sent(self):
+        lines = self._run("fetch_setup_status >/dev/null", symlink=True)
+        self._assert_no_token_sent(lines)
+        self.assertIn("sending no Authorization header", self.stderr)
+
+    def test_multi_line_token_is_not_sent(self):
+        # An LF inside the token would add a header of the caller's choosing.
+        lines = self._run("fetch_setup_status >/dev/null",
+                          content=self.TOKEN + "\nX-Injected: yes\n")
+        self._assert_no_token_sent(lines)
+        self.assertFalse(any("X-Injected" in ln for ln in lines))
+        self.assertIn("sending no Authorization header", self.stderr)
+
+    def test_short_token_is_not_sent(self):
+        lines = self._run("fetch_setup_status >/dev/null", content="short\n")
+        self.assertEqual([ln for ln in lines if ln.startswith("HDR ")], [])
+
+    def test_redirect_following_is_refused(self):
+        lines = self._run("rc=0; curl_auth -sSL http://127.0.0.1:9/x || rc=$?; exit $rc", expect_rc=2)
+        self.assertEqual(lines, [], "curl must not run when asked to follow redirects")
+        self.assertIn("refuses to follow redirects", self.stderr)
 
     def _assert_header_file_only(self, lines):
         argv = [ln for ln in lines if ln.startswith("ARGV ")]
