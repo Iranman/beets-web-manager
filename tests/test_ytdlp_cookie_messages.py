@@ -109,7 +109,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         source = app_family_source()
 
         self.assertIn('os.environ.get("YTDLP_PIP_PACKAGE", "yt-dlp[default,curl-cffi]")', source)
-        self.assertIn('os.environ.get("YTDLP_BGUTIL_PIP_PACKAGE", "bgutil-ytdlp-pot-provider==1.3.1")', source)
+        self.assertIn('os.environ.get("YTDLP_BGUTIL_PIP_PACKAGE", "bgutil-ytdlp-pot-provider==2.0.1")', source)
         self.assertIn('raw = os.environ.get("YTDLP_JS_RUNTIMES", "deno,node,quickjs")', source)
         self.assertIn('raw = os.environ.get("YTDLP_REMOTE_COMPONENTS", "")', source)
         self.assertIn("runtime package installation disabled", source)
@@ -183,9 +183,17 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         self.assertIn("['slskd', 'spotiflac', 'ytdlp', 'soundcloud']", playlist_source)
         self.assertIn("{ value: 'ytdlp', label: 'YouTube' }", playlist_source)
         self.assertIn("bgutil-provider:", compose_source)
-        self.assertIn("image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno", compose_source)
+        self.assertIn("image: brainicism/bgutil-ytdlp-pot-provider:2.0.1-deno@sha256:6e17b6fac7f91dbf59dffbdc7ee5da8988c6b2c76001b8653a5b967e8b99f389", compose_source)
         self.assertIn("YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-http://bgutil-provider:4416}", compose_source)
         self.assertNotIn("127.0.0.1:4416", compose_source)
+
+
+class FullStackPoProviderAllowlistTests(unittest.TestCase):
+    def test_full_stack_allowlist_default_admits_bundled_po_provider(self):
+        compose = (Path(__file__).resolve().parents[1] / "docker-compose.full.yml").read_text(encoding="utf-8")
+        po_url = re.search(r"YTDLP_PO_PROVIDER_URL: \$\{YTDLP_PO_PROVIDER_URL:-http://([^}]+)\}", compose).group(1)
+        allow = re.search(r"BEETS_OUTBOUND_ALLOWLIST: \$\{BEETS_OUTBOUND_ALLOWLIST:-([^}]*)\}", compose).group(1)
+        self.assertIn(po_url.rstrip("/"), allow.split(","))
 
 
 if __name__ == "__main__":
