@@ -1167,4 +1167,8 @@ def _slskd_fallback_methods(requested: str = "") -> List[str]:
 
 
 def _strip_track_filename_id_suffix(value: Any) -> str:
-    return _canonical_strip_track_filename_id_suffix(value)
+    try:
+        return _canonical_strip_track_filename_id_suffix(value)
+    except NameError:
+        from backend.matching import strip_track_filename_id_suffix as _fallback_strip
+        return _fallback_strip(value)

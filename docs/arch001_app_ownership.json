@@ -6933,10 +6933,10 @@
    "module": "backend/slskd_service.py",
    "lines": [
     1169,
-    1170
+    1174
    ],
-   "size": 2,
-   "body_lines": 1,
+   "size": 6,
+   "body_lines": 5,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
