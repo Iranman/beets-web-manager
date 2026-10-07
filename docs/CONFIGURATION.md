@@ -169,7 +169,7 @@ From plugin 1.6.0, `/webmanager/status` reports Beets' own view of the library:
 The roots are configured in `config.yaml`:
 
 - `webmanager.import_roots` (default `[/downloads]`): directories the plugin accepts imports from.
-- `webmanager.allowed_roots`: directories the plugin may move or remove files in. When unset or empty, it is derived from Beets: the library `directory:` plus `import_roots`. Set it only if you need something different. The `BEETS_ALLOWED_ROOTS` environment variable on the `beets` container (comma-separated) overrides it.
+- `webmanager.allowed_roots`: directories the plugin may move or remove files in. When unset or empty, it is derived from Beets: the library `directory:` plus `import_roots`. A derived root that is `/`, the Beets config directory, one of its parents or a directory inside it is skipped (logged once in the Beets log); if `directory:` itself is skipped, the plugin falls back to its default roots. Set it only if you need something different. The `BEETS_ALLOWED_ROOTS` environment variable on the `beets` container (comma-separated) overrides it.
 
 Setup compares these with Web Manager's own mounts. It changes nothing, but it warns when:
 

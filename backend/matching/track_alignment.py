@@ -136,11 +136,31 @@ def _hit_recording_id(hit: Dict[str, Any]) -> str:
     return _s(hit.get("recording_id") or hit.get("mb_recording_id") or hit.get("mb_trackid") or "").strip().lower()
 
 
+def acoustid_score_percent(value: Any) -> float:
+    """An AcoustID hit score on the 0..100 scale.
+
+    Stored scores are integer percents (helpers_mb._acoustid_parse_candidates
+    writes ``int(round(score * 100))``, and the file cache keeps that int);
+    display packets carry 0..1 floats. So only a *float* in 0..1 is a
+    fraction: integer 0 or 1 means 0 or 1 percent, never 100. A numeric
+    string follows the same rule by its spelling ("0.95" fraction, "1"
+    percent)."""
+    if value is None or isinstance(value, bool):
+        return 0.0
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = float(text) if any(ch in text for ch in ".eE") else int(text)
+        except ValueError:
+            return 0.0
+    if isinstance(value, int):
+        return float(value)
+    score = _float(value)
+    return score * 100.0 if 0.0 <= score <= 1.0 else score
+
+
 def _hit_score(hit: Dict[str, Any]) -> float:
-    score = _float(hit.get("score") or hit.get("confidence") or 0.0)
-    if score <= 1.0:
-        score *= 100.0
-    return score
+    return acoustid_score_percent(hit.get("score") or hit.get("confidence") or 0)
 
 
 def _acoustid_status_for_target(local: Dict[str, Any], target_recording_id: str) -> Tuple[AcoustIDStatus, List[str], List[str]]:
@@ -203,8 +223,14 @@ def _edge_for(local_index: int, target_index: int, local: Dict[str, Any], target
         if local_rec == target_rec:
             positives.append("embedded_recording_id_matches")
             hard_positive = True
-        elif trust_model == "existing_library":
+        else:
+            # MI-10: an embedded Recording ID that contradicts the target is
+            # evidence under every trust model, fresh imports included. When
+            # the fingerprint confirms the target anyway, the two top-tier
+            # sources disagree: surface that, never pick a side.
             conflicts.append("recording_id_conflict")
+            if acoustid_status == AcoustIDStatus.CONFIRMED:
+                conflicts.append("fingerprint_recording_id_conflict")
 
     if acoustid_status == AcoustIDStatus.CONFIRMED:
         hard_positive = True

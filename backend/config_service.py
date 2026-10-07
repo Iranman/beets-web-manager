@@ -122,10 +122,12 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
         from backend.beets_plugins import provision_bundled_plugins, update_config_yaml_plugins
         from backend.config_manager import get_config_path
         # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
-        cfg_dir = config_dir if config_dir else get_config_path().parent
+        # Edit the BEETS_CONFIG file itself, not always config.yaml (F7).
+        config_path = config_dir / "config.yaml" if config_dir else get_config_path()
+        cfg_dir = config_path.parent
         if cfg_dir.exists():
             provision_bundled_plugins(cfg_dir)
-            update_config_yaml_plugins(cfg_dir / "config.yaml")
+            update_config_yaml_plugins(config_path)
     except Exception as ex:
         try:
             _app_logger.warning("Auto plugin provisioning on startup skipped/failed: %s", ex)
@@ -155,11 +157,7 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
 # round-trips through the browser on every save), so it is replaced with a
 # deterministic, single-pass, O(len(text)) line scan below: no regex,
 # no backtracking, no pathological input.
-_CONFIG_SECRET_KEYS = frozenset({
-    "apikey", "api_key", "api_token", "auth_token", "token", "user_token",
-    "pass", "password", "secret", "client_secret", "access_token",
-    "refresh_token",
-})
+_CONFIG_SECRET_KEYS = config_layers.SECRET_CONFIG_KEYS
 
 
 def _redact_config_line(line: str) -> str:

@@ -174,7 +174,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.6.1")
+        self.assertEqual(data["plugin_version"], "1.6.2")
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
         for key in ("allowed_roots", "import_roots", "library_directory", "fpcalc_available", "ffmpeg_available"):
@@ -187,7 +187,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.6.1")
+        self.assertEqual(PLUGIN_VERSION, "1.6.2")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(
@@ -710,6 +710,8 @@ class DerivedAllowedRootsTests(unittest.TestCase):
         self.addCleanup(ops_mod.set_import_roots, None)
         self.config_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.config_dir, True)
+        ops_mod._WARNED_DROPPED_ROOTS.clear()
+        self.addCleanup(ops_mod._WARNED_DROPPED_ROOTS.clear)
 
     def _derived(self, directory):
         with patch.object(ops_mod, "get_library_directory", return_value=directory),                 patch.object(ops_mod.beets_config, "config_dir", return_value=self.config_dir):
@@ -728,10 +730,29 @@ class DerivedAllowedRootsTests(unittest.TestCase):
             for root in roots:
                 self.assertFalse(ops_mod._covers_config_dir(root), (bad, roots))
         ops_mod.set_import_roots(["/downloads", "/config"])
+        ops_mod._WARNED_DROPPED_ROOTS.clear()  # the loop above already warned once
         with self.assertLogs("beets.webmanager", level="WARNING") as logs:
             self.assertEqual(self._derived(music), [os.path.normpath(music), "/downloads"])
         self.assertIn("webmanager.allowed_roots", logs.output[0])
         self.assertIn("/config", logs.output[0])
+
+    def test_config_dir_descendants_are_dropped_f3i(self):
+        inside = os.path.join(self.config_dir, "music")
+        with patch.object(ops_mod.beets_config, "config_dir", return_value=self.config_dir):
+            self.assertTrue(ops_mod._covers_config_dir(inside))
+            # A sibling sharing the name prefix is not inside the config dir.
+            self.assertFalse(ops_mod._covers_config_dir(self.config_dir + "-music"))
+        self.assertEqual(self._derived(inside), list(ops_mod.DEFAULT_ALLOWED_ROOTS))
+        music = os.path.join(self.config_dir + "-music", "lib")
+        ops_mod.set_import_roots(["/downloads", os.path.join(self.config_dir, "imports")])
+        self.assertEqual(self._derived(music), [os.path.normpath(music), os.path.normpath("/downloads")])
+
+    def test_dropped_root_is_logged_once(self):
+        with self.assertLogs("beets.webmanager", level="WARNING") as logs:
+            for _ in range(3):
+                self._derived("/")
+            ops_mod.log.warning("sentinel")
+        self.assertEqual(len(logs.output), 2, logs.output)
 
     def test_normal_library_directory_is_used(self):
         music = os.path.join(self.config_dir + "-music", "lib")

@@ -481,8 +481,8 @@
    "desired_owner": "backend/app_runtime.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_acoustid_cached_fingerprint_ids",
-    "_acoustid_fingerprint_ids",
+    "_acoustid_confirmed_recording",
+    "_acoustid_top_tier",
     "_acoustid_verify_match",
     "_acq_display_year",
     "_acq_download_payload",
@@ -507,7 +507,7 @@
     "_ai_batch_recalculate_batch_state",
     "_ai_batch_recompute_counts"
    ],
-   "caller_count": 583,
+   "caller_count": 584,
    "dependencies": []
   },
   {
@@ -2554,10 +2554,10 @@
    "module": "backend/config_service.py",
    "lines": [
     106,
-    133
+    135
    ],
-   "size": 28,
-   "body_lines": 13,
+   "size": 30,
+   "body_lines": 15,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2571,8 +2571,8 @@
    "name": "_redact_config_line",
    "module": "backend/config_service.py",
    "lines": [
-    165,
-    180
+    163,
+    178
    ],
    "size": 16,
    "body_lines": 8,
@@ -2591,8 +2591,8 @@
    "name": "_redact_config_content",
    "module": "backend/config_service.py",
    "lines": [
-    183,
-    186
+    181,
+    184
    ],
    "size": 4,
    "body_lines": 3,
@@ -2613,8 +2613,8 @@
    "name": "_contains_redacted_config_secret",
    "module": "backend/config_service.py",
    "lines": [
-    189,
-    202
+    187,
+    200
    ],
    "size": 14,
    "body_lines": 8,
@@ -2633,8 +2633,8 @@
    "name": "_plugin_installed_map",
    "module": "backend/config_service.py",
    "lines": [
-    215,
-    220
+    213,
+    218
    ],
    "size": 6,
    "body_lines": 5,
@@ -2653,8 +2653,8 @@
    "name": "_plugin_status_payload",
    "module": "backend/config_service.py",
    "lines": [
-    223,
-    243
+    221,
+    241
    ],
    "size": 21,
    "body_lines": 20,
@@ -4625,8 +4625,8 @@
    "name": "_read_file_media_tags",
    "module": "backend/acoustid_service.py",
    "lines": [
-    21,
-    60
+    24,
+    63
    ],
    "size": 40,
    "body_lines": 35,
@@ -4652,8 +4652,8 @@
    "name": "_audio_cache_file_identity",
    "module": "backend/acoustid_service.py",
    "lines": [
-    66,
-    76
+    69,
+    79
    ],
    "size": 11,
    "body_lines": 9,
@@ -4673,8 +4673,8 @@
    "name": "_acoustid_lookup_cached_outcome",
    "module": "backend/acoustid_service.py",
    "lines": [
-    79,
-    107
+    82,
+    110
    ],
    "size": 29,
    "body_lines": 21,
@@ -4696,8 +4696,8 @@
    "name": "_acoustid_lookup_cached",
    "module": "backend/acoustid_service.py",
    "lines": [
-    110,
-    115
+    113,
+    118
    ],
    "size": 6,
    "body_lines": 1,
@@ -4732,11 +4732,11 @@
    "name": "_audio_identity_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    118,
-    123
+    121,
+    124
    ],
-   "size": 6,
-   "body_lines": 5,
+   "size": 4,
+   "body_lines": 2,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -4754,8 +4754,8 @@
    "name": "_audio_identity_compact_candidate",
    "module": "backend/acoustid_service.py",
    "lines": [
-    126,
-    137
+    127,
+    138
    ],
    "size": 12,
    "body_lines": 11,
@@ -4777,8 +4777,8 @@
    "name": "_audio_identity_decision",
    "module": "backend/acoustid_service.py",
    "lines": [
-    140,
-    243
+    141,
+    244
    ],
    "size": 104,
    "body_lines": 98,
@@ -4802,11 +4802,11 @@
    "name": "_acoustid_verify_match",
    "module": "backend/acoustid_service.py",
    "lines": [
-    246,
-    271
+    247,
+    284
    ],
-   "size": 26,
-   "body_lines": 18,
+   "size": 38,
+   "body_lines": 24,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -4819,8 +4819,81 @@
    "caller_count": 2,
    "dependencies": [
     "_acoustid_lookup_cached",
+    "_acoustid_top_tier",
     "_playlist_artist_name_score",
     "_playlist_title_score",
+    "_s"
+   ]
+  },
+  {
+   "name": "_acoustid_top_tier",
+   "module": "backend/acoustid_service.py",
+   "lines": [
+    287,
+    296
+   ],
+   "size": 10,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACOUSTID",
+   "desired_owner": "backend/acoustid_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_acoustid_confirmed_recording",
+    "_acoustid_verify_match"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_acoustid_confirmed_recording",
+   "module": "backend/acoustid_service.py",
+   "lines": [
+    299,
+    311
+   ],
+   "size": 13,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACOUSTID",
+   "desired_owner": "backend/acoustid_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_album_track_fingerprint_check",
+    "_artist_folder_fingerprint_confirms",
+    "_confirmed_recording_ids"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_acoustid_top_tier",
+    "_s"
+   ]
+  },
+  {
+   "name": "_confirmed_recording_ids",
+   "module": "backend/acoustid_service.py",
+   "lines": [
+    314,
+    316
+   ],
+   "size": 3,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_acoustid_cached_fingerprint_ids",
+    "_acoustid_fingerprint_ids"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_acoustid_confirmed_recording",
     "_s"
    ]
   },
@@ -4828,11 +4901,11 @@
    "name": "_acoustid_fingerprint_ids",
    "module": "backend/acoustid_service.py",
    "lines": [
-    274,
-    291
+    319,
+    336
    ],
    "size": 18,
-   "body_lines": 12,
+   "body_lines": 8,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -4846,18 +4919,18 @@
    "caller_count": 3,
    "dependencies": [
     "_acoustid_lookup_cached",
-    "_s"
+    "_confirmed_recording_ids"
    ]
   },
   {
    "name": "_acoustid_cached_fingerprint_ids",
    "module": "backend/acoustid_service.py",
    "lines": [
-    294,
-    312
+    339,
+    354
    ],
-   "size": 19,
-   "body_lines": 14,
+   "size": 16,
+   "body_lines": 11,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -4867,17 +4940,17 @@
    "caller_count": 0,
    "dependencies": [
     "_audio_cache_file_identity",
-    "_s"
+    "_confirmed_recording_ids"
    ]
   },
   {
    "name": "_acoustid_fingerprint_match",
    "module": "backend/acoustid_service.py",
    "lines": [
-    315,
-    331
+    357,
+    377
    ],
-   "size": 17,
+   "size": 21,
    "body_lines": 8,
    "route": null,
    "mutation_capable": false,
@@ -4898,8 +4971,8 @@
    "name": "_acoustid_hits_or_none",
    "module": "backend/acoustid_service.py",
    "lines": [
-    334,
-    345
+    380,
+    391
    ],
    "size": 12,
    "body_lines": 9,
@@ -4920,8 +4993,8 @@
    "name": "same_recording_proof",
    "module": "backend/acoustid_service.py",
    "lines": [
-    348,
-    377
+    394,
+    423
    ],
    "size": 30,
    "body_lines": 22,
@@ -4943,8 +5016,8 @@
    "name": "_acoustid_multi_file",
    "module": "backend/acoustid_service.py",
    "lines": [
-    380,
-    427
+    426,
+    473
    ],
    "size": 48,
    "body_lines": 39,
@@ -4969,8 +5042,8 @@
    "name": "_normalize_albumartist",
    "module": "backend/acoustid_service.py",
    "lines": [
-    441,
-    458
+    487,
+    504
    ],
    "size": 18,
    "body_lines": 8,
@@ -5000,8 +5073,8 @@
    "name": "_album_track_norm",
    "module": "backend/acoustid_service.py",
    "lines": [
-    466,
-    471
+    512,
+    517
    ],
    "size": 6,
    "body_lines": 5,
@@ -5033,8 +5106,8 @@
    "name": "_album_item_abs_path",
    "module": "backend/acoustid_service.py",
    "lines": [
-    474,
-    478
+    520,
+    524
    ],
    "size": 5,
    "body_lines": 4,
@@ -5060,11 +5133,11 @@
    "name": "_album_track_fingerprint_check",
    "module": "backend/acoustid_service.py",
    "lines": [
-    481,
-    530
+    527,
+    579
    ],
-   "size": 50,
-   "body_lines": 32,
+   "size": 53,
+   "body_lines": 35,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -5078,6 +5151,7 @@
    ],
    "caller_count": 4,
    "dependencies": [
+    "_acoustid_confirmed_recording",
     "_acoustid_lookup_cached",
     "_album_item_abs_path",
     "_album_track_norm",
@@ -5088,11 +5162,11 @@
    "name": "_artist_folder_fingerprint_confirms",
    "module": "backend/acoustid_service.py",
    "lines": [
-    533,
-    571
+    582,
+    621
    ],
-   "size": 39,
-   "body_lines": 30,
+   "size": 40,
+   "body_lines": 29,
    "route": null,
    "mutation_capable": false,
    "domain": "ACOUSTID",
@@ -5104,6 +5178,7 @@
    ],
    "caller_count": 2,
    "dependencies": [
+    "_acoustid_confirmed_recording",
     "_acoustid_lookup_cached",
     "_playlist_artist_name_score",
     "_s"
@@ -5113,8 +5188,8 @@
    "name": "_playlist_title_variants",
    "module": "backend/acoustid_service.py",
    "lines": [
-    574,
-    605
+    624,
+    655
    ],
    "size": 32,
    "body_lines": 31,
@@ -5137,8 +5212,8 @@
    "name": "_playlist_token_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    608,
-    614
+    658,
+    664
    ],
    "size": 7,
    "body_lines": 6,
@@ -5159,8 +5234,8 @@
    "name": "_playlist_title_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    617,
-    635
+    667,
+    685
    ],
    "size": 19,
    "body_lines": 18,
@@ -5193,8 +5268,8 @@
    "name": "_playlist_strip_artist_channel_noise",
    "module": "backend/acoustid_service.py",
    "lines": [
-    644,
-    660
+    694,
+    710
    ],
    "size": 17,
    "body_lines": 11,
@@ -5215,8 +5290,8 @@
    "name": "_playlist_artist_name_variants",
    "module": "backend/acoustid_service.py",
    "lines": [
-    663,
-    689
+    713,
+    739
    ],
    "size": 27,
    "body_lines": 26,
@@ -5240,8 +5315,8 @@
    "name": "_playlist_artist_name_pair_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    692,
-    704
+    742,
+    754
    ],
    "size": 13,
    "body_lines": 12,
@@ -5265,8 +5340,8 @@
    "name": "_playlist_artist_name_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    707,
-    717
+    757,
+    767
    ],
    "size": 11,
    "body_lines": 10,
@@ -23773,10 +23848,10 @@
    "module": "backend/import_service.py",
    "lines": [
     1735,
-    1861
+    1872
    ],
-   "size": 127,
-   "body_lines": 123,
+   "size": 138,
+   "body_lines": 134,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -23799,8 +23874,8 @@
    "name": "_beet_import_timeout",
    "module": "backend/import_service.py",
    "lines": [
-    1864,
-    1875
+    1875,
+    1886
    ],
    "size": 12,
    "body_lines": 10,
@@ -23821,8 +23896,8 @@
    "name": "_audio_validation_inspection_failed",
    "module": "backend/import_service.py",
    "lines": [
-    1878,
-    1896
+    1889,
+    1907
    ],
    "size": 19,
    "body_lines": 18,
@@ -23843,8 +23918,8 @@
    "name": "_filter_import_review_selected_audio_files",
    "module": "backend/import_service.py",
    "lines": [
-    1899,
-    1949
+    1910,
+    1960
    ],
    "size": 51,
    "body_lines": 49,
@@ -23868,8 +23943,8 @@
    "name": "_resolve_import_review_db_music_path",
    "module": "backend/import_service.py",
    "lines": [
-    1952,
-    1971
+    1963,
+    1982
    ],
    "size": 20,
    "body_lines": 14,
@@ -23892,8 +23967,8 @@
    "name": "_import_skipped_items",
    "module": "backend/import_service.py",
    "lines": [
-    1974,
-    2022
+    1985,
+    2033
    ],
    "size": 49,
    "body_lines": 47,
@@ -23913,8 +23988,8 @@
    "name": "_target_preview_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    2025,
-    2083
+    2036,
+    2094
    ],
    "size": 59,
    "body_lines": 58,
@@ -23939,8 +24014,8 @@
    "name": "_import_review_selected_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    2112,
-    2148
+    2123,
+    2159
    ],
    "size": 37,
    "body_lines": 31,
@@ -23964,8 +24039,8 @@
    "name": "_import_target_preview_cache_key",
    "module": "backend/import_service.py",
    "lines": [
-    2151,
-    2198
+    2162,
+    2209
    ],
    "size": 48,
    "body_lines": 47,
@@ -23987,8 +24062,8 @@
    "name": "_cached_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    2201,
-    2220
+    2212,
+    2231
    ],
    "size": 20,
    "body_lines": 19,
@@ -24011,8 +24086,8 @@
    "name": "_build_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    2223,
-    2510
+    2234,
+    2521
    ],
    "size": 288,
    "body_lines": 281,
@@ -24042,8 +24117,8 @@
    "name": "_import_review_confidence_score",
    "module": "backend/import_service.py",
    "lines": [
-    2513,
-    2529
+    2524,
+    2540
    ],
    "size": 17,
    "body_lines": 16,
@@ -24063,8 +24138,8 @@
    "name": "_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2532,
-    2540
+    2543,
+    2551
    ],
    "size": 9,
    "body_lines": 8,
@@ -24085,8 +24160,8 @@
    "name": "_write_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2543,
-    2548
+    2554,
+    2559
    ],
    "size": 6,
    "body_lines": 5,
@@ -24105,8 +24180,8 @@
    "name": "_import_review_auto_update",
    "module": "backend/import_service.py",
    "lines": [
-    2551,
-    2560
+    2562,
+    2571
    ],
    "size": 10,
    "body_lines": 9,
@@ -24131,8 +24206,8 @@
    "name": "_import_review_auto_key",
    "module": "backend/import_service.py",
    "lines": [
-    2563,
-    2574
+    2574,
+    2585
    ],
    "size": 12,
    "body_lines": 10,
@@ -24153,8 +24228,8 @@
    "name": "evaluate_import_eligibility",
    "module": "backend/import_service.py",
    "lines": [
-    2577,
-    2693
+    2588,
+    2704
    ],
    "size": 117,
    "body_lines": 115,
@@ -24184,8 +24259,8 @@
    "name": "start_folder_import_with_id",
    "module": "backend/import_service.py",
    "lines": [
-    2698,
-    4057
+    2709,
+    4068
    ],
    "size": 1360,
    "body_lines": 1349,
@@ -24246,8 +24321,8 @@
    "name": "_coerce_library_import_all_album",
    "module": "backend/import_service.py",
    "lines": [
-    4066,
-    4093
+    4077,
+    4104
    ],
    "size": 28,
    "body_lines": 27,
@@ -24271,8 +24346,8 @@
    "name": "_library_import_all_retry_payload",
    "module": "backend/import_service.py",
    "lines": [
-    4096,
-    4104
+    4107,
+    4115
    ],
    "size": 9,
    "body_lines": 8,
@@ -24294,8 +24369,8 @@
    "name": "_library_import_all_record",
    "module": "backend/import_service.py",
    "lines": [
-    4107,
-    4118
+    4118,
+    4129
    ],
    "size": 12,
    "body_lines": 10,
@@ -24318,8 +24393,8 @@
    "name": "_library_import_all_read_last",
    "module": "backend/import_service.py",
    "lines": [
-    4121,
-    4129
+    4132,
+    4140
    ],
    "size": 9,
    "body_lines": 8,
@@ -24339,8 +24414,8 @@
    "name": "_library_import_all_write_last",
    "module": "backend/import_service.py",
    "lines": [
-    4132,
-    4140
+    4143,
+    4151
    ],
    "size": 9,
    "body_lines": 8,
@@ -24359,8 +24434,8 @@
    "name": "_resolve_import_source_path",
    "module": "backend/import_service.py",
    "lines": [
-    4148,
-    4182
+    4159,
+    4193
    ],
    "size": 35,
    "body_lines": 16,

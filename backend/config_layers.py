@@ -341,6 +341,20 @@ def redact_url_userinfo(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
+# Beets config.yaml keys whose values are secrets. The single list shared by
+# the config editor's redaction (config_service) and the setup preview diff
+# masker (beets_plugins). Includes the secret keys Beets and its bundled
+# plugins mark ``redact=True``; identifiers Beets also redacts (user,
+# username, userid, client_id, prefix, google_engine) are left out because
+# the editor refuses to save a redacted placeholder.
+SECRET_CONFIG_KEYS = frozenset({
+    "apikey", "api_key", "api_token", "apisecret", "auth_token", "token", "user_token",
+    "pass", "password", "passphrase", "pwd", "secret", "client_secret",
+    "access_token", "refresh_token", "fanarttv_key", "genius_api_key",
+    "google_key", "lastfm_key",
+})
+
+
 # ── Private (mode 0600) files ────────────────────────────────────────────────
 
 def create_private_file(path: Path, data: str, *, unique: bool = False) -> Path:
