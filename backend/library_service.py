@@ -15,7 +15,7 @@ from backend.pending_review_store import _load_pending_reviews, _queue_folder_fo
 from backend.playlist_service import _artist_folder_merge_key, _safe_artist_folder_name
 from backend.import_reconciliation_service import _apply_artist_folder_reconcile_resilient
 from backend.cleanup_service import _album_cleanup_file_info, _album_cleanup_quality_tuple, _album_cleanup_remove_empty_tree, _album_cleanup_verified_same_file, _artist_alias_key, _unique_dest
-from backend.app_runtime import _path_is_under, _path_under, _redact_security_text, _safe_inventory_error_message, _safe_path_component, _split_beets_multi, _split_collab_credit, _split_mbid_values
+from backend.app_runtime import PLAYLIST_DOWNLOAD_ALLOWED_ROOTS, _path_is_under, _path_under, _redact_security_text, _safe_inventory_error_message, _safe_path_component, _split_beets_multi, _split_collab_credit, _split_mbid_values
 from backend.import_guard import release_track_matches_missing_target as _guard_release_track_matches_missing_target
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from helpers_mb import _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release, _resolve_mb_release_id, _fetch_mb_release_candidate, _mb_release_group_candidates
@@ -595,7 +595,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
 def _app_managed_download_path(path: Path) -> bool:
     # Validated roots only: an unsafe DOWNLOADS_ROOT authorizes nothing (#251 F-1).
     managed_roots = [root / "_beets_missing_import" for root in DOWNLOADS_ALLOWED_ROOTS]
-    managed_roots.append(PLAYLIST_DOWNLOAD_ROOT)
+    managed_roots.extend(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS)  # #268 S-4
     try:
         path_res = path.resolve(strict=False)
     except Exception:

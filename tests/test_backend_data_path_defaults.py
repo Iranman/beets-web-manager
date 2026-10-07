@@ -92,12 +92,14 @@ def _runtime_defaults(env_overrides):
     code = (
         "import json, backend.app_runtime as rt, backend.dedup_service as d;"
         "print(json.dumps({'aliases': rt.PLAYLIST_PATH_ROOT_ALIASES,"
-        " 'browse': [p.as_posix() for p in d._BROWSE_ALLOWED_ROOTS]}))"
+        " 'browse': [p.as_posix() for p in d._BROWSE_ALLOWED_ROOTS],"
+        " 'playlist': rt.PLAYLIST_DOWNLOAD_ROOT.as_posix()}))"
     )
     with tempfile.TemporaryDirectory() as data_dir:
         env = {k: v for k, v in os.environ.items()
                if k not in {"PLAYLIST_PATH_ROOT_ALIASES", "PLEX_MUSIC_ROOT", "MUSIC_ROOT",
-                            "DOWNLOADS_ROOT", "MUSIC_LIBRARY_PATH", "BEETS_MUSIC_DIR", "DOWNLOAD_PATH"}}
+                            "DOWNLOADS_ROOT", "MUSIC_LIBRARY_PATH", "BEETS_MUSIC_DIR", "DOWNLOAD_PATH",
+                            "PLAYLIST_DOWNLOAD_ROOT"}}
         env.update({"WEB_MANAGER_DATA_DIR": data_dir, **env_overrides})
         out = subprocess.run([sys.executable, "-c", code], cwd=REPO, env=env,
                              capture_output=True, text=True, timeout=120, check=True).stdout
@@ -117,6 +119,13 @@ class RuntimeDefaultsFromSettings(unittest.TestCase):
     def test_unsafe_downloads_root_adds_no_scan_root(self):
         got = _runtime_defaults({"DOWNLOADS_ROOT": "/"})
         self.assertEqual([Path(p) for p in got["browse"]], [Path("/music")])
+
+    def test_playlist_download_root_is_never_the_working_directory(self):
+        # #269 F-3: "" or a relative value used to mean the process CWD.
+        for raw in ("", "relative/dir", "."):
+            with self.subTest(raw=raw):
+                got = _runtime_defaults({"PLAYLIST_DOWNLOAD_ROOT": raw})
+                self.assertEqual(got["playlist"], "/downloads/music/Playlist Downloads")
 
 
 class AcquisitionUsesValidatedDownloadsRoot(unittest.TestCase):
@@ -153,7 +162,7 @@ class LibraryServiceDownloadRoots(unittest.TestCase):
             mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", torrent_roots),
             mock.patch.object(lib, "TORRENT_SOURCE_MOVE_ALLOWED", False),
             mock.patch.object(lib, "MUSIC_ROOT", self.music),
-            mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ROOT", self.root / "playlist"),
+            mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (self.root / "playlist",)),
         )
 
     def _run(self, fn, path, allowed, torrent_roots=()):
