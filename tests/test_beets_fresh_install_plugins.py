@@ -21,7 +21,7 @@ FULL_COMPOSE = (ROOT / "docker-compose.full.yml").read_text(encoding="utf-8")
 class BeetsFreshInstallPackagingTests(unittest.TestCase):
     def test_beets_version_and_runtime_dependencies_are_coherent(self):
         self.assertNotIn("beets[", REQ)
-        self.assertIn("pylast==7.1.0", REQ)
+        self.assertIn("pylast==7.2.0", REQ)
         self.assertNotIn("beets==2.2.0", REQ)
         self.assertNotIn("python3-discogs-client==", REQ)
         # Stock-Beets architecture: chroma/AcoustID fingerprinting runs
