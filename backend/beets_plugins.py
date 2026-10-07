@@ -40,6 +40,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from backend.config_layers import SECRET_CONFIG_KEYS
+
 log = logging.getLogger("beets.plugins.manifest")
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -227,7 +229,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.INTEGRATION,
         plugin_type=PluginType.BUILTIN,
         description="Deezer cover art and metadata search provider.",
-        python_packages=["deezer-python==2.1.0"],
+        python_packages=["deezer-python==7.4.0"],
     ),
     "spotify": PluginDefinition(
         name="spotify",
@@ -301,7 +303,7 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.OPTIONAL,
         plugin_type=PluginType.BUILTIN,
         description="Downloads song lyrics from Genius, Musixmatch, and web sources.",
-        python_packages=["beautifulsoup4==4.12.3"],
+        python_packages=["beautifulsoup4==4.15.0"],
         commands=["lyrics"],
     ),
     "parentwork": PluginDefinition(
@@ -412,14 +414,18 @@ class PluginHealthStatus:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ensure_plugin_sys_path(config_dir: Optional[Path | str] = None) -> None:
-    """Ensure `/config/beetsplug` and `/config/plugin-packages` are in sys.path."""
+    """Ensure `/config/beetsplug` and `/config/plugin-packages` are in sys.path.
+
+    Appended, never prepended (F9): files in the shared config volume must
+    not shadow the standard library or Web Manager's own modules.
+    """
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
     beetsplug_dir = cfg_dir / "beetsplug"
     packages_dir = cfg_dir / "plugin-packages"
 
     for d in (str(beetsplug_dir), str(packages_dir)):
         if d not in sys.path and Path(d).exists():
-            sys.path.insert(0, d)
+            sys.path.append(d)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -460,6 +466,10 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
     """
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
     target_beetsplug_dir = cfg_dir / "beetsplug"
+    # F5c: a symlinked beetsplug dir is not supported. Its resolved target
+    # would pass the per-file containment check, so refuse it before mkdir.
+    if target_beetsplug_dir.is_symlink():
+        raise RuntimeError("Refusing to provision plugins: beetsplug is a symbolic link")
     target_beetsplug_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure .webmanager_api_key file is always provisioned in config directory
@@ -1014,10 +1024,10 @@ def _timestamped_backup_prefix(path: Path) -> str:
 
 # S-7: the preview diff must never echo config.yaml secrets. It is built
 # with no context lines (n=0), and every changed line is masked by
-# _mask_secret_config_line(). No regex: config text is untrusted input and
-# an earlier regex here was polynomial (py/polynomial-redos); every step
-# below is a single O(len(line)) scan.
-_SECRET_KEY_WORDS = ("password", "passwd", "secret", "token", "bearer", "credential")
+# _mask_config_diff(). No regex: config text is untrusted input and an
+# earlier regex here was polynomial (py/polynomial-redos); every step below
+# is a single O(len(line)) scan.
+_SECRET_KEY_WORDS = ("password", "passwd", "passphrase", "secret", "token", "bearer", "credential")
 _SECRET_MASK = "********"
 
 
@@ -1026,13 +1036,18 @@ def _is_secret_key(key: str) -> bool:
     if not k:
         return False
     return (
-        k.endswith("key") or k.endswith("pass") or k.startswith("auth")
+        k in SECRET_CONFIG_KEYS
+        or k.endswith(("key", "pass", "pwd")) or k.startswith("auth")
         or any(word in k for word in _SECRET_KEY_WORDS)
     )
 
 
 def _mask_url_userinfo(body: str) -> str:
-    """``scheme://user:pass@host`` -> ``scheme://user:********@host`` (linear)."""
+    """``scheme://user:pass@host`` -> ``scheme://user:********@host`` (linear).
+
+    The userinfo ends at the LAST ``@`` before the next ``/``, so a password
+    holding a raw ``@`` or space is masked whole (F2r).
+    """
     out: List[str] = []
     pos = 0
     while True:
@@ -1040,49 +1055,58 @@ def _mask_url_userinfo(body: str) -> str:
         if start < 0:
             break
         auth_start = start + 3
-        end = auth_start
-        while end < len(body) and body[end] not in "/@ \t\"'":
-            end += 1
-        if end < len(body) and body[end] == "@":
-            colon = body.find(":", auth_start, end)
-            if colon >= 0:
-                out.append(body[pos:colon + 1] + _SECRET_MASK)
-                pos = end
-                continue
+        slash = body.find("/", auth_start)
+        end = len(body) if slash < 0 else slash
+        at = body.rfind("@", auth_start, end)
+        colon = body.find(":", auth_start, at) if at >= 0 else -1
+        if colon >= 0:
+            out.append(body[pos:colon + 1] + _SECRET_MASK)
+            pos = at
+            continue
         out.append(body[pos:auth_start])
         pos = auth_start
     out.append(body[pos:])
     return "".join(out)
 
 
-def _mask_secret_config_line(body: str) -> Tuple[str, bool]:
+def _mask_secret_config_line(body: str) -> Tuple[Optional[str], bool]:
     """Mask everything after the first secret-looking ``key:`` on a line.
 
     Handles block (``apikey: x``), list (``- token: x``), quoted keys and
-    flow mappings (``{user: a, apikey: x}``). Returns (masked, opens_block):
-    opens_block is True when the secret value continues on indented lines
-    (``key:`` with an empty value or a ``|``/``>`` block scalar).
+    flow mappings (``{user: a, apikey: x}``). A ``key:`` needs a following
+    space/tab/end, as in YAML. Returns (masked, opens_block): masked is None
+    when the line has no ``key:`` at all (a continuation line, ``- item``,
+    ``? key`` / ``: value``), which the caller masks whole; opens_block is
+    True when the secret value continues on indented lines (``key:`` with an
+    empty value or a ``|``/``>`` block scalar).
     """
     body = _mask_url_userinfo(body)
     seg_start = 0
+    has_key = False
+    last = len(body) - 1
     for i, ch in enumerate(body):
         if ch in "{[,":
             seg_start = i + 1
-        elif ch == ":":
+        elif ch == ":" and (i == last or body[i + 1] in " \t,}]"):
             key = body[seg_start:i].lstrip(" \t-")
+            if not has_key and not key.strip():
+                return None, False
+            has_key = True
             if _is_secret_key(key):
                 rest = body[i + 1:].strip()
                 opens_block = not rest or rest[0] in "|>"
                 return body[:i + 1] + ("" if not rest else " " + _SECRET_MASK), opens_block
             seg_start = i + 1
-    return body, False
+    return (body if has_key else None), False
 
 
 def _mask_config_diff(lines: Iterable[str]) -> str:
     out: List[str] = []
     block_indent: Optional[int] = None
-    for line in lines:
-        if line.startswith(("---", "+++", "@@")) or not line:
+    for index, line in enumerate(lines):
+        # Only the first two lines are file headers; a removed "--- x" or
+        # added "+++ x" content line further down is masked like any other.
+        if (index < 2 and line.startswith(("---", "+++"))) or line.startswith("@@") or not line:
             block_indent = None
             out.append(line)
             continue
@@ -1091,12 +1115,19 @@ def _mask_config_diff(lines: Iterable[str]) -> str:
         ending = rest[len(body):]
         stripped = body.lstrip(" \t")
         indent = len(body) - len(stripped)
-        if block_indent is not None and (not stripped or indent > block_indent):
-            out.append(f"{sign}{body[:indent]}{_SECRET_MASK if stripped else ''}{ending}")
+        if not stripped:
+            out.append(line)
+            continue
+        if block_indent is not None and indent > block_indent:
+            out.append(f"{sign}{body[:indent]}{_SECRET_MASK}{ending}")
             continue
         block_indent = None
         masked, opens_block = _mask_secret_config_line(body)
-        if opens_block:
+        if masked is None:
+            # No "key:" (F2r): mask the whole value, keep indent / "- ".
+            keep = len(body) - len(body.lstrip(" \t-"))
+            masked = body[:keep] + _SECRET_MASK
+        elif opens_block:
             block_indent = indent
         out.append(f"{sign}{masked}{ending}")
     return "".join(out)
@@ -1111,10 +1142,15 @@ def preview_recommended_plugins(config_path: Path | str) -> Dict[str, Any]:
     new_text, _added, _changed = _plan_config_yaml_plugins(
         text, missing, parse_configured_pluginpath(text) or ["/config/beetsplug"]
     )
+    # F2n: without a trailing newline the last line always differs ("X" vs
+    # "X\n") and would be shown on its own, out of its block context.
+    def _lines(t: str) -> List[str]:
+        return (t if t.endswith("\n") else t + "\n").splitlines(keepends=True)
+
     diff = _mask_config_diff(
         difflib.unified_diff(
-            text.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
+            _lines(text),
+            _lines(new_text),
             fromfile="config.yaml",
             tofile="config.yaml (proposed)",
             n=0,
@@ -1324,15 +1360,19 @@ def verify_plugin(
 def verify_all_plugins(
     config_dir: Optional[Path | str] = None,
     *,
+    config_file: Optional[Path | str] = None,
     remote_status: Optional[Dict[str, Any]] = None,
     loaded_plugins: Optional[Iterable[str]] = None,
     available_binaries: Optional[Dict[str, bool]] = None,
 ) -> Dict[str, Any]:
-    """Inspect and verify all plugins across categories."""
+    """Inspect and verify all plugins across categories.
+
+    ``config_file`` is the BEETS_CONFIG file (default ``<config_dir>/config.yaml``).
+    """
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
     ensure_plugin_sys_path(cfg_dir)
 
-    config_path = cfg_dir / "config.yaml"
+    config_path = Path(config_file) if config_file else cfg_dir / "config.yaml"
     config_text = ""
     if config_path.exists():
         try:
@@ -1413,7 +1453,9 @@ def verify_all_plugins(
     }
 
 
-def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, Any]:
+def provision_and_verify(
+    config_dir: Optional[Path | str] = None, *, config_file: Optional[Path | str] = None
+) -> Dict[str, Any]:
     """Execute complete plugin provisioning workflow:
 
     1. Copy bundled plugins to `/config/beetsplug`.
@@ -1424,6 +1466,9 @@ def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, A
        after writing config -- unlike the deleted embedded control agent's
        own 30s status cache).
     4. Return full diagnostic response.
+
+    ``config_file`` is the BEETS_CONFIG file to edit (F7); it defaults to
+    ``<config_dir>/config.yaml``.
     """
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -1432,11 +1477,11 @@ def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, A
     provisioned_files = provision_bundled_plugins(cfg_dir)
 
     # 2. Update config.yaml
-    config_path = cfg_dir / "config.yaml"
+    config_path = Path(config_file) if config_file else cfg_dir / "config.yaml"
     changed, msg = update_config_yaml_plugins(config_path)
 
     # 3. Verify all plugins against the live stock Beets process.
-    verification = verify_all_plugins(cfg_dir)
+    verification = verify_all_plugins(cfg_dir, config_file=config_path)
     verification["provisioned_files"] = provisioned_files
     verification["config_updated"] = changed
     verification["message"] = msg

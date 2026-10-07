@@ -226,9 +226,10 @@ def get_library_db_path() -> Optional[str]:
 
 
 def _covers_config_dir(directory: str) -> bool:
-    """True when ``directory`` is ``/`` or the Beets config dir or one of its
-    ancestors. Such a library ``directory`` must not become a mutation root:
-    it would put config.yaml, the API key file and the library DB in scope."""
+    """True when ``directory`` is ``/``, the Beets config dir, one of its
+    ancestors or one of its descendants (F3i: ``/config/<sub>``). Such a
+    directory must not become a mutation root: it would put config.yaml, the
+    API key file, the library DB or the provisioned plugin code in scope."""
     config_dirs = ["/config"]
     try:
         config_dirs.append(str(beets_config.config_dir()))
@@ -236,18 +237,27 @@ def _covers_config_dir(directory: str) -> bool:
         pass
     directory = os.path.realpath(str(directory))
     for config_dir in config_dirs:
+        real_config_dir = os.path.realpath(config_dir)
         try:
-            if os.path.commonpath([directory, os.path.realpath(config_dir)]) == directory:
+            if os.path.commonpath([directory, real_config_dir]) in (directory, real_config_dir):
                 return True
         except ValueError:  # different drives (Windows)
             continue
     return False
 
 
+_WARNED_DROPPED_ROOTS: set = set()
+
+
 def _warn_dropped_root(root: str, source: str) -> None:
+    # get_allowed_roots() runs per request: warn once per root, not every call.
+    if (source, root) in _WARNED_DROPPED_ROOTS:
+        return
+    _WARNED_DROPPED_ROOTS.add((source, root))
     log.warning(
-        "webmanager: not using %s %r as an allowed mutation root (it is / or contains the Beets "
-        "config directory); set webmanager.allowed_roots explicitly if you need something else",
+        "webmanager: not using %s %r as an allowed mutation root (it is /, or contains or is "
+        "inside the Beets config directory); set webmanager.allowed_roots explicitly if you "
+        "need something else",
         source, root,
     )
 

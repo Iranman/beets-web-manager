@@ -665,7 +665,7 @@ def plan_artist_folder_reconcile(
         status="Preview",
         summary=f"Reconcile {len(album_ids)} albums for artist '{canonical_name}'",
         changes=changes,
-        rollback_available=True,
+        rollback_available=False,  # #228: no rollback.operations and no engine family
         metadata={
             "canonical_name": canonical_name,
             "album_ids": album_ids,
@@ -2176,8 +2176,9 @@ def plan_album_mb_track_repair(
         status="Preview",
         summary=f"Repair MB track metadata for album {aid} ({album.get('album')})",
         changes=changes,
-        rollback_available=True,
-        rollback_reason="Restores the album and track metadata captured before the sync.",
+        # #228: the generic rollback route cannot reach this family (no
+        # rollback.operations); only rollback_album_mb_track_repair can (ARCH-023).
+        rollback_available=False,
         metadata={"album_id": aid, "before_state": before, "payload": payload, "plan": plan},
     )
     return {

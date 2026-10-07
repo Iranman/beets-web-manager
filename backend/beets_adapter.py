@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.error
 from typing import Any, Dict, List, Optional, Union
 
+from backend.config_layers import redact_url_userinfo
+
 try:
     from backend.security import OutboundPolicyError
 except ImportError:
@@ -218,6 +220,9 @@ class BeetsAdapter:
             or DEFAULT_BEETS_WEB_URL
         )
         self.base_url = raw_url.rstrip("/")
+        # #208: BEETS_WEB_URL may carry user:pass@. Requests use base_url;
+        # every log line and error message uses this redacted form.
+        self._display_url = redact_url_userinfo(self.base_url)
         self._api_key = api_key or os.environ.get("BEETS_WEBMANAGER_API_KEY")
         self._api_key_file = (
             api_key_file
@@ -313,7 +318,7 @@ class BeetsAdapter:
                         return json.loads(data.decode("utf-8"))
                     except Exception as json_err:
                         raise BeetsAdapterError(
-                            f"Malformed JSON response from Beets server at {url}: {json_err}",
+                            f"Malformed JSON response from Beets server at {redact_url_userinfo(url)}: {json_err}",
                             error_code="MALFORMED_RESPONSE",
                         ) from json_err
                 return data
@@ -363,28 +368,28 @@ class BeetsAdapter:
                 error_code=upstream_error_code or "BEETS_UPSTREAM_ERROR",
             )
         except TimeoutError as ex:
-            log.warning("Timeout connecting to Beets server at %s (%s): %s", self.base_url, path, ex)
+            log.warning("Timeout connecting to Beets server at %s (%s): %s", self._display_url, path, ex)
             raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self.base_url}"
+                f"Timeout connecting to Beets server at {self._display_url}"
             ) from ex
         except urllib.error.URLError as ex:
             reason = getattr(ex, "reason", None)
-            log.warning("Beets connection error at %s (%s): %s", self.base_url, path, ex)
+            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, ex)
             if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}"
+                    f"Timeout connecting to Beets server at {self._display_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}"
+                f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
-            log.warning("Beets connection error at %s (%s): %s", self.base_url, path, ex)
+            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}"
+                    f"Timeout connecting to Beets server at {self._display_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}"
+                f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
 
     # -------------------------------------------------------------------------
@@ -496,28 +501,28 @@ class BeetsAdapter:
                 error_code="BEETS_UPSTREAM_ERROR",
             ) from ex
         except TimeoutError as ex:
-            log.warning("Timeout streaming item %s file from %s: %s", item_id, self.base_url, ex)
+            log.warning("Timeout streaming item %s file from %s: %s", item_id, self._display_url, ex)
             raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self.base_url}"
+                f"Timeout connecting to Beets server at {self._display_url}"
             ) from ex
         except urllib.error.URLError as ex:
             reason = getattr(ex, "reason", None)
-            log.warning("Connection error streaming item %s file from %s: %s", item_id, self.base_url, ex)
+            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, ex)
             if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}"
+                    f"Timeout connecting to Beets server at {self._display_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}"
+                f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
-            log.warning("Connection error streaming item %s file from %s: %s", item_id, self.base_url, ex)
+            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}"
+                    f"Timeout connecting to Beets server at {self._display_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}"
+                f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
 
     def open_album_art(self, album_id: int):
@@ -537,28 +542,28 @@ class BeetsAdapter:
                 error_code="BEETS_UPSTREAM_ERROR",
             ) from ex
         except TimeoutError as ex:
-            log.warning("Timeout streaming album %s art from %s: %s", album_id, self.base_url, ex)
+            log.warning("Timeout streaming album %s art from %s: %s", album_id, self._display_url, ex)
             raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self.base_url}"
+                f"Timeout connecting to Beets server at {self._display_url}"
             ) from ex
         except urllib.error.URLError as ex:
             reason = getattr(ex, "reason", None)
-            log.warning("Connection error streaming album %s art from %s: %s", album_id, self.base_url, ex)
+            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, ex)
             if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}"
+                    f"Timeout connecting to Beets server at {self._display_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}"
+                f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
         except (OutboundPolicyError, ConnectionError, OSError) as ex:
-            log.warning("Connection error streaming album %s art from %s: %s", album_id, self.base_url, ex)
+            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, ex)
             if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
                 raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self.base_url}"
+                    f"Timeout connecting to Beets server at {self._display_url}"
                 ) from ex
             raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self.base_url}"
+                f"Cannot connect to Beets server at {self._display_url}"
             ) from ex
 
     # -------------------------------------------------------------------------
