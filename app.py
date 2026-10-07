@@ -11,6 +11,7 @@ import datetime, gzip, os, re, secrets, sys, threading
 from backend.security import install_secure_urllib
 install_secure_urllib()
 from backend.ai_batch_state_store import AiBatchStateConflictError
+import backend.provider_boundary as provider_boundary
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -307,6 +308,15 @@ def _handle_ai_batch_state_conflict(exc):
     # individually -- Flask/Werkzeug dispatch to the most specific
     # registered handler for the exception's class.
     return jsonify({"ok": False, "error": str(exc), "code": "ai_batch_state_conflict"}), 409
+
+@app.errorhandler(provider_boundary.ProviderError)
+def _handle_provider_unavailable(exc):
+    # A provider outage that reached a route is 503, not a generic 500 and
+    # never an empty result. Fixed text only: no exception text, URL or body.
+    _app_logger.warning("Provider unavailable in route: %s (%s)",
+                        getattr(exc, "provider", "") or "unknown", exc.outcome.value)
+    return jsonify({"ok": False, "error": provider_boundary.unavailable_message(exc),
+                    "unavailable": True}), 503
 
 @app.errorhandler(Exception)
 def _handle_unexpected_error(exc):

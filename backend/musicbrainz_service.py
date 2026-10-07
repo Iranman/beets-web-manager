@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, _MALFORMED_RELEASE_GROUP_STAMP_RE, _MB_UUID_RE, _extract_mb_uuid, _is_valid_mb_uuid, _s, _up, _ur
 from backend.app_runtime import _normalize_name, _path_is_under, _split_mbid_values
-from helpers_mb import _fetch_mb_recording_details, _fetch_mb_release_candidate
+from helpers_mb import _fetch_mb_recording_details, _fetch_mb_release_candidate, _mb_unavailable
 from backend.beets_adapter import lib, BeetsUnavailableError
+from backend.security import OutboundPolicyError
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm, _read_file_media_tags
 from backend.artwork_service import DISCOGS_TOKEN, _ARTIST_IMAGE_MAX_BYTES, _RELEASE_ART_MBID_RE, _artist_image_ext, _IMAGE_FETCH_HEADERS, _artist_name_key, _release_art_cache_info, _release_art_save_miss
@@ -341,34 +342,6 @@ def _folder_track_search_titles(source_folder: str, existing_album_id: int = 0,
     return titles
 
 
-def _musicbrainz_transient_error(ex: Exception) -> bool:
-    code = getattr(ex, "code", None)
-    if code in {429, 500, 502, 503, 504}:
-        return True
-    reason = getattr(ex, "reason", "")
-    details = " ".join(
-        str(part)
-        for part in (
-            ex,
-            reason,
-            getattr(reason, "reason", ""),
-            getattr(reason, "strerror", ""),
-        )
-        if part
-    ).lower()
-    return any(marker in details for marker in (
-        "timed out",
-        "temporarily",
-        "unexpected_eof",
-        "eof occurred in violation of protocol",
-        "connection reset",
-        "connection aborted",
-        "remote end closed connection",
-        "remote disconnected",
-        "server disconnected",
-    ))
-
-
 def _mb_release_search_by_folder_tracks(source_folder: str,
                                         existing_album_id: int = 0,
                                         artist: str = "",
@@ -405,23 +378,17 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
                 headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"},
             )
             data = {}
-            for attempt in range(1, 4):
-                try:
-                    with provider_boundary.opened("musicbrainz", req, timeout=25) as resp:
-                        data = json.loads(resp.read())
-                    break
-                except Exception as ex:
-                    transient = _musicbrainz_transient_error(ex)
-                    if transient and attempt < 3:
-                        if log is not None:
-                            log.append(
-                                f"  MB recording search transient error for {title!r}; retrying ({attempt}/3)"
-                            )
-                        time.sleep(1.5)
-                        continue
-                    if log is not None:
-                        log.append(f"  WARN: MB recording search failed for {title!r}: {ex}")
-                    break
+            # BA-5: provider_boundary.opened already retries; an outage
+            # raises (never "no candidates" for the rest of the folder).
+            try:
+                with provider_boundary.opened("musicbrainz", req, timeout=25) as resp:
+                    data = json.loads(resp.read())
+            except Exception as ex:
+                unavailable = _mb_unavailable(ex)
+                if log is not None:
+                    log.append(f"  WARN: MB recording search failed for {title!r}: {unavailable or ex}")
+                if unavailable is not None:
+                    raise unavailable from ex
             if data.get("recordings") or query_scope == "title":
                 if query_scope == "title" and artist:
                     used_title_only_fallback = True
@@ -466,7 +433,15 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
     return cands[:limit]
 
 
+class ReleaseArtUnavailable(Exception):
+    """The art source could not be asked (timeout, 429, 5xx, DNS, policy):
+    not an answer, so never cached as "no art" (IA-01)."""
+
+
 def _release_art_download(mbid: str, url: str, source: str) -> str:
+    """Download and cache one image. "" means the source answered without
+    usable art (404, not an image, too large). Raises ReleaseArtUnavailable
+    when the source could not be asked."""
     try:
         RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # Cover Art Archive / Discogs image URLs come from provider responses:
@@ -477,6 +452,14 @@ def _release_art_download(mbid: str, url: str, source: str) -> str:
             if not ext:
                 return ""
             blob = r.read(_ARTIST_IMAGE_MAX_BYTES + 1)
+    except OutboundPolicyError:
+        return ""  # the provider pointed at a non-public address: unusable art
+    except Exception as exc:
+        unavailable = _mb_unavailable(exc)
+        if unavailable is None:
+            return ""  # the source answered (4xx): no such image
+        raise ReleaseArtUnavailable(str(unavailable)) from exc
+    try:
         if not blob or len(blob) > _ARTIST_IMAGE_MAX_BYTES:
             return ""
         if ext == ".jpeg":
@@ -544,13 +527,23 @@ def _ensure_release_group_art(mbid: str, artist_name: str = "", album_title: str
     if cached.get("miss"):
         return {"ok": False, "error": "no art found"}
 
-    url = _release_art_download(
-        mbid, f"https://coverartarchive.org/release-group/{mbid}/front-250", "coverartarchive")
+    unavailable = False
+    try:
+        url = _release_art_download(
+            mbid, f"https://coverartarchive.org/release-group/{mbid}/front-250", "coverartarchive")
+    except ReleaseArtUnavailable:
+        url, unavailable = "", True
     if not url and (artist_name or album_title):
         discogs_url = _fetch_release_group_art_discogs(artist_name, album_title)
         if discogs_url:
-            url = _release_art_download(mbid, discogs_url, "discogs")
+            try:
+                url = _release_art_download(mbid, discogs_url, "discogs")
+            except ReleaseArtUnavailable:
+                unavailable = True
     if not url:
+        if unavailable:
+            # IA-01: an outage is not "no art"; do not cache a 7-day miss.
+            return {"ok": False, "error": "artwork source unavailable", "unavailable": True}
         _release_art_save_miss(mbid)
         return {"ok": False, "error": "no art found"}
     return {"ok": True, "url": url}

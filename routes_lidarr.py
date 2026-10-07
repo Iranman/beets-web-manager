@@ -54,7 +54,11 @@ def _lidarr_request_json(path: str, *, params: Dict[str, Any] | None = None,
 
 def _http_error_message(exc: Exception) -> Tuple[str, int]:
     if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            return "Lidarr rejected the API key", 502
         return f"Lidarr returned HTTP {exc.code}", 502
+    if isinstance(exc, ValueError):  # json.JSONDecodeError: not a reachability problem
+        return "Lidarr returned an unexpected response", 502
     if isinstance(exc, RuntimeError):
         return str(exc), 503
     return "Could not reach Lidarr", 502

@@ -26,7 +26,9 @@ class AcquisitionExtraOnlyCleanupTests(unittest.TestCase):
         self.assertIn("complete_local_by_identity", self.source)
         self.assertIn("complete_local_by_text", self.source)
         self.assertIn("def _acq_locally_satisfies_wanted", self.source)
-        self.assertIn("if complete_local_by_identity.get(identity) or complete_local_by_text.get(fallback):", self.source)
+        # IA-07: text fallback refuses a different release group; behavior is in
+        # tests/test_integrations_reliability.AcquisitionQueueIdentityTests.
+        self.assertIn("if complete_local_by_identity.get(identity) or _text_fallback(complete_local_by_text, fallback, rgid):", self.source)
 
     def test_expected_count_uses_representative_tracktotal(self):
         self.assertIn("def _representative_tracktotal", self.source)

@@ -132,6 +132,9 @@ type ApiErrorBody = {
    * other rejection reasons so the caller knows to prompt for the
    * administrator password and retry, rather than just showing an error. */
   reauth_required?: boolean;
+  /** Set on a 503 from the provider-outage handler (e.g. MusicBrainz down);
+   * its `error` is fixed, user-safe text and is not a Beets engine outage. */
+  unavailable?: boolean;
 };
 
 const _CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -181,7 +184,7 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     // contract change). An uncoded 503 is treated as engine-offline the same
     // way lib/api.ts's apiFetch() does; ENGINE_AUTH_FAILED is carried in
     // errorCode by every route that returns it, so it never reaches here.
-    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode);
+    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode && body?.unavailable !== true);
     let isEngineAuthError = errorCode === 'ENGINE_AUTH_FAILED';
     let isAuthError = (response.status === 401 || response.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && !isEngineAuthError;
     let message = body?.error || `HTTP ${response.status}`;

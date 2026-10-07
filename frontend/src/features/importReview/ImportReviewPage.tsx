@@ -63,6 +63,7 @@ import {
   blockedActionHint,
 } from './importReviewDecision';
 import type { MatchBucket, MatchConfidenceLevel, TrackRow, TargetPreviewState, SelectedMatch } from './importReviewDecision';
+import { MusicBrainzUnavailableNotice } from '../../components/MusicBrainzUnavailableNotice';
 import type {
   AiSuggestResponse,
   AiSuggestion,
@@ -2493,7 +2494,7 @@ function AddMbidsDialog({
   );
 }
 
-function ReviewCard({
+export function ReviewCard({
   item,
   mbid,
   suggestion,
@@ -2774,6 +2775,7 @@ function ReviewCard({
               />
             ) : null}
             <TargetPathPreviewPanel state={targetPreviewState} />
+            <MusicBrainzUnavailableNotice show={suggestion?.musicbrainz_unavailable} />
 
             {actionState?.message ? (
               <Alert severity={actionTone(actionState)} sx={{ mt: 2 }}>

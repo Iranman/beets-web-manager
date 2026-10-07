@@ -54,8 +54,12 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     let serverMessage = `HTTP ${res.status}`;
     let errorCode = '';
+    let providerUnavailable = false;
     try {
-      const body = (await res.json()) as { error?: string; error_code?: string };
+      const body = (await res.json()) as { error?: string; error_code?: string; unavailable?: boolean };
+      // A provider outage (e.g. MusicBrainz) is a 503 with unavailable:true and
+      // fixed user-safe text; it is not a Beets engine outage.
+      providerUnavailable = body?.unavailable === true;
       if (typeof body?.error === 'string' && body.error) {
         serverMessage = body.error;
       }
@@ -72,7 +76,7 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
     if ((res.status === 401 || res.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && errorCode !== 'ENGINE_AUTH_FAILED') {
       throw new ApiError(res.status, 'Your session expired. Sign in again.', 'auth');
     }
-    if (errorCode === 'ENGINE_OFFLINE' || (res.status === 503 && !errorCode)) {
+    if (errorCode === 'ENGINE_OFFLINE' || (res.status === 503 && !errorCode && !providerUnavailable)) {
       throw new ApiError(res.status, 'Beets engine is unavailable.', 'engine_offline');
     }
     throw new ApiError(res.status, serverMessage, 'http_error');

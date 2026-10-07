@@ -126,6 +126,17 @@ def _image_lacks_tag_or_digest(image: str) -> bool:
     return ":" not in last_component
 
 
+_PROJECT_IMAGE_REPOS = frozenset({"ghcr.io/iranman/beets-web-manager", "lscr.io/linuxserver/beets"})
+
+
+def _image_repo(image: str) -> str:
+    """Repository part of an image reference: no digest, no tag."""
+    ref = str(image or "").strip().strip("\"'").split("@", 1)[0]
+    head, _, last = ref.rpartition("/")
+    last = last.split(":", 1)[0]
+    return f"{head}/{last}".lower() if head else last.lower()
+
+
 def _check_image_digest_semantics(label: str, image: str, has_build: bool, errors: list[str], *, allow_latest: bool = False) -> None:
     if not image:
         errors.append(f"{label} image is missing")
@@ -152,16 +163,65 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
                 "unpinned, or set to a moving `latest` tag"
             )
     else:
-        # Project GHCR images use versioning/release channel variables (e.g. ${BEETS_WEB_MANAGER_VERSION:-stable})
-        is_project_image = "ghcr.io/iranman/" in image or "BEETS_WEB_MANAGER_VERSION" in image or "linuxserver/beets" in image
-        if is_project_image:
+        # Project images may carry a tag variable (e.g. ${BEETS_WEB_MANAGER_VERSION:-stable}),
+        # but only after their exact repository name.
+        if _image_repo(image) in _PROJECT_IMAGE_REPOS:
             if _image_lacks_tag_or_digest(image):
                 errors.append(f"{label} image has no tag: {image}")
         else:
-            if "@sha256:" not in image:
+            if "${" in image:
+                # A variable could swap in any image at deploy time, and a
+                # ${VAR:-img@sha256:...} default only pins the fallback.
+                errors.append(f"{label} third-party image must be a literal reference, not a variable: {image}")
+            elif "@sha256:" not in image:
                 errors.append(f"{label} image is not digest-pinned: {image}")
             if _image_lacks_tag_or_digest(image):
                 errors.append(f"{label} image has no tag or digest: {image}")
+
+
+_PROJECT_SERVICES = ("beets", "beets-web-manager")
+
+
+def _check_third_party_images(text: str, label: str, errors: list[str]) -> None:
+    """Every service other than beets/beets-web-manager (e.g. the
+    bgutil-provider sidecar) runs a third-party image: it must be pinned by
+    digest so a moved tag can never change what runs. Services built from
+    source here (`build:`) are not third-party images and are skipped."""
+    services = _services(text)
+    if not services and re.search(r"(?m)^services:", text):
+        errors.append(f"{label}: has a services: section but no service could be read from it")
+    for name, block in services.items():
+        if name in _PROJECT_SERVICES or _has_build_block(block):
+            continue
+        _check_image_digest_semantics(f"{label}: {name}", _image_line(block), False, errors)
+
+
+def _services(text: str) -> dict[str, str]:
+    """{name: body} for the top-level `services:` mapping, at whatever
+    indentation the file uses. Blank and comment lines (even at column 0)
+    do not end the section; the next top-level key does."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"services:\s*(#.*)?$", line)), None)
+    if start is None:
+        return {}
+    bodies: dict[str, list[str]] = {}
+    name, indent = None, None
+    for line in lines[start + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        depth = len(line) - len(line.lstrip())
+        if depth == 0:
+            break
+        if indent is None:
+            indent = depth
+        if depth <= indent:
+            match = re.match(r"\s*[\"']?([A-Za-z0-9_.-]+)[\"']?\s*:", line)
+            name = match.group(1) if match else None
+            if name:
+                bodies[name] = []
+        elif name:
+            bodies[name].append(line)
+    return {n: "\n".join(body) for n, body in bodies.items()}
 
 
 def _check_no_hardcoded_lan_allowlist(text: str, source_label: str, errors: list[str]) -> None:
@@ -357,10 +417,13 @@ def main() -> int:
     for path in (STANDALONE_COMPOSE, FULL_COMPOSE, ROOT / "docker-compose.dev.yml", ENV_EXAMPLE):
         if path.exists():
             _check_no_owner_specific_paths(_read(path), path.name, errors)
+            if path is not ENV_EXAMPLE:
+                _check_third_party_images(_read(path), path.name, errors)
     examples_dir = ROOT / "examples"
     if examples_dir.is_dir():
         for path in sorted(examples_dir.glob("*.yml")):
             _check_no_owner_specific_paths(_read(path), f"examples/{path.name}", errors)
+            _check_third_party_images(_read(path), f"examples/{path.name}", errors)
 
     result = {"ok": not errors, "errors": errors, "warnings": warnings}
     print(json.dumps(result, indent=2, sort_keys=True))

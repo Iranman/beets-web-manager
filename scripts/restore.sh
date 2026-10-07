@@ -13,6 +13,12 @@
 #   --web-manager-data DIR   host folder mounted at /web-manager-data
 #                                                               [WEB_MANAGER_DATA_DIR, default ./web-manager]
 #   --yes                    do not ask for confirmation
+#   --allow-legacy-backup    restore an old backup that has no MANIFEST.txt
+#                            (its files cannot be verified; a warning is printed)
+#
+# A backup is verified against its MANIFEST.txt before anything is touched.
+# The manifest detects damage, not tampering (it is not signed): keep
+# backups where only root can write.
 #
 # Nothing is deleted: every file the restore replaces is first moved to
 # <folder>/.pre-restore-<timestamp>/ inside the same folder.
@@ -31,9 +37,10 @@ set -euo pipefail
 BEETS_CONFIG_DIR="${BEETS_CONFIG_DIR:-./beets}"
 WEB_MANAGER_DATA_DIR="${WEB_MANAGER_DATA_DIR:-./web-manager}"
 ASSUME_YES=0
+ALLOW_LEGACY_BACKUP=0
 BACKUP_FILE=""
 
-usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; }
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -41,6 +48,7 @@ while [ $# -gt 0 ]; do
     --beets-config) BEETS_CONFIG_DIR="${2:?--beets-config needs a directory}"; shift 2 ;;
     --web-manager-data) WEB_MANAGER_DATA_DIR="${2:?--web-manager-data needs a directory}"; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
+    --allow-legacy-backup) ALLOW_LEGACY_BACKUP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) fail "unknown option: $1 (see --help)" ;;
     *) [ -z "${BACKUP_FILE}" ] || fail "only one backup file may be given"; BACKUP_FILE="$1"; shift ;;
@@ -124,9 +132,12 @@ if [ -f "${MANIFEST}" ]; then
 ${UNLISTED}"
   echo "Verified $(wc -l < "${SUMS}" | tr -d ' ') file checksums against MANIFEST.txt." >&2
 elif [ -n "${SRC_WM}" ]; then
-  fail "the backup has no MANIFEST.txt, so its contents cannot be verified -- refusing to restore it"
+  fail "the backup has no MANIFEST.txt, so its contents cannot be verified -- refusing to restore it (reason code: backup_manifest_missing)"
+elif [ "${ALLOW_LEGACY_BACKUP}" -eq 1 ]; then
+  echo "WARNING: UNVERIFIED BACKUP: ${BACKUP_FILE} is an older backup without MANIFEST.txt, so its files cannot be checked for damage or changes -- restoring it anyway because --allow-legacy-backup was given." >&2
 else
-  echo "Note: older backup without MANIFEST.txt; file checksums cannot be verified." >&2
+  fail "the backup has no MANIFEST.txt (made by an older backup.sh), so its files cannot be verified -- nothing was restored (reason code: backup_manifest_missing).
+  If you trust this backup, re-run with --allow-legacy-backup."
 fi
 
 if [ -s "${BEETS_CONFIG_DIR}/musiclibrary.blb-wal" ]; then

@@ -924,10 +924,16 @@ def ai_suggest(iid):
     acoustid_cands = _acoustid_lookup_cached(item_path) if item_path else []
 
     # ── 2. MusicBrainz text search ────────────────────────────────────────────
-    mb_text_cands = _mb_recording_search(_mb_t, _mb_a, limit=6)
-    # Broaden if nothing found
-    if not mb_text_cands and _mb_a:
-        mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
+    # A MusicBrainz outage keeps the AcoustID evidence; the MB part is
+    # reported unavailable, never as "no candidates".
+    musicbrainz_unavailable = False
+    try:
+        mb_text_cands = _mb_recording_search(_mb_t, _mb_a, limit=6)
+        # Broaden if nothing found
+        if not mb_text_cands and _mb_a:
+            mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
+    except provider_boundary.ProviderError:
+        musicbrainz_unavailable, mb_text_cands = True, []
 
     # ── 3. Discogs (supplemental genre / label info) ──────────────────────────
     discogs_cands = _discogs_track_search(_mb_t, _mb_a, limit=3)
@@ -954,7 +960,7 @@ def ai_suggest(iid):
             ms = c.get("_match_score", {})
             lines.append(
                 f"  [{c.get('candidate_index', -1)}] match={ms.get('total', 0):.2f} "
-                f"mb={c['score']:3d} {c['title']} — {c['artist']} / "
+                f"mb={int(c.get('score') or 0):3d} {c['title']} — {c['artist']} / "
                 f"{c['album']} ({c['year']}) {c.get('country','')} "
                 f"[{c['mb_trackid']}] via {c.get('source','mb')}")
         mb_section = "\n\n" + "\n".join(lines)
@@ -1193,7 +1199,8 @@ def ai_suggest(iid):
                         "selected_candidate": _compact_track_ai_candidate(selected_candidate) if selected_candidate else {},
                         "evidence": evidence,
                         "acoustid_candidates": acoustid_cands,
-                        "discogs_candidates": discogs_cands})
+                        "discogs_candidates": discogs_cands,
+                        "musicbrainz_unavailable": musicbrainz_unavailable})
     except Exception as exc:
         _app_logger.warning("AI track suggestion failed: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not generate suggestions."})
