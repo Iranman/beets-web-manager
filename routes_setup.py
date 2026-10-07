@@ -23,7 +23,6 @@ import os
 import posixpath
 import re
 import secrets
-import shutil
 import sys
 import threading
 import time
@@ -1400,7 +1399,8 @@ def _resolve_setting_item(
 
 
 def _beets_web_url() -> str:
-    return config_layers.beets_web_url()
+    """BEETS_WEB_URL for status/diagnostics display, userinfo redacted."""
+    return config_layers.redact_url_userinfo(config_layers.beets_web_url())
 
 
 _LAYER_NOTES = {
@@ -1666,24 +1666,15 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
     _SETUP_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     backup_path = ""
     if exists:
-        backup = _SETUP_ENV_FILE.with_name(f"{_SETUP_ENV_FILE.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-        shutil.copy2(_SETUP_ENV_FILE, backup)
-        try:
-            os.chmod(backup, 0o600)
-        except Exception:
-            pass
-        backup_path = str(backup)
-    tmp = _SETUP_ENV_FILE.with_suffix(_SETUP_ENV_FILE.suffix + ".tmp")
-    tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(tmp, 0o600)
-    except Exception:
-        pass
-    tmp.replace(_SETUP_ENV_FILE)
-    try:
-        os.chmod(_SETUP_ENV_FILE, 0o600)
-    except Exception:
-        pass
+        # Created 0600 via O_EXCL (it holds secrets); API callers get the
+        # file name only, never the container path.
+        backup = config_layers.create_private_file(
+            _SETUP_ENV_FILE.with_name(f"{_SETUP_ENV_FILE.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"),
+            _SETUP_ENV_FILE.read_text(encoding="utf-8"),
+            unique=True,
+        )
+        backup_path = backup.name
+    config_layers.replace_private_file(_SETUP_ENV_FILE, "\n".join(lines).rstrip() + "\n")
     for key, value in desired.items():
         os.environ[key] = value
     try:

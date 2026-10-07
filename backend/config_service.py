@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
-import os, re, shutil
+import os, re, stat
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
 from backend.app_runtime import _app_logger, _plugin_install_log, _read_beets_plugin_list
 from backend.app_runtime import _REDACTED_SECRET
 from backend.beets_adapter import BeetsError
+from backend import config_layers
 from backend.auth_service import _auth_secret_is_usable, _browser_password_is_usable, _security_auth_password, _security_auth_token
 
 # ── ARCH-001 extracted code ──
@@ -77,15 +78,20 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
         return
     try:
         backup = path.with_name(path.name + ".bak-legacy-plugin-migration")
-        if not backup.exists():
-            shutil.copy2(str(path), str(backup))
+        try:  # 0600 via O_EXCL: config.yaml can hold tokens. Kept once.
+            config_layers.create_private_file(backup, path.read_text(encoding="utf-8"))
+        except FileExistsError:
+            # Left by an older version (copy2, often 0644): tighten it, but
+            # never chmod through a symlink.
+            if stat.S_ISREG(os.lstat(backup).st_mode):
+                config_layers.ensure_private_mode(backup)
         if not text.endswith("\n"):
             text += "\n"
         text += f"{_LEGACY_BEETS_CONFIG_MIGRATION_MARKER}\n"
         path.write_text(text, encoding="utf-8")
         print(
             "Repaired legacy config.yaml defaults from before the Issue #14 fix "
-            f"(backup saved to {backup}).",
+            f"(backup saved to {backup.name}).",
             flush=True,
         )
     except Exception:

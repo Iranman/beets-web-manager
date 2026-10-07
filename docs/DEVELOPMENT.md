@@ -33,7 +33,7 @@ python scripts/release_metadata.py check
 
 `generate_endpoint_inventory.py --check` fails if `security/endpoint_inventory.json` is stale relative to the route decorators in `app.py`/`routes_jobs.py`/`routes_lidarr.py`/`routes_setup.py`/`routes_submissions.py`. Run it without `--check` to regenerate after adding/removing a route, then fill in any new `"NEEDS_REVIEW"` field by hand before committing.
 
-Frontend, from `frontend/`:
+Frontend, from `frontend/` (Node.js 24 LTS with its bundled npm 11, the same as CI and the Dockerfile; npm 10 rejects lockfiles written by npm 11):
 
 ```bash
 npm ci

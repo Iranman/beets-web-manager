@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -166,9 +167,9 @@ def _is_safe_staging_path(path: Union[str, Path]) -> bool:
         return False
     p = Path(path).resolve()
     music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
-    # Must NOT be inside music root
+    # Must NOT be the music root, inside it, or an ancestor of it (#182)
     try:
-        if p == music_root or music_root in p.parents:
+        if p == music_root or music_root in p.parents or p in music_root.parents:
             return False
     except Exception:
         return False
@@ -194,13 +195,25 @@ def _same_entry(before: os.stat_result, now: os.stat_result) -> bool:
         before.st_ino, before.st_dev, stat.S_IFMT(before.st_mode))
 
 
+class _ValidatedPath(type(Path())):
+    """A resolved staging path carrying the lstat identity seen when it was
+    validated (``None`` if it did not exist then). Paths derived from it
+    (``.parent``, ``/``) carry no identity (#182)."""
+    identity: Optional[os.stat_result] = None
+
+
 def _validated_staging_target(path: Union[str, Path], what: str) -> Path:
     """Resolve once, refuse anything outside staging, a staging root itself,
-    protected data, or a symlink. Returns the resolved path to operate on."""
+    protected data, or a symlink. Returns the resolved path to operate on,
+    with its lstat identity captured for the destructive helpers (#182)."""
     raw = Path(path)
     if not _is_safe_staging_path(raw):
         raise ValueError(f"Refusing to {what} outside staging roots: {path}")
-    resolved = raw.resolve()
+    resolved = _ValidatedPath(raw.resolve())
+    try:
+        resolved.identity = os.lstat(str(resolved))
+    except FileNotFoundError:
+        pass
     if _is_staging_root(resolved):
         raise ValueError(f"Refusing to {what} a staging root itself: {path}")
     if _is_protected_data_path(resolved) or _has_symlink_component(resolved):
@@ -208,15 +221,22 @@ def _validated_staging_target(path: Union[str, Path], what: str) -> Path:
     return resolved
 
 
-def _remove_resolved(resolved: Path) -> None:
-    """Delete an already-validated resolved path, re-checking with lstat
-    immediately before the call (S1/F3)."""
-    before = os.lstat(str(resolved))
-    if stat.S_ISLNK(before.st_mode) or _has_symlink_component(resolved):
-        raise ValueError(f"Refusing to delete through a symlink: {resolved}")
+def _check_validated_entry(resolved: Path, what: str) -> os.stat_result:
+    """Re-check right before a destructive call: no symlink component, and
+    the entry is still the one :func:`_validated_staging_target` saw (same
+    st_dev/st_ino/type). An unvalidated path is refused (S1/F3, #182)."""
+    if _has_symlink_component(resolved):
+        raise ValueError(f"Refusing to {what} through a symlink: {resolved}")
     now = os.lstat(str(resolved))
-    if not _same_entry(before, now):
-        raise ValueError(f"Path changed during validation: {resolved}")
+    expected = getattr(resolved, "identity", None)
+    if expected is None or not _same_entry(expected, now):
+        raise ValueError(f"Path changed since validation: {resolved}")
+    return now
+
+
+def _remove_resolved(resolved: Path) -> None:
+    """Delete a path returned by :func:`_validated_staging_target`."""
+    now = _check_validated_entry(resolved, "delete")
     if stat.S_ISDIR(now.st_mode):
         shutil.rmtree(str(resolved))
     else:
@@ -224,16 +244,15 @@ def _remove_resolved(resolved: Path) -> None:
 
 
 def _move_resolved(src: Path, dst: Path) -> None:
-    """Move an already-validated resolved source to a validated resolved
-    target, re-checking with lstat immediately before the call (S1/F3)."""
-    before = os.lstat(str(src))
-    if stat.S_ISLNK(before.st_mode):
-        raise ValueError(f"Refusing to move a symlink: {src}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if _has_symlink_component(dst.parent) or _has_symlink_component(src) or os.path.lexists(str(dst)):
+    """Move a validated source to a validated target. The symlink re-check
+    runs before ``mkdir`` creates any target parent (#182) and again after."""
+    if _has_symlink_component(dst.parent) or os.path.lexists(str(dst)):
         raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
-    if not _same_entry(before, os.lstat(str(src))):
-        raise ValueError(f"Source changed during validation: {src}")
+    _check_validated_entry(src, "move")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if _has_symlink_component(dst.parent) or os.path.lexists(str(dst)):
+        raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
+    _check_validated_entry(src, "move")
     shutil.move(str(src), str(dst))
 
 
@@ -1273,6 +1292,20 @@ ALBUM_CLEANUP_FAMILY = "album_cleanup_v1"
 #: Phrase an operator must send to plan an album removal that ALSO deletes
 #: the audio files (irreversible). Without it a removal is row-only.
 DELETE_ALBUM_FILES_CONFIRMATION = "DELETE ALBUM FILES"
+
+
+def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return True
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def rollback_album_cleanup(operation_id: str, store: Optional[TransactionStore] = None) -> Dict[str, Any]:
+    """Album removal has no engine rollback (LT-4); reported honestly."""
+    return {"ok": False, "code": "not_supported", "operation_id": operation_id,
+            "error": "Album cleanup has no rollback; re-attach kept files through untracked recovery."}
 
 
 def _transport_error(exc: BaseException) -> bool:
@@ -2406,6 +2439,12 @@ def apply_import_review_cleanup(
         return {"ok": False, "code": "not_found", "error": "Transaction not found"}
     meta = tx.get("metadata") or {}
     status = tx.get("status")
+    family = meta.get("mutation_family")
+    if family and family != IMPORT_REVIEW_CLEANUP_FAMILY:
+        # Checked before the Preview -> Approved CAS (#182): never approve
+        # another family's plan as a side effect of this call.
+        return {"ok": False, "code": "wrong_family", "operation_id": operation_id,
+                "error": "Not an Import Review cleanup transaction."}
     if approved_by and status == "Preview":
         if not _approve_preview(st, operation_id, approved_by):
             return {"ok": False, "code": "not_approved", "operation_id": operation_id,
@@ -2759,10 +2798,11 @@ def apply_playlist_media_cleanup(
             return {"ok": False, "code": "not_approved", "operation_id": operation_id,
                     "error": "Another attempt already claimed this transaction."}
         st.update(operation_id, metadata={"engine_request": {"item_ids": item_ids, "delete_files": False}})
+        # Decide up front whether the adapter takes the key (#182): a
+        # TypeError raised inside remove() is a failure, never a retry.
+        key = {"idempotency_key": operation_id} if _accepts_kwarg(ad.remove, "idempotency_key") else {}
         try:
-            res = ad.remove(item_ids=item_ids, delete_files=False, idempotency_key=operation_id)
-        except TypeError:
-            res = ad.remove(item_ids=item_ids, delete_files=False)
+            res = ad.remove(item_ids=item_ids, delete_files=False, **key)
         except Exception as exc:
             if _transport_error(exc):
                 st.append_log(operation_id, "Engine call outcome unknown (transport error); left Running for "

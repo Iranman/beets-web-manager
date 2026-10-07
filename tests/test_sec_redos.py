@@ -65,6 +65,20 @@ _O_SLSKD_BRACKET = re.compile(
 )
 
 
+# #186: playlist_service._playlist_primary_artist_name before the rewrite.
+_O_PL_SLASH = re.compile(r"\s*/\s*")
+_O_PL_FEAT = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+", re.I)
+
+
+def _o_primary_artist(artist):
+    text = str(artist or "").strip()
+    if not text:
+        return ""
+    text = _O_PL_SLASH.split(text, maxsplit=1)[0].strip()
+    text = _O_PL_FEAT.split(text, maxsplit=1)[0].strip()
+    return text or str(artist or "").strip()
+
+
 def _o_group(rx, s):
     # Callers strip the prefix, so the prefix is compared stripped; the group exactly.
     m = rx.search(s)
@@ -91,6 +105,7 @@ _PAIRS = [
     ("slskd_split", _O_SLSKD_SPLIT.split,
      lambda s: split_ws_led(s, slskd_service._DASH_SEP_CORE_RE, need_ws=True)),
     ("slskd_bracket", lambda s: _O_SLSKD_BRACKET.sub(" ", s), strip_bracket_credits),
+    ("playlist_primary_artist", _o_primary_artist, playlist_service._playlist_primary_artist_name),
 ]
 
 _CORPUS = [
@@ -104,9 +119,11 @@ _CORPUS = [
     "Song — 2011 Remaster", "Song -  ", "Song - x - y", "Song (feat. Someone) [Remix]", "Song (feat. Someone",
     "Song ( Produced  By X ) tail", "Song [Clean Version]", "Song (with\nX)", "Song (with X)\n(edit)", "(ft.(ft.)",
     "01 - Artist - Title.flac", "Artist - Title", "  ft. x", "[with y]", "Ⅰn mono", "İn mono", "ın mono", "a ſ ft. b",
+    "a (produced\n by x) b", "a (produced\n\n by x\n) b", "a (prod\n by x) b", "Song (PRODUCED\tBY X)",
+    "Jay-Z / Kanye West", "A featuring B / C", "A Feat. B", "A feat.B", "afeat b", "A  FT  B", "/x", "A /", "A\nfeat\nB",
 ]
 
-_ALPHABET = " \t\n 　 -–—()[]/,+&.aAfeatwithxndmoiıİſprodcuby"
+_ALPHABET = " \t\n 　 -–—()[]/,+&.aAfeatwithxndmoiıİſprodcubyg"
 
 
 def _fuzz(seed, count=4000, max_len=24):
@@ -134,7 +151,7 @@ class OracleEquivalenceTests(unittest.TestCase):
     def test_seeded_fuzz_word_heavy(self):
         # Fewer separators, more keyword fragments: exercises the \b and re.I paths.
         rng = random.Random(1357)
-        words = ["feat", "feat.", "ft", "ft.", "featuring", "with", "x", "and", "in", "mono", "prod.", "produced",
+        words = ["feat", "feat.", "ft", "ft.", "featuring", "FEATURING", "produced by", "with", "x", "and", "in", "mono", "prod.", "produced",
                  "by", "remix", "edit", "-", "–", "(", ")", "[", "]", "/", ",", "&", "+", "a", "İn", "ſ"]
         seps = ["", " ", "  ", "\t", "\n", " "]
         inputs = ["".join(rng.choice(words) + rng.choice(seps) for _ in range(rng.randint(0, 8))) for _ in range(4000)]
@@ -198,6 +215,30 @@ class CallerTests(_ReDoSCase):
         self.assertEqual(f("Song Title (Explicit)"), ("Song Title", True))
         self.assertEqual(f("Song - Radio Edit"), ("Song", True))
         self.assertEqual(f("Song Title (Live)"), ("Song Title (Live)", False))
+
+    def test_playlist_primary_artist(self):
+        f = playlist_service._playlist_primary_artist_name
+        self.assert_linear_and_fast(f, lambda n: "a" + " " * n + "x")
+        self.assert_linear_and_fast(f, lambda n: "a" + " " * n + "feat")
+        self.assert_linear_and_fast(f, lambda n: "a feat" * (n // 6))
+        self.assertEqual(f("Jay-Z / Kanye West"), "Jay-Z")
+        self.assertEqual(f("Drake featuring Rihanna"), "Drake")
+        self.assertEqual(f("Afeat B"), "Afeat B")
+
+    def test_playlist_download_text_candidates(self):
+        f = playlist_service._playlist_download_text_candidates
+        self.assert_linear_and_fast(f, lambda n: "a" + " " * n + "x.mp3")
+        self.assert_linear_and_fast(f, lambda n: "001 a" + " " * n + "- x.mp3")
+        got = f("/nonexistent/001 Requested - Artist - Song.mp3")
+        self.assertIn("Song", got["titles"])
+        self.assertIn("Artist", got["artists"])
+        self.assertNotIn("Requested", got["artists"])
+
+    def test_strip_bracket_credits_produced_by_across_newline(self):
+        # #186 N1: "prod" matched first and had no closer before the newline;
+        # the original regex backtracked into "produced\s+by".
+        self.assertEqual(strip_bracket_credits("a (produced\n by x) b"), "a b")
+        self.assertEqual(strip_bracket_credits("a (prod\n by x) b"), "a (prod\n by x) b")
 
     def test_slskd(self):
         self.assert_linear_and_fast(slskd_service._slskd_title_norm, lambda n: "(feat" * (n // 5))
