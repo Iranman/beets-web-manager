@@ -3827,7 +3827,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if album_db_id is not None:
                 aid = int(album_db_id)
                 try:
-                    composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+                    composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
                 except Exception as _mbe:
                     log.append(f"  update_album_metadata warning: {_mbe}")
 

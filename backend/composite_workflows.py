@@ -199,17 +199,11 @@ def _data_dir() -> Path:
 
 def _get_staging_roots() -> List[Path]:
     """Roots under which staging helpers may touch files: the configured
-    import/download roots plus ``<data dir>/playlist_staging``. The data
-    directory itself is NOT a staging root -- it holds transactions.db,
-    caches and backups (S1/F1)."""
-    roots_env = os.environ.get("BEETS_IMPORT_ROOTS") or os.environ.get("DOWNLOAD_PATH") or "/downloads"
-    paths = []
-    for r in roots_env.split(","):
-        r = r.strip()
-        if r:
-            paths.append(Path(r).resolve())
-    paths.append((_data_dir() / "playlist_staging").resolve())
-    return paths
+    downloads root (``config_layers.downloads_root``) plus
+    ``<data dir>/playlist_staging``. The data directory itself is NOT a
+    staging root -- it holds transactions.db, caches and backups (S1/F1)."""
+    from backend.config_layers import downloads_root
+    return [Path(downloads_root()).resolve(), (_data_dir() / "playlist_staging").resolve()]
 
 
 _PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".blb")
@@ -260,7 +254,8 @@ def _has_symlink_component(path: Union[str, Path]) -> bool:
 
 
 def _music_root() -> Path:
-    return Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
+    from backend.config_layers import music_root
+    return Path(music_root()).resolve()
 
 
 def _is_safe_staging_path(path: Union[str, Path]) -> bool:
@@ -1419,12 +1414,21 @@ def _library_refs_under(folder: Any, adapter: Optional[BeetsAdapter] = None) -> 
     (BA-7: Web Manager never opens the Beets library file). Raises when Beets
     is unavailable, so a folder change fails closed.
     ponytail: item paths only; an album's artpath is not checked (an album
-    with art but no items under the folder is not seen)."""
-    target = Path(_decode_path(folder)).resolve(strict=False)
+    with art but no items under the folder is not seen).
+
+    A pure string comparison of normalized absolute paths: nothing here
+    touches the filesystem with the caller's path (CodeQL #1381)."""
+    def norm(p: Any) -> str:
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+
+    target = norm(_decode_path(folder))
+    prefix = target.rstrip(os.sep) + os.sep
     refs = []
     for rec in (adapter or beets_adapter).list_item_paths(details=True):
-        p = Path(_item_abs_path(rec.get("path"))).resolve(strict=False) if rec.get("path") else None
-        if p is not None and (p == target or target in p.parents):
+        if not rec.get("path"):
+            continue
+        p = norm(_item_abs_path(rec.get("path")))
+        if p == target or p.startswith(prefix):
             refs.append({"table": "items", "id": rec.get("id"), "path": _decode_path(rec.get("path"))})
     return refs
 
@@ -2328,11 +2332,24 @@ def plan_album_metadata(
         return refusal
     release_id = _s(album_updates.get("mb_albumid")).strip().lower()
     if release_id:
-        verdict = _verified_album_identity(album, release_id, _s(album_updates.get("mb_releasegroupid")),
-                                           allow_establish=True, rg_explicit="mb_releasegroupid" in album_updates)
+        # An operator's explicit Release choice (manual match, import review,
+        # duplicate resolver) may move the album to that Release's own
+        # Release Group, which is still resolved and verified from MusicBrainz;
+        # an inferred or automatic Release may not.
+        verdict = _verified_album_identity(
+            album, release_id, _s(album_updates.get("mb_releasegroupid")), allow_establish=True,
+            rg_explicit="mb_releasegroupid" in album_updates or bool(payload.get("release_selected_by_operator")))
         if not verdict["ok"]:
             return verdict
         album_updates["mb_albumid"] = verdict["release_id"]
+        album_updates["mb_releasegroupid"] = verdict["release_group_id"]
+    elif "mb_releasegroupid" in album_updates and _uuid_or_blank(album.get("mb_albumid")):
+        # A Release-Group-only write must agree with the album's Release.
+        verdict = _verified_album_identity(album, _uuid_or_blank(album.get("mb_albumid")),
+                                           _s(album_updates.get("mb_releasegroupid")),
+                                           allow_establish=True, rg_explicit=True)
+        if not verdict["ok"]:
+            return verdict
         album_updates["mb_releasegroupid"] = verdict["release_group_id"]
     refusal = _identity_write_error(album_updates)
     if refusal:
@@ -2819,7 +2836,7 @@ def _import_review_quarantine_root() -> str:
 def _import_review_allowed_roots(allow_music: bool) -> List[str]:
     from backend.serializers import _import_review_cleanup_roots
     roots: List[str] = []
-    # The configured staging roots (BEETS_IMPORT_ROOTS/DOWNLOAD_PATH) stay
+    # The configured downloads root (DOWNLOADS_ROOT) stays
     # cleanable, exactly as the pre-engine apply allowed.
     for root in list(_import_review_cleanup_roots(allow_music=allow_music)) + _get_staging_roots():
         try:

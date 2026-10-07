@@ -84,7 +84,7 @@ class MusicRootAncestorTests(_Env):
         music = media / "music"
         music.mkdir(parents=True)
         (music / "01.flac").write_bytes(b"a")
-        with mock.patch.dict(os.environ, {"BEETS_IMPORT_ROOTS": str(self.root), "MUSIC_ROOT": str(music)}):
+        with mock.patch.dict(os.environ, {"DOWNLOADS_ROOT": str(self.root), "MUSIC_ROOT": str(music)}):
             self.assertFalse(cw._is_safe_staging_path(media))
             with self.assertRaises(ValueError):
                 cw.delete_staging_file(str(media))

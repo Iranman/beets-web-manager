@@ -164,6 +164,59 @@ class AlbumMetadataTests(_IdentityEnv):
         self.assertEqual((ad.albums[1]["album"], ad.items[11]["title"]), ("Old Title", "Old Track"))
 
 
+class OperatorReleaseAndCodeqlTests(_IdentityEnv):
+    """QA #243 findings 1, 2 and 4, and F5."""
+
+    def plan(self, ad, updates, **kw):
+        return cw.plan_album_metadata({"album_id": 1, "updates": updates, **kw}, adapter=ad, store=self.store)
+
+    def test_operator_selected_release_may_change_release_group(self):
+        ad = self.adapter()
+        plan = self.plan(ad, {"mb_albumid": REL_B}, release_selected_by_operator=True)
+        self.assertTrue(plan["ok"], plan)
+        self.assertTrue(cw.apply_album_metadata(plan["operation_id"], adapter=ad, store=self.store)["ok"])
+        self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_B, RG_B))
+
+    def test_release_group_only_write_must_agree_with_release(self):
+        ad = self.adapter()
+        self.assertFalse(self.plan(ad, {"mb_releasegroupid": RG_B}).get("ok"))
+        self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_A, RG_A))
+        self.assertTrue(self.plan(ad, {"mb_releasegroupid": RG_A})["ok"])
+
+    def test_manual_match_route_marks_release_operator_selected(self):
+        import app as app_module  # noqa: F401  (registers routes)
+        import routes_library
+        ad = self.adapter()
+        captured = {}
+        plan = {"matched_count": 1, "actual_count": 1, "expected_count": 1, "unmatched_items": []}
+        with mock.patch.object(cw, "beets_adapter", ad),              mock.patch.object(cw, "_get_store", return_value=self.store),              mock.patch.object(routes_library.lib, "get_album", return_value=mock.Mock(albumartist="A", album="Old Title")),              mock.patch.object(routes_library, "_resolve_mb_release_id", return_value=REL_B),              mock.patch.object(routes_library, "_album_mb_match_plan", return_value=plan),              mock.patch.object(routes_library.jobs, "start_python",
+                               side_effect=lambda fn, **kw: (captured.__setitem__("fn", fn), mock.Mock(job_id="j"))[1]):
+            with routes_library.app.test_request_context(
+                    "/api/albums/1/match", method="POST",
+                    data=json.dumps({"mb_id": REL_B}), content_type="application/json"):
+                routes_library.match_album(1)
+            try:
+                captured["fn"]([])
+            except Exception:
+                pass
+        self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_B, RG_B))
+
+    def test_library_refs_compare_normalized_strings_without_resolve(self):
+        ad = FakeAdapter()
+        ad.items = {1: {"id": 1, "path": os.path.join(str(self.music), "A", "..", "A", "01.flac")},
+                    2: {"id": 2, "path": os.path.join(str(self.music), "AB", "01.flac")}}
+        with mock.patch("pathlib.Path.resolve", side_effect=AssertionError("resolve() called")):
+            refs = cw._library_refs_under(os.path.join(str(self.music), "A"), adapter=ad)
+        self.assertEqual([r["id"] for r in refs], [1])
+
+    def test_staging_roots_follow_downloads_root(self):
+        dl = os.path.join(str(self.music), "..", "dl-root")
+        with mock.patch.dict(os.environ, {"DOWNLOADS_ROOT": dl, "BEETS_IMPORT_ROOTS": "/elsewhere"}):
+            roots = cw._get_staging_roots()
+        self.assertEqual(roots[0], __import__("pathlib").Path(dl).resolve())
+        self.assertNotIn("elsewhere", " ".join(map(str, roots)))
+
+
 class FolderCleanupTests(_Env):
     """BA-2: folder cleanup does the work it reports; #218: no apply after cancel."""
 

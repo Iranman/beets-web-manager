@@ -150,6 +150,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `routes_maintenance`'s generic rollback cannot reach the composite metadata and MusicBrainz rollbacks: they record no `rollback.operations`.
   - `update_album_metadata(aid, {}, force_write_tags=True)` plans nothing, so it writes no tags.
   - The frontend relink caller must send `mbAlbumId` or `mbReleaseGroupId`. Without one, the endpoint now refuses with `relink_identity_required`.
+  - Composite refusal transitions pass `logs=[...]`, which replaces the earlier log lines instead of appending (album metadata and MusicBrainz track repair refusals).
+  - `_restore_rows` restores with `move=True` even when the apply did not move files.
+  - A folder cleanup that fails part-way records no `engine_result`, so it cannot be rolled back through the route.
+  - Folder reference checks compare Beets-reported item paths only; an album `artpath` under the folder is not checked.
+  - `backend/app_runtime.py` still hard-codes `DOWNLOADS_ROOT = Path("/data/torrents/music")` instead of `config_layers.downloads_root()` (BA-12 remainder).
 - Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
 - Priority: P2. Status: Open.
 

@@ -146,7 +146,7 @@ class NoFakeSuccessTests(unittest.TestCase):
             src = music / "a.flac"
             src.write_bytes(b"12345")
             with mock.patch.dict(os.environ, {"MUSIC_ROOT": str(music), "DOWNLOAD_PATH": str(dl),
-                                              "BEETS_IMPORT_ROOTS": str(dl), "WEB_MANAGER_DATA_DIR": str(root / "d")}):
+                                              "DOWNLOADS_ROOT": str(dl), "WEB_MANAGER_DATA_DIR": str(root / "d")}):
                 with self.assertRaises(ValueError):
                     cw.create_hardlink(str(src), str(music / "b.flac"), expected_size=5)
                 with self.assertRaises(ValueError):
