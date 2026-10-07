@@ -261,7 +261,7 @@ PLAYLIST_PATH_ROOT_ALIASES = [
     for value in (
         os.environ.get("PLAYLIST_PATH_ROOT_ALIASES")
         or os.environ.get("PLEX_MUSIC_ROOT")
-        or "/data/music,/music"
+        or str(_MUSIC_ROOT_SETTING)
     ).split(",")
     if value.strip()
 ]
@@ -306,6 +306,14 @@ DOWNLOADS_ROOT = DOWNLOADS_CONTAINER_ROOT
 # DOWNLOADS_ROOT as an allowlist entry: empty when it is "/" or overlaps the
 # library, so a misconfiguration fails closed (the setup check blocks on it).
 DOWNLOADS_ALLOWED_ROOTS = _config_layers.safe_roots("DOWNLOADS_ROOT", [DOWNLOADS_ROOT], _MUSIC_ROOT_SETTING)
+
+
+def validated_downloads_root() -> Path:
+    """DOWNLOADS_ROOT for creating download folders, or RuntimeError (with the
+    setup-block message) when it is "/" or overlaps the library (#251 F-1)."""
+    if not DOWNLOADS_ALLOWED_ROOTS:
+        raise RuntimeError(_config_layers.UNSAFE_DOWNLOADS_ROOT_MESSAGE)
+    return DOWNLOADS_ALLOWED_ROOTS[0]
 
 
 DEFAULT_TORRENT_SOURCE_ROOTS = str(DOWNLOADS_ROOT)

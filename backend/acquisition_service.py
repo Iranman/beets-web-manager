@@ -9,14 +9,14 @@ import urllib.error
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
-from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ROOT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
+from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
 from backend.import_service import _delete_staged_import_folder, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
 from backend.playlist_service import _playlist_download_audio_allowed, _playlist_download_match, _playlist_filter_preview_downloads, _playlist_identity_log, _playlist_stamp_download_tags
-from backend.app_runtime import _path_under
+from backend.app_runtime import _path_under, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm
@@ -123,11 +123,15 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "'ytdlp', or 'soundcloud'"
             ),
         }, 200
+    try:
+        downloads_root = validated_downloads_root()
+    except RuntimeError as exc:
+        return {"ok": False, "error": str(exc)}, 200
 
     def _do(log, cancel_event=None):
         _safe = lambda s: re.sub(r'[\\/:*?"<>|]', '_', str(s)).strip()
         yr_sfx   = f" ({year})" if year else ""
-        dest_dir = str(DOWNLOADS_ROOT / _safe(artist) / (_safe(album) + yr_sfx))
+        dest_dir = str(downloads_root / _safe(artist) / (_safe(album) + yr_sfx))
         download_result: Dict[str, Any]
         resolved_mbid = mb_albumid
         effective_track_count = track_count
@@ -347,7 +351,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 suffix = str(int(time.time() * 1000))
                 source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
                 return str(
-                    DOWNLOADS_ROOT
+                    downloads_root
                     / _safe(artist)
                     / f"{_safe(album)}{yr_sfx} - {source_slug} missing {suffix}"
                 )

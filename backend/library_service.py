@@ -593,10 +593,9 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
 
 
 def _app_managed_download_path(path: Path) -> bool:
-    managed_roots = [
-        DOWNLOADS_ROOT / "_beets_missing_import",
-        PLAYLIST_DOWNLOAD_ROOT,
-    ]
+    # Validated roots only: an unsafe DOWNLOADS_ROOT authorizes nothing (#251 F-1).
+    managed_roots = [root / "_beets_missing_import" for root in DOWNLOADS_ALLOWED_ROOTS]
+    managed_roots.append(PLAYLIST_DOWNLOAD_ROOT)
     try:
         path_res = path.resolve(strict=False)
     except Exception:
@@ -624,6 +623,9 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
     if _app_managed_download_path(path):
         return False
     roots = TORRENT_SOURCE_ROOTS or DOWNLOADS_ALLOWED_ROOTS
+    if not roots:
+        # No safe download root (DOWNLOADS_ROOT unsafe): copy, never move (#251 N1).
+        return True
     return any(_path_is_under(path, root) for root in roots)
 
 

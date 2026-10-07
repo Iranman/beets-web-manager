@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from backend.app_runtime import _app_logger, DOWNLOADS_ROOT, MUSIC_ROOT, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _s
+from backend.app_runtime import _app_logger, DOWNLOADS_ALLOWED_ROOTS, MUSIC_ROOT, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _s
 from backend.config_layers import downloads_root
 from backend.library_service import _scan_scope_label
 from backend.playlist_service import (
@@ -44,7 +44,8 @@ from backend.app_runtime import WEB_MANAGER_DATA_DIR
 # ── ARCH-001 extracted code ──
 
 
-_BROWSE_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
+# An unsafe DOWNLOADS_ROOT ("/" or overlapping the library) adds no root (#251).
+_BROWSE_ALLOWED_ROOTS = (MUSIC_ROOT, *DOWNLOADS_ALLOWED_ROOTS)
 
 
 _dedup_scans: Dict[str, Any] = {}   # jid → {status, log, duplicates, scanned, found, total}

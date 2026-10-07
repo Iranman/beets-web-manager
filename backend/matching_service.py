@@ -980,9 +980,10 @@ def _album_track_path_prefixes(path: str) -> List[str]:
         return []
     for marker in (
         str(MUSIC_ROOT).rstrip("/") + "/",
-        "/data/media/music/",
-        "/data/torrents/music/",
-        "/data/downloads/music/",
+        # Layout suffixes, not roots: "/media/music/" also matches any
+        # "<prefix>/media/music/" path and splits it at the same place.
+        "/media/music/",
+        "/torrents/music/",
         "/downloads/music/",
         "/download/music/",
     ):
