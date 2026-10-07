@@ -42,6 +42,9 @@ The project uses Semantic Versioning.
 - **A second Move All or MBSync All is refused while one runs.** Starting either library-wide job while the same one still runs returns HTTP 409 `job_already_running` with the running job's `job_id`; nothing new starts and no transaction is recorded. Other jobs are not affected: the guard applies only to jobs that declare an explicit `dedupe_key`.
 
 ### Fixed
+- Lidarr Wanted panel uses the release group as the album identity (#242 QA F-4/F-6). Downloads send `mb_releasegroupid`, Import & Tag sends a release-group reference that the backend resolves to a release, Lidarr status rows match by release group, and labels say "release group".
+- Track and folder Find Match and playlist suggestions show "MusicBrainz is unavailable; showing local/fingerprint results only." when the response sets `musicbrainz_unavailable` (#252 NF-4). A provider 503 (`unavailable: true`) now shows its own message instead of "Beets engine is unavailable."
+- Untracked files: after a refused or failed rollback, the panel re-reads the transaction so "Roll back" follows the server's `rollback.allowed` (#245).
 - Integrations report a provider outage as "unavailable" instead of "no results". Covers wave-5 findings IA-01..IA-03, IA-05..IA-08, IA-10, IA-16, IA-17, IA-19, IA-20 and BA-5.
   - MusicBrainz searches and tracklist lookups no longer stack their own retries on top of the provider boundary's: 3 requests per outage instead of up to 9. An outage, timeout or 5xx raises or reports `unavailable`. Before, it came back as "no candidates" or as the release-group ID used as a release.
   - Cover Art Archive timeouts and 5xx are no longer cached as "no art"; only a real 404 is.
