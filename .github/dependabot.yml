@@ -32,4 +32,4 @@ updates:
       # The frontend build stage tracks Node LTS (even majors). Odd majors are
       # short-lived "Current" releases that never become LTS.
       - dependency-name: node
-        versions: ["25.x", "27.x", "29.x", "31.x"]
+        versions: [">= 25, < 26", ">= 27, < 28", ">= 29, < 30", ">= 31, < 32"]

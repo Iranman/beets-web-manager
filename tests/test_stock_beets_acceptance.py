@@ -377,7 +377,8 @@ webmanager:
             # Registry pulls and loopback port picks can flake in CI (`docker run` exit 125), so both
             # are retried a bounded number of times; the last failure's stderr goes into the assertion.
             pull_err = _docker_with_retry(["docker", "pull", STOCK_BEETS_IMAGE])
-            if pull_err is not None:
+            cached = subprocess.run(["docker", "image", "inspect", STOCK_BEETS_IMAGE], capture_output=True).returncode == 0
+            if pull_err is not None and not cached:
                 self.fail(f"docker pull {STOCK_BEETS_IMAGE} failed after retries:\n{pull_err}")
 
             import socket
