@@ -24,7 +24,8 @@ def _release_group_id(row: Dict[str, Any]) -> str:
 
 
 def _release_id(row: Dict[str, Any]) -> str:
-    return _id(row.get("release_id") or row.get("mb_albumid") or row.get("album_id") or "")
+    # MI-17: never `album_id` -- that is a Beets row id, not a Release MBID.
+    return _id(row.get("release_id") or row.get("mb_albumid") or "")
 
 
 def _artist_id(row: Dict[str, Any]) -> str:

@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 try:
-    from matching import align_tracks_global
+    from matching import AcoustIDStatus, acoustid_evidence_from_hits, align_tracks_global
 except ImportError:
-    from backend.matching import align_tracks_global
+    from backend.matching import AcoustIDStatus, acoustid_evidence_from_hits, align_tracks_global
 
 
 SimilarityFn = Callable[[str, str], float]
@@ -134,6 +134,10 @@ def resolve_unmatched_via_acoustid(comparison: List[Dict[str, Any]], acoustid_lo
                 score = 0
             target = missing_by_mbid.get(mbid)
             if not target or score < min_score:
+                continue
+            # MI-5 class: a hit at the floor is not proof while another
+            # recording sits in the ambiguity window.
+            if acoustid_evidence_from_hits(hits, mbid).status != AcoustIDStatus.CONFIRMED:
                 continue
             target["status"] = "acoustid_verified"
             target["file_path"] = _s(extra.get("file_path"))

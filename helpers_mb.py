@@ -648,7 +648,7 @@ def _note_acoustid_service_error(http_status: int, body: Any) -> None:
     if key in _ACOUSTID_SERVICE_ERRORS_LOGGED:
         return
     _ACOUSTID_SERVICE_ERRORS_LOGGED.add(key)
-    hint = " -- check ACOUSTID_API_KEY" if code == 4 else ""
+    hint = " -- check ACOUSTID_API_KEY" if code in _ACOUSTID_AUTH_CODES else ""
     logging.getLogger("helpers_mb").warning(
         "AcoustID lookup rejected by service (http=%s code=%s message=%s)%s; "
         "fingerprint evidence is unavailable until this is fixed.",
@@ -664,12 +664,20 @@ _ACOUSTID_UNAVAILABLE_CODES = {5}      # internal error
 
 
 def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """AcoustID lookup JSON -> recording candidates, best result first.
+
+    MI-16: every recording of each of the top 5 results is kept (a per-result
+    cap made a target ranked 4th read as CONFLICT). ``mb_releasegroupid`` is
+    set only when the recording maps to exactly one release group; otherwise
+    it is empty and the full set is in ``mb_releasegroupids`` with
+    ``release_group_ambiguous`` -- a recording on an album and a single is
+    not evidence for either release group."""
     out = []
     seen_mbids: set = set()
     for result in (data.get("results") or [])[:5]:
         confidence = int(round((result.get("score") or 0) * 100))
         acoustid_id = str(result.get("id") or "")
-        for rec in (result.get("recordings") or [])[:3]:
+        for rec in (result.get("recordings") or []):
             mb_id = rec.get("id", "")
             if not mb_id or mb_id in seen_mbids:
                 continue
@@ -681,11 +689,11 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             rel_title = rel.get("title", "")
             rel_year  = (rel.get("date", {}).get("year") if isinstance(rel.get("date"), dict) else "")
             mb_albumids = [r.get("id", "") for r in releases if r.get("id")]
-            releasegroups = rec.get("releasegroups") or rec.get("release-groups") or []
-            rg = releasegroups[0] if releasegroups else {}
-            rg_id = rg.get("id", "") if isinstance(rg, dict) else ""
-            rg_title = rg.get("title", "") if isinstance(rg, dict) else ""
-            if not rg_id:
+            rg_titles: Dict[str, str] = {}
+            for rg in (rec.get("releasegroups") or rec.get("release-groups") or []):
+                if isinstance(rg, dict) and rg.get("id"):
+                    rg_titles.setdefault(str(rg["id"]).strip().lower(), rg.get("title", ""))
+            if not rg_titles:
                 for rel_item in releases:
                     rel_rg = (
                         rel_item.get("releasegroup")
@@ -694,9 +702,10 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                         or {}
                     )
                     if isinstance(rel_rg, dict) and rel_rg.get("id"):
-                        rg_id = rel_rg.get("id", "")
-                        rg_title = rel_rg.get("title", "") or rg_title
-                        break
+                        rg_titles.setdefault(str(rel_rg["id"]).strip().lower(), rel_rg.get("title", ""))
+            rg_ids = list(rg_titles)
+            rg_id = rg_ids[0] if len(rg_ids) == 1 else ""
+            rg_title = rg_titles[rg_id] if rg_id else ""
             out.append({
                 "score":       confidence,
                 "acoustid_id": acoustid_id,
@@ -710,6 +719,8 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "source":      "acoustid",
                 "mb_albumids": mb_albumids,
                 "mb_releasegroupid": rg_id,
+                "mb_releasegroupids": rg_ids,
+                "release_group_ambiguous": len(rg_ids) > 1,
                 "release_group": rg_title,
             })
     return out
