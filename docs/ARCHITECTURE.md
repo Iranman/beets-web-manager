@@ -106,6 +106,7 @@ Existing mutation mechanisms include:
 
 - Narrow, operation-specific `BeetsAdapter` methods (`modify`, `move`, `remove`, `mbsync`, `fetch_art`, `embed_art`, `lastgenre`, `mbsubmit`) — the only way Web Manager reaches a stock-Beets mutation. The web-manager container never shells out to `beet` locally and never runs a local Beets Python runtime (enforced by an AST-based structural test, `tests/test_arch003_boundary_enforcement.py`).
 - A file-backed `TransactionStore` in `backend/transaction_engine.py` (plan/apply/verify/recover) with statuses, changes, metadata diffs, rollback fields, and job attachment. This bookkeeping is pure Web-Manager-local orchestration; it does not itself talk to Beets.
+- Rollback eligibility is server-owned (#228): `GET /api/transactions` and `GET /api/transactions/<id>` add `rollback.allowed` (bool), `rollback.allowed_code` (`allowed`, `not_applied`, `already_rolled_back`, `not_supported`, `unavailable`, `unsupported_operation`, `not_completed`) and `rollback.allowed_reason` (empty when allowed), computed by `routes_maintenance.rollback_eligibility` from the same gate `POST /api/transactions/<id>/rollback` applies. `rollback.available` and `rollback.reason` stay the stored values. An engine rollback that ran but failed verification (status Recovery Required) answers with `mutated: true`.
 - Several workflow-specific preview/dry-run routes, including import target preview, cleanup scans, folder placeholder preview, and transaction endpoints.
 
 Intended direction (the target shape for every production mutation path):
