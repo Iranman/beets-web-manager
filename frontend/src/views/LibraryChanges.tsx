@@ -88,7 +88,9 @@ function actionErrorMessage(verb: 'Cancel' | 'Apply', ex: unknown) {
     || status === undefined || status === 0 || status >= 500)) {
     return `Apply failed: ${reason} The library may have been partly changed, or the outcome is unknown. Do not apply again. Check the transaction's current status below (for example Recovery Required) and follow its recovery guidance.`;
   }
-  if (verb === 'Cancel' || status === 404 || status === 409 || body?.mutated === false) {
+  // A timed-out or 5xx cancel may still have landed, so only 404/409 (CAS
+  // refusals) or an explicit mutated:false prove nothing changed.
+  if (status === 404 || status === 409 || body?.mutated === false) {
     return `${verb} refused: ${reason} Nothing was changed by this request. Review the transaction's current status below before acting.`;
   }
   return `${verb} refused: ${reason} Review the transaction's current status below before acting.`;

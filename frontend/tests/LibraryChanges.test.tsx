@@ -210,6 +210,14 @@ describe('LibraryChanges cancel/apply refusals', () => {
     expect(banner.textContent).toMatch(/outcome is unknown/);
   });
 
+  it('cancel transport failure does not claim nothing changed', async () => {
+    await renderWith(tx({}, 'Approved'));
+    mockCancel.mockRejectedValue(Object.assign(new Error('Request timed out.'), { isTimeout: true, httpStatus: 0 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const banner = await screen.findByText(/Cancel refused/);
+    expect(banner.textContent).not.toMatch(/Nothing was changed/);
+  });
+
   it('apply refused with mutated:false says nothing changed', async () => {
     await renderWith(tx({}, 'Approved'));
     mockApply.mockRejectedValue(Object.assign(new Error('Plan is stale'), { body: { code: 'stale', mutated: false }, httpStatus: 400 }));
