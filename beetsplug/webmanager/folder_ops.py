@@ -52,11 +52,7 @@ def contained_path(raw: Any, root: str) -> str:
     if not isinstance(raw, str) or not raw or "\x00" in raw or not os.path.isabs(raw):
         raise _Refused("path must be an absolute path inside the Beets library directory", "PATH_INVALID", 400)
     path = os.path.abspath(raw)
-    try:
-        inside = os.path.commonpath([path, root]) == root
-    except ValueError:
-        inside = False
-    if not inside or path == root:
+    if not path.startswith(root + os.sep):  # strictly inside: the root itself is refused too
         raise _Refused("path is outside the Beets library directory", "PATH_OUTSIDE_LIBRARY", 400)
     current = os.path.realpath(root)
     for part in os.path.relpath(path, root).split(os.sep):
