@@ -30,7 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import jsonify, request, session
 
@@ -1481,6 +1481,46 @@ def _load_env_file() -> Tuple[List[Dict[str, Any]], Dict[str, str], bool]:
     return entries, values, True
 
 
+_URL_DISPLAY_FIELDS = ("value", "effective_value", "saved_value", "runtime_value", "default")
+
+
+def _is_url_setting(name: str) -> bool:
+    """URL-valued settings (BEETS_WEB_URL, PLEX_URL, AI_BASE_URL, ...). The
+    catalog has no URL type, so the *_URL naming convention is the marker."""
+    return name.endswith("_URL")
+
+
+def _redact_url_setting(name: str, item: Dict[str, Any], raw_values: Iterable[str]) -> None:
+    """#183 F1 / #208: never return user:pass@ of a URL setting from
+    GET /api/setup/env, in any field, status_message included."""
+    if not _is_url_setting(name):
+        return
+    for field in _URL_DISPLAY_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str) and config_layers.url_has_userinfo(value):
+            item[field] = config_layers.redact_url_userinfo(value)
+    message = item.get("status_message")
+    if isinstance(message, str):
+        for raw in raw_values:
+            if raw and config_layers.url_has_userinfo(raw):
+                message = message.replace(raw, config_layers.redact_url_userinfo(raw))
+        item["status_message"] = message
+
+
+def _is_redacted_url_echo(name: str, value: str, stored: Iterable[str]) -> bool:
+    """True when a saved URL setting is just the redacted form GET returned
+    for a stored credentialed URL; saving it must keep the stored value.
+    BEETS_WEB_URL is exempt: its userinfo is refused (#208), so saving the
+    plain URL is exactly how the user removes it."""
+    if not _is_url_setting(name) or name == "BEETS_WEB_URL":
+        return False
+    return any(
+        raw and raw != value and config_layers.url_has_userinfo(raw)
+        and value == config_layers.redact_url_userinfo(raw)
+        for raw in stored
+    )
+
+
 def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     catalog = _env_catalog()
     _, persisted, exists = _load_env_file()
@@ -1507,6 +1547,7 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     for name in names:
         meta = catalog[name]
         var_item = _resolve_setting_item(name, meta, persisted)
+        _redact_url_setting(name, var_item, (persisted.get(name, "").strip(), os.environ.get(name, "").strip()))
         for field in ("layer", "apply", "layer_note"):
             if field in meta:
                 var_item[field] = meta[field]
@@ -1622,6 +1663,12 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
             raise ValueError(f"{key} cannot contain newlines")
         if len(value) > 4096:
             raise ValueError(f"{key} is too long")
+        if key == "BEETS_WEB_URL":
+            from backend.beets_adapter import BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo
+            if beets_web_url_has_userinfo(value):
+                # #208: refused at save, not only after the next restart;
+                # the constant message never echoes the value.
+                raise ValueError(BEETS_WEB_URL_USERINFO_MESSAGE)
     if updates.get("BEETS_WEB_PASSWORD"):
         unmet = _password_requirements_unmet(updates["BEETS_WEB_PASSWORD"])
         if unmet:
@@ -2882,7 +2929,16 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             entry["category"] = "service" if key in _SERVICE_INTEGRATION_KEYS else "beets_plugin"
 
     blocking = []
-    if not beets_reachable:
+    # #208: a BEETS_WEB_URL with user:pass@ is refused by the adapter (it
+    # never authenticated). Checked from the setting itself; the message
+    # never echoes the credentials.
+    from backend.beets_adapter import (
+        BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo,
+    )
+    beets_web_url_userinfo = beets_web_url_has_userinfo(config_layers.beets_web_url())
+    if beets_web_url_userinfo:
+        blocking.append(BEETS_WEB_URL_USERINFO_MESSAGE)
+    elif not beets_reachable:
         # One primary reason while stock Beets is unreachable; everything
         # that depends on it (plugins, fpcalc, compatibility) is unknown,
         # not failed.
@@ -2932,6 +2988,12 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             "id": "beets_config_path_invalid",
             "severity": "warning",
             "message": config_path_error,
+        })
+    if beets_web_url_userinfo:
+        warnings.insert(0, {
+            "id": BEETS_WEB_URL_USERINFO_CODE,
+            "severity": "warning",
+            "message": BEETS_WEB_URL_USERINFO_MESSAGE,
         })
 
     ready = not blocking
@@ -3133,10 +3195,13 @@ def setup_save_env():
         return jsonify({"ok": False, "error": "expected variables object and clear list"}), 400
 
     updates: Dict[str, str] = {}
+    _, stored_env, _ = _load_env_file()
     for key, raw_value in raw_updates.items():
         key = str(key)
         value = "" if raw_value is None else str(raw_value)
         if _is_secret_env(key) and value == "" and key not in raw_clear:
+            continue
+        if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), os.environ.get(key, "").strip())):
             continue
         updates[key] = value
     clear = [str(key) for key in raw_clear]
@@ -3149,6 +3214,9 @@ def setup_save_env():
     try:
         backup_path = _write_env_file(updates, clear)
     except ValueError as ex:
+        from backend.beets_adapter import BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE
+        if str(ex) == BEETS_WEB_URL_USERINFO_MESSAGE:
+            return jsonify({"ok": False, "error": BEETS_WEB_URL_USERINFO_MESSAGE, "code": BEETS_WEB_URL_USERINFO_CODE}), 400
         return jsonify({"ok": False, "error": str(ex)}), 400
     except Exception as ex:
         app.logger.warning("Could not save environment file: %s", type(ex).__name__)
@@ -3545,6 +3613,12 @@ def setup_save_settings():
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "expected a JSON object"}), 400
     expected_revision = payload.pop("expected_revision", None)
+    from backend.beets_adapter import (
+        BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo,
+    )
+    if beets_web_url_has_userinfo(str(payload.get("BEETS_WEB_URL") or "")):
+        # #208: same refusal as the adapter; never echo the value.
+        return jsonify({"ok": False, "error": BEETS_WEB_URL_USERINFO_MESSAGE, "code": BEETS_WEB_URL_USERINFO_CODE}), 400
     store, relative_name = _settings_store_for_target()
     record = store.read_text_record(relative_name)
     if record.get("exists") and not expected_revision:
