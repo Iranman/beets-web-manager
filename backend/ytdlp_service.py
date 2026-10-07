@@ -904,6 +904,19 @@ def _spotiflac_album_download(artist: str, album: str, year: str,
     raise RuntimeError("SpotiFLAC: no album source URL found")
 
 
+def _ytdlp_outtmpl(directory: str, template: str, literal_prefix: str = "") -> str:
+    """yt-dlp ``outtmpl`` = literal ``directory`` / literal ``literal_prefix``
+    + yt-dlp ``template``. yt-dlp evaluates the whole string, so the literal
+    parts are made inert (#269 F-1/F-2): ``%`` is doubled (rendered back as
+    ``%``, so "100% Pure" stays "100% Pure"), and ``$`` is refused because
+    yt-dlp runs os.path.expandvars over the template and has no escape for it.
+    A relative directory is refused too (a leading "~" would be expanded)."""
+    literal = os.path.join(directory, literal_prefix)
+    if "$" in literal or not os.path.isabs(directory):
+        raise ValueError("yt-dlp output folder must be an absolute path without '$'")
+    return literal.replace("%", "%%") + template
+
+
 def _ytdlp_album_download(artist: str, album: str, year: str,
                            dest_dir: str, log: list,
                            track_count: int = 0,
@@ -921,6 +934,7 @@ def _ytdlp_album_download(artist: str, album: str, year: str,
     cookie_auths = _ytdlp_cookie_auths_for_source(source, log)
     js_runtime = _require_ytdlp_js_runtime() if _ytdlp_source_requires_js(source) else {}
 
+    outtmpl = _ytdlp_outtmpl(dest_dir, '%(title)s.%(ext)s')
     os.makedirs(dest_dir, exist_ok=True)
     if track_count:
         max_tracks = max(track_count + 2, 3)
@@ -947,7 +961,7 @@ def _ytdlp_album_download(artist: str, album: str, year: str,
     ydl_opts = {
         'format': _ytdlp_audio_format_for_source(source),
         'postprocessors': _ytdlp_postprocessors_for_source(source),
-        'outtmpl': os.path.join(dest_dir, '%(title)s.%(ext)s'),
+        'outtmpl': outtmpl,
         'logger': _YdlLogger(),
         'quiet': True,
         'no_warnings': False,
@@ -1053,6 +1067,7 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
     cookie_auths = _ytdlp_cookie_auths_for_source(source, log)
     js_runtime = _require_ytdlp_js_runtime() if _ytdlp_source_requires_js(source) else {}
 
+    _ytdlp_outtmpl(dest_dir, "")  # refuse an unusable folder before creating it
     os.makedirs(dest_dir, exist_ok=True)
     bot_check_seen = {"count": 0}
     _ytlog = log
@@ -1081,7 +1096,8 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
             return set()
 
     def _safe_name(value: str, fallback: str) -> str:
-        cleaned = re.sub(r'[\\/:*?"<>|]+', "_", _s(value)).strip()
+        # "$" too: titles can be remote data, and yt-dlp would expand "$VAR" (#269 F-2).
+        cleaned = re.sub(r'[\\/:*?"<>|$]+', "_", _s(value)).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
         return (cleaned or fallback)[:90]
 
@@ -1131,7 +1147,7 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
             if track_num else
             f"{idx:03d} {_safe_name(title, f'track-{idx}')}"
         )
-        outtmpl = os.path.join(dest_dir, f"{prefix} - %(title).120s.%(ext)s")
+        outtmpl = _ytdlp_outtmpl(dest_dir, "%(title).120s.%(ext)s", f"{prefix} - ")
         queries = _ytdlp_track_queries(source, artist, album, title, year)
 
         log.append(f"  [yt-dlp] [{idx}/{len(wanted_tracks)}] {label}")
