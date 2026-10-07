@@ -191,10 +191,9 @@ class FolderCleanupTests(_Env):
         src.mkdir(parents=True)
         (src / "01.flac").write_bytes(b"a")
         dst = self.music / "Artist" / "Album"
-        with mock.patch.dict(os.environ, {"BEETS_LIBRARY_DB": ""}):
-            plan = cw.plan_folder_cleanup({"action": "safe_rename", "source": str(src), "target": str(dst)}, store=self.store)
-            self.assertTrue(plan["ok"], plan)
-            res = cw.apply_folder_cleanup(plan["operation_id"], store=self.store)
+        plan = cw.plan_folder_cleanup({"action": "safe_rename", "source": str(src), "target": str(dst)}, store=self.store)
+        self.assertTrue(plan["ok"], plan)
+        res = cw.apply_folder_cleanup(plan["operation_id"], store=self.store)
         self.assertTrue(res["ok"], res)
         self.assertTrue((dst / "01.flac").exists())
         self.assertFalse(src.exists())
@@ -203,19 +202,39 @@ class FolderCleanupTests(_Env):
         src = self.music / "Artist" / "Album"
         src.mkdir(parents=True)
         (src / "01.flac").write_bytes(b"a")
-        with mock.patch.dict(os.environ, {"BEETS_LIBRARY_DB": ""}):
-            plan = cw.plan_folder_cleanup({"action": "remove_empty", "source": str(src)}, store=self.store)
+        plan = cw.plan_folder_cleanup({"action": "remove_empty", "source": str(src)}, store=self.store)
         self.assertEqual(plan.get("code"), "folder_cleanup_not_empty", plan)
 
     def test_engine_apply_of_cancelled_plan_changes_nothing(self):
         src = self.music / "Empty"
         src.mkdir()
-        plan = te.create_folder_cleanup_plan(self.store, {"action": "remove_empty", "source": str(src)}, db_path="")
+        plan = te.create_folder_cleanup_plan(self.store, {"action": "remove_empty", "source": str(src)})
         self.store.transition(plan["operation_id"], "Preview", "Cancelled")
-        res = te.execute_folder_cleanup_apply(self.store, plan["operation_id"], db_path="")
+        res = te.execute_folder_cleanup_apply(self.store, plan["operation_id"])
         self.assertFalse(res["ok"])
         self.assertTrue(src.exists())
         self.assertEqual(self.store.get(plan["operation_id"])["status"], "Cancelled")
+
+    def test_cancel_between_check_and_claim_changes_nothing(self):
+        src = self.music / "Empty"
+        src.mkdir()
+        op = te.create_folder_cleanup_plan(self.store, {"action": "remove_empty", "source": str(src)})["operation_id"]
+        self.store.transition(op, "Preview", "Approved")
+        real = te._claim_apply_running
+
+        def racing_claim(store, operation_id, observed_status, metadata):
+            store.update(operation_id, status="Cancelled")  # the cancel wins the race
+            return real(store, operation_id, observed_status, metadata)
+
+        with mock.patch.object(te, "_claim_apply_running", racing_claim):
+            res = te.execute_folder_cleanup_apply(self.store, op)
+        self.assertFalse(res["ok"], res)
+        self.assertTrue(src.exists())
+        self.assertEqual(self.store.get(op)["status"], "Cancelled")
+
+    def test_engine_never_opens_a_sqlite_file(self):
+        """BA-7: Web Manager never opens the Beets library file."""
+        self.assertNotIn("sqlite3", inspect.getsource(te))
 
 
 class EngineClaimTests(unittest.TestCase):
@@ -238,41 +257,6 @@ class EngineClaimTests(unittest.TestCase):
         store.transition.return_value = None
         self.assertIsNone(te._claim_apply_running(store, "op", "Approved", {}))
         store.transition.assert_called_once_with("op", "Approved", "Running", metadata={})
-
-
-class EngineFamilyInterleavingTests(unittest.TestCase):
-    """#218: one interleaving per engine apply family. The existing family
-    suites run with a cancel landing between each apply's status check and
-    its claim; every family must lose the claim and stop (the suites' own
-    results are irrelevant here: their applies are being cancelled)."""
-
-    MODULES = ["test_album_lifecycle_wave24_engine_unit", "test_beets_transaction_engine",
-               "test_sec002_wave22_album_maintenance", "test_album_artwork_fetch_v1",
-               "test_sec002_wave19_mb_track_repair", "test_sec002_wave21_artist_folder_reconcile",
-               "test_confirmed_import_v1", "test_sec002_wave20_existing_album_reconcile",
-               "test_library_cleanup_closure", "test_sec002_wave27_genre_repair"]
-
-    def test_cancel_before_claim_stops_every_family(self):
-        families = sorted({f.name for f in ast.walk(ast.parse(inspect.getsource(te)))
-                           if isinstance(f, ast.FunctionDef) and any(
-                               isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_claim_apply_running"
-                               for n in ast.walk(f))})
-        self.assertEqual(len(families), 16, families)
-        real, seen = te._claim_apply_running, {}
-
-        def racing_claim(store, operation_id, observed_status, metadata):
-            store.update(operation_id, status="Cancelled")  # the cancel wins the race
-            claimed = real(store, operation_id, observed_status, metadata)
-            caller = inspect.currentframe().f_back.f_code.co_name
-            seen.setdefault(caller, []).append((claimed, store.get(operation_id).get("status")))
-            return claimed
-
-        suite = unittest.defaultTestLoader.loadTestsFromNames(f"tests.{m}" for m in self.MODULES)
-        with mock.patch.object(te, "_claim_apply_running", racing_claim):
-            suite.run(unittest.TestResult())
-        self.assertEqual(sorted(seen), families)
-        for caller, outcomes in seen.items():
-            self.assertTrue(all(c is None and s == "Cancelled" for c, s in outcomes), (caller, outcomes))
 
 
 class RollbackEligibilityTests(_Env):
@@ -344,54 +328,6 @@ class RelinkRouteTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(resp.get_json()["code"], "relink_identity_required")
         start.assert_not_called()
-
-
-class MbTrackRepairEngineEvidenceTests(unittest.TestCase):
-    """MI-18: no Recording ID from text/position alignment when AcoustID is unavailable."""
-
-    def test_blank_slots_go_to_review_without_acoustid(self):
-        from tests.test_sec002_wave19_mb_track_repair import Wave19FixtureBase, _engine_repair_plan, _fake_tracklist_a
-
-        class _Case(Wave19FixtureBase):
-            def runTest(inner):
-                inner._create_album_and_items(album_id=1)
-                res = _engine_repair_plan(inner.store, {"album_id": 1}, music_allowed_roots=[str(inner.music_root)],
-                                          db_path=str(inner.db_path), fetch_tracklist_fn=lambda _: _fake_tracklist_a())
-                inner.assertEqual(res.get("updated", 0), 0, res)
-                inner.assertEqual(res.get("conflicts"), 2, res)
-
-        result = unittest.TestResult()
-        _Case().run(result)
-        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
-
-
-class MbTrackRepairAcoustidRuleTests(unittest.TestCase):
-    """MI-6 in the engine's own copy: weak (< 80) or tied hits never confirm
-    and never contradict the tracklist."""
-
-    OTHER = "eeeeeeee-0000-4000-8000-00000000000e"
-    TRACKS = [{"mb_trackid": REC_1, "title": "Song"}]
-
-    def check(self, hits):
-        path = mock.Mock()
-        path.exists.return_value = True
-        return te._mb_track_repair_acoustid_check(path, self.TRACKS, lambda _p: hits)["status"]
-
-    def test_weak_or_tied_hits_are_unclear(self):
-        cases = {
-            "weak in tracklist": [{"mb_trackid": REC_1, "title": "Song", "score": 79}],
-            "weak outside": [{"mb_trackid": self.OTHER, "title": "Unrelated", "score": 75}],
-            "tied in tracklist": [{"mb_trackid": REC_1, "title": "Song", "score": 90},
-                                  {"mb_trackid": self.OTHER, "title": "Unrelated", "score": 88}],
-            "tied outside": [{"mb_trackid": self.OTHER, "title": "Unrelated", "score": 90},
-                             {"mb_trackid": REC_1, "title": "Song", "score": 89}],
-        }
-        for name, hits in cases.items():
-            self.assertEqual(self.check(hits), "unclear", name)
-
-    def test_confirmed_hits_still_decide(self):
-        self.assertEqual(self.check([{"mb_trackid": REC_1, "title": "Song", "score": 0.95}]), "match")
-        self.assertEqual(self.check([{"mb_trackid": self.OTHER, "title": "Unrelated", "score": 95}]), "mismatch")
 
 
 class MoveAllLogTests(unittest.TestCase):

@@ -93,7 +93,33 @@ def _real_transaction_families(repo_root: Path) -> set:
         # Also catch string literals assigned to a "mutation_family" dict key.
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("_v1"):
             families.add(node.value)
-    return families
+    return families | _composite_families(repo_root)
+
+
+def _composite_families(repo_root: Path) -> set:
+    """Families implemented in backend/composite_workflows.py over the Beets
+    adapter: a module-level ``*_FAMILY = "..._v1"`` constant counts only when
+    some transaction actually records it as ``"mutation_family"``."""
+    path = repo_root / "backend" / "composite_workflows.py"
+    if not path.exists():
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return set()
+    consts = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id.endswith("_FAMILY") and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str) and node.value.value.endswith("_v1")):
+            consts[node.targets[0].id] = node.value.value
+    recorded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and k.value == "mutation_family" and isinstance(v, ast.Name):
+                    recorded.add(v.id)
+    return {fam for name, fam in consts.items() if name in recorded}
 
 
 def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:

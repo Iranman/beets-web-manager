@@ -118,7 +118,7 @@ Intended direction (the target shape for every production mutation path):
 6. Verify final state (via `BeetsAdapter` reads).
 7. Record completed steps and recovery information.
 
-Current migration status: every Beets read and mutation path, including the composite Plan/Apply/Rollback workflows (merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, artwork, genre repair, mbsync-all, move-all), runs through `backend/composite_workflows.py` and `backend/beets_adapter.py`. The retired `backend/beets_client.py` control-agent client is deleted (ARCH-010, closed in v0.1.25). `backend/transaction_engine.py` still contains engine-side functions that open the Beets SQLite library directly; they have no production caller and are tracked for removal.
+Current migration status: every Beets read and mutation path, including the composite Plan/Apply/Rollback workflows (merge-album, merge-artist, Clean All, track replacement, folder/album cleanup, artist-folder reconcile, album maintenance/relocation/metadata-repair, artwork, genre repair, mbsync-all, move-all), runs through `backend/composite_workflows.py` and `backend/beets_adapter.py`. The retired `backend/beets_client.py` control-agent client is deleted (ARCH-010, closed in v0.1.25). `backend/transaction_engine.py` now holds only the TransactionStore, folder cleanup and import-review cleanup; the engine-side families that opened the Beets SQLite library directly were removed (BA-7), and folder cleanup checks Beets references through the adapter.
 
 ## Frontend Architecture
 

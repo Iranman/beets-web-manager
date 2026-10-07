@@ -83,15 +83,9 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
     def test_track_relabel_rejects_fingerprint_mismatch(self):
         # ARCH-003 Wave 33 continuation: _match_tracks_from_mb_shared no
         # longer rewrites mb_trackid/track/disc/title via raw local SQL at
-        # all -- it delegates through beets_client to
-        # album_mb_track_repair_v1 (backend/transaction_engine.py), which
-        # owns the actual mutation and its own AcoustID cross-check
-        # (acoustid_verify option, backed by
-        # _mb_track_repair_acoustid_check() -- see
-        # tests/test_arch003_wave33_mb_track_repair_extensions.py::
-        # AcoustidVerifyTests for the engine-side "mismatch" rejection
-        # behavior itself, and GreedyAlignmentAdversarialTests for the
-        # alignment/tie-break behavior). What must still hold here, at
+        # all -- it delegates to the album_mb_track_repair_v1 composite
+        # workflow (backend/composite_workflows.py), which owns the actual
+        # mutation and its AcoustID cross-check. What must still hold here, at
         # the app.py call site, is that this function always requests
         # that cross-check -- it is not optional for this caller, since
         # the pre-migration behavior always ran it unconditionally.
