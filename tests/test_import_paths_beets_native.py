@@ -332,7 +332,7 @@ class ConfirmedImportJobTests(unittest.TestCase):
         isvc = self.isvc
         self.ad = _adapter({"id": 9, "mb_albumid": REL, "mb_releasegroupid": album_rg})
         src = "/downloads/Artist - Album"
-        with mock.patch.object(isvc, "_resolve_import_review_source_path", return_value=(src, None)),              mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=True),              mock.patch.object(isvc, "_prefer_album_mb_release", side_effect=lambda rid, log: rid),              mock.patch.object(isvc, "_beet_import_timeout", return_value=60):
+        with mock.patch.object(isvc, "_resolve_import_review_source_path", return_value=(src, None)),              mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=True),              mock.patch.object(isvc, "_beet_import_timeout", return_value=60):
             body, code = isvc.start_folder_import_with_id({"path": src, "mb_albumid": REL})
         self.assertEqual(code, 200, body)
         return self.result
@@ -372,6 +372,27 @@ class ConfirmedImportJobTests(unittest.TestCase):
         self._assert_kept_and_not_retagged()
         (tx,) = [t for t in self.store.list()[0] if t.get("operation_type") == "Import"]
         self.assertEqual(tx["status"], "Failed")
+        self.assertEqual(tx["metadata"]["engine_result"]["kept_album_ids"], [9])
+        self.assertIn("Album_id 9", res["error"])
+
+
+class AiImportReleaseTests(unittest.TestCase):
+    def test_ai_candidate_release_is_imported_unchanged(self):
+        import backend.ai_service as ai
+        planned = {}
+
+        def plan(payload, *a, **k):
+            planned.update(payload)
+            return {"ok": True, "operation_id": "op-1"}
+
+        with mock.patch.object(ai, "_preserve_torrent_source_path", return_value=False),                 mock.patch.object(ai, "_prefer_album_mb_release", side_effect=lambda rid, log: "44444444-4444-4444-4444-444444444444"),                 mock.patch.object(ai, "_validate_import_source_audio"),                 mock.patch.object(ai, "_fetch_mb_release_tracklist",
+                                  return_value={"ok": True, "release_group": RG, "tracks": []}),                 mock.patch.object(ai.composite_workflows, "plan_confirmed_import", side_effect=plan),                 mock.patch.object(ai.composite_workflows, "apply_confirmed_import",
+                                  return_value={"ok": False, "error": "stop here"}):
+            with self.assertRaises(RuntimeError):
+                ai._ai_import_folder("/downloads/Artist - Single", REL, {}, [])
+        self.assertEqual(planned["mb_albumid"], REL)
+        self.assertEqual(planned["mb_releasegroupid"], RG)
+        self.assertIs(planned["use_move"], True)
 
 
 if __name__ == "__main__":

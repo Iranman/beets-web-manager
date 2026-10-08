@@ -3109,7 +3109,9 @@ _IMPORT_REFUSALS = {
     "AUTOTAG_NOT_ALLOWED": (
         "The webmanager Beets plugin refuses imports that use Beets' own autotagger "
         "(AUTOTAG_NOT_ALLOWED). Web Manager imports through Beets' importer and "
-        "MusicBrainz lookup, so this plugin version cannot import. Nothing was imported."),
+        "MusicBrainz lookup, so this plugin version cannot import. Restart the Beets "
+        "container so it loads the current webmanager plugin (1.8.0 or later), then retry. "
+        "Nothing was imported."),
     "PATH_NOT_ALLOWED": (
         "The import source is not inside one of the Beets plugin's import roots "
         "(webmanager.import_roots, default /downloads). Nothing was imported."),
@@ -3185,10 +3187,13 @@ def apply_confirmed_import(
     use_move = meta.get("use_move") is True and not in_place
     duplicate_action = _s(meta.get("duplicate_action") or "skip").lower()
 
-    def _fail(expected: str, code: str, error: str, mutated: Any = False) -> Dict[str, Any]:
-        st.transition(operation_id, expected, "Failed", logs=[f"Apply failed ({code}): {error}"])
+    def _fail(expected: str, code: str, error: str, mutated: Any = False,
+              album_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+        # album_ids: the rows Beets imported and this failure keeps (never removed here).
+        extra = {"metadata": {"engine_result": {"mutation_started": True, "kept_album_ids": album_ids}}}             if album_ids else {}
+        st.transition(operation_id, expected, "Failed", logs=[f"Apply failed ({code}): {error}"], **extra)
         return {"ok": False, "code": code, "operation_id": operation_id, "status": "Failed",
-                "mutated": mutated, "error": error}
+                "mutated": mutated, "error": error, "album_ids": album_ids or []}
 
     if not paths or not release_id or (planned_rg and not _uuid_or_blank(planned_rg)) \
             or duplicate_action not in _CONFIRMED_DUPLICATE_ACTIONS:
@@ -3215,14 +3220,14 @@ def apply_confirmed_import(
     if len(new) > 1:
         return _fail("Running", "import_ambiguous",
                      f"Beets created {len(new)} album rows for this release; review them before continuing.",
-                     mutated=True)
+                     mutated=True, album_ids=[int(a.get("id") or 0) for a in new])
     album = new[0]
     album_id = int(album.get("id") or 0)
     got_rg = _s(album.get("mb_releasegroupid")).strip().lower()
     if planned_rg and got_rg != planned_rg:
         return _fail("Running", "release_group_mismatch",
                      f"Beets imported album {album_id} with a different Release Group than the one confirmed; "
-                     "review it before continuing.", mutated=True)
+                     "review it before continuing.", mutated=True, album_ids=[album_id])
     item_ids = [int(i.get("id")) for i in ad.find_all_items_by_album_id(album_id) if i.get("id") is not None]
     st.transition(operation_id, "Running", "Completed",
                   metadata={"engine_result": {"album_id": album_id, "item_ids": item_ids,

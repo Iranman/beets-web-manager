@@ -7083,13 +7083,12 @@
    "desired_owner": "backend/matching_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_ai_import_folder",
     "clean_rgid_group_assign_release",
     "clean_rgid_group_relink",
     "clean_rgid_group_send_to_repair",
     "start_reimport_disk"
    ],
-   "caller_count": 5,
+   "caller_count": 4,
    "dependencies": [
     "_s"
    ]
@@ -8395,11 +8394,9 @@
    "desired_owner": "backend/musicbrainz_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_ai_import_folder",
-    "_ai_suggest_album_internal",
-    "start_folder_import_with_id"
+    "_ai_suggest_album_internal"
    ],
-   "caller_count": 3,
+   "caller_count": 1,
    "dependencies": [
     "_fetch_mb_release_tracklist"
    ]
@@ -23673,10 +23670,10 @@
    "module": "backend/ai_service.py",
    "lines": [
     2349,
-    2515
+    2470
    ],
-   "size": 167,
-   "body_lines": 161,
+   "size": 122,
+   "body_lines": 116,
    "route": null,
    "mutation_capable": true,
    "domain": "AI",
@@ -23691,11 +23688,9 @@
     "_fetch_artwork_after_retag",
     "_fetch_mb_release_tracklist",
     "_invalidate_lib_cache",
-    "_prefer_album_mb_release",
     "_preserve_torrent_source_path",
     "_record_ai_match",
     "_remove_pending_review_for_path",
-    "_repair_album_mbid_sticking_once",
     "_s",
     "_trigger_plex_refresh",
     "_validate_import_source_audio"
@@ -23705,8 +23700,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2518,
-    2552
+    2473,
+    2507
    ],
    "size": 35,
    "body_lines": 25,
@@ -23922,10 +23917,10 @@
    "module": "backend/import_service.py",
    "lines": [
     415,
-    1309
+    1319
    ],
-   "size": 895,
-   "body_lines": 871,
+   "size": 905,
+   "body_lines": 881,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT",
@@ -23972,8 +23967,8 @@
    "name": "_validate_wanted_album_items_with_acoustid",
    "module": "backend/import_service.py",
    "lines": [
-    1312,
-    1449
+    1322,
+    1459
    ],
    "size": 138,
    "body_lines": 134,
@@ -23999,8 +23994,8 @@
    "name": "_beet_import_timeout",
    "module": "backend/import_service.py",
    "lines": [
-    1452,
-    1463
+    1462,
+    1473
    ],
    "size": 12,
    "body_lines": 10,
@@ -24021,8 +24016,8 @@
    "name": "_audio_validation_inspection_failed",
    "module": "backend/import_service.py",
    "lines": [
-    1466,
-    1484
+    1476,
+    1494
    ],
    "size": 19,
    "body_lines": 18,
@@ -24043,8 +24038,8 @@
    "name": "_filter_import_review_selected_audio_files",
    "module": "backend/import_service.py",
    "lines": [
-    1487,
-    1537
+    1497,
+    1547
    ],
    "size": 51,
    "body_lines": 49,
@@ -24068,8 +24063,8 @@
    "name": "_resolve_import_review_db_music_path",
    "module": "backend/import_service.py",
    "lines": [
-    1540,
-    1559
+    1550,
+    1569
    ],
    "size": 20,
    "body_lines": 14,
@@ -24092,8 +24087,8 @@
    "name": "_import_skipped_items",
    "module": "backend/import_service.py",
    "lines": [
-    1562,
-    1610
+    1572,
+    1620
    ],
    "size": 49,
    "body_lines": 47,
@@ -24113,8 +24108,8 @@
    "name": "_target_preview_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    1613,
-    1671
+    1623,
+    1681
    ],
    "size": 59,
    "body_lines": 58,
@@ -24139,8 +24134,8 @@
    "name": "_import_review_selected_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    1700,
-    1736
+    1710,
+    1746
    ],
    "size": 37,
    "body_lines": 31,
@@ -24164,8 +24159,8 @@
    "name": "_import_target_preview_cache_key",
    "module": "backend/import_service.py",
    "lines": [
-    1739,
-    1786
+    1749,
+    1796
    ],
    "size": 48,
    "body_lines": 47,
@@ -24187,8 +24182,8 @@
    "name": "_cached_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    1789,
-    1808
+    1799,
+    1818
    ],
    "size": 20,
    "body_lines": 19,
@@ -24211,8 +24206,8 @@
    "name": "_build_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    1811,
-    2098
+    1821,
+    2108
    ],
    "size": 288,
    "body_lines": 281,
@@ -24242,8 +24237,8 @@
    "name": "_import_review_confidence_score",
    "module": "backend/import_service.py",
    "lines": [
-    2101,
-    2117
+    2111,
+    2127
    ],
    "size": 17,
    "body_lines": 16,
@@ -24263,8 +24258,8 @@
    "name": "_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2120,
-    2128
+    2130,
+    2138
    ],
    "size": 9,
    "body_lines": 8,
@@ -24285,8 +24280,8 @@
    "name": "_write_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2131,
-    2136
+    2141,
+    2146
    ],
    "size": 6,
    "body_lines": 5,
@@ -24305,8 +24300,8 @@
    "name": "_import_review_auto_update",
    "module": "backend/import_service.py",
    "lines": [
-    2139,
-    2148
+    2149,
+    2158
    ],
    "size": 10,
    "body_lines": 9,
@@ -24331,8 +24326,8 @@
    "name": "_import_review_auto_key",
    "module": "backend/import_service.py",
    "lines": [
-    2151,
-    2162
+    2161,
+    2172
    ],
    "size": 12,
    "body_lines": 10,
@@ -24353,8 +24348,8 @@
    "name": "evaluate_import_eligibility",
    "module": "backend/import_service.py",
    "lines": [
-    2165,
-    2281
+    2175,
+    2291
    ],
    "size": 117,
    "body_lines": 115,
@@ -24384,11 +24379,11 @@
    "name": "start_folder_import_with_id",
    "module": "backend/import_service.py",
    "lines": [
-    2286,
-    2909
+    2296,
+    2931
    ],
-   "size": 624,
-   "body_lines": 613,
+   "size": 636,
+   "body_lines": 625,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT",
@@ -24419,7 +24414,6 @@
     "_move_artwork_to_target",
     "_normalise_wanted_tracks",
     "_path_is_under",
-    "_prefer_album_mb_release",
     "_preserve_torrent_source_path",
     "_queue_folder_for_manual_review",
     "_record_ai_match",
@@ -24440,8 +24434,8 @@
    "name": "_coerce_library_import_all_album",
    "module": "backend/import_service.py",
    "lines": [
-    2918,
-    2945
+    2940,
+    2967
    ],
    "size": 28,
    "body_lines": 27,
@@ -24465,8 +24459,8 @@
    "name": "_library_import_all_retry_payload",
    "module": "backend/import_service.py",
    "lines": [
-    2948,
-    2956
+    2970,
+    2978
    ],
    "size": 9,
    "body_lines": 8,
@@ -24488,8 +24482,8 @@
    "name": "_library_import_all_record",
    "module": "backend/import_service.py",
    "lines": [
-    2959,
-    2970
+    2981,
+    2992
    ],
    "size": 12,
    "body_lines": 10,
@@ -24512,8 +24506,8 @@
    "name": "_library_import_all_read_last",
    "module": "backend/import_service.py",
    "lines": [
-    2973,
-    2981
+    2995,
+    3003
    ],
    "size": 9,
    "body_lines": 8,
@@ -24533,8 +24527,8 @@
    "name": "_library_import_all_write_last",
    "module": "backend/import_service.py",
    "lines": [
-    2984,
-    2992
+    3006,
+    3014
    ],
    "size": 9,
    "body_lines": 8,
@@ -24553,8 +24547,8 @@
    "name": "_resolve_import_source_path",
    "module": "backend/import_service.py",
    "lines": [
-    3000,
-    3034
+    3022,
+    3056
    ],
    "size": 35,
    "body_lines": 16,

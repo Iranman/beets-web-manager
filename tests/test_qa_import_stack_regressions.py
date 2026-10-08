@@ -43,7 +43,7 @@ class VerificationFailureReviewTests(base.ConfirmedImportJobTests):
         src = "/downloads/Artist - Single"
         with mock.patch.object(isvc, "_resolve_import_review_source_path", return_value=(src, None)), \
                 mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=True), \
-                mock.patch.object(isvc, "_prefer_album_mb_release", side_effect=lambda rid, log: OTHER_REL), \
+                mock.patch.object(isvc, "_prefer_album_mb_release", side_effect=lambda rid, log: OTHER_REL, create=True), \
                 mock.patch.object(isvc, "_beet_import_timeout", return_value=60):
             body, code = isvc.start_folder_import_with_id({"path": src, "mb_albumid": REL})
         self.assertEqual(code, 200, body)

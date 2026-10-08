@@ -31,7 +31,7 @@ from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _
 from backend.matching_service import _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
-from backend.musicbrainz_service import _mb_release_track_count, _prefer_album_mb_release
+from backend.musicbrainz_service import _mb_release_track_count
 from backend.serializers import _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
 from backend.plex_service import _trigger_plex_refresh
@@ -1153,6 +1153,17 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             raise RuntimeError(
                 "Could not look up the Release Group of the selected MusicBrainz release; "
                 "nothing was imported.")
+        def _keep_for_review(reason: str, kept_ids: List[int]) -> None:
+            # Never removes the rows Beets just imported: a removal goes
+            # through the transaction preview/approve flow, not this job.
+            ids = ", ".join(str(i) for i in kept_ids)
+            reason = f"{reason} Album_id {ids} was left in the library for review."
+            _queue_folder_for_manual_review(
+                aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                        "kept_album_ids": kept_ids, "reason": reason},
+                reason, log, allow_existing=True)
+            raise RuntimeError(reason)
+
         plan_res = composite_workflows.plan_confirmed_import({
             "source_folder": aldir,
             "existing_album_id": existing_album_id,
@@ -1184,7 +1195,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 )
                 raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
             # A verification failure after Beets imported (release_group_mismatch,
-            # import_ambiguous) leaves the album rows in the library for review.
+            # import_ambiguous) keeps the album rows and sends the folder to review.
+            if atomic_res.get("album_ids"):
+                _keep_for_review(atomic_res.get("error") or "Beets import failed verification.",
+                                 atomic_res["album_ids"])
             raise RuntimeError(atomic_res.get("error") or "Beets import failed.")
 
         # Beets applied the confirmed Release (tags, file placement, write) and
@@ -1196,12 +1210,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                    f"(Release Group {planned_rg}, verified).")
 
         def _needs_review(reason: str) -> None:
-            # Never removes the rows Beets just imported: a removal goes
-            # through the transaction preview/approve flow, not this job.
-            _maybe_queue_review(aldir, {"mb_albumid": mb_albumid, "mb_valid": True,
-                                        "confidence": "low", "reason": reason},
-                                reason, allow_existing=True)
-            raise RuntimeError(f"{reason} Album_id {aid} was left in the library for review.")
+            _keep_for_review(reason, [aid])
 
         if existing_album_id:
             # Missing-track fill: Beets kept the new files as their own album
@@ -1276,7 +1285,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
-        log.append(f"✓ Done — '{Path(aldir).name}' tagged and renamed to library structure.")
+        log.append(f"✓ Done — '{Path(aldir).name}' imported by Beets"
+                   + (" in place." if source_is_music_library else " into the library structure."))
         return {
             "album_ids": [int(aid) for aid in album_ids if str(aid).isdigit()],
             "item_ids": [],
@@ -2630,7 +2640,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "torrent root; using --copy so qBittorrent source files remain."
             )
         import_mode = "--move" if selected_subset_import else ("--copy" if preserve_torrent_source or not use_move else "--move")
-        mb_albumid = _prefer_album_mb_release(mb_albumid, log)
+        # The confirmed Release is imported as confirmed: never swapped for
+        # another Release (or Release Group) here.
         mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
         if not mb_identity.get("ok"):
             raise RuntimeError(
@@ -2722,7 +2733,18 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
             raise
         if not apply_res.get("ok"):
-            raise RuntimeError(apply_res.get("error") or "Beets import failed.")
+            reason = apply_res.get("error") or "Beets import failed."
+            kept_ids = apply_res.get("album_ids") or []
+            if kept_ids:
+                # Verification failed after Beets imported: keep the rows (a
+                # removal goes through preview/approve) and send the folder to review.
+                reason = (f"{reason} Album_id {', '.join(str(i) for i in kept_ids)} "
+                          "was left in the library for review.")
+                _queue_folder_for_manual_review(
+                    folder_path, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                                  "kept_album_ids": kept_ids, "reason": reason},
+                    reason, log, allow_existing=True)
+            raise RuntimeError(reason)
         log.append(f"[import] Beets import completed: {import_folder_path}")
         if apply_res.get("resumed"):
             log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")
