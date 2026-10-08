@@ -50,17 +50,5 @@ class MissingTrackImportGuardTests(unittest.TestCase):
         self.assertIn("_partial_expected = int(", self.source)
         self.assertNotIn("Repaired {comp.get('in_library', 0)}/", self.source)
 
-    def test_selected_release_validation_accepts_clean_partial_source(self):
-        self.assertIn("clean_partial_import = bool(", self.source)
-        self.assertIn("and actual < expected", self.source)
-        self.assertIn("and (actual >= min(6, expected)", self.source)
-        self.assertIn("and matches >= max(1, int(math.ceil(actual * 0.90)))", self.source)
-        self.assertIn("and unmatched == 0", self.source)
-        self.assertIn("and duplicate_matches == 0", self.source)
-        self.assertIn("ok = matches >= min_required or clean_partial_import", self.source)
-        self.assertIn("Clean partial import accepted:", self.source)
-        self.assertIn("missing_expected_tracks", self.source)
-
-
 if __name__ == "__main__":
     unittest.main()

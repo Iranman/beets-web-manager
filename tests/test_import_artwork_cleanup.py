@@ -19,7 +19,7 @@ def _artwork_helper_source(src: str) -> str:
 def _cleanup_block_source(src: str) -> str:
     # The cleanup block inside import_folder_with_id, from the comment to end of except block
     start = src.index("# ── Move orphaned artwork to canonical album folder")
-    end = src.index("for aid in album_ids:\n            _repair_album_mbid_sticking_once", start)
+    end = src.index("if selected_subset_import and partial_remaining_audio:\n            log.append(\"  Pending Review kept", start)
     return src[start:end]
 
 

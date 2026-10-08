@@ -23,7 +23,7 @@ import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
 from backend.artwork_service import _fetch_artwork_after_retag
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_match_score
-from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok, _repair_album_mbid_sticking_once
+from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
 from backend.app_runtime import jobs
 from backend.musicbrainz_service import _artist_folder_key, _discogs_release_fallback_candidate, _mb_release_search_by_folder_tracks, _prefer_album_mb_release
 from backend.serializers import _compact_mb_candidate, _resolve_import_review_source_path
@@ -2348,16 +2348,14 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
 
 def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
                       log: list, cancel_event=None):
-    """Import a folder with a specific MB release ID, then apply
-    full MB metadata (mbsync → write → move) so files are correctly tagged and
-    renamed in the library structure.
-    Runs directly — no Flask context needed, safe for background threads."""
+    """Import a folder as a specific MB release through Beets' own importer
+    (confirmed import), which tags, writes and places the files. Web Manager
+    does not retag the result (ARCH-024). A preserved torrent source is
+    copied, never moved. Runs directly -- safe for background threads."""
     preserve_torrent_source = _preserve_torrent_source_path(folder_path)
     if preserve_torrent_source:
-        log.append(
-            "  [torrent] Protected source detected; the engine will import "
-            "via a disposable copy, leaving the qBittorrent source in place."
-        )
+        log.append("  [torrent] Protected source detected; Beets copies it, "
+                   "leaving the qBittorrent source in place.")
 
     # ── Step 1: confirmed_import_v1 (Plan -> Apply) with the AI-reviewed,
     # human/AI-approved release ──────────────────────────────────────────
@@ -2388,7 +2386,8 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     # locally-executed `beet` invocation. The Web Manager has no local
     # Beets binary/engine config to invoke in the two-service topology in
     # the first place.
-    mb_albumid = _prefer_album_mb_release(mb_albumid, log)
+    # The AI-chosen candidate is imported as chosen: never swapped for another
+    # Release (or Release Group) here.
     _validate_import_source_audio(folder_path, log, reject_downloads=True)
     mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb_identity.get("ok"):
@@ -2396,8 +2395,10 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
             "The selected MusicBrainz release could not be loaded. Import was not started."
         )
     resolved_releasegroupid = _s(mb_identity.get("release_group") or "").strip().lower()
-    if resolved_releasegroupid:
-        log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
+    if not resolved_releasegroupid:
+        raise RuntimeError("The Release Group of the selected MusicBrainz release is unknown, so the "
+                           "import could not be verified. Import was not started.")
+    log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
 
     plan_res = composite_workflows.plan_confirmed_import({
         "source_folder": folder_path,
@@ -2405,7 +2406,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         "mb_releasegroupid": resolved_releasegroupid,
         "mb_release_group_resolved": resolved_releasegroupid,
         "mb_tracks": mb_identity.get("tracks") or [],
-        "use_move": True,
+        "use_move": not preserve_torrent_source,
     })
     if not plan_res.get("ok"):
         raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
@@ -2425,58 +2426,12 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     if atomic_res.get("resumed"):
         log.append("  Resumed an already-verified prior result for this release (native import was not re-invoked).")
 
-    # ── Step 2: album identity ────────────────────────────────────────────
-    # confirmed_import_v1's Apply already performed authoritative, verified
-    # result capture (queried the library by the exact planned Release ID,
-    # confirmed items and files exist on disk) -- trust that directly
-    # rather than re-deriving it through a heuristic DB search.
-    aid = atomic_res.get("album_id")
-
-    if aid is None:
-        log.append("  WARN: album not found in DB after import — skipping retag")
-        _remove_pending_review_for_path(folder_path, log)
-        _invalidate_lib_cache()
-        _trigger_plex_refresh(log, workflow="batch")
-        log.append("  ✓ Done (as-is, no retag)")
-        return {
-            "album_id": None,
-            "metadata_imported": True,
-            "identity_verified": False,
-            "artwork_status": "skipped_no_album",
-            "artwork_retryable": False,
-        }
-
-    # ── Step 3: stamp mb_albumid + retag ─────────────────────────────────────
-    log.append(f"  Retagging album_id={aid} with MB data…")
+    # Beets applied the release; apply_confirmed_import verified exactly one
+    # new album with that Release ID and Release Group.
+    aid = int(atomic_res["album_id"])
+    log.append(f"  Beets imported album_id={aid} as release {mb_albumid} (verified).")
     if cancel_event and cancel_event.is_set():
         raise RuntimeError("cancelled")
-
-    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mb_albumid})
-    if not p_res.get("ok") or not p_res.get("operation_id"):
-        raise RuntimeError(f"beet mbsync/track repair plan failed: {p_res.get('error', 'plan failed')}")
-    app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-    if not app_res.get("ok"):
-        raise RuntimeError(f"beet mbsync/track repair apply failed: {app_res.get('error')}")
-
-    if cancel_event and cancel_event.is_set():
-        raise RuntimeError("cancelled")
-
-    up_res = composite_workflows.update_album_metadata(int(aid), {}, force_write_tags=True)
-    if not up_res.get("ok"):
-        raise RuntimeError(f"beet write failed: {up_res.get('error')}")
-
-    rel_res = composite_workflows.relocate_album(int(aid), mode="rename")
-    if not rel_res.get("ok"):
-        raise RuntimeError(f"beet relocate failed: {rel_res.get('error')}")
-    log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
-
-    _repair_album_mbid_sticking_once(
-        int(aid),
-        mb_albumid,
-        log,
-        write_tags=True,
-        cancel_event=cancel_event,
-    )
 
     # ── Step 4: verify persisted identity, then fetch artwork ────────────────
     art_outcome = _fetch_artwork_after_retag(int(aid), mb_albumid, log, cancel_event=cancel_event)

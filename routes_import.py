@@ -1541,6 +1541,9 @@ def start_ai_batch_import():
     return _start_ai_batch_job(scan_path, recover_batch_job_id=recover_batch_job_id)
 
 
+IMPORT_NOT_MATCHED_STATUS = "not matched; left in place for review"
+
+
 @app.post("/api/import")
 def start_import():
     payload  = request.get_json(silent=True) or {}
@@ -1549,11 +1552,19 @@ def start_import():
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
     path     = str(validated_path)
-    fallback = payload.get("fallback", "asis")   # asis | skip
+    # Beets quiet_fallback: skip by default, so an album Beets cannot match is
+    # left in place for review; asis (import with existing tags, no release
+    # group) only when the caller asks for it.
+    fallback = _s(payload.get("fallback") or "skip").strip().lower()
+    if fallback not in ("asis", "skip"):
+        return jsonify({"ok": False, "error": "fallback must be 'asis' or 'skip'"}), 400
     write    = payload.get("write", True)
     move     = payload.get("move", False)
     noincremental = payload.get("reimport", False)   # "reimport" key kept for JS compat
-    search_id     = payload.get("search_id", "").strip()
+    raw_search_id = _s(payload.get("search_id")).strip()
+    search_id     = _extract_mb_uuid(raw_search_id)   # Beets --search-id (a Release ID)
+    if raw_search_id and not search_id:
+        return jsonify({"ok": False, "error": "search_id must be a MusicBrainz Release ID or URL"}), 400
     # Auto-create directory so import always starts
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -1577,15 +1588,27 @@ def start_import():
 
     def _do(log, cancel_event=None):
         _validate_import_source_audio(path, log, reject_downloads=True)
-        beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source}
+        # Beets' own importer (beet import -q): a preserved torrent source is
+        # always copied; anything else is copied unless move was requested.
+        beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source or not move,
+                         "move": bool(move) and not preserve_torrent_source, "write": write}
         if search_id:
             beets_options["search_id"] = search_id
+        log.append(f"[import] Beets import ({'move' if beets_options['move'] else 'copy'}, "
+                   f"quiet fallback {fallback}{', search id ' + search_id if search_id else ''})")
         res = composite_workflows.reimport_source(path, beets_options=beets_options, timeout=300.0)
         if not res.get("ok"):
-            raise RuntimeError(f"Engine import failed: {res.get('error', 'reimport_source failed')}")
-        combined = ""
-        _delete_if_already_in_library(path, combined, log)
+            raise RuntimeError(res.get("error") or "Beets import failed.")
+        _delete_if_already_in_library(path, "", log)
         _invalidate_lib_cache()
+        not_matched = [{"path": p, "status": IMPORT_NOT_MATCHED_STATUS} for p in res.get("not_matched") or []]
+        for row in not_matched:
+            log.append(f"[import] {row['path']}: {IMPORT_NOT_MATCHED_STATUS}")
+        if not res.get("not_matched_known", True):
+            log.append("[import] Beets did not report which folders it skipped; "
+                       f"check {path} for folders left in place.")
+        return {"albums_imported": res.get("albums_imported"), "quiet_fallback": fallback,
+                "not_matched": not_matched, "not_matched_known": res.get("not_matched_known", True)}
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})

@@ -5,34 +5,33 @@ from __future__ import annotations
 
 import copy, hashlib, json, math, os, re, sqlite3, threading, time
 import backend.job_contract as job_contract
-from backend.matching import AcoustIDStatus, verify_audio_against_request
+from backend.matching import verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
 from backend.ai_service import _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
-from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_album_ids_from_db, _delete_album_items_under_folder, _delete_if_already_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
+from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_if_already_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _library_album_ids_for_folder, _queue_folder_for_manual_review, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
-from backend.cleanup_service import _cleanup_template_tokens_for_album
 from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
 from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
-from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing, missing_wanted_tracks_block_retag as _guard_missing_wanted_tracks_block_retag
+from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
 import backend.item_replacement as _item_replacement
-from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_multi_file, _album_item_abs_path, _album_track_fingerprint_check
+from backend.acoustid_service import _acoustid_lookup_cached, _album_item_abs_path
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
 from backend.matching_service import _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
-from backend.musicbrainz_service import _library_album_ids_for_musicbrainz, _mb_release_track_count, _prefer_album_mb_release
+from backend.musicbrainz_service import _mb_release_track_count
 from backend.serializers import _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
 from backend.plex_service import _trigger_plex_refresh
@@ -350,75 +349,6 @@ def _start_reimport_disk_job_internal(aldir: str, mb_albumid: str,
     return data["job_id"]
 
 
-def _validate_import_source_evidence(evidence: Dict[str, Any], log: list, *, reject_downloads: bool = True) -> Dict[str, Any]:
-    """Same policy as _validate_import_source_audio(), but evaluated against
-    already-computed engine-side audio evidence instead of walking the
-    source locally (SEC-002 Wave 8 ARCH-003: reimport_disk()'s source lives
-    on the Beets engine, not the web manager, so audio properties must come
-    from composite_workflows.inspect_import_source(), not a local ffprobe/rglob
-    pass this container cannot perform).
-
-    Uses validate_audio_properties() directly -- the pure, already-existing
-    evidence-in/decision-out half of the same code _validate_audio_tree_preferences()
-    calls -- so the accept/reject policy itself is identical, not
-    reimplemented.
-
-    Only _validate_import_source_audio()'s other six call sites (unrelated
-    to Wave 8) still use the local-filesystem path; this function is used
-    by reimport_disk() only. Rejected-download handling
-    (_handle_rejected_audio_download, which deletes/quarantines the file)
-    still assumes local access and is not migrated here -- rejections are
-    the uncommon case for an already-organized reimport source, and
-    building an engine-side quarantine/delete capability for that edge case
-    is deferred, not silently dropped (see docs/TECHNICAL_DEBT.md)."""
-    prefs = _music_format_preferences()
-    canonical_path = _s(evidence.get("canonical_path"))
-    try:
-        root_is_library = _path_is_under(Path(canonical_path).resolve(strict=False), MUSIC_ROOT.resolve(strict=False))
-    except Exception:
-        root_is_library = False
-
-    accepted: List[Dict[str, Any]] = []
-    rejected: List[Dict[str, Any]] = []
-    for entry in evidence.get("audio_files") or []:
-        rel = _s(entry.get("relative_path"))
-        abs_path = str(Path(canonical_path) / rel) if rel else canonical_path
-        result = _validate_audio_properties(entry.get("properties") or {}, prefs)
-        row = {"path": abs_path, **result}
-        (accepted if result.get("ok") else rejected).append(row)
-
-    for row in accepted:
-        msg = row.get("message") or "Accepted: audio matches Music Format Preferences"
-        log.append(f"  [audio] {msg}")
-    if not rejected:
-        return {"ok": True, "accepted": accepted, "rejected": rejected, "total": len(accepted)}
-
-    handled_results: List[Dict[str, Any]] = []
-    for row in rejected:
-        msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
-        log.append(f"  [audio] {msg}: {Path(row.get('path') or '').name}")
-        if reject_downloads and not root_is_library and row.get("path"):
-            log.append("  [audio] Rejected-file quarantine/delete requires local access this route no longer has; leaving file in place for manual review.")
-    if root_is_library:
-        _mark_music_format_needs_replacement([
-            {
-                "path": row.get("path"),
-                "status": "Needs replacement",
-                "reason": "; ".join(row.get("reasons") or ["does not match Music Format Preferences"]),
-                "audio": row.get("properties") or {},
-                "queued_retry": True,
-            }
-            for row in rejected
-        ])
-        raise RuntimeError(
-            "Existing library audio does not match Music Format Preferences. "
-            "Current files were kept and marked Needs replacement."
-        )
-    raise RuntimeError(
-        _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
-    )
-
-
 def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
     """Remove a temporary download folder after a failed candidate.
 
@@ -586,7 +516,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         return {"ok": False, "error": "Import source rejected."}, 400
     # Only the engine's own canonical path is ever used from here on --
     # the raw client-supplied aldir is never reused after this point.
-    aldir = str(import_source_evidence["canonical_path"])
+    aldir = str(import_source_evidence["path"])
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)
@@ -1203,81 +1133,52 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # transaction.
             log.append("  Orphan DB-row pre-cleanup for unowned folders: not performed (not_supported)")
 
-        # Uses the engine-supplied evidence captured at request time (see
-        # import_source_evidence above), not a local scan -- this route's
-        # source lives on the Beets engine, not the web manager.
-        _validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)
-        log.append(f"[1/3] Importing & tagging '{Path(aldir).name}' in-place with MB {mb_albumid}…")
-        import_timed_out = False
-        import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_count", 0))
-        # SEC-002 Wave 8 final mutation binding: the actual Beets import now
-        # runs through the engine's reviewed reimport_source_atomic() (POST
-        # /imports/reimport), not a bare `_beet_run(... "import" ...)`. This
-        # binds the final mutation itself -- not just the earlier inspect
-        # step -- to a fresh, engine-side re-verification of the source
-        # signature and, where real deterministic evidence exists, album
-        # identity, immediately before any file is touched. See
-        # docs/TECHNICAL_DEBT.md ("SEC-002 Wave 8: production reimport
-        # binding") for the evidence-selection rationale and known limits.
-        expected_identity: Dict[str, Any] = {}
-        if existing_album_id:
-            # Strong, DB-backed evidence: the engine looks this row up
-            # itself and only objects if the source audio's own embedded
-            # tags actively conflict with it -- absence of embedded tags
-            # (the common case for a folder being repaired in place) is not
-            # itself treated as a conflict. See verify_deterministic_identity().
-            expected_identity["existing_album_id"] = existing_album_id
-        else:
-            # No prior DB row exists. mb_albumid (already resolved, and for
-            # existing-library/known folders already preflight-matched
-            # above) is the only concrete deterministic claim available for
-            # a brand-new folder. If the source has no embedded MusicBrainz
-            # tags to confirm it against -- the common case for freshly
-            # downloaded, not-yet-tagged audio -- the engine correctly
-            # returns review_required rather than importing on trust alone.
-            expected_identity["mb_albumid"] = mb_albumid
-
+        # Web Manager mounts the downloads root and (read-only) the library
+        # in the documented compose, so the audio policy reads the files here.
+        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
+        import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
+        # Beets' own importer does the work (beet import -q --search-id
+        # <mb_albumid>) through the confirmed-import family: Beets looks the
+        # Release up, applies it and places the files; a source Beets cannot
+        # confidently match is skipped by Beets and goes to review. A library
+        # folder is imported in place; a download source is moved unless it
+        # is a preserved torrent source, which is copied (D10).
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("cancelled")
-        try:
-            atomic_res = composite_workflows.reimport_source(
-                aldir,
-                expected_source_signature=import_source_evidence.get("source_signature"),
-                expected_deterministic_identity=expected_identity,
-                beets_options={
-                    "mb_albumid": mb_albumid,
-                    "duplicate_action": "keep" if existing_album_id else "remove",
-                },
-                timeout=import_timeout + 15.0,
-            )
-        except BeetsAuthError:
-            raise RuntimeError("Beets engine authentication failed.")
-        except BeetsUnavailableError:
-            raise RuntimeError("Beets engine is unavailable.")
-        except BeetsError:
-            raise RuntimeError("Beets import request failed.")
+        # The Release Group the import must land in; apply_confirmed_import
+        # refuses an album Beets tagged into any other one.
+        planned_rg = _s((_fetch_mb_release_tracklist(mb_albumid, log) or {}).get("release_group")).strip().lower()
+        if not planned_rg:
+            raise RuntimeError(
+                "Could not look up the Release Group of the selected MusicBrainz release; "
+                "nothing was imported.")
+        def _keep_for_review(reason: str, kept_ids: List[int]) -> None:
+            # Never removes the rows Beets just imported: a removal goes
+            # through the transaction preview/approve flow, not this job.
+            ids = ", ".join(str(i) for i in kept_ids)
+            reason = f"{reason} Album_id {ids} was left in the library for review."
+            _queue_folder_for_manual_review(
+                aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                        "kept_album_ids": kept_ids, "reason": reason},
+                reason, log, allow_existing=True)
+            raise RuntimeError(reason)
 
+        plan_res = composite_workflows.plan_confirmed_import({
+            "source_folder": aldir,
+            "existing_album_id": existing_album_id,
+            "mb_albumid": mb_albumid,
+            "mb_releasegroupid": planned_rg,
+            "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir),
+            "in_place": source_is_music_library,
+            "duplicate_action": "keep" if existing_album_id else "skip",
+        })
+        atomic_res = composite_workflows.apply_confirmed_import(
+            plan_res["operation_id"], timeout=import_timeout + 15.0)
         if not atomic_res.get("ok"):
-            err_code = atomic_res.get("error_code", "import_failed")
-            err_msg = str(atomic_res.get("message") or err_code)
-            if err_code == "import_failed" and "timed out" in err_msg.lower():
-                # Soft-timeout recovery, matching the previous behavior: the
-                # Beets CLI process may exceed its timeout while having
-                # still completed the actual mutation. The web manager has
-                # its own authoritative read access to the same Beets
-                # library DB, so check directly rather than treating this
-                # as a hard failure immediately.
-                import_timed_out = True
-                log.append(f"  ⚠ Beets import timed out — checking if files were processed")
-            elif err_code in ("review_required", "identity_mismatch", "stale_source",
-                               "identity_verification_failed"):
-                _review_reasons = {
-                    "review_required": "Could not verify this source's MusicBrainz identity with enough confidence to import automatically.",
-                    "identity_mismatch": "This source's embedded MusicBrainz identity conflicts with the requested target; refusing to import automatically.",
-                    "stale_source": "Source files changed after they were inspected; refusing to import a possibly different set of files.",
-                    "identity_verification_failed": "Could not verify this source's identity against the library database.",
-                }
-                review_reason = _review_reasons[err_code]
+            if atomic_res.get("code") == "not_imported":
+                review_reason = ("Beets could not confidently match this source to the selected "
+                                 "MusicBrainz release.")
                 _maybe_queue_review(
                     aldir,
                     {
@@ -1293,372 +1194,55 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     allow_existing=bool(existing_album_id),
                 )
                 raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
-            else:
-                raise RuntimeError(f"Beets import failed ({err_code}).")
+            # A verification failure after Beets imported (release_group_mismatch,
+            # import_ambiguous) keeps the album rows and sends the folder to review.
+            if atomic_res.get("album_ids"):
+                _keep_for_review(atomic_res.get("error") or "Beets import failed verification.",
+                                 atomic_res["album_ids"])
+            raise RuntimeError(atomic_res.get("error") or "Beets import failed.")
 
-        # atomic_res never carries raw stdout/stderr (SEC-002 Wave 8
-        # sanitization). The previous "already in the library" phrase-
-        # detection cleanup relied on that text and, in the shipped
-        # topology, already had no local view of engine-owned download
-        # paths to act on regardless -- calling it with an empty string
-        # preserves its existing (already inert here) behavior.
-        _delete_if_already_in_library(aldir, "", log)
+        # Beets applied the confirmed Release (tags, file placement, write) and
+        # apply_confirmed_import verified exactly one new album with that
+        # mb_albumid and the planned Release Group. Web Manager does not retag
+        # it (ARCH-024).
+        aid = int(atomic_res["album_id"])
+        log.append(f"[2/3] Beets imported album_id {aid} as release {mb_albumid} "
+                   f"(Release Group {planned_rg}, verified).")
 
-        # ── Find album in DB ───────────────────────────────────────────────────
-        log.append("[2/3] Locating album in library…")
-        album_ids: list = []
-        item_ids: list = []
-        strategy = ""
+        def _needs_review(reason: str) -> None:
+            _keep_for_review(reason, [aid])
 
-        if not import_timed_out and atomic_res.get("ok"):
-            aid = atomic_res.get("album_id")
-            if aid and atomic_res.get("album_id_verified") and not atomic_res.get("album_lookup_failed"):
-                album_ids = [int(aid)]
-                strategy = "engine-verified mb_albumid"
-            else:
-                raise RuntimeError(
-                    "Beets import completed but the engine could not deterministically "
-                    "verify the resulting album; refusing to guess which library row it "
-                    "created."
-                )
-        else:
-            # Soft-timeout recovery: the mutation call itself reported a
-            # timeout, so fall back to a direct, deterministic lookup by
-            # mb_albumid via composite_workflows (the same authoritative key the
-            # engine's own atomic endpoint uses), never a heuristic path/name guess.
-            time.sleep(1)
-            try:
-                mb_albums = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
-                for malb in mb_albums:
-                    m_aid = int(malb.get("id") or 0)
-                    if m_aid:
-                        items = composite_workflows.find_all_items_by_album_id(m_aid)
-                        if items:
-                            album_ids = [m_aid]
-                            strategy = "post-timeout mb_albumid lookup"
-                            break
-            except Exception as ex:
-                log.append(f"  DB warning (post-timeout lookup): {ex}")
-            if not album_ids:
-                raise RuntimeError("import timed out and album was not found in the Beets DB")
-
-        log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
-
-        # ── Retag + rename ────────────────────────────────────────────────────
-        log.append("[3/3] Matching tracks, writing tags, renaming files…")
-        final_album_ids: List[int] = []
-        skipped_album_errors: List[str] = []
-        for aid in album_ids:
-            if existing_album_id and aid == existing_album_id and wanted_tracks:
-                still_missing_before_retag = _wanted_tracks_not_in_album(
-                    existing_album_id, mb_albumid, wanted_tracks, log)
-                if _guard_missing_wanted_tracks_block_retag(still_missing_before_retag):
-                    labels = ", ".join(
-                        _wanted_track_label(t) for t in still_missing_before_retag[:5]
-                    )
-                    _delete_album_items_under_folder(aid, aldir, log)
-                    _delete_staged_import_folder(aldir, log)
-                    raise RuntimeError(
-                        "Downloaded file(s) did not satisfy requested missing "
-                        "MusicBrainz track(s) before retagging; existing "
-                        f"album_id {aid} was left untouched: "
-                        f"{labels or len(still_missing_before_retag)}"
-                    )
-
-            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
-            if not p_res.get("ok") or not p_res.get("operation_id"):
-                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
-            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-            if not app_res.get("ok"):
-                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
-            log.append(f"  Set albums.mb_albumid (id={aid})")
-
-            # Match each track by title similarity against MB release data
-            # (handles filenames like "Artist - Album - %02i{$track} - Title")
-            match_targets = wanted_tracks if (existing_album_id and aid != existing_album_id) else None
-            matched = _match_tracks_from_mb(
-                mb_albumid,
-                aid,
-                log,
-                zero_unmatched=True,
-                target_tracks=match_targets,
-            )
-            if matched < 0:
-                raise RuntimeError(
-                    "MusicBrainz release lookup failed during track matching; "
-                    "refusing to delete imported DB rows."
-                )
-            log.append(f"  → {matched} track(s) matched and numbered from MB.")
-
-            if existing_album_id and aid != existing_album_id and wanted_tracks and matched > 0:
+        if existing_album_id:
+            # Missing-track fill: Beets kept the new files as their own album
+            # (duplicate_action keep); merge them onto the existing album.
+            if wanted_tracks:
                 fp_validation = _validate_wanted_album_items_with_acoustid(
                     aid, mb_albumid, wanted_tracks, log)
                 if not fp_validation.get("ok", True):
-                    labels = []
-                    for mismatch in (fp_validation.get("mismatches") or [])[:5]:
-                        target = mismatch.get("target") or {}
-                        labels.append(
-                            _wanted_track_label({
-                                "disc": target.get("disc", 1),
-                                "track": target.get("track", 0),
-                                "title": target.get("title", ""),
-                            })
-                        )
-                    _delete_album_items_under_folder(aid, aldir, log)
-                    raise RuntimeError(
-                        "AcoustID rejected downloaded file(s) for requested "
-                        "missing MusicBrainz track(s): "
-                        f"{', '.join(labels) if labels else len(fp_validation.get('mismatches') or [])}"
-                    )
+                    _needs_review("AcoustID rejected downloaded file(s) for the requested "
+                                  "missing MusicBrainz track(s).")
+            aid = _merge_imported_album_into_existing(
+                aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
+                replace_existing_item_ids=replace_existing_item_ids)
+            merged = composite_workflows.get_album(aid) or {}
+            if (_s(merged.get("mb_albumid")).strip().lower() != mb_albumid
+                    or _s(merged.get("mb_releasegroupid")).strip().lower() != planned_rg):
+                _needs_review(f"Album_id {aid} does not carry the selected release and "
+                              "Release Group after the merge.")
 
-            if existing_album_id and aid != existing_album_id and matched > 0:
-                merged_aid = _merge_imported_album_into_existing(
-                    aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
-                    replace_existing_item_ids=replace_existing_item_ids)
-                if merged_aid != aid:
-                    aid = merged_aid
-                    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
-                    if not p_res.get("ok") or not p_res.get("operation_id"):
-                        raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid} after merge")
-                    app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-                    if not app_res.get("ok"):
-                        raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid} after merge")
-                    log.append(f"  Set albums.mb_albumid (id={aid}) after merge")
-                    matched = _match_tracks_from_mb(
-                        mb_albumid, aid, log, zero_unmatched=True)
-                    if matched < 0:
-                        raise RuntimeError(
-                            "MusicBrainz release lookup failed during track matching; "
-                            "refusing to delete imported DB rows."
-                        )
-                    log.append(
-                        f"  → {matched} track(s) matched and numbered from MB after merge."
-                    )
-
-            expected_tracks = _mb_release_track_count(mb_albumid, log)
-            if not expected_tracks:
-                raise RuntimeError(
-                    "MusicBrainz release lookup failed during validation; "
-                    "refusing to delete imported DB rows."
-                )
-            actual_tracks = 0
-            try:
-                actual_tracks = len(composite_workflows.find_all_items_by_album_id(aid))
-            except Exception:
-                pass
-            if existing_album_id and aid == existing_album_id and wanted_tracks:
-                still_missing_requested = _wanted_tracks_not_in_album(
-                    existing_album_id, mb_albumid, wanted_tracks, log)
-                if still_missing_requested:
-                    labels = ", ".join(
-                        _wanted_track_label(t) for t in still_missing_requested[:5]
-                    )
-                    _delete_album_items_under_folder(aid, aldir, log)
-                    raise RuntimeError(
-                        "Downloaded file(s) did not satisfy requested missing "
-                        f"MusicBrainz track(s): {labels or len(still_missing_requested)}"
-                    )
-                validation_expected = max(1, min(actual_tracks, expected_tracks))
-                max_allowed = expected_tracks + max(1, expected_tracks // 4)
-            elif existing_album_id and aid == existing_album_id:
-                validation_expected = expected_tracks
-                max_allowed = validation_expected + max(2, validation_expected // 4)
-            else:
-                validation_expected = len(wanted_tracks) if wanted_tracks else expected_tracks
-                max_allowed = validation_expected + max(1 if wanted_tracks else 2, validation_expected // 4)
-                clean_partial_import = (
-                    not wanted_tracks
-                    and actual_tracks < expected_tracks
-                    and (actual_tracks >= min(6, expected_tracks) or (actual_tracks <= 3 and matched >= actual_tracks))
-                    and matched >= max(1, int(math.ceil(actual_tracks * 0.90)))
-                )
-                if clean_partial_import:
-                    validation_expected = max(1, actual_tracks)
-                    max_allowed = expected_tracks + max(1, expected_tracks // 4)
-                    log.append(
-                        "  Clean partial import accepted: "
-                        f"{matched}/{actual_tracks} imported source track(s) "
-                        f"matched the {expected_tracks}-track MusicBrainz release. "
-                        "Unimported release tracks will remain missing."
-                    )
-            min_matched = max(1, min(validation_expected, int(validation_expected * 0.60)))
-            if actual_tracks > max_allowed or matched < min_matched:
-                mismatch_msg = (
-                    f"{actual_tracks} file(s), {matched}/{validation_expected} "
-                    "expected MB track match(es)"
-                )
-                if existing_album_id and aid == existing_album_id:
-                    scan = _source_audio_missing_track_scan(aldir, existing_album_id, mb_albumid, log)
-                    if (scan.get("ok") and scan.get("audio_count")
-                            and not scan.get("useful_files")
-                            and not scan.get("unknown_files")):
-                        log.append(
-                            "[import] Source folder contained no tracks still missing "
-                            "from the existing album; existing library album left untouched."
-                        )
-                        _delete_if_already_in_library(aldir, "already in library", log)
-                        _invalidate_lib_cache()
-                        return
-                    raise RuntimeError(
-                        f"Downloaded files do not match MusicBrainz release and "
-                        f"existing album_id {aid} was left untouched: "
-                        f"{mismatch_msg}"
-                    )
-                _delete_album_ids_from_db([aid], log, delete_files=not source_is_music_library)
-                if len(album_ids) > 1:
-                    skipped_album_errors.append(f"album_id {aid}: {mismatch_msg}")
-                    log.append(
-                        f"  Skipped non-matching sidecar album_id {aid}: {mismatch_msg}"
-                    )
-                    continue
-                raise RuntimeError(
-                    f"Downloaded files do not match MusicBrainz release: {mismatch_msg}"
-                )
-
-            if aid not in final_album_ids:
-                final_album_ids.append(aid)
-
-            # ── Infer intended albumartist from folder structure ──────────────────
-            # mbsync may change "Wiz Khalifa" → "Wiz Khalifa & Curren$y", moving
-            # files out from under the artist folder they belong to in Lidarr.
-            # Priority: explicit override → folder path (if under MUSIC_ROOT).
-            _intended_albumartist = forced_albumartist  # may be "" if not provided
-            if not _intended_albumartist:
-                try:
-                    _music_root_pfx = str(MUSIC_ROOT) + "/"
-                    if aldir.startswith(_music_root_pfx):
-                        _rel_parts = Path(aldir).relative_to(MUSIC_ROOT).parts
-                        if len(_rel_parts) >= 2:   # Artist/Album/...
-                            _intended_albumartist = _artist_folder_name_without_mbid(_rel_parts[0])
-                except Exception:
-                    pass
-
-            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
-            if not p_res.get("ok") or not p_res.get("operation_id"):
-                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
-            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-            if not app_res.get("ok"):
-                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
-
-            # ── Restore albumartist if mbsync changed it ──────────────────────
-            if _intended_albumartist:
-                try:
-                    _cur_album = composite_workflows.get_album(aid)
-                    _cur_aa = (_cur_album.get("albumartist") if _cur_album else "") or ""
-                except Exception:
-                    _cur_aa = ""
-                if _cur_aa != _intended_albumartist:
-                    up_aa = composite_workflows.update_album_metadata(aid, {"albumartist": _intended_albumartist}, force_write_tags=True)
-                    if not up_aa.get("ok"):
-                        raise RuntimeError(f"Engine update albumartist failed for album {aid}")
-                    log.append(
-                        f"  [albumartist] Pinned: '{_cur_aa}' → '{_intended_albumartist}'")
-
-            # Strip any trailing year suffix from album name BEFORE rename so the
-            # path template $album (%left{$year,4}) doesn't produce "Album (2022) (2022)"
-            _strip_year_from_album_name(aid, log)
-
-            up_res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
-            if not up_res.get("ok"):
-                raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
-            rel_res = composite_workflows.relocate_album(aid, mode="rename")
-            if not rel_res.get("ok"):
-                raise RuntimeError(f"Engine relocate_album failed for album {aid}")
-            log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
-
-            # ── Post-move fallback: only inspect this album's current item dirs ──
-            # If a future Beets template/plugin issue leaves unresolved tokens in
-            # filenames, do not sweep the entire artist folder from a single import.
-            try:
-                _cleanup_template_tokens_for_album(aid, log)
-            except Exception as pf_ex:
-                log.append(f"  Post-fix current-album sweep warning: {pf_ex}")
-
-            # Report final filenames
-            try:
-                items3 = composite_workflows.find_all_items_by_album_id(aid)
-                rows3 = sorted(items3, key=lambda it: int(it.get("track") or 0))
-                log.append(f"  ✓ Final file names ({len(rows3)} tracks):")
-                for it in rows3:
-                    pth = it.get("path")
-                    fname = Path(
-                        pth.decode("utf-8", errors="replace") if isinstance(pth, bytes) else str(pth or "")
-                    ).name
-                    trk = int(it.get("track") or 0)
-                    log.append(f"    [{trk:02d}] {fname}")
-            except Exception:
-                pass
-
-        if skipped_album_errors:
-            if final_album_ids:
-                log.append(
-                    "  Ignored non-matching sidecar album(s): "
-                    + "; ".join(skipped_album_errors[:3])
-                )
-            else:
-                raise RuntimeError(
-                    "Downloaded files do not match MusicBrainz release: "
-                    + "; ".join(skipped_album_errors)
-                )
-
-        # Wave 25 Round (independent review): item_ids holds items
-        # _find_ids_in_db found WITHOUT an album_id -- i.e. standalone
-        # tracks Beets did not group into an album row. The previous
-        # version of this loop resolved each item's real album_id (below,
-        # for _strip_year_from_album_name) but then discarded it, passing
-        # the item's own row id to update_album_metadata()/relocate_album()
-        # /plan_album_mb_track_repair() as if it WERE an album_id. Those
-        # functions take an album_id; an item id can numerically collide
-        # with an unrelated album's id, causing wrong-album mutation. Fix:
-        # always use the freshly re-resolved real album_id for every
-        # album-scoped call, never the item id; skip items that genuinely
-        # have no album (there is nothing album-level to repair); and
-        # dedupe so two items sharing the same album are only processed
-        # once.
-        _item_repaired_album_ids: set = set()
-        for iid in item_ids:
-            try:
-                _item_data = composite_workflows.get_item(iid)
-                _real_aid = int(_item_data.get("album_id") or 0) if _item_data else 0
-            except Exception:
-                _real_aid = 0
-            if _real_aid <= 0:
-                # Genuinely standalone track: no album row to repair,
-                # relocate, or MB-track-repair -- album-level operations
-                # do not apply.
-                continue
-            if _real_aid in _item_repaired_album_ids:
-                continue
-            _item_repaired_album_ids.add(_real_aid)
-
-            _strip_year_from_album_name(_real_aid, log)
-
-            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
-            if not p_res.get("ok") or not p_res.get("operation_id"):
-                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {_real_aid}")
-            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-            if not app_res.get("ok"):
-                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {_real_aid}")
-            up_res = composite_workflows.update_album_metadata(_real_aid, {}, force_write_tags=True)
-            if not up_res.get("ok"):
-                raise RuntimeError(f"Engine update_album_metadata failed for album {_real_aid}")
-            rel_res = composite_workflows.relocate_album(_real_aid, mode="rename")
-            if not rel_res.get("ok"):
-                raise RuntimeError(f"Engine relocate_album failed for album {_real_aid}")
-            if _real_aid not in final_album_ids:
-                final_album_ids.append(_real_aid)
-
-        if final_album_ids:
-            album_ids = final_album_ids
-
-        for _mbid_aid in album_ids:
-            _repair_album_mbid_sticking_once(
-                int(_mbid_aid),
-                mb_albumid,
-                log,
-                write_tags=True,
-                cancel_event=cancel_event,
-            )
+        if forced_albumartist:
+            cur = composite_workflows.get_album(aid) or {}
+            if _s(cur.get("albumartist")) != forced_albumartist:
+                up_aa = composite_workflows.update_album_metadata(
+                    aid, {"albumartist": forced_albumartist}, force_write_tags=True)
+                if not up_aa.get("ok"):
+                    raise RuntimeError(f"Engine update albumartist failed for album {aid}")
+                rel_res = composite_workflows.relocate_album(aid, mode="rename")
+                if not rel_res.get("ok"):
+                    raise RuntimeError(f"Engine relocate_album failed for album {aid}")
+                log.append(f"  [albumartist] Set to the requested '{forced_albumartist}'.")
+        log.append("[3/3] Tags and file placement were done by Beets' importer.")
+        album_ids = [aid]
 
         # ── Fetch and embed album art ─────────────────────────────────────────
         # Wave 25 round (independent review): BeetsClient had no
@@ -1701,10 +1285,11 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
-        log.append(f"✓ Done — '{Path(aldir).name}' tagged and renamed to library structure.")
+        log.append(f"✓ Done — '{Path(aldir).name}' imported by Beets"
+                   + (" in place." if source_is_music_library else " into the library structure."))
         return {
             "album_ids": [int(aid) for aid in album_ids if str(aid).isdigit()],
-            "item_ids": [int(iid) for iid in item_ids if str(iid).isdigit()],
+            "item_ids": [],
             "aldir": aldir,
             "mb_albumid": mb_albumid,
             "existing_album_id": int(existing_album_id or 0),
@@ -2708,63 +2293,11 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 # Service behind POST /api/folders/import-with-id (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
-def _release_is_operator_choice(final_release_id: str, final_releasegroup_id: str,
-                                operator_release_id: str, operator_releasegroup_id: str) -> bool:
-    """Music-identity F-1: the Release being stamped is the operator's own
-    choice -- the Release they picked, or one in the Release Group they named
-    -- and not a Release that ``_prefer_album_mb_release`` swapped in."""
-    final_rel = _s(final_release_id).strip().lower()
-    final_rg = _s(final_releasegroup_id).strip().lower()
-    op_rel = _s(operator_release_id).strip().lower()
-    op_rg = _s(operator_releasegroup_id).strip().lower()
-    return bool((op_rel and final_rel == op_rel) or (op_rg and final_rg == op_rg))
-
-
-def _retag_release_operator_selected(album_id: int, *, auto_import: bool, confirmed_album_id: int,
-                                     operator_album_id: int, release_is_operator_choice: bool = True) -> bool:
-    """F-2: the retag stamp may move an album to the selected Release's
-    Release Group only for the album this import verifiably produced or the
-    existing album the operator named -- never for an id found by a guessing
-    strategy, never under auto-import, and never for a Release the operator
-    did not choose (F-1)."""
-    return (release_is_operator_choice and not auto_import and int(album_id or 0) > 0
-            and int(album_id) in (int(confirmed_album_id or 0), int(operator_album_id or 0)))
-
-
-def _stamp_import_release(album_id: int, mb_albumid: str, resolved_releasegroupid: str, log: list, *,
-                          auto_import: bool, confirmed_album_id: int, operator_album_id: int,
-                          operator_release_id: str, operator_releasegroup_id: str) -> Dict[str, Any]:
-    """The import retag's Release stamp (step 3/4). It may move the album to
-    another Release Group only when the album and the Release are both the
-    operator's own choice (QA F-2, music-identity F-1). A refusal is logged
-    with its fixed code and message (F-4); a Release Group change is logged
-    (F-2)."""
-    selected = _retag_release_operator_selected(
-        album_id, auto_import=auto_import, confirmed_album_id=confirmed_album_id,
-        operator_album_id=operator_album_id,
-        release_is_operator_choice=_release_is_operator_choice(
-            mb_albumid, resolved_releasegroupid, operator_release_id, operator_releasegroup_id))
-    try:
-        res = composite_workflows.update_album_metadata(
-            int(album_id), {"mb_albumid": mb_albumid}, release_selected_by_operator=selected)
-    except Exception as exc:
-        log.append(f"  update_album_metadata warning: {type(exc).__name__}")
-        return {"ok": False, "code": "stamp_failed"}
-    res = res if isinstance(res, dict) else {"ok": bool(res)}
-    if not res.get("ok"):
-        log.append(f"  Release ID stamp refused for album {album_id}: "
-                   f"{_s(res.get('code')) or 'refused'}: {_s(res.get('error'))}")
-    elif res.get("release_group_change"):
-        change = res["release_group_change"]
-        log.append(f"  Release Group changed {change.get('from')} -> {change.get('to')} (operator-selected Release)")
-    return res
-
-
 def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
-    """Two-step import for a skipped folder:
-      1. beet import --quiet-fallback asis  (always succeeds, gets files into library)
-      2. beet modify + mbsync + write + move  (applies the confirmed MB album ID)
-    This bypasses the similarity threshold that causes --search-id to skip in quiet mode.
+    """Import a folder as a confirmed MusicBrainz Release with Beets' own
+    importer (beet import -q --search-id). Beets applies the Release and
+    places the files; a source Beets would not confidently match is skipped
+    and goes to review. Web Manager does not retag afterwards (ARCH-024).
     Body: {
       "path": "/data/torrents/music/...",
       "mb_albumid": "representative-release-uuid",
@@ -2815,9 +2348,6 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     queue_review_on_uncertain = payload.get("queue_review", True) is not False
     light_confirm = bool(payload.get("light_confirm"))
     auto_import = bool(payload.get("auto_import"))
-    # F-2: only an id the operator sent may follow the selected Release into
-    # another Release Group -- never a guessed id, never under auto-import.
-    operator_album_id = 0 if auto_import else existing_album_id
     review_item_id = _s(payload.get("review_item_id")).strip()
     auto_import_idempotency_key = _s(payload.get("auto_import_idempotency_key")).strip()
     trigger_plex_refresh_after = bool(payload.get("trigger_plex"))
@@ -2909,25 +2439,6 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # re-tagging/re-validating a folder that is already inside the music
         # library, as opposed to importing from staging/downloads.
         source_is_library = _path_is_under(Path(folder_path), Path(music_root))
-        # Wave 25 Docker acceptance round (third NameError found by the same
-        # real fresh-import scenario): already_present/combined are
-        # referenced much further below by a legacy "beet reported nothing
-        # to import" phrase-matching fallback (_delete_if_already_in_library
-        # searches raw beet CLI stdout for phrases like "already in the
-        # library"). That mechanism predates the import_folder_v1 engine
-        # migration -- the controlled composite_workflows.plan_import_folder /
-        # apply_import_folder path no longer exposes raw beet stdout to
-        # app.py at all, so there is no text left to phrase-match, and
-        # fabricating a signal here would be dishonest. Defaulting both
-        # False/"" keeps that specific legacy fallback inert rather than
-        # crashing; a genuinely already-imported source is still found by
-        # the real library lookups (strategies A-G below, which query by MB
-        # identity/path/name), and the one real remaining gap -- a source
-        # where none of those find a match because nothing was ever
-        # imported -- is now an honest error instead of a NameError.
-        already_present = False
-        combined = ""
-
         if input_looks_like_release_group:
             resolved_release = _resolve_album_release_for_import(
                 mb_albumid,
@@ -2949,320 +2460,6 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 f"{resolved_release} for selected release group {selected_releasegroupid}."
             )
             mb_albumid = resolved_release
-
-        def _find_ids_in_db(path_prefix: str, since: float = 0.0):
-            """Return (album_ids, item_ids) from beets SQLite via composite_workflows."""
-            try:
-                res = composite_workflows.resolve_folder_to_albums(path_prefix, since=since if since else None)
-                return res.get("album_ids", []), res.get("item_ids", [])
-            except Exception as ex:
-                log.append(f"  DB query warning: {ex}")
-                return [], []
-
-        def _album_match_summary(album_db_id: int) -> Dict[str, Any]:
-            """Compare imported item titles to the requested MB release before retagging."""
-            mb = _fetch_mb_release_tracklist(mb_albumid, log)
-            if not mb.get("ok"):
-                raise RuntimeError(mb.get("error") or "MusicBrainz release lookup failed")
-            mb_tracks = mb.get("tracks") or []
-            try:
-                raw_items = composite_workflows.find_all_items_by_album_id(album_db_id)
-                rows = sorted(
-                    raw_items,
-                    key=lambda it: (
-                        int(it.get("disc") or 1),
-                        int(it.get("track") or 0),
-                        _s(it.get("title") or ""),
-                        int(it.get("id") or 0),
-                    ),
-                )
-                album_row = composite_workflows.get_album(album_db_id)
-            except Exception as ex:
-                raise RuntimeError(f"Could not validate imported album: {ex}")
-
-            matched_indices: set = set()
-            unmatched = 0
-            duplicate_matches = 0
-            best_lines: List[str] = []
-            imported_audio_paths: List[str] = []
-            for row in rows:
-                raw_path = _s(row.get("path"))
-                file_name = Path(raw_path).name if raw_path else ""
-                if raw_path:
-                    fpath_for_fp = Path(raw_path)
-                    if not fpath_for_fp.is_absolute():
-                        fpath_for_fp = Path(music_root) / raw_path
-                    if fpath_for_fp.exists():
-                        imported_audio_paths.append(str(fpath_for_fp))
-                item = {
-                    "id": int(row.get("id") or 0),
-                    "title": _s(row.get("title")),
-                    "track": int(row.get("track") or 0),
-                    "disc": int(row.get("disc") or 1),
-                    "path": raw_path,
-                    "mb_trackid": _s(row.get("mb_trackid")).strip().lower(),
-                    "length": float(row.get("length") or 0),
-                }
-                best = _best_album_track_match(item, mb_tracks)
-                idx = int(best.get("idx", -1))
-                score = float(best.get("score") or 0.0)
-                title_score = float(best.get("title_score") or 0.0)
-                fp = _album_track_fingerprint_check(item, mb_tracks)
-                if fp.get("status") == AcoustIDStatus.CONFLICT:
-                    unmatched += 1
-                elif (
-                    (best.get("exact_mbid") and title_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD)
-                    or (not best.get("exact_mbid") and score >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD)
-                ):
-                    if idx >= 0 and idx not in matched_indices:
-                        matched_indices.add(idx)
-                    else:
-                        duplicate_matches += 1
-                        unmatched += 1
-                else:
-                    unmatched += 1
-                if len(best_lines) < 4:
-                    mbt = best.get("track") or {}
-                    mb_disc = int(mbt.get("disc") or 1)
-                    mb_track = int(mbt.get("track") or 0)
-                    mb_pos = f"d{mb_disc}t{mb_track:02d}" if mb_disc > 1 else f"{mb_track:02d}"
-                    file_part = f"file={file_name!r} " if file_name else ""
-                    best_lines.append(
-                        f"    {file_part}current={item['title']!r} -> "
-                        f"selected MB #{mb_pos} {mbt.get('title','?')!r} ({score:.0%})"
-                    )
-            expected = len(mb_tracks)
-            actual = len(rows)
-            matches = len(matched_indices)
-            acoustid_release_hits: Dict[str, int] = {}
-            if imported_audio_paths:
-                try:
-                    acoustid_release_hits = _acoustid_multi_file(imported_audio_paths)
-                except Exception as ex:
-                    log.append(f"  Validation AcoustID warning: {ex}")
-            target_mbid = _s(mb_albumid).strip().lower()
-            acoustid_target_hits = 0
-            acoustid_top_release = ""
-            acoustid_top_hits = 0
-            if acoustid_release_hits:
-                acoustid_target_hits = sum(
-                    int(hits or 0)
-                    for rid, hits in acoustid_release_hits.items()
-                    if _s(rid).strip().lower() == target_mbid
-                )
-                acoustid_top_release, acoustid_top_hits = max(
-                    acoustid_release_hits.items(),
-                    key=lambda item: int(item[1] or 0),
-            )
-            min_required = max(1, min(expected or actual or 1, int((expected or actual or 1) * 0.60)))
-            max_allowed = (expected + max(1, expected // 4)) if expected else actual
-            extra_unmatched = max(0, unmatched, actual - expected)
-            clean_partial_import = bool(
-                expected
-                and actual < expected
-                and (actual >= min(6, expected) or (actual <= 3 and matches >= actual))
-                and matches >= max(1, int(math.ceil(actual * 0.90)))
-                and unmatched == 0
-                and duplicate_matches == 0
-            )
-            selected_subset_ok = bool(
-                selected_subset_import
-                and actual > 0
-                and matches >= max(1, int(math.ceil(actual * 0.90)))
-                and unmatched == 0
-                and duplicate_matches == 0
-            )
-            acoustid_mismatch = bool(
-                target_mbid
-                and acoustid_top_release
-                and _s(acoustid_top_release).strip().lower() != target_mbid
-                and int(acoustid_target_hits or 0) == 0
-            )
-            ok = matches >= min_required or clean_partial_import or selected_subset_ok
-            if expected and actual > expected and (unmatched or duplicate_matches):
-                ok = False
-            if expected and actual > max_allowed:
-                ok = False
-            if acoustid_mismatch:
-                ok = False
-            album_name = _s(album_row["album"]) if album_row else ""
-            albumartist = _s(album_row["albumartist"]) if album_row else ""
-            return {
-                "ok": ok,
-                "matches": matches,
-                "unmatched": unmatched,
-                "duplicate_matches": duplicate_matches,
-                "extra_unmatched": extra_unmatched,
-                "expected": expected,
-                "actual": actual,
-                "min_required": min_required,
-                "max_allowed": max_allowed,
-                "clean_partial_import": clean_partial_import,
-                "selected_subset_import": selected_subset_ok,
-                "missing_expected_tracks": max(0, expected - actual),
-                "album": album_name,
-                "albumartist": albumartist,
-                "release_title": mb.get("release_title", ""),
-                "release_artist": mb.get("release_artist", ""),
-                "acoustid_release_hits": acoustid_release_hits,
-                "acoustid_target_hits": int(acoustid_target_hits or 0),
-                "acoustid_top_release": acoustid_top_release,
-                "acoustid_top_hits": int(acoustid_top_hits or 0),
-                "acoustid_mismatch": acoustid_mismatch,
-                "examples": best_lines,
-            }
-
-        def _cleanup_failed_import_copy(album_db_id: int) -> None:
-            """Remove a failed copy-mode import only when the original source still exists.
-
-            Wave 25 round (independent review): this previously deleted each
-            item's file via a generic, DB-unaware engine delete-file call
-            BEFORE calling plan_album_cleanup/apply_album_cleanup -- but
-            album_cleanup_v1's own Apply already deletes both the DB rows
-            AND the on-disk files itself (symlink-checked, TOCTOU-
-            precondition-rechecked, step-tracked), per its own contract
-            ("Create transaction plan for deleting an album from Beets DB
-            and disk"). The manual pre-delete loop was therefore redundant
-            AND bypassed that transaction's own safety checks for the file
-            half of the deletion (the files were gone before Apply's own
-            symlink/TOCTOU checks ever ran on them). Let the existing
-            transaction do the whole job instead of duplicating it unsafely.
-            """
-            if source_is_library:
-                log.append("  Failed import cleanup skipped: source is already under the music library")
-                return
-            if use_move or not Path(folder_path).exists():
-                log.append("  Failed import cleanup skipped: source folder is not safely preserved")
-                return
-            try:
-                rows = composite_workflows.find_all_items_by_album_id(album_db_id)
-                if not rows:
-                    return
-                stale = [
-                    r for r in rows
-                    if not r.get("added") or float(r.get("added") or 0) < t_before
-                ]
-                if stale:
-                    log.append(
-                        "  Failed import cleanup skipped: album rows were not created by this job")
-                    return
-                # LT-17: row-only. The imported files are never deleted here;
-                # they stay where Beets put them (untracked) for review.
-                app_res = composite_workflows.remove_album_rows_after_failed_import(
-                    album_db_id, reason="failed import validation (copied import)")
-                if not app_res.get("ok"):
-                    raise RuntimeError(app_res.get("error") or f"Row removal failed for album {album_db_id}")
-                log.append(f"  Removed failed import's Beets rows: album_id {album_db_id}; "
-                           "its files were kept on disk (untracked) for review")
-            except Exception as ex:
-                log.append(f"  Failed import cleanup warning: {ex}")
-
-        def _rollback_failed_library_source_import(album_db_id: int) -> bool:
-            """Undo DB rows created by a failed validation of a library-source folder."""
-            if not source_is_library or not album_db_id:
-                return False
-            source_root = Path(folder_path).resolve(strict=False)
-            try:
-                rows = composite_workflows.find_all_items_by_album_id(album_db_id)
-                if not rows:
-                    return False
-                for row in rows:
-                    try:
-                        added = float(row.get("added") or 0)
-                    except Exception:
-                        added = 0.0
-                    if added < t_before:
-                        log.append(
-                            "  Failed library import DB rollback skipped: "
-                            f"album_id {album_db_id} has older item rows"
-                        )
-                        return False
-                    raw_path = _s(row.get("path"))
-                    fpath = Path(raw_path)
-                    if not fpath.is_absolute():
-                        fpath = Path(music_root) / raw_path
-                    try:
-                        fpath.resolve(strict=False).relative_to(source_root)
-                    except Exception:
-                        log.append(
-                            "  Failed library import DB rollback skipped: "
-                            f"item path is outside source folder ({fpath})"
-                        )
-                        return False
-                # LT-17: these are the operator's own library files -- remove
-                # the rows this failed validation created, never the files.
-                app_res = composite_workflows.remove_album_rows_after_failed_import(
-                    album_db_id, reason="failed library-source import validation")
-                if not app_res.get("ok"):
-                    raise RuntimeError(f"Row removal failed for album {album_db_id}: {app_res.get('error')}")
-                log.append(
-                    "  Rolled back failed library-source import DB rows for "
-                    f"album_id {album_db_id}; source files were kept on disk"
-                )
-                return True
-            except Exception as ex:
-                log.append(f"  Failed library import DB rollback warning: {ex}")
-            return False
-
-        def _queue_failed_library_source_review(summary: Dict[str, Any]) -> bool:
-            release_name = " - ".join(
-                v for v in (
-                    _s(summary.get("release_artist", "")).strip(),
-                    _s(summary.get("release_title", "")).strip(),
-                ) if v
-            )
-            reason = (
-                "Selected MusicBrainz release did not match this library folder "
-                f"({int(summary.get('matches') or 0)}/"
-                f"{int(summary.get('expected') or summary.get('actual') or 0)} "
-                f"track(s) matched, {int(summary.get('actual') or 0)} file(s) present). "
-                "The failed Beets DB rows were rolled back; choose the correct release "
-                "before importing or deleting the source folder."
-            )
-            if release_name:
-                reason = f"Selected MusicBrainz release ({release_name}) did not match this library folder " + reason.split("this library folder ", 1)[1]
-            preflight = {
-                "ok": False,
-                "matches": int(summary.get("matches") or 0),
-                "expected": int(summary.get("expected") or 0),
-                "audio_count": int(summary.get("actual") or 0),
-                "min_required": int(summary.get("min_required") or 0),
-                "release_title": summary.get("release_title", ""),
-                "release_artist": summary.get("release_artist", ""),
-                "acoustid_mismatch": bool(summary.get("acoustid_mismatch")),
-                "acoustid_target_hits": int(summary.get("acoustid_target_hits") or 0),
-                "acoustid_top_release": summary.get("acoustid_top_release", ""),
-                "acoustid_top_hits": int(summary.get("acoustid_top_hits") or 0),
-                "examples": summary.get("examples") or [],
-            }
-            sug = dict(ai_suggestion or {})
-            sug.update({
-                "mb_albumid": mb_albumid,
-                "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                "mb_releasegroupid": selected_releasegroupid,
-                "mb_releasegroup_url": (
-                    f"https://musicbrainz.org/release-group/{selected_releasegroupid}"
-                    if selected_releasegroupid else ""
-                ),
-                "mb_valid": bool(_MB_UUID_RE.match(_s(mb_albumid).strip().lower())),
-                "confidence": "low",
-                "albumartist": summary.get("albumartist") or Path(folder_path).parent.name,
-                "album": summary.get("album") or Path(folder_path).name,
-                "reason": reason,
-            })
-            evidence = _ai_match_evidence_packet(
-                "light_confirm",
-                folder_path=folder_path,
-                suggestion=sug,
-                folder_evidence=_build_folder_evidence(folder_path),
-                preflight=preflight,
-                wanted_tracks=wanted_tracks,
-                reason=reason,
-            )
-            return _queue_folder_for_manual_review(
-                folder_path, sug, reason, log,
-                allow_existing=True, evidence=evidence,
-            )
 
         def _handoff_existing_album_import(candidate_album_ids: List[int]) -> bool:
             """Handle Beets album-duplicate skips as an existing-album missing-track import."""
@@ -3443,10 +2640,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "torrent root; using --copy so qBittorrent source files remain."
             )
         import_mode = "--move" if selected_subset_import else ("--copy" if preserve_torrent_source or not use_move else "--move")
-        # Music-identity F-1: what the operator chose, before any preference swap.
-        operator_release_id = _s(mb_albumid).strip().lower()
-        operator_releasegroup_id = _s(selected_releasegroupid).strip().lower()
-        mb_albumid = _prefer_album_mb_release(mb_albumid, log)
+        # The confirmed Release is imported as confirmed: never swapped for
+        # another Release (or Release Group) here.
         mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
         if not mb_identity.get("ok"):
             raise RuntimeError(
@@ -3461,8 +2656,11 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         if resolved_releasegroupid and not selected_releasegroupid:
             selected_releasegroupid = resolved_releasegroupid
-        if selected_releasegroupid:
-            log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
+        if not selected_releasegroupid:
+            raise RuntimeError(
+                "The Release Group of the selected MusicBrainz release is unknown, so the "
+                "import could not be verified. Import was not started.")
+        log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
         if selected_subset_import:
             active_selected_source_files = _filter_import_review_selected_audio_files(selected_source_files, log)
             log.append("  [audio] Selected partial-import files passed pre-stage audio validation.")
@@ -3476,8 +2674,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         else:
             _validate_import_source_audio(folder_path, log, reject_downloads=True)
-        log.append(f"[1/4] Importing '{Path(folder_path).name}' with MB ID {mb_albumid}…")
-        t_before = time.time() - 5
+        log.append(f"[1/2] Importing '{Path(folder_path).name}' with MB ID {mb_albumid}…")
         import_timeout = _beet_import_timeout(import_folder_path)
 
         # Wave 25 Round 3: routed through confirmed_import_v1, NOT
@@ -3500,7 +2697,11 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "mb_releasegroupid": selected_releasegroupid,
             "mb_release_group_resolved": resolved_releasegroupid,
             "mb_tracks": mb_identity.get("tracks") or [],
-            "use_move": use_move,
+            # The mode decided above: a preserved torrent source is copied.
+            "use_move": import_mode == "--move",
+            # A folder already inside the library is imported where it is.
+            "in_place": source_is_library and not selected_subset_import,
+            "duplicate_action": "keep" if existing_album_id else "skip",
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
@@ -3520,6 +2721,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         try:
             apply_res = composite_workflows.apply_confirmed_import(
                 plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
+                timeout=import_timeout + 15.0,
             )
         except (BeetsError, BeetsUnavailableError) as ex:
             diag = getattr(ex, "diagnostics", None) or {}
@@ -3530,416 +2732,29 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if diag.get("stderr_excerpt"):
                 log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
             raise
-        log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+        if not apply_res.get("ok"):
+            reason = apply_res.get("error") or "Beets import failed."
+            kept_ids = apply_res.get("album_ids") or []
+            if kept_ids:
+                # Verification failed after Beets imported: keep the rows (a
+                # removal goes through preview/approve) and send the folder to review.
+                reason = (f"{reason} Album_id {', '.join(str(i) for i in kept_ids)} "
+                          "was left in the library for review.")
+                _queue_folder_for_manual_review(
+                    folder_path, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                                  "kept_album_ids": kept_ids, "reason": reason},
+                    reason, log, allow_existing=True)
+            raise RuntimeError(reason)
+        log.append(f"[import] Beets import completed: {import_folder_path}")
         if apply_res.get("resumed"):
             log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")
-        confirmed_import_album_id = int(apply_res.get("album_id") or 0)
-        confirmed_import_item_ids = [int(i) for i in (apply_res.get("item_ids") or [])]
-
-        # ── Step 2: find the album ─────────────────────────────────────────────
-        log.append("[2/4] Locating album in library…")
-        time.sleep(1)
-
-        # confirmed_import_v1's Apply already performed authoritative,
-        # verified result capture (queried the library by the exact planned
-        # Release ID, confirmed items and files exist on disk) -- trust
-        # that directly rather than re-discovering it through the broad
-        # heuristic strategies below, which exist to cover cases this
-        # deterministic result does not (kept as a defensive fallback, not
-        # the primary path, now that a real verified result is available).
-        if confirmed_import_album_id > 0:
-            album_ids, item_ids = [confirmed_import_album_id], list(confirmed_import_item_ids)
-            strategy = "confirmed_import_v1 verified result"
-        else:
-            album_ids, item_ids = [], []
-            strategy = ""
-
-        # A: items still in the import source folder
-        if not album_ids and not item_ids:
-            album_ids, item_ids = _find_ids_in_db(import_folder_path)
-            strategy = (
-                "source path (library)" if source_is_library
-                else "source path (selected subset)" if selected_subset_import
-                else "source path (downloads)"
-            )
-
-        # B: items recently copied to the music library
-        if not album_ids and not item_ids:
-            album_ids, item_ids = _find_ids_in_db(music_root, since=t_before)
-            strategy = "recently added to music library"
-
-        # C: exact MusicBrainz identity lookup before broad artist-folder scans.
-        if not album_ids and not item_ids:
-            album_ids = _library_album_ids_for_musicbrainz(mb_albumid, selected_releasegroupid)
-            if album_ids:
-                strategy = "existing MusicBrainz release/release-group ID"
-        # D: music root path candidates — try artist/album subfolders
-        if not album_ids and not item_ids:
-            folder_name = Path(folder_path).name
-            artist_name  = Path(folder_path).parent.name
-            for candidate in [
-                f"{music_root}/{artist_name}/{folder_name}",
-                f"{music_root}/{folder_name}",
-                f"{music_root}/{artist_name}",
-            ]:
-                album_ids, item_ids = _find_ids_in_db(candidate)
-                if album_ids or item_ids:
-                    strategy = f"music path ({candidate})"
-                    break
-
-        # E: search by album TEXT field in SQLite (no path / time constraints)
-        #    Handles "already in library" where beets renamed the folder
-        album_guess  = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '',
-                              Path(folder_path).name).strip()
-        album_guess = _restore_time_colon_title(album_guess)
-        artist_guess = Path(folder_path).parent.name
-        if not album_ids and not item_ids:
-            try:
-                found_items = composite_workflows.find_items_by_query(f"album:{album_guess}", limit=200)
-                if not found_items and artist_guess.lower() not in {
-                        "music","torrents","downloads","data","failed_imports"}:
-                    found_items = composite_workflows.find_items_by_query(f"album:{album_guess} artist:{artist_guess}", limit=200)
-                for row in found_items:
-                    row_aid = row.get("album_id")
-                    row_id = row.get("id")
-                    if row_aid and row_aid not in album_ids:
-                        album_ids.append(row_aid)
-                    elif not row_aid and row_id not in item_ids:
-                        item_ids.append(row_id)
-                if album_ids or item_ids:
-                    strategy = f"album name ({album_guess!r})"
-            except Exception as ex:
-                log.append(f"  Strategy H warning: {ex}")
-
-        # F: search by the target mb_albumid itself (album was already correctly tagged)
-        if not album_ids and not item_ids:
-            try:
-                _e_rows = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
-                for _row in _e_rows:
-                    _aid = int(_row.get("id") or 0)
-                    if _aid and _aid not in album_ids:
-                        album_ids.append(_aid)
-                if album_ids:
-                    strategy = f"existing mb_albumid={mb_albumid[:8]}…"
-            except Exception as ex:
-                log.append(f"  Strategy F warning: {ex}")
-
-        # G: LIKE fuzzy on album name (handles "(Taped Over)" suffix mismatches)
-        if not album_ids and not item_ids:
-            try:
-                found_items = composite_workflows.find_items_by_query(f"album:{album_guess}", limit=200)
-                if found_items and artist_guess.lower() not in {
-                        "music","torrents","downloads","data","failed_imports","ye","kanye"}:
-                    found_items = [r for r in found_items if r.get("album_id") is not None]
-                for row in found_items:
-                    row_aid = row.get("album_id")
-                    row_id = row.get("id")
-                    if row_aid and row_aid not in album_ids:
-                        album_ids.append(row_aid)
-                    elif not row_aid and row_id not in item_ids:
-                        item_ids.append(row_id)
-                if album_ids or item_ids:
-                    strategy = f"fuzzy album name ({album_guess!r})"
-            except Exception as ex:
-                log.append(f"  Strategy G warning: {ex}")
-
-        # H: albumartist search — last resort when album title was renamed by beets
-        if not album_ids and not item_ids and already_present and \
-                artist_guess.lower() not in {"music","torrents","downloads","data","failed_imports"}:
-            try:
-                found_items = composite_workflows.find_items_by_query(f"albumartist:{artist_guess}", limit=50)
-                if not found_items:
-                    found_items = composite_workflows.find_items_by_query(f"artist:{artist_guess}", limit=50)
-                for row in found_items:
-                    row_aid = row.get("album_id")
-                    if row_aid and row_aid not in album_ids:
-                        album_ids.append(row_aid)
-                if album_ids:
-                    strategy = f"albumartist ({artist_guess!r}) — pick correct album below"
-                    # Narrow to most likely match if multiple albums exist
-                    if len(album_ids) > 1:
-                        try:
-                            best, best_score = album_ids[0], 0
-                            for aid in album_ids:
-                                _ag_row = composite_workflows.get_album(aid)
-                                _ag_name = (_ag_row.get("album") if _ag_row else "") or ""
-                                from difflib import SequenceMatcher as _SM2
-                                sc = _SM2(None, album_guess.lower(),
-                                          _ag_name.lower()).ratio()
-                                if sc > best_score:
-                                    best_score, best = sc, aid
-                            album_ids = [best]
-                            strategy = f"albumartist+fuzzy ({artist_guess!r}/{album_guess!r})"
-                        except Exception:
-                            album_ids = album_ids[:1]
-            except Exception as ex:
-                log.append(f"  Strategy H warning: {ex}")
-
-        if not album_ids and not item_ids:
-            # Strategy I: when beet said "no files imported" / "already in library",
-            # try locating the existing library album directly by the provided MB albumid.
-            # This handles the case where the folder name doesn't match the stored album
-            # name (e.g. "1999 - Californication" vs "Californication") or the files were
-            # already moved to the library by a previous import.
-            if already_present and mb_albumid:
-                try:
-                    _h_rows = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
-                    for _row in _h_rows:
-                        _aid = int(_row.get("id") or 0)
-                        if _aid and _aid not in album_ids:
-                            album_ids.append(_aid)
-                    if album_ids:
-                        strategy = f"existing mb_albumid in library (Strategy I)"
-                        log.append(f"  Strategy I: found album by mb_albumid in library")
-                except Exception as _hex:
-                    log.append(f"  Strategy I warning: {_hex}")
-
-        if not album_ids and not item_ids:
-            if already_present:
-                # Nothing found anywhere, but beet confirmed the selected files are already present.
-                _delete_if_already_in_library(folder_path, combined, log)
-                _remove_pending_review_for_path(folder_path, log)
-                log.append("Album already in library — source cleaned up.")
-                return {"status": "already_in_library"}
-            log.append("ERROR: could not find album in library after import. "
-                       "The import may have silently failed. Check beet.log for details.")
-            raise RuntimeError("could not find album in library after import")
-
-        if album_ids:
-            log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
-        else:
-            log.append(f"Found {len(item_ids)} item(s) (no album grouping) via {strategy}")
-
-        if album_ids:
-            candidate_album_ids = [int(aid) for aid in album_ids]
-            validated_album_ids: List[int] = []
-            validation_errors: List[str] = []
-            failed_library_source_summaries: List[Dict[str, Any]] = []
-            rolled_back_failed_library_source = False
-            for aid in album_ids:
-                if strategy == "confirmed_import_v1 verified result":
-                    # Already authoritatively verified server-side inside
-                    # execute_confirmed_import_apply()'s post-import
-                    # capture (exact planned Release ID + RGID match,
-                    # items/files confirmed on disk) via structured
-                    # library queries. Re-deriving that here through
-                    # _album_match_summary() would be redundant at best --
-                    # and structurally broken at worst, since it depends
-                    # on raw SQL through _db(), which is intentionally
-                    # disabled in the two-service topology
-                    # (BeetsClient.raw_sqlite_query always raises "Raw
-                    # SQLite queries are not permitted"). Trust the
-                    # already-verified result directly instead of
-                    # re-deriving it through a path that can never
-                    # succeed here.
-                    log.append(
-                        f"  Album {aid} already verified by confirmed_import_v1 "
-                        "(exact planned release match) — skipping redundant re-validation."
-                    )
-                    validated_album_ids.append(aid)
-                    continue
-                summary = _album_match_summary(int(aid))
-                log.append(
-                    f"  Validation album_id {aid}: {summary['matches']}/"
-                    f"{summary['expected'] or summary['actual']} track(s) match requested MB release"
-                    f" ({summary['actual']} file(s) in album)"
-                )
-                if summary.get("ok"):
-                    if summary.get("clean_partial_import"):
-                        log.append(
-                            "  Clean partial import accepted: "
-                            f"{summary['matches']}/{summary['actual']} imported source track(s) "
-                            f"matched the {summary['expected']}-track MusicBrainz release. "
-                            f"{summary.get('missing_expected_tracks', 0)} release track(s) remain missing."
-                        )
-                    validated_album_ids.append(aid)
-                    continue
-                if summary.get("extra_unmatched"):
-                    log.append(
-                        f"  Release mismatch: {summary['extra_unmatched']} extra file(s) "
-                        "did not map to the selected MusicBrainz release"
-                    )
-                release_name = " - ".join(
-                    v for v in (
-                        _s(summary.get("release_artist", "")).strip(),
-                        _s(summary.get("release_title", "")).strip(),
-                    ) if v
-                )
-                if release_name:
-                    log.append(f"  Selected MB release: {release_name}")
-                log.append(
-                    f"  Imported as: {summary.get('albumartist','')} - {summary.get('album','')}")
-                if summary.get("acoustid_top_release"):
-                    status = "mismatch" if summary.get("acoustid_mismatch") else "checked"
-                    log.append(
-                        f"  AcoustID {status}: selected release "
-                        f"{summary.get('acoustid_target_hits', 0)} hit(s), "
-                        f"top release {summary.get('acoustid_top_release')} "
-                        f"{summary.get('acoustid_top_hits', 0)} hit(s)"
-                    )
-                if summary.get("examples"):
-                    log.append("  Track comparison (current file/tag -> selected MB track):")
-                for line in summary.get("examples") or []:
-                    log.append(line)
-                if source_is_library:
-                    failed_library_source_summaries.append(summary)
-                    rolled_back_failed_library_source = (
-                        _rollback_failed_library_source_import(int(aid))
-                        or rolled_back_failed_library_source
-                    )
-                else:
-                    _cleanup_failed_import_copy(int(aid))
-                validation_errors.append(
-                    f"album_id {aid} matched {summary['matches']}/"
-                    f"{summary['expected'] or summary['actual']} track(s), "
-                    f"{summary['actual']} file(s) present"
-                )
-            album_ids = validated_album_ids
-            if not album_ids and not item_ids:
-                if source_is_library and rolled_back_failed_library_source and failed_library_source_summaries:
-                    if _queue_failed_library_source_review(failed_library_source_summaries[0]):
-                        _invalidate_lib_cache()
-                        return {
-                            "status": "queued_for_review",
-                            "reason": "library_source_validation_failed",
-                        }
-                if (already_present or source_is_library) and _handoff_existing_album_import(candidate_album_ids):
-                    _invalidate_lib_cache()
-                    return
-                raise RuntimeError(
-                    "Imported files do not match the selected MusicBrainz release "
-                    f"({'; '.join(validation_errors)})"
-                )
-
-        def _apply_verified_review_track_mapping(album_db_id: int) -> int:
-            importable_rows = [
-                row for row in raw_track_mapping
-                if isinstance(row, dict)
-                and _s(row.get("status")).strip().lower() in _IMPORT_REVIEW_IMPORTABLE_STATUSES
-            ]
-            if not (auto_import and selected_subset_import and importable_rows):
-                return 0
-            mapped_by_name: Dict[str, Dict[str, Any]] = {}
-            for row in importable_rows:
-                source_name = Path(_s(row.get("source_path")).strip()).name.casefold()
-                if source_name:
-                    mapped_by_name[source_name] = row
-            if not mapped_by_name:
-                return 0
-            updated = 0
-            try:
-                item_rows = composite_workflows.find_all_items_by_album_id(album_db_id)
-            except Exception as ex:
-                log.append(f"  Verified review mapping warning: {ex}")
-                return 0
-            for item_row in item_rows:
-                try:
-                    item_name = Path(_s(item_row.get("path"))).name.casefold()
-                    mapping = mapped_by_name.get(item_name)
-                    if not mapping:
-                        continue
-                    track_num = int(mapping.get("num") or mapping.get("track") or 0)
-                    disc_num = int(mapping.get("disc") or 1)
-                    mb_trackid = _s(mapping.get("mb_trackid") or mapping.get("recording_id")).strip().lower()
-                    title = _s(mapping.get("mb_title") or mapping.get("title") or mapping.get("local_title")).strip()
-                    updates: Dict[str, Any] = {}
-                    if track_num > 0:
-                        updates["track"] = track_num
-                    if disc_num > 0:
-                        updates["disc"] = disc_num
-                    if mb_trackid:
-                        updates["mb_trackid"] = mb_trackid
-                    if title:
-                        updates["title"] = title
-                    clean = {k: v for k, v in updates.items() if k in {"track", "disc", "mb_trackid", "title"}}
-                    if not clean:
-                        continue
-                    try:
-                        res = composite_workflows.update_item_metadata(
-                            int(item_row["id"]),
-                            clean,
-                            force_write_tags=False,
-                            write_tags=False,
-                        )
-                    except (BeetsUnavailableError, BeetsError) as ex:
-                        log.append(f"  Verified review mapping engine warning: {ex}")
-                        return updated
-                    if not res.get("ok"):
-                        log.append(f"  Verified review mapping engine warning: {res.get('error') or 'item metadata update rejected'}")
-                        return updated
-                    updated += int(res.get("item_fields_changed") or 0) or 1
-                except Exception as ex:
-                    # Regression guard: this loop used to run inside one
-                    # broad try/except (raw SQL UPDATE path). Migrating to
-                    # per-item engine calls must not let one malformed
-                    # mapping row (bad int(), missing key, etc.) raise
-                    # uncaught out of this helper and abort the whole
-                    # import job -- skip the row and keep going.
-                    log.append(f"  Verified review mapping warning for item {item_row['id']}: {ex}")
-                    continue
-            if updated:
-                log.append(f"  Applied verified Import Review track mapping to {updated} item(s).")
-            return updated
-
-        def _retag(query_flag: str, label: str, album_db_id=None):
-            """Stamp mb_albumid → fetch MB data → match tracks by title → write + move via engine transaction."""
-            log.append(f"[3/4] Setting mb_albumid on {label} via engine transaction…")
-            if album_db_id is not None:
-                aid = int(album_db_id)
-                _stamp_import_release(
-                    aid, mb_albumid, resolved_releasegroupid, log, auto_import=auto_import,
-                    confirmed_album_id=confirmed_import_album_id, operator_album_id=operator_album_id,
-                    operator_release_id=operator_release_id, operator_releasegroup_id=operator_releasegroup_id)
-
-                verified_mapping_count = _apply_verified_review_track_mapping(aid)
-                importable_mapping_count = sum(
-                    1 for row in raw_track_mapping
-                    if isinstance(row, dict)
-                    and _s(row.get("status")).strip().lower() in _IMPORT_REVIEW_IMPORTABLE_STATUSES
-                )
-                if verified_mapping_count and verified_mapping_count >= importable_mapping_count:
-                    log.append("[3/4] Reused verified Import Review track mapping; skipped broad MB title rematch.")
-                else:
-                    log.append("[3/4] Matching tracks from MusicBrainz release data…")
-                    matched = _match_tracks_from_mb(mb_albumid, aid, log)
-                    log.append(f"  → {matched} track(s) matched and updated.")
-
-                log.append("[3/4] Syncing album metadata from MusicBrainz via engine transaction…")
-                try:
-                    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid})
-                    if p_res.get("ok") and p_res.get("operation_id"):
-                        composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-                except Exception as _se:
-                    log.append(f"  mbsync transaction warning: {_se}")
-
-                cur_album = _strip_year_from_album_name(aid, log)
-
-                log.append("[3/4] Writing tags to audio files via engine transaction…")
-                try:
-                    # Wave 24 final review section 30: force_write_tags
-                    # requests a real Beets Item.write() resync -- an
-                    # empty diff-based update here was a silent no-op.
-                    res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
-                    if not res.get("ok"):
-                        log.append(f"  write tags warning: {res.get('error')}")
-                except Exception as _we:
-                    log.append(f"  write tags warning: {_we}")
-
-                log.append("[4/4] Renaming files to match library path template via engine transaction…")
-                try:
-                    rel_res = composite_workflows.relocate_album(aid, mode="rename")
-                    if rel_res.get("ok"):
-                        log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
-                except Exception as _me:
-                    log.append(f"  relocate warning: {_me}")
-                _cleanup_template_tokens_for_album(aid, log)
-
-        # ── Steps 3 & 4: tag + move ────────────────────────────────────────────
-        for aid in album_ids:
-            _retag(f"album_id:{aid}", f"album {aid}", album_db_id=aid)
-
-        for iid in item_ids:
-            _retag(f"id:{iid}", f"item {iid}", album_db_id=None)
+        # Beets applied the confirmed Release (tags, placement, write) and
+        # apply_confirmed_import verified exactly one new album with that
+        # mb_albumid and the planned Release Group. Web Manager does not retag
+        # it (ARCH-024); a verification failure above raised with the rows kept.
+        album_ids = [int(apply_res["album_id"])]
+        log.append(f"[2/2] Beets imported album_id {album_ids[0]} as release {mb_albumid} "
+                   f"(Release Group {apply_res.get('mb_releasegroupid') or '?'}, verified).")
 
         partial_remaining_audio: List[Path] = []
         if selected_subset_import:
@@ -3977,9 +2792,6 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     log.append(
                         f"  [cleanup] Source folder kept: {len(partial_remaining_audio)} unmatched audio file(s) awaiting review."
                     )
-                elif already_present:
-                    # Route through the safe helper — never deletes music-library paths
-                    _delete_if_already_in_library(str(src_dir), combined, log)
                 else:
                     # Move artwork to the canonical album folder before cleanup
                     _move_artwork_to_target(src_dir, list(album_ids), log)
@@ -4021,15 +2833,6 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 composite_workflows.delete_file(import_folder_path)
             except Exception as ex:
                 log.append(f"  [cleanup] WARN staging cleanup skipped: {ex}")
-        for aid in album_ids:
-            _repair_album_mbid_sticking_once(
-                int(aid),
-                mb_albumid,
-                log,
-                write_tags=True,
-                cancel_event=cancel_event,
-            )
-
         if selected_subset_import and partial_remaining_audio:
             log.append("  Pending Review kept for unmatched files left in the source folder.")
             if auto_import_idempotency_key:

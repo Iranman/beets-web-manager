@@ -371,8 +371,8 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         # canonical_path used -- proving the route reaches past the
         # (now engine-side) validation gate for a legitimate source.
         with mock.patch.object(APP.composite_workflows, "inspect_import_source", return_value={
-                    "ok": True, "canonical_path": "/data/torrents/music/real_album",
-                    "audio_count": 3, "audio_files": [], "source_signature": "abc",
+                    "ok": True, "path": "/data/torrents/music/real_album",
+                    "audio_file_count": 3, "audio_files": [],
                 }), \
              patch_app_family(APP, "_library_album_ids_for_folder", return_value=[]):
             res = self.client.post("/api/albums/reimport-disk", json={

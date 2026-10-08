@@ -29,15 +29,12 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
     def test_import_paths_call_central_audio_validation(self):
         self.assertIn('from backend.audio_preferences import', APP_SOURCE)
         self.assertIn('def _validate_import_source_audio(', APP_SOURCE)
-        # reimport_disk() and _playlist_run_import_downloaded() are deliberate exceptions (SEC-002 Wave 8 & Wave 12
-        # ARCH-003): their sources live on the Beets engine, not the web manager, so the web manager cannot locally
-        # scan/ffprobe them -- they validate via engine-side inspection and handoff instead.
+        # _playlist_run_import_downloaded() is a deliberate exception (Wave 12 ARCH-003). reimport_disk() validates
+        # locally again: the documented compose mounts the downloads root and the library into Web Manager.
         self.assertGreaterEqual(APP_SOURCE.count('_validate_import_source_audio('), 5)
         self.assertIn('_validate_import_source_audio(import_dir, log, reject_downloads=True)', APP_SOURCE)
         self.assertIn('_validate_import_source_audio(folder_path, log, reject_downloads=True)', APP_SOURCE)
-        self.assertIn('def _validate_import_source_evidence(', APP_SOURCE)
-        self.assertIn('_validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)', APP_SOURCE)
-        self.assertIn('_validate_audio_properties(entry.get("properties")', APP_SOURCE)
+        self.assertIn('_validate_import_source_audio(aldir, log, reject_downloads=True)', APP_SOURCE)
         self.assertIn('_playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)', APP_SOURCE)
         self.assertNotIn('_validate_import_source_audio(str(round_dl_dir), state["log"], reject_downloads=True)', APP_SOURCE)
 

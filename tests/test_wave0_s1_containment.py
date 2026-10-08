@@ -261,10 +261,12 @@ class AlbumCleanupTests(_Env):
         self.assertEqual(ad.destructive_calls(), [("remove", [], [8], False)])
 
     def test_confirmed_import_honours_copy_mode(self):
-        ad = FakeAdapter()
-        plan = cw.plan_confirmed_import({"paths": [str(self.dl / "x")], "use_move": False}, store=self.store)
+        ad = mock.MagicMock()
+        ad.find_all_albums_by_mb_albumid.return_value = []
+        plan = cw.plan_confirmed_import({"paths": [str(self.dl / "x")], "use_move": False,
+                                         "mb_albumid": "11111111-1111-1111-1111-111111111111"}, store=self.store)
         cw.apply_confirmed_import(plan["operation_id"], adapter=ad, store=self.store)
-        kw = [c for c in ad.calls if c[0] == "run_import"][0][1]
+        kw = ad.run_import.call_args.kwargs
         self.assertTrue(kw["copy"])
         self.assertFalse(kw["move"])
 
