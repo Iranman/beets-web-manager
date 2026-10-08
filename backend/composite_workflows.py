@@ -4472,10 +4472,14 @@ def mbsync_library(
         out.update(code=_s(op.get("error_code")) or "mbsync_failed",
                    error=f"Beets' library sync failed: {_s(op.get('error')) or 'unknown error'}.")
     elif partial:
+        parts = []
+        if counts["failed_count"]:
+            parts.append(f"{counts['failed_count']} albums or singles could not be synced (see the log)")
+        if counts["write_failed_count"]:
+            parts.append(f"{counts['write_failed_count']} tracks' tags could not be written (their Beets "
+                         "database fields did change)")
         out.update(code="MBSYNC_PARTIAL",
-                   error=f"{counts['failed_count']} albums or singles could not be synced and "
-                         f"{counts['write_failed_count']} tracks' tags could not be written (their Beets "
-                         "database fields did change); the rest synced.")
+                   error=f"{'; '.join(parts)}. {counts['processed']} of {counts['targets']} were synced.")
     if st:
         st.update(transaction_id, changes=rows, counts={"albums": counts["changed_albums"],
                                                         "items": counts["changed_items"], "changes": len(rows)},

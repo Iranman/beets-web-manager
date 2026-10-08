@@ -367,6 +367,8 @@ class AdapterToPluginTests(MbsyncLibraryEndpointTests):
             res, tx, log = self._sync()
         self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "MBSYNC_PARTIAL", True))
         self.assertEqual(res["summary"]["write_failed_count"], 2)
+        self.assertIn("2 tracks' tags could not be written", res["error"])
+        self.assertNotIn("could not be synced", res["error"])
         self.assertEqual(len(tx["metadata"]["engine_result"]["write_failed"]), 2)
         self.assertTrue(any("tags not written" in line for line in log))
 
