@@ -146,7 +146,9 @@ def _claim_rollback(st: TransactionStore, operation_id: str, to: str = "Running"
     never marked Rolled Back."""
     tx = st.get(operation_id)
     applied_failed = tx.get("status") == "Failed" and (tx.get("metadata") or {}).get("engine_result")
-    return st.transition(operation_id, "Failed" if applied_failed else "Completed", to)
+    source = "Failed" if applied_failed else "Completed"
+    claimed = st.transition(operation_id, source, to)
+    return None if claimed is None else {**claimed, "claimed_from": source}
 
 
 def _rollback_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
@@ -1586,9 +1588,10 @@ def rollback_folder_cleanup(
     """Undo a folder_cleanup_v1 apply through the engine's own records."""
     from backend.transaction_engine import rollback_folder_cleanup as engine_rollback
     st = _get_store(store)
-    if _claim_rollback(st, operation_id) is None:
+    claimed = _claim_rollback(st, operation_id)
+    if claimed is None:
         return _rollback_refused(st, operation_id)
-    return engine_rollback(st, operation_id)
+    return engine_rollback(st, operation_id, claimed_from=claimed["claimed_from"])
 
 
 def safe_rename_library_folder(

@@ -1971,12 +1971,21 @@ def _folder_adapter(adapter: Any = None) -> Any:
 #: 202 still running). Its idempotency key is replayed to learn the outcome.
 FOLDER_OP_UNCONFIRMED = "FOLDER_OP_UNCONFIRMED"
 _FOLDER_STEP_ATTEMPTS = 3
+#: Plugin refusal (503) while Beets holds its mutation lock, e.g. during an
+#: import; the step was not started, so it is safe to retry later.
+FOLDER_OP_BUSY = "BUSY"
+_BUSY_DEFERRED = "Beets is busy (for example an import); retry later."
+
+
+class _FolderOpBusy(Exception):
+    pass
+
 #: Operator text for a failed plugin step, by error code. Static on purpose:
 #: Beets' own reply text never reaches an API response.
 FOLDER_STEP_MESSAGES = {
     "BEETS_NOT_FOUND": "the webmanager plugin needs 1.7.0; restart Beets after the plugin update",
     "BEETS_UNREACHABLE": "Beets is unreachable",
-    "BUSY": "Beets is busy with another library change (for example an import); nothing was changed, retry later",
+    FOLDER_OP_BUSY: "Beets is busy (for example an import); retry later",
     FOLDER_OP_UNCONFIRMED: ("Beets did not confirm the step in time (for example while a Beets import is running); "
                             "the transaction recorded it, and rollback waits until Beets has finished it"),
     "NOT_EMPTY": "the folder is not empty",
@@ -2003,9 +2012,8 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
     that follows an unconfirmed attempt: a key Beets has no record of (one
     older than plugin 1.9.0, or a step Beets stopped in the middle of) runs
     afresh, and a refusal (say SOURCE_MISSING) cannot prove the first attempt
-    did nothing (#300 R3). ``BUSY`` (plugin 1.9.0, another mutation such as an
-    import holds Beets' lock) means Beets did not register the step: nothing
-    ran, so it is a plain retryable failure, not an unconfirmed one (#300 R2)."""
+    did nothing (#300 R3). ``BUSY`` (plugin 1.9.0) means Beets did not
+    register the step: nothing ran, so it is retryable, not unconfirmed (#300 R2)."""
     last = None
     for attempt in range(_FOLDER_STEP_ATTEMPTS):
         if attempt:
@@ -2245,10 +2253,13 @@ def rollback_folder_cleanup(
     *,
     music_allowed_roots: Optional[List[str]] = None,
     adapter: Any = None,
+    claimed_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Roll back an applied folder_cleanup_v1 transaction through Beets:
     re-create removed folders, then move every recorded file/folder back, in
-    reverse order. A step that cannot be proven restored is counted failed."""
+    reverse order. A step that cannot be proven restored is counted failed.
+    ``claimed_from``: the status a caller's Running claim came from; a
+    deferred rollback restores it (Failed when unknown)."""
     if not _TRANSACTION_ID_RE.match(operation_id):
         return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
 
@@ -2282,7 +2293,16 @@ def rollback_folder_cleanup(
 
         def _step(op: str, **paths: str) -> Optional[str]:
             steps[0] += 1
-            return _folder_step(ad, f"{attempt}:{steps[0]}", op, **paths)
+            err = _folder_step(ad, f"{attempt}:{steps[0]}", op, **paths)
+            if err == FOLDER_OP_BUSY:
+                raise _FolderOpBusy()
+            return err
+
+        def _defer(note: str, error: str, mutated: bool = False) -> Dict[str, Any]:
+            back = (claimed_from or "Failed") if status == "Running" else str(status)
+            store.transition(operation_id, "Running", back)
+            store.append_log(operation_id, f"Rollback deferred: {note}")
+            return {**refused, "code": "rollback_deferred", "status": back, "mutated": mutated, "error": error}
 
         def _usable(p: Path) -> bool:
             root = _cleanup_root_for_path(p, allowed_roots)
@@ -2297,47 +2317,49 @@ def rollback_folder_cleanup(
             for step in _unconfirmed_steps(operation_id, meta):
                 paths = {k: v for k, v in step.items() if k not in ("key", "op")}
                 err = _folder_step(ad, step["key"], step["op"], **paths)
+                if err == FOLDER_OP_BUSY:
+                    return _defer("Beets is busy.", _BUSY_DEFERRED)
                 if err and err.startswith(FOLDER_OP_UNCONFIRMED):
-                    back = "Failed" if status == "Running" else str(status)
-                    store.transition(operation_id, "Running", back)
-                    store.append_log(operation_id, f"Rollback deferred: Beets has not finished step {step['key']}.")
-                    return {**refused, "code": "rollback_deferred", "status": back,
-                            "error": "Beets has not finished an earlier step of this cleanup (it may be waiting "
-                                     "for an import to end); nothing was rolled back. Try again later."}
+                    return _defer(f"Beets has not finished step {step['key']}.",
+                                  "Beets has not finished an earlier step of this cleanup (it may be waiting "
+                                  "for an import to end); nothing was rolled back. Try again later.")
 
-            dirs_restored = dirs_failed = 0
-            for dr in reversed(meta.get("removed_dirs") or []):
-                dp = Path(dr)
-                if not _usable(dp):
-                    dirs_failed += 1
-                    problems.append(f"Not restored (outside roots or symlink): {dp}")
-                    continue
-                err = None if dp.is_dir() else _step("create_dir", path=str(dp))
-                if err:
-                    dirs_failed += 1
-                    problems.append(f"Could not re-create {dp}: {err}")
-                else:
-                    dirs_restored += 1
+            dirs_restored = dirs_failed = files_restored = files_failed = 0
+            try:
+                for dr in reversed(meta.get("removed_dirs") or []):
+                    dp = Path(dr)
+                    if not _usable(dp):
+                        dirs_failed += 1
+                        problems.append(f"Not restored (outside roots or symlink): {dp}")
+                        continue
+                    err = None if dp.is_dir() else _step("create_dir", path=str(dp))
+                    if err:
+                        dirs_failed += 1
+                        problems.append(f"Could not re-create {dp}: {err}")
+                    else:
+                        dirs_restored += 1
 
-            files_restored = files_failed = 0
-            for mr in reversed(meta.get("moved_records") or []):
-                sp = Path(mr["source"])
-                tp = Path(mr["target"])
-                if sp.exists() and not tp.exists():
-                    files_restored += 1  # already back (an earlier attempt)
-                    continue
-                if not (tp.exists() and not sp.exists() and _usable(sp) and _usable(tp)):
-                    files_failed += 1
-                    problems.append(f"Cannot move back {tp} -> {sp}: paths changed since apply")
-                    continue
-                err = None if sp.parent.is_dir() else _step("create_dir", path=str(sp.parent))
-                kind = mr.get("kind") or ("dir" if tp.is_dir() else "file")
-                err = err or _step("rename_dir" if kind == "dir" else "move_file", source=str(tp), target=str(sp))
-                if err:
-                    files_failed += 1
-                    problems.append(f"Could not move back {tp} -> {sp}: {err}")
-                else:
-                    files_restored += 1
+                for mr in reversed(meta.get("moved_records") or []):
+                    sp = Path(mr["source"])
+                    tp = Path(mr["target"])
+                    if sp.exists() and not tp.exists():
+                        files_restored += 1  # already back (an earlier attempt)
+                        continue
+                    if not (tp.exists() and not sp.exists() and _usable(sp) and _usable(tp)):
+                        files_failed += 1
+                        problems.append(f"Cannot move back {tp} -> {sp}: paths changed since apply")
+                        continue
+                    err = None if sp.parent.is_dir() else _step("create_dir", path=str(sp.parent))
+                    kind = mr.get("kind") or ("dir" if tp.is_dir() else "file")
+                    err = err or _step("rename_dir" if kind == "dir" else "move_file", source=str(tp), target=str(sp))
+                    if err:
+                        files_failed += 1
+                        problems.append(f"Could not move back {tp} -> {sp}: {err}")
+                    else:
+                        files_restored += 1
+            except _FolderOpBusy:
+                # A retry resumes: each step skips what is already back.
+                return _defer("Beets is busy.", _BUSY_DEFERRED, bool(files_restored or dirs_restored))
 
             ok = files_failed == 0 and dirs_failed == 0
             final_status = "Rolled Back" if ok else ("Partially Rolled Back" if files_restored or dirs_restored else "Failed")
