@@ -7,6 +7,7 @@ embedded images exactly.
 
 import base64
 import hashlib
+import json
 import io
 import os
 import shutil
@@ -228,6 +229,36 @@ class AlbumArtRefusalTests(AlbumArtEngineTests):
         res = self.client.post("/webmanager/album-art", headers=self.auth,
                                json={"album_id": self.album.id, "image_b64": "@@@", "image_sha256": "0" * 64})
         self.assertRefused(res, 400, "INVALID_IMAGE")
+
+    def test_request_without_content_length_is_refused(self):
+        data = image_bytes()
+        body = json.dumps({"album_id": self.album.id, "image_b64": base64.b64encode(data).decode("ascii"),
+                           "image_sha256": sha(data)}).encode()
+        res = self.client.post("/webmanager/album-art", input_stream=io.BytesIO(body),
+                               headers={**self.auth, "Content-Type": "application/json",
+                                        "Transfer-Encoding": "chunked"})
+        self.assertRefused(res, 411, "LENGTH_REQUIRED")
+
+    def test_too_many_pixels_is_refused(self):
+        buf = io.BytesIO()
+        Image.new("1", (art_mod.MAX_IMAGE_SIDE + 1, 1)).save(buf, format="PNG")
+        self.assertRefused(self._set(buf.getvalue()), 400, "INVALID_IMAGE")
+
+    def test_tampered_manifest_is_refused_before_any_write(self):
+        res = self._set(image_bytes())
+        art_id = res.get_json()["art_id"]
+        manifest_path = os.path.join(self.quarantine, art_id, "manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        for embedded in ({"1": [{"sha256": "../../key"}]}, {"1": [{"sha256": "0" * 64, "type": "x"}]}):
+            manifest["embedded"] = embedded
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+            rb = self._rollback(art_id)
+            self.assertEqual(rb.status_code, 400, rb.get_json())
+            self.assertEqual(rb.get_json()["error_code"], "SNAPSHOT_PATH_INVALID")
+            self.assertTrue(self._artpath().endswith("cover.jpg"))
+            self.assertTrue(os.path.isfile(os.path.join(self.album_dir, "cover.jpg")))
 
     def test_changed_release_group_is_refused(self):
         self.assertRefused(self._set(image_bytes(), expected_mb_releasegroupid="4" * 8), 409, "IDENTITY_CHANGED")

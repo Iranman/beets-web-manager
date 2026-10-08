@@ -50,6 +50,10 @@ from .engine_common import (
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 # base64 grows 4/3, plus the small JSON envelope.
 MAX_REQUEST_BYTES = MAX_IMAGE_BYTES * 4 // 3 + 64 * 1024
+# Same pixel limits as Web Manager's own gate (artwork_service), so a
+# direct plugin caller cannot hand embedart/ArtResizer a decompression bomb.
+MAX_IMAGE_SIDE = 12_000
+MAX_IMAGE_PIXELS = 50_000_000
 MANIFEST_KIND = "album_art"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -64,6 +68,49 @@ def image_extension(data: bytes) -> str:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
     return ""
+
+
+def image_size_ok(data: bytes) -> bool:
+    """Header-only dimension check (Pillow reads the size without decoding)."""
+    try:
+        from PIL import Image as PILImage
+    except ImportError:  # ponytail: no Pillow -> magic/size checks only; Web Manager's gate still applies
+        return True
+    import io
+    import warnings
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PILImage.DecompressionBombWarning)
+            with PILImage.open(io.BytesIO(data), formats=("JPEG", "PNG", "WEBP")) as img:
+                width, height = img.size
+    except Exception:
+        return False
+    return 0 < width <= MAX_IMAGE_SIDE and 0 < height <= MAX_IMAGE_SIDE and width * height <= MAX_IMAGE_PIXELS
+
+
+def _manifest_ok(manifest: Dict[str, Any]) -> bool:
+    """Every field rollback will use, checked before anything is written."""
+    if not isinstance(manifest.get("album_id"), int):
+        return False
+    for key in ("old_artpath", "previous_cover", "new_artpath"):
+        if not isinstance(manifest.get(key) or "", str):
+            return False
+    displaced = manifest.get("displaced") or {}
+    if not isinstance(displaced, dict) or (displaced and not (
+            isinstance(displaced.get("path"), str) and isinstance(displaced.get("copy"), str))):
+        return False
+    embedded = manifest.get("embedded") or {}
+    if not isinstance(embedded, dict):
+        return False
+    for entries in embedded.values():
+        if not isinstance(entries, list):
+            return False
+        for e in entries:
+            if not (isinstance(e, dict) and _SHA256.fullmatch(str(e.get("sha256")))
+                    and (e.get("type") is None or isinstance(e.get("type"), int))
+                    and isinstance(e.get("desc") or "", str)):
+                return False
+    return True
 
 
 def _sha(data: bytes) -> str:
@@ -167,8 +214,18 @@ def _album_check(lib, data: Dict[str, Any]):
 
 @ops.webmanager_bp.route("/album-art", methods=["POST"])
 def run_set_album_art():
-    if (request.content_length or 0) > MAX_REQUEST_BYTES:
+    # Checked before the body is read: a chunked request has no length.
+    if request.content_length is None:
+        return _error("Content-Length is required", "LENGTH_REQUIRED", 411)
+    if request.content_length > MAX_REQUEST_BYTES:
         return _error("image is larger than 15 MB", "IMAGE_TOO_LARGE", 413)
+    # One lock over check-then-write, so nothing changes the album between
+    # the path checks and set_art (RLock: the inner holds nest).
+    with ops.mutation_lock:
+        return _set_album_art()
+
+
+def _set_album_art():
     data = request.get_json(force=True, silent=True) or {}
     lib = g.lib
     raw = data.get("image_b64")
@@ -182,8 +239,8 @@ def run_set_album_art():
     if len(image) > MAX_IMAGE_BYTES:
         return _error("image is larger than 15 MB", "IMAGE_TOO_LARGE", 413)
     ext = image_extension(image)
-    if not ext:
-        return _error("image must be JPEG, PNG or WebP", "INVALID_IMAGE")
+    if not ext or not image_size_ok(image):
+        return _error("image must be JPEG, PNG or WebP, at most 12000 pixels a side", "INVALID_IMAGE")
     if _sha(image) != digest:
         return _error("image_sha256 does not match the image", "IMAGE_HASH_MISMATCH")
 
@@ -269,6 +326,11 @@ def run_set_album_art():
 
 @ops.webmanager_bp.route("/album-art/rollback", methods=["POST"])
 def run_album_art_rollback():
+    with ops.mutation_lock:
+        return _album_art_rollback()
+
+
+def _album_art_rollback():
     data = request.get_json(force=True, silent=True) or {}
     lib = g.lib
     folder = _manifest_dir(data.get("art_id"))
@@ -289,8 +351,10 @@ def run_album_art_rollback():
             manifest = json.load(fh)
     except (OSError, ValueError):
         return fail("no engine album-art record for this id", "ART_RECORD_NOT_FOUND", 404)
-    if manifest.get("kind") != MANIFEST_KIND or manifest.get("status") != "applied":
+    if not isinstance(manifest, dict) or manifest.get("kind") != MANIFEST_KIND             or manifest.get("status") != "applied":
         return fail("no applied album-art change for this id", "ART_RECORD_NOT_FOUND", 404)
+    if not _manifest_ok(manifest):
+        return fail("the engine album-art record is malformed", "SNAPSHOT_PATH_INVALID")
     album = lib.get_album(manifest.get("album_id"))
     if album is None:
         return fail("album not found", "ALBUM_NOT_FOUND", 404)
@@ -304,7 +368,8 @@ def run_album_art_rollback():
         copies.append(_fspath(displaced.get("copy")))
         if not _inside_allowed(_fspath(displaced.get("path"))):
             return fail("recorded path is outside allowed roots", "SNAPSHOT_PATH_INVALID")
-    if any(not os.path.normpath(c).startswith(folder + os.sep) for c in copies):
+    real_folder = os.path.realpath(folder)
+    if any(not os.path.realpath(c).startswith(real_folder + os.sep) for c in copies):
         return fail("recorded path is outside the engine folder", "SNAPSHOT_PATH_INVALID")
     current = _fspath(album.artpath)
     if os.path.normpath(current or ".") != os.path.normpath(_fspath(manifest.get("new_artpath")) or "."):
