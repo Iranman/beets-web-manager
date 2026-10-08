@@ -270,5 +270,50 @@ class FolderRollbackUnconfirmedTests(_Env):
         self.assertTrue(err.startswith(te.FOLDER_OP_UNCONFIRMED), err)
 
 
+def _busy():
+    ad = mock.Mock()
+    ad.folder_op.side_effect = BeetsAdapterError("busy", status_code=503, error_code="BUSY")
+    return ad
+
+
+class FolderRollbackBusyTests(_Env):
+    """#307: the plugin refuses a step with 503 BUSY (nothing started) while a
+    Beets import holds its lock; rollback defers instead of failing."""
+
+    def _plan(self):
+        (self.music / "Empty").mkdir()
+        op = te.create_folder_cleanup_plan(self.store, {"action": "remove_empty",
+                                                        "source": str(self.music / "Empty")})["operation_id"]
+        self.store.transition(op, "Preview", "Approved")
+        return op
+
+    def test_busy_replay_defers(self):
+        p = mock.patch.object(te, "_FOLDER_STEP_RETRY_DELAY", 0)
+        p.start()
+        self.addCleanup(p.stop)
+        op = self._plan()
+        held = mock.Mock()
+        held.folder_op.side_effect = BeetsAdapterTimeoutError("read timed out")
+        te.execute_folder_cleanup_apply(self.store, op, adapter=held)
+        res = te.rollback_folder_cleanup(self.store, op, adapter=_busy())
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "rollback_deferred", False))
+        self.assertIn("busy", res["error"])
+        self.assertEqual(self.store.get(op)["status"], "Failed")
+
+    def test_busy_restore_step_defers_then_retry_restores(self):
+        op = self._plan()
+        local = LocalFolderOps(self.music)
+        self.assertEqual(te.execute_folder_cleanup_apply(self.store, op, adapter=local)["status"], "Completed")
+        self.assertFalse((self.music / "Empty").exists())
+        res = te.rollback_folder_cleanup(self.store, op, adapter=_busy())
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "rollback_deferred", False))
+        tx = self.store.get(op)
+        self.assertEqual(tx["status"], "Completed")
+        self.assertNotIn("files_failed_count", tx["metadata"])
+        self.assertFalse((self.music / "Empty").exists())
+        self.assertTrue(te.rollback_folder_cleanup(self.store, op, adapter=local)["ok"])
+        self.assertTrue((self.music / "Empty").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()
