@@ -48,8 +48,15 @@ def _music_format_policy_rejection_error(rejected_count: int,
         count = len(results)
     handling = _s((prefs or {}).get("rejected_download_handling") or "").strip().casefold()
     action = "deleted" if handling == "delete" else "quarantined"
-    failed = sum(1 for result in results if (result or {}).get("error") or not (result or {}).get("removed"))
-    if count <= 0:
+    kept = sum(1 for result in results if (result or {}).get("handling") == "kept")
+    failed = sum(1 for result in results if (result or {}).get("handling") != "kept"
+                 and ((result or {}).get("error") or not (result or {}).get("removed")))
+    if kept:
+        handled = (f"{max(count - kept - failed, 0)}/{count} rejected file(s) were {action}; "
+                   f"{kept} left in place (seeded torrent source or library file)")
+        if failed:
+            handled += f"; {failed} need manual cleanup"
+    elif count <= 0:
         handled = f"Rejected files were {action}"
     elif failed:
         handled = f"{max(count - failed, 0)}/{count} rejected file(s) were {action}; {failed} need manual cleanup"

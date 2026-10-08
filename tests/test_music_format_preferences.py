@@ -112,8 +112,94 @@ class MusicFormatPreferencesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             doomed = Path(tmp) / "bad.flac"
             doomed.write_text("x", encoding="utf-8")
-            handle_rejected_download(str(doomed), {**DEFAULT_MUSIC_FORMAT_PREFERENCES, "rejected_download_handling": "delete"})
+            handle_rejected_download(str(doomed), {**DEFAULT_MUSIC_FORMAT_PREFERENCES, "rejected_download_handling": "delete"},
+                                     preserve_source=False)
             self.assertFalse(doomed.exists())
+
+
+class RejectedDownloadPreservedSourceTests(unittest.TestCase):
+    """The user's rule: never move or delete a preserved torrent source."""
+
+    def setUp(self):
+        import backend.library_service as lib
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.downloads = self.root / "downloads"
+        self.music = self.root / "music"
+        self.quarantine = self.root / "quarantine"
+        for patch in (
+            mock.patch.object(lib, "DOWNLOADS_ALLOWED_ROOTS", (self.downloads,)),
+            mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads / "torrents",)),
+            mock.patch.object(lib, "TORRENT_SOURCE_MOVE_ALLOWED", False),
+            mock.patch.object(lib, "MUSIC_ROOT", self.music),
+            mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (self.root / "playlist",)),
+            mock.patch.dict("os.environ", {"MUSIC_FORMAT_QUARANTINE_DIR": str(self.quarantine)}),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _file(self, *parts):
+        path = self.root.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+        return path
+
+    def _handle(self, path, handling, **kwargs):
+        log = []
+        prefs = {**DEFAULT_MUSIC_FORMAT_PREFERENCES, "rejected_download_handling": handling}
+        return handle_rejected_download(str(path), prefs, log=log, **kwargs), log
+
+    def test_seeded_torrent_source_is_kept_under_quarantine_and_delete(self):
+        for handling in ("quarantine", "delete"):
+            seeded = self._file("downloads", "torrents", "Artist - Album", f"{handling}.flac")
+            with mock.patch("shutil.move") as move:
+                result, log = self._handle(seeded, handling)
+            move.assert_not_called()
+            self.assertTrue(seeded.exists())
+            self.assertEqual(result["handling"], "kept")
+            self.assertFalse(result["removed"])
+            self.assertIn("seeding", result["reason"])
+            self.assertIn("left in place", log[0])
+            self.assertIn("seeding", log[0])
+
+    def test_caller_flag_keeps_source(self):
+        src = self._file("elsewhere", "a.flac")
+        result, _ = self._handle(src, "delete", preserve_source=True)
+        self.assertEqual(result["handling"], "kept")
+        self.assertTrue(src.exists())
+
+    def test_unevaluable_rule_fails_closed(self):
+        import backend.library_service as lib
+        src = self._file("downloads", "other", "a.flac")
+        with mock.patch.object(lib, "_preserve_torrent_source_path", side_effect=OSError("boom")):
+            result, _ = self._handle(src, "delete")
+        self.assertEqual(result["handling"], "kept")
+        self.assertTrue(src.exists())
+
+    def test_non_preserved_download_is_still_quarantined(self):
+        staged = self._file("downloads", "_beets_missing_import", "slskd-1", "a.flac")
+        result, log = self._handle(staged, "quarantine")
+        self.assertFalse(staged.exists())
+        self.assertTrue(result["removed"])
+        self.assertTrue(Path(result["quarantined_to"]).is_relative_to(self.quarantine))
+        self.assertIn("quarantined", log[0])
+
+    def test_music_library_file_is_never_moved(self):
+        for handling in ("quarantine", "delete"):
+            lib_file = self._file("music", "Artist", "Album", f"{handling}.flac")
+            result, _ = self._handle(lib_file, handling, preserve_source=False)
+            self.assertTrue(lib_file.exists())
+            self.assertEqual(result["handling"], "kept")
+
+    def test_import_refused_with_kept_count(self):
+        from backend.ai_service import _music_format_policy_rejection_error
+        seeded = self._file("downloads", "torrents", "Album", "a.flac")
+        result, _ = self._handle(seeded, "quarantine")
+        message = _music_format_policy_rejection_error(1, [result], {"rejected_download_handling": "quarantine"})
+        self.assertIn("Import stopped", message)
+        self.assertIn("1 left in place", message)
+        self.assertNotIn("manual cleanup", message)
 
     def test_existing_file_not_removed_until_verified_replacement_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -448,10 +448,41 @@ def validate_audio_tree(root: str, prefs: Optional[Dict[str, Any]], audio_exts: 
     return {"ok": not rejected, "accepted": accepted, "rejected": rejected, "total": len(files)}
 
 
-def handle_rejected_download(path_value: str, prefs: Optional[Dict[str, Any]] = None, *, log: Optional[List[str]] = None) -> Dict[str, Any]:
+def _rejected_download_keep_reason(path: Path, preserve_source: Optional[bool]) -> str:
+    """Why a rejected file must stay where it is ("" = safe to move/delete).
+
+    Reuses the single preserve rule (``library_service._preserve_torrent_source_path``)
+    and fails closed: if the rule cannot be evaluated, the file is kept.
+    """
+    try:
+        # Lazy: library_service sits above this helper and imports it indirectly.
+        from backend.library_service import MUSIC_ROOT, _path_is_under, _preserve_torrent_source_path
+        if _path_is_under(path.resolve(strict=False), MUSIC_ROOT.resolve(strict=False)):
+            return "file is in the music library"
+        if preserve_source is None:
+            preserve_source = _preserve_torrent_source_path(path)
+    except Exception:
+        return "could not confirm the file is not a preserved torrent source"
+    return "file is a preserved torrent source that may still be seeding" if preserve_source else ""
+
+
+def handle_rejected_download(path_value: str, prefs: Optional[Dict[str, Any]] = None, *,
+                             log: Optional[List[str]] = None,
+                             preserve_source: Optional[bool] = None) -> Dict[str, Any]:
+    """Quarantine or delete one rejected download, unless it must be kept.
+
+    Files in the music library and preserved torrent sources are never moved or
+    deleted: they report ``handling="kept"`` with a ``reason``. ``preserve_source``
+    lets a caller that already knows pass it; ``None`` applies the shared rule.
+    """
     preferences = normalize_music_format_preferences(prefs)
     path = Path(path_value)
     handling = preferences.get("rejected_download_handling") or "quarantine"
+    keep_reason = _rejected_download_keep_reason(path, preserve_source)
+    if keep_reason:
+        if log is not None:
+            log.append(f"Rejected download left in place ({keep_reason}): {path.name}")
+        return {"path": str(path), "handling": "kept", "removed": False, "quarantined_to": "", "reason": keep_reason}
     result = {"path": str(path), "handling": handling, "removed": False, "quarantined_to": ""}
     try:
         if handling == "delete":
