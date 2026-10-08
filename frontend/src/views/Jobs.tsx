@@ -595,7 +595,7 @@ function MusicBrainzPanel({ onStarted }: { onStarted: () => Promise<void> }) {
   const { run, busy, err } = useWorkflowRunner(onStarted);
 
   const actions: WorkflowAction[] = [
-    { value: 'sync', label: 'Sync metadata', description: 'Run beet mbsync for albums that already have MusicBrainz compatibility IDs.' },
+    { value: 'sync', label: 'Sync metadata', description: "Beets runs its own mbsync on every album and single that has a MusicBrainz ID. Tags are written only if Beets' import write setting says so; files are never moved.", dangerous: true, confirm: "Sync the whole library from MusicBrainz with Beets' mbsync? Beets updates its database and, if its import write setting says so, writes tags. Files are never moved. This cannot be rolled back; the transaction lists what changed. Cancelling stops after the current album." },
     { value: 'audit', label: 'Audit IDs only', description: 'Scan for stale or mismatched MusicBrainz IDs and report findings without making any changes.' },
     { value: 'repair', label: 'Repair IDs', description: 'Fix stale or mismatched MusicBrainz IDs in the Beets DB and write corrected tags to files.', dangerous: true, confirm: 'Repair stale/mismatched MusicBrainz IDs and rewrite tags? This modifies the Beets DB and audio file tags.' },
     { value: 'rebuild', label: 'Full rebuild', description: 'Run beet mbsync across the full library, repair all track IDs, and rewrite every tag.', dangerous: true, confirm: 'Run a full MusicBrainz rebuild across the entire library? This will rewrite tags on all albums.' },

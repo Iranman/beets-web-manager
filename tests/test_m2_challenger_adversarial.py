@@ -75,20 +75,6 @@ class M2AdversarialBase(unittest.TestCase):
 class TestEngineOfflineFailClosed(M2AdversarialBase):
     """Challenge 1: Simulate engine offline (BeetsUnavailableError)."""
 
-    def test_mbsync_all_engine_offline_on_orphan_lookup_and_mbsync(self):
-        """When engine is offline, mbsync must fail closed, log error, and not call subprocess."""
-        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", side_effect=BeetsUnavailableError("Engine connection refused")), \
-             mock.patch.object(app_module.composite_workflows, "mbsync", side_effect=BeetsUnavailableError("Engine connection refused")):
-
-            job = self._run_job_sync(app_module.library_mbsync_all, "/api/library/mbsync-all")
-
-            self.assertIsNotNone(job)
-            self.assertEqual(job.status, "failed")
-            self.assertEqual(job.returncode, 1)
-            self.assertTrue(any("ERROR:" in line for line in job.log))
-            self.assertTrue(any("Engine connection refused" in line for line in job.log))
-            self.assertEqual(self._beet_subprocess_calls, [])
-
     def test_move_all_engine_offline_on_path_scan_and_move(self):
         """When engine is offline, move_all must fail closed, log error, and not call subprocess."""
         with mock.patch.object(app_module.composite_workflows, "list_distinct_item_paths", side_effect=BeetsUnavailableError("Engine unreachable")), \
@@ -108,45 +94,6 @@ class TestEngineOfflineFailClosed(M2AdversarialBase):
 
 class TestRemoteJobFailureDiagnostics(M2AdversarialBase):
     """Challenge 2: Simulate remote job failure (non-zero return code)."""
-
-    def test_mbsync_remote_failure_rc2_sets_failed_status(self):
-        """When remote mbsync returns returncode=2 (fatal exit), job status must be failed."""
-        remote_job_id = "mbsync-remote-fail-2"
-        responses = [
-            {"status": "running", "stdout": ["syncing tracks..."], "stderr": []},
-            {"status": "failed", "returncode": 2, "stdout": [], "stderr": ["fatal database lock error", "aborting"]},
-        ]
-
-        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=responses):
-
-            job = self._run_job_sync(app_module.library_mbsync_all, "/api/library/mbsync-all")
-
-            self.assertIsNotNone(job)
-            self.assertEqual(job.status, "failed")
-            self.assertEqual(job.returncode, 1)
-            self.assertTrue(any("fatal database lock error" in line for line in job.log))
-            self.assertEqual(self._beet_subprocess_calls, [])
-
-    def test_mbsync_remote_failure_rc1_status_investigation(self):
-        """Examine job status when remote mbsync returns returncode=1 (error exit)."""
-        remote_job_id = "mbsync-remote-fail-1"
-        responses = [
-            {"status": "failed", "returncode": 1, "stdout": [], "stderr": ["tag update error for track 42"]},
-        ]
-
-        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=responses):
-
-            job = self._run_job_sync(app_module.library_mbsync_all, "/api/library/mbsync-all")
-
-            self.assertIsNotNone(job)
-            # Server diagnostics are logged
-            self.assertTrue(any("tag update error for track 42" in line for line in job.log))
-            # Observe actual status for rc=1
-            print(f"\n[EMPIRICAL OBSERVE] mbsync rc=1 -> job.status={job.status}, returncode={job.returncode}")
 
     def test_move_all_remote_failure_rc1_cleanup_and_status_investigation(self):
         """Examine move_all behavior when remote move_library fails with returncode=1 (e.g. rescan/update failed)."""
@@ -170,42 +117,6 @@ class TestRemoteJobFailureDiagnostics(M2AdversarialBase):
 
 class TestUserCancellation(M2AdversarialBase):
     """Challenge 3: Simulate user cancellation (cancel_event.set())."""
-
-    def test_mbsync_cancellation_during_remote_execution(self):
-        """Cancelling mbsync must invoke beets_client.cancel_job and append [cancelled]."""
-        remote_job_id = "mbsync-remote-cancel"
-        cancel_called = threading.Event()
-
-        def fake_cancel_job(jid):
-            if jid == remote_job_id:
-                cancel_called.set()
-            return {"ok": True}
-
-        def fake_get_job(jid):
-            time.sleep(0.05)
-            return {"status": "running", "stdout": ["processing..."], "stderr": []}
-
-        with mock.patch.object(app_module.composite_workflows, "find_all_orphan_albums", return_value=[]), \
-             mock.patch.object(app_module.composite_workflows, "mbsync", return_value={"ok": True, "job_id": remote_job_id}), \
-             mock.patch.object(app_module.composite_workflows, "get_job", side_effect=fake_get_job), \
-             mock.patch.object(app_module.composite_workflows, "cancel_job", side_effect=fake_cancel_job):
-
-            with app_module.app.test_request_context("/api/library/mbsync-all", method="POST"):
-                resp = app_module.library_mbsync_all()
-                job_id = resp.get_json()["job_id"]
-                job = app_module.jobs.get(job_id)
-
-            # Let it start polling, then trigger cancellation
-            time.sleep(0.1)
-            job.kill()
-
-            deadline = time.time() + 5.0
-            while job.finished_at is None and time.time() < deadline:
-                time.sleep(0.05)
-
-            self.assertTrue(cancel_called.is_set(), "composite_workflows.cancel_job was not called with remote_job_id")
-            self.assertTrue(any("[cancelled]" in line for line in job.log))
-            self.assertEqual(self._beet_subprocess_calls, [])
 
     def test_move_all_cancellation_aborts_empty_dir_cleanup(self):
         """Cancelling move_all must invoke beets_client.cancel_job and not execute folder cleanup."""

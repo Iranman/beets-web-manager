@@ -16,6 +16,9 @@ tests/test_stock_beets_acceptance.py for the acceptance proof against the
 real, unmodified lscr.io/linuxserver/beets:latest image.
 """
 
+import logging
+import threading
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from .schemas import beets_native_fields
 
@@ -31,6 +34,7 @@ class PluginIncompatibleError(Exception):
 
 _CAPABILITY_CLASS_NAMES = {
     "mbsync": "MBSyncPlugin",
+    "mbsync_library": "MBSyncPlugin",
     "fetchart": "FetchArtPlugin",
     "embedart": "EmbedCoverArtPlugin",
     "lastgenre": "LastGenrePlugin",
@@ -200,6 +204,250 @@ def run_mbsync(
         "synced_items": changed_items,
         "synced_albums": changed_albums,
     }
+
+
+#: Most changed albums/singletons one library sync lists in its result; the
+#: counters always cover everything.
+MAX_LIBRARY_CHANGES = 200
+#: Most failures listed in a library sync result.
+MAX_LIBRARY_FAILURES = 100
+#: Stop a library sync after this many albums in a row failed (MusicBrainz
+#: down, for example) instead of failing every remaining album.
+MAX_CONSECUTIVE_FAILURES = 10
+_VALUE_CHARS = 120
+_UNTRACKED_FIELDS = frozenset({"mtime"})  # changes on every tag write
+
+
+def _field_values(model) -> Dict[str, Any]:
+    from beets import util
+
+    out: Dict[str, Any] = {}
+    for key in model.keys():
+        if key in _UNTRACKED_FIELDS:
+            continue
+        value = model.get(key)
+        if isinstance(value, bytes):
+            value = util.displayable_path(value)
+        elif not (value is None or isinstance(value, (bool, int, float))):
+            value = str(value)
+        out[key] = value
+    return out
+
+
+def _short(value: Any) -> Any:
+    return value[:_VALUE_CHARS] if isinstance(value, str) else value
+
+
+def _diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, List[Any]]:
+    return {k: [_short(before.get(k)), _short(after.get(k))]
+            for k in sorted(set(before) | set(after)) if before.get(k) != after.get(k)}
+
+
+def _album_state(lib, album_id: int):
+    album = lib.get_album(album_id)
+    if album is None:
+        return None
+    return _field_values(album), {it.id: _field_values(it) for it in album.items()}
+
+
+class _FoundProbe:
+    """The Library as MBSyncPlugin.albums()/singletons() see it, counting
+    their own `lib.transaction()` calls. mbsync opens that transaction only
+    once the Release/Recording was found at the metadata source; when it is
+    not found it only logs and moves on. Our own reads go through the real
+    Library (bound methods), so they are not counted."""
+
+    def __init__(self, lib):
+        self._lib = lib
+        self.applied = 0
+
+    def __getattr__(self, name):
+        return getattr(self._lib, name)
+
+    def transaction(self):
+        self.applied += 1
+        return self._lib.transaction()
+
+
+class MetadataLookupError(Exception):
+    """The metadata source failed (MusicBrainz down, rate limited, ...)
+    while mbsync looked a target up."""
+
+
+class _LookupErrors(logging.Handler):
+    """Collects the record Beets' metadata_plugins.maybe_handle_plugin_error
+    logs ("Error in '<source>.album_for_id': <error>") when a source plugin
+    raises. With raise_on_error off (Beets' default) that log line is the
+    only trace: the lookup returns None, exactly as for a Release the source
+    no longer has. Only records from the thread that created the handler
+    count, so other Beets logging at the same time is ignored."""
+
+    def __init__(self):
+        super().__init__(logging.ERROR)
+        self.thread = threading.get_ident()
+        self.errors: List[str] = []
+
+    def emit(self, record):
+        if record.thread != self.thread:
+            return
+        msg = record.getMessage()
+        if msg.startswith("Error in '") and ("album_for_id'" in msg or "track_for_id'" in msg):
+            self.errors.append(msg)
+
+
+@contextmanager
+def _catch_lookup_errors():
+    handler = _LookupErrors()
+    beets_log = logging.getLogger("beets")
+    beets_log.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        beets_log.removeHandler(handler)
+
+
+def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[str, Any]:
+    """Run Beets' own mbsync over the whole library, one album or singleton
+    at a time: exactly the targets `beet mbsync` with no query visits
+    (albums with an mb_albumid, singletons with an mb_trackid), through
+    MBSyncPlugin.albums()/singletons() with an exact `id:` query each.
+
+    Files are never moved (move=False). Tags are written when ``write`` is
+    true, but not by mbsync itself: its apply_item_changes() ignores
+    Item.try_write()'s result, so a failed tag write would pass silently
+    while the database changed. mbsync therefore runs with write=False and
+    this function calls Item.try_write() on each item mbsync changed,
+    stores the new mtime when it worked, and lists the item under
+    ``write_failed`` when it did not (its database fields did change).
+
+    Going one target at a time is what lets the caller cancel between
+    targets (``cancel`` is a threading.Event), hold ``lock`` (the plugin's
+    mutation lock) only for one album, and record what Beets changed: each
+    target's stored fields are read before and after the call. Beets keeps
+    no undo, so this change log is the only record; it lists at most
+    MAX_LIBRARY_CHANGES targets, with values cut to 120 characters. Targets
+    finished before a cancel or a restart stay changed (mbsync commits one
+    transaction per album).
+
+    A target whose Release/Recording the source no longer has is counted as
+    ``not_found`` (and not as unchanged). A target whose lookup failed
+    (MusicBrainz down or rate limited: Beets logs "Error in
+    '<source>.album_for_id'" and the lookup returns None, see
+    _LookupErrors) or that raises is recorded as failed and the sync goes
+    on, unless MAX_CONSECUTIVE_FAILURES targets in a row fail
+    (``aborted``)."""
+    plugin = _require_plugin("mbsync")
+    if not hasattr(plugin, "singletons") or not hasattr(plugin, "albums"):
+        raise PluginIncompatibleError(
+            "mbsync plugin does not expose the expected singletons()/albums() methods"
+        )
+    from beets import util
+
+    albums = list(lib.albums())
+    singles = list(lib.items("singleton:true"))
+    targets = [("album", a.id) for a in albums if a.mb_albumid]
+    targets += [("singleton", i.id) for i in singles if i.mb_trackid]
+    res: Dict[str, Any] = {
+        "write": bool(write), "move": False,
+        "albums_total": len(albums), "singletons_total": len(singles),
+        "targets": len(targets), "processed": 0, "changed_albums": 0, "changed_singletons": 0,
+        "changed_items": 0, "unchanged": 0, "not_found": 0,
+        "skipped_no_id": len(albums) + len(singles) - len(targets),
+        "skipped_empty": 0, "skipped_missing": 0, "failed_count": 0, "failed": [],
+        "write_failed_count": 0, "write_failed": [],
+        "cancelled": False, "aborted": False, "changes": [], "changes_truncated": False,
+    }
+    consecutive = 0
+    for kind, tid in targets:
+        if progress:  # counters after each finished, skipped or failed target
+            progress({k: v for k, v in res.items() if k not in ("changes", "failed", "write_failed")})
+        if cancel.is_set():
+            res["cancelled"] = True
+            break
+        probe = _FoundProbe(lib)
+        with lock:
+            try:
+                if kind == "album":
+                    before = _album_state(lib, tid)
+                    if before is None:
+                        res["skipped_missing"] += 1
+                        continue
+                    if not before[1]:  # mbsync reads items()[0]: an empty album raises
+                        res["skipped_empty"] += 1
+                        continue
+                    with _catch_lookup_errors() as lookup:
+                        plugin.albums(probe, [f"id:{tid}"], False, False, False)
+                    after = _album_state(lib, tid) or ({}, {})
+                else:
+                    item = lib.get_item(tid)
+                    if item is None:
+                        res["skipped_missing"] += 1
+                        continue
+                    before = ({}, {tid: _field_values(item)})
+                    with _catch_lookup_errors() as lookup:
+                        plugin.singletons(probe, [f"id:{tid}"], False, False, False)
+                    refreshed = lib.get_item(tid)
+                    after = ({}, {tid: _field_values(refreshed)} if refreshed is not None else {})
+                if lookup.errors and not probe.applied:
+                    raise MetadataLookupError(lookup.errors[0][:200])
+            except Exception as ex:
+                res["failed_count"] += 1
+                if len(res["failed"]) < MAX_LIBRARY_FAILURES:
+                    res["failed"].append({"kind": kind, "id": tid, "error": f"{type(ex).__name__}: {str(ex)[:200]}"})
+                consecutive += 1
+                if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                    res["aborted"] = True
+                    break
+                continue
+            consecutive = 0
+            res["processed"] += 1
+            if not probe.applied:  # mbsync changed nothing: not "unchanged" either
+                res["not_found"] += 1
+                continue
+            album_fields = _diff(before[0], after[0])
+            items = []
+            for iid, old in before[1].items():
+                fields = _diff(old, after[1].get(iid, {}))
+                if not fields:
+                    continue
+                entry = {"item_id": iid, "title": _short(after[1].get(iid, {}).get("title") or old.get("title")),
+                         "fields": fields}
+                if write:
+                    changed_item = lib.get_item(iid)
+                    written, error = False, ""
+                    try:
+                        if changed_item is not None and changed_item.try_write():
+                            changed_item.store()  # the new mtime, as apply_item_changes would
+                            written = True
+                    except Exception as ex:  # one item must not end the run and lose the counts
+                        error = f"{type(ex).__name__}: {str(ex)[:200]}"
+                    if not written:
+                        entry["write_failed"] = True
+                        res["write_failed_count"] += 1
+                        if len(res["write_failed"]) < MAX_LIBRARY_FAILURES:
+                            path = changed_item.path if changed_item is not None else b""
+                            failure = {"item_id": iid, "title": entry["title"],
+                                       "path": _short(util.displayable_path(path))}
+                            if error:
+                                failure["error"] = error
+                            res["write_failed"].append(failure)
+                items.append(entry)
+        if not (album_fields or items):
+            res["unchanged"] += 1
+        else:
+            res["changed_albums" if kind == "album" else "changed_singletons"] += 1
+            res["changed_items"] += len(items)
+            if len(res["changes"]) < MAX_LIBRARY_CHANGES:
+                state = after[0] or before[0] or (after[1].get(tid) or {})
+                res["changes"].append({
+                    "kind": kind, "id": tid,
+                    "artist": _short(state.get("albumartist") or state.get("artist")),
+                    "album": _short(state.get("album")),
+                    "album_fields": album_fields, "items": items,
+                })
+            else:
+                res["changes_truncated"] = True
+    return res
 
 
 def run_fetchart(lib, album_ids: List[int], force: bool = False) -> Dict[str, Any]:
