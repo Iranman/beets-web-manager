@@ -73,6 +73,16 @@ class StagingTagWriteTests(_Env):
             with self.assertRaises(FileNotFoundError):
                 cw.write_staging_tags(str(target), {"title": "Bad"})
 
+    @unittest.skipUnless(FD_OK, "fd-relative operations unavailable")
+    def test_hardlink_to_library_file_is_refused(self):
+        try:
+            os.link(self.lib_file, self.dl / "seed.flac")
+        except OSError:
+            self.skipTest("hard links unavailable")
+        with self.assertRaises(ValueError):
+            cw.write_staging_tags(str(self.dl / "seed.flac"), {"title": "Bad"})
+        self.assertLibraryUntouched()
+
     @unittest.skipUnless(CAN_SYMLINK, "symlinks unavailable")
     def test_symlinked_file_into_library_is_refused(self):
         os.symlink(self.lib_file, self.dl / "link.flac")

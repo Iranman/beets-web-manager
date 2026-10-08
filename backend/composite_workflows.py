@@ -576,7 +576,8 @@ def write_staging_tags(path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
     library yet, and Beets' importer re-tags it from MusicBrainz on import.
     Confined like the other staging helpers: the path must be a regular file
     under a staging root (downloads root or ``<data dir>/playlist_staging``),
-    never under MUSIC_ROOT, never protected data, with no symlinked component.
+    never under MUSIC_ROOT, never protected data, with no symlinked component
+    and no second hard link.
     It is opened fd-relative with O_NOFOLLOW and must still be the validated
     entry, so a component swapped for a symlink cannot redirect the write.
     A refusal raises ValueError; a tag error returns ``ok: False``."""
@@ -588,12 +589,17 @@ def write_staging_tags(path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
     root, parts = _staging_parts(resolved)
     with _staging_dir_fd(root, parts[:-1]) as parent_fd:
         try:
-            fd = os.open(parts[-1], os.O_RDWR | os.O_NOFOLLOW, dir_fd=parent_fd)
+            fd = os.open(parts[-1], os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY, dir_fd=parent_fd)
         except OSError as exc:
             raise ValueError(f"Path changed since validation: {resolved}") from exc
         with open(fd, "r+b") as fh:
-            if not _same_entry(expected, os.fstat(fh.fileno())):
+            opened = os.fstat(fh.fileno())
+            if not _same_entry(expected, opened):
                 raise ValueError(f"Path changed since validation: {resolved}")
+            # Tags are rewritten in place: a hardlink (e.g. one made for
+            # seeding) would change the library file sharing the inode.
+            if opened.st_nlink != 1:
+                raise ValueError(f"Refusing to write tags to a hardlinked file: {resolved}")
             try:
                 import mediafile
                 mf = mediafile.MediaFile(fh)
