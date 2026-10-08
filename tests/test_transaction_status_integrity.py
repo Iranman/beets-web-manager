@@ -193,6 +193,66 @@ class ImportReviewCleanupRollbackTests(_Env):
         self.assertTrue(src.exists() and not dest.exists())
 
 
+class FolderRollbackUnconfirmedTests(_Env):
+    """#300 R1/R3: rollback re-queries every unconfirmed apply step in Beets
+    before it trusts Web Manager's own view of the library."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(te, "_FOLDER_STEP_RETRY_DELAY", 0)
+        p.start()
+        self.addCleanup(p.stop)
+        (self.music / "Empty").mkdir()
+        plan = te.create_folder_cleanup_plan(self.store, {"action": "remove_empty",
+                                                          "source": str(self.music / "Empty")})
+        self.op = plan["operation_id"]
+        self.store.transition(self.op, "Preview", "Approved")
+        held = mock.Mock()  # the request is held: Beets has not run it yet
+        held.folder_op.side_effect = BeetsAdapterTimeoutError("read timed out")
+        res = te.execute_folder_cleanup_apply(self.store, self.op, adapter=held)
+        self.assertEqual(res["status"], "Failed")
+        self.key = f"{self.op}:apply:0"
+
+    def test_apply_records_the_unconfirmed_step_with_its_key(self):
+        steps = self.store.get(self.op)["metadata"]["engine_result"]["unconfirmed_steps"]
+        self.assertEqual(steps, [{"key": self.key, "op": "remove_empty_dir", "path": str(self.music / "Empty")}])
+
+    def test_rollback_defers_while_beets_still_runs_the_step(self):
+        running = mock.Mock()
+        running.folder_op.return_value = {"operation_id": self.key, "status": "running"}
+        res = cw.rollback_folder_cleanup(self.op, store=self.store) if False else \
+            te.rollback_folder_cleanup(self.store, self.op, adapter=running)
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "rollback_deferred", False))
+        self.assertEqual(self.store.get(self.op)["status"], "Failed")
+        self.assertEqual({c.args[1] for c in running.folder_op.call_args_list}, {self.key})
+
+    def test_rollback_settles_the_step_then_restores_it(self):
+        """The held request never arrived: the replay runs it now (so a late
+        copy is only a replay), and the rollback then re-creates the folder."""
+        local = LocalFolderOps(self.music)
+        res = te.rollback_folder_cleanup(self.store, self.op, adapter=local)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([c[:2] for c in local.calls][0], ("remove_empty_dir", self.key))
+        self.assertTrue((self.music / "Empty").is_dir())
+        self.assertEqual(self.store.get(self.op)["status"], "Rolled Back")
+
+    def test_route_rollback_defers_with_409(self):
+        running = mock.Mock()
+        running.folder_op.return_value = {"operation_id": self.key, "status": "running"}
+        with mock.patch.object(te, "_folder_adapter", return_value=running):
+            res = cw.rollback_folder_cleanup(self.op, store=self.store)
+        self.assertEqual(res["code"], "rollback_deferred")
+        self.assertEqual(self.store.get(self.op)["status"], "Failed")
+
+    def test_refusal_after_an_unanswered_attempt_stays_unconfirmed(self):
+        """R3: Beets restarted after doing the step; the replay runs afresh and
+        is refused. That refusal does not prove the step was not done."""
+        ad = mock.Mock()
+        ad.folder_op.side_effect = [BeetsAdapterTimeoutError("lost"),
+                                    BeetsAdapterError("gone", status_code=409, error_code="SOURCE_MISSING")]
+        err = te._folder_step(ad, "k", "move_file", source="/m/a", target="/m/b")
+        self.assertTrue(err.startswith(te.FOLDER_OP_UNCONFIRMED), err)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1976,7 +1976,8 @@ _FOLDER_STEP_ATTEMPTS = 3
 FOLDER_STEP_MESSAGES = {
     "BEETS_NOT_FOUND": "the webmanager plugin needs 1.7.0; restart Beets after the plugin update",
     "BEETS_UNREACHABLE": "Beets is unreachable",
-    FOLDER_OP_UNCONFIRMED: "Beets did not confirm the step; the transaction recorded it so rollback can undo it",
+    FOLDER_OP_UNCONFIRMED: ("Beets did not confirm the step in time (for example while a Beets import is running); "
+                            "the transaction recorded it, and rollback waits until Beets has finished it"),
     "NOT_EMPTY": "the folder is not empty",
     "PATH_IS_TRACKED": "the path holds Beets library items; move them through Beets",
     "TARGET_EXISTS": "the target already exists",
@@ -1997,7 +1998,12 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
     code, never raw upstream text. A reply that leaves the outcome unknown is
     retried with the same idempotency key, which makes the plugin report the
     first attempt's result instead of running the step twice; if it stays
-    unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``."""
+    unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``. So does a refusal
+    that follows an unconfirmed attempt: Beets keeps its idempotency records in
+    memory, so after a Beets restart the replay runs the step afresh and a
+    refusal (say SOURCE_MISSING) cannot prove the first attempt did nothing
+    (#300 R3)."""
+    last = None
     for attempt in range(_FOLDER_STEP_ATTEMPTS):
         if attempt:
             time.sleep(_FOLDER_STEP_RETRY_DELAY)
@@ -2008,6 +2014,8 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
             if not getattr(exc, "status_code", None):  # no HTTP reply (connection error/timeout)
                 last = f"{FOLDER_OP_UNCONFIRMED} ({code})"  # no reply: Beets may have done it
                 continue
+            if last is not None:
+                return f"{last} then {code}"
             if code == "BEETS_NOT_FOUND":
                 return "BEETS_NOT_FOUND (the webmanager plugin needs 1.7.0; restart Beets after the plugin update)"
             return str(code)
@@ -2059,14 +2067,20 @@ def execute_folder_cleanup_apply(
         ad = _folder_adapter(adapter)
         moved_records: List[Dict[str, Any]] = []
         removed_dirs: List[str] = []
+        unconfirmed: List[Dict[str, str]] = []
 
         def _record(done: str) -> None:
-            result = {"moved_records": list(moved_records), "removed_dirs": list(removed_dirs)}
+            result = {"moved_records": list(moved_records), "removed_dirs": list(removed_dirs),
+                      "unconfirmed_steps": list(unconfirmed)}
             store.update(operation_id, metadata={"filesystem_mutated": True, "engine_result": result, **result})
             store.append_log(operation_id, f"Beets: {done}")
 
         def _step(op: str, **paths: str) -> Optional[str]:
-            return _folder_step(ad, f"{operation_id}:apply:{len(moved_records) + len(removed_dirs)}", op, **paths)
+            key = f"{operation_id}:apply:{len(moved_records) + len(removed_dirs)}"
+            err = _folder_step(ad, key, op, **paths)
+            if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                unconfirmed.append({"key": key, "op": op, **paths})  # rollback re-queries it (#300 R1)
+            return err
 
         def _fail(msg: str, code: str, step_error: Optional[str] = None) -> Dict[str, Any]:
             mutated = bool(moved_records or removed_dirs)
@@ -2206,6 +2220,17 @@ def execute_folder_cleanup_apply(
             }
 
 
+def _unconfirmed_steps(operation_id: str, meta: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Apply steps Beets never confirmed, with their idempotency keys. Older
+    records only flag the move (``unconfirmed``); moves and renames run
+    before removals, so a move's key index is its position in the list."""
+    if "unconfirmed_steps" in meta:
+        return list(meta.get("unconfirmed_steps") or [])
+    return [{"key": f"{operation_id}:apply:{i}", "op": "rename_dir" if mr.get("kind") == "dir" else "move_file",
+             "source": mr["source"], "target": mr["target"]}
+            for i, mr in enumerate(meta.get("moved_records") or []) if mr.get("unconfirmed")]
+
+
 #: Statuses a folder cleanup rollback starts from; each also needs the apply
 #: record (``engine_result``). Running is a caller's own claim (#224 CAS).
 _FOLDER_ROLLBACK_FROM = frozenset({"Completed", "Failed", "Running"})
@@ -2261,6 +2286,22 @@ def rollback_folder_cleanup(
             return root is not None and not _path_has_symlink_under(p.parent, root)
 
         with _lock_resources(resource_keys):
+            # #300 R1: an unconfirmed apply step may still run in Beets (a held
+            # request, or one queued behind Beets' import lock), so the local
+            # view below is trusted only once Beets has a final outcome for it.
+            # Replaying its key reads that outcome, or runs the step now, which
+            # makes any late copy of the request a replay that changes nothing.
+            for step in _unconfirmed_steps(operation_id, meta):
+                paths = {k: v for k, v in step.items() if k not in ("key", "op")}
+                err = _folder_step(ad, step["key"], step["op"], **paths)
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    back = "Failed" if status == "Running" else str(status)
+                    store.transition(operation_id, "Running", back)
+                    store.append_log(operation_id, f"Rollback deferred: Beets has not finished step {step['key']}.")
+                    return {**refused, "code": "rollback_deferred", "status": back,
+                            "error": "Beets has not finished an earlier step of this cleanup (it may be waiting "
+                                     "for an import to end); nothing was rolled back. Try again later."}
+
             dirs_restored = dirs_failed = 0
             for dr in reversed(meta.get("removed_dirs") or []):
                 dp = Path(dr)
