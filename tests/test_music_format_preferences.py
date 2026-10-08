@@ -242,6 +242,17 @@ class RejectedDownloadPreservedSourceTests(unittest.TestCase):
         self.assertEqual(result["handling"], "quarantine")
         self.assertFalse(staged.exists())
 
+    def test_marker_subfolder_inside_torrent_folder_is_kept(self):
+        # QA R1 (PR #321): a marker on a sub-folder does not unpreserve the
+        # torrent folder above it.
+        import backend.library_service as lib
+        staged = self._file("downloads", "Torrent", "A - YT missing Song", "x.flac")
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads,)):
+            for handling in ("quarantine", "delete"):
+                result, _ = self._handle(staged, handling)
+                self.assertEqual(result["handling"], "kept")
+                self.assertTrue(staged.exists())
+
     def test_existing_file_not_removed_until_verified_replacement_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             final = Path(tmp) / "replacement.flac"
