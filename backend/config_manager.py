@@ -16,10 +16,11 @@ import logging
 import os
 import posixpath
 import shutil
+import stat
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import yaml
 
@@ -172,12 +173,47 @@ def get_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     }
 
 
+def _replace_config_file(cfg: Path, text: str) -> None:
+    """Atomically replace ``cfg`` with ``text``, keeping its file mode.
+
+    config.yaml holds Beets' secrets, which Beets reads as plain YAML, so the
+    protection is the file mode. The unique temp file is created 0600
+    (mkstemp) and gets the current file's mode before the replace, so a 0600
+    config.yaml never becomes umask-readable (it did when the temp file was
+    created with open()). A missing or non-regular file gets 0600."""
+    try:
+        st = os.lstat(cfg)
+        mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
+    except FileNotFoundError:
+        mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{cfg.name}.", suffix=".tmp", dir=str(cfg.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, str(cfg))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def save_config(
     content: str,
     expected_revision: Optional[str] = None,
     config_path: Optional[Path] = None,
+    merge_stored: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    """Save new configuration with CAS validation, atomic replace, and backup."""
+    """Save new configuration with CAS validation, atomic replace, and backup.
+
+    ``merge_stored`` (if given) maps the on-disk content to the final
+    content to write. It runs on the same snapshot the revision check and
+    the backup use, so redacted secrets are restored from exactly the
+    revision the editor showed (config_service._restore_redacted_config_secrets)."""
     explicit = config_path is not None
     cfg = config_path or get_config_path()
     if not explicit and not (cfg.exists() and cfg.is_file()):
@@ -195,6 +231,13 @@ def save_config(
         if expected_revision.strip().lower() != current_rev.lower():
             raise ConfigConflictError()
 
+    if merge_stored is not None:
+        content = merge_stored(current_data["content"])
+        # The merged text holds real secrets; YAML errors quote the bad line,
+        # so this error carries no parser detail.
+        if not validate_config_yaml(content)[0]:
+            raise ConfigValidationError("Invalid YAML after restoring redacted secrets")
+
     cfg.parent.mkdir(parents=True, exist_ok=True)
     bak = get_config_backup_path(cfg)
 
@@ -209,20 +252,9 @@ def save_config(
         except Exception as exc:
             log.warning("Failed to create config backup for %s: %s", cfg, exc)
 
-    # Atomic write via temp file + replace
-    tmp_path = cfg.with_name(f".{cfg.name}.tmp.{os.getpid()}.{time.time_ns()}")
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(str(tmp_path), str(cfg))
+        _replace_config_file(cfg, content)
     except Exception as exc:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
         log.error("Failed to write configuration file %s: %s", cfg, exc)
         raise ConfigError("Failed to write configuration file.") from exc
 
@@ -260,20 +292,9 @@ def revert_config(
     if not valid:
         raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}")
 
-    # Atomic replace
-    tmp_path = cfg.with_name(f".{cfg.name}.tmp.{os.getpid()}.{time.time_ns()}")
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(backup_content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(str(tmp_path), str(cfg))
+        _replace_config_file(cfg, backup_content)
     except Exception as exc:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
         log.error("Failed to revert configuration %s: %s", cfg, exc)
         raise ConfigError("Failed to revert configuration.") from exc
 
