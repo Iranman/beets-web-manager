@@ -1568,17 +1568,60 @@ def _resolve_import_review_db_music_path(
     )
 
 
+# Folders Beets skipped during a Web Manager import. /webmanager/import runs
+# Beets' importer without an import log, so beet.log never names them.
+_IMPORT_SKIPPED_FILE = Path(os.environ["WEB_MANAGER_DATA_DIR"]) / "import_skipped.json"
+
+
+_import_skipped_lock = threading.Lock()
+
+
+def _load_recorded_import_skips() -> List[Dict[str, Any]]:
+    try:
+        rows = json.loads(_IMPORT_SKIPPED_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and _s(r.get("path"))]
+
+
+def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:
+    """Replace the recorded skips under ``source`` with this import's skips:
+    one entry per folder, so a re-import never duplicates one and a folder
+    that has since imported drops out."""
+    src = _s(source)
+    now = int(time.time())
+    fresh: Dict[str, Dict[str, Any]] = {}
+    for r in skipped:
+        path = _s(r.get("path"))
+        if path:
+            fresh[path] = {"path": path, "reason": _s(r.get("reason")) or "not_matched",
+                           "source": src, "skipped_at": now}
+    with _import_skipped_lock:
+        kept = [r for r in _load_recorded_import_skips()
+                if r["path"] not in fresh and not Path(r["path"]).is_relative_to(src)]
+        rows = (list(fresh.values()) + kept)[:1000]
+        try:
+            _IMPORT_SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _IMPORT_SKIPPED_FILE.with_name(_IMPORT_SKIPPED_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(rows, indent=2))
+            os.replace(tmp, _IMPORT_SKIPPED_FILE)
+        except OSError as ex:
+            raise RuntimeError(f"Could not record skipped import folders ({type(ex).__name__}).") from ex
+
+
 def _import_skipped_items(limit: int = 500, *, deep_scan: bool = True,
                           max_log_lines: int = 0) -> List[Dict[str, Any]]:
     try:
         lines = Path(LOG_FILE).read_text(errors="replace").splitlines()
     except FileNotFoundError:
-        return []
+        lines = []
     if max_log_lines > 0:
         lines = lines[-max_log_lines:]
 
-    skipped = []
-    seen: set = set()
+    # Skips recorded by Web Manager imports first (newest first), then beet.log.
+    entries: List[Tuple[str, str]] = [(r["path"], _s(r.get("reason"))) for r in _load_recorded_import_skips()]
     for line in reversed(lines):
         stripped = line.strip()
         # Match lines like: "skip /path/to/folder" or "skip /a/b; /c/d"
@@ -1586,35 +1629,39 @@ def _import_skipped_items(limit: int = 500, *, deep_scan: bool = True,
             continue
         rest = stripped[5:].strip()
         # Multiple folders can be separated by "; "; read newest entries first.
-        parts = [p.strip() for p in reversed(rest.split(";"))]
-        for part in parts:
-            if not part or part in seen:
-                continue
-            seen.add(part)
-            # Filter out stale log entries, but stop as soon as the caller's
-            # requested page is filled instead of scanning the entire import log.
-            p = Path(part)
-            if p.exists():
-                if p.is_file():
-                    has_audio = p.suffix.lower() in AUDIO_EXT
-                elif deep_scan:
-                    has_audio = any(
-                        f.suffix.lower() in AUDIO_EXT
-                        for f in p.rglob("*") if f.is_file()
-                    )
-                else:
-                    has_audio = True
-                if not has_audio:
-                    continue
+        entries.extend((p.strip(), "") for p in reversed(rest.split(";")))
+
+    skipped = []
+    seen: set = set()
+    for part, reason in entries:
+        if not part or part in seen:
+            continue
+        seen.add(part)
+        # Filter out stale log entries, but stop as soon as the caller's
+        # requested page is filled instead of scanning the entire import log.
+        p = Path(part)
+        if p.exists():
+            if p.is_file():
+                has_audio = p.suffix.lower() in AUDIO_EXT
+            elif deep_scan:
+                has_audio = any(
+                    f.suffix.lower() in AUDIO_EXT
+                    for f in p.rglob("*") if f.is_file()
+                )
             else:
-                continue  # folder gone entirely; already imported/moved
-            skipped.append({
-                "path":     part,
-                "filename": p.name,
-                "folder":   str(p.parent),
-            })
-            if len(skipped) >= limit:
-                return skipped
+                has_audio = True
+            if not has_audio:
+                continue
+        else:
+            continue  # folder gone entirely; already imported/moved
+        skipped.append({
+            "path":     part,
+            "filename": p.name,
+            "folder":   str(p.parent),
+            "reason":   reason,
+        })
+        if len(skipped) >= limit:
+            return skipped
 
     return skipped
 

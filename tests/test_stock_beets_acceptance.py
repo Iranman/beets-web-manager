@@ -203,7 +203,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.9.0")
+        self.assertEqual(status_data["plugin_version"], "1.10.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -372,6 +372,15 @@ webmanager:
                     os.chmod(track_path, 0o666)
                 except Exception:
                     pass
+            # An album Beets cannot match: this config loads no metadata source,
+            # so an autotag import finds no candidates and skips it (D2).
+            skip_dir = os.path.join(downloads_dir, "Skip Album")
+            os.makedirs(skip_dir)
+            _create_synthetic_audio(os.path.join(skip_dir, "01.wav"), title="Nothing",
+                                    artist="Nobody", album="No Match")
+            if os.name != "nt":
+                os.chmod(skip_dir, 0o777)
+                os.chmod(os.path.join(skip_dir, "01.wav"), 0o666)
 
             # 5. Pre-pull image and start stock Beets container bound strictly to loopback 127.0.0.1.
             # Registry pulls and loopback port picks can flake in CI (`docker run` exit 125), so both
@@ -459,7 +468,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.9.0")
+                    self.assertEqual(status_res["plugin_version"], "1.10.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -481,6 +490,19 @@ webmanager:
                         self.assertEqual(ex.code, 400)
                         body = json.loads(ex.read().decode("utf-8"))
                         self.assertEqual(body["error_code"], "PATH_NOT_ALLOWED")
+
+                # Step 2c (plugin 1.10.0): a folder Beets skips is reported with a reason.
+                req_skip = urllib.request.Request(
+                    f"{base_url}/webmanager/import",
+                    data=json.dumps({"paths": ["/downloads/Skip Album"], "autotag": True,
+                                     "copy": True, "move": False}).encode("utf-8"),
+                    headers=auth_header,
+                    method="POST",
+                )
+                with _raw_urlopen(req_skip, timeout=30) as resp:
+                    skip_res = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(skip_res["skipped_paths"], ["/downloads/Skip Album"])
+                self.assertEqual(skip_res["skipped"], [{"path": "/downloads/Skip Album", "reason": "no_candidates"}])
 
                 # Step 3: Concurrent Idempotency Test
                 # Execute two simultaneous POST requests with same key and payload
