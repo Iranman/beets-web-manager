@@ -3013,6 +3013,7 @@ _RELOCATION_REFUSALS = {
     "ALBUM_CHANGED": "The album's tracks changed since it was moved, so it cannot be moved back; nothing was changed.",
     "ITEM_MOVED": "A track was moved again since; nothing was changed.",
     "ART_CHANGED": "The album's cover changed since it was moved; nothing was changed.",
+    "FILE_MISSING": "A moved track's or the cover's file is no longer where Beets put it; nothing was changed.",
     "TARGET_EXISTS": "Something is already at a track's or the cover's old location; nothing was overwritten or changed.",
     "PATH_OUTSIDE_ROOTS": "An old location is outside the folders Beets may write to; nothing was changed.",
     "SYMLINK_REJECTED": "An old location runs through a symlink; nothing was changed.",
@@ -3024,7 +3025,8 @@ _RELOCATION_REFUSALS = {
 
 
 #: Rollback refusals (HTTP 409): the album changed since it was moved.
-RELOCATION_ROLLBACK_REFUSALS = ("album_not_found", "album_changed", "item_moved", "art_changed", "target_exists")
+RELOCATION_ROLLBACK_REFUSALS = ("album_not_found", "album_changed", "item_moved", "art_changed", "file_missing",
+                                "target_exists")
 
 
 def _album_item_paths(album: Dict[str, Any], ad: BeetsAdapter, aid: int) -> Dict[str, str]:
@@ -3164,17 +3166,31 @@ def finish_album_relocation(
     if not _paths_match(meta["before"]["items"], engine_before):
         problems.append("planned paths")
     moved = sum(1 for k, p in after_items.items() if p != engine_before.get(k))
+    # Item.move() skips a track whose file is missing: a partial move. Failed
+    # (with the engine result) stays rollbackable; the rollback moves back
+    # only the tracks that moved.
+    skipped = [str(k) for k in engine.get("skipped") or []]
     folders = sorted({os.path.dirname(p) for p in after_items.values()})
-    status = "Completed" if not problems else "Recovery Required"
+    status = "Recovery Required" if problems else "Failed" if skipped else "Completed"
+    art_before = _s((engine.get("before") or {}).get("artpath"))
     st.update(
         operation_id, status=status,
         metadata={"engine_result": engine, "after": {**after, "folders": folders}, "verification_problems": problems},
         logs=[f"Beets moved {moved} of {len(after_items)} tracks of album {aid} to "
               f"{', '.join(folders) or '(nowhere)'}; cover: {_s(after.get('artpath')) or '(none)'}"]
+             + ([f"Partial move: Beets skipped tracks {', '.join(skipped)} (file missing); "
+                 "roll back to move the others back"] if skipped else [])
+             + ([f"Beets cleared the cover path {art_before} (file missing); rollback restores it"]
+                if art_before and not _s(after.get("artpath")) else [])
              + ([f"Verification mismatch: {', '.join(problems)}"] if problems else []),
     )
-    return {"ok": not problems, "operation_id": operation_id, "status": status, "album_id": aid,
-            "dest_dir": folders[0] if folders else "", "moved_count": moved, "verification_problems": problems}
+    out = {"ok": not problems and not skipped, "operation_id": operation_id, "status": status, "album_id": aid,
+           "dest_dir": folders[0] if folders else "", "moved_count": moved, "skipped": skipped,
+           "verification_problems": problems}
+    if skipped:
+        out.update(code="partial_move", error=f"Beets skipped {len(skipped)} track(s) whose file is missing; "
+                                              "the others moved. Roll back from Transactions to undo.")
+    return out
 
 
 def album_relocation_unchanged(ad: BeetsAdapter, meta: Dict[str, Any]) -> bool:
@@ -3216,6 +3232,10 @@ def rollback_album_relocation(
              for k, p in (after.get("items") or {}).items()]
     from backend.resource_locks import attempt_owner, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"], attempt_owner(operation_id), timeout=10):
+        # Recorded before the call: a retry sends the same key and paths; Beets
+        # treats tracks already back as done, so it resumes, never replays blindly.
+        st.update(operation_id, metadata={"rollback_request": {"idempotency_key": f"{operation_id}:rollback",
+                                                               "items": items}})
         try:
             res = ad.rollback_album_relocation(aid, items, _s(after.get("artpath")), _s(before.get("artpath")),
                                                idempotency_key=f"{operation_id}:rollback")

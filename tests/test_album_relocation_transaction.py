@@ -128,7 +128,15 @@ class RenameAndMoveRoundTripTests(_Engine):
     def _round_trip(self, folder, mode):
         album = self.make_album(folder)
         before = self.snapshot(album.id)
+        for p in before[0][0].values():
+            os.chmod(p, 0o640)
+
+        def owner_mode(state):  # util.move is os.replace on one filesystem: owner and mode kept
+            return sorted((os.stat(p).st_uid, os.stat(p).st_mode) for p in [*state[0].values(), state[1]])
+
+        kept = owner_mode(before[0])
         res = cw.relocate_album(album.id, mode=mode, adapter=self.ad, store=self.store)
+        self.assertEqual(owner_mode(self.beets_state(album.id)), kept)
         self.assertTrue(res["ok"], res)
         op = res["operation_id"]
         tx = self.store.get(op)
@@ -154,6 +162,7 @@ class RenameAndMoveRoundTripTests(_Engine):
         self.assertTrue(rb["ok"], rb)
         self.assertEqual(self.store.get(op)["status"], "Rolled Back")
         self.assertEqual(self.snapshot(album.id), before)  # paths, artpath and every file's bytes
+        self.assertEqual(owner_mode(before[0]), kept)
         self.assertFalse(os.path.exists(os.path.join(self.music, "A")))  # vacated folders pruned
         self.assertEqual(len(self.store.list(limit=100)[0]), 1)
 
@@ -274,6 +283,92 @@ class RollbackRefusalTests(_Engine):
         self.assertTrue(cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)["ok"])
         self.assertEqual(self.beets_state(self.album.id), self.old)
 
+    def test_moved_track_file_missing_is_refused(self):
+        os.remove(self.beets_state(self.album.id)[0][min(self.old[0])])
+        self.refused("file_missing")
+
+    def test_moved_cover_file_missing_is_refused(self):
+        os.remove(self.beets_state(self.album.id)[1])
+        self.refused("file_missing")
+
+    def test_unique_path_rename_is_never_accepted_and_nothing_is_overwritten(self):
+        import beetsplug.webmanager.relocation_ops as rel
+        target = self.old[0][min(self.old[0])]
+        real_mkdirall = rel.util.mkdirall
+
+        def race(path):  # someone takes the old path between the check and the move
+            real_mkdirall(path)
+            if os.fsdecode(path) == target:
+                with open(target, "wb") as f:
+                    f.write(b"raced in")
+
+        state = self.beets_state(self.album.id)
+        with mock.patch.object(rel.util, "mkdirall", side_effect=race):
+            rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["code"], rb["mutated"]), ("undone", False))
+        self.assertEqual(self.beets_state(self.album.id), state)  # Beets' name.1.flac was moved back
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), b"raced in")
+        self.assertFalse(os.path.exists(target[:-5] + ".1.flac"))
+
+    def test_compensation_that_cannot_be_proven_is_rollback_failed_not_undone(self):
+        import beetsplug.webmanager.relocation_ops as rel
+        real_move = rel.util.move
+        first_back = self.old[0][min(self.old[0])]
+
+        def fail_on_cover(src, dst, *a, **k):
+            if os.fsdecode(dst).endswith("cover.jpg"):
+                os.remove(first_back)  # a moved-back track vanishes before compensation
+                raise OSError("disk full")
+            return real_move(src, dst, *a, **k)
+
+        with mock.patch.object(rel.util, "move", side_effect=fail_on_cover):
+            rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["code"], rb["mutated"]), ("rollback_failed", None))
+        self.assertEqual(self.store.get(self.op)["status"], "Recovery Required")
+
+    def test_interrupted_rollback_resumes_from_the_recorded_paths(self):
+        import beetsplug.webmanager.relocation_ops as rel
+        first = min(self.old[0])
+        item = self.lib.get_item(first)
+        rel._move_item(self.lib, item, self.old[0][first])  # Beets restarted after this step
+        rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["ok"], rb["restored"]), (True, 1), rb)
+        self.assertEqual(self.beets_state(self.album.id), self.old)
+
+    def test_rollback_request_is_recorded(self):
+        cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        req = self.store.get(self.op)["metadata"]["rollback_request"]
+        self.assertEqual(req["idempotency_key"], f"{self.op}:rollback")
+        self.assertEqual({str(e["id"]): e["restore_path"] for e in req["items"]},
+                         {str(k): v for k, v in self.old[0].items()})
+
+    def _raw_rollback(self, items, artpath=None, restore_artpath=None):
+        now_items, now_art = self.beets_state(self.album.id)
+        return self.client.post(
+            "/webmanager/album-relocation/rollback", headers={"Authorization": f"Bearer {self.token}"},
+            json={"album_id": self.album.id, "artpath": now_art if artpath is None else artpath,
+                  "restore_artpath": now_art if restore_artpath is None else restore_artpath,
+                  "items": [{"id": k, "path": now_items[k], "restore_path": items[k]} for k in now_items]})
+
+    def test_two_tracks_restored_to_one_path_are_refused(self):
+        one = self.old[0][min(self.old[0])]
+        r = self._raw_rollback({k: one for k in self.old[0]})
+        self.assertEqual(r.get_json()["error_code"], "PATH_INVALID")
+
+    def test_cover_restored_onto_a_track_path_is_refused(self):
+        before = self.snapshot(self.album.id)
+        r = self._raw_rollback(self.old[0], restore_artpath=self.old[0][min(self.old[0])])
+        self.assertEqual((r.status_code, r.get_json()["error_code"]), (400, "PATH_INVALID"))
+        self.assertEqual(self.snapshot(self.album.id), before)
+
+    def test_restore_onto_a_tracked_path_whose_file_is_missing_is_refused(self):
+        other = self.make_album(os.path.join(self.music, "other"), n=1, art=False)
+        tracked = os.fsdecode(next(iter(other.items())).path)
+        os.remove(tracked)  # Beets still references it
+        r = self._raw_rollback({k: tracked if k == min(self.old[0]) else v for k, v in self.old[0].items()})
+        self.assertEqual((r.status_code, r.get_json()["error_code"]), (409, "TARGET_EXISTS"))
+
     def test_second_rollback_is_a_no_op(self):
         self.assertTrue(cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)["ok"])
         before = self.snapshot(self.album.id)
@@ -345,6 +440,32 @@ class ApplyRefusalAndRecoveryTests(_Engine):
             out = recovery.sweep(adapter=self.ad, store=self.store, before=time.time() + 1)
         self.assertEqual(out[0]["action"], "Recovery Required", out)
 
+    def test_missing_track_file_is_a_recorded_partial_move_and_rollback_undoes_only_the_moved(self):
+        old = self.beets_state(self.album.id)
+        missing = max(old[0])
+        os.remove(old[0][missing])
+        res = cw.relocate_album(self.album.id, adapter=self.ad, store=self.store)
+        self.assertEqual((res["ok"], res["code"], res["status"]), (False, "partial_move", "Failed"), res)
+        tx = self.store.get(res["operation_id"])
+        self.assertEqual(tx["metadata"]["engine_result"]["skipped"], [str(missing)])
+        self.assertEqual(tx["metadata"]["engine_result"]["moved"], [str(min(old[0]))])
+        now = self.beets_state(self.album.id)[0]
+        self.assertEqual(now[missing], old[0][missing])  # Beets skipped it
+        self.assertNotEqual(now[min(old[0])], old[0][min(old[0])])
+        rb = cw.rollback_album_relocation(res["operation_id"], adapter=self.ad, store=self.store)
+        self.assertEqual((rb["ok"], rb["restored"]), (True, 1), rb)
+        self.assertEqual(self.beets_state(self.album.id), old)
+
+    def test_missing_cover_file_artpath_cleared_by_beets_is_restored_by_rollback(self):
+        old = self.beets_state(self.album.id)
+        os.remove(old[1])
+        res = cw.relocate_album(self.album.id, adapter=self.ad, store=self.store)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.beets_state(self.album.id)[1], "")  # Album.move_art dropped it
+        self.assertIn("cleared the cover path", str(self.store.get(res["operation_id"])))
+        self.assertTrue(cw.rollback_album_relocation(res["operation_id"], adapter=self.ad, store=self.store)["ok"])
+        self.assertEqual(self.beets_state(self.album.id), old)
+
     def test_old_plugin_without_the_endpoint_changes_nothing(self):
         op = self._approved()
         with mock.patch.object(self.ad, "relocate_album",
@@ -374,6 +495,11 @@ class PluginPathSafetyTests(_Engine):
     def test_restore_with_another_extension_is_refused(self):
         r = self._rollback(os.path.join(self.music, "x", "t.mp3"))
         self.assertEqual(r.get_json()["error_code"], "EXTENSION_CHANGED")
+
+    def test_restore_onto_an_allowed_root_itself_or_a_sibling_prefix_is_refused(self):
+        self.assertEqual(self._rollback(self.music).get_json()["error_code"], "PATH_OUTSIDE_ROOTS")
+        r = self._rollback(os.path.join(self.music + "2", "t.flac"))
+        self.assertEqual(r.get_json()["error_code"], "PATH_OUTSIDE_ROOTS")
 
     def test_relative_or_dotted_restore_path_is_refused(self):
         r = self._rollback(os.path.join(self.music, "x", "..", "..", "t.flac"))

@@ -5,7 +5,11 @@ POST /webmanager/album-relocation
     Beets' own ``Album.move()`` moves the album's files and cover to where
     its path templates put them. Refused (409 ``STALE_PLAN``) unless the album
     still has exactly the planned items at the planned paths. The result
-    lists every item's absolute path, and the cover path, before and after.
+    lists every item's absolute path, and the cover path, before and after,
+    plus ``moved`` and ``skipped`` item ids: ``Item.move()`` skips a track
+    whose file is missing (a warning only), so a partial move is reported,
+    never hidden. Beets drops ``artpath`` when the cover file is missing;
+    the before-state keeps it so the rollback can put the field back.
 
 POST /webmanager/album-relocation/rollback
     {"album_id": N, "items": [{"id", "path", "restore_path"}, ...],
@@ -15,10 +19,22 @@ POST /webmanager/album-relocation/rollback
     before anything moves; refused, with nothing changed, when the album is
     gone (``ALBUM_NOT_FOUND``), its item set changed (``ALBUM_CHANGED``), an
     item is no longer at ``path`` (``ITEM_MOVED``), the cover changed
-    (``ART_CHANGED``), a restore path is occupied or tracked
-    (``TARGET_EXISTS``), or a restore path is unsafe (outside the allowed
-    roots, a symlink component, another extension). A failure part-way puts
-    the files already moved back (``ROLLBACK_FAILED``).
+    (``ART_CHANGED``), a moved file is gone (``FILE_MISSING``), a restore
+    path is occupied or tracked (``TARGET_EXISTS``), or a restore path is
+    unsafe (outside the allowed roots, a symlink component, another
+    extension). A track already at its restore path counts as done, so a
+    rollback a restart interrupted resumes from the recorded paths. Each
+    track's file move and row store share one Beets transaction, and the
+    path is checked after the move: a ``unique_path`` rename
+    (``name.1.ext``) is a failure, never accepted. A failure part-way puts
+    the files already moved back (``UNDONE``) or, when that cannot be
+    proven, fails (``ROLLBACK_FAILED``). Vacated folders are removed only
+    when empty, with ``os.rmdir`` (never ``util.prune_dirs``, which
+    ``rmtree``s after its own emptiness check).
+
+Within one filesystem ``util.move`` is ``os.replace``, which keeps owner and
+mode. Across filesystems Beets copies, copies mode and times (not owner),
+then removes the source; nothing here chowns.
 
 Both hold ``ops.mutation_lock``. Refusals and undone failures (``UNDONE``:
 every moved file was put back) are not kept under the Idempotency-Key, so a
@@ -30,7 +46,6 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Tuple
 
-from beets import config as beets_config
 from beets import util
 from beets.util import MoveOperation
 from flask import g, jsonify, request
@@ -56,14 +71,25 @@ def _state(lib, album) -> Dict[str, Any]:
             "artpath": _abs(lib, album.artpath)}
 
 
-def _safe_target(lib, path: Any, current: str) -> str:
+def _root_of(path: str) -> str:
+    roots = [os.path.abspath(r) for r in ops.get_allowed_roots()]
+    return next((r for r in roots if path.startswith(r + os.sep)), "")
+
+
+def _contained(path: Any) -> Tuple[str, str]:
+    """(path, root): a normalized absolute path strictly inside an allowed
+    root, with no symlink component below that root."""
     if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path:
         raise _no("restore path must be a normalized absolute path", "PATH_INVALID", 400)
-    roots = [os.path.abspath(r) for r in ops.get_allowed_roots()]
-    root = next((r for r in roots if path.startswith(r + os.sep)), None)
-    if root is None:
+    root = _root_of(path)
+    if not root:
         raise _no("restore path is outside the allowed roots", "PATH_OUTSIDE_ROOTS", 400)
     folder_ops.contained_path(path, root)  # symlink components below the root
+    return path, root
+
+
+def _safe_target(lib, path: Any, current: str) -> Tuple[str, str]:
+    path, root = _contained(path)
     if os.path.splitext(path)[1].lower() != os.path.splitext(current)[1].lower():
         raise _no("restore path has another file extension", "EXTENSION_CHANGED", 400)
     if os.path.lexists(path):
@@ -72,7 +98,7 @@ def _safe_target(lib, path: Any, current: str) -> str:
         folder_ops._refuse_tracked(lib, path)
     except folder_ops._Refused:
         raise _no("restore path is a library item's path", "TARGET_EXISTS") from None
-    return path
+    return path, root
 
 
 def _check_relocate(lib, data: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
@@ -104,7 +130,12 @@ def _relocate(lib, album, before) -> Dict[str, Any]:
                 os.path.exists(p) for p in before["items"].values()):
             raise
         raise _Undone() from None
-    return {"album_id": album.id, "before": before, "after": _state(lib, lib.get_album(album.id))}
+    album = lib.get_album(album.id)
+    after = _state(lib, album)
+    moved = sorted(k for k, p in after["items"].items() if p != before["items"].get(k))
+    skipped = sorted(str(it.id) for it in album.items()  # Item.move() skips a missing file
+                     if str(it.id) not in moved and _abs(lib, it.destination()) != before["items"].get(str(it.id)))
+    return {"album_id": album.id, "before": before, "after": after, "moved": moved, "skipped": skipped}
 
 
 def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str, str]], Tuple[str, str]]:
@@ -119,68 +150,94 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
     steps, targets = [], set()
     for iid, entry in wanted.items():
         now = live["items"][iid]
-        if _abs(lib, entry.get("path")) != now:
-            raise _no(f"item {iid} was moved again since the relocation", "ITEM_MOVED")
         restore = entry.get("restore_path")
         if restore == now:
-            continue
-        target = _safe_target(lib, restore, now)
+            continue  # never moved (skipped by the apply), or already back (an interrupted rollback)
+        if _abs(lib, entry.get("path")) != now:
+            raise _no(f"item {iid} was moved again since the relocation", "ITEM_MOVED")
+        if not os.path.isfile(now):
+            raise _no(f"item {iid}'s file is missing", "FILE_MISSING")
+        target, root = _safe_target(lib, restore, now)
         if target in targets:
             raise _no("two items would be restored to one path", "PATH_INVALID", 400)
         targets.add(target)
-        steps.append((by_id[iid], now, target))
+        steps.append((by_id[iid], now, target, root))
     art_now, art_back = live["artpath"], str(data.get("restore_artpath") or "")
-    if _abs(lib, data.get("artpath")) != art_now:
+    art_root = ""
+    if art_now == art_back:
+        pass  # unchanged by the apply, or already back
+    elif _abs(lib, data.get("artpath")) != art_now:
         raise _no("the album's cover changed since the relocation", "ART_CHANGED")
-    if art_now and art_back and art_back != art_now:
+    elif art_now and art_back:
         if not os.path.isfile(art_now):
-            raise _no("the album's cover file is missing", "ART_CHANGED")
+            raise _no("the album's cover file is missing", "FILE_MISSING")
         if art_back in targets:
             raise _no("the cover would be restored onto a track", "PATH_INVALID", 400)
-        _safe_target(lib, art_back, art_now)
-    elif bool(art_now) != bool(art_back):
+        art_back, art_root = _safe_target(lib, art_back, art_now)
+    elif art_now and not art_back:
         raise _no("the album's cover changed since the relocation", "ART_CHANGED")
     else:
-        art_back = art_now
-    return album, steps, (art_now, art_back)
+        _contained(art_back)  # Beets dropped a missing cover's artpath: restore the field only
+    return album, steps, (art_now, art_back, art_root), live
 
 
-def _move_item(lib, item, dest: str) -> None:
-    util.mkdirall(os.fsencode(dest))
-    item.move_file(os.fsencode(dest), MoveOperation.MOVE)
-    item.store()
+def _move_item(lib, item, dest: str, root: str = "") -> None:
+    """Move one track and store its row in one Beets transaction. A
+    ``unique_path`` rename (dest taken meanwhile) is a failure, never a result."""
+    with lib.transaction():
+        util.mkdirall(os.fsencode(dest))
+        if root:
+            folder_ops.contained_path(dest, root)  # re-check after mkdirall, right before the move
+        item.move_file(os.fsencode(dest), MoveOperation.MOVE)
+        item.store()
     if _abs(lib, item.path) != dest:
         raise RuntimeError("Beets moved the file to another path")
 
 
-def _rollback(lib, album, steps, art) -> Dict[str, Any]:
-    art_now, art_back = art
-    done: List[Tuple[Any, str, str]] = []
-    art_moved = False
+def _remove_empty_dirs(path: str) -> None:
+    """Remove ``path`` and its parents below their allowed root while each
+    is empty. ``os.rmdir`` removes only an empty folder, atomically."""
+    root = _root_of(path)
+    while root and path.startswith(root + os.sep):
+        try:
+            os.rmdir(path)
+        except OSError:
+            return
+        path = os.path.dirname(path)
+
+
+def _rollback(lib, album, steps, art, live) -> Dict[str, Any]:
+    art_now, art_back, art_root = art
+    done: List[Tuple[Any, str]] = []
+    art_moved = art_set = False
     try:
-        for item, now, back in steps:
-            done.append((item, now, back))
-            _move_item(lib, item, back)
+        for item, now, back, root in steps:
+            done.append((item, now))
+            _move_item(lib, item, back, root)
         if art_back != art_now:
-            util.mkdirall(os.fsencode(art_back))
-            util.move(os.fsencode(art_now), os.fsencode(art_back))
-            art_moved = True
-            album.artpath = os.fsencode(art_back)
-            album.store()
+            with lib.transaction():
+                if art_now:
+                    util.mkdirall(os.fsencode(art_back))
+                    folder_ops.contained_path(art_back, art_root)
+                    util.move(os.fsencode(art_now), os.fsencode(art_back))  # no overwrite
+                    art_moved = True
+                album.artpath = os.fsencode(art_back)
+                album.store()
+                art_set = True
     except Exception:
         ops.log.exception("album relocation rollback failed; putting moved files back")
-        if art_moved:
+        if art_moved and not art_set:
             util.move(os.fsencode(art_back), os.fsencode(art_now))
-            album.artpath = os.fsencode(art_now)
-            album.store()
-        for item, now, _back in reversed(done):
+        for item, now in reversed(done):
             if os.path.exists(item.path) and _abs(lib, item.path) != now:
                 _move_item(lib, item, now)
+        if _state(lib, lib.get_album(album.id)) != live or not all(os.path.isfile(now) for _i, now in done):
+            raise  # not provably all back: ROLLBACK_FAILED, never "nothing changed"
         raise _Undone() from None
-    clutter = beets_config["clutter"].as_str_seq()
-    for vacated in {os.path.dirname(now) for _i, now, _b in steps} | ({os.path.dirname(art_now)} if art_moved else set()):
-        util.prune_dirs(os.fsencode(vacated), lib.directory, clutter=clutter)  # as Beets' own Item.move does
-    return {"album_id": album.id, "restored_items": len(steps), "restored_art": art_moved,
+    for vacated in {os.path.dirname(now) for _i, now, _b, _r in steps} | (
+            {os.path.dirname(art_now)} if art_moved else set()):
+        _remove_empty_dirs(vacated)
+    return {"album_id": album.id, "restored_items": len(steps), "restored_art": art_set,
             "after": _state(lib, lib.get_album(album.id))}
 
 
