@@ -537,13 +537,15 @@ def run_acceptance() -> None:
         _ok(f"Seeded synthetic WAV file at {track_file}")
 
         import_exec = stack.compose(
-            "exec", "-T", "beets",
+            # Run as the LSIO service user (abc), like a real import, so the
+            # files are owned by the same user the webmanager plugin writes as.
+            "exec", "-T", "--user", "abc", "beets",
             "/lsiopy/bin/beet", "-c", "/config/config.yaml", "-l", "/config/musiclibrary.blb",
             "import", "-q", "-A", "/downloads/Acceptance Artist/Acceptance Album"
         )
         if import_exec.returncode != 0:
             import_exec = stack.compose(
-                "exec", "-T", "beets",
+                "exec", "-T", "--user", "abc", "beets",
                 "beet", "-c", "/config/config.yaml", "-l", "/config/musiclibrary.blb",
                 "import", "-q", "-A", "/downloads/Acceptance Artist/Acceptance Album"
             )
