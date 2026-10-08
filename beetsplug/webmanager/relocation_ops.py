@@ -176,8 +176,14 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
         art_back, art_root = _safe_target(lib, art_back, art_now)
     elif art_now and not art_back:
         raise _no("the album's cover changed since the relocation", "ART_CHANGED")
-    else:
-        _contained(art_back)  # Beets dropped a missing cover's artpath: restore the field only
+    else:  # Beets dropped a missing cover's artpath: restore the field only
+        art_back, _root = _contained(art_back)
+        if os.path.splitext(art_back)[1].lower() not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+            raise _no("restore cover path is not an image", "EXTENSION_CHANGED", 400)
+        try:
+            folder_ops._refuse_tracked(lib, art_back)
+        except folder_ops._Refused:
+            raise _no("restore cover path is a library item's path", "TARGET_EXISTS") from None
     return album, steps, (art_now, art_back, art_root), live
 
 

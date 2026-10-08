@@ -466,6 +466,28 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         self.assertTrue(cw.rollback_album_relocation(res["operation_id"], adapter=self.ad, store=self.store)["ok"])
         self.assertEqual(self.beets_state(self.album.id), old)
 
+    def test_field_only_cover_restore_refuses_a_track_or_non_image_path(self):
+        res = cw.relocate_album(self.album.id, adapter=self.ad, store=self.store)
+        self.assertTrue(res["ok"], res)
+        items, _art = self.beets_state(self.album.id)
+        album = self.lib.get_album(self.album.id)
+        album.artpath = b""
+        album.store()
+
+        def rollback(restore_art):
+            return self.client.post(
+                "/webmanager/album-relocation/rollback", headers={"Authorization": f"Bearer {self.token}"},
+                json={"album_id": self.album.id, "artpath": "", "restore_artpath": restore_art,
+                      "items": [{"id": k, "path": v, "restore_path": v} for k, v in items.items()]}).get_json()
+
+        self.assertEqual(rollback(items[min(items)])["error_code"], "EXTENSION_CHANGED")
+        os.rename(items[min(items)], items[min(items)][:-5] + ".jpg")
+        track_jpg = self.lib.get_item(min(items))
+        track_jpg.path = os.fsencode(items[min(items)][:-5] + ".jpg")
+        track_jpg.store()
+        items = self.beets_state(self.album.id)[0]
+        self.assertEqual(rollback(items[min(items)])["error_code"], "TARGET_EXISTS")  # a track's own path
+
     def test_old_plugin_without_the_endpoint_changes_nothing(self):
         op = self._approved()
         with mock.patch.object(self.ad, "relocate_album",
