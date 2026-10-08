@@ -176,7 +176,7 @@ The project uses Semantic Versioning.
 - **Helpers that crashed or faked success now fail honestly (LT-18, LT-12).**
   - `run_command("mbsubmit")` reported "completed" without contacting Beets. The item/album "mbsubmit" jobs now fail with `not_supported`.
   - `get_job()` returned success for any id; it now reads the engine's operation registry. `cancel_job()` no longer claims a cancellation the engine cannot do.
-  - `POST /api/library/move-all` and `POST /api/library/mbsync-all` called helpers with arguments they did not accept. They now fail with `not_supported` before changing anything; a library-wide move or MusicBrainz rewrite has no plan or rollback yet.
+  - `POST /api/library/move-all` and `POST /api/library/mbsync-all` called helpers with arguments they did not accept. Move All now fails with `not_supported` before changing anything, because a library-wide move has no plan or rollback yet. MBSync All runs through Beets (see the MBSync All entry above).
   - `replace_album_art()` (used by artwork upload/URL replace) wrote into the album folder with no audit and was called with unsupported arguments. It is replaced by the audited artwork replacement through Beets (D5, see the next entry).
   - `POST /api/albums/<id>/move-to-library` now relocates through the album relocation family.
   - `create_hardlink()` (torrent re-seed linking) accepts the expected size and links only into staging roots.
@@ -316,7 +316,7 @@ The project uses Semantic Versioning.
 - `PLAYLIST_DIR`, `BEETS_SQLITE_TIMEOUT` and `WEB_MANAGER_PATH` are removed from the settings catalog; nothing used them. `BEETS_LIBRARY` is marked deprecated and read-only.
 - The built-in fallback settings template no longer lists unrelated variables (`DIGARR_INITIAL_PASSWORD`, `POSTGRES_PASSWORD`, `BEETS_UID`, `BEETS_GID`).
 - Docs: `ARCHITECTURE.md`, `DEVELOPMENT.md` and `CONFIGURATION.md` no longer describe the deleted `backend/beets_client.py` as present or ARCH-010 as open.
-- Docs: `ARCHITECTURE.md` and `TECHNICAL_DEBT.md` say that Move All and MBSync All are refused with `not_supported`, and that album rename and move-to-library apply with no operator review and have no rollback. `CONFIGURATION.md`, `TROUBLESHOOTING.md` and `.env.example` document that the default Music Format Preferences move a rejected download out of `/downloads` into `MUSIC_FORMAT_QUARANTINE_DIR`.
+- Docs: `ARCHITECTURE.md` and `TECHNICAL_DEBT.md` say that Move All is refused with `not_supported`; MBSync All, album rename and move-to-library are described in their entries above. `CONFIGURATION.md`, `TROUBLESHOOTING.md` and `.env.example` document that the default Music Format Preferences move a rejected download out of `/downloads` into `MUSIC_FORMAT_QUARANTINE_DIR`, except a preserved torrent source, which stays in place.
 - Frontend dependencies: `react`/`react-dom` 19.3.0 with `@types/react`/`@types/react-dom` 19.3.0, `@mui/material` 9.4.0, `jsdom` 30.1.1, `typescript-eslint` 8.71.1, `@types/node` 26.6.4. No code changes were needed.
 
 
