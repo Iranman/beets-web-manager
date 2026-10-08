@@ -2152,7 +2152,9 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                             failure_reason=outcome["reason"],
                         )
                     else:
-                        review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=_ai_batch_build_evidence(folder, result, suggestion, pf), batch_job_id=state.get("batch_job_id", ""))
+                        kept_ids = getattr(ex, "kept_album_ids", None)
+                        review_sug = {**suggestion, "kept_album_ids": kept_ids} if kept_ids else suggestion
+                        review_id = _ai_batch_queue_pending_review(folder, review_sug, evidence=_ai_batch_build_evidence(folder, result, suggestion, pf), batch_job_id=state.get("batch_job_id", ""))
                         _ai_batch_mark_folder(
                             state,
                             fid,
@@ -2421,7 +2423,13 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
             log.append(f"  Native Beets stderr: {diag['stderr_excerpt']}")
         raise RuntimeError(f"Beets import failed: {ex}")
     if not atomic_res.get("ok"):
-        raise RuntimeError(f"Beets import failed: {atomic_res.get('error', 'confirmed import apply failed')}")
+        kept = atomic_res.get("album_ids") or []
+        msg = f"Beets import failed: {atomic_res.get('error', 'confirmed import apply failed')}"
+        if kept:  # verification failed after Beets imported: the rows stay
+            msg += f" Album_id {', '.join(str(i) for i in kept)} was left in the library for review."
+        err = RuntimeError(msg)
+        err.kept_album_ids = kept  # type: ignore[attr-defined]  # read by the batch review queue
+        raise err
     if atomic_res.get("resumed"):
         log.append("  Resumed an already-verified prior result for this release (native import was not re-invoked).")
 
