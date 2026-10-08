@@ -189,6 +189,17 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Done: the Web Manager side (the post-import retag is removed, #295) and the plugin side (`autotag`, `search_ids`, `quiet_fallback`, `skipped_paths`, in-place import, `musicbrainz` provisioning), which shipped in plugin 1.8.0 (#299) and was hardened in 1.8.1.
   - Still open: reimport-disk's existing-album repair (`_repair_existing_album_in_place`, no import) calls `_match_tracks_from_mb(zero_unmatched=True)`, which `plan_album_mb_track_repair` refuses since MI-1, so that repair path matches nothing.
 
+## ARCH-025 Auto-Import Failure Overwrites The Review Item's Status
+
+- Affected area: `backend/import_service.py`, `start_folder_import_with_id` → `_do_locked`. Also involved: `backend/import_reconciliation_service.py`.
+- Evidence:
+  - On the auto-import path (`auto_import_idempotency_key` set), a job can fail after it has already queued its folder for review. That happens through `_review_and_raise` (a refused Release Group, an unknown Release Group, `not_imported`, #311), or through the `kept_album_ids` verification-failure path.
+  - In that case, `_do_locked`'s `except` handler then calls `_mark_pending_review_status(..., "auto_enqueue_failed")`.
+  - `auto_enqueue_failed` is one of the reconciler's `resume_statuses`. A review item that is waiting for a human decision can therefore be shown as an enqueue failure and become eligible for an automatic resume.
+- This was already true before #311: the `kept_album_ids` path behaves the same way.
+- Desired state: when the job has already queued a review item, the handler keeps that item's review status (for example, it carries a "review queued" flag on the exception) and does not mark it `auto_enqueue_failed`.
+- Priority: P3. Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
