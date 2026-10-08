@@ -314,6 +314,21 @@ class FolderRollbackBusyTests(_Env):
         self.assertTrue(te.rollback_folder_cleanup(self.store, op, adapter=local)["ok"])
         self.assertTrue((self.music / "Empty").is_dir())
 
+    def test_wrapper_busy_restores_the_status_it_claimed_from(self):
+        """QA #306 D1: the wrapper's Running claim is undone to its source,
+        whatever the record holds (completed_at is unset here)."""
+        op = self._plan()
+        self.assertEqual(te.execute_folder_cleanup_apply(self.store, op, adapter=LocalFolderOps(self.music))["status"],
+                         "Completed")
+        self.store.update(op, metadata={"completed_at": None})  # e.g. a record written before completed_at
+        for source in ("Completed", "Failed"):
+            with self.subTest(source=source):
+                self.store.update(op, status=source)
+                with mock.patch.object(te, "_folder_adapter", return_value=_busy()):
+                    res = cw.rollback_folder_cleanup(op, store=self.store)
+                self.assertEqual((res["code"], res["status"]), ("rollback_deferred", source))
+                self.assertEqual(self.store.get(op)["status"], source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2252,10 +2252,13 @@ def rollback_folder_cleanup(
     *,
     music_allowed_roots: Optional[List[str]] = None,
     adapter: Any = None,
+    claimed_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Roll back an applied folder_cleanup_v1 transaction through Beets:
     re-create removed folders, then move every recorded file/folder back, in
-    reverse order. A step that cannot be proven restored is counted failed."""
+    reverse order. A step that cannot be proven restored is counted failed.
+    ``claimed_from``: the status a caller's Running claim came from; a
+    deferred rollback restores it (Failed when unknown)."""
     if not _TRANSACTION_ID_RE.match(operation_id):
         return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
 
@@ -2295,9 +2298,7 @@ def rollback_folder_cleanup(
             return err
 
         def _defer(note: str, error: str, mutated: bool = False) -> Dict[str, Any]:
-            # Running here is the caller's claim from Completed or Failed;
-            # only a completed apply records completed_at.
-            back = ("Completed" if meta.get("completed_at") else "Failed") if status == "Running" else str(status)
+            back = (claimed_from or "Failed") if status == "Running" else str(status)
             store.transition(operation_id, "Running", back)
             store.append_log(operation_id, f"Rollback deferred: {note}")
             return {**refused, "code": "rollback_deferred", "status": back, "mutated": mutated, "error": error}
