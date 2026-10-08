@@ -40,6 +40,23 @@ Within one filesystem ``util.move`` is ``os.replace``, which keeps owner and
 mode. Across filesystems Beets copies, copies mode and times (not owner),
 then removes the source; nothing here chowns.
 
+Preserved torrent sources (plugin 1.15.0, capability
+``album_relocation_link``): ``operations`` ({item id: "move"|"link"}) and
+``art_operation`` mark files Web Manager judged to be in a seeding folder.
+Those are never moved: Beets' ``Item.move()``/``move_art()`` run with
+``HARDLINK`` and, when a hard link is impossible (``util.hardlink`` raises
+``FilesystemError``: another filesystem, ``EXDEV``, or no permission), with
+``COPY``. The row points at the new library file; the original keeps its
+path, bytes and inode. The result lists each changed track's ``methods``
+(``moved``/``linked``/``copied``) and ``art_method``, and the evidence holds
+[size, mtime, dev, inode] of every original and of each library file made.
+Their rollback never moves anything: once the original is proven unchanged
+(same inode, size and mtime; else ``SOURCE_CHANGED``) and the library file
+proven to be the one this relocation made (the original's inode for a link,
+the recorded evidence for a copy; else ``LIBRARY_FILE_CHANGED``), the row is
+pointed back at the original, and only then is the library file unlinked,
+when it is untracked. A library file that is already gone is not an error.
+
 Both hold ``ops.mutation_lock``. Refusals and undone failures (``UNDONE``:
 every moved file was put back) are not kept under the Idempotency-Key, so a
 retry after the operator fixes the cause runs.
@@ -48,6 +65,7 @@ retry after the operator fixes the cause runs.
 from __future__ import annotations
 
 import os
+import stat
 from typing import Any, Dict, List, Tuple
 
 from beets import util
@@ -113,18 +131,98 @@ def _check_relocate(lib, data: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     expected = {str(k): _abs(lib, v) for k, v in (data.get("expected_paths") or {}).items()}
     if not expected or expected != before["items"]:
         raise _no("the album changed since the relocation was planned", "STALE_PLAN")
-    return album, before
+    link_ops = {str(k): v for k, v in (data.get("operations") or {}).items()}
+    art_op = data.get("art_operation") or "move"
+    if (not set(link_ops) <= set(before["items"]) or art_op not in ("move", "link")
+            or any(v not in ("move", "link") for v in link_ops.values())):
+        raise _no("operations must map this album's track ids to move or link", "INVALID_REQUEST", 400)
+    return album, before, link_ops, art_op
 
 
 def _evidence(path: str) -> Any:
-    """[size, mtime] of a file, or None. Moves keep both (``os.replace``, or
-    copy + ``copystat`` across filesystems), so a file found at a restore
-    path after a crash can be proven to be the one Beets moved."""
+    """[size, mtime, dev, inode] of a file, or None. Moves keep size and mtime
+    (``os.replace``, or copy + ``copystat`` across filesystems), so a file
+    found at a restore path after a crash can be proven to be the one Beets
+    moved; a linked or copied original keeps all four."""
     try:
         st = os.stat(path)
     except (OSError, ValueError):
         return None
-    return [st.st_size, st.st_mtime]
+    return [st.st_size, st.st_mtime, st.st_dev, st.st_ino]
+
+
+_LINKED = ("linked", "copied")
+
+
+def _same_file(path: str, ev: Any) -> bool:
+    """``path`` is a regular file (no symlink) matching ``ev`` exactly."""
+    try:
+        st = os.lstat(path)
+        return (stat.S_ISREG(st.st_mode) and st.st_size == int(ev[0]) and abs(st.st_mtime - float(ev[1])) < 1
+                and (st.st_dev, st.st_ino) == (int(ev[2]), int(ev[3])))
+    except (OSError, TypeError, ValueError, IndexError):
+        return False
+
+
+def _ours(path: str, method: Any, origin: Any, library: Any) -> bool:
+    """``path`` is the library file this relocation made: a hard link of the
+    original (its inode) or the copy whose evidence it recorded."""
+    if method == "linked":
+        try:
+            st = os.lstat(path)
+            return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == (int(origin[2]), int(origin[3]))
+        except (OSError, TypeError, ValueError, IndexError):
+            return False
+    return method == "copied" and _same_file(path, library)
+
+
+def _original(lib, restore: Any, now: str, origin: Any) -> Tuple[str, str]:
+    """(path, root) of a linked/copied track's untouched original, proven by
+    the inode, size and mtime recorded at apply; refuses otherwise."""
+    path, root = _contained(restore)
+    if os.path.splitext(path)[1].lower() != os.path.splitext(now)[1].lower():
+        raise _no("restore path has another file extension", "EXTENSION_CHANGED", 400)
+    if not _same_file(path, origin):
+        raise _no("the original in the torrent folder is gone or changed since the relocation "
+                  "(a tag write through a hard link changes it too)", "SOURCE_CHANGED")
+    try:
+        folder_ops._refuse_tracked(lib, path)
+    except folder_ops._Refused:
+        raise _no("restore path is a library item's path", "TARGET_EXISTS") from None
+    return path, root
+
+
+def _place(move, link: bool) -> str:
+    """Run one Beets move: MOVE, or for a preserved torrent source HARDLINK,
+    then COPY when a hard link is impossible. Never MOVE a linked file."""
+    if not link:
+        move(MoveOperation.MOVE)
+        return "moved"
+    try:
+        move(MoveOperation.HARDLINK)
+        return "linked"
+    except util.FilesystemError as exc:  # EXDEV, EPERM (protected_hardlinks), no link support
+        ops.log.info("hard link impossible (%s); copying instead", exc)
+    move(MoveOperation.COPY)
+    return "copied"
+
+
+def _unlink_ours(lib, path: str, original: str, method: Any, origin: Any, library: Any) -> bool:
+    """Remove a library file this relocation made, only while it is provably
+    ours, untracked, and the original is still intact at its path."""
+    try:
+        path, _root = _contained(path)
+        folder_ops._refuse_tracked(lib, path)
+    except folder_ops._Refused:
+        return False
+    if not (_ours(path, method, origin, library) and _same_file(original, origin)):
+        return False
+    try:
+        os.unlink(path)
+    except OSError:
+        return False
+    _remove_empty_dirs(os.path.dirname(path))
+    return True
 
 
 def _adoptable(lib, now: str, restore: Any, evidence: Any) -> str:
@@ -155,17 +253,43 @@ class _Undone(Exception):
     """The operation failed and every file it had moved was put back."""
 
 
-def _relocate(lib, album, before) -> Dict[str, Any]:
+def _relocate(lib, album, before, link_ops, art_op) -> Dict[str, Any]:
     evidence = {"items": {k: _evidence(p) for k, p in before["items"].items()},
-                "artpath": _evidence(before["artpath"]) if before["artpath"] else None}
+                "artpath": _evidence(before["artpath"]) if before["artpath"] else None,
+                "library": {}, "library_art": None}
+    methods: Dict[str, str] = {}
+    art_method = ""
     try:
-        album.move(operation=MoveOperation.MOVE)
+        # Beets' Album.move(), per track: a preserved track links or copies.
+        album.store()
+        moved_dir = None
+        for item in album.items():
+            iid, old = str(item.id), item.path
+            how = _place(lambda op, it=item: it.move(op, with_album=False), link_ops.get(iid) == "link")
+            if item.path != old:
+                methods[iid] = how
+                evidence["library"][iid] = _evidence(_abs(lib, item.path))
+                moved_dir = moved_dir or os.path.dirname(item.path)
+        old_art = album.artpath
+        how = _place(lambda op: album.move_art(op, item_dir=moved_dir), art_op == "link")
+        album.store()
+        if album.artpath and album.artpath != old_art:
+            art_method = how
+            evidence["library_art"] = _evidence(_abs(lib, album.artpath))
     except Exception:
         ops.log.exception("album relocation failed; putting moved files back")
         album = lib.get_album(album.id)
         for item in album.items():
-            back = before["items"].get(str(item.id))
-            if back and _abs(lib, item.path) != back and os.path.exists(item.path):
+            iid = str(item.id)
+            back, now = before["items"].get(iid), _abs(lib, item.path)
+            if not back or now == back:
+                continue
+            if methods.get(iid) in _LINKED:
+                if _same_file(back, evidence["items"].get(iid)):
+                    _adopt_item(lib, item, back)
+                    _unlink_ours(lib, now, back, methods[iid], evidence["items"].get(iid),
+                                 evidence["library"].get(iid))
+            elif link_ops.get(iid) != "link" and os.path.exists(item.path):
                 _move_item(lib, item, back)
         if _state(lib, album)["artpath"] != before["artpath"] or not all(
                 os.path.exists(p) for p in before["items"].values()):
@@ -179,7 +303,7 @@ def _relocate(lib, album, before) -> Dict[str, Any]:
                      if k not in moved and dest[k] != before["items"].get(k))
     renamed = sorted(k for k in moved if after["items"][k] != dest[k])  # util.unique_path: name.1.ext
     return {"album_id": album.id, "before": before, "after": after, "moved": moved, "skipped": skipped,
-            "renamed": renamed, "evidence": evidence}
+            "renamed": renamed, "evidence": evidence, "methods": methods, "art_method": art_method}
 
 
 def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str, str]], Tuple[str, str]]:
@@ -191,37 +315,61 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
     if not wanted or set(wanted) != set(live["items"]):
         raise _no("the album's tracks changed since it was relocated", "ALBUM_CHANGED")
     by_id = {str(it.id): it for it in album.items()}
-    steps, targets = [], set()
+    steps, targets, cleanup = [], set(), []
     for iid, entry in wanted.items():
         now = live["items"][iid]
         restore = entry.get("restore_path")
+        method, origin, library = entry.get("method"), entry.get("evidence"), entry.get("library_evidence")
         if restore == now:
-            continue  # never moved (skipped by the apply), or already back (an interrupted rollback)
+            # Never moved (skipped by the apply), or already back (an interrupted
+            # rollback): a linked/copied track may still have its library file.
+            if method in _LINKED and isinstance(entry.get("path"), str) and entry["path"] != now:
+                cleanup.append((entry["path"], now, method, origin, library))
+            continue
         if _abs(lib, entry.get("path")) != now:
             raise _no(f"item {iid} was moved again since the relocation", "ITEM_MOVED")
-        adopt = False
-        if not os.path.isfile(now):
+        if method in _LINKED:
+            # The original never moved: point the row back, then drop our library file.
+            target, root = _original(lib, restore, now, origin)
+            if os.path.lexists(now):
+                if not _ours(now, method, origin, library):
+                    raise _no(f"item {iid}'s library file changed since the relocation", "LIBRARY_FILE_CHANGED")
+                cleanup.append((now, target, method, origin, library))
+            mode = "repoint"
+        elif not os.path.isfile(now):
             # A crash after Beets moved the file back but before the row was stored.
-            target, root, adopt = _adoptable(lib, now, restore, entry.get("evidence")), "", True
+            target, root, mode = _adoptable(lib, now, restore, origin), "", "adopt"
             if not target:
                 raise _no(f"item {iid}'s file is missing", "FILE_MISSING")
         else:
             target, root = _safe_target(lib, restore, now)
+            mode = "move"
         if target in targets:
             raise _no("two items would be restored to one path", "PATH_INVALID", 400)
         targets.add(target)
-        steps.append((by_id[iid], now, target, root, adopt))
+        steps.append((by_id[iid], now, target, root, mode))
     art_now, art_back = live["artpath"], str(data.get("restore_artpath") or "")
-    art_root, art_adopt = "", False
+    art_root, art_mode = "", "move"
+    art_method, art_origin = data.get("art_method"), data.get("art_evidence")
+    art_library = data.get("art_library_evidence")
     if art_now == art_back:
-        pass  # unchanged by the apply, or already back
+        # Unchanged by the apply, or already back: a linked/copied cover may still have its library file.
+        if art_method in _LINKED and isinstance(data.get("artpath"), str) and data["artpath"] not in ("", art_now):
+            cleanup.append((data["artpath"], art_now, art_method, art_origin, art_library))
     elif _abs(lib, data.get("artpath")) != art_now:
         raise _no("the album's cover changed since the relocation", "ART_CHANGED")
     elif art_now and art_back:
         if art_back in targets:
             raise _no("the cover would be restored onto a track", "PATH_INVALID", 400)
-        if not os.path.isfile(art_now):
-            art_back, art_adopt = _adoptable(lib, art_now, art_back, data.get("art_evidence")), True
+        if art_method in _LINKED:
+            art_back, art_root = _original(lib, art_back, art_now, art_origin)
+            if os.path.lexists(art_now):
+                if not _ours(art_now, art_method, art_origin, art_library):
+                    raise _no("the album's library cover changed since the relocation", "LIBRARY_FILE_CHANGED")
+                cleanup.append((art_now, art_back, art_method, art_origin, art_library))
+            art_mode = "repoint"
+        elif not os.path.isfile(art_now):
+            art_back, art_mode = _adoptable(lib, art_now, art_back, art_origin), "adopt"
             if not art_back:
                 raise _no("the album's cover file is missing", "FILE_MISSING")
         else:
@@ -236,7 +384,7 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
             folder_ops._refuse_tracked(lib, art_back)
         except folder_ops._Refused:
             raise _no("restore cover path is a library item's path", "TARGET_EXISTS") from None
-    return album, steps, (art_now, art_back, art_root, art_adopt), live
+    return album, steps, (art_now, art_back, art_root, art_mode), live, cleanup
 
 
 def _move_item(lib, item, dest: str, root: str = "") -> None:
@@ -271,22 +419,26 @@ def _adopt_item(lib, item, dest: str) -> None:
         item.store()
 
 
-def _rollback(lib, album, steps, art, live) -> Dict[str, Any]:
-    art_now, art_back, art_root, art_adopt = art
-    done: List[Tuple[Any, str]] = []
+def _rollback(lib, album, steps, art, live, cleanup) -> Dict[str, Any]:
+    art_now, art_back, art_root, art_mode = art
+    done: List[Tuple[Any, str, str]] = []
     art_moved = art_set = False
-    adopted = 0
+    adopted = repointed = 0
     try:
-        for item, now, back, root, adopt in steps:
-            if adopt:
+        for item, now, back, root, mode in steps:
+            if mode == "adopt":
                 _adopt_item(lib, item, back)  # kept on failure: its row now matches its file
                 adopted += 1
                 continue
-            done.append((item, now))
-            _move_item(lib, item, back, root)
+            done.append((item, now, mode))
+            if mode == "repoint":
+                _adopt_item(lib, item, back)  # the original never moved; nothing moves
+                repointed += 1
+            else:
+                _move_item(lib, item, back, root)
         if art_back != art_now:
             with lib.transaction():
-                if art_now and not art_adopt:
+                if art_now and art_mode == "move":
                     util.mkdirall(os.fsencode(art_back))
                     folder_ops.contained_path(art_back, art_root)
                     util.move(os.fsencode(art_now), os.fsencode(art_back))  # no overwrite
@@ -298,17 +450,24 @@ def _rollback(lib, album, steps, art, live) -> Dict[str, Any]:
         ops.log.exception("album relocation rollback failed; putting moved files back")
         if art_moved and not art_set:
             util.move(os.fsencode(art_back), os.fsencode(art_now))
-        for item, now in reversed(done):
-            if os.path.exists(item.path) and _abs(lib, item.path) != now:
+        for item, now, mode in reversed(done):
+            if mode == "repoint":
+                if _abs(lib, item.path) != now:
+                    _adopt_item(lib, item, now)  # its library file is still there: cleanup runs last
+            elif os.path.exists(item.path) and _abs(lib, item.path) != now:
                 _move_item(lib, item, now)
-        if _state(lib, lib.get_album(album.id)) != live or not all(os.path.isfile(now) for _i, now in done):
+        if _state(lib, lib.get_album(album.id)) != live or not all(os.path.isfile(now) for _i, now, _m in done):
             raise  # not provably all back: ROLLBACK_FAILED, never "nothing changed"
         raise _Undone() from None
+    # Rows are final: drop only the library files this relocation made.
+    kept = [path for path, original, method, origin, library in cleanup
+            if not _unlink_ours(lib, path, original, method, origin, library)]
     for vacated in {os.path.dirname(s[1]) for s in steps} | (
-            {os.path.dirname(art_now)} if art_moved or art_adopt else set()):
+            {os.path.dirname(art_now)} if art_set and art_now else set()):
         _remove_empty_dirs(vacated)
     return {"album_id": album.id, "restored_items": len(steps), "adopted_items": adopted,
-            "restored_art": art_set, "after": _state(lib, lib.get_album(album.id))}
+            "repointed_items": repointed, "removed_library_files": len(cleanup) - len(kept),
+            "kept_library_files": kept, "restored_art": art_set, "after": _state(lib, lib.get_album(album.id))}
 
 
 def _run(op_type: str, check, run, failure_code: str):

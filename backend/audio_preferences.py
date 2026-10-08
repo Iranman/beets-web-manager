@@ -456,23 +456,12 @@ def _rejected_download_keep_reason(path: Path, preserve_source: Optional[bool]) 
     """
     try:
         # Lazy: library_service sits above this helper and imports it indirectly.
-        from backend.library_service import (
-            DOWNLOADS_ALLOWED_ROOTS, MUSIC_ROOT, TORRENT_SOURCE_ROOTS,
-            _path_is_under, _preserve_torrent_source_path,
-        )
+        from backend.library_service import MUSIC_ROOT, _path_is_under, _preserve_torrent_source_file
         if _path_is_under(path.resolve(strict=False), MUSIC_ROOT.resolve(strict=False)):
             return "file is in the music library"
         if preserve_source is None:
-            # Judge folders, as folder imports do: the app-managed markers are
-            # folder names, never file names (#321 QA F1/F2). Any preserved folder
-            # between the file and the torrent root keeps it (#321 QA R1).
-            roots = {r.resolve(strict=False) for r in (TORRENT_SOURCE_ROOTS or DOWNLOADS_ALLOWED_ROOTS)}
-            folder = path.parent
-            preserve_source = _preserve_torrent_source_path(folder) or any(
-                _preserve_torrent_source_path(a)
-                for a in folder.parents
-                if a.resolve(strict=False) not in roots
-            )
+            # Folders, not file names; any preserved folder up to the torrent root (#321).
+            preserve_source = _preserve_torrent_source_file(path)
     except Exception:
         return "could not confirm the file is not a preserved torrent source"
     return "file is a preserved torrent source that may still be seeding" if preserve_source else ""

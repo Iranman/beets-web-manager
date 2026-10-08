@@ -641,6 +641,17 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
     return any(_path_is_under(path, root) for root in roots)
 
 
+def _preserve_torrent_source_file(path_value: str | Path) -> bool:
+    """True when one file sits in a preserved torrent source: its folder, or
+    any folder between it and the torrent root, is preserved. Judges folders,
+    as folder imports do: the app-managed markers are folder names, never file
+    names (#321). Raises when the rule cannot be evaluated; callers fail closed."""
+    roots = {r.resolve(strict=False) for r in (TORRENT_SOURCE_ROOTS or DOWNLOADS_ALLOWED_ROOTS)}
+    folder = Path(path_value).parent
+    return _preserve_torrent_source_path(folder) or any(
+        _preserve_torrent_source_path(a) for a in folder.parents if a.resolve(strict=False) not in roots)
+
+
 _MUSIC_LIBRARY_ROOT = str(MUSIC_ROOT)
 
 

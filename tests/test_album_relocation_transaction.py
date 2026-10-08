@@ -1,6 +1,6 @@
 """Album rename / move to library through Beets (album_move_v1).
 
-Real BeetsAdapter -> real webmanager plugin (plugin 1.14.0) -> real Beets
+Real BeetsAdapter -> real webmanager plugin (plugin 1.15.0) -> real Beets
 library and files (Flask test client in place of HTTP). The plan records every
 path; the operator's click is the approval; the apply is Beets' Album.move();
 the rollback moves every file and the cover back through Beets, and Beets
@@ -589,7 +589,7 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         with mock.patch.object(self.ad, "relocate_album",
                                side_effect=BeetsAdapterNotFoundError("x", error_code="BEETS_NOT_FOUND")):
             res = cw.apply_album_relocation(op, adapter=self.ad, store=self.store)
-        self.assertIn("1.14.0", res["error"])
+        self.assertIn("1.15.0", res["error"])
         self.assertEqual(self.store.get(op)["status"], "Failed")
 
 

@@ -98,6 +98,11 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **Check**: the import job's log shows `Rejected download: <reason>: <file>` and `Rejected download quarantined: <path>`. Look in `<quarantine dir>/<YYYYMMDD>/`.
 * **Fix**: move the file back yourself, then change Settings > Music Format Preferences so that the format or channel layout is accepted, and import again. The move is not a library transaction, so the Transactions page cannot roll it back. See [Music Format Preferences and rejected downloads](CONFIGURATION.md#music-format-preferences-and-rejected-downloads).
 
+### 14. "Move to library" left the album in `/downloads` too, or was refused with `plugin_outdated`
+* **Cause**: the album is in a preserved torrent source (a folder under `TORRENT_SOURCE_ROOTS` that Web Manager did not create). Its files are never moved, so the torrent keeps seeding: Beets hard links them into `/music` (same file, two names) or, when `/downloads` and `/music` are on different filesystems or Docker volumes, copies them. Beets then tracks the copy in `/music`. With webmanager plugin older than 1.15.0, such a move is refused and nothing changes.
+* **Check**: the transaction log says `Preserved torrent source left in place: N track(s) hard linked and M copied`. `stat` on a hard-linked track shows the same inode as the torrent file and a link count of 2.
+* **Fix**: nothing to fix. A copy uses extra disk space; put `/downloads` and `/music` on one filesystem (one volume or bind mount) to get hard links instead. A hard link shares the file's content, so a tag write to the library file also changes the torrent's file. Rolling the transaction back removes only the library files the move made. For `plugin_outdated`, restart the `beets` container so it loads plugin 1.15.0. Set `ALLOW_TORRENT_SOURCE_MOVE=1` only if moving seeding files is what you want.
+
 ---
 
 ## Operational Diagnostics
