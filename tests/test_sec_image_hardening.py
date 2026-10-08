@@ -34,6 +34,17 @@ class DockerfileTests(unittest.TestCase):
         # installs packages at runtime, so the final image must not ship it.
         self.assertRegex(DOCKERFILE, r"pip install --no-cache-dir -r requirements\.txt[\s\\]*&& pip uninstall -y pip")
 
+    def test_tini_runs_after_privilege_drop(self):
+        # D6: a root tini without CAP_KILL (hardened Compose) cannot forward
+        # SIGTERM to the uid-PUID app. tini must be exec'd by gosu instead.
+        entrypoint = re.search(r'^ENTRYPOINT\s+(.+)$', DOCKERFILE, re.M).group(1)
+        self.assertNotIn("tini", entrypoint)
+        self.assertIn('exec gosu "$RUN_AS" tini -- "$@"', ENTRYPOINT.read_text(encoding="utf-8"))
+
+    def test_version_label_default_is_not_a_release(self):
+        # D11: a stale release-number default mislabels local builds.
+        self.assertRegex(DOCKERFILE, r"(?m)^ARG VERSION=dev$")
+
 
 @unittest.skipUnless(shutil.which("sh"), "POSIX sh not available")
 class EntrypointRootRefusalTests(unittest.TestCase):

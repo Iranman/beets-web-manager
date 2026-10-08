@@ -19,7 +19,7 @@ from backend.mb_alignment import summarize_mb_track_alignment
 from backend.matching_contract import build_album_matching_decision
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from helpers_mb import _resolve_release_group_to_release
-from backend.beets_adapter import BeetsUnavailableError
+from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError, beets_adapter
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
 from backend.acoustid_service import _acoustid_multi_file, _album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist
@@ -1854,6 +1854,17 @@ def _stamp_folder_for_item_path(
     return None
 
 
+def _artist_folder_album_rows() -> List[Dict[str, Any]]:
+    """Every item's path, album id and album-artist MBID, read through the
+    adapter. composite_workflows.get_artist_folder_album_mbids() takes one
+    folder and returns no paths, so this whole-library caller raised
+    TypeError there (Clean All logged it on every run)."""
+    items = beets_adapter.get_items()
+    BeetsAdapter._require_item_paths(items)
+    return [{"path": BeetsAdapter._decode_path(it.get("path")), "album_id": it.get("album_id"),
+             "mb_albumartistid": it.get("mb_albumartistid")} for it in items]
+
+
 def _stamp_artist_folder_album_mbid_counts(
     root: Path,
     folders: List[Path],
@@ -1865,7 +1876,7 @@ def _stamp_artist_folder_album_mbid_counts(
     album_ids_by_folder: Dict[str, set] = {}
     mbid_album_ids_by_folder: Dict[str, Dict[str, set]] = {}
     try:
-        rows = composite_workflows.get_artist_folder_album_mbids()
+        rows = _artist_folder_album_rows()
     except Exception as ex:
         _app_logger.error("Artist folder MBID counts: engine call failed: %s", ex, exc_info=True)
         return {}, {}, _safe_inventory_error_message(ex)

@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 import backend.composite_workflows as cw
+from tests._folder_ops_local import patch_local_folder_ops
 from tests.test_wave0_s1_containment import FakeAdapter, _Env
 
 
@@ -307,6 +308,7 @@ class SafeRenameTests(_Env):
         p = mock.patch.object(cw, "beets_adapter", self.adapter)
         p.start()
         self.addCleanup(p.stop)
+        patch_local_folder_ops(self, self.music)  # folder steps run in Beets
 
     def test_folder_with_beets_items_is_refused(self):
         """BA-7: references come from the adapter, never the Beets DB file."""

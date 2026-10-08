@@ -16,7 +16,8 @@ FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf2583
 # Immutable image provenance. Required, not optional: a blank/missing
 # VCS_REF fails the build rather than silently producing an unlabeled image.
 ARG VCS_REF
-ARG VERSION=0.1.18
+# CI passes the release version; a local build without it is labelled "dev".
+ARG VERSION=dev
 ARG BUILD_DATE
 RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
 LABEL org.opencontainers.image.title="Beets Web Manager" \
@@ -77,8 +78,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 COPY docker/web-manager-entrypoint.sh /usr/local/bin/web-manager-entrypoint.sh
 RUN chmod +x /usr/local/bin/web-manager-entrypoint.sh
 
-# Starts as root (required to remap PUID/PGID and fix bind-mount ownership
-# below) then execs the application as the unprivileged `beets` user via
-# gosu -- the application process itself never runs as root.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/web-manager-entrypoint.sh"]
+# Starts as root (required to remap PUID/PGID and fix bind-mount ownership)
+# then execs `gosu <PUID:PGID> tini -- <app>`: tini ends up as PID 1 with
+# the app's uid, so it can forward SIGTERM to the app without CAP_KILL under
+# the hardened (cap_drop: ALL) Compose settings, and still reaps zombies.
+# Neither tini nor the application ever runs as root.
+ENTRYPOINT ["/usr/local/bin/web-manager-entrypoint.sh"]
 CMD ["python", "app.py"]

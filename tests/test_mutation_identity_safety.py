@@ -357,6 +357,11 @@ class FolderCleanupTests(_Env):
         p = mock.patch.object(cw, "beets_adapter", self.adapter)
         p.start()
         self.addCleanup(p.stop)
+        try:
+            from _folder_ops_local import patch_local_folder_ops
+        except ImportError:  # pragma: no cover
+            from tests._folder_ops_local import patch_local_folder_ops
+        patch_local_folder_ops(self, self.music)
 
     def test_apply_refuses_folder_that_gained_beets_items(self):
         src = self.music / "Artist" / "Albm"

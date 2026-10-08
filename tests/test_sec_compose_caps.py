@@ -43,7 +43,7 @@ class EntrypointReadOnlyRootTests(unittest.TestCase):
     def test_falls_back_to_numeric_ids_when_passwd_is_read_only(self):
         self.assertIn('[ -w /etc/passwd ] && [ -w /etc/group ]', ENTRYPOINT)
         self.assertIn('RUN_AS="$PUID:$PGID"', ENTRYPOINT)
-        self.assertIn('exec gosu "$RUN_AS" "$@"', ENTRYPOINT)
+        self.assertIn('exec gosu "$RUN_AS" tini -- "$@"', ENTRYPOINT)
 
     def test_config_is_only_chowned_when_mounted(self):
         # The external-Beets example has no /config mount; chowning the

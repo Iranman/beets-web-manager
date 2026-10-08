@@ -20,7 +20,7 @@ from backend.audio_preferences import mark_needs_replacement as _mark_music_form
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
-from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_multi_file, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
+from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
 from backend.artwork_service import _fetch_artwork_after_retag
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_match_score
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok, _repair_album_mbid_sticking_once
@@ -972,9 +972,11 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
 
     # ── AcoustID fingerprinting (multi-file, cached) ──────────────────────────
     acoustid_release_hits = _acoustid_multi_file(audio_files)
-    acoustid_cands: List[Dict[str, Any]] = (
-        _acoustid_lookup_cached(audio_files[0]) if audio_files else []
-    )
+    # #252 NF-2: an AcoustID that was not asked (no key, rejected key,
+    # outage) is reported as such, never as "no fingerprint candidates".
+    acoustid_lookup = _acoustid_lookup_cached_outcome(audio_files[0]) if audio_files else None
+    acoustid_status = acoustid_failure_status(acoustid_lookup) if acoustid_lookup else ""
+    acoustid_cands: List[Dict[str, Any]] = list(acoustid_lookup.data or []) if acoustid_lookup else []
 
     # ── MusicBrainz release search ─────────────────────────────────────────────
     # When the artist folder is MBID-stamped, prefer arid: lookup over artist name
@@ -1114,6 +1116,8 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                     "acoustid_candidates": acoustid_cands,
                     "acoustid_release_hits": acoustid_release_hits,
                     "evidence": evidence,
+                    "acoustid_unavailable": bool(acoustid_status),
+                    "acoustid_status": acoustid_status,
                 }
 
     if not mb_candidates:
@@ -1164,6 +1168,8 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
             "musicbrainz_unavailable": mb_unavailable,
+            "acoustid_unavailable": bool(acoustid_status),
+            "acoustid_status": acoustid_status,
         }
 
     # ── build prompt sections ─────────────────────────────────────────────────
@@ -1413,6 +1419,8 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "acoustid_candidates": acoustid_cands,
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
+            "acoustid_unavailable": bool(acoustid_status),
+            "acoustid_status": acoustid_status,
         }
     except Exception as exc:
         _app_logger.warning("AI folder suggestion failed: %s", type(exc).__name__)

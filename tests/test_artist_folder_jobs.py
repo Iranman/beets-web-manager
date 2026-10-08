@@ -46,7 +46,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn('def _safe_artist_folder_name', app_source)
         self.assertIn('def _stamp_folder_for_item_path', app_source)
         self.assertIn('def _stamp_artist_folder_album_mbid_counts', app_source)
-        self.assertIn('composite_workflows.get_artist_folder_album_mbids', app_source)
+        self.assertIn('rows = _artist_folder_album_rows()', app_source)
         self.assertIn('folder_id_album_sets, folder_album_totals, scan_error = _stamp_artist_folder_album_mbid_counts(root, folders)', app_source)
         self.assertIn('album_total = int(folder_album_totals.get(folder_key) or 0)', app_source)
         self.assertIn('match_ratio = best_count / album_total if album_total else 0.0', app_source)

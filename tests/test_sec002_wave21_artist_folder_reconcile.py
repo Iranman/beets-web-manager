@@ -503,7 +503,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
 
     def test_genuine_empty_inventory_reports_ok_true(self):
         with mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", return_value=[]), \
-             mock.patch.object(app_module.composite_workflows, "get_artist_folder_album_mbids", return_value=[]):
+             mock.patch("backend.matching_service._artist_folder_album_rows", return_value=[]):
             result = app_module._stamp_artist_folder_scan(self.root)
         self.assertTrue(result.get("ok"))
         self.assertEqual(result["candidates"], [])
@@ -560,7 +560,7 @@ class StampArtistFolderScanFailClosedTests(unittest.TestCase):
             # Genuine success case: an empty inventory legitimately produces
             # the "no folders need stamping" outcome.
             with mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", return_value=[]), \
-                 mock.patch.object(app_module.composite_workflows, "get_artist_folder_album_mbids", return_value=[]):
+                 mock.patch("backend.matching_service._artist_folder_album_rows", return_value=[]):
                 with app_module.app.test_request_context(
                     "/api/clean/artist-folders/stamp-mbid", method="POST",
                     json={"root": str(self.root), "dry_run": False},

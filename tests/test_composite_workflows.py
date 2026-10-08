@@ -35,6 +35,7 @@ from backend.composite_workflows import (
     sync_deleted_files,
 )
 from backend.transaction_engine import TransactionStore
+from tests._folder_ops_local import patch_local_folder_ops
 
 
 class TestCompositeWorkflows(unittest.TestCase):
@@ -228,6 +229,7 @@ class TestCompositeWorkflows(unittest.TestCase):
         sub_dir = Path(self.tmpdir.name) / "empty_dir"
         sub_dir.mkdir()
         self.mock_adapter.list_item_paths.return_value = []
+        patch_local_folder_ops(self, self.tmpdir.name)  # folder steps run in Beets
         with patch.dict("os.environ", {"MUSIC_ROOT": self.tmpdir.name}), \
              patch("backend.composite_workflows.beets_adapter", self.mock_adapter):
             plan_res = plan_folder_cleanup({"source": str(sub_dir), "action": "remove_empty"}, store=self.store)
