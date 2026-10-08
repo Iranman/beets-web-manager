@@ -112,6 +112,34 @@ def _apply_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
             "error": f"Only a Preview or Approved transaction can be applied (this one is {status}); nothing was changed."}
 
 
+def _apply_claimed(st: TransactionStore, operation_id: str,
+                   write: Callable[[], Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+    """The plain adapter-backed apply families (#218): CAS Preview|Approved
+    -> Running before ``write`` runs (refused, writing nothing, otherwise),
+    then Running -> Completed, or Failed when ``write`` returns ok=False
+    (``mutated: False`` there means it wrote nothing, so no apply record is
+    kept). ``write`` may return a ``log`` line and extra result fields. An
+    exception ends Failed -- Recovery Required when a transport error leaves
+    the outcome unknown -- and is re-raised for the caller's error mapping."""
+    if _claim_apply(st, operation_id, metadata={"engine_result": {"mutation_started": True}}) is None:
+        return _apply_refused(st, operation_id)
+    try:
+        res = dict(write() or {})
+    except Exception as exc:
+        unknown = _transport_error(exc)
+        st.transition(operation_id, "Running", "Recovery Required" if unknown else "Failed",
+                      logs=[f"Apply raised {type(exc).__name__}"
+                            + ("; the outcome is unknown, so it is not retried." if unknown else ".")])
+        raise
+    logs = {"logs": [res.pop("log")]} if res.get("log") else {}
+    if res.get("ok") is False:
+        clear = {"metadata": {"engine_result": None}} if res.get("mutated") is False else {}
+        st.transition(operation_id, "Running", "Failed", **(logs or {"logs": [_s(res.get("error"))]}), **clear)
+        return {**res, "operation_id": operation_id, "status": "Failed"}
+    st.transition(operation_id, "Running", "Completed", **logs)
+    return {**res, "ok": True, "operation_id": operation_id, "status": "Completed"}
+
+
 def _claim_rollback(st: TransactionStore, operation_id: str, to: str = "Running") -> Optional[Dict[str, Any]]:
     """CAS Completed (or Failed with an apply record) -> ``to`` (#224). A
     Preview, Approved or Cancelled transaction never wrote anything, so it is
@@ -722,16 +750,12 @@ def apply_artist_folder_reconcile(
     canonical_name = meta.get("canonical_name")
     album_ids = meta.get("album_ids", [])
 
-    if album_ids and canonical_name:
-        ad.modify(
-            fields={"albumartist": canonical_name},
-            album_ids=[int(x) for x in album_ids],
-            write=True,
-            move=True,
-        )
+    def write() -> None:
+        if album_ids and canonical_name:
+            ad.modify(fields={"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
+                      write=True, move=True)
 
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    return _apply_claimed(st, operation_id, write)
 
 
 def rollback_artist_folder_reconcile(
@@ -1975,14 +1999,17 @@ def apply_album_artwork_fetch(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
-    artpath = ""
-    if aid:
-        ad.fetch_art(album_ids=[int(aid)])
-        ad.embed_art(album_ids=[int(aid)])
-        album = ad.get_album(int(aid))
-        artpath = album.get("artpath", "") if album else ""
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed", "artpath": artpath}
+
+    def write() -> Dict[str, Any]:
+        artpath = ""
+        if aid:
+            ad.fetch_art(album_ids=[int(aid)])
+            ad.embed_art(album_ids=[int(aid)])
+            album = ad.get_album(int(aid))
+            artpath = album.get("artpath", "") if album else ""
+        return {"artpath": artpath}
+
+    return _apply_claimed(st, op_id, write)
 
 
 def rollback_album_artwork_fetch(
@@ -2071,10 +2098,14 @@ def apply_album_artwork(
     tx = st.get(operation_id)
     meta = tx.get("metadata", {})
     aid = meta.get("album_id")
-    if aid:
-        fetch_and_embed_album_art(int(aid), adapter=ad, store=st)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+
+    def write() -> Optional[Dict[str, Any]]:
+        if not aid:
+            return None
+        res = fetch_and_embed_album_art(int(aid), adapter=ad, store=st)
+        return None if res.get("ok") else {"ok": False, "error": res.get("error") or "Artwork fetch failed."}
+
+    return _apply_claimed(st, operation_id, write)
 
 
 def rollback_album_artwork(
@@ -2606,11 +2637,15 @@ def apply_item_metadata(
     iid = meta.get("item_id")
     updates = meta.get("updates") or {}
     write = meta.get("write_tags", True)
+    # Intended: a forced tag rewrite also re-places the file for path-format
+    # fields, exactly as BeetsAdapter.update_item_metadata does.
     move = meta.get("force_write_tags", force_write_tags)
-    if iid and updates:
-        ad.modify(fields=updates, item_ids=[int(iid)], write=write, move=move)
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed"}
+
+    def _write() -> None:
+        if iid and updates:
+            ad.modify(fields=updates, item_ids=[int(iid)], write=write, move=move)
+
+    return _apply_claimed(st, op_id, _write)
 
 
 def rollback_item_metadata(
@@ -2696,21 +2731,21 @@ def apply_album_maintenance(
     if tx.get("status") in ("Completed", "Failed", "Rolled Back", "Running"):
         return {"ok": False, "code": "already_applied", "operation_id": operation_id,
                 "error": f"Transaction is {tx.get('status')}; it cannot be applied again."}
-    if mode not in _ALBUM_MAINTENANCE_SUPPORTED_MODES or not aid:
-        st.update(operation_id, status="Failed",
-                  logs=[f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."])
-        return {"ok": False, "code": "not_supported", "operation_id": operation_id, "status": "Failed",
-                "error": f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."}
-    if not ad.get_album(aid):
-        st.update(operation_id, status="Completed", logs=[f"Album {aid} is already gone."])
-        return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted_albums": 0}
-    if ad.find_all_items_by_album_id(aid):
-        st.update(operation_id, status="Failed", logs=[f"Album {aid} still has items; nothing was removed."])
-        return {"ok": False, "code": "album_not_empty", "operation_id": operation_id, "status": "Failed",
-                "error": f"Album {aid} still has items; only an empty album row can be removed here."}
-    ad.remove(album_ids=[aid], delete_files=False)
-    st.update(operation_id, status="Completed", logs=[f"Removed empty album row {aid}."])
-    return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted_albums": 1}
+
+    def write() -> Dict[str, Any]:
+        if mode not in _ALBUM_MAINTENANCE_SUPPORTED_MODES or not aid:
+            msg = f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."
+            return {"ok": False, "code": "not_supported", "mutated": False, "error": msg, "log": msg}
+        if not ad.get_album(aid):
+            return {"deleted_albums": 0, "log": f"Album {aid} is already gone."}
+        if ad.find_all_items_by_album_id(aid):
+            return {"ok": False, "code": "album_not_empty", "mutated": False,
+                    "log": f"Album {aid} still has items; nothing was removed.",
+                    "error": f"Album {aid} still has items; only an empty album row can be removed here."}
+        ad.remove(album_ids=[aid], delete_files=False)
+        return {"deleted_albums": 1, "log": f"Removed empty album row {aid}."}
+
+    return _apply_claimed(st, operation_id, write)
 
 
 def rollback_album_maintenance(
@@ -2756,10 +2791,13 @@ def apply_album_relocation(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
-    if aid:
-        ad.move(album_ids=[int(aid)])
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed", "moved_count": 1}
+
+    def write() -> Dict[str, Any]:
+        if aid:
+            ad.move(album_ids=[int(aid)])
+        return {"moved_count": 1 if aid else 0}
+
+    return _apply_claimed(st, op_id, write)
 
 
 def rollback_album_relocation(
@@ -2845,10 +2883,12 @@ def apply_album_genre_repair(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
-    if aid:
-        ad.lastgenre(album_ids=[int(aid)], force=True)
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed"}
+
+    def write() -> None:
+        if aid:
+            ad.lastgenre(album_ids=[int(aid)], force=True)
+
+    return _apply_claimed(st, op_id, write)
 
 
 def rollback_album_genre_repair(
