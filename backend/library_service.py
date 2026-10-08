@@ -26,7 +26,7 @@ import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags
 from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
-from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _stamp_artist_folder_album_mbid_counts
+from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from backend.musicbrainz_service import _artist_album_index, _artist_folder_key, _mb_artist_lookup_by_id, _mb_artist_search_one, _mb_canonical_for_artist_entries, _mb_release_has_tracks, _mb_release_search_by_folder_tracks
 from backend.serializers import _DOWNLOADS_ROOTS, _format_duration, _import_review_path_text_error, _leaked_db_paths_summary, _resolve_import_review_source_path
@@ -340,9 +340,8 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             )
             return replacement
         log.append(
-            f"  Same-release-group candidate rejected by folder tracklist: "
-            f"{replacement_pre.get('matches', 0)}/"
-            f"{replacement_pre.get('expected', 0)} track(s) matched"
+            "  Same-release-group candidate rejected by "
+            f"{_preflight_rejection_reason(replacement_pre)}"
         )
         return ""
 
@@ -382,8 +381,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             )
             return rel_id
         log.append(
-            f"  {label} rejected by folder tracklist: "
-            f"{pre.get('matches', 0)}/{pre.get('expected', 0)} track(s) matched"
+            f"  {label} rejected by {_preflight_rejection_reason(pre)}"
             + (f" ({pre.get('release_title')})" if pre.get("release_title") else "")
         )
         for line in (pre.get("examples") or [])[:3]:
@@ -418,8 +416,8 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             )
             return first
         log.append(
-            f"  REFUSED: no release in the requested release-group {rgid} matches the "
-            "folder tracklist; not searching other release groups. Manual Review is required."
+            f"  REFUSED: no release in the requested release-group {rgid} passed the "
+            "folder preflight; not searching other release groups. Manual Review is required."
         )
         return ""
 
