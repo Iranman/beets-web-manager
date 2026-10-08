@@ -55,7 +55,11 @@ def _queue_folder_for_manual_review(folder_path: str, suggestion: Optional[dict]
     try:
         _add_to_pending(folder_path, sug, allow_existing=allow_existing, evidence=evidence, origin=origin)
         if log is not None:
-            log.append("  Queued folder for manual Review; no library files were changed.")
+            kept = sug.get("kept_album_ids")
+            log.append(
+                f"  Queued folder for manual Review; album_id {', '.join(str(i) for i in kept)} "
+                "imported by Beets was left in the library." if kept else
+                "  Queued folder for manual Review; no library files were changed.")
         return True
     except Exception as ex:
         if log is not None:
