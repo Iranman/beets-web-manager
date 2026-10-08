@@ -2752,7 +2752,7 @@ def _beets_setup_warnings(
             "message": str(compat.get("message") or "Restart the Beets container to load the provisioned webmanager plugin."),
         })
 
-    from backend.beets_plugins import refused_config_plugins
+    from backend.beets_plugins import refused_config_pluginpath, refused_config_plugins
     refused = refused_config_plugins()
     if refused:
         warnings.append({
@@ -2762,6 +2762,17 @@ def _beets_setup_warnings(
                 "Web Manager did not edit the Beets config.yaml: it could not prove the edit would keep "
                 f"valid YAML and every listed plugin. Add {', '.join(refused)} to `plugins:` in config.yaml "
                 "manually, then restart the Beets container."
+            ),
+        })
+    refused_paths = refused_config_pluginpath()
+    if refused_paths:
+        warnings.append({
+            "id": "beets_config_pluginpath_not_added",
+            "severity": "warning",
+            "message": (
+                "Web Manager did not edit the Beets config.yaml, so Beets cannot load the webmanager plugin. "
+                f"Add {', '.join(refused_paths)} to `pluginpath:` in config.yaml manually, then restart "
+                "the Beets container."
             ),
         })
 

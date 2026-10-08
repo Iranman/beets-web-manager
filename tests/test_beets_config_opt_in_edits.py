@@ -731,6 +731,12 @@ class SetupWarningTests(unittest.TestCase):
         self.assertIn("musicbrainz", warnings[0]["message"])
         self.assertEqual(actions, [])
 
+    def test_refused_pluginpath_edit_warns_n2(self):
+        with mock.patch("backend.beets_plugins._REFUSED_CONFIG_PLUGINPATH", ["/config/beetsplug"]):
+            warnings, _ = self.module._beets_setup_warnings(self._diag({}), "/music", "/downloads")
+        self.assertEqual(self._ids(warnings), ["beets_config_pluginpath_not_added"])
+        self.assertIn("/config/beetsplug", warnings[0]["message"])
+
     def test_restart_required_warning(self):
         warnings, _ = self.module._beets_setup_warnings(
             self._diag({}, {"restart_required": True, "message": "restart beets"}), "/music", "/downloads"

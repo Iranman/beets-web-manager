@@ -662,9 +662,13 @@ def parse_configured_pluginpath(config_text: str) -> List[str]:
     if not match:
         return paths
 
-    inline_val = match.group(1).strip()
-    if inline_val:
-        paths.append(inline_val)
+    inline_val = _strip_yaml_comment(match.group(1))
+    if inline_val.startswith("["):
+        # Flow list `[/a, /b]` (may span lines): its entries, not one string.
+        paths.extend(t.strip().strip("'\"") for t in inline_val.strip("[]").split(","))
+        paths = [t for t in paths if t]
+    elif inline_val:
+        paths.append(inline_val.strip("'\""))
 
     list_block = match.group(2) or ""
     for line in list_block.splitlines():
@@ -930,7 +934,8 @@ def _read_config_snapshot(path: Path) -> bytes:
 
 def _decode_config(data: bytes, name: str) -> str:
     try:
-        text = data.decode("utf-8")
+        # utf-8-sig: a leading BOM would otherwise become part of the first key.
+        text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise BeetsConfigEditError(f"Could not read {name}: {type(exc).__name__}") from exc
     # Same newline handling as Path.read_text (universal newlines).
@@ -1019,6 +1024,25 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 _REFUSED_CONFIG_PLUGINS: List[str] = []
+_REFUSED_CONFIG_PLUGINPATH: List[str] = []
+
+
+def _configured_names(text: str) -> Tuple[List[str], List[str]]:
+    """(plugins, pluginpath) as Beets will read them: from yaml.safe_load
+    when the text parses, else from the text parsers."""
+    try:
+        data = yaml.safe_load(text)
+        if isinstance(data, dict):
+            return (_yaml_names(data.get("plugins"), "plugins"),
+                    _yaml_names(data.get("pluginpath"), "pluginpath"))
+    except (yaml.YAMLError, BeetsConfigEditError):
+        pass
+    return parse_configured_plugins(text), parse_configured_pluginpath(text)
+
+
+def refused_config_pluginpath() -> List[str]:
+    """pluginpath entries the last refused startup edit could not add."""
+    return list(_REFUSED_CONFIG_PLUGINPATH)
 
 
 def refused_config_plugins() -> List[str]:
@@ -1084,16 +1108,21 @@ def update_config_yaml_plugins(
     except BeetsConfigEditError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    global _REFUSED_CONFIG_PLUGINS
+    global _REFUSED_CONFIG_PLUGINS, _REFUSED_CONFIG_PLUGINPATH
     try:
         new_text, missing_plugins, changed = _plan_config_yaml_plugins(text, plugins_to_ensure, pluginpath_to_ensure)
     except BeetsConfigEditError as exc:
-        # Nothing written. Surfaced as a setup warning (refused_config_plugins).
-        _REFUSED_CONFIG_PLUGINS = [p for p in plugins_to_ensure if p not in parse_configured_plugins(text)]
-        log.warning("Not editing %s: %s. Add %s to `plugins:` manually.",
-                    path.name, exc, ", ".join(_REFUSED_CONFIG_PLUGINS) or "the required plugins")
+        # Nothing written. Surfaced as setup warnings (refused_config_plugins /
+        # refused_config_pluginpath).
+        configured, paths = _configured_names(text)
+        _REFUSED_CONFIG_PLUGINS = [p for p in plugins_to_ensure if p not in configured]
+        _REFUSED_CONFIG_PLUGINPATH = [p for p in pluginpath_to_ensure if p not in paths]
+        log.warning("Not editing %s: %s. Add plugins %s and pluginpath %s manually.",
+                    path.name, exc, ", ".join(_REFUSED_CONFIG_PLUGINS) or "(none)",
+                    ", ".join(_REFUSED_CONFIG_PLUGINPATH) or "(none)")
         raise
     _REFUSED_CONFIG_PLUGINS = []
+    _REFUSED_CONFIG_PLUGINPATH = []
     text = new_text
 
     if not changed:

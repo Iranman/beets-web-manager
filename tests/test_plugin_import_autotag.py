@@ -192,6 +192,7 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
     def tearDown(self):
         import backend.beets_plugins as bp
         bp._REFUSED_CONFIG_PLUGINS = []
+        bp._REFUSED_CONFIG_PLUGINPATH = []
 
     def _update(self, text):
         """Run the startup edit on ``text``; returns (new_text, refused)."""
@@ -262,6 +263,58 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
         ):
             new, refused = self._update(text)
             self.assertTrue(refused, (text, new))
+
+    def _refuse(self, text):
+        """Startup edit that must be refused; returns (plugins, pluginpath) to add."""
+        from backend.beets_plugins import (BeetsConfigEditError, refused_config_pluginpath,
+                                           refused_config_plugins, update_config_yaml_plugins)
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "config.yaml")
+            with open(path, "wb") as f:
+                f.write(text.encode("utf-8"))
+            with self.assertRaises(BeetsConfigEditError):
+                update_config_yaml_plugins(path)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), text.encode("utf-8"))
+        return refused_config_plugins(), refused_config_pluginpath()
+
+    def test_refused_names_come_from_yaml_n1(self):
+        """N1: a folded `plugins: >-` already listing web and webmanager must
+        not ask the user to add them."""
+        self.assertEqual(self._refuse("plugins: >-\n  web\n  webmanager\n"), (["musicbrainz"], ["/config/beetsplug"]))
+
+    def test_pluginpath_only_refusal_is_reported_n2(self):
+        self.assertEqual(
+            self._refuse("plugins: web webmanager musicbrainz\npluginpath: >-\n  /x\n"),
+            ([], ["/config/beetsplug"]),
+        )
+
+    def test_flow_pluginpath_is_edited_n3(self):
+        import yaml
+        from backend.beets_plugins import parse_configured_pluginpath
+        self.assertEqual(parse_configured_pluginpath("pluginpath: [/a, '/b']  # c\n"), ["/a", "/b"])
+        for text, paths in (
+            ("plugins: web webmanager\npluginpath: [/a, /config/beetsplug]\n", ["/a", "/config/beetsplug"]),
+            ("plugins: web webmanager\npluginpath: [/a]\n", ["/a", "/config/beetsplug"]),
+        ):
+            new, refused = self._update(text)
+            self.assertFalse(refused, text)
+            self.assertEqual(yaml.safe_load(new)["pluginpath"], paths)
+
+    def test_utf8_bom_is_dropped_n4(self):
+        import yaml
+        from backend.beets_plugins import update_config_yaml_plugins
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "config.yaml")
+            with open(path, "wb") as f:
+                f.write(b"\xef\xbb\xbfplugins: web webmanager\n")
+            update_config_yaml_plugins(path, backup=False)
+            with open(path, "rb") as f:
+                raw = f.read()
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+        loaded = yaml.safe_load(raw.decode("utf-8"))
+        self.assertEqual(loaded["plugins"].split(), ["web", "webmanager", "musicbrainz"])
+        self.assertEqual([k for k in loaded if "plugins" in k], ["plugins"])
 
     def test_opt_in_apply_shares_the_check(self):
         from backend.beets_plugins import BeetsConfigEditError, apply_recommended_plugins
