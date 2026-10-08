@@ -258,7 +258,7 @@ def _redact_config_content(text: str) -> str:
     return "".join(out)
 
 
-def _path_label(path: Tuple[Any, ...]) -> str:
+def _config_path_label(path: Tuple[Any, ...]) -> str:
     return ".".join(f"[{p}]" if isinstance(p, int) else p for p in path)
 
 
@@ -288,7 +288,7 @@ def _restore_redacted_config_secrets(submitted: str, stored: str) -> str:
         if cont or value.strip(" \t") not in _REDACTED_VALUE_FORMS:
             if _REDACTED_SECRET in value or _REDACTED_SECRET in cont:
                 raise ConfigSecretMergeError(
-                    f"Refusing to save redacted secret placeholders: {_path_label(path)}. Replace the whole "
+                    f"Refusing to save redacted secret placeholders: {_config_path_label(path)}. Replace the whole "
                     f"{_REDACTED_SECRET} placeholder with the new value, or leave it unchanged to keep the stored one.",
                     error_code="config_redacted_placeholder",
                 )
@@ -297,7 +297,7 @@ def _restore_redacted_config_secrets(submitted: str, stored: str) -> str:
         found = stored_values.get(path, [])
         if counts[path] != 1 or len(found) != 1:
             raise ConfigSecretMergeError(
-                f"{_path_label(path)}: cannot tell which stored secret {_REDACTED_SECRET} stands for "
+                f"{_config_path_label(path)}: cannot tell which stored secret {_REDACTED_SECRET} stands for "
                 f"(found {len(found)} stored, {counts[path]} submitted). Type the value, or reload the page."
             )
         stored_value, stored_cont = found[0]

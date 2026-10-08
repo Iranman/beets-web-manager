@@ -2516,8 +2516,8 @@
    "name": "_install_optional_plugins",
    "module": "backend/config_service.py",
    "lines": [
-    19,
-    21
+    20,
+    22
    ],
    "size": 3,
    "body_lines": 1,
@@ -2534,8 +2534,8 @@
    "name": "_security_auth_configured",
    "module": "backend/config_service.py",
    "lines": [
-    24,
-    25
+    25,
+    26
    ],
    "size": 2,
    "body_lines": 1,
@@ -2559,8 +2559,8 @@
    "name": "_repair_legacy_beets_config",
    "module": "backend/config_service.py",
    "lines": [
-    31,
-    103
+    32,
+    104
    ],
    "size": 73,
    "body_lines": 47,
@@ -2577,8 +2577,8 @@
    "name": "_bootstrap_beets_plugins",
    "module": "backend/config_service.py",
    "lines": [
-    106,
-    135
+    107,
+    136
    ],
    "size": 30,
    "body_lines": 15,
@@ -2592,34 +2592,58 @@
    "dependencies": []
   },
   {
-   "name": "_redact_config_line",
+   "name": "_config_secret_segments",
    "module": "backend/config_service.py",
    "lines": [
-    163,
-    178
+    172,
+    234
    ],
-   "size": 16,
-   "body_lines": 8,
+   "size": 63,
+   "body_lines": 51,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
    "desired_owner": "backend/config_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_redact_config_content",
+    "_restore_redacted_config_secrets"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_is_empty_config_value"
+   ]
+  },
+  {
+   "name": "_is_empty_config_value",
+   "module": "backend/config_service.py",
+   "lines": [
+    237,
+    239
+   ],
+   "size": 3,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CONFIG",
+   "desired_owner": "backend/config_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_config_secret_segments",
     "_redact_config_content"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": []
   },
   {
    "name": "_redact_config_content",
    "module": "backend/config_service.py",
    "lines": [
-    181,
-    184
+    245,
+    258
    ],
-   "size": 4,
-   "body_lines": 3,
+   "size": 14,
+   "body_lines": 9,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2630,18 +2654,39 @@
    ],
    "caller_count": 1,
    "dependencies": [
-    "_redact_config_line"
+    "_config_secret_segments",
+    "_is_empty_config_value"
    ]
   },
   {
-   "name": "_contains_redacted_config_secret",
+   "name": "_config_path_label",
    "module": "backend/config_service.py",
    "lines": [
-    187,
-    200
+    261,
+    262
    ],
-   "size": 14,
-   "body_lines": 8,
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CONFIG",
+   "desired_owner": "backend/config_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_restore_redacted_config_secrets"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_restore_redacted_config_secrets",
+   "module": "backend/config_service.py",
+   "lines": [
+    265,
+    307
+   ],
+   "size": 43,
+   "body_lines": 36,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2651,14 +2696,17 @@
     "save_config"
    ],
    "caller_count": 1,
-   "dependencies": []
+   "dependencies": [
+    "_config_path_label",
+    "_config_secret_segments"
+   ]
   },
   {
    "name": "_plugin_installed_map",
    "module": "backend/config_service.py",
    "lines": [
-    213,
-    218
+    320,
+    325
    ],
    "size": 6,
    "body_lines": 5,
@@ -2677,8 +2725,8 @@
    "name": "_plugin_status_payload",
    "module": "backend/config_service.py",
    "lines": [
-    221,
-    241
+    328,
+    348
    ],
    "size": 21,
    "body_lines": 20,
@@ -34373,10 +34421,10 @@
    "module": "routes_system.py",
    "lines": [
     152,
-    184
+    188
    ],
-   "size": 33,
-   "body_lines": 32,
+   "size": 37,
+   "body_lines": 36,
    "route": {
     "method": "POST",
     "path": "/api/config"
@@ -34389,7 +34437,7 @@
    "caller_count": 0,
    "dependencies": [
     "_config_error_response",
-    "_contains_redacted_config_secret",
+    "_restore_redacted_config_secrets",
     "_s"
    ]
   },
@@ -34397,8 +34445,8 @@
    "name": "revert_config",
    "module": "routes_system.py",
    "lines": [
-    188,
-    209
+    192,
+    213
    ],
    "size": 22,
    "body_lines": 21,
@@ -34421,8 +34469,8 @@
    "name": "api_plugins_install_log",
    "module": "routes_system.py",
    "lines": [
-    213,
-    215
+    217,
+    219
    ],
    "size": 3,
    "body_lines": 1,
@@ -34442,8 +34490,8 @@
    "name": "api_plugins_installed",
    "module": "routes_system.py",
    "lines": [
-    219,
-    221
+    223,
+    225
    ],
    "size": 3,
    "body_lines": 1,
