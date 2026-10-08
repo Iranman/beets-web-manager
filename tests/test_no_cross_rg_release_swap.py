@@ -76,13 +76,13 @@ class ProvidedReleaseStaysInItsReleaseGroupTests(base.ConfirmedImportJobTests):
     one in another group) is not run, nothing is imported, and the folder
     goes to review. The same holds when the provided ID cannot be resolved."""
 
-    def _reimport(self, *, passing, has_tracks=True, group_candidates=(), album=None):
+    def _reimport(self, *, passing, has_tracks=True, group_candidates=(), album=None, aldir=None):
         """reimport-disk with SINGLE_REL provided; ``passing`` are the Releases
         whose folder preflight passes. The free search would offer ALBUM_REL
         (another Release Group)."""
         isvc = self.isvc
         self.ad = base._adapter(album or {"id": 9, "mb_albumid": ALBUM_REL, "mb_releasegroupid": ALBUM_RG})
-        aldir = str(isvc.MUSIC_ROOT) + "/Artist/Song"
+        aldir = aldir or str(isvc.MUSIC_ROOT) + "/Artist/Song"
 
         def preflight(folder, rid, **k):
             ok = rid in passing
@@ -115,6 +115,9 @@ class ProvidedReleaseStaysInItsReleaseGroupTests(base.ConfirmedImportJobTests):
         self.free_search.assert_not_called()
         self.ad.run_import.assert_not_called()
         self.assertTrue(self.isvc._queue_folder_for_manual_review.called)
+        log = "\n".join(res.get("log") or [])
+        self.assertNotIn("Searching MusicBrainz", log)
+        self.assertIn("REFUSED", log)
 
     def test_failed_preflight_goes_to_review_not_to_another_release_group(self):
         self._assert_review_without_import(self._reimport(passing={ALBUM_REL}))
@@ -122,6 +125,17 @@ class ProvidedReleaseStaysInItsReleaseGroupTests(base.ConfirmedImportJobTests):
     def test_unresolvable_provided_release_goes_to_review_not_to_free_search(self):
         # _mb_release_has_tracks is False on a transient MB timeout/rate limit.
         self._assert_review_without_import(self._reimport(passing={ALBUM_REL}, has_tracks=False))
+
+    def test_downloads_source_goes_to_review_too(self):
+        # QA F-B: review was queued only for in-library / existing-album sources.
+        aldir = str(self.isvc.DOWNLOADS_ROOT) + "/Artist - Song"
+        res = self._reimport(passing={ALBUM_REL}, album={}, aldir=aldir)
+        self._assert_review_without_import(res)
+        args = self.isvc._queue_folder_for_manual_review.call_args.args
+        self.assertEqual(args[0], aldir)
+        # The rejected Release is handed to the store, which keeps it as rejected_mb_albumid.
+        self.assertEqual(args[1]["mb_albumid"], SINGLE_REL)
+        self.assertIn("queued for Review", res.get("error") or str(res))
 
     def test_same_release_group_replacement_is_imported(self):
         res = self._reimport(

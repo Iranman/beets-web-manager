@@ -678,58 +678,57 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             allow_oversized_partial=not strict_edition_guard,
         )
         if not _resolved_mbid:
-            if existing_album_id or source_is_music_library:
-                review_reason = (
-                    "No MusicBrainz release candidate matched this folder's "
-                    "tracklist. Verify the correct artist and release before retagging."
-                )
-                review_suggestion = {
-                    "artist": _guess_artist,
-                    "albumartist": _guess_artist,
-                    "album": _guess_album,
-                    "confidence": "low",
-                    "reason": review_reason,
-                }
-                rejected_preflight = None
-                rejected_mbid = _s(mb_albumid).strip().lower()
-                if _MB_UUID_RE.match(rejected_mbid):
-                    review_suggestion["mb_albumid"] = rejected_mbid
-                    review_suggestion["mb_url"] = f"https://musicbrainz.org/release/{rejected_mbid}"
-                    review_suggestion["mb_valid"] = True
-                    try:
-                        rejected_preflight = _folder_release_preflight(
-                            aldir,
-                            rejected_mbid,
-                            existing_album_id=existing_album_id,
-                            log=None,
-                        )
-                    except Exception:
-                        rejected_preflight = None
-                    review_reason = _preflight_review_reason(
-                        rejected_preflight,
-                        review_reason,
+            review_reason = (
+                "No MusicBrainz release candidate matched this folder's "
+                "tracklist. Verify the correct artist and release before retagging."
+            )
+            review_suggestion = {
+                "artist": _guess_artist,
+                "albumartist": _guess_artist,
+                "album": _guess_album,
+                "confidence": "low",
+                "reason": review_reason,
+            }
+            rejected_preflight = None
+            rejected_mbid = _s(mb_albumid).strip().lower()
+            if _MB_UUID_RE.match(rejected_mbid):
+                review_suggestion["mb_albumid"] = rejected_mbid
+                review_suggestion["mb_url"] = f"https://musicbrainz.org/release/{rejected_mbid}"
+                review_suggestion["mb_valid"] = True
+                try:
+                    rejected_preflight = _folder_release_preflight(
+                        aldir,
+                        rejected_mbid,
+                        existing_album_id=existing_album_id,
+                        log=None,
                     )
-                    review_suggestion["reason"] = review_reason
-                review_evidence = _ai_match_evidence_packet(
-                    "missing_track" if wanted_tracks else "light_confirm",
-                    folder_path=aldir,
-                    suggestion=review_suggestion,
-                    folder_evidence=_build_folder_evidence(aldir),
-                    preflight=rejected_preflight,
-                    wanted_tracks=wanted_tracks,
-                    reason=review_reason,
-                )
-                _maybe_queue_review(
-                    aldir,
-                    review_suggestion,
+                except Exception:
+                    rejected_preflight = None
+                review_reason = _preflight_review_reason(
+                    rejected_preflight,
                     review_reason,
-                    allow_existing=bool(existing_album_id),
-                    evidence=review_evidence,
                 )
+                review_suggestion["reason"] = review_reason
+            review_evidence = _ai_match_evidence_packet(
+                "missing_track" if wanted_tracks else "light_confirm",
+                folder_path=aldir,
+                suggestion=review_suggestion,
+                folder_evidence=_build_folder_evidence(aldir),
+                preflight=rejected_preflight,
+                wanted_tracks=wanted_tracks,
+                reason=review_reason,
+            )
+            queued = _maybe_queue_review(
+                aldir,
+                review_suggestion,
+                review_reason,
+                allow_existing=bool(existing_album_id),
+                evidence=review_evidence,
+            )
             raise RuntimeError(
                 "Could not resolve a MusicBrainz release ID for import; "
                 "queued for Review without changing library files."
-                if (existing_album_id or source_is_music_library)
+                if queued
                 else "Could not resolve a MusicBrainz release ID for import"
             )
         if _resolved_mbid != mb_albumid:
