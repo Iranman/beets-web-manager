@@ -569,21 +569,43 @@ def move_staging_file(src: str, dst: str) -> Dict[str, Any]:
 
 
 def write_staging_tags(path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
-    """Write audio metadata tags directly to a file before library import."""
-    p = Path(path).resolve()
-    if not p.exists() or not p.is_file():
+    """Write hint tags to a playlist download BEFORE Beets imports it.
+
+    The one documented exception to "tags are written by Beets" (see
+    docs/ARCHITECTURE.md, Non-Negotiable Rules): the file is not in the
+    library yet, and Beets' importer re-tags it from MusicBrainz on import.
+    Confined like the other staging helpers: the path must be a regular file
+    under a staging root (downloads root or ``<data dir>/playlist_staging``),
+    never under MUSIC_ROOT, never protected data, with no symlinked component.
+    It is opened fd-relative with O_NOFOLLOW and must still be the validated
+    entry, so a component swapped for a symlink cannot redirect the write.
+    A refusal raises ValueError; a tag error returns ``ok: False``."""
+    resolved = _validated_staging_target(path, "write tags to")
+    expected = getattr(resolved, "identity", None)
+    if expected is None or not stat.S_ISREG(expected.st_mode):
         raise FileNotFoundError(f"File not found: {path}")
-    try:
-        import mediafile
-        mf = mediafile.MediaFile(str(p))
-        for k, v in tags.items():
-            if hasattr(mf, k):
-                setattr(mf, k, v)
-        mf.save()
-        return {"ok": True, "path": str(p), "tags_written": list(tags.keys())}
-    except Exception as exc:
-        log.warning("Failed to write tags to %s: %s", path, exc)
-        return {"ok": False, "error": str(exc), "path": str(p)}
+    _require_dir_fd_support()
+    root, parts = _staging_parts(resolved)
+    with _staging_dir_fd(root, parts[:-1]) as parent_fd:
+        try:
+            fd = os.open(parts[-1], os.O_RDWR | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError(f"Path changed since validation: {resolved}") from exc
+        with open(fd, "r+b") as fh:
+            if not _same_entry(expected, os.fstat(fh.fileno())):
+                raise ValueError(f"Path changed since validation: {resolved}")
+            try:
+                import mediafile
+                mf = mediafile.MediaFile(fh)
+                for k, v in tags.items():
+                    if hasattr(mf, k):
+                        setattr(mf, k, v)
+                fh.seek(0)  # mutagen re-reads the file object on save
+                mf.save()
+            except Exception as exc:
+                log.warning("Failed to write tags to %s: %s", resolved, exc)
+                return {"ok": False, "error": str(exc), "path": str(resolved)}
+    return {"ok": True, "path": str(resolved), "tags_written": list(tags.keys())}
 
 
 # -----------------------------------------------------------------------------
