@@ -112,8 +112,146 @@ class MusicFormatPreferencesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             doomed = Path(tmp) / "bad.flac"
             doomed.write_text("x", encoding="utf-8")
-            handle_rejected_download(str(doomed), {**DEFAULT_MUSIC_FORMAT_PREFERENCES, "rejected_download_handling": "delete"})
+            handle_rejected_download(str(doomed), {**DEFAULT_MUSIC_FORMAT_PREFERENCES, "rejected_download_handling": "delete"},
+                                     preserve_source=False)
             self.assertFalse(doomed.exists())
+
+
+class RejectedDownloadPreservedSourceTests(unittest.TestCase):
+    """The user's rule: never move or delete a preserved torrent source."""
+
+    def setUp(self):
+        import backend.library_service as lib
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.downloads = self.root / "downloads"
+        self.music = self.root / "music"
+        self.quarantine = self.root / "quarantine"
+        for patch in (
+            mock.patch.object(lib, "DOWNLOADS_ALLOWED_ROOTS", (self.downloads,)),
+            mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads / "torrents",)),
+            mock.patch.object(lib, "TORRENT_SOURCE_MOVE_ALLOWED", False),
+            mock.patch.object(lib, "MUSIC_ROOT", self.music),
+            mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (self.root / "playlist",)),
+            mock.patch.dict("os.environ", {"MUSIC_FORMAT_QUARANTINE_DIR": str(self.quarantine)}),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _file(self, *parts):
+        path = self.root.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+        return path
+
+    def _handle(self, path, handling, **kwargs):
+        log = []
+        prefs = {**DEFAULT_MUSIC_FORMAT_PREFERENCES, "rejected_download_handling": handling}
+        return handle_rejected_download(str(path), prefs, log=log, **kwargs), log
+
+    def test_seeded_torrent_source_is_kept_under_quarantine_and_delete(self):
+        for handling in ("quarantine", "delete"):
+            seeded = self._file("downloads", "torrents", "Artist - Album", f"{handling}.flac")
+            with mock.patch("shutil.move") as move:
+                result, log = self._handle(seeded, handling)
+            move.assert_not_called()
+            self.assertTrue(seeded.exists())
+            self.assertEqual(result["handling"], "kept")
+            self.assertFalse(result["removed"])
+            self.assertIn("seeding", result["reason"])
+            self.assertIn("left in place", log[0])
+            self.assertIn("seeding", log[0])
+
+    def test_caller_flag_keeps_source(self):
+        src = self._file("elsewhere", "a.flac")
+        result, _ = self._handle(src, "delete", preserve_source=True)
+        self.assertEqual(result["handling"], "kept")
+        self.assertTrue(src.exists())
+
+    def test_unevaluable_rule_fails_closed(self):
+        import backend.library_service as lib
+        src = self._file("downloads", "other", "a.flac")
+        with mock.patch.object(lib, "_preserve_torrent_source_path", side_effect=OSError("boom")):
+            result, _ = self._handle(src, "delete")
+        self.assertEqual(result["handling"], "kept")
+        self.assertTrue(src.exists())
+
+    def test_non_preserved_download_is_still_quarantined(self):
+        staged = self._file("downloads", "_beets_missing_import", "slskd-1", "a.flac")
+        result, log = self._handle(staged, "quarantine")
+        self.assertFalse(staged.exists())
+        self.assertTrue(result["removed"])
+        self.assertTrue(Path(result["quarantined_to"]).is_relative_to(self.quarantine))
+        self.assertIn("quarantined", log[0])
+
+    def test_caller_folder_decision_wins_for_app_managed_marker_folder(self):
+        # The marker matches the folder name, not the file path: the caller's
+        # folder decision (app-managed, preserve_source=False) must be honoured.
+        staged = self._file("downloads", "Artist - YT missing Album", "a.flac")
+        result, _ = self._handle(staged, "quarantine", preserve_source=False)
+        self.assertFalse(staged.exists())
+        self.assertTrue(result["removed"])
+        self.assertTrue(Path(result["quarantined_to"]).is_relative_to(self.quarantine))
+
+    def test_validate_import_source_audio_passes_folder_decision(self):
+        import backend.ai_service as ai
+        report = {"accepted": [], "rejected": [{"path": "/downloads/x/a.flac", "message": "Rejected"}]}
+        with mock.patch.object(ai, "_validate_audio_tree_preferences", return_value=report), \
+                mock.patch.object(ai, "_handle_rejected_audio_download", return_value={"removed": True}) as handle:
+            with self.assertRaises(RuntimeError):
+                ai._validate_import_source_audio("/downloads/x", [], preserve_source=False)
+        self.assertIs(handle.call_args.kwargs["preserve_source"], False)
+
+    def test_music_library_file_is_never_moved(self):
+        for handling in ("quarantine", "delete"):
+            lib_file = self._file("music", "Artist", "Album", f"{handling}.flac")
+            result, _ = self._handle(lib_file, handling, preserve_source=False)
+            self.assertTrue(lib_file.exists())
+            self.assertEqual(result["handling"], "kept")
+
+    def test_import_refused_with_kept_count(self):
+        from backend.ai_service import _music_format_policy_rejection_error
+        seeded = self._file("downloads", "torrents", "Album", "a.flac")
+        result, _ = self._handle(seeded, "quarantine")
+        message = _music_format_policy_rejection_error(1, [result], {"rejected_download_handling": "quarantine"})
+        self.assertIn("Import stopped", message)
+        self.assertIn("1 left in place", message)
+        self.assertNotIn("manual cleanup", message)
+
+    def test_qa_marker_in_file_name_does_not_unpreserve_torrent_source(self):
+        # QA (PR #321): the per-file rule must not treat a seeded file as
+        # app-managed just because its own name contains a "- yt missing" marker.
+        for handling in ("quarantine", "delete"):
+            seeded = self._file("downloads", "torrents", "Some Album", f"Artist - YT missing Song {handling}.flac")
+            result, _ = self._handle(seeded, handling)
+            self.assertTrue(seeded.exists())
+            self.assertEqual(result["handling"], "kept")
+
+    def test_qa_per_file_rule_matches_folder_rule_for_marker_folder(self):
+        # QA (PR #321): per-file callers (reimport-disk, import-review subset)
+        # should reach the same decision as the folder import for an
+        # app-created "- YT missing" folder, which is quarantined.
+        import backend.library_service as lib
+        folder = self.downloads / "Artist - YT missing Album"
+        staged = self._file("downloads", "Artist - YT missing Album", "a.flac")
+        # Default deployment: TORRENT_SOURCE_ROOTS defaults to DOWNLOADS_ROOT.
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads,)):
+            self.assertFalse(lib._preserve_torrent_source_path(folder))
+            result, _ = self._handle(staged, "quarantine")
+        self.assertEqual(result["handling"], "quarantine")
+        self.assertFalse(staged.exists())
+
+    def test_marker_subfolder_inside_torrent_folder_is_kept(self):
+        # QA R1 (PR #321): a marker on a sub-folder does not unpreserve the
+        # torrent folder above it.
+        import backend.library_service as lib
+        staged = self._file("downloads", "Torrent", "A - YT missing Song", "x.flac")
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads,)):
+            for handling in ("quarantine", "delete"):
+                result, _ = self._handle(staged, handling)
+                self.assertEqual(result["handling"], "kept")
+                self.assertTrue(staged.exists())
 
     def test_existing_file_not_removed_until_verified_replacement_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

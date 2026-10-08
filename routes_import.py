@@ -1588,7 +1588,8 @@ def start_import():
         label += f" [{search_id[:8]}…]"
 
     def _do(log, cancel_event=None):
-        _validate_import_source_audio(path, log, reject_downloads=True)
+        _validate_import_source_audio(path, log, reject_downloads=True,
+                                      preserve_source=preserve_torrent_source)
         # Beets' own importer (beet import -q): a preserved torrent source is
         # always copied; anything else is copied unless move was requested.
         beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source or not move,

@@ -11,7 +11,7 @@ from backend.config_manager import ConfigConflictError, ConfigError, ConfigValid
 from backend.ai_service import _run_ai_matching_regressions
 from backend.app_runtime import _app_logger, _env_int, _plugin_install_log, _s
 from backend.auth_service import _auth_failure_rate_limit_response, _constant_time_equal, _csrf_request_allowed, _json_security_error, _request_authorized, _security_auth_disabled, _security_auth_username, _verify_password
-from backend.config_service import _contains_redacted_config_secret, _plugin_status_payload, _redact_config_content
+from backend.config_service import _plugin_status_payload, _redact_config_content, _restore_redacted_config_secrets
 from backend.playlist_service import _music_format_preferences
 from backend.setup_service import _first_run_setup_required
 from app import app  # noqa: E402  (route modules load after app.py defines app)
@@ -160,13 +160,17 @@ def save_config():
         return jsonify({"ok": False, "error": "Config content is too large", "code": "config_too_large"}), 413
     if not content.strip():
         return jsonify({"ok": False, "error": "Empty config rejected", "code": "config_empty"}), 400
-    if _contains_redacted_config_secret(content):
-        return jsonify({"ok": False, "error": "Refusing to save redacted secret placeholders", "code": "config_redacted_placeholder"}), 400
     expected_revision = _s(payload.get("expected_revision") or payload.get("revision") or "").strip()
     if not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "config_missing_revision"}), 428
     try:
-        result = composite_workflows.save_config(content, expected_revision=expected_revision)
+        # Secrets left as the GET placeholder keep their stored value; merged
+        # from the snapshot the revision check runs against.
+        result = composite_workflows.save_config(
+            content,
+            expected_revision=expected_revision,
+            merge_stored=lambda stored: _restore_redacted_config_secrets(content, stored),
+        )
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
     except BeetsUnavailableError as exc:

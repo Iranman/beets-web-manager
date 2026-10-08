@@ -983,6 +983,22 @@ class BeetsAdapter:
             headers["Idempotency-Key"] = idempotency_key
         return self._request("POST", "/webmanager/mbsync", json_data=payload, headers=headers)
 
+    def mbsync_library(self, idempotency_key: str) -> Dict[str, Any]:
+        """Start Beets' own mbsync over the whole library inside Beets
+        (plugin 1.13.0, capability ``mbsync_library``). Always async: the
+        reply carries ``operation_id`` and the ``write``/``move`` Beets'
+        config chose; poll get_operation(). A second start while one runs
+        raises with error_code ALREADY_RUNNING; replaying the same key
+        reports the original operation."""
+        return self._request("POST", "/webmanager/mbsync/library", json_data={},
+                             headers={"Idempotency-Key": idempotency_key})
+
+    def cancel_mbsync_library(self, operation_id: str) -> Dict[str, Any]:
+        """Ask a running library mbsync to stop after its current album.
+        Raises with error_code NOT_RUNNING when it already finished."""
+        return self._request("POST", f"/webmanager/mbsync/library/{urllib.parse.quote(str(operation_id), safe='')}/cancel",
+                             json_data={})
+
     def fetch_art(
         self,
         album_ids: List[int],

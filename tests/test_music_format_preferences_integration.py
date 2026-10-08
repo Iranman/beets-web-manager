@@ -33,7 +33,9 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         # locally again: the documented compose mounts the downloads root and the library into Web Manager.
         self.assertGreaterEqual(APP_SOURCE.count('_validate_import_source_audio('), 5)
         self.assertIn('_validate_import_source_audio(import_dir, log, reject_downloads=True)', APP_SOURCE)
-        self.assertIn('_validate_import_source_audio(folder_path, log, reject_downloads=True)', APP_SOURCE)
+        # Callers that already decided the folder's torrent-source status pass it on.
+        self.assertEqual(APP_SOURCE.count('_validate_import_source_audio(folder_path, log, reject_downloads=True,'), 2)
+        self.assertEqual(APP_SOURCE.count('preserve_source=preserve_torrent_source)'), 3)
         self.assertIn('_validate_import_source_audio(aldir, log, reject_downloads=True)', APP_SOURCE)
         self.assertIn('_playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)', APP_SOURCE)
         self.assertNotIn('_validate_import_source_audio(str(round_dl_dir), state["log"], reject_downloads=True)', APP_SOURCE)
@@ -60,7 +62,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertLess(defer_pos, reject_pos)
 
     def test_rejected_downloads_use_saved_handling_but_library_rows_are_kept(self):
-        self.assertIn('_handle_rejected_audio_download(row["path"], prefs, log=log)', APP_SOURCE)
+        self.assertIn('_handle_rejected_audio_download(row["path"], prefs, log=log,', APP_SOURCE)
         self.assertIn('_MUSIC_FORMAT_POLICY_HANDLED_MESSAGE', APP_SOURCE)
         self.assertIn('_music_format_policy_rejection_error', APP_SOURCE)
         self.assertIn('Downloaded audio does not match Music Format Preferences. ', APP_SOURCE)

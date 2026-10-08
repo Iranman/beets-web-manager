@@ -62,16 +62,22 @@ def _bind_library_music_dir():
     where the var is empty and every item.path loads relative -- so file
     checks, moves and tag writes would act on the wrong path. Bind the
     library's directory for this request's thread."""
-    lib = getattr(g, "lib", None)
+    bind_music_dir(getattr(g, "lib", None))
+    return None
+
+
+def bind_music_dir(lib) -> None:
+    """Bind ``lib``'s directory for the calling thread (a request thread,
+    or a background thread an operation starts: threads do not inherit
+    the ContextVar)."""
     directory = getattr(lib, "directory", None)
     if not directory:
-        return None
+        return
     try:
         from beets import context as beets_context
     except ImportError:  # Beets before relative path storage: nothing to bind
-        return None
+        return
     beets_context.set_music_dir(directory)
-    return None
 
 
 def compute_fingerprint(data: Dict[str, Any]) -> str:
@@ -407,7 +413,7 @@ def get_upstream_web_readonly() -> bool:
 
 
 _CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_relocation", "operations", "status"]
-_PLUGIN_GATED_CAPABILITIES = ["mbsync", "fetchart", "embedart", "lastgenre", "mbsubmit"]
+_PLUGIN_GATED_CAPABILITIES = ["mbsync", "mbsync_library", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
 def get_capabilities() -> List[str]:
@@ -1207,6 +1213,76 @@ def run_mbsync_route():
         )
 
     return _run_plugin_gated_operation("mbsync", "mbsync", _build)
+
+
+# The one library-wide mbsync that may run (plugin 1.13.0): its operation id
+# and cancel event, under _library_sync_lock.
+_library_sync: Dict[str, Any] = {}
+_library_sync_lock = threading.Lock()
+
+
+@webmanager_bp.route("/mbsync/library", methods=["POST"])
+def run_mbsync_library_route():
+    """Run Beets' own mbsync over the whole library in the background
+    (always async: it can take hours). Tag writes follow Beets' own
+    import.write, as `beet mbsync` with no options does; files are never
+    moved (import.move is ignored -- moving files is the relocation
+    workflow's job, which records old paths). Only one runs at a time;
+    another start answers 409 ALREADY_RUNNING. Poll GET /operations/<id>;
+    POST /mbsync/library/<id>/cancel stops it after the current album."""
+    if not plugin_ops.is_capability_available("mbsync"):
+        return jsonify({
+            "error": "mbsync plugin is not loaded or configured on this Beets server",
+            "error_code": "CAPABILITY_UNAVAILABLE",
+        }), 409
+    from beets import ui
+
+    with _library_sync_lock:
+        running = _library_sync.get("op_id")
+        if running and request.headers.get("Idempotency-Key") != running:
+            return jsonify({"error": "A library-wide MusicBrainz sync is already running",
+                            "error_code": "ALREADY_RUNNING", "operation_id": running}), 409
+        op_id, _, early = _idempotency_precheck("mbsync_library", {})
+        if early is not None:
+            return early
+        cancel = threading.Event()
+        _library_sync.update(op_id=op_id, cancel=cancel)
+    lib = g.lib
+    move, write = False, bool(ui.should_write())
+
+    def _bg():
+        bind_music_dir(lib)
+        try:
+            result = plugin_ops.run_mbsync_library(
+                lib, write, cancel, mutation_lock,
+                progress=lambda r: update_operation(op_id, "running", result=r))
+            if result.get("aborted"):
+                update_operation(op_id, "failed", result=result, error_code="MBSYNC_ABORTED",
+                                 error=f"Stopped after {plugin_ops.MAX_CONSECUTIVE_FAILURES} albums in a row failed")
+            else:
+                update_operation(op_id, "succeeded", result=result)
+        except (plugin_ops.PluginCapabilityError, plugin_ops.PluginIncompatibleError) as ex:
+            update_operation(op_id, "failed", error=str(ex), error_code="CAPABILITY_UNAVAILABLE")
+        except Exception:
+            log.exception("Error during library-wide mbsync")
+            update_operation(op_id, "failed", error="Library mbsync failed", error_code="MBSYNC_LIBRARY_FAILED")
+        finally:
+            with _library_sync_lock:
+                if _library_sync.get("op_id") == op_id:
+                    _library_sync.clear()
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"operation_id": op_id, "status": "running", "write": write, "move": move}), 202
+
+
+@webmanager_bp.route("/mbsync/library/<string:op_id>/cancel", methods=["POST"])
+def cancel_mbsync_library_route(op_id: str):
+    """Ask the running library sync to stop after the album it is on."""
+    with _library_sync_lock:
+        if _library_sync.get("op_id") != op_id:
+            return jsonify({"error": "That library sync is not running", "error_code": "NOT_RUNNING"}), 409
+        _library_sync["cancel"].set()
+    return jsonify({"operation_id": op_id, "status": "cancelling"}), 202
 
 
 @webmanager_bp.route("/fetchart", methods=["POST"])
