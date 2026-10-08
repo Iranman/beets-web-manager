@@ -390,14 +390,15 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             log.append(line)
         return ""
 
-    def _accept_from_release_group(rgid: str, first: str) -> str:
+    def _accept_from_release_group(rgid: str, first: str, *, first_checked: bool = False) -> str:
         """Explicit release group (#260): return only a release of ``rgid``.
 
         Tries the ranked release, then every other release in the group.
         Never falls back to a free search, which could pick another group."""
-        accepted = _source_accepts_release(first, "Resolved release-group candidate")
-        if accepted:
-            return accepted
+        if not first_checked:
+            accepted = _source_accepts_release(first, "Resolved release-group candidate")
+            if accepted:
+                return accepted
         others = [
             c for c in _mb_release_group_candidates(rgid, log)
             if c.get("mb_albumid") and c["mb_albumid"] != first
@@ -465,7 +466,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                            "Manual Review is required.")
                 return ""
             log.append(f"  Looking for a replacement inside release group {provided_rg}…")
-            return _accept_from_release_group(provided_rg, resolved)
+            return _accept_from_release_group(provided_rg, resolved, first_checked=True)
         elif resolved and _MB_UUID_RE.match(resolved):
             rg_resolved = _resolve_release_group_to_release(
                 resolved, log, year=year, track_count=track_count)
