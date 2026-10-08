@@ -374,10 +374,14 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
                     "ok": True, "path": "/data/torrents/music/real_album",
                     "audio_file_count": 3, "audio_files": [],
                 }), \
-             patch_app_family(APP, "_library_album_ids_for_folder", return_value=[]):
+             patch_app_family(APP, "_library_album_ids_for_folder", return_value=[]), \
+             mock.patch("backend.import_service.jobs.start_python") as start_job:
+            # The job is not run: it would queue a real Review item for this
+            # unresolvable folder in the shared pending-review file.
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": "/data/torrents/music/real_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
             })
+        start_job.assert_called_once()
         # Fails further downstream (no real job/DB/engine wired up in this
         # unit test) -- the point is it is NOT rejected at the validation
         # gate (400) the way the outside-root/symlink cases above are.
