@@ -252,6 +252,17 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
         self.assertFalse(self._update("plugins: web\n")[1])
         self.assertEqual(refused_config_plugins(), [])
 
+    def test_duplicate_key_edits_that_hide_user_settings_are_refused(self):
+        """A quoted top-level key the text edit cannot see makes the planner
+        add a second `pluginpath:` / `web:`; YAML keeps the last one, so the
+        pluginpath and web checks are what stop the write."""
+        for text in (
+            'plugins: web webmanager\n"pluginpath": /config/mine\n',
+            'plugins: fetchart\npluginpath:\n  - /config/beetsplug\n"web": {host: 1.2.3.4}\n',
+        ):
+            new, refused = self._update(text)
+            self.assertTrue(refused, (text, new))
+
     def test_opt_in_apply_shares_the_check(self):
         from backend.beets_plugins import BeetsConfigEditError, apply_recommended_plugins
         text = "plugins: >\n  web\n  webmanager\n"
