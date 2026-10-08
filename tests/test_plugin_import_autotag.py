@@ -101,15 +101,32 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertTrue(data["autotag"])
         self.assertEqual((data["quiet_fallback"], data["search_ids"]), ("skip", [REL]))
         self.assertEqual(data["skipped_paths"], [src])
+        self.assertEqual(data["skipped"], [{"path": src, "reason": "no_candidates"}])
         self.assertEqual(len(self.lib.albums()), 0)
         self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
         self.assertEqual(before, {k: beets_config["import"][k].get() for k in before})
+
+    def test_weak_match_is_reported_as_no_strong_match(self):
+        from unittest import mock
+        from beets.autotag import Recommendation
+        import beets.importer.tasks as tasks_mod
+        src = os.path.join(self.downloads, "Some Artist - Weak")
+        _album(src, "Some Artist", "Weak")
+
+        def weak(task, search_ids):
+            task.cur_artist, task.cur_album = "Some Artist", "Weak"
+            task.candidates, task.rec = [object()], Recommendation.medium
+        with mock.patch.object(tasks_mod.ImportTask, "lookup_candidates", weak):
+            res = self._import(paths=[src], autotag=True, copy=True, move=False)
+        self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "no_strong_match"}])
+        self.assertEqual(len(self.lib.albums()), 0)
 
     def test_autotag_asis_imports_when_asked(self):
         src = os.path.join(self.downloads, "Some Artist - Asis")
         _album(src, "Some Artist", "Asis")
         res = self._import(paths=[src], autotag=True, quiet_fallback="asis", copy=True, move=False)
         self.assertEqual(res.get_json()["skipped_paths"], [])
+        self.assertEqual(res.get_json()["skipped"], [])
         self.assertEqual([a.album for a in self.lib.albums()], ["Asis"])
         self.assertTrue(os.path.isdir(src))
 
@@ -119,6 +136,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         self._import(paths=[src], copy=True, move=False)
         res = self._import(paths=[src], copy=True, move=False, duplicate_action="skip")
         self.assertEqual(res.get_json()["skipped_paths"], [src])
+        self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "duplicate"}])
         self.assertEqual(len(self.lib.albums()), 1)
 
     def test_in_place_only_inside_the_library_directory(self):
