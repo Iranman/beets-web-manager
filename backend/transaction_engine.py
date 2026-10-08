@@ -1976,6 +1976,7 @@ _FOLDER_STEP_ATTEMPTS = 3
 FOLDER_STEP_MESSAGES = {
     "BEETS_NOT_FOUND": "the webmanager plugin needs 1.7.0; restart Beets after the plugin update",
     "BEETS_UNREACHABLE": "Beets is unreachable",
+    "BUSY": "Beets is busy with another library change (for example an import); nothing was changed, retry later",
     FOLDER_OP_UNCONFIRMED: ("Beets did not confirm the step in time (for example while a Beets import is running); "
                             "the transaction recorded it, and rollback waits until Beets has finished it"),
     "NOT_EMPTY": "the folder is not empty",
@@ -1999,10 +2000,12 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
     retried with the same idempotency key, which makes the plugin report the
     first attempt's result instead of running the step twice; if it stays
     unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``. So does a refusal
-    that follows an unconfirmed attempt: Beets keeps its idempotency records in
-    memory, so after a Beets restart the replay runs the step afresh and a
-    refusal (say SOURCE_MISSING) cannot prove the first attempt did nothing
-    (#300 R3)."""
+    that follows an unconfirmed attempt: a key Beets has no record of (one
+    older than plugin 1.9.0, or a step Beets stopped in the middle of) runs
+    afresh, and a refusal (say SOURCE_MISSING) cannot prove the first attempt
+    did nothing (#300 R3). ``BUSY`` (plugin 1.9.0, another mutation such as an
+    import holds Beets' lock) means Beets did not register the step: nothing
+    ran, so it is a plain retryable failure, not an unconfirmed one (#300 R2)."""
     last = None
     for attempt in range(_FOLDER_STEP_ATTEMPTS):
         if attempt:

@@ -55,6 +55,7 @@ class PluginFolderOpTests(unittest.TestCase):
         beets_web_app.config["TESTING"] = True
         self.client = beets_web_app.test_client()
         self.n = 0
+        self.addCleanup(setattr, ops_mod, "_durable_file", None)  # never write into a removed tempdir
 
     def post(self, body, auth=True):
         self.n += 1
@@ -80,6 +81,77 @@ class PluginFolderOpTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(self.p("Artist")))  # only the named folder is removed
         res = self.post({"op": "create_dir", "path": self.p("Artist", "Album")})
         self.assertEqual((res.status_code, res.get_json()["existed"]), (200, False))
+
+    def post_key(self, body, key):
+        return self.client.post("/webmanager/folder-op", json=body,
+                                headers={"Idempotency-Key": key, "Authorization": f"Bearer {TOKEN}"})
+
+    def hold_lock(self):
+        """Hold the plugin's mutation lock in another thread, as an import does."""
+        held, done = threading.Event(), threading.Event()
+
+        def holder():
+            with ops_mod.mutation_lock:
+                held.set()
+                done.wait(10)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        held.wait(5)
+
+        def release():
+            done.set()
+            t.join()
+        return release
+
+    def test_busy_lock_refuses_unregistered_then_retry_runs(self):
+        """#300 R2: no queueing behind an import. BUSY comes before the key is
+        registered, so nothing runs later and the same key can be retried."""
+        key = f"busy-{id(self)}"
+        body = {"op": "create_dir", "path": self.p("X")}
+        release = self.hold_lock()
+        try:
+            with mock.patch.object(folder_ops, "LOCK_WAIT_SECONDS", 0.05):
+                res = self.post_key(body, key)
+        finally:
+            release()
+        self.assertEqual((res.status_code, res.get_json()["error_code"]), (503, "BUSY"))
+        self.assertEqual(res.headers.get("Retry-After"), "30")
+        self.assertIsNone(ops_mod.get_operation(key))
+        self.assertFalse(os.path.exists(self.p("X")))
+        res = self.post_key(body, key)
+        self.assertEqual((res.status_code, res.get_json()["existed"]), (200, False))
+
+    def test_busy_lock_still_replays_a_known_key(self):
+        key = f"known-{id(self)}"
+        body = {"op": "rename_dir", "source": self.p("Artist", "Albm"), "target": self.p("Artist", "Album")}
+        self.assertEqual(self.post_key(body, key).status_code, 200)
+        release = self.hold_lock()
+        try:
+            with mock.patch.object(folder_ops, "LOCK_WAIT_SECONDS", 0.05):
+                res = self.post_key(body, key)
+        finally:
+            release()
+        self.assertEqual((res.status_code, res.get_json()["status"]), (200, "succeeded"))
+
+    def test_outcome_survives_a_beets_restart(self):
+        """#300 R3: after a restart the replay reads "succeeded", not the
+        SOURCE_MISSING a fresh run would give."""
+        key = f"restart-{id(self)}"
+        body = {"op": "rename_dir", "source": self.p("Artist", "Albm"), "target": self.p("Artist", "Album")}
+        self.assertEqual(self.post_key(body, key).status_code, 200)
+        self.assertTrue(os.path.isfile(os.path.join(self.td, ops_mod.REGISTRY_FILENAME)))
+        with mock.patch.dict(ops_mod._operations, clear=True), mock.patch.object(ops_mod, "_durable_file", None):
+            res = self.post_key(body, key)
+            self.assertEqual((res.status_code, res.get_json()["status"]), (200, "succeeded"), res.get_json())
+            other = self.post_key({"op": "create_dir", "path": self.p("Y")}, key)
+            self.assertEqual(other.get_json()["error_code"], "OPERATION_COLLISION")
+
+    def test_unreadable_registry_is_ignored(self):
+        with open(os.path.join(self.td, ops_mod.REGISTRY_FILENAME), "w") as fh:
+            fh.write("{not json")
+        with mock.patch.object(ops_mod, "_durable_file", None):
+            self.assertEqual(self.post({"op": "create_dir", "path": self.p("X")}).status_code, 200)
 
     def test_move_file_never_overwrites(self):
         with open(self.p("Artist", "Albm", "a.txt"), "w") as fh:
@@ -249,6 +321,25 @@ class EngineTests(_Env):
         p = mock.patch.object(te, "_FOLDER_STEP_RETRY_DELAY", 0)
         p.start()
         self.addCleanup(p.stop)
+
+    def test_busy_beets_is_a_retryable_failure_with_no_unconfirmed_record(self):
+        """#300 R2: BUSY means Beets did not register the step, so nothing ran:
+        one call, no retry, nothing recorded for rollback, a clear message."""
+        op, src, _dst = self.plan_merge()
+        self.store.transition(op, "Preview", "Approved")
+        busy = mock.Mock()
+        busy.folder_op.side_effect = BeetsAdapterError("busy", status_code=503, error_code="BUSY")
+        res = te.execute_folder_cleanup_apply(self.store, op, adapter=busy)
+        self.assertEqual((res["ok"], res["status"], res["mutated"], res["rollback_available"]),
+                         (False, "Failed", False, False))
+        self.assertEqual(res["step_error_code"], "BUSY")
+        self.assertIn("retry later", res["step_error_message"])
+        self.assertNotIn("FOLDER_OP_UNCONFIRMED", res["error"])
+        self.assertEqual(busy.folder_op.call_count, 1)
+        meta = self.store.get(op)["metadata"]
+        self.assertFalse((meta.get("engine_result") or {}).get("unconfirmed_steps"))
+        self.assertFalse(meta.get("unconfirmed_steps"))
+        self.assertEqual(sorted(p.name for p in src.iterdir()), ["a.txt", "b.txt"])
 
     def test_unconfirmed_step_is_never_reported_success(self):
         (self.music / "Empty").mkdir()
