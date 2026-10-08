@@ -154,13 +154,29 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
     def test_pathological_dash_runs_stay_linear(self):
         # Security review of #320 (F1): one "- " per list level used to copy
         # the rest of the line, O(k*L) per GET on a saved block scalar.
-        text = "note: |\n  " + "- " * 262144 + "x\n"  # 512 KB, valid YAML
-        start = time.perf_counter()
-        self.assertEqual(_redact_config_content(text), text)
-        self.assertLess(time.perf_counter() - start, 1.0)
-        start = time.perf_counter()
-        _restore_redacted_config_secrets(f'token: "{R}"\n' + text, "token: abc\n" + text)
-        self.assertLess(time.perf_counter() - start, 1.0)
+        # Asserts the growth rate, not a wall-clock budget (shared CI runners
+        # vary): 8x the input must cost well under 64x (quadratic) the time.
+        # Locally: 512 KB redact ~0.2 s, restore ~0.4 s; before the fix ~5 s.
+        def best_of_3(fn, text):
+            times = []
+            for _ in range(3):
+                start = time.perf_counter()
+                fn(text)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        def redact(text):
+            self.assertEqual(_redact_config_content(text), text)
+
+        def restore(text):
+            _restore_redacted_config_secrets(f'token: "{R}"\n' + text, "token: abc\n" + text)
+
+        small = "note: |\n  " + "- " * 32768 + "x\n"  # 64 KB
+        big = "note: |\n  " + "- " * 262144 + "x\n"  # 512 KB, valid YAML
+        for fn in (redact, restore):
+            t_small, t_big = best_of_3(fn, small), best_of_3(fn, big)
+            self.assertLess(t_big, 5.0, fn.__name__)
+            self.assertLess(t_big, 24 * t_small + 0.05, f"{fn.__name__}: {t_small:.3f}s -> {t_big:.3f}s")
 
     @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_save_keeps_private_mode_of_config_with_secrets(self):
