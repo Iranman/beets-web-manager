@@ -154,13 +154,12 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
     def test_pathological_dash_runs_stay_linear(self):
         # Security review of #320 (F1): one "- " per list level used to copy
         # the rest of the line, O(k*L) per GET on a saved block scalar.
-        # Compares two inputs of the same size and the same number of list
-        # items: one 512 KB line of dashes against short lines of 64 dashes.
-        # A linear scan costs about the same on both (measured ~2x); the old
-        # per-item copy was O(dashes * line length) on the long line (~40x).
-        # A same-size comparison keeps cache/allocator effects out of the
-        # ratio, so shared CI runners do not make it flaky (a wall-clock
-        # budget and a 64 KB vs 512 KB growth ratio both were).
+        # Asserts growth over a 32x spread (32 KB vs 1 MB): linear is ~32x
+        # (up to ~70x with cache effects on shared CI runners), quadratic is
+        # ~1024x, so the 200x bound separates them. The old loop took ~5 s at
+        # 512 KB (~20 s at 1 MB); the absolute bound is a generous backstop.
+        # Narrower spreads (64 KB vs 512 KB) and same-size comparisons were
+        # flaky on CI runners although the scan is linear.
         def best_of_3(fn, text):
             times = []
             for _ in range(3):
@@ -175,11 +174,13 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
         def restore(text):
             _restore_redacted_config_secrets(f'token: "{R}"\n' + text, "token: abc\n" + text)
 
-        one_line = "note: |\n  " + "- " * 262144 + "x\n"  # 512 KB, valid YAML
-        short_lines = "note: |\n" + ("  " + "- " * 63 + "x\n") * 4096  # same size and dash count
+        small = "note: |\n  " + "- " * 16384 + "x\n"  # 32 KB
+        big = "note: |\n  " + "- " * 524288 + "x\n"  # 1 MB, valid YAML
         for fn in (redact, restore):
-            t_long, t_short = best_of_3(fn, one_line), best_of_3(fn, short_lines)
-            self.assertLess(t_long, 8 * t_short + 0.05, f"{fn.__name__}: {t_short:.3f}s vs {t_long:.3f}s")
+            t_small, t_big = best_of_3(fn, small), best_of_3(fn, big)
+            msg = f"{fn.__name__}: {t_small:.3f}s (32 KB) -> {t_big:.3f}s (1 MB)"
+            self.assertLess(t_big, 15.0, msg)
+            self.assertLess(t_big, 200 * t_small, msg)
 
     @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_save_keeps_private_mode_of_config_with_secrets(self):
