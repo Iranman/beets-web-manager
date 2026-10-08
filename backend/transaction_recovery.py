@@ -123,7 +123,8 @@ def _interrupted_apply(st: TransactionStore, op: str) -> Dict[str, Any]:
     """A claimed composite apply (``_claim_apply``) records no engine evidence,
     so a restart that left it Running cannot tell whether Beets wrote it."""
     tx = st.transition(op, "Running", "Recovery Required", logs=[
-        "Recovered after restart: the apply was interrupted; check the library and roll back or re-run."])
+        "Recovered after restart: the apply was interrupted; check the library; this transaction "
+        "cannot be rolled back or re-applied — re-plan if needed."])
     return {"operation_id": op, "action": "Recovery Required" if tx else "skipped"}
 
 
