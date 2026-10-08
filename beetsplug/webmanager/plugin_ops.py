@@ -31,6 +31,7 @@ class PluginIncompatibleError(Exception):
 
 _CAPABILITY_CLASS_NAMES = {
     "mbsync": "MBSyncPlugin",
+    "mbsync_library": "MBSyncPlugin",
     "fetchart": "FetchArtPlugin",
     "embedart": "EmbedCoverArtPlugin",
     "lastgenre": "LastGenrePlugin",
@@ -200,6 +201,148 @@ def run_mbsync(
         "synced_items": changed_items,
         "synced_albums": changed_albums,
     }
+
+
+#: Most changed albums/singletons one library sync lists in its result; the
+#: counters always cover everything.
+MAX_LIBRARY_CHANGES = 200
+#: Most failures listed in a library sync result.
+MAX_LIBRARY_FAILURES = 100
+#: Stop a library sync after this many albums in a row raised (MusicBrainz
+#: down, for example) instead of failing every remaining album.
+MAX_CONSECUTIVE_FAILURES = 10
+_VALUE_CHARS = 120
+_UNTRACKED_FIELDS = frozenset({"mtime"})  # changes on every tag write
+
+
+def _field_values(model) -> Dict[str, Any]:
+    from beets import util
+
+    out: Dict[str, Any] = {}
+    for key in model.keys():
+        if key in _UNTRACKED_FIELDS:
+            continue
+        value = model.get(key)
+        if isinstance(value, bytes):
+            value = util.displayable_path(value)
+        elif not (value is None or isinstance(value, (bool, int, float))):
+            value = str(value)
+        out[key] = value
+    return out
+
+
+def _short(value: Any) -> Any:
+    return value[:_VALUE_CHARS] if isinstance(value, str) else value
+
+
+def _diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, List[Any]]:
+    return {k: [_short(before.get(k)), _short(after.get(k))]
+            for k in sorted(set(before) | set(after)) if before.get(k) != after.get(k)}
+
+
+def _album_state(lib, album_id: int):
+    album = lib.get_album(album_id)
+    if album is None:
+        return None
+    return _field_values(album), {it.id: _field_values(it) for it in album.items()}
+
+
+def run_mbsync_library(lib, move: bool, write: bool, cancel, lock, progress=None) -> Dict[str, Any]:
+    """Run Beets' own mbsync over the whole library, one album or singleton
+    at a time: exactly the targets `beet mbsync` with no query visits
+    (albums with an mb_albumid, singletons with an mb_trackid), through
+    MBSyncPlugin.albums()/singletons() with an exact `id:` query each.
+
+    Going one target at a time is what lets the caller cancel between
+    targets (``cancel`` is a threading.Event), hold ``lock`` (the plugin's
+    mutation lock) only for one album, and record what Beets changed: each
+    target's stored fields are read before and after the call. Beets keeps
+    no undo, so this change log is the only record; it lists at most
+    MAX_LIBRARY_CHANGES targets, with values cut to 120 characters.
+
+    A target whose Release/Recording MusicBrainz no longer has is left
+    unchanged by mbsync (it only logs it), so it counts as unchanged. A
+    target that raises is recorded as failed and the sync goes on, unless
+    MAX_CONSECUTIVE_FAILURES targets in a row raise (``aborted``)."""
+    plugin = _require_plugin("mbsync")
+    if not hasattr(plugin, "singletons") or not hasattr(plugin, "albums"):
+        raise PluginIncompatibleError(
+            "mbsync plugin does not expose the expected singletons()/albums() methods"
+        )
+    albums = list(lib.albums())
+    singles = list(lib.items("singleton:true"))
+    targets = [("album", a.id) for a in albums if a.mb_albumid]
+    targets += [("singleton", i.id) for i in singles if i.mb_trackid]
+    res: Dict[str, Any] = {
+        "write": bool(write), "move": bool(move),
+        "albums_total": len(albums), "singletons_total": len(singles),
+        "targets": len(targets), "processed": 0, "changed_albums": 0, "changed_singletons": 0,
+        "changed_items": 0, "unchanged": 0, "skipped_no_mbid": len(albums) + len(singles) - len(targets),
+        "skipped_empty": 0, "skipped_missing": 0, "failed_count": 0, "failed": [],
+        "cancelled": False, "aborted": False, "changes": [], "changes_truncated": False,
+    }
+    consecutive = 0
+    for kind, tid in targets:
+        if cancel.is_set():
+            res["cancelled"] = True
+            break
+        with lock:
+            try:
+                if kind == "album":
+                    before = _album_state(lib, tid)
+                    if before is None:
+                        res["skipped_missing"] += 1
+                        continue
+                    if not before[1]:  # mbsync reads items()[0]: an empty album raises
+                        res["skipped_empty"] += 1
+                        continue
+                    plugin.albums(lib, [f"id:{tid}"], move, False, write)
+                    after = _album_state(lib, tid) or ({}, {})
+                else:
+                    item = lib.get_item(tid)
+                    if item is None:
+                        res["skipped_missing"] += 1
+                        continue
+                    before = ({}, {tid: _field_values(item)})
+                    plugin.singletons(lib, [f"id:{tid}"], move, False, write)
+                    refreshed = lib.get_item(tid)
+                    after = ({}, {tid: _field_values(refreshed)} if refreshed is not None else {})
+            except Exception as ex:
+                res["failed_count"] += 1
+                if len(res["failed"]) < MAX_LIBRARY_FAILURES:
+                    res["failed"].append({"kind": kind, "id": tid, "error": f"{type(ex).__name__}: {str(ex)[:200]}"})
+                consecutive += 1
+                if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                    res["aborted"] = True
+                    break
+                continue
+        consecutive = 0
+        res["processed"] += 1
+        album_fields = _diff(before[0], after[0])
+        items = []
+        for iid, old in before[1].items():
+            fields = _diff(old, after[1].get(iid, {}))
+            if fields:
+                new = after[1].get(iid, {})
+                items.append({"item_id": iid, "title": _short(new.get("title") or old.get("title")), "fields": fields})
+        if not (album_fields or items):
+            res["unchanged"] += 1
+        else:
+            res["changed_albums" if kind == "album" else "changed_singletons"] += 1
+            res["changed_items"] += len(items)
+            if len(res["changes"]) < MAX_LIBRARY_CHANGES:
+                state = after[0] or before[0] or (after[1].get(tid) or {})
+                res["changes"].append({
+                    "kind": kind, "id": tid,
+                    "artist": _short(state.get("albumartist") or state.get("artist")),
+                    "album": _short(state.get("album")),
+                    "album_fields": album_fields, "items": items,
+                })
+            else:
+                res["changes_truncated"] = True
+        if progress:
+            progress({k: v for k, v in res.items() if k not in ("changes", "failed")})
+    return res
 
 
 def run_fetchart(lib, album_ids: List[int], force: bool = False) -> Dict[str, Any]:

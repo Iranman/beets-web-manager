@@ -3752,117 +3752,26 @@ def library_move_all():
 
 @app.post("/api/library/mbsync-all")
 def library_mbsync_all():
-    """Sync all library tracks against MusicBrainz metadata (beet mbsync)."""
+    """Sync the whole library from MusicBrainz with Beets' own mbsync, run
+    inside Beets by the webmanager plugin (plugin 1.13.0). The job records
+    what Beets changed on its transaction; there is no rollback."""
+    meta = {"type": "mbsync-all", "dedupe_key": "library:mbsync-all",
+            "transaction": {"operation_type": "MusicBrainz Match", "source": "mbsync-all",
+                            "summary": "Sync the whole library from MusicBrainz (Beets mbsync)",
+                            "rollback_available": False,
+                            "rollback_reason": composite_workflows.MBSYNC_LIBRARY_ROLLBACK_REASON}}
+
     def _do(log, cancel_event=None):
-        # LT-18: ask the engine first; when the library-wide sync is refused
-        # (not_supported today) nothing else -- not even the orphan-row prune --
-        # runs, and the job fails instead of reporting success.
-        try:
-            mbsync_res = composite_workflows.mbsync(query="", async_job=True)
-        except Exception as ex:
-            raise RuntimeError(f"Failed to start beet mbsync on engine: {ex}") from ex
-        if isinstance(mbsync_res, dict) and mbsync_res.get("ok") is False:
-            raise RuntimeError(mbsync_res.get("error") or "Library-wide mbsync was refused; nothing was changed.")
-        try:
-            orphan_rows = composite_workflows.find_all_orphan_albums()
-            orphan_ids = [int(r["id"]) for r in orphan_rows]
-        except Exception as ex:
-            log.append(f"  [warn] Orphan lookup failed (non-fatal): {ex}")
-            orphan_ids = []
+        # The dedupe guard lets only this job run under the key, so the
+        # running job it finds is this one: its hook-created transaction.
+        me = jobs.find_duplicate(meta)
+        tx_id = str(((me.metadata if me else None) or {}).get("transaction_id") or "")
+        res = composite_workflows.mbsync_library(log, cancel_event, transaction_id=tx_id, store=transactions)
+        if res.get("mutated") is not False:
+            _invalidate_lib_cache()
+        return res
 
-        pruned = 0
-        for oid in orphan_ids:
-            if cancel_event and cancel_event.is_set():
-                log.append("[cancelled]"); return
-            try:
-                # Empty orphan rows only; delete_album never deletes files.
-                res = composite_workflows.delete_album(oid, delete_files=False)
-                if res.get("ok"):
-                    pruned += 1
-                else:
-                    log.append(f"  [warn] Could not prune orphaned album {oid}: {res.get('error')}")
-            except Exception as ex:
-                log.append(f"  [warn] Could not prune orphaned album {oid}: {ex}")
-        if orphan_ids:
-            log.append(f"Pruned {pruned}/{len(orphan_ids)} orphaned album record(s) with no tracks.")
-
-        log.append("Running beet mbsync on full library via engine IPC — this may take several minutes…")
-        deadline = time.time() + 7200.0  # 2-hour hard cap
-
-        remote_job_id = mbsync_res.get("job_id") if isinstance(mbsync_res, dict) else None
-        rc = 0
-        if remote_job_id:
-            seen_stdout = 0
-            seen_stderr = 0
-            while True:
-                if cancel_event and cancel_event.is_set():
-                    try:
-                        composite_workflows.cancel_job(remote_job_id)
-                    except Exception:
-                        pass
-                    log.append("[cancelled]")
-                    return
-
-                if time.time() > deadline:
-                    try:
-                        composite_workflows.cancel_job(remote_job_id)
-                    except Exception:
-                        pass
-                    log.append("⚠ mbsync timed out after 2 hours.")
-                    return
-
-                try:
-                    job_info = composite_workflows.get_job(remote_job_id)
-                except Exception:
-                    time.sleep(0.5)
-                    continue
-
-                r_stdout = job_info.get("stdout") or []
-                if len(r_stdout) > seen_stdout:
-                    for line in r_stdout[seen_stdout:]:
-                        stripped = line.rstrip()
-                        if stripped:
-                            log.append(stripped)
-                    seen_stdout = len(r_stdout)
-
-                r_stderr = job_info.get("stderr") or []
-                if len(r_stderr) > seen_stderr:
-                    for line in r_stderr[seen_stderr:]:
-                        stripped = line.rstrip()
-                        if stripped:
-                            log.append(f"  ⚠ {stripped}")
-                    seen_stderr = len(r_stderr)
-
-                status = job_info.get("status")
-                if status in ("success", "failed", "cancelled", "timeout"):
-                    rc = job_info.get("returncode", 0 if status == "success" else 1)
-                    if status == "cancelled":
-                        log.append("[cancelled]")
-                        return
-                    if status == "timeout":
-                        log.append("⚠ mbsync timed out after 2 hours.")
-                        return
-                    break
-
-                time.sleep(0.5)
-        elif isinstance(mbsync_res, dict):
-            # Sync response / unit test mock fallback
-            stdout = mbsync_res.get("stdout") or ""
-            stderr = mbsync_res.get("stderr") or ""
-            for line in stdout.splitlines():
-                if line.strip():
-                    log.append(line.rstrip())
-            for line in stderr.splitlines():
-                if line.strip():
-                    log.append(f"  ⚠ {line.rstrip()}")
-            rc = mbsync_res.get("returncode", 0 if mbsync_res.get("ok", True) else 1)
-
-        if rc not in (0, 1):
-            raise RuntimeError(f"beet mbsync exited with rc={rc}")
-        _invalidate_lib_cache()
-        log.append("✓ beet mbsync complete." if rc == 0 else "⚠ mbsync finished with some errors (see above).")
-
-    job = jobs.start_python(_do, label="MBSync all library tracks", metadata={"type": "mbsync-all", "dedupe_key": "library:mbsync-all"})
+    job = jobs.start_python(_do, label="MBSync all library tracks", metadata=meta)
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
