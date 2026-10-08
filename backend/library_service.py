@@ -457,7 +457,15 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                     "provided release ID despite the folder tracklist mismatch."
                 )
                 return resolved
-            log.append("  Searching for a replacement MusicBrainz release from folder tracks…")
+            # A replacement stays inside the provided Release's own Release
+            # Group; a cross-group replacement is never automatic (review).
+            provided_rg = _s(_fetch_mb_release_tracklist(resolved, log).get("release_group")).strip().lower()
+            if not provided_rg:
+                log.append("  REFUSED: the provided release's release group is unknown; "
+                           "Manual Review is required.")
+                return ""
+            log.append(f"  Looking for a replacement inside release group {provided_rg}…")
+            return _accept_from_release_group(provided_rg, resolved)
         elif resolved and _MB_UUID_RE.match(resolved):
             rg_resolved = _resolve_release_group_to_release(
                 resolved, log, year=year, track_count=track_count)

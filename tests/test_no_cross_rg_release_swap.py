@@ -5,7 +5,13 @@ import unittest
 from unittest import mock
 
 import backend.ai_service as ai
+import backend.library_service as lsvc
 import backend.musicbrainz_service as msvc
+
+try:
+    import test_import_paths_beets_native as base
+except ImportError:  # pragma: no cover
+    from tests import test_import_paths_beets_native as base
 
 SINGLE_REL = "55555555-5555-5555-5555-555555555555"
 SINGLE_RG = "66666666-6666-6666-6666-666666666666"
@@ -61,6 +67,44 @@ class SuggestionKeepsTheCandidateReleaseTests(unittest.TestCase):
                 self.assertEqual(sug["mb_releasegroupid"], SINGLE_RG)
                 self.assertEqual(sug["mb_releasegroupurl"],
                                  f"https://musicbrainz.org/release-group/{SINGLE_RG}")
+
+
+class ProvidedReleaseStaysInItsReleaseGroupTests(base.ConfirmedImportJobTests):
+    """F2: a provided Release that fails the folder preflight is replaced only
+    by a Release of its own Release Group; the free search (which would find
+    one in another group) is not run, nothing is imported, and the folder
+    goes to review."""
+
+    def test_failed_preflight_goes_to_review_not_to_another_release_group(self):
+        isvc = self.isvc
+        self.ad = base._adapter({"id": 9, "mb_albumid": ALBUM_REL, "mb_releasegroupid": ALBUM_RG})
+        aldir = str(isvc.MUSIC_ROOT) + "/Artist/Song"
+
+        def preflight(folder, rid, **k):
+            ok = rid == ALBUM_REL
+            return {"ok": ok, "matches": 2 if ok else 0, "expected": 2, "audio_count": 2,
+                    "release_group": ALBUM_RG if ok else SINGLE_RG}
+
+        free_search = mock.MagicMock(return_value=[{"mb_albumid": ALBUM_REL, "tracks": 2,
+                                                    "artist": "Artist", "album": "Song"}])
+        with mock.patch.object(isvc.composite_workflows, "inspect_import_source",
+                               return_value={"ok": True, "path": aldir, "audio_file_count": 2}), \
+                mock.patch.object(isvc, "_folder_release_preflight", side_effect=preflight), \
+                mock.patch.object(lsvc, "_folder_release_preflight", side_effect=preflight), \
+                mock.patch.object(lsvc, "_folder_import_track_count", return_value=2), \
+                mock.patch.object(lsvc, "_resolve_mb_release_id", return_value=SINGLE_REL), \
+                mock.patch.object(lsvc, "_mb_release_has_tracks", return_value=True), \
+                mock.patch.object(lsvc, "_fetch_mb_release_tracklist", side_effect=_tracklist("Single")), \
+                mock.patch.object(lsvc, "_mb_release_group_candidates", return_value=[]), \
+                mock.patch.object(lsvc, "_mb_release_search", free_search), \
+                mock.patch.object(lsvc, "_mb_release_search_by_folder_tracks", free_search):
+            body, code = isvc.start_reimport_disk({"aldir": aldir, "mb_albumid": SINGLE_REL,
+                                                   "skip_import_lock": True})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.result["status"], "failed", self.result)
+        free_search.assert_not_called()
+        self.ad.run_import.assert_not_called()
+        self.assertTrue(isvc._queue_folder_for_manual_review.called)
 
 
 if __name__ == "__main__":
