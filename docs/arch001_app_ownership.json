@@ -525,7 +525,7 @@
     "_ai_batch_queue_pending_review",
     "_ai_batch_recalculate_batch_state"
    ],
-   "caller_count": 590,
+   "caller_count": 591,
    "dependencies": []
   },
   {
@@ -6183,10 +6183,10 @@
    "module": "backend/artwork_service.py",
    "lines": [
     936,
-    952
+    958
    ],
-   "size": 17,
-   "body_lines": 16,
+   "size": 23,
+   "body_lines": 22,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -6198,6 +6198,7 @@
    "caller_count": 1,
    "dependencies": [
     "_album_art_download_error",
+    "_s",
     "_validate_album_art_bytes"
    ]
   },
@@ -6205,8 +6206,8 @@
    "name": "_album_art_path_text",
    "module": "backend/artwork_service.py",
    "lines": [
-    955,
-    956
+    961,
+    962
    ],
    "size": 2,
    "body_lines": 1,
@@ -6227,8 +6228,8 @@
    "name": "_album_art_album_id",
    "module": "backend/artwork_service.py",
    "lines": [
-    959,
-    963
+    965,
+    969
    ],
    "size": 5,
    "body_lines": 4,
@@ -6247,8 +6248,8 @@
    "name": "_resolve_album_art_request_album",
    "module": "backend/artwork_service.py",
    "lines": [
-    966,
-    1000
+    972,
+    1006
    ],
    "size": 35,
    "body_lines": 34,
@@ -6272,8 +6273,8 @@
    "name": "_album_art_expected_release_group",
    "module": "backend/artwork_service.py",
    "lines": [
-    1003,
-    1004
+    1009,
+    1010
    ],
    "size": 2,
    "body_lines": 1,
@@ -6297,11 +6298,11 @@
    "name": "_replace_album_art_bytes",
    "module": "backend/artwork_service.py",
    "lines": [
-    1007,
-    1025
+    1013,
+    1034
    ],
-   "size": 19,
-   "body_lines": 16,
+   "size": 22,
+   "body_lines": 19,
    "route": null,
    "mutation_capable": true,
    "domain": "ARTWORK",
@@ -6321,8 +6322,8 @@
    "name": "_replace_album_art_from_url",
    "module": "backend/artwork_service.py",
    "lines": [
-    1028,
-    1038
+    1037,
+    1047
    ],
    "size": 11,
    "body_lines": 8,
@@ -6345,8 +6346,8 @@
    "name": "_save_art_to_disk",
    "module": "backend/artwork_service.py",
    "lines": [
-    1041,
-    1054
+    1050,
+    1063
    ],
    "size": 14,
    "body_lines": 11,
@@ -6369,8 +6370,8 @@
    "name": "_fetch_artwork_after_retag",
    "module": "backend/artwork_service.py",
    "lines": [
-    1057,
-    1112
+    1066,
+    1121
    ],
    "size": 56,
    "body_lines": 40,
@@ -6393,8 +6394,8 @@
    "name": "_get_album_item_dir",
    "module": "backend/artwork_service.py",
    "lines": [
-    1115,
-    1133
+    1124,
+    1142
    ],
    "size": 19,
    "body_lines": 17,
@@ -33753,8 +33754,8 @@
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    798,
-    850
+    802,
+    854
    ],
    "size": 53,
    "body_lines": 33,
@@ -33774,8 +33775,8 @@
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    853,
-    857
+    857,
+    861
    ],
    "size": 5,
    "body_lines": 2,
@@ -33797,8 +33798,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    861,
-    883
+    865,
+    887
    ],
    "size": 23,
    "body_lines": 22,
@@ -33822,8 +33823,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    886,
-    906
+    890,
+    910
    ],
    "size": 21,
    "body_lines": 17,
@@ -33842,8 +33843,8 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    910,
-    1087
+    914,
+    1091
    ],
    "size": 178,
    "body_lines": 177,
@@ -33870,8 +33871,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1091,
-    1100
+    1095,
+    1104
    ],
    "size": 10,
    "body_lines": 9,
@@ -33891,8 +33892,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1103,
-    1108
+    1107,
+    1112
    ],
    "size": 6,
    "body_lines": 5,

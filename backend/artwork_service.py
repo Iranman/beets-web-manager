@@ -942,8 +942,14 @@ def _download_album_art_bytes(image_url: str) -> Tuple[bytes, Dict[str, Any]]:
     except OutboundPolicyError as exc:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
     try:
-        with provider_boundary.opened_public("artwork", image_url, timeout=15, headers=_IMAGE_FETCH_HEADERS) as resp:
+        with provider_boundary.opened_public("artwork", image_url, timeout=15, headers=_IMAGE_FETCH_HEADERS,
+                                             max_bytes=_ALBUM_ART_UPLOAD_MAX_BYTES + 1) as resp:
+            ctype = _s(resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype and not ctype.startswith("image/"):
+                raise AlbumArtRequestError("That URL is not an image", 400)
             data = resp.read(_ALBUM_ART_UPLOAD_MAX_BYTES + 1)
+    except AlbumArtRequestError:
+        raise
     except OutboundPolicyError as exc:
         raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
     except Exception as exc:
@@ -1019,6 +1025,9 @@ def _replace_album_art_bytes(album_id: int, data: bytes, *, source: str,
     except Exception as exc:
         raise RuntimeError("Could not update album artwork") from exc
     if not result.get("ok"):
+        # A refusal carries our own fixed text (composite_workflows), never engine text.
+        if result.get("mutated") is False or result.get("code") in {"identity_changed", "not_found", "invalid_image"}:
+            raise AlbumArtRequestError(_s(result.get("error")) or "Could not update album artwork", 409)
         raise RuntimeError("Could not update album artwork")
     if log is not None:
         log.append(f"Saved cover art: {Path(_s(result.get('artpath') or '')).name or 'albumart.jpg'}")

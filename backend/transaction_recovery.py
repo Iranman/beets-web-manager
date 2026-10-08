@@ -42,6 +42,8 @@ def _families() -> Dict[str, Dict[str, Any]]:
             "kind": "registry", "finish": composite_workflows.finish_track_quarantine},
         composite_workflows.ALBUM_CLEANUP_FAMILY: {
             "kind": "registry", "finish": composite_workflows.finish_album_cleanup},
+        composite_workflows.ALBUM_ART_REPLACE_FAMILY: {
+            "kind": "registry", "finish": composite_workflows.finish_album_art_replace},
         duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: {
             "kind": "registry", "finish": duplicate_cleanup.finish_reviewed_cleanup},
         album_row_merge.ALBUM_ROW_MERGE_FAMILY: {

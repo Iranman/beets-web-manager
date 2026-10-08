@@ -5,6 +5,8 @@ Communicates over HTTP with the stock LinuxServer Beets container:
 - Authenticated mutations via beetsplug.webmanager (/webmanager/*)
 """
 
+import base64
+import hashlib
 import http.client
 import os
 from pathlib import Path
@@ -784,6 +786,36 @@ class BeetsAdapter:
         payload = {"quarantine_id": str(quarantine_id or "")}
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/replace-item-file/rollback", json_data=payload, headers=headers)
+
+    def set_album_art(
+        self,
+        album_id: int,
+        image: bytes,
+        expected_mb_releasegroupid: str = "",
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Make ``image`` the album's cover inside Beets (plugin 1.12.0):
+        Album.set_art() puts it in the album folder and sets artpath, and
+        embedart embeds it when it is loaded. The engine keeps the previous
+        cover and embedded images and returns their id (``art_id``)."""
+        payload = {"album_id": int(album_id), "image_b64": base64.b64encode(image).decode("ascii"),
+                   "image_sha256": hashlib.sha256(image).hexdigest(),
+                   "expected_mb_releasegroupid": str(expected_mb_releasegroupid or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        # Embedding rewrites every track of the album.
+        return self._request("POST", "/webmanager/album-art", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
+    def rollback_album_art(
+        self,
+        art_id: str,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Undo set_album_art(); the engine restores from its own manifest."""
+        payload = {"art_id": str(art_id or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-art/rollback", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
 
     def quarantine_remove_items(
         self,

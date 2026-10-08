@@ -123,7 +123,6 @@ class NoFakeSuccessTests(unittest.TestCase):
     def test_library_wide_operations_are_refused(self):
         self.assertEqual(cw.move_library(query="", rescan_first=True)["code"], "not_supported")
         self.assertEqual(cw.mbsync(query="", async_job=True)["code"], "not_supported")
-        self.assertEqual(cw.replace_album_art(1, "AAAA", source="x")["code"], "not_supported")
 
     def test_move_album_to_library_uses_the_relocation_family(self):
         ad = mock.MagicMock()

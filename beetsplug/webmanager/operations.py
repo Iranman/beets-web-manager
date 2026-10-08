@@ -44,7 +44,7 @@ MAX_COMPLETED_OPERATIONS = 1000
 # key still reads its result after a Beets restart. Only final outcomes are
 # saved: a step that was running when Beets stopped is not running any more,
 # so replaying its key runs it (or refuses it) against the current files.
-_DURABLE_TYPES = frozenset({"folder_op"})
+_DURABLE_TYPES = frozenset({"folder_op", "album_art_set", "album_art_rollback"})
 DURABLE_RETENTION_SECONDS = 7 * 86400
 REGISTRY_FILENAME = "webmanager_operations.json"
 _FINAL = ("succeeded", "failed")
@@ -405,7 +405,7 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
-_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "operations", "status"]
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "operations", "status"]
 _PLUGIN_GATED_CAPABILITIES = ["mbsync", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
@@ -1277,3 +1277,4 @@ from . import remove_ops  # noqa: E402,F401
 from . import merge_ops  # noqa: E402,F401
 from . import untracked_ops  # noqa: E402,F401
 from . import folder_ops  # noqa: E402,F401
+from . import art_ops  # noqa: E402,F401
