@@ -219,6 +219,27 @@ The Beets image version is independent of the Beets Web Manager image version --
 
 Beets Web Manager builds and publishes exactly one image, `ghcr.io/iranman/beets-web-manager`. There is no custom Beets image anywhere in this repository or its CI -- the sole Beets runtime this repository verifies against is the unmodified, official `lscr.io/linuxserver/beets` image, exercised over HTTP by the `webmanager` integration plugin (`beetsplug/webmanager/`) in the `stock-beets-acceptance` job. Upgrading the Beets image version on a deployment with an existing library requires the backup/upgrade/rollback procedure in `docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an automatic, one-time, non-reversible database schema migration on first open.
 
+## Music Format Preferences and rejected downloads
+
+Settings > Music Format Preferences decides which audio an import or download may bring in. The preferences are stored in `MUSIC_FORMAT_PREFS_FILE` (default `/config/music_format_preferences.json`). The defaults are:
+
+- **Accepted channel layouts:** stereo, 2.1 and Dolby Atmos. Mono, 5.1 and 7.1 are rejected, and so is any other channel count unless you set a custom maximum.
+- **Accepted formats:** FLAC, MP3, AAC, E-AC-3 and TrueHD. Every other format is rejected, including WAV, ALAC, Opus and Ogg Vorbis.
+- A file whose channel layout cannot be determined, or that ffprobe cannot inspect, is rejected too.
+- **Rejected downloads:** Quarantine.
+
+Folder imports (`POST /api/import`), imports with a MusicBrainz ID, disk re-imports, AI imports, import review, album downloads and playlist downloads check every audio file before Beets imports it. When a file is rejected:
+
+- **The source is outside `MUSIC_ROOT`** (for example under `/downloads`): with "Quarantine", the rejected file is **moved** out of its folder to `MUSIC_FORMAT_QUARANTINE_DIR/<YYYYMMDD>/<file name>`. A name that is already taken gets `-<unix time>` added. With "Delete", the file is deleted. Only the rejected audio files are handled; other files in the folder stay where they are. The import stops (a playlist download skips that track instead), and the job log names each file and where it went (`Rejected download quarantined: …`). This also happens in a preserved torrent source, which imports otherwise only copy from, so a torrent client can lose a file it is seeding.
+- **The source is inside `MUSIC_ROOT`:** nothing is moved or deleted. The files are marked "Needs replacement" and the import stops.
+- Import review is the exception: a selected file that could not be inspected stays in review for a retry and is not moved.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MUSIC_FORMAT_QUARANTINE_DIR` | `/config/music_format_quarantine` | Where rejected downloads are moved. In the shipped Compose files, Web Manager's `/config` is the Beets config folder (`BEETS_CONFIG_PATH`, default `./beets`), so the files end up on the host in `<Beets config folder>/music_format_quarantine/`. It is a Web Manager setting: set it on the System page (it applies without a restart) or in the service's `environment:`. `docker-compose.yml` does not forward it from the Compose `.env`. |
+
+The quarantine move is not a library transaction. It does not appear on the Transactions page and cannot be rolled back there. Nothing empties the quarantine folder. To use a quarantined file, move it back yourself, change the preferences so that it is accepted, and import again.
+
 ## Library location and unattended duplicate deletion
 
 - `MUSIC_ROOT` — where the Beets library is mounted inside the Web Manager container (default `/music`). Every shipped compose file mounts this path and now also sets the variable explicitly. It is the only setting for the library location. The setup and System page "Music Library" check tests this path inside the Web Manager container. It blocks setup only when the path is missing or unreadable; a read-only mount is fine. Web Manager uses the absolute item paths Beets reports, so `MUSIC_ROOT` must be the same path as Beets' `directory:` in the `beets` container. It is a container-side variable (layer 3 above): change it under the `beets-web-manager` service's `environment:` together with the volume target.
