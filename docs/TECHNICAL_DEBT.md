@@ -172,10 +172,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Evidence:
   - webmanager plugin 1.6.2 rejects `autotag: true` (`AUTOTAG_NOT_ALLOWED`) and always runs the importer with `autotag: no`, ignores `search_ids` and `quiet_fallback`, and uses the bare `ImportSession`, whose `choose_match` raises `NotImplementedError` once autotag is on. Web Manager now sends the Beets-native request (see "Import contract" in `ARCHITECTURE.md`), so every import route fails cleanly until the plugin accepts it.
   - Verified against `lscr.io/linuxserver/beets:latest` (Beets 2.14.1): Beets loads MusicBrainz as a plugin, so `musicbrainz` must be in `plugins:` when a `plugins:` list exists. Without it Beets finds no candidates and every confirmed import is skipped (`not_imported`). `docs/CONFIGURATION.md` still says MusicBrainz needs no `plugins:` entry.
-  - import-with-id and reimport-disk still retag after the import (`_match_tracks_from_mb`, `plan_album_mb_track_repair`, `relocate_album`). Once Beets applies the confirmed Release itself these steps repeat its work and should be reduced to verification.
+  - Resolved: import-with-id and reimport-disk no longer retag after the import (`_match_tracks_from_mb`, `plan_album_mb_track_repair`, `relocate_album`, and the post-import discovery, re-validation and row-removal code are gone). They verify the album Beets produced and keep its rows when verification fails.
   - A reimport-disk source inside the library needs the plugin to accept an in-place import (no copy, no move) from the library directory; today it is refused with `path_not_allowed`.
 - Desired state: the plugin runs Beets' quiet import with autotag, `search_ids` and `quiet_fallback`, and returns the paths of the tasks Beets skipped as `skipped_paths`, so `/api/import` can name every folder left in place; provisioning enables `musicbrainz`; Web Manager only verifies.
-- Priority: P1 (no import works without it). Status: Open.
+- Priority: P1 (no import works without it). Status: Partially resolved. The Web Manager side is done (the post-import retag is removed). The plugin side (`autotag`, `search_ids`, `quiet_fallback`, `skipped_paths`, in-place import, `musicbrainz` provisioning) is in plugin 1.8.0 (PR #299). It closes when that ships.
+  - Still open: reimport-disk's existing-album repair (`_repair_existing_album_in_place`, no import) calls `_match_tracks_from_mb(zero_unmatched=True)`, which `plan_album_mb_track_repair` refuses since MI-1, so that repair path matches nothing.
 
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 

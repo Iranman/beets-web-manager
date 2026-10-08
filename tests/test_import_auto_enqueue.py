@@ -96,16 +96,6 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('"auto_import_idempotency_key": key', body)
         self.assertIn('start_folder_import_with_id(import_payload)', body)
 
-    def test_auto_import_reuses_verified_track_mapping_before_broad_rematch(self):
-        body = app_unit_source("start_folder_import_with_id")
-        self.assertIn('def _apply_verified_review_track_mapping(album_db_id: int) -> int:', body)
-        self.assertIn('auto_import and selected_subset_import and importable_rows', body)
-        self.assertIn('Applied verified Import Review track mapping', body)
-        self.assertIn('skipped broad MB title rematch', body)
-        self.assertIn('matched = _match_tracks_from_mb(mb_albumid,', body)
-        self.assertIn('log.append("[3/4] Syncing album metadata from MusicBrainz', body)
-        self.assertIn('log.append("[3/4] Writing tags to audio files', body)
-        self.assertIn('log.append("[4/4] Renaming files to match library path template', body)
     def test_import_job_metadata_contains_immutable_selection_and_skips_plex_by_default(self):
         body = app_unit_source("start_folder_import_with_id")
         self.assertIn('"selected_source_files": [str(p) for p in selected_source_files]', body)
@@ -139,7 +129,6 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('return None, True', body)
         import_body = app_unit_source("start_folder_import_with_id")
         self.assertIn('_remove_pending_review_for_path(folder_path, log)', import_body)
-        self.assertIn('return {"status": "already_in_library"}', import_body)
 
     def test_stale_review_item_with_verified_tracks_resumes_import(self):
         self.assertIn('def _stale_review_item_can_resume_import(item: Dict[str, Any]) -> bool:', APP)
@@ -158,13 +147,6 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('skip_import_lock = bool(payload.get("skip_import_lock"))', body)
         self.assertIn('[reimport] Running inside parent import slot', body)
         self.assertIn('"skip_import_lock": skip_import_lock', body)
-    def test_import_album_lookup_prefers_musicbrainz_before_artist_scan(self):
-        self.assertIn('def _library_album_ids_for_musicbrainz(mb_albumid: str = "", mb_releasegroupid: str = "") -> List[int]:', APP)
-        body = section(APP, '# ── Step 2: find the album', 'if not album_ids and not item_ids:')
-        lookup = section(APP, '# ── Step 2: find the album', '# E: search by album TEXT field')
-        self.assertIn('# C: exact MusicBrainz identity lookup before broad artist-folder scans.', lookup)
-        self.assertIn('_library_album_ids_for_musicbrainz(mb_albumid, selected_releasegroupid)', lookup)
-        self.assertLess(lookup.index('_library_album_ids_for_musicbrainz'), lookup.index('f"{music_root}/{artist_name}"'))
     def test_frontend_calls_backend_auto_enqueue_after_safe_preview(self):
         body = section(REVIEW_PAGE, 'Backend-owned auto-enqueue', 'Keep ref in sync')
         self.assertIn('autoEnqueueImport(payload)', body)

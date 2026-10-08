@@ -45,7 +45,6 @@ KNOWN_UNBOUND_CALLS = {
     # music-identity / backend: read helpers called with arguments the shim lacks
     ("routes_library.py", "get_mbid_sticking_candidates"),
     ("backend/ai_service.py", "discover_import_sources"),
-    ("backend/import_service.py", "find_items_by_query"),
     # library-transaction (later wave): mutation flows that would be switched ON
     ("backend/import_reconciliation_service.py", "apply_artist_folder_reconcile"),
     # integrations-automation: playlist shims (also return fabricated ok)

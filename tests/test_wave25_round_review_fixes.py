@@ -71,21 +71,6 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         self.assertNotIn("update_album_metadata(int(iid)", self.app_source)
         self.assertNotIn("relocate_album(int(iid)", self.app_source)
 
-    def test_reimport_disk_item_loop_resolves_real_album_id(self):
-        """The fixed loop must re-derive a genuine album_id (queried fresh
-        via beets_client) before calling any album-scoped engine
-        method, and must skip items that have none rather than substitute
-        the item's own id."""
-        idx = self.app_source.index("_item_repaired_album_ids: set = set()")
-        window = self.app_source[idx: idx + 2200]
-        self.assertIn("composite_workflows.get_item(iid)", window)
-        self.assertIn("_real_aid = int(_item_data.get(\"album_id\") or 0)", window)
-        self.assertIn("if _real_aid <= 0:", window)
-        self.assertIn('composite_workflows.plan_album_mb_track_repair({"album_id": _real_aid', window)
-        self.assertIn("composite_workflows.update_album_metadata(_real_aid,", window)
-        self.assertIn("composite_workflows.relocate_album(_real_aid,", window)
-
-
     # ── Bug: plan_album_mb_track_repair() called without album_id ──────────
 
     def test_every_plan_album_mb_track_repair_call_supplies_album_id(self):
@@ -170,21 +155,6 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         self.assertNotIn("_delete_row_file(row", self.app_source)
 
     # ── Redundant/unsafe raw delete_file before a real transaction ─────────
-
-    def test_cleanup_failed_import_copy_relies_on_the_real_transaction(self):
-        """_cleanup_failed_import_copy previously called the generic,
-        DB-unaware beets_client.delete_file() on each item's file BEFORE
-        calling plan_album_cleanup/apply_album_cleanup -- but
-        album_cleanup_v1's own Apply already deletes both the DB rows and
-        the files itself (with its own symlink/TOCTOU checks). The raw
-        pre-delete bypassed those checks and was purely redundant."""
-        idx = self.app_source.index("def _cleanup_failed_import_copy")
-        end_idx = self.app_source.index("def _rollback_failed_library_source_import")
-        body = self.app_source[idx:end_idx]
-        self.assertNotIn("composite_workflows.delete_file(", body)
-        # Wave 0 (LT-17): the rollback is row-only -- it never deletes files.
-        self.assertIn("composite_workflows.remove_album_rows_after_failed_import(", body)
-        self.assertNotIn("delete_files=True", body)
 
     # ── Inventory classification truthfulness (reimport_source) ────────────
 

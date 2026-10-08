@@ -251,5 +251,128 @@ class ReimportDiskRouteTests(unittest.TestCase):
         self.assertIn('"use_move": import_mode == "--move"', with_id)
         self.assertIn('if not apply_res.get("ok"):', with_id)
 
+
+class ConfirmedImportJobTests(unittest.TestCase):
+    """reimport-disk and import-with-id after Beets imported the confirmed
+    Release: no Web Manager retag (ARCH-024), and a verification failure
+    never removes the rows Beets just created."""
+
+    RG_OTHER = "33333333-3333-3333-3333-333333333333"
+    RETAG_AND_REMOVAL = ("plan_album_mb_track_repair", "apply_album_mb_track_repair", "relocate_album",
+                         "update_album_metadata", "remove_album_rows_after_failed_import",
+                         "plan_album_cleanup", "apply_album_cleanup", "plan_playlist_media_cleanup")
+
+    def setUp(self):
+        import contextlib
+        import backend.import_service as isvc
+        self.isvc = isvc
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TransactionStore(tmp.name)
+        self.result = {}
+
+        def run_now(fn, label="", metadata=None):
+            log = []
+            try:
+                self.result = {"status": "completed", "result": fn(log), "log": log}
+            except Exception as ex:
+                self.result = {"status": "failed", "error": str(ex), "log": log}
+            return types.SimpleNamespace(job_id="job-1")
+
+        tracklist = {"ok": True, "release_group": RG, "tracks": []}
+        for target, name, kw in (
+            (isvc.jobs, "start_python", {"side_effect": run_now}),
+            (isvc.job_contract, "held", {"side_effect": lambda *a, **k: contextlib.nullcontext()}),
+            (isvc, "_fetch_mb_release_tracklist", {"return_value": tracklist}),
+            (isvc, "_match_tracks_from_mb", {"side_effect": AssertionError("retag ran")}),
+            (isvc, "_repair_album_mbid_sticking_once", {"side_effect": AssertionError("retag ran")}),
+            (isvc, "_validate_import_source_audio", {}),
+            (isvc, "_remove_pending_review_for_path", {}),
+            (isvc, "_invalidate_lib_cache", {}),
+            (isvc, "_trigger_plex_refresh", {}),
+            (isvc, "_record_recent_import", {}),
+            (isvc, "_maybe_queue_review", {"create": True}),
+            (isvc, "_queue_folder_for_manual_review", {"return_value": True}),
+            (isvc, "_library_album_ids_for_folder", {"return_value": []}),
+            (isvc, "_auto_merge_case_duplicate_artist_folder", {}),
+        ):
+            patcher = mock.patch.object(target, name, **kw)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.cw_calls = []
+        for name in self.RETAG_AND_REMOVAL:
+            patcher = mock.patch.object(isvc.composite_workflows, name,
+                                        side_effect=lambda *a, _n=name, **k: self.cw_calls.append(_n) or {"ok": False})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        plan, apply = cw.plan_confirmed_import, cw.apply_confirmed_import
+        for name, fn in (("plan_confirmed_import", lambda *a, **k: plan(*a, store=self.store, **k)),
+                         ("apply_confirmed_import", lambda *a, **k: apply(*a, store=self.store, adapter=self.ad, **k))):
+            patcher = mock.patch.object(isvc.composite_workflows, name, side_effect=fn)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        art = mock.patch.object(isvc.composite_workflows, "fetch_and_embed_album_art", return_value={"ok": True})
+        art.start()
+        self.addCleanup(art.stop)
+        getalb = mock.patch.object(isvc.composite_workflows, "get_album", return_value=None)
+        getalb.start()
+        self.addCleanup(getalb.stop)
+
+    def _reimport_disk(self, album_rg):
+        isvc = self.isvc
+        self.ad = _adapter({"id": 9, "mb_albumid": REL, "mb_releasegroupid": album_rg})
+        aldir = str(isvc.MUSIC_ROOT) + "/Artist/Album"
+        with mock.patch.object(isvc.composite_workflows, "inspect_import_source",
+                               return_value={"ok": True, "path": aldir, "audio_file_count": 2}),              mock.patch.object(isvc, "_resolve_album_release_for_import", return_value=REL),              mock.patch.object(isvc, "_folder_release_preflight", return_value={"ok": True, "matches": 2, "expected": 2}):
+            body, code = isvc.start_reimport_disk({"aldir": aldir, "mb_albumid": REL, "skip_import_lock": True})
+        self.assertEqual(code, 200, body)
+        return self.result
+
+    def _import_with_id(self, album_rg):
+        isvc = self.isvc
+        self.ad = _adapter({"id": 9, "mb_albumid": REL, "mb_releasegroupid": album_rg})
+        src = "/downloads/Artist - Album"
+        with mock.patch.object(isvc, "_resolve_import_review_source_path", return_value=(src, None)),              mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=True),              mock.patch.object(isvc, "_prefer_album_mb_release", side_effect=lambda rid, log: rid),              mock.patch.object(isvc, "_beet_import_timeout", return_value=60):
+            body, code = isvc.start_folder_import_with_id({"path": src, "mb_albumid": REL})
+        self.assertEqual(code, 200, body)
+        return self.result
+
+    def _assert_kept_and_not_retagged(self):
+        self.assertEqual(self.cw_calls, [])  # no retag, relocate or row removal
+        kw = self.ad.run_import.call_args.kwargs
+        self.assertEqual((kw["search_ids"], kw["autotag"], kw["quiet_fallback"]), ([REL], True, "skip"))
+
+    def test_reimport_disk_keeps_the_album_and_verifies_the_release_group(self):
+        res = self._reimport_disk(RG)
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual(res["result"]["album_ids"], [9])
+        kw = self.ad.run_import.call_args.kwargs
+        self.assertEqual((kw["copy"], kw["move"]), (False, False))  # library folder: in place
+        self._assert_kept_and_not_retagged()
+
+    def test_reimport_disk_verification_mismatch_keeps_rows_and_fails(self):
+        res = self._reimport_disk(self.RG_OTHER)
+        self.assertEqual(res["status"], "failed")
+        self.assertIn("different Release Group", res["error"])
+        self._assert_kept_and_not_retagged()
+        (tx,) = [t for t in self.store.list()[0] if t.get("operation_type") == "Import"]
+        self.assertEqual(tx["status"], "Failed")
+
+    def test_import_with_id_keeps_the_album_and_verifies_the_release_group(self):
+        res = self._import_with_id(RG)
+        self.assertEqual(res["status"], "completed", res)
+        kw = self.ad.run_import.call_args.kwargs
+        self.assertEqual((kw["copy"], kw["move"]), (True, False))  # torrent source copied
+        self._assert_kept_and_not_retagged()
+
+    def test_import_with_id_verification_mismatch_keeps_rows_and_fails(self):
+        res = self._import_with_id(self.RG_OTHER)
+        self.assertEqual(res["status"], "failed")
+        self.assertIn("different Release Group", res["error"])
+        self._assert_kept_and_not_retagged()
+        (tx,) = [t for t in self.store.list()[0] if t.get("operation_type") == "Import"]
+        self.assertEqual(tx["status"], "Failed")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -245,85 +245,9 @@ class OperatorReleaseAndCodeqlTests(_IdentityEnv):
 
 
 class ImportRetagOperatorFlagTests(_IdentityEnv):
-    """QA F-2: the import retag stamp may change Release Group only for the
-    album this import produced or the album the operator named."""
-
-    def test_rule(self):
-        from backend.import_service import _retag_release_operator_selected as sel
-        self.assertTrue(sel(7, auto_import=False, confirmed_album_id=7, operator_album_id=0))
-        self.assertTrue(sel(9, auto_import=False, confirmed_album_id=0, operator_album_id=9))
-        # Guessed ids (strategies B-I): neither confirmed nor named.
-        self.assertFalse(sel(11, auto_import=False, confirmed_album_id=0, operator_album_id=0))
-        self.assertFalse(sel(11, auto_import=False, confirmed_album_id=7, operator_album_id=9))
-        # Auto-import never.
-        self.assertFalse(sel(7, auto_import=True, confirmed_album_id=7, operator_album_id=7))
-        self.assertFalse(sel(0, auto_import=False, confirmed_album_id=0, operator_album_id=0))
-
-    def test_retag_uses_the_rule(self):
-        import backend.import_service as imp
-        src = inspect.getsource(imp.start_folder_import_with_id)
-        self.assertNotIn("release_selected_by_operator=True", src)
-        self.assertIn("_stamp_import_release(", src)
-        self.assertIn("release_selected_by_operator=selected", inspect.getsource(imp._stamp_import_release))
-        self.assertIn("operator_album_id = 0 if auto_import else existing_album_id", src)
-
-    def test_preference_swapped_release_is_not_the_operator_choice(self):
-        """Music-identity F-1: the operator picked a single (REL_A2); the
-        import preferred an album Release in another Release Group (REL_B)."""
-        from backend.import_service import _release_is_operator_choice as choice
-        from backend.import_service import _retag_release_operator_selected as sel
-        self.assertFalse(choice(REL_B, RG_B, REL_A2, ""))
-        self.assertFalse(choice(REL_B, RG_B, REL_A2, RG_A))
-        self.assertTrue(choice(REL_A2, RG_A, REL_A2, ""))
-        self.assertTrue(choice(REL_A, RG_A, REL_A2, RG_A))  # same Release Group the operator named
-        self.assertFalse(sel(9, auto_import=False, confirmed_album_id=0, operator_album_id=9,
-                             release_is_operator_choice=False))
-        # With the flag off, the existing album keeps its Release Group.
-        ad = self.adapter()
-        res = cw.update_album_metadata(1, {"mb_albumid": REL_B}, release_selected_by_operator=False,
-                                       adapter=ad, store=self.store)
-        self.assertEqual(res.get("code"), "repair_identity_mismatch", res)
-        self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_A, RG_A))
-
-    def test_import_records_choice_before_preference_and_logs_refusal(self):
-        import backend.import_service as imp
-        src = inspect.getsource(imp.start_folder_import_with_id)
-        self.assertLess(src.index("operator_release_id = "), src.index("_prefer_album_mb_release(mb_albumid"))
-        self.assertIn("_stamp_import_release(", src)
-        self.assertIn("operator_release_id=operator_release_id", src)
-
-    def _stamp(self, ad, aid, **kw):
-        from backend.import_service import _stamp_import_release
-        args = dict(auto_import=False, confirmed_album_id=0, operator_album_id=0,
-                    operator_release_id=REL_B, operator_releasegroup_id="")
-        args.update(kw)
-        log = []
-        with mock.patch.object(cw, "beets_adapter", ad), mock.patch.object(cw, "_get_store", return_value=self.store):
-            res = _stamp_import_release(aid, REL_B, RG_B, log, **args)
-        return res, log
-
-    def test_retag_stamp_behaviour(self):
-        """QA N-1: the real stamp path. Guessed album (auto-import or not)
-        and a preference-swapped Release keep RG_A; the operator's album and
-        Release move to RG_B and the change is logged."""
-        cases = {
-            "auto-import, guessed": dict(auto_import=True),
-            "auto-import, even the confirmed album": dict(auto_import=True, confirmed_album_id=1),
-            "guessed id": dict(confirmed_album_id=7, operator_album_id=9),
-            "preference-swapped Release": dict(operator_album_id=1, operator_release_id=REL_A2),
-        }
-        for name, kw in cases.items():
-            ad = self.adapter()
-            res, log = self._stamp(ad, 1, **kw)
-            self.assertEqual(res.get("code"), "repair_identity_mismatch", name)
-            self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_A, RG_A), name)
-            # F-4: the refusal is in the job log with its fixed code.
-            self.assertTrue(any("Release ID stamp refused for album 1: repair_identity_mismatch" in l for l in log), log)
-        ad = self.adapter()
-        res, log = self._stamp(ad, 1, operator_album_id=1)
-        self.assertTrue(res.get("ok"), res)
-        self.assertEqual((ad.albums[1]["mb_albumid"], ad.albums[1]["mb_releasegroupid"]), (REL_B, RG_B))
-        self.assertTrue(any(f"Release Group changed {RG_A} -> {RG_B}" in l for l in log), log)
+    """QA F-2: an album metadata write may change Release Group only when the
+    Release is the operator's choice. Imports no longer stamp a Release:
+    Beets applies the confirmed one (ARCH-024)."""
 
     def test_cross_release_group_change_is_recorded(self):
         """Music-identity F-2."""

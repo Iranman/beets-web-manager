@@ -141,16 +141,6 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
             "source_is_library is referenced before it is assigned",
         )
 
-    def test_already_present_and_combined_are_assigned_before_use(self):
-        idx = self.app_source.index("def start_folder_import_with_id(")
-        already_present_assign = self.app_source.index("already_present = False", idx)
-        combined_assign = self.app_source.index('combined = ""', idx)
-        first_use_idx = self.app_source.index(
-            "if not album_ids and not item_ids and already_present", idx
-        )
-        self.assertLess(already_present_assign, first_use_idx)
-        self.assertLess(combined_assign, first_use_idx)
-
     def test_flag_logic_matches_release_group_vs_release_id_semantics(self):
         # Mirrors exactly what the route computes from mb_albumid /
         # selected_releasegroupid, without needing to invoke the full Flask
@@ -168,43 +158,6 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
         self.assertTrue(_compute("rg-uuid", "rg-uuid"))
         # No release-group detected at all.
         self.assertFalse(_compute("release-uuid", ""))
-
-
-class TestConfirmedImportV1ResultSkipsRedundantRawSqlRevalidation(unittest.TestCase):
-    """Real Docker acceptance finding (Wave 25 Round 4, corrected): once
-    confirmed_import_v1's own Apply step had already verified the album
-    via structured queries (exact planned Release ID + RGID + items/files
-    confirmed on disk), _album_match_summary() unconditionally ran a
-    SECOND, redundant validation pass over every discovered album_id --
-    via raw SQL through _db(), which BeetsClient.raw_sqlite_query() always
-    rejects ("Raw SQLite queries are not permitted") in the two-service
-    topology. This meant every confirmed_import_v1 import (fresh-import
-    and crash-resume alike) failed at this later step, even after the
-    actual import fix (a missing `musicbrainz` plugin in the acceptance
-    engine's config) let native import succeed for the first time."""
-
-    def setUp(self):
-        self.app_source = app_family_source()
-
-    def test_confirmed_import_v1_result_is_trusted_without_calling_album_match_summary(self):
-        idx = self.app_source.index("def start_folder_import_with_id(")
-        loop_idx = self.app_source.index("for aid in album_ids:", idx)
-        skip_idx = self.app_source.index(
-            'strategy == "confirmed_import_v1 verified result"', idx
-        )
-        summary_call_idx = self.app_source.index(
-            "summary = _album_match_summary(int(aid))", idx
-        )
-        self.assertLess(loop_idx, skip_idx)
-        self.assertLess(
-            skip_idx, summary_call_idx,
-            "the confirmed_import_v1 skip check must run before the raw-SQL revalidation call",
-        )
-        # The skip branch must trust the result directly (append + continue)
-        # before ever reaching _album_match_summary for that album.
-        window = self.app_source[skip_idx: summary_call_idx]
-        self.assertIn("validated_album_ids.append(aid)", window)
-        self.assertIn("continue", window)
 
 
 class TestRecoveryRequiredStatusPersists(unittest.TestCase):
