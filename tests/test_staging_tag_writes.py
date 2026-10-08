@@ -42,6 +42,15 @@ class StagingTagWriteTests(_Env):
             self.assertTrue(res["ok"], res)
             self.assertEqual(_title(f), "Hello")
 
+    @unittest.skipUnless(FD_OK, "fd-relative operations unavailable")
+    def test_writes_id3_tags_to_an_mp3(self):
+        f = self.dl / "song.mp3"
+        f.write_bytes((b"\xff\xfb\x90\x64" + b"\x00" * 413) * 10)  # ten MPEG1 L3 frames
+        res = cw.write_staging_tags(str(f), {"title": "Hello", "artist": "X"})
+        self.assertTrue(res["ok"], res)
+        mf = mediafile.MediaFile(str(f))
+        self.assertEqual((mf.type, mf.title, mf.artist), ("mp3", "Hello", "X"))
+
     def test_music_root_file_is_refused(self):
         with self.assertRaises(ValueError):
             cw.write_staging_tags(str(self.lib_file), {"title": "Bad"})

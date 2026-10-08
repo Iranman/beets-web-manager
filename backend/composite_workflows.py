@@ -581,7 +581,7 @@ def write_staging_tags(path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
     It is opened fd-relative with O_NOFOLLOW and must still be the validated
     entry, so a component swapped for a symlink cannot redirect the write.
     A refusal raises ValueError; a tag error returns ``ok: False``."""
-    resolved = _validated_staging_target(path, "write tags to")
+    resolved = _validated_staging_target(path, "tag")
     expected = getattr(resolved, "identity", None)
     if expected is None or not stat.S_ISREG(expected.st_mode):
         raise FileNotFoundError(f"File not found: {path}")
