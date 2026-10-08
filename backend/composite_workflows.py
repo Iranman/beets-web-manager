@@ -54,7 +54,7 @@ from backend.config_manager import (
     revert_config,
     save_config,
 )
-from backend.transaction_engine import TransactionStore
+from backend.transaction_engine import ROLLBACK_UNAPPLIED_STATUSES, TransactionStore
 
 log = logging.getLogger("beets.workflows")
 
@@ -112,19 +112,65 @@ def _apply_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
             "error": f"Only a Preview or Approved transaction can be applied (this one is {status}); nothing was changed."}
 
 
+def _apply_claimed(st: TransactionStore, operation_id: str,
+                   write: Callable[[], Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+    """The plain adapter-backed apply families (#218): CAS Preview|Approved
+    -> Running before ``write`` runs (refused, writing nothing, otherwise),
+    then Running -> Completed, or Failed when ``write`` returns ok=False
+    (``mutated: False`` there means it wrote nothing, so no apply record is
+    kept). ``write`` may return a ``log`` line and extra result fields. An
+    exception ends Failed -- Recovery Required when a transport error leaves
+    the outcome unknown -- and is re-raised for the caller's error mapping."""
+    if _claim_apply(st, operation_id, metadata={"engine_result": {"mutation_started": True}}) is None:
+        return _apply_refused(st, operation_id)
+    try:
+        res = dict(write() or {})
+    except Exception as exc:
+        unknown = _transport_error(exc)
+        st.transition(operation_id, "Running", "Recovery Required" if unknown else "Failed",
+                      logs=[f"Apply raised {type(exc).__name__}"
+                            + ("; the outcome is unknown, so it is not retried." if unknown else ".")])
+        raise
+    logs = {"logs": [res.pop("log")]} if res.get("log") else {}
+    if res.get("ok") is False:
+        clear = {"metadata": {"engine_result": None}} if res.get("mutated") is False else {}
+        st.transition(operation_id, "Running", "Failed", **(logs or {"logs": [_s(res.get("error"))]}), **clear)
+        return {**res, "operation_id": operation_id, "status": "Failed"}
+    st.transition(operation_id, "Running", "Completed", **logs)
+    return {**res, "ok": True, "operation_id": operation_id, "status": "Completed"}
+
+
 def _claim_rollback(st: TransactionStore, operation_id: str, to: str = "Running") -> Optional[Dict[str, Any]]:
     """CAS Completed (or Failed with an apply record) -> ``to`` (#224). A
     Preview, Approved or Cancelled transaction never wrote anything, so it is
     never marked Rolled Back."""
     tx = st.get(operation_id)
     applied_failed = tx.get("status") == "Failed" and (tx.get("metadata") or {}).get("engine_result")
-    return st.transition(operation_id, "Failed" if applied_failed else "Completed", to)
+    source = "Failed" if applied_failed else "Completed"
+    claimed = st.transition(operation_id, source, to)
+    return None if claimed is None else {**claimed, "claimed_from": source}
 
 
 def _rollback_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
     status = st.get(operation_id).get("status")
     return {"ok": False, "code": "rollback_not_eligible", "operation_id": operation_id, "status": status,
             "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
+
+def engine_rollback_refusal(tx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Refusal for an engine-family rollback of ``tx`` in an unapplied
+    status, or None. The caller then finishes with a CAS from the status it
+    read (``st.transition(id, tx["status"], ...)``)."""
+    status = tx.get("status")
+    if status not in ROLLBACK_UNAPPLIED_STATUSES:
+        return None
+    return {"ok": False, "code": "rollback_not_eligible", "operation_id": tx.get("id"), "status": status,
+            "mutated": False, "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
+
+def _rollback_conflict(operation_id: str) -> Dict[str, Any]:
+    return {"ok": False, "code": "conflict", "operation_id": operation_id,
+            "error": "The transaction changed state during rollback; reload and check it."}
 
 
 def _rollback_noop(operation_id: str, store: Optional[TransactionStore]) -> Dict[str, Any]:
@@ -722,16 +768,12 @@ def apply_artist_folder_reconcile(
     canonical_name = meta.get("canonical_name")
     album_ids = meta.get("album_ids", [])
 
-    if album_ids and canonical_name:
-        ad.modify(
-            fields={"albumartist": canonical_name},
-            album_ids=[int(x) for x in album_ids],
-            write=True,
-            move=True,
-        )
+    def write() -> None:
+        if album_ids and canonical_name:
+            ad.modify(fields={"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
+                      write=True, move=True)
 
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+    return _apply_claimed(st, operation_id, write)
 
 
 def rollback_artist_folder_reconcile(
@@ -1421,15 +1463,18 @@ def rollback_track_replacement(
         return {"ok": False, "code": "not_applied", "error": "No applied item file replacement to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     res = ad.rollback_replace_item_file(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else res
-    st.update(
-        operation_id,
-        status="Rolled Back",
+    if st.transition(
+        operation_id, tx.get("status"), "Rolled Back",
         metadata={**meta, "rollback_result": result},
         logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
               f"replacement re-added as item {result.get('recreated_source_item_id')}"],
-    )
+    ) is None:
+        return _rollback_conflict(operation_id)
     out = {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     out.update({k: result.get(k) for k in ("restored_target_path", "recreated_source_item_id", "recreated_source_path")})
     return out
@@ -1543,9 +1588,10 @@ def rollback_folder_cleanup(
     """Undo a folder_cleanup_v1 apply through the engine's own records."""
     from backend.transaction_engine import rollback_folder_cleanup as engine_rollback
     st = _get_store(store)
-    if _claim_rollback(st, operation_id) is None:
+    claimed = _claim_rollback(st, operation_id)
+    if claimed is None:
         return _rollback_refused(st, operation_id)
-    return engine_rollback(st, operation_id)
+    return engine_rollback(st, operation_id, claimed_from=claimed["claimed_from"])
 
 
 def safe_rename_library_folder(
@@ -1918,6 +1964,9 @@ def rollback_track_quarantine(
         return {"ok": False, "code": "not_applied", "error": "No applied track quarantine to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else (res or {})
     if res.get("ok") is False or result.get("ok") is False:
@@ -1928,8 +1977,7 @@ def rollback_track_quarantine(
                           logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
                                 for r in result.get("restored") or []])
     if moved is None:
-        return {"ok": False, "code": "conflict", "operation_id": operation_id,
-                "error": "The transaction changed state during rollback; reload and check it."}
+        return _rollback_conflict(operation_id)
     return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored": result.get("restored") or []}
 
 
@@ -1975,14 +2023,17 @@ def apply_album_artwork_fetch(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
-    artpath = ""
-    if aid:
-        ad.fetch_art(album_ids=[int(aid)])
-        ad.embed_art(album_ids=[int(aid)])
-        album = ad.get_album(int(aid))
-        artpath = album.get("artpath", "") if album else ""
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed", "artpath": artpath}
+
+    def write() -> Dict[str, Any]:
+        artpath = ""
+        if aid:
+            ad.fetch_art(album_ids=[int(aid)])
+            ad.embed_art(album_ids=[int(aid)])
+            album = ad.get_album(int(aid))
+            artpath = album.get("artpath", "") if album else ""
+        return {"artpath": artpath}
+
+    return _apply_claimed(st, op_id, write)
 
 
 def rollback_album_artwork_fetch(
@@ -2071,10 +2122,14 @@ def apply_album_artwork(
     tx = st.get(operation_id)
     meta = tx.get("metadata", {})
     aid = meta.get("album_id")
-    if aid:
-        fetch_and_embed_album_art(int(aid), adapter=ad, store=st)
-    st.update(operation_id, status="Completed")
-    return {"ok": True, "operation_id": operation_id, "status": "Completed"}
+
+    def write() -> Optional[Dict[str, Any]]:
+        if not aid:
+            return None
+        res = fetch_and_embed_album_art(int(aid), adapter=ad, store=st)
+        return None if res.get("ok") else {"ok": False, "error": res.get("error") or "Artwork fetch failed."}
+
+    return _apply_claimed(st, operation_id, write)
 
 
 def rollback_album_artwork(
@@ -2606,11 +2661,15 @@ def apply_item_metadata(
     iid = meta.get("item_id")
     updates = meta.get("updates") or {}
     write = meta.get("write_tags", True)
+    # Intended: a forced tag rewrite also re-places the file for path-format
+    # fields, exactly as BeetsAdapter.update_item_metadata does.
     move = meta.get("force_write_tags", force_write_tags)
-    if iid and updates:
-        ad.modify(fields=updates, item_ids=[int(iid)], write=write, move=move)
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed"}
+
+    def _write() -> None:
+        if iid and updates:
+            ad.modify(fields=updates, item_ids=[int(iid)], write=write, move=move)
+
+    return _apply_claimed(st, op_id, _write)
 
 
 def rollback_item_metadata(
@@ -2696,21 +2755,21 @@ def apply_album_maintenance(
     if tx.get("status") in ("Completed", "Failed", "Rolled Back", "Running"):
         return {"ok": False, "code": "already_applied", "operation_id": operation_id,
                 "error": f"Transaction is {tx.get('status')}; it cannot be applied again."}
-    if mode not in _ALBUM_MAINTENANCE_SUPPORTED_MODES or not aid:
-        st.update(operation_id, status="Failed",
-                  logs=[f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."])
-        return {"ok": False, "code": "not_supported", "operation_id": operation_id, "status": "Failed",
-                "error": f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."}
-    if not ad.get_album(aid):
-        st.update(operation_id, status="Completed", logs=[f"Album {aid} is already gone."])
-        return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted_albums": 0}
-    if ad.find_all_items_by_album_id(aid):
-        st.update(operation_id, status="Failed", logs=[f"Album {aid} still has items; nothing was removed."])
-        return {"ok": False, "code": "album_not_empty", "operation_id": operation_id, "status": "Failed",
-                "error": f"Album {aid} still has items; only an empty album row can be removed here."}
-    ad.remove(album_ids=[aid], delete_files=False)
-    st.update(operation_id, status="Completed", logs=[f"Removed empty album row {aid}."])
-    return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted_albums": 1}
+
+    def write() -> Dict[str, Any]:
+        if mode not in _ALBUM_MAINTENANCE_SUPPORTED_MODES or not aid:
+            msg = f"Album maintenance mode {mode or '(none)'!r} is not supported; nothing was changed."
+            return {"ok": False, "code": "not_supported", "mutated": False, "error": msg, "log": msg}
+        if not ad.get_album(aid):
+            return {"deleted_albums": 0, "log": f"Album {aid} is already gone."}
+        if ad.find_all_items_by_album_id(aid):
+            return {"ok": False, "code": "album_not_empty", "mutated": False,
+                    "log": f"Album {aid} still has items; nothing was removed.",
+                    "error": f"Album {aid} still has items; only an empty album row can be removed here."}
+        ad.remove(album_ids=[aid], delete_files=False)
+        return {"deleted_albums": 1, "log": f"Removed empty album row {aid}."}
+
+    return _apply_claimed(st, operation_id, write)
 
 
 def rollback_album_maintenance(
@@ -2756,10 +2815,13 @@ def apply_album_relocation(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
-    if aid:
-        ad.move(album_ids=[int(aid)])
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed", "moved_count": 1}
+
+    def write() -> Dict[str, Any]:
+        if aid:
+            ad.move(album_ids=[int(aid)])
+        return {"moved_count": 1 if aid else 0}
+
+    return _apply_claimed(st, op_id, write)
 
 
 def rollback_album_relocation(
@@ -2845,10 +2907,12 @@ def apply_album_genre_repair(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
-    if aid:
-        ad.lastgenre(album_ids=[int(aid)], force=True)
-    st.update(op_id, status="Completed")
-    return {"ok": True, "operation_id": op_id, "status": "Completed"}
+
+    def write() -> None:
+        if aid:
+            ad.lastgenre(album_ids=[int(aid)], force=True)
+
+    return _apply_claimed(st, op_id, write)
 
 
 def rollback_album_genre_repair(
@@ -3093,11 +3157,11 @@ def rollback_import_review_cleanup(
                 and s.get("status") == "completed"]
     res = engine_rollback(st, operation_id)
     if not res.get("ok"):
-        return {**res, "ok": False, "code": "rollback_failed"}
+        return {"code": "rollback_failed", **res, "ok": False}
     restored = res.get("restored") or []
     if len(restored) < len(expected):
-        st.update(operation_id, status="Partially Rolled Back",
-                  logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
+        st.transition(operation_id, "Rolled Back", "Partially Rolled Back",
+                      logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
         return {**res, "ok": False, "code": "partial", "status": "Partially Rolled Back",
                 "error": f"Only {len(restored)} of {len(expected)} quarantined files were restored."}
     return res

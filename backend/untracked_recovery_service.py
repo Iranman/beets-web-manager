@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from backend.beets_adapter import BeetsAdapter, beets_adapter
-from backend.composite_workflows import _decode_path, _get_store, _s
+from backend.composite_workflows import _decode_path, _get_store, _rollback_conflict, _s, engine_rollback_refusal
 from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
@@ -536,6 +536,9 @@ def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = No
         return _fail("not_applied", "No applied untracked recovery to roll back.")
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     keys = _lock_keys(meta)
     with resource_locks().hold(keys, attempt_owner(f"{operation_id}:rollback"), timeout=10):
         res = ad.untracked_rollback(engine["record_id"], idempotency_key=f"{operation_id}:rollback")
@@ -556,6 +559,9 @@ def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = No
                 if not os.path.isfile(f["path"]) or _sha256(f["path"]) != f["sha256"]:
                     problems.append(f"{f['path']} was not restored intact")
         status = "Rolled Back" if not problems else "Recovery Required"
-        st.update(operation_id, status=status, metadata={"rollback_result": res, "rollback_problems": problems},
-                  logs=["Rolled back through the engine record"] + [f"Rollback problem: {p}" for p in problems])
+        if st.transition(operation_id, tx.get("status"), status,
+                         metadata={"rollback_result": res, "rollback_problems": problems},
+                         logs=["Rolled back through the engine record"]
+                         + [f"Rollback problem: {p}" for p in problems]) is None:
+            return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status, "rollback_problems": problems}

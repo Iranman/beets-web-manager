@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import backend.duplicate_identity as duplicate_identity
 from backend.beets_adapter import BeetsAdapter, beets_adapter
-from backend.composite_workflows import _decode_path, _get_store, _s
+from backend.composite_workflows import _decode_path, _get_store, _rollback_conflict, _s, engine_rollback_refusal
 from backend.transaction_engine import TransactionStore
 
 REVIEWED_CLEANUP_FAMILY = "duplicate_cleanup_v1"
@@ -394,6 +394,9 @@ def rollback_reviewed_cleanup(
         return {"ok": False, "code": "not_applied", "error": "No applied reviewed cleanup to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else res
     problems: List[str] = []
@@ -408,9 +411,11 @@ def rollback_reviewed_cleanup(
         if members != [int(p["delete_item_id"])]:
             problems.append(f"item {p['delete_item_id']} is not back in album row {row['album_id']}")
     status = "Rolled Back" if not problems else "Recovery Required"
-    st.update(operation_id, status=status, metadata={**meta, "rollback_result": result, "rollback_problems": problems},
-              logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
-                    for r in result.get("restored") or []] + [f"Rollback problem: {x}" for x in problems])
+    if st.transition(operation_id, tx.get("status"), status,
+                     metadata={**meta, "rollback_result": result, "rollback_problems": problems},
+                     logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
+                           for r in result.get("restored") or []] + [f"Rollback problem: {x}" for x in problems]) is None:
+        return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status,
             "restored": result.get("restored") or [], "rollback_problems": problems}
 

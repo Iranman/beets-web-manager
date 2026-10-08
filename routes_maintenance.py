@@ -752,7 +752,8 @@ def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None)
         return jsonify(body), status
     if rollback_family is not None and not res.get("ok") and res.get("status") == "Recovery Required":
         res = {**res, "mutated": True}  # #228 F3: it ran, then failed verification
-    status_code = 200 if res.get("ok") else (409 if res.get("code") in ("not_approved", "already_applied") else 400)
+    refused = ("not_approved", "already_applied", "rollback_not_eligible", "rollback_deferred", "conflict")
+    status_code = 200 if res.get("ok") else (409 if res.get("code") in refused else 400)
     return jsonify(res), status_code
 
 
@@ -803,7 +804,9 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     * folder cleanup: needs ``metadata.engine_result`` and status Completed
       or Failed (a part-way apply);
     * engine family (``_ENGINE_FAMILIES``): needs ``metadata.engine_result``
-      and any status but Rolled Back; album cleanup has no rollback;
+      and a status an apply leaves behind (not Rolled Back, nor one of
+      composite_workflows.ROLLBACK_UNAPPLIED_STATUSES); album cleanup has
+      no rollback;
     * local family: needs ``rollback.available`` with only metadata /
       Recording ID restore operations, and status Completed, or Failed with
       ``metadata.engine_result``.
@@ -833,6 +836,8 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
+        if status in composite_workflows.ROLLBACK_UNAPPLIED_STATUSES:
+            return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []

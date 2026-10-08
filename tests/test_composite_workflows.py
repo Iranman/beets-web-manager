@@ -142,6 +142,10 @@ class TestCompositeWorkflows(unittest.TestCase):
         again = apply_track_replacement(op_id, adapter=self.mock_adapter, store=self.store)
         self.assertEqual(again["code"], "already_applied")
         self.assertEqual(self.mock_adapter.replace_item_file.call_count, 1)
+        # The forced re-approve above is not a real state (approve is a
+        # Preview -> Approved CAS); restore the applied status, because a
+        # rollback never starts from Approved (#224).
+        self.store.update(op_id, status="Completed")
 
         self.mock_adapter.rollback_replace_item_file.return_value = {
             "success": True, "restored_target_path": album_item["path"],

@@ -115,6 +115,11 @@ def _get_apply_lock(operation_id: str) -> Any:
 #: already applied, or already undone.
 _APPLY_TERMINAL = frozenset({"Cancelled", "Completed", "Rolled Back", "Partially Rolled Back"})
 
+#: Statuses no apply leaves behind (#224): a rollback never starts from them,
+#: even when an apply record is present -- a Cancelled transaction is never
+#: marked Rolled Back, and a Running one is still being applied.
+ROLLBACK_UNAPPLIED_STATUSES = frozenset({"Pending", "Preview", "Approved", "Cancelled", "Running"})
+
 
 def _claim_apply_running(store: "TransactionStore", operation_id: str, observed_status: Any,
                          metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1456,62 +1461,73 @@ def rollback_import_review_cleanup(
     if not meta.get("rollback_available"):
         return {"ok": False, "error": "Rollback unavailable: transaction contains irreversible steps or has already been rolled back."}
 
+    # #224: claim (CAS) from an applied status before moving anything back.
+    status = tx.get("status")
+    if status in ROLLBACK_UNAPPLIED_STATUSES or store.transition(operation_id, str(status), "Running") is None:
+        return {"ok": False, "code": "rollback_not_eligible", "operation_id": operation_id, "mutated": False,
+                "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
     steps = meta.get("steps") or []
     log: List[str] = []
     restored: List[str] = []
 
-    for step in steps:
-        if step.get("type") == "move_quarantine" and step.get("status") == "completed":
-            src_str = step.get("source")
-            dest_str = step.get("destination")
-            if src_str and dest_str:
-                dest = Path(dest_str)
-                src = Path(src_str)
-                if not dest.exists() or dest.is_symlink():
-                    continue
-                # Refuse rather than silently overwrite/descend if something
-                # has since reappeared at the original path (a new file
-                # created there since quarantine, or -- via shutil.move's
-                # directory-descend behavior -- a directory), and refuse if
-                # any existing parent component of the restore target is a
-                # symlink.
-                if src.exists() or src.is_symlink():
-                    log.append(f"Skipped restore of {dest}: {src} already exists")
-                    continue
-                parent = src.parent
-                existing_parent = parent
-                while not existing_parent.exists() and existing_parent != existing_parent.parent:
-                    existing_parent = existing_parent.parent
-                if existing_parent.is_symlink():
-                    log.append(f"Skipped restore of {dest}: unsafe parent directory for {src}")
-                    continue
-                try:
-                    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        for step in steps:
+            if step.get("type") == "move_quarantine" and step.get("status") == "completed":
+                src_str = step.get("source")
+                dest_str = step.get("destination")
+                if src_str and dest_str:
+                    dest = Path(dest_str)
+                    src = Path(src_str)
+                    if not dest.exists() or dest.is_symlink():
+                        continue
+                    # Refuse rather than silently overwrite/descend if something
+                    # has since reappeared at the original path (a new file
+                    # created there since quarantine, or -- via shutil.move's
+                    # directory-descend behavior -- a directory), and refuse if
+                    # any existing parent component of the restore target is a
+                    # symlink.
                     if src.exists() or src.is_symlink():
                         log.append(f"Skipped restore of {dest}: {src} already exists")
                         continue
+                    parent = src.parent
+                    existing_parent = parent
+                    while not existing_parent.exists() and existing_parent != existing_parent.parent:
+                        existing_parent = existing_parent.parent
+                    if existing_parent.is_symlink():
+                        log.append(f"Skipped restore of {dest}: unsafe parent directory for {src}")
+                        continue
                     try:
-                        os.rename(str(dest), str(src))
-                    except OSError as exc:
-                        if getattr(exc, "errno", None) != errno.EXDEV:
-                            raise
-                        shutil.copyfile(str(dest), str(src))
+                        parent.mkdir(parents=True, exist_ok=True)
+                        if src.exists() or src.is_symlink():
+                            log.append(f"Skipped restore of {dest}: {src} already exists")
+                            continue
                         try:
-                            shutil.copystat(str(dest), str(src))
-                        except Exception:
-                            pass
-                        dest.unlink()
-                except Exception as ex:
-                    log.append(f"Failed to restore {dest} -> {src}: {ex}")
-                    continue
-                restored.append(src_str)
-                log.append(f"Restored {dest} -> {src}")
-                step["status"] = "rolled_back"
+                            os.rename(str(dest), str(src))
+                        except OSError as exc:
+                            if getattr(exc, "errno", None) != errno.EXDEV:
+                                raise
+                            shutil.copyfile(str(dest), str(src))
+                            try:
+                                shutil.copystat(str(dest), str(src))
+                            except Exception:
+                                pass
+                            dest.unlink()
+                    except Exception as ex:
+                        log.append(f"Failed to restore {dest} -> {src}: {ex}")
+                        continue
+                    restored.append(src_str)
+                    log.append(f"Restored {dest} -> {src}")
+                    step["status"] = "rolled_back"
+    except Exception:
+        # Never left Running: record what was restored so far.
+        store.transition(operation_id, "Running", "Recovery Required", metadata={**meta, "steps": steps},
+                         logs=tx.get("logs", []) + log + ["Rollback stopped on an unexpected error."])
+        raise
 
     tx_meta = {**meta, "rollback_available": False, "steps": steps}
-    store.update(
-        operation_id,
-        status="Rolled Back",
+    store.transition(
+        operation_id, "Running", "Rolled Back",
         applied_at=time.time(),
         metadata=tx_meta,
         logs=tx.get("logs", []) + log,
@@ -1955,12 +1971,23 @@ def _folder_adapter(adapter: Any = None) -> Any:
 #: 202 still running). Its idempotency key is replayed to learn the outcome.
 FOLDER_OP_UNCONFIRMED = "FOLDER_OP_UNCONFIRMED"
 _FOLDER_STEP_ATTEMPTS = 3
+#: Plugin refusal (503) while Beets holds its mutation lock, e.g. during an
+#: import; the step was not started, so it is safe to retry later.
+FOLDER_OP_BUSY = "BUSY"
+_BUSY_DEFERRED = "Beets is busy (for example an import); retry later."
+
+
+class _FolderOpBusy(Exception):
+    pass
+
 #: Operator text for a failed plugin step, by error code. Static on purpose:
 #: Beets' own reply text never reaches an API response.
 FOLDER_STEP_MESSAGES = {
     "BEETS_NOT_FOUND": "the webmanager plugin needs 1.7.0; restart Beets after the plugin update",
     "BEETS_UNREACHABLE": "Beets is unreachable",
-    FOLDER_OP_UNCONFIRMED: "Beets did not confirm the step; the transaction recorded it so rollback can undo it",
+    FOLDER_OP_BUSY: "Beets is busy (for example an import); retry later",
+    FOLDER_OP_UNCONFIRMED: ("Beets did not confirm the step in time (for example while a Beets import is running); "
+                            "the transaction recorded it, and rollback waits until Beets has finished it"),
     "NOT_EMPTY": "the folder is not empty",
     "PATH_IS_TRACKED": "the path holds Beets library items; move them through Beets",
     "TARGET_EXISTS": "the target already exists",
@@ -1981,7 +2008,12 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
     code, never raw upstream text. A reply that leaves the outcome unknown is
     retried with the same idempotency key, which makes the plugin report the
     first attempt's result instead of running the step twice; if it stays
-    unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``."""
+    unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``. So does a refusal
+    that follows an unconfirmed attempt: Beets keeps its idempotency records in
+    memory, so after a Beets restart the replay runs the step afresh and a
+    refusal (say SOURCE_MISSING) cannot prove the first attempt did nothing
+    (#300 R3)."""
+    last = None
     for attempt in range(_FOLDER_STEP_ATTEMPTS):
         if attempt:
             time.sleep(_FOLDER_STEP_RETRY_DELAY)
@@ -1992,6 +2024,8 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
             if not getattr(exc, "status_code", None):  # no HTTP reply (connection error/timeout)
                 last = f"{FOLDER_OP_UNCONFIRMED} ({code})"  # no reply: Beets may have done it
                 continue
+            if last is not None:
+                return f"{last} then {code}"
             if code == "BEETS_NOT_FOUND":
                 return "BEETS_NOT_FOUND (the webmanager plugin needs 1.7.0; restart Beets after the plugin update)"
             return str(code)
@@ -2043,14 +2077,20 @@ def execute_folder_cleanup_apply(
         ad = _folder_adapter(adapter)
         moved_records: List[Dict[str, Any]] = []
         removed_dirs: List[str] = []
+        unconfirmed: List[Dict[str, str]] = []
 
         def _record(done: str) -> None:
-            result = {"moved_records": list(moved_records), "removed_dirs": list(removed_dirs)}
+            result = {"moved_records": list(moved_records), "removed_dirs": list(removed_dirs),
+                      "unconfirmed_steps": list(unconfirmed)}
             store.update(operation_id, metadata={"filesystem_mutated": True, "engine_result": result, **result})
             store.append_log(operation_id, f"Beets: {done}")
 
         def _step(op: str, **paths: str) -> Optional[str]:
-            return _folder_step(ad, f"{operation_id}:apply:{len(moved_records) + len(removed_dirs)}", op, **paths)
+            key = f"{operation_id}:apply:{len(moved_records) + len(removed_dirs)}"
+            err = _folder_step(ad, key, op, **paths)
+            if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                unconfirmed.append({"key": key, "op": op, **paths})  # rollback re-queries it (#300 R1)
+            return err
 
         def _fail(msg: str, code: str, step_error: Optional[str] = None) -> Dict[str, Any]:
             mutated = bool(moved_records or removed_dirs)
@@ -2190,6 +2230,17 @@ def execute_folder_cleanup_apply(
             }
 
 
+def _unconfirmed_steps(operation_id: str, meta: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Apply steps Beets never confirmed, with their idempotency keys. Older
+    records only flag the move (``unconfirmed``); moves and renames run
+    before removals, so a move's key index is its position in the list."""
+    if "unconfirmed_steps" in meta:
+        return list(meta.get("unconfirmed_steps") or [])
+    return [{"key": f"{operation_id}:apply:{i}", "op": "rename_dir" if mr.get("kind") == "dir" else "move_file",
+             "source": mr["source"], "target": mr["target"]}
+            for i, mr in enumerate(meta.get("moved_records") or []) if mr.get("unconfirmed")]
+
+
 #: Statuses a folder cleanup rollback starts from; each also needs the apply
 #: record (``engine_result``). Running is a caller's own claim (#224 CAS).
 _FOLDER_ROLLBACK_FROM = frozenset({"Completed", "Failed", "Running"})
@@ -2201,10 +2252,13 @@ def rollback_folder_cleanup(
     *,
     music_allowed_roots: Optional[List[str]] = None,
     adapter: Any = None,
+    claimed_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Roll back an applied folder_cleanup_v1 transaction through Beets:
     re-create removed folders, then move every recorded file/folder back, in
-    reverse order. A step that cannot be proven restored is counted failed."""
+    reverse order. A step that cannot be proven restored is counted failed.
+    ``claimed_from``: the status a caller's Running claim came from; a
+    deferred rollback restores it (Failed when unknown)."""
     if not _TRANSACTION_ID_RE.match(operation_id):
         return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
 
@@ -2238,46 +2292,73 @@ def rollback_folder_cleanup(
 
         def _step(op: str, **paths: str) -> Optional[str]:
             steps[0] += 1
-            return _folder_step(ad, f"{attempt}:{steps[0]}", op, **paths)
+            err = _folder_step(ad, f"{attempt}:{steps[0]}", op, **paths)
+            if err == FOLDER_OP_BUSY:
+                raise _FolderOpBusy()
+            return err
+
+        def _defer(note: str, error: str, mutated: bool = False) -> Dict[str, Any]:
+            back = (claimed_from or "Failed") if status == "Running" else str(status)
+            store.transition(operation_id, "Running", back)
+            store.append_log(operation_id, f"Rollback deferred: {note}")
+            return {**refused, "code": "rollback_deferred", "status": back, "mutated": mutated, "error": error}
 
         def _usable(p: Path) -> bool:
             root = _cleanup_root_for_path(p, allowed_roots)
             return root is not None and not _path_has_symlink_under(p.parent, root)
 
         with _lock_resources(resource_keys):
-            dirs_restored = dirs_failed = 0
-            for dr in reversed(meta.get("removed_dirs") or []):
-                dp = Path(dr)
-                if not _usable(dp):
-                    dirs_failed += 1
-                    problems.append(f"Not restored (outside roots or symlink): {dp}")
-                    continue
-                err = None if dp.is_dir() else _step("create_dir", path=str(dp))
-                if err:
-                    dirs_failed += 1
-                    problems.append(f"Could not re-create {dp}: {err}")
-                else:
-                    dirs_restored += 1
+            # #300 R1: an unconfirmed apply step may still run in Beets (a held
+            # request, or one queued behind Beets' import lock), so the local
+            # view below is trusted only once Beets has a final outcome for it.
+            # Replaying its key reads that outcome, or runs the step now, which
+            # makes any late copy of the request a replay that changes nothing.
+            for step in _unconfirmed_steps(operation_id, meta):
+                paths = {k: v for k, v in step.items() if k not in ("key", "op")}
+                err = _folder_step(ad, step["key"], step["op"], **paths)
+                if err == FOLDER_OP_BUSY:
+                    return _defer("Beets is busy.", _BUSY_DEFERRED)
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    return _defer(f"Beets has not finished step {step['key']}.",
+                                  "Beets has not finished an earlier step of this cleanup (it may be waiting "
+                                  "for an import to end); nothing was rolled back. Try again later.")
 
-            files_restored = files_failed = 0
-            for mr in reversed(meta.get("moved_records") or []):
-                sp = Path(mr["source"])
-                tp = Path(mr["target"])
-                if sp.exists() and not tp.exists():
-                    files_restored += 1  # already back (an earlier attempt)
-                    continue
-                if not (tp.exists() and not sp.exists() and _usable(sp) and _usable(tp)):
-                    files_failed += 1
-                    problems.append(f"Cannot move back {tp} -> {sp}: paths changed since apply")
-                    continue
-                err = None if sp.parent.is_dir() else _step("create_dir", path=str(sp.parent))
-                kind = mr.get("kind") or ("dir" if tp.is_dir() else "file")
-                err = err or _step("rename_dir" if kind == "dir" else "move_file", source=str(tp), target=str(sp))
-                if err:
-                    files_failed += 1
-                    problems.append(f"Could not move back {tp} -> {sp}: {err}")
-                else:
-                    files_restored += 1
+            dirs_restored = dirs_failed = files_restored = files_failed = 0
+            try:
+                for dr in reversed(meta.get("removed_dirs") or []):
+                    dp = Path(dr)
+                    if not _usable(dp):
+                        dirs_failed += 1
+                        problems.append(f"Not restored (outside roots or symlink): {dp}")
+                        continue
+                    err = None if dp.is_dir() else _step("create_dir", path=str(dp))
+                    if err:
+                        dirs_failed += 1
+                        problems.append(f"Could not re-create {dp}: {err}")
+                    else:
+                        dirs_restored += 1
+
+                for mr in reversed(meta.get("moved_records") or []):
+                    sp = Path(mr["source"])
+                    tp = Path(mr["target"])
+                    if sp.exists() and not tp.exists():
+                        files_restored += 1  # already back (an earlier attempt)
+                        continue
+                    if not (tp.exists() and not sp.exists() and _usable(sp) and _usable(tp)):
+                        files_failed += 1
+                        problems.append(f"Cannot move back {tp} -> {sp}: paths changed since apply")
+                        continue
+                    err = None if sp.parent.is_dir() else _step("create_dir", path=str(sp.parent))
+                    kind = mr.get("kind") or ("dir" if tp.is_dir() else "file")
+                    err = err or _step("rename_dir" if kind == "dir" else "move_file", source=str(tp), target=str(sp))
+                    if err:
+                        files_failed += 1
+                        problems.append(f"Could not move back {tp} -> {sp}: {err}")
+                    else:
+                        files_restored += 1
+            except _FolderOpBusy:
+                # A retry resumes: each step skips what is already back.
+                return _defer("Beets is busy.", _BUSY_DEFERRED, bool(files_restored or dirs_restored))
 
             ok = files_failed == 0 and dirs_failed == 0
             final_status = "Rolled Back" if ok else ("Partially Rolled Back" if files_restored or dirs_restored else "Failed")
