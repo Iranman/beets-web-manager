@@ -135,6 +135,36 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual(len(self.lib.albums()), 1)
         self.assertEqual(sorted(os.listdir(inside)), ["01.wav", "02.wav"])
 
+    def test_import_never_links_and_restores_link_settings(self):
+        """L1: a user's `link: yes` must not turn an import into symlinks, and
+        ImportSession's own link/hardlink/reflink reset must not persist."""
+        src = os.path.join(self.downloads, "Some Artist - Linked")
+        _album(src, "Some Artist", "Linked")
+        before = {k: beets_config["import"][k].get() for k in ("link", "hardlink", "reflink")}
+        beets_config["import"]["link"] = True
+        try:
+            res = self._import(paths=[src], copy=False, move=False)
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertEqual(len(self.lib.albums()), 1)
+            self.assertEqual(os.listdir(self.music), [])
+            self.assertIs(beets_config["import"]["link"].get(), True)
+            other = os.path.join(self.downloads, "Some Artist - Moved")
+            _album(other, "Some Artist", "Moved")
+            res = self._import(paths=[other], move=True)
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertIs(beets_config["import"]["link"].get(), True)
+            for item in self.lib.items():
+                self.assertFalse(os.path.islink(item.path), item.path)
+        finally:
+            for k, v in before.items():
+                beets_config["import"][k] = v
+
+    def test_in_place_refused_when_library_dir_covers_config_dir(self):
+        """L2: the same _covers_config_dir guard as _derived_allowed_roots."""
+        beets_config["directory"] = str(beets_config.config_dir())
+        res = self._import(paths=[os.path.join(self.downloads, "X")], copy=False, move=False)
+        self.assertEqual((res.status_code, res.get_json()["error_code"]), (400, "PATH_NOT_ALLOWED"))
+
 
 class MusicbrainzProvisioningTests(unittest.TestCase):
     """Beets >= 2.4 needs `musicbrainz` in plugins:; provisioning adds it and
@@ -151,12 +181,89 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
         ):
             new, _, changed = _plan_config_yaml_plugins(text, REQUIRED_CONFIG_PLUGINS, ["/config/beetsplug"])
             self.assertTrue(changed)
-            listed = yaml.safe_load(new)["plugins"].split()
+            listed = yaml.safe_load(new)["plugins"]
+            listed = listed.split() if isinstance(listed, str) else listed
             self.assertEqual(listed[:len(kept)], kept, text)
             self.assertTrue({"web", "webmanager", "musicbrainz"} <= set(listed), text)
             self.assertEqual(parse_configured_plugins(new), listed)
         unchanged = "plugins: musicbrainz web webmanager\npluginpath:\n  - /config/beetsplug\nweb:\n  include_paths: yes\n"
         self.assertFalse(_plan_config_yaml_plugins(unchanged, REQUIRED_CONFIG_PLUGINS, ["/config/beetsplug"])[2])
+
+    def tearDown(self):
+        import backend.beets_plugins as bp
+        bp._REFUSED_CONFIG_PLUGINS = []
+
+    def _update(self, text):
+        """Run the startup edit on ``text``; returns (new_text, refused)."""
+        from backend.beets_plugins import BeetsConfigEditError, refused_config_plugins, update_config_yaml_plugins
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "config.yaml")
+            with open(path, "wb") as f:
+                f.write(text.encode("utf-8"))
+            try:
+                update_config_yaml_plugins(path)
+            except BeetsConfigEditError:
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), text.encode("utf-8"), "a refused edit must not touch the file")
+                self.assertEqual(os.listdir(td), ["config.yaml"], "a refused edit must not leave a backup")
+                self.assertIn("musicbrainz", refused_config_plugins())
+                return None, True
+            with open(path, encoding="utf-8") as f:
+                return f.read(), False
+
+    def _assert_kept(self, text, new):
+        import yaml
+
+        def names(t):
+            v = (yaml.safe_load(t) or {}).get("plugins") or []
+            return set(v.split() if isinstance(v, str) else v)
+
+        self.assertEqual(names(new), names(text) | {"web", "webmanager", "musicbrainz"}, new)
+        self.assertIn("/config/beetsplug", yaml.safe_load(new)["pluginpath"])
+        for key in ("plugins:", "pluginpath:", "web:", "webmanager:"):
+            self.assertLessEqual(new.count("\n" + key) + new.startswith(key), 1, (key, new))
+
+    def test_security_probe_layouts_keep_every_plugin(self):
+        """PR #299 security probes: (a) comment inside a block list,
+        (b) zero-indent block list, (c) multi-line flow list."""
+        for text in (
+            "plugins:\n  - web\n  - webmanager\n  # disabled\n  - fetchart\n",
+            "plugins:\n- web\n- webmanager\n",
+            "plugins: [web,\n  webmanager, fetchart]\n",
+            "plugins:\n  - web\n\n  - fetchart  # mine\npluginpath:\n- /config/beetsplug\ndirectory: /music\n",
+            "directory: /music\nplugins:\n  - chroma\nweb:\n  port: 9000\n",
+        ):
+            new, refused = self._update(text)
+            self.assertFalse(refused, text)
+            self._assert_kept(text, new)
+        new, _ = self._update("plugins:\n  - web\n  - webmanager\n  # disabled\n  - fetchart\n")
+        self.assertIn("  # disabled\n  - fetchart\n  - musicbrainz", new)
+
+    def test_unsafe_layouts_are_refused_byte_identical(self):
+        from backend.beets_plugins import refused_config_plugins
+        for text in (
+            "plugins: web\n  bad: [\n",           # original is not YAML
+            "plugins: >\n  web\n  fetchart\n",    # folded scalar the text edit cannot follow
+            "plugins: {web: 1}\n",                # not a list of names
+            "- just\n- a list\n",                 # not a mapping
+        ):
+            new, refused = self._update(text)
+            self.assertTrue(refused, (text, new))
+        self.assertFalse(self._update("plugins: web\n")[1])
+        self.assertEqual(refused_config_plugins(), [])
+
+    def test_opt_in_apply_shares_the_check(self):
+        from backend.beets_plugins import BeetsConfigEditError, apply_recommended_plugins
+        text = "plugins: >\n  web\n  webmanager\n"
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "config.yaml")
+            with open(path, "wb") as f:
+                f.write(text.encode("utf-8"))
+            with self.assertRaises(BeetsConfigEditError):
+                apply_recommended_plugins(path, ["fetchart"])
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), text.encode("utf-8"))
+            self.assertEqual(os.listdir(td), ["config.yaml"])
 
 
 if __name__ == "__main__":

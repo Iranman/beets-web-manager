@@ -40,6 +40,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+import yaml
+
 from backend.config_layers import SECRET_CONFIG_KEYS
 
 log = logging.getLogger("beets.plugins.manifest")
@@ -614,13 +616,27 @@ _PLUGIN_MIGRATION_BACKUP_PREFIX = "config.yaml.bak-plugins-"
 
 
 def _strip_yaml_comment(value: str) -> str:
-    return re.sub(r"(^|\s)#.*$", "", value).strip()
+    return re.sub(r"(?m)(^|\s)#.*$", "", value).strip()
+
+
+def _list_key_re(key: str) -> "re.Pattern[str]":
+    """Top-level `key:` and its value. Group 1: the inline value (a flow
+    list may span lines up to its `]`). Group 2: a block list -- `- item`
+    lines at any indent, zero included, with blank or comment lines between
+    items; it always ends on an item line."""
+    return re.compile(
+        rf"(?m)^{key}:[ \t]*((?:\[[^\]]*\])?.*)$((?:(?:\n[ \t]*(?:#.*)?$)*\n[ \t]*-[ \t]+\S.*$)*)"
+    )
+
+
+_PLUGINS_RE = _list_key_re("plugins")
+_PLUGINPATH_RE = _list_key_re("pluginpath")
 
 
 def parse_configured_plugins(config_text: str) -> List[str]:
     """Parse configured plugins from YAML text without losing order."""
     plugins: List[str] = []
-    match = re.search(r"(?m)^plugins:[ \t]*(.*)$((?:\n[ \t]+-[ \t]*\S.*$)*)", config_text)
+    match = _PLUGINS_RE.search(config_text)
     if not match:
         return plugins
 
@@ -642,7 +658,7 @@ def parse_configured_plugins(config_text: str) -> List[str]:
 def parse_configured_pluginpath(config_text: str) -> List[str]:
     """Parse configured pluginpath entries from YAML text."""
     paths: List[str] = []
-    match = re.search(r"(?m)^pluginpath:[ \t]*(.*)$((?:\n[ \t]+-[ \t]*\S.*$)*)", config_text)
+    match = _PLUGINPATH_RE.search(config_text)
     if not match:
         return paths
 
@@ -776,6 +792,7 @@ def _plan_config_yaml_plugins(
     Returns (new_text, missing_plugins_added, changed).
     """
     changed = False
+    original_text = text
     current_plugins = parse_configured_plugins(text)
     current_pluginpath = parse_configured_pluginpath(text)
 
@@ -784,8 +801,14 @@ def _plan_config_yaml_plugins(
     if missing_plugins:
         changed = True
         new_plugins = list(current_plugins) + missing_plugins
-        plugins_match = re.search(r"(?m)^plugins:[ \t]*(.*)$((?:\n[ \t]+-[ \t]*\S.*$)*)", text)
-        if plugins_match:
+        plugins_match = _PLUGINS_RE.search(text)
+        if plugins_match and plugins_match.group(2):
+            # Block list: append items after the last one at its indent, so
+            # comments and layout inside the list are kept.
+            indent = re.search(r"\n([ \t]*)-[^\n]*$", plugins_match.group(2)).group(1)
+            end = plugins_match.end()
+            text = text[:end] + "".join(f"\n{indent}- {p}" for p in missing_plugins) + text[end:]
+        elif plugins_match:
             new_line = "plugins: " + " ".join(new_plugins)
             text = text[:plugins_match.start()] + new_line + text[plugins_match.end():]
         else:
@@ -802,15 +825,17 @@ def _plan_config_yaml_plugins(
         if not final_pluginpath:
             final_pluginpath = ["/config/beetsplug"]
 
-        pluginpath_match = re.search(r"(?m)^pluginpath:[ \t]*(.*)$((?:\n[ \t]+-[ \t]*\S.*$)*)", text)
+        pluginpath_match = _PLUGINPATH_RE.search(text)
         pluginpath_block = "pluginpath:\n" + "".join(f"  - {p}\n" for p in final_pluginpath)
 
         if pluginpath_match:
             text = text[:pluginpath_match.start()] + pluginpath_block.rstrip("\n") + text[pluginpath_match.end():]
         else:
-            # Place after plugins: line if possible
-            if re.search(r"(?m)^plugins:.*$", text):
-                text = re.sub(r"(?m)^plugins:.*$\n?", lambda m: m.group(0) + pluginpath_block, text, count=1)
+            # Place after the whole plugins: entry (a block list included).
+            plugins_match = _PLUGINS_RE.search(text)
+            if plugins_match:
+                end = plugins_match.end()
+                text = text[:end] + "\n" + pluginpath_block.rstrip("\n") + text[end:]
             else:
                 text = pluginpath_block + text
 
@@ -833,7 +858,52 @@ def _plan_config_yaml_plugins(
             text, added = _set_web_include_paths(text, overwrite_false=False)
             changed = changed or added
 
+    if changed:
+        _check_planned_edit(original_text, text, missing_plugins, pluginpath_to_ensure)
     return text, missing_plugins, changed
+
+
+def _yaml_names(value: Any, key: str) -> List[str]:
+    """Beets reads `plugins:` as a whitespace-separated string or a list of
+    names, and `pluginpath:` as one path or a list of paths."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return value.split() if key == "plugins" else [value]
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return list(value)
+    raise BeetsConfigEditError(f"`{key}:` in config.yaml is not a list of names")
+
+
+def _check_planned_edit(old_text: str, new_text: str, added: List[str], pluginpath: List[str]) -> None:
+    """Fail closed: the planner is a text edit, so prove at the YAML level
+    that the result parses, lists exactly the old plugins plus ``added``,
+    carries ``pluginpath`` and leaves every other setting as it was."""
+    try:
+        old = yaml.safe_load(old_text)
+    except yaml.YAMLError as exc:
+        raise BeetsConfigEditError(f"config.yaml is not valid YAML ({type(exc).__name__})") from exc
+    try:
+        new = yaml.safe_load(new_text)
+    except yaml.YAMLError as exc:
+        raise BeetsConfigEditError(f"the planned config.yaml edit is not valid YAML ({type(exc).__name__})") from exc
+    old = {} if old is None else old
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        raise BeetsConfigEditError("config.yaml is not a YAML mapping")
+    if set(_yaml_names(new.get("plugins"), "plugins")) != set(_yaml_names(old.get("plugins"), "plugins")) | set(added):
+        raise BeetsConfigEditError("the planned config.yaml edit would change the configured plugins")
+    if not set(pluginpath) <= set(_yaml_names(new.get("pluginpath"), "pluginpath")):
+        raise BeetsConfigEditError("the planned config.yaml edit would lose a pluginpath entry")
+    for key, value in old.items():
+        if key in ("plugins", "pluginpath"):
+            continue
+        if key == "web" and isinstance(value, dict) and isinstance(new.get(key), dict):
+            # include_paths may be added; no value the user set may change.
+            if any(k not in new[key] or new[key][k] != v for k, v in value.items()):
+                raise BeetsConfigEditError("the planned config.yaml edit would change `web:` settings")
+            continue
+        if key not in new or new[key] != value:
+            raise BeetsConfigEditError("the planned config.yaml edit would change another setting")
 
 
 def _read_config_snapshot(path: Path) -> bytes:
@@ -948,6 +1018,15 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+_REFUSED_CONFIG_PLUGINS: List[str] = []
+
+
+def refused_config_plugins() -> List[str]:
+    """Required plugins the last update_config_yaml_plugins() run could not
+    add because the edit was refused (fail closed); empty otherwise."""
+    return list(_REFUSED_CONFIG_PLUGINS)
+
+
 def update_config_yaml_plugins(
     config_path: Path | str,
     ensure_plugins: Optional[List[str]] = None,
@@ -963,6 +1042,9 @@ def update_config_yaml_plugins(
     - Ensures `/config/beetsplug` is in `pluginpath:`.
     - Removes obsolete `/opt/beets-web-manager-agent/beetsplug` path.
     - Adds `include_paths: yes` to an existing `web:` block that lacks it.
+    - Fails closed: raises BeetsConfigEditError and writes nothing when the
+      original or the planned text does not parse as YAML or the edit would
+      lose a plugin or change another setting (see refused_config_plugins()).
     - Creates a timestamped backup before modification.
     - Writes atomically via temporary file and replace.
     - A missing config.yaml (fresh install) is created from
@@ -1002,7 +1084,17 @@ def update_config_yaml_plugins(
     except BeetsConfigEditError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    text, missing_plugins, changed = _plan_config_yaml_plugins(text, plugins_to_ensure, pluginpath_to_ensure)
+    global _REFUSED_CONFIG_PLUGINS
+    try:
+        new_text, missing_plugins, changed = _plan_config_yaml_plugins(text, plugins_to_ensure, pluginpath_to_ensure)
+    except BeetsConfigEditError as exc:
+        # Nothing written. Surfaced as a setup warning (refused_config_plugins).
+        _REFUSED_CONFIG_PLUGINS = [p for p in plugins_to_ensure if p not in parse_configured_plugins(text)]
+        log.warning("Not editing %s: %s. Add %s to `plugins:` manually.",
+                    path.name, exc, ", ".join(_REFUSED_CONFIG_PLUGINS) or "the required plugins")
+        raise
+    _REFUSED_CONFIG_PLUGINS = []
+    text = new_text
 
     if not changed:
         return False, "All required plugins and pluginpath already configured"

@@ -465,6 +465,9 @@ def _import_session_class(autotag: bool, tasks: List[Any]):
     return _RecordingSession
 
 
+_LINK_MODES = ("link", "hardlink", "reflink")
+
+
 @webmanager_bp.route("/import", methods=["POST"])
 def run_import():
     """Confirmed non-interactive import execution inside Beets."""
@@ -520,6 +523,13 @@ def run_import():
     # In-place import (copy=no, move=no) may also target a folder strictly
     # inside the Beets library directory: the files stay where they are.
     library_dir = get_library_directory() if not copy and not move else None
+    if library_dir and _covers_config_dir(library_dir):
+        # Same guard as _derived_allowed_roots(): a library directory of `/`
+        # or one containing /config must not open the config dir to imports.
+        return jsonify({
+            "error": "In-place import is not allowed: the Beets library directory contains the config directory",
+            "error_code": "PATH_NOT_ALLOWED",
+        }), 400
     safe_paths: List[str] = []
     for p in paths:
         if not p or not isinstance(p, str) or "\x00" in p:
@@ -630,6 +640,9 @@ def run_import():
             orig_resume = beets_config["import"]["resume"].get()
             orig_search_ids = beets_config["import"]["search_ids"].get()
             orig_quiet_fallback = beets_config["import"]["quiet_fallback"].get()
+            # ImportSession forces these off when move is on, and the change
+            # outlives the request; an in-place import must never link.
+            orig_links = {k: beets_config["import"][k].get() for k in _LINK_MODES}
 
             try:
                 beets_config["import"]["pretend"] = pretend
@@ -645,6 +658,8 @@ def run_import():
                 beets_config["import"]["resume"] = False
                 beets_config["import"]["incremental"] = incremental
                 beets_config["import"]["singletons"] = singletons
+                for k in _LINK_MODES:
+                    beets_config["import"][k] = False
                 if set_fields:
                     beets_config["import"]["set_fields"] = set_fields
 
@@ -698,6 +713,8 @@ def run_import():
                 beets_config["import"]["incremental"] = orig_incremental
                 beets_config["import"]["singletons"] = orig_singletons
                 beets_config["import"]["set_fields"] = orig_set_fields
+                for k, v in orig_links.items():
+                    beets_config["import"][k] = v
 
     if is_async:
         lib = g.lib
