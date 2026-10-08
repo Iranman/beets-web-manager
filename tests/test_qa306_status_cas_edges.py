@@ -105,6 +105,20 @@ class RouteEdges(_RouteEnv):
                 self.assertEqual(self.store.get(op)["status"], status)
         ad.rollback_replace_item_file.assert_not_called()
 
+    def test_engine_rollback_route_reports_a_lost_race_as_409(self):
+        """N2: a concurrent rollback finished first; the final CAS loses."""
+        op = self.store.create(operation_type="Replace", status="Completed",
+                               metadata=dict(_REPLACE_META, engine_result={"quarantine_id": "q1"}))["id"]
+        ad = _adapter()
+
+        def concurrent(*_a, **_k):
+            self.store.update(op, status="Rolled Back")
+            return {"result": {"restored_target_path": "/m/a.flac"}}
+        ad.rollback_replace_item_file.side_effect = concurrent
+        with mock.patch.object(cw, "beets_adapter", ad):
+            resp = self.client.post(f"/api/transactions/{op}/rollback")
+        self.assertEqual((resp.status_code, resp.get_json()["code"]), (409, "conflict"))
+
     def test_folder_rollback_route_defers_then_restores(self):
         p = mock.patch.object(te, "_FOLDER_STEP_RETRY_DELAY", 0)
         p.start()

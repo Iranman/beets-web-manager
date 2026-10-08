@@ -752,7 +752,7 @@ def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None)
         return jsonify(body), status
     if rollback_family is not None and not res.get("ok") and res.get("status") == "Recovery Required":
         res = {**res, "mutated": True}  # #228 F3: it ran, then failed verification
-    refused = ("not_approved", "already_applied", "rollback_not_eligible", "rollback_deferred")
+    refused = ("not_approved", "already_applied", "rollback_not_eligible", "rollback_deferred", "conflict")
     status_code = 200 if res.get("ok") else (409 if res.get("code") in refused else 400)
     return jsonify(res), status_code
 
