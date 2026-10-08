@@ -154,33 +154,20 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
     def test_pathological_dash_runs_stay_linear(self):
         # Security review of #320 (F1): one "- " per list level used to copy
         # the rest of the line, O(k*L) per GET on a saved block scalar.
-        # Asserts growth over a 32x spread (32 KB vs 1 MB): linear is ~32x
-        # (up to ~70x with cache effects on shared CI runners), quadratic is
-        # ~1024x, so the 200x bound separates them. The old loop took ~5 s at
-        # 512 KB (~20 s at 1 MB); the absolute bound is a generous backstop.
-        # Narrower spreads (64 KB vs 512 KB) and same-size comparisons were
-        # flaky on CI runners although the scan is linear.
-        def best_of_3(fn, text):
-            times = []
-            for _ in range(3):
-                start = time.perf_counter()
-                fn(text)
-                times.append(time.perf_counter() - start)
-            return min(times)
-
+        # Absolute bound only: timing ratios were flaky on shared CI runners
+        # (main and #321 both missed a 200x ratio while the scan is linear).
+        # 2 MB takes ~0.5-3 s with the fix; the old loop took ~76 s (19 s at 1 MB).
         def redact(text):
             self.assertEqual(_redact_config_content(text), text)
 
         def restore(text):
             _restore_redacted_config_secrets(f'token: "{R}"\n' + text, "token: abc\n" + text)
 
-        small = "note: |\n  " + "- " * 16384 + "x\n"  # 32 KB
-        big = "note: |\n  " + "- " * 524288 + "x\n"  # 1 MB, valid YAML
+        big = "note: |\n  " + "- " * 1048576 + "x\n"  # 2 MB, valid YAML
         for fn in (redact, restore):
-            t_small, t_big = best_of_3(fn, small), best_of_3(fn, big)
-            msg = f"{fn.__name__}: {t_small:.3f}s (32 KB) -> {t_big:.3f}s (1 MB)"
-            self.assertLess(t_big, 15.0, msg)
-            self.assertLess(t_big, 200 * t_small, msg)
+            start = time.perf_counter()
+            fn(big)
+            self.assertLess(time.perf_counter() - start, 15.0, fn.__name__)
 
     @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_save_keeps_private_mode_of_config_with_secrets(self):
