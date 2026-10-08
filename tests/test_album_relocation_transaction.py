@@ -380,7 +380,10 @@ class RollbackRefusalTests(_Engine):
         self._crash_after_file_move(first)
         rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
         self.assertEqual((rb["ok"], rb["status"]), (True, "Rolled Back"), rb)
-        self.assertEqual(self.store.get(self.op)["metadata"]["rollback_result"]["adopted_items"], 1)
+        tx = self.store.get(self.op)
+        self.assertEqual(tx["metadata"]["rollback_result"]["adopted_items"], 1)
+        moved = len(self.old[0]) - 1
+        self.assertTrue(any(f"Moved {moved} tracks" in str(line) for line in tx["logs"]), tx["logs"])
         self.assertEqual(self.beets_state(self.album.id), self.old)
         self.assertEqual(sorted(tree(self.music).values()), sorted(self.before_tree.values()))
 

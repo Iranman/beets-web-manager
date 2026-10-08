@@ -3289,7 +3289,7 @@ def rollback_album_relocation(
         if st.transition(
             operation_id, tx.get("status"), status,
             metadata={"rollback_result": result, "rollback_request": {**request_meta, "outcome": "succeeded"}},
-            logs=[f"Moved {result.get('restored_items', 0)} tracks of album {aid} back to "
+            logs=[f"Moved {result.get('restored_items', 0) - (result.get('adopted_items') or 0)} tracks of album {aid} back to "
                   f"{', '.join(meta['before'].get('folders') or []) or '(unknown)'}"
                   + ("; cover restored" if result.get("restored_art") else "")]
                  + ([f"{result['adopted_items']} track(s) were already back after an interrupted rollback "
