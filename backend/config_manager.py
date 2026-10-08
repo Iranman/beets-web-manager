@@ -19,7 +19,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import yaml
 
@@ -176,8 +176,14 @@ def save_config(
     content: str,
     expected_revision: Optional[str] = None,
     config_path: Optional[Path] = None,
+    merge_stored: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    """Save new configuration with CAS validation, atomic replace, and backup."""
+    """Save new configuration with CAS validation, atomic replace, and backup.
+
+    ``merge_stored`` (if given) maps the on-disk content to the final
+    content to write. It runs on the same snapshot the revision check and
+    the backup use, so redacted secrets are restored from exactly the
+    revision the editor showed (config_service._restore_redacted_config_secrets)."""
     explicit = config_path is not None
     cfg = config_path or get_config_path()
     if not explicit and not (cfg.exists() and cfg.is_file()):
@@ -194,6 +200,13 @@ def save_config(
     if expected_revision and expected_revision.strip():
         if expected_revision.strip().lower() != current_rev.lower():
             raise ConfigConflictError()
+
+    if merge_stored is not None:
+        content = merge_stored(current_data["content"])
+        # The merged text holds real secrets; YAML errors quote the bad line,
+        # so this error carries no parser detail.
+        if not validate_config_yaml(content)[0]:
+            raise ConfigValidationError("Invalid YAML after restoring redacted secrets")
 
     cfg.parent.mkdir(parents=True, exist_ok=True)
     bak = get_config_backup_path(cfg)

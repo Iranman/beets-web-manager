@@ -54,6 +54,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ### 7. The Config page shows an empty `config.yaml`, or says the config was not found
 * **Cause**: The editor reads `BEETS_CONFIG` (default `/config/config.yaml`). In v0.1.49 and earlier it read the host-side `BEETS_CONFIG_PATH`. After any Settings save, that sent it to an empty file inside the container, and edits were never written to Beets' real config.
 * **Fix**: Upgrade. If you saved edits from the Config page on v0.1.49 or earlier, they are not in `/config/config.yaml`; apply them again. The editor now refuses to read or write anything other than a file directly inside the Beets config directory.
+* **Saving refused with `config_secret_ambiguous` or `config_redacted_placeholder`**: secret values show as `[REDACTED]`; leave that text unchanged to keep the stored secret, replace the whole `[REDACTED]` (quotes included) to set a new one, or use `""` to clear it. `config_secret_ambiguous` means the stored `config.yaml` has that secret key twice in the same section, or not at all at that place (for example you moved or copied the line). Type the real value on that line, or reload the page and redo the edit.
 
 ---
 
