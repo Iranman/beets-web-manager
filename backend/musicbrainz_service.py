@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, _MALFORMED_RELEASE_GROUP_STAMP_RE, _MB_UUID_RE, _extract_mb_uuid, _is_valid_mb_uuid, _s, _up, _ur
 from backend.app_runtime import _normalize_name, _path_is_under, _split_mbid_values
-from helpers_mb import _fetch_mb_recording_details, _fetch_mb_release_candidate, _mb_unavailable
+from helpers_mb import _fetch_mb_release_candidate, _mb_unavailable
 from backend.beets_adapter import lib, BeetsUnavailableError
 from backend.security import OutboundPolicyError
 import backend.composite_workflows as composite_workflows
@@ -596,43 +596,6 @@ def _parse_manual_musicbrainz_identifier(raw_value: Any) -> Dict[str, str]:
     if not uuid_match:
         return {"ok": False, "error": "This is not a valid MusicBrainz UUID or URL."}
     return {"ok": True, "entity_type": "unknown", "mbid": uuid_match.group(0).lower()}
-
-
-def _prefer_album_mb_release(mb_albumid: str, log: list) -> str:
-    """If mb_albumid points to a single/EP release, look up the recording on
-    MusicBrainz and return the release ID of the best album that contains it.
-    Returns the original mb_albumid unchanged if it is already an album or if
-    no better album release can be found."""
-    if not mb_albumid:
-        return mb_albumid
-    tracklist = _fetch_mb_release_tracklist(mb_albumid, log)
-    if not tracklist.get("ok"):
-        return mb_albumid
-    primary_type = tracklist.get("release_group_primary_type", "").casefold()
-    if primary_type not in ("single", "ep", ""):
-        return mb_albumid  # Already an album — keep it
-    # Find the first recording MBID on this release to look up its appearances
-    mb_trackid = next(
-        (t["mb_trackid"] for t in (tracklist.get("tracks") or []) if t.get("mb_trackid")),
-        "",
-    )
-    if not mb_trackid:
-        return mb_albumid
-    details = _fetch_mb_recording_details(mb_trackid)
-    album_release_id = details.get("mb_albumid", "")
-    if not album_release_id or album_release_id == mb_albumid:
-        return mb_albumid
-    # Verify the found release is actually an album type
-    album_data = _fetch_mb_release_tracklist(album_release_id, log)
-    found_type = album_data.get("release_group_primary_type", "").casefold()
-    if found_type not in ("single", "ep"):
-        log.append(
-            f"  [album-prefer] Upgrading {primary_type or 'unknown'} release "
-            f"{mb_albumid!r} → album release {album_release_id!r} "
-            f"({album_data.get('release_title', '')})"
-        )
-        return album_release_id
-    return mb_albumid
 
 
 # ── Clean: artist folder merge ────────────────────────────────────────────────

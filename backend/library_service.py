@@ -390,14 +390,15 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             log.append(line)
         return ""
 
-    def _accept_from_release_group(rgid: str, first: str) -> str:
+    def _accept_from_release_group(rgid: str, first: str, *, first_checked: bool = False) -> str:
         """Explicit release group (#260): return only a release of ``rgid``.
 
         Tries the ranked release, then every other release in the group.
         Never falls back to a free search, which could pick another group."""
-        accepted = _source_accepts_release(first, "Resolved release-group candidate")
-        if accepted:
-            return accepted
+        if not first_checked:
+            accepted = _source_accepts_release(first, "Resolved release-group candidate")
+            if accepted:
+                return accepted
         others = [
             c for c in _mb_release_group_candidates(rgid, log)
             if c.get("mb_albumid") and c["mb_albumid"] != first
@@ -457,13 +458,26 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                     "provided release ID despite the folder tracklist mismatch."
                 )
                 return resolved
-            log.append("  Searching for a replacement MusicBrainz release from folder tracks…")
+            # A replacement stays inside the provided Release's own Release
+            # Group; a cross-group replacement is never automatic (review).
+            provided_rg = _s(_fetch_mb_release_tracklist(resolved, log).get("release_group")).strip().lower()
+            if not provided_rg:
+                log.append("  REFUSED: the provided release's release group is unknown; "
+                           "Manual Review is required.")
+                return ""
+            log.append(f"  Looking for a replacement inside release group {provided_rg}…")
+            return _accept_from_release_group(provided_rg, resolved, first_checked=True)
         elif resolved and _MB_UUID_RE.match(resolved):
             rg_resolved = _resolve_release_group_to_release(
                 resolved, log, year=year, track_count=track_count)
             if rg_resolved:
                 return _accept_from_release_group(resolved, rg_resolved)
             log.append(f"  WARN: {resolved} did not resolve to a release with tracks")
+        # The free search below may pick any Release Group: it runs only when
+        # no MusicBrainz ID was provided.
+        log.append("  REFUSED: the provided MusicBrainz ID could not be resolved inside its own "
+                   "release group; Manual Review is required.")
+        return ""
 
     log.append("  Searching MusicBrainz for a release ID…")
     album_only_pool_loaded = False

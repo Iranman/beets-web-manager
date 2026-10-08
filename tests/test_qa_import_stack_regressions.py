@@ -6,7 +6,7 @@ Found by end-to-end runs against stock Beets 2.14.1 + webmanager plugin 1.8.1:
   the rows and failed the job, but queued no review item, although the
   Import contract says "the job fails and the folder goes to review".
 - import-with-id replaced the operator's confirmed single/EP Release with an
-  album release (_prefer_album_mb_release), so Beets was asked to import a
+  album release, so Beets was asked to import a
   different Release (and Release Group) than the one confirmed, and the
   import of a confirmed single failed as not_imported.
 - ai-batch's import step planned use_move=True for a preserved torrent
@@ -43,7 +43,6 @@ class VerificationFailureReviewTests(base.ConfirmedImportJobTests):
         src = "/downloads/Artist - Single"
         with mock.patch.object(isvc, "_resolve_import_review_source_path", return_value=(src, None)), \
                 mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=True), \
-                mock.patch.object(isvc, "_prefer_album_mb_release", side_effect=lambda rid, log: OTHER_REL, create=True), \
                 mock.patch.object(isvc, "_beet_import_timeout", return_value=60):
             body, code = isvc.start_folder_import_with_id({"path": src, "mb_albumid": REL})
         self.assertEqual(code, 200, body)
@@ -62,7 +61,6 @@ class AiBatchTorrentSourceTests(unittest.TestCase):
             return {"ok": True, "operation_id": "op-1"}
 
         with mock.patch.object(ai, "_preserve_torrent_source_path", return_value=True), \
-                mock.patch.object(ai, "_prefer_album_mb_release", side_effect=lambda rid, log: rid), \
                 mock.patch.object(ai, "_validate_import_source_audio"), \
                 mock.patch.object(ai, "_fetch_mb_release_tracklist",
                                   return_value={"ok": True, "release_group": RG, "tracks": []}), \
