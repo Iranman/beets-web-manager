@@ -4355,8 +4355,8 @@ def get_album_cleanup_index() -> List[Dict[str, Any]]:
 MBSYNC_LIBRARY_FAMILY = "mbsync_library_v1"
 MBSYNC_LIBRARY_ROLLBACK_REASON = (
     "Beets' mbsync keeps no undo, so this sync cannot be rolled back. The change log lists the old "
-    "and new values of the first 200 changed albums or singles, so they can be put back by hand; "
-    "files Beets moved stay where Beets put them.")
+    "and new values of the first 200 changed albums or singles, so they can be put back by hand. "
+    "Files are never moved; tags written to files stay written.")
 _MBSYNC_LIBRARY_REFUSALS = {
     "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.13.0; nothing was changed.",
     "CAPABILITY_UNAVAILABLE": "Enable Beets' mbsync plugin (add mbsync to plugins: in Beets' config.yaml and "
@@ -4364,8 +4364,8 @@ _MBSYNC_LIBRARY_REFUSALS = {
     "ALREADY_RUNNING": "Beets is already syncing the library from MusicBrainz; wait for it to finish.",
 }
 _MBSYNC_LIBRARY_COUNTS = ("albums_total", "singletons_total", "targets", "processed", "changed_albums",
-                          "changed_singletons", "changed_items", "unchanged", "skipped_no_mbid",
-                          "skipped_empty", "skipped_missing", "failed_count")
+                          "changed_singletons", "changed_items", "unchanged", "not_found", "skipped_no_id",
+                          "skipped_empty", "skipped_missing", "failed_count", "write_failed_count")
 
 
 def _mbsync_change_rows(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4400,8 +4400,10 @@ def mbsync_library(
     """Sync the whole library from MusicBrainz with Beets' own mbsync,
     run inside Beets by the webmanager plugin (LT-18). Web Manager only
     starts it, follows it, forwards a cancel and records what Beets
-    reports changing on ``transaction_id``. Write and move follow Beets'
-    own config, as `beet mbsync` does.
+    reports changing on ``transaction_id``. Tag writes follow Beets'
+    import.write, as `beet mbsync` does; files are never moved. A target
+    that failed, or whose tags could not be written, fails the job
+    (MBSYNC_PARTIAL) with the counts; the other targets keep their changes.
 
     A cancel stops Beets after the album it is on; albums already synced
     keep their changes. There is no rollback (MBSYNC_LIBRARY_ROLLBACK_REASON)."""
@@ -4417,8 +4419,8 @@ def mbsync_library(
                 "error": _MBSYNC_LIBRARY_REFUSALS.get(code) or f"Beets refused the library sync ({code}); nothing was changed."}
     op_id = _s(started.get("operation_id"))
     write, move = bool(started.get("write")), bool(started.get("move"))
-    log.append(f"Beets is syncing the library from MusicBrainz with mbsync (operation {op_id}; from Beets' config: "
-               f"write tags {'yes' if write else 'no'}, move files {'yes' if move else 'no'}).")
+    log.append(f"Beets is syncing the library from MusicBrainz with mbsync (operation {op_id}; "
+               f"write tags {'yes' if write else 'no'} per Beets' import.write; files are never moved).")
     if st:
         st.update(transaction_id, metadata={"mutation_family": MBSYNC_LIBRARY_FAMILY, "engine_operation_id": op_id,
                                             "write": write, "move": move})
@@ -4460,23 +4462,34 @@ def mbsync_library(
     changed = counts["changed_albums"] + counts["changed_singletons"]
     rows = _mbsync_change_rows(result.get("changes") or [])
     cancelled = bool(result.get("cancelled"))
-    out: Dict[str, Any] = {"ok": status == "succeeded", "operation_id": op_id, "cancelled": cancelled,
-                           "write": write, "move": move, "summary": counts, "changed": changed,
-                           "mutated": changed > 0, "failed": result.get("failed") or [],
-                           "changes_truncated": bool(result.get("changes_truncated"))}
+    write_failed = result.get("write_failed") or []
+    partial = counts["failed_count"] + counts["write_failed_count"]
+    out: Dict[str, Any] = {"ok": status == "succeeded" and not partial, "operation_id": op_id,
+                           "cancelled": cancelled, "write": write, "move": move, "summary": counts,
+                           "changed": changed, "mutated": changed > 0, "failed": result.get("failed") or [],
+                           "write_failed": write_failed, "changes_truncated": bool(result.get("changes_truncated"))}
     if status != "succeeded":
         out.update(code=_s(op.get("error_code")) or "mbsync_failed",
                    error=f"Beets' library sync failed: {_s(op.get('error')) or 'unknown error'}.")
+    elif partial:
+        out.update(code="MBSYNC_PARTIAL",
+                   error=f"{counts['failed_count']} albums or singles could not be synced and "
+                         f"{counts['write_failed_count']} tracks' tags could not be written (their Beets "
+                         "database fields did change); the rest synced.")
     if st:
         st.update(transaction_id, changes=rows, counts={"albums": counts["changed_albums"],
                                                         "items": counts["changed_items"], "changes": len(rows)},
                   metadata={"engine_result": {**counts, "cancelled": cancelled, "aborted": bool(result.get("aborted")),
-                                              "failed": out["failed"], "changes_truncated": out["changes_truncated"]}})
+                                              "failed": out["failed"], "write_failed": write_failed,
+                                              "changes_truncated": out["changes_truncated"]}})
     for f in out["failed"][:20]:
         log.append(f"  [warn] {f.get('kind')} {f.get('id')}: {f.get('error')}")
+    for f in write_failed[:20]:
+        log.append(f"  [warn] item {f.get('item_id')} ({f.get('title')}): tags not written to {f.get('path')}")
     log.append(f"{counts['processed']} of {counts['targets']} synced: {changed} changed ({counts['changed_items']} "
-               f"tracks), {counts['unchanged']} unchanged, {counts['failed_count']} failed, "
-               f"{counts['skipped_no_mbid']} without a MusicBrainz ID skipped.")
+               f"tracks), {counts['unchanged']} unchanged, {counts['not_found']} not found at MusicBrainz, "
+               f"{counts['failed_count']} failed, {counts['write_failed_count']} tag writes failed, "
+               f"{counts['skipped_no_id']} without a MusicBrainz ID skipped.")
     if cancelled and cancel_event is not None:
         cancel_event.is_set()  # Beets stopped because of the cancel: the job records it Cancelled
         log.append("[cancelled] Beets stopped the sync; the albums synced before that keep their changes.")

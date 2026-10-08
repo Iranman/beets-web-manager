@@ -1223,8 +1223,10 @@ _library_sync_lock = threading.Lock()
 @webmanager_bp.route("/mbsync/library", methods=["POST"])
 def run_mbsync_library_route():
     """Run Beets' own mbsync over the whole library in the background
-    (always async: it can take hours). Write and move follow Beets' own
-    config, as `beet mbsync` with no options does. Only one runs at a time;
+    (always async: it can take hours). Tag writes follow Beets' own
+    import.write, as `beet mbsync` with no options does; files are never
+    moved (import.move is ignored -- moving files is the relocation
+    workflow's job, which records old paths). Only one runs at a time;
     another start answers 409 ALREADY_RUNNING. Poll GET /operations/<id>;
     POST /mbsync/library/<id>/cancel stops it after the current album."""
     if not plugin_ops.is_capability_available("mbsync"):
@@ -1245,13 +1247,13 @@ def run_mbsync_library_route():
         cancel = threading.Event()
         _library_sync.update(op_id=op_id, cancel=cancel)
     lib = g.lib
-    move, write = bool(ui.should_move()), bool(ui.should_write())
+    move, write = False, bool(ui.should_write())
 
     def _bg():
         bind_music_dir(lib)
         try:
             result = plugin_ops.run_mbsync_library(
-                lib, move, write, cancel, mutation_lock,
+                lib, write, cancel, mutation_lock,
                 progress=lambda r: update_operation(op_id, "running", result=r))
             if result.get("aborted"):
                 update_operation(op_id, "failed", result=result, error_code="MBSYNC_ABORTED",

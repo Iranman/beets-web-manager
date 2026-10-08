@@ -71,10 +71,10 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
             pass
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def _add_album(self, mb_albumid, title="Old Title"):
+    def _add_album(self, mb_albumid, title="Old Title", root=None):
         items = []
         for n in (1, 2):
-            items.append(Item(path=os.path.join(self.files, f"{mb_albumid or 'x'}-{n}.mp3").encode(),
+            items.append(Item(path=os.path.join(root or self.files, f"{mb_albumid or 'x'}-{n}.mp3").encode(),
                               title=f"old {n}", artist="Old Artist", albumartist="Old Artist", album=title,
                               track=n, disc=1, mb_trackid=f"rec-{mb_albumid}-{n}" if mb_albumid else "",
                               mb_releasetrackid=f"rt-{mb_albumid}-{n}" if mb_albumid else ""))
@@ -110,7 +110,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
             op = self._wait(body["operation_id"])
         self.assertEqual(op["status"], "succeeded")
         r = op["result"]
-        self.assertEqual((r["targets"], r["processed"], r["skipped_no_mbid"]), (2, 2, 1))
+        self.assertEqual((r["targets"], r["processed"], r["skipped_no_id"], r["not_found"]), (2, 2, 1, 0))
         self.assertEqual((r["changed_albums"], r["changed_singletons"], r["changed_items"]), (1, 1, 3))
         self.assertFalse(r["cancelled"])
         # Beets itself stored the MusicBrainz values.
@@ -158,7 +158,54 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         with mock.patch.object(metadata_plugins, "album_for_id", return_value=None):
             res = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={})
             self.assertEqual(res.status_code, 202)
-            self.assertEqual(self._wait(res.get_json()["operation_id"])["result"]["unchanged"], 2)
+            r = self._wait(res.get_json()["operation_id"])["result"]
+            self.assertEqual((r["unchanged"], r["not_found"], r["failed_count"]), (2, 2, 0))
+
+    def test_partial_failure_records_the_album_and_goes_on_with_progress_per_album(self):
+        bad, good = self._add_album("rel-bad"), self._add_album("rel-good")
+
+        def lookup(aid, *a, **k):
+            if aid == "rel-bad":
+                raise RuntimeError("MusicBrainz 503")
+            return _album_info(aid, "New Title")
+
+        seen = []
+        with mock.patch.object(metadata_plugins, "album_for_id", side_effect=lookup):
+            res = plugin_ops.run_mbsync_library(self.lib, False, threading.Event(), threading.RLock(),
+                                                progress=lambda r: seen.append(r["processed"] + r["failed_count"]))
+        self.assertEqual((res["processed"], res["failed_count"], res["changed_albums"], res["aborted"]), (1, 1, 1, False))
+        self.assertEqual(res["failed"][0]["id"], bad.id)
+        self.assertEqual(self.lib.get_album(good.id).album, "New Title")
+        self.assertEqual(self.lib.get_album(bad.id).album, "Old Title")
+        self.assertEqual(seen, [0, 1])  # reported before each album, after the one before it
+
+    def test_tag_write_failures_are_reported_not_silent_and_files_never_move(self):
+        beets_config["import"]["write"] = True
+        beets_config["import"]["move"] = True  # ignored: MBSync All never moves files
+        # In the library directory, where import.move would move them; the
+        # files do not exist, so Item.try_write() fails.
+        album = self._add_album("rel-a", root=os.path.join(self.td, "music", "Old"))
+        paths = sorted(i.path for i in album.items())
+        with mock.patch.object(metadata_plugins, "album_for_id",
+                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")):
+            body = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={}).get_json()
+            self.assertEqual((body["write"], body["move"]), (True, False))
+            op = self._wait(body["operation_id"])
+        r = op["result"]
+        self.assertEqual((r["changed_items"], r["write_failed_count"]), (2, 2))
+        self.assertEqual(sorted(f["item_id"] for f in r["write_failed"]), sorted(i.id for i in album.items()))
+        self.assertTrue(all(i["write_failed"] for i in r["changes"][0]["items"]))
+        self.assertEqual(self.lib.get_album(album.id).album, "New Title")  # the DB did change
+        self.assertEqual(sorted(i.path for i in self.lib.get_album(album.id).items()), paths)
+
+    def test_successful_tag_writes_are_not_reported_as_failures(self):
+        beets_config["import"]["write"] = True
+        self._add_album("rel-a")
+        with mock.patch.object(metadata_plugins, "album_for_id",
+                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")), \
+             mock.patch.object(Item, "try_write", autospec=True, return_value=True) as tw:
+            r = plugin_ops.run_mbsync_library(self.lib, True, threading.Event(), threading.RLock())
+        self.assertEqual((tw.call_count, r["write_failed_count"], r["changed_items"]), (2, 0, 2))
 
     def test_failures_are_recorded_and_a_run_of_them_aborts(self):
         for n in range(plugin_ops.MAX_CONSECUTIVE_FAILURES + 2):
@@ -253,6 +300,17 @@ class AdapterToPluginTests(MbsyncLibraryEndpointTests):
         self.assertEqual(res["summary"]["processed"], 1)
         self.assertTrue(cancel.observed)
         self.assertTrue(tx["metadata"]["engine_result"]["cancelled"])
+
+    def test_workflow_fails_the_job_on_partial_failure_with_counts(self):
+        beets_config["import"]["write"] = True
+        self._add_album("rel-a")  # files missing: tag writes fail
+        with mock.patch.object(metadata_plugins, "album_for_id",
+                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")):
+            res, tx, log = self._sync()
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "MBSYNC_PARTIAL", True))
+        self.assertEqual(res["summary"]["write_failed_count"], 2)
+        self.assertEqual(len(tx["metadata"]["engine_result"]["write_failed"]), 2)
+        self.assertTrue(any("tags not written" in line for line in log))
 
     def test_workflow_reports_a_missing_mbsync_plugin(self):
         beets_plugins_mod._instances.clear()

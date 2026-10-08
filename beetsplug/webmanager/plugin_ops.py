@@ -247,45 +247,81 @@ def _album_state(lib, album_id: int):
     return _field_values(album), {it.id: _field_values(it) for it in album.items()}
 
 
-def run_mbsync_library(lib, move: bool, write: bool, cancel, lock, progress=None) -> Dict[str, Any]:
+class _FoundProbe:
+    """The Library as MBSyncPlugin.albums()/singletons() see it, counting
+    their own `lib.transaction()` calls. mbsync opens that transaction only
+    once the Release/Recording was found at the metadata source; when it is
+    not found it only logs and moves on. Our own reads go through the real
+    Library (bound methods), so they are not counted."""
+
+    def __init__(self, lib):
+        self._lib = lib
+        self.applied = 0
+
+    def __getattr__(self, name):
+        return getattr(self._lib, name)
+
+    def transaction(self):
+        self.applied += 1
+        return self._lib.transaction()
+
+
+def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[str, Any]:
     """Run Beets' own mbsync over the whole library, one album or singleton
     at a time: exactly the targets `beet mbsync` with no query visits
     (albums with an mb_albumid, singletons with an mb_trackid), through
     MBSyncPlugin.albums()/singletons() with an exact `id:` query each.
+
+    Files are never moved (move=False). Tags are written when ``write`` is
+    true, but not by mbsync itself: its apply_item_changes() ignores
+    Item.try_write()'s result, so a failed tag write would pass silently
+    while the database changed. mbsync therefore runs with write=False and
+    this function calls Item.try_write() on each item mbsync changed,
+    stores the new mtime when it worked, and lists the item under
+    ``write_failed`` when it did not (its database fields did change).
 
     Going one target at a time is what lets the caller cancel between
     targets (``cancel`` is a threading.Event), hold ``lock`` (the plugin's
     mutation lock) only for one album, and record what Beets changed: each
     target's stored fields are read before and after the call. Beets keeps
     no undo, so this change log is the only record; it lists at most
-    MAX_LIBRARY_CHANGES targets, with values cut to 120 characters.
+    MAX_LIBRARY_CHANGES targets, with values cut to 120 characters. Targets
+    finished before a cancel or a restart stay changed (mbsync commits one
+    transaction per album).
 
-    A target whose Release/Recording MusicBrainz no longer has is left
-    unchanged by mbsync (it only logs it), so it counts as unchanged. A
-    target that raises is recorded as failed and the sync goes on, unless
-    MAX_CONSECUTIVE_FAILURES targets in a row raise (``aborted``)."""
+    A target whose Release/Recording the source no longer has is counted as
+    ``not_found``. A target that raises is recorded as failed and the sync
+    goes on, unless MAX_CONSECUTIVE_FAILURES targets in a row raise
+    (``aborted``)."""
     plugin = _require_plugin("mbsync")
     if not hasattr(plugin, "singletons") or not hasattr(plugin, "albums"):
         raise PluginIncompatibleError(
             "mbsync plugin does not expose the expected singletons()/albums() methods"
         )
+    from beets import util
+
     albums = list(lib.albums())
     singles = list(lib.items("singleton:true"))
     targets = [("album", a.id) for a in albums if a.mb_albumid]
     targets += [("singleton", i.id) for i in singles if i.mb_trackid]
     res: Dict[str, Any] = {
-        "write": bool(write), "move": bool(move),
+        "write": bool(write), "move": False,
         "albums_total": len(albums), "singletons_total": len(singles),
         "targets": len(targets), "processed": 0, "changed_albums": 0, "changed_singletons": 0,
-        "changed_items": 0, "unchanged": 0, "skipped_no_mbid": len(albums) + len(singles) - len(targets),
+        "changed_items": 0, "unchanged": 0, "not_found": 0,
+        "skipped_no_id": len(albums) + len(singles) - len(targets),
         "skipped_empty": 0, "skipped_missing": 0, "failed_count": 0, "failed": [],
+        "write_failed_count": 0, "write_failed": [],
         "cancelled": False, "aborted": False, "changes": [], "changes_truncated": False,
     }
     consecutive = 0
     for kind, tid in targets:
+        if progress:  # counters after each finished, skipped or failed target
+            progress({k: v for k, v in res.items() if k not in ("changes", "failed", "write_failed")})
         if cancel.is_set():
             res["cancelled"] = True
             break
+        probe = _FoundProbe(lib)
         with lock:
             try:
                 if kind == "album":
@@ -296,7 +332,7 @@ def run_mbsync_library(lib, move: bool, write: bool, cancel, lock, progress=None
                     if not before[1]:  # mbsync reads items()[0]: an empty album raises
                         res["skipped_empty"] += 1
                         continue
-                    plugin.albums(lib, [f"id:{tid}"], move, False, write)
+                    plugin.albums(probe, [f"id:{tid}"], False, False, False)
                     after = _album_state(lib, tid) or ({}, {})
                 else:
                     item = lib.get_item(tid)
@@ -304,7 +340,7 @@ def run_mbsync_library(lib, move: bool, write: bool, cancel, lock, progress=None
                         res["skipped_missing"] += 1
                         continue
                     before = ({}, {tid: _field_values(item)})
-                    plugin.singletons(lib, [f"id:{tid}"], move, False, write)
+                    plugin.singletons(probe, [f"id:{tid}"], False, False, False)
                     refreshed = lib.get_item(tid)
                     after = ({}, {tid: _field_values(refreshed)} if refreshed is not None else {})
             except Exception as ex:
@@ -316,15 +352,30 @@ def run_mbsync_library(lib, move: bool, write: bool, cancel, lock, progress=None
                     res["aborted"] = True
                     break
                 continue
-        consecutive = 0
-        res["processed"] += 1
-        album_fields = _diff(before[0], after[0])
-        items = []
-        for iid, old in before[1].items():
-            fields = _diff(old, after[1].get(iid, {}))
-            if fields:
-                new = after[1].get(iid, {})
-                items.append({"item_id": iid, "title": _short(new.get("title") or old.get("title")), "fields": fields})
+            consecutive = 0
+            res["processed"] += 1
+            if not probe.applied:
+                res["not_found"] += 1
+            album_fields = _diff(before[0], after[0])
+            items = []
+            for iid, old in before[1].items():
+                fields = _diff(old, after[1].get(iid, {}))
+                if not fields:
+                    continue
+                entry = {"item_id": iid, "title": _short(after[1].get(iid, {}).get("title") or old.get("title")),
+                         "fields": fields}
+                if write:
+                    changed_item = lib.get_item(iid)
+                    if changed_item is not None and changed_item.try_write():
+                        changed_item.store()  # the new mtime, as apply_item_changes would
+                    else:
+                        entry["write_failed"] = True
+                        res["write_failed_count"] += 1
+                        if len(res["write_failed"]) < MAX_LIBRARY_FAILURES:
+                            path = changed_item.path if changed_item is not None else b""
+                            res["write_failed"].append({"item_id": iid, "title": entry["title"],
+                                                        "path": _short(util.displayable_path(path))})
+                items.append(entry)
         if not (album_fields or items):
             res["unchanged"] += 1
         else:
@@ -340,8 +391,6 @@ def run_mbsync_library(lib, move: bool, write: bool, cancel, lock, progress=None
                 })
             else:
                 res["changes_truncated"] = True
-        if progress:
-            progress({k: v for k, v in res.items() if k not in ("changes", "failed")})
     return res
 
 

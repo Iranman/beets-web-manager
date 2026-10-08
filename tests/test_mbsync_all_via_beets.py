@@ -19,7 +19,7 @@ CHANGE = {"kind": "album", "id": 5, "artist": "A", "album": "New",
           "album_fields": {"album": ["Old", "New"]},
           "items": [{"item_id": 9, "title": "t1", "fields": {"title": ["x", "t1"]}}]}
 DONE = {"status": "succeeded", "result": {"targets": 2, "processed": 2, "changed_albums": 1, "changed_items": 1,
-                                          "unchanged": 1, "skipped_no_mbid": 3, "changes": [CHANGE],
+                                          "unchanged": 1, "skipped_no_id": 3, "changes": [CHANGE],
                                           "cancelled": False}}
 
 
@@ -73,7 +73,7 @@ class MbsyncLibraryWorkflowTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in tx["changes"]], ["album:5", "item:9"])
         self.assertEqual(tx["changes"][1]["metadata_diff"],
                          [{"field": "title", "old": "x", "new": "t1", "changed": True}])
-        self.assertTrue(any("write tags yes, move files no" in line for line in log))
+        self.assertTrue(any("write tags yes per Beets' import.write; files are never moved" in line for line in log))
         self.assertTrue(any("2 of 2 synced: 1 changed" in line for line in log))
 
     def test_refusals_change_nothing(self):
