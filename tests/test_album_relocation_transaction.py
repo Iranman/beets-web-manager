@@ -188,6 +188,7 @@ class RollbackRefusalTests(_Engine):
         self.folder = os.path.join(self.music, "incoming", "x")
         self.album = self.make_album(self.folder)
         self.old = self.beets_state(self.album.id)
+        self.before_tree = tree(self.music)
         res = cw.relocate_album(self.album.id, adapter=self.ad, store=self.store)
         self.assertTrue(res["ok"], res)
         self.op = res["operation_id"]
@@ -369,6 +370,74 @@ class RollbackRefusalTests(_Engine):
         r = self._raw_rollback({k: tracked if k == min(self.old[0]) else v for k, v in self.old[0].items()})
         self.assertEqual((r.status_code, r.get_json()["error_code"]), (409, "TARGET_EXISTS"))
 
+    def _crash_after_file_move(self, iid):
+        """Beets moved track ``iid`` back, then died before storing its row."""
+        os.makedirs(os.path.dirname(self.old[0][iid]), exist_ok=True)
+        os.replace(self.beets_state(self.album.id)[0][iid], self.old[0][iid])  # keeps size and mtime
+
+    def test_retry_adopts_a_file_a_crash_left_at_its_old_path(self):
+        first = min(self.old[0])
+        self._crash_after_file_move(first)
+        rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["ok"], rb["status"]), (True, "Rolled Back"), rb)
+        self.assertEqual(self.store.get(self.op)["metadata"]["rollback_result"]["adopted_items"], 1)
+        self.assertEqual(self.beets_state(self.album.id), self.old)
+        self.assertEqual(sorted(tree(self.music).values()), sorted(self.before_tree.values()))
+
+    def test_retry_adopts_a_cover_a_crash_left_at_its_old_path(self):
+        os.makedirs(os.path.dirname(self.old[1]), exist_ok=True)
+        os.replace(self.beets_state(self.album.id)[1], self.old[1])
+        rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(self.beets_state(self.album.id), self.old)
+
+    def test_file_at_old_path_that_is_not_provably_the_track_is_refused(self):
+        first = min(self.old[0])
+        self._crash_after_file_move(first)
+        with open(self.old[0][first], "ab") as f:
+            f.write(b"changed")  # size no longer matches the apply-time evidence
+        content = tree(self.music)
+        self.refused("file_missing")
+        self.assertEqual(tree(self.music), content)  # nothing moved, nothing overwritten
+
+    def test_old_path_file_without_recorded_evidence_is_refused(self):
+        first = min(self.old[0])
+        self._crash_after_file_move(first)
+        meta = self.store.get(self.op)["metadata"]
+        engine = {**meta["engine_result"], "evidence": {}}
+        self.store.update(self.op, metadata={"engine_result": engine})
+        self.refused("file_missing")
+
+    def test_beets_dying_mid_rollback_is_recovery_required_never_completed(self):
+        from backend.beets_adapter import BeetsAdapterConnectionError
+        with mock.patch.object(self.ad, "rollback_album_relocation",
+                               side_effect=BeetsAdapterConnectionError("reset", error_code="beets_unavailable")):
+            with self.assertRaises(BeetsAdapterConnectionError):
+                cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertEqual(self.store.get(self.op)["status"], "Recovery Required")
+        self.assertIsNone(self.store.get(self.op)["metadata"]["rollback_request"]["outcome"])
+        self._crash_after_file_move(min(self.old[0]))  # what Beets had done before it died
+        rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)  # retry resumes
+        self.assertEqual((rb["ok"], rb["status"]), (True, "Rolled Back"), rb)
+        self.assertEqual(self.beets_state(self.album.id), self.old)
+
+    def test_refusal_after_an_interrupted_attempt_is_recovery_required_not_nothing_changed(self):
+        self.store.update(self.op, metadata={"rollback_request": {"items": [], "outcome": None}})
+        first = min(self.old[0])
+        self._crash_after_file_move(first)
+        with open(self.old[0][first], "ab") as f:
+            f.write(b"x")
+        rb = cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["code"], rb["mutated"], rb["status"]), ("file_missing", None, "Recovery Required"))
+        self.assertEqual(self.store.get(self.op)["status"], "Recovery Required")
+
+    def test_restart_after_an_interrupted_rollback_marks_recovery_required(self):
+        self.store.update(self.op, metadata={"rollback_request": {"items": [], "outcome": None}})
+        out = recovery.sweep(adapter=self.ad, store=self.store, before=time.time() + 1)
+        self.assertIn({"operation_id": self.op, "action": "Recovery Required", "note": "rollback interrupted"}, out)
+        self.assertEqual(self.store.get(self.op)["status"], "Recovery Required")
+        self.assertTrue(cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)["ok"])
+
     def test_second_rollback_is_a_no_op(self):
         self.assertTrue(cw.rollback_album_relocation(self.op, adapter=self.ad, store=self.store)["ok"])
         before = self.snapshot(self.album.id)
@@ -427,6 +496,30 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         self.assertEqual(self.snapshot(self.album.id), moved)  # not moved twice
         self.assertTrue(cw.rollback_album_relocation(op, adapter=self.ad, store=self.store)["ok"])
         self.assertEqual(self.beets_state(self.album.id)[0], {int(k): v for k, v in planned.items()})
+
+    def test_restart_after_a_file_moved_but_before_its_row_was_stored_needs_recovery(self):
+        op = self._approved()
+        self.store.transition(op, "Approved", "Running", metadata={"engine_request": {"operation_id": op}})
+        item = next(iter(self.lib.get_album(self.album.id).items()))
+        dest = os.fsdecode(item.destination())
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(os.fsdecode(item.path), dest)  # Beets died here: the row still has the old path
+        out = recovery.sweep(adapter=self.ad, store=self.store, before=time.time() + 1)
+        self.assertEqual(out[0]["action"], "Recovery Required", out)
+        self.assertNotIn("nothing was changed", str(self.store.get(op)["logs"]))
+
+    def test_unique_path_rename_on_apply_is_flagged(self):
+        item = next(iter(self.lib.get_album(self.album.id).items()))
+        dest = os.fsdecode(item.destination())
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(b"already there")
+        res = cw.relocate_album(self.album.id, adapter=self.ad, store=self.store)
+        tx = self.store.get(res["operation_id"])
+        self.assertEqual(tx["metadata"]["engine_result"]["renamed"], [str(item.id)])
+        self.assertIn("Warning: Beets renamed tracks", str(tx["logs"]))
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), b"already there")
 
     def test_restart_with_engine_record_lost_and_album_moved_needs_recovery(self):
         import beetsplug.webmanager.operations as ops_mod

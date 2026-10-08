@@ -3182,11 +3182,13 @@ def finish_album_relocation(
                  "roll back to move the others back"] if skipped else [])
              + ([f"Beets cleared the cover path {art_before} (file missing); rollback restores it"]
                 if art_before and not _s(after.get("artpath")) else [])
+             + ([f"Warning: Beets renamed tracks {', '.join(engine['renamed'])} (name.1.ext) because "
+                 "their template path was taken"] if engine.get("renamed") else [])
              + ([f"Verification mismatch: {', '.join(problems)}"] if problems else []),
     )
     out = {"ok": not problems and not skipped, "operation_id": operation_id, "status": status, "album_id": aid,
            "dest_dir": folders[0] if folders else "", "moved_count": moved, "skipped": skipped,
-           "verification_problems": problems}
+           "renamed": list(engine.get("renamed") or []), "verification_problems": problems}
     if skipped:
         out.update(code="partial_move", error=f"Beets skipped {len(skipped)} track(s) whose file is missing; "
                                               "the others moved. Roll back from Transactions to undo.")
@@ -3194,12 +3196,18 @@ def finish_album_relocation(
 
 
 def album_relocation_unchanged(ad: BeetsAdapter, meta: Dict[str, Any]) -> bool:
-    """True when live Beets still has the album exactly as planned (restart
-    recovery: proves an unconfirmed apply changed nothing)."""
+    """True when live Beets still has the album exactly as planned AND every
+    planned file is still there (restart recovery: proves an unconfirmed apply
+    changed nothing). Rows alone are not proof: a crash between Beets' file
+    move and its row store leaves the row at the old path with the file gone.
+    Web Manager stats the paths through its own read-only mounts; a path it
+    cannot see counts as changed (Recovery Required), never as unchanged."""
     live = _live_relocation_state(ad, int(meta["album_id"]))
     before = meta.get("before") or {}
+    files = [*(before.get("items") or {}).values(), *([before["artpath"]] if before.get("artpath") else [])]
     return (live is not None and _paths_match(live["items"], before.get("items") or {})
-            and _same_art(live["artpath"], before.get("artpath")))
+            and _same_art(live["artpath"], before.get("artpath"))
+            and all(os.path.isfile(p) for p in files))
 
 
 def rollback_album_relocation(
@@ -3228,24 +3236,44 @@ def rollback_album_relocation(
         return refusal
     aid = int(meta["album_id"])
     before, after = engine.get("before") or {}, engine["after"]
-    items = [{"id": int(k), "path": p, "restore_path": (before.get("items") or {}).get(k)}
+    evidence = engine.get("evidence") or {}
+    items = [{"id": int(k), "path": p, "restore_path": (before.get("items") or {}).get(k),
+              "evidence": (evidence.get("items") or {}).get(k)}
              for k, p in (after.get("items") or {}).items()]
+    key = f"{operation_id}:rollback"
+    # An earlier attempt whose outcome was never recorded (Beets or Web Manager
+    # died mid-rollback) may have moved some tracks back.
+    interrupted = bool(meta.get("rollback_request")) and not meta["rollback_request"].get("outcome")
     from backend.resource_locks import attempt_owner, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"], attempt_owner(operation_id), timeout=10):
         # Recorded before the call: a retry sends the same key and paths; Beets
-        # treats tracks already back as done, so it resumes, never replays blindly.
-        st.update(operation_id, metadata={"rollback_request": {"idempotency_key": f"{operation_id}:rollback",
-                                                               "items": items}})
+        # treats tracks already back as done and adopts a file a crash left at
+        # its old path when size and mtime prove it, so it resumes, never replays blindly.
+        request_meta = {"idempotency_key": key, "items": items, "outcome": None}
+        st.update(operation_id, metadata={"rollback_request": request_meta})
         try:
             res = ad.rollback_album_relocation(aid, items, _s(after.get("artpath")), _s(before.get("artpath")),
-                                               idempotency_key=f"{operation_id}:rollback")
+                                               idempotency_key=key, art_evidence=evidence.get("artpath"))
         except BeetsAdapterError as exc:
             if _transport_error(exc):
-                raise  # status unchanged; a retry replays the same key
+                st.transition(operation_id, tx.get("status"), "Recovery Required", logs=[
+                    "Beets did not answer the rollback; some tracks may already be back. Retry the rollback: "
+                    "Beets resumes from the recorded paths and refuses what it cannot prove."])
+                raise
             code = exc.error_code or ""
             message = _RELOCATION_REFUSALS.get(code)
+            if message and interrupted:
+                st.transition(operation_id, tx.get("status"), "Recovery Required",
+                              metadata={"rollback_request": {**request_meta, "outcome": "refused"}},
+                              logs=[f"Rollback refused by Beets ({code}) after an earlier rollback attempt was "
+                                    "interrupted; the album may be partly moved back. Check its files."])
+                return {"ok": False, "code": code.lower(), "mutated": None, "operation_id": operation_id,
+                        "status": "Recovery Required",
+                        "error": "An earlier rollback was interrupted and this one was refused "
+                                 f"({code}); the album may be partly moved back. Check its files."}
             if message:
-                st.update(operation_id, logs=[f"Rollback refused by Beets ({code}); nothing was changed."])
+                st.update(operation_id, metadata={"rollback_request": {**request_meta, "outcome": "refused"}},
+                          logs=[f"Rollback refused by Beets ({code}); nothing was changed."])
                 return {"ok": False, "code": code.lower(), "mutated": False, "operation_id": operation_id,
                         "status": tx.get("status"), "error": message}
             st.transition(operation_id, tx.get("status"), "Recovery Required",
@@ -3260,10 +3288,13 @@ def rollback_album_relocation(
         status = "Rolled Back" if ok else "Recovery Required"
         if st.transition(
             operation_id, tx.get("status"), status,
-            metadata={"rollback_result": result},
+            metadata={"rollback_result": result, "rollback_request": {**request_meta, "outcome": "succeeded"}},
             logs=[f"Moved {result.get('restored_items', 0)} tracks of album {aid} back to "
                   f"{', '.join(meta['before'].get('folders') or []) or '(unknown)'}"
                   + ("; cover restored" if result.get("restored_art") else "")]
+                 + ([f"{result['adopted_items']} track(s) were already back after an interrupted rollback "
+                     "(size and mtime matched); their rows were updated without moving anything"]
+                    if result.get("adopted_items") else [])
                  + ([] if ok else ["Verification mismatch: paths after rollback"]),
         ) is None:
             return _rollback_conflict(operation_id)

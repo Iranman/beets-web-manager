@@ -839,12 +839,15 @@ class BeetsAdapter:
         artpath: str,
         restore_artpath: str,
         idempotency_key: Optional[str] = None,
+        art_evidence: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
-        """Move a relocated album's files (``[{id, path, restore_path}]``)
-        and cover back through Beets (plugin 1.14.0). Refused, changing
-        nothing, when the album changed since or a restore path is taken."""
+        """Move a relocated album's files (``[{id, path, restore_path,
+        evidence}]``) and cover back through Beets (plugin 1.14.0). Refused,
+        changing nothing, when the album changed since or a restore path is
+        taken. ``evidence`` ([size, mtime] recorded at apply) lets Beets adopt
+        a file a crash left at its restore path without its row."""
         payload = {"album_id": int(album_id), "items": items, "artpath": str(artpath or ""),
-                   "restore_artpath": str(restore_artpath or "")}
+                   "restore_artpath": str(restore_artpath or ""), "art_evidence": art_evidence}
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/album-relocation/rollback", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
