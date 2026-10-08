@@ -20,6 +20,13 @@ APP_SOURCE = app_family_source()
 HELPERS_SOURCE = (ROOT / "helpers_mb.py").read_text(encoding="utf-8")
 
 
+def _answer(hits):
+    """A real AcoustID answer for synthetic hits (the lookup seam is typed)."""
+    from backend.provider_boundary import ProviderOutcome, ProviderResult
+    hits = list(hits or [])
+    return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if hits else ProviderOutcome.NO_RESULT, data=hits)
+
+
 def load_symbols(names, namespace):
     wanted = set(names)
     tree = get_app_ast()
@@ -52,7 +59,7 @@ class SharedAudioIdentityDecisionTests(unittest.TestCase):
             "_s": lambda value: value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or ""),
             "_playlist_title_score": score,
             "_playlist_artist_name_score": score,
-            "_acoustid_lookup_cached": lookup or (lambda path: []),
+            "_acoustid_lookup_cached_outcome": lambda path: _answer((lookup or (lambda _p: []))(path)),
             "verify_audio_against_request": verify_audio_against_request,
             "_canonical_similarity": canonical_similarity,
             "recording_review": recording_review,

@@ -552,6 +552,10 @@ class AcquisitionQueueIdentityTests(unittest.TestCase):
 
 # -- routes during a MusicBrainz outage (QA F-1/F-2), boundary follow-ups (F-3, sec F1) --
 
+def _aid(outcome, hits=()):
+    return pb.ProviderResult("acoustid", outcome, data=list(hits))
+
+
 def _patch_all(target, **attrs):
     return mock.patch.multiple(target, **attrs)
 
@@ -594,13 +598,34 @@ class MusicBrainzOutageRouteTests(_RouteCase):
                         _build_folder_evidence=mock.Mock(return_value=evidence),
                         _resolve_import_review_source_path=mock.Mock(return_value=(Path(tmp.name), None)),
                         _acoustid_multi_file=mock.Mock(return_value={}),
-                        _acoustid_lookup_cached=mock.Mock(return_value=[]),
+                        _acoustid_lookup_cached_outcome=mock.Mock(return_value=_aid(pb.ProviderOutcome.NO_RESULT)),
                         _discogs_release_fallback_candidate=mock.Mock(return_value={})):
             res = self.client.post("/api/folders/ai-suggest", json={"path": tmp.name})
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
         self.assertTrue(body["musicbrainz_unavailable"])
         self.assertTrue(body["suggestion"]["reason"].startswith("MusicBrainz lookup failed"))
+        self.assertFalse(body["acoustid_unavailable"])  # no audio files: nothing to ask
+
+    def test_folder_ai_suggest_flags_acoustid_not_configured(self):
+        """#252 NF-2: the folder route says AcoustID was not asked, not "no fingerprint"."""
+        import backend.ai_service as ai_service
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        evidence = {"audio_files": [str(Path(tmp.name) / "01.flac")], "folder_track_count": 1,
+                    "nested_audio_count": 0, "guessed_artist": "Artist", "guessed_album": "Album",
+                    "guessed_year": "", "track_lines": [], "filenames": []}
+        with _patch_all(ai_service, _ai_api_key=mock.Mock(return_value=""),
+                        _build_folder_evidence=mock.Mock(return_value=evidence),
+                        _resolve_import_review_source_path=mock.Mock(return_value=(Path(tmp.name), None)),
+                        _acoustid_multi_file=mock.Mock(return_value={}),
+                        _acoustid_lookup_cached_outcome=mock.Mock(
+                            return_value=_aid(pb.ProviderOutcome.NOT_CONFIGURED)),
+                        _discogs_release_fallback_candidate=mock.Mock(return_value={})):
+            body = self.client.post("/api/folders/ai-suggest", json={"path": tmp.name}).get_json()
+        self.assertTrue(body["acoustid_unavailable"])
+        self.assertEqual(body["acoustid_status"], "not_configured")
+        self.assertEqual(body["acoustid_candidates"], [])
 
     def test_track_ai_suggest_keeps_acoustid_evidence(self):
         import routes_library
@@ -613,7 +638,8 @@ class MusicBrainzOutageRouteTests(_RouteCase):
                      "year": "2001", "score": 97, "source": "acoustid", "country": ""}]
         with _patch_all(routes_library, lib=lib, _ai_api_key=mock.Mock(return_value=""),
                         _item_ai_abs_path=mock.Mock(return_value="/music/a/song.flac"),
-                        _acoustid_lookup_cached=mock.Mock(return_value=acoustid),
+                        _acoustid_lookup_cached_outcome=mock.Mock(
+                            return_value=_aid(pb.ProviderOutcome.CONFIRMED, acoustid)),
                         _discogs_track_search=mock.Mock(return_value=[])):
             res = self.client.post("/api/items/1/ai-suggest", json={})
         body = res.get_json()
@@ -621,6 +647,27 @@ class MusicBrainzOutageRouteTests(_RouteCase):
         self.assertTrue(body["musicbrainz_unavailable"])
         self.assertEqual(body["acoustid_candidates"], acoustid)
         self.assertIn(REL, [c.get("mb_trackid") for c in body["mb_candidates"]])
+        self.assertFalse(body["acoustid_unavailable"])
+
+    def test_track_ai_suggest_flags_acoustid_not_checked(self):
+        """#252 NF-2: a rejected key / missing key / outage is flagged, not "no candidates"."""
+        import routes_library
+        lib = mock.Mock()
+        lib.get_item.return_value = mock.Mock(
+            title="Song", artist="Artist", album="Album", albumartist="Artist", year=2001, track=1,
+            path=b"/music/a/song.flac", length=200.0, genre="", label="", mb_trackid="", mb_albumid="",
+            mb_releasegroupid="")
+        for outcome, status in ((pb.ProviderOutcome.AUTHENTICATION_ERROR, "auth_failed"),
+                                (pb.ProviderOutcome.NOT_CONFIGURED, "not_configured"),
+                                (pb.ProviderOutcome.UNAVAILABLE, "lookup_failed")):
+            with self.subTest(status=status),                     _patch_all(routes_library, lib=lib, _ai_api_key=mock.Mock(return_value=""),
+                               _item_ai_abs_path=mock.Mock(return_value="/music/a/song.flac"),
+                               _acoustid_lookup_cached_outcome=mock.Mock(return_value=_aid(outcome)),
+                               _discogs_track_search=mock.Mock(return_value=[])):
+                body = self.client.post("/api/items/1/ai-suggest", json={}).get_json()
+                self.assertTrue(body["ok"], body)
+                self.assertTrue(body["acoustid_unavailable"])
+                self.assertEqual(body["acoustid_status"], status)
 
     def test_playlist_suggestions_keep_beets_suggestions(self):
         import routes_playlist
