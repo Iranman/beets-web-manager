@@ -472,6 +472,11 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             if rg_resolved:
                 return _accept_from_release_group(resolved, rg_resolved)
             log.append(f"  WARN: {resolved} did not resolve to a release with tracks")
+        # The free search below may pick any Release Group: it runs only when
+        # no MusicBrainz ID was provided.
+        log.append("  REFUSED: the provided MusicBrainz ID could not be resolved inside its own "
+                   "release group; Manual Review is required.")
+        return ""
 
     log.append("  Searching MusicBrainz for a release ID…")
     album_only_pool_loaded = False
