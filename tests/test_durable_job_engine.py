@@ -9,9 +9,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import job_engine
 from job_engine import JobStore, TERMINAL_STATUSES
+from tests._job_store_cleanup import close_job_stores_at_cleanup
 
 
 def _wait(job, timeout=5.0):
@@ -24,6 +26,7 @@ class DurableJobStoreTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        close_job_stores_at_cleanup(self)
         self.dir = Path(self._tmp.name) / "jobs"
 
     def _record(self, jid):
@@ -153,6 +156,54 @@ class DurableJobStoreTests(unittest.TestCase):
         _wait(job)
         store.clear_finished()
         self.assertFalse((self.dir / f"{job.job_id}.json").exists())
+
+    def test_close_waits_for_the_final_write_and_stops_the_heartbeat(self):
+        # #286: the in-memory status flips before the final write lands, so a
+        # caller removing the directory must close() the store first.
+        real_write = JobStore._write
+
+        def slow_final_write(store, job):
+            if job.finished_at is not None:
+                time.sleep(0.2)
+            real_write(store, job)
+
+        with mock.patch.object(JobStore, "_write", slow_final_write):
+            store = JobStore(self.dir)
+            job = store.start_python(lambda log: None)
+            _wait(job)
+            self.assertTrue(store.close())
+        self.assertEqual(self._record(job.job_id)["status"], "success")
+        self.assertFalse(store._heartbeat.is_alive())
+        self.assertEqual(list(self.dir.glob(".*.tmp")), [])
+
+    def test_a_job_dropped_before_its_final_write_stays_deleted_and_is_joined(self):
+        # #309 QA: clear/prune can drop a finished job while its thread's final
+        # write is still in flight. close() must still join that thread, and
+        # the write must not bring the deleted record back.
+        real_write = JobStore._write
+
+        def slow_final_write(store, job):
+            if job.finished_at is not None:
+                time.sleep(0.3)
+            real_write(store, job)
+
+        drops = {
+            "clear": lambda store: store.clear_finished(),
+            "prune": lambda store: store.prune_finished(max_age_seconds=1, metadata_max_age_seconds=1),
+        }
+        for name, drop in drops.items():
+            with self.subTest(name), mock.patch.object(JobStore, "_write", slow_final_write):
+                store = JobStore(self.dir)
+                job = store.start_python(lambda log: None)
+                _wait(job)
+                job.finished_at -= 60  # old enough to prune; its final write is still pending
+                drop(store)
+                self.assertIsNone(store.get(job.job_id))
+                self.assertTrue(job._thread.is_alive())  # the race window is open
+                self.assertTrue(store.close())
+                self.assertFalse(job._thread.is_alive())
+                self.assertFalse((self.dir / f"{job.job_id}.json").exists())
+                self.assertIsNone(JobStore(self.dir).get(job.job_id))  # not back after a restart
 
     def test_heartbeat_refreshes_running_jobs(self):
         original = job_engine.HEARTBEAT_SECONDS
