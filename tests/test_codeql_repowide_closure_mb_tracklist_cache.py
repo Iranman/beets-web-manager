@@ -84,9 +84,13 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
             mbid = "11111111-2222-3333-4444-555555555555"
             with patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_CACHE_DIR", cache_dir), \
                  patch_app_family(app_module, "_MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", 604800):
-                app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"]})
+                app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"], "release_artist": "X"})
                 cached = app_module._mb_release_tracklist_read_disk(mbid, __import__("time").time())
-        self.assertEqual(cached, {"tracks": ["a"]})
+                app_module._mb_release_tracklist_write_disk(mbid, {"tracks": ["a"]})
+                stale = app_module._mb_release_tracklist_read_disk(mbid, __import__("time").time())
+        self.assertEqual(cached, {"tracks": ["a"], "release_artist": "X"})
+        # Pre-artist-credits entries are refetched, not served.
+        self.assertIsNone(stale)
 
 
 if __name__ == "__main__":

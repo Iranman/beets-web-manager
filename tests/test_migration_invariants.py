@@ -49,7 +49,7 @@ class MigrationInvariantsTests(unittest.TestCase):
         from beetsplug.webmanager import PLUGIN_VERSION as INIT_PV, PROTOCOL_VERSION as INIT_PROT
         from beetsplug.webmanager.operations import PLUGIN_VERSION as OP_PV, PROTOCOL_VERSION as OP_PROT
 
-        self.assertEqual(PLUGIN_VERSION, "1.7.0")
+        self.assertEqual(PLUGIN_VERSION, "1.8.1")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
         self.assertEqual(INIT_PV, PLUGIN_VERSION)
         self.assertEqual(INIT_PROT, PROTOCOL_VERSION)

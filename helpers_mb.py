@@ -87,16 +87,6 @@ def _mb_release_track_for_recording(release: Dict[str, Any], mb_trackid: str) ->
     return {}, {}
 
 
-def _mb_first_label(release: Dict[str, Any]) -> str:
-    for entry in release.get("label-info") or []:
-        if not isinstance(entry, dict):
-            continue
-        label = _mb_text((entry.get("label") or {}).get("name"))
-        if label:
-            return label
-    return ""
-
-
 def _compact_mb_recording_release(release: Dict[str, Any], mb_trackid: str) -> Dict[str, Any]:
     release_id = _mb_text(release.get("id"))
     release_group = release.get("release-group") or {}
@@ -120,7 +110,6 @@ def _compact_mb_recording_release(release: Dict[str, Any], mb_trackid: str) -> D
         "year": date[:4] if date[:4].isdigit() else "",
         "country": _mb_text(release.get("country")),
         "status": _mb_text(release.get("status")),
-        "label": _mb_first_label(release),
         "mb_releasegroupid": release_group_id,
         "mb_releasegroupurl": f"https://musicbrainz.org/release-group/{release_group_id}" if release_group_id else "",
         "release_group_primary_type": _mb_text(release_group.get("primary-type")),
@@ -147,7 +136,7 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
     only valid album context.
     """
     url = (f"https://musicbrainz.org/ws/2/recording/{mb_trackid}"
-           "?inc=releases+release-groups+artist-credits+media+genres+label-info&fmt=json")
+           "?inc=releases+release-groups+artist-credits+media+genres&fmt=json")
     req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
     try:
         with provider_boundary.opened("musicbrainz", req, timeout=10) as r:
@@ -230,7 +219,6 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
     result["year"] = best.get("year", "")
     result["date"] = best.get("date", "")
     result["country"] = best.get("country", "")
-    result["label"] = best.get("label", "") or result.get("label", "")
     result["mb_releasegroupid"] = best.get("mb_releasegroupid", "")
     result["mb_releasegroupurl"] = best.get("mb_releasegroupurl", "")
     result["release_group_primary_type"] = best.get("release_group_primary_type", "")
@@ -534,7 +522,7 @@ def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         url = (f"https://musicbrainz.org/ws/2/release/{mb_id}"
-               "?inc=artist-credits+media+label-info+release-groups&fmt=json")
+               "?inc=artist-credits+media+labels+release-groups&fmt=json")
         req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
         with provider_boundary.opened("musicbrainz", req, timeout=15) as r:
             rel = json.loads(r.read())

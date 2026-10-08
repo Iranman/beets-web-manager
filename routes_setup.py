@@ -2752,6 +2752,30 @@ def _beets_setup_warnings(
             "message": str(compat.get("message") or "Restart the Beets container to load the provisioned webmanager plugin."),
         })
 
+    from backend.beets_plugins import refused_config_pluginpath, refused_config_plugins
+    refused = refused_config_plugins()
+    if refused:
+        warnings.append({
+            "id": "beets_config_plugins_not_added",
+            "severity": "warning",
+            "message": (
+                "Web Manager did not edit the Beets config.yaml: it could not prove the edit would keep "
+                f"valid YAML and every listed plugin. Add {', '.join(refused)} to `plugins:` in config.yaml "
+                "manually, then restart the Beets container."
+            ),
+        })
+    refused_paths = refused_config_pluginpath()
+    if refused_paths:
+        warnings.append({
+            "id": "beets_config_pluginpath_not_added",
+            "severity": "warning",
+            "message": (
+                "Web Manager did not edit the Beets config.yaml, so Beets cannot load the webmanager plugin. "
+                f"Add {', '.join(refused_paths)} to `pluginpath:` in config.yaml manually, then restart "
+                "the Beets container."
+            ),
+        })
+
     library = diagnostics.get("beets_library") if isinstance(diagnostics.get("beets_library"), dict) else {}
 
     if library.get("web_include_paths") is False:
@@ -4086,6 +4110,11 @@ def plugins_provision():
     except ConfigPathError as exc:
         return jsonify({"ok": False, "all_required_healthy": False, "error": CONFIG_PATH_ERROR_MESSAGE}), exc.status_code
     except Exception as exc:
+        from backend.beets_plugins import BeetsConfigEditError
+        if isinstance(exc, BeetsConfigEditError):
+            # Refused edit: config.yaml untouched; the setup warning says what to add.
+            _invalidate_setup_status_cache()
+            return _beets_config_edit_error(exc, "plugins_provision")
         app.logger.error("plugins_provision failed: %s", exc, exc_info=True)
         return jsonify({
             "ok": False,

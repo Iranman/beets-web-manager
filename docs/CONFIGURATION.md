@@ -194,9 +194,11 @@ First-run setup (`POST /api/setup/first-run`) creates the administrator credenti
 
 Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when the app detects HTTPS. `remember=false` produces a browser-session cookie (cleared on browser close); `remember=true` produces a persistent cookie with a `BEETS_WEB_SESSION_HOURS`-hour lifetime (default 168 = 7 days). State-changing requests (`POST`/`PUT`/`PATCH`/`DELETE`) are additionally checked for same-origin intent (`Origin`/`Referer`/`Sec-Fetch-Site` plus an `X-Beets-CSRF: 1` header) unless an explicit `Authorization: Bearer`/`Basic` header is present, since a script presenting its own credential is not a browser CSRF target.
 
-## MusicBrainz is core, not a plugin
+## MusicBrainz is a Beets plugin (Beets 2.4 and later)
 
-MusicBrainz autotagging is built into Beets itself -- there is no `musicbrainz` entry in a `plugins:` list to enable or disable, unlike `fetchart`, `mbsync`, `discogs`, etc. `/api/setup/status`'s `integrations.musicbrainz` therefore reports Beets-engine/plugin-loader health (`connected` / `unavailable` / `plugin_loader_failed`), never plugin membership, and every integration entry carries a `category` field (`service` for MusicBrainz/AcoustID/AI/Plex/Lidarr/SLSKD, `beets_plugin` for togglable Beets plugins) so the UI can render them as distinct groups. MusicBrainz lookups, matching, and review never depend on any AI provider credential being configured.
+Since Beets 2.4, MusicBrainz autotagging is the `musicbrainz` plugin and must be listed in `plugins:`. Without it the importer finds no candidates, so every quiet import skips its albums ("not matched; left in place for review"). Web Manager's startup provisioning adds `musicbrainz` to an existing `plugins:` entry, next to `web` and `webmanager`. It keeps every plugin already listed, whether written inline (`plugins: a b`), as a flow list (`[a, b]`) or as a block list, and backs up `config.yaml` first. Fresh installs get it from `config.yaml.example`. On Beets older than 2.4, where MusicBrainz is built in, the extra entry only logs `plugin musicbrainz not found`.
+
+The plugin report (`/api/plugins/status`) shows `musicbrainz` as enabled and loaded only when Beets really lists and loads it. `/api/setup/status`'s `integrations.musicbrainz` still reports Beets-engine/plugin-loader health (`connected` / `unavailable` / `plugin_loader_failed`), and every integration entry carries a `category` field (`service` for MusicBrainz/AcoustID/AI/Plex/Lidarr/SLSKD, `beets_plugin` for togglable Beets plugins) so the UI can render them as distinct groups. MusicBrainz lookups, matching, and review never depend on any AI provider credential being configured.
 
 ## Submission and fingerprinting terms
 
