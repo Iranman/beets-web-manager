@@ -2746,8 +2746,6 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     reason, log, allow_existing=True)
             raise RuntimeError(reason)
         log.append(f"[import] Beets import completed: {import_folder_path}")
-        if apply_res.get("resumed"):
-            log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")
         # Beets applied the confirmed Release (tags, placement, write) and
         # apply_confirmed_import verified exactly one new album with that
         # mb_albumid and the planned Release Group. Web Manager does not retag

@@ -2430,8 +2430,6 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         err = RuntimeError(msg)
         err.kept_album_ids = kept  # type: ignore[attr-defined]  # read by the batch review queue
         raise err
-    if atomic_res.get("resumed"):
-        log.append("  Resumed an already-verified prior result for this release (native import was not re-invoked).")
 
     # Beets applied the release; apply_confirmed_import verified exactly one
     # new album with that Release ID and Release Group.
