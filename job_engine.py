@@ -328,6 +328,9 @@ class JobStore:
         self.recovered: List[Dict[str, Any]] = []
         self._closed = threading.Event()
         self._heartbeat: Optional[threading.Thread] = None
+        # Every started job thread, also after clear/prune drops its job:
+        # close() must join a thread whose final write is still in flight.
+        self._threads: List[threading.Thread] = []
         if self.root is not None:
             try:
                 self.root.mkdir(parents=True, exist_ok=True)
@@ -345,6 +348,10 @@ class JobStore:
         target = self.root / f"{job.job_id}.json"
         tmp = self.root / f".{job.job_id}.{threading.get_ident()}.tmp"
         with self._write_lock:
+            # A cleared or pruned job is never written back: its thread's
+            # final save can land after the record was deleted (#286).
+            if self._jobs.get(job.job_id) is not job:
+                return
             # Snapshot inside the lock: the last writer always persists the
             # current state (a stale "running" can never land after a finish).
             record = job.to_record()
@@ -361,10 +368,11 @@ class JobStore:
     def _delete(self, jid: str) -> None:
         if self.root is None:
             return
-        try:
-            (self.root / f"{jid}.json").unlink()
-        except OSError:
-            pass
+        with self._write_lock:  # never between a write's check and its replace
+            try:
+                (self.root / f"{jid}.json").unlink()
+            except OSError:
+                pass
 
     def _recover(self) -> None:
         """Load persisted jobs; resolve those this process never finished."""
@@ -376,6 +384,7 @@ class JobStore:
             except Exception:
                 continue
             job._persist = self._write
+            self._jobs[job.job_id] = job
             if rec.get("status") == "running":
                 read_only = is_read_only_job(job.metadata)
                 job._terminal = "failed" if read_only else "recovery_required"
@@ -393,7 +402,6 @@ class JobStore:
                 self._write(job)
                 self.recovered.append({"job_id": job.job_id, "status": job._terminal,
                                        "type": job.metadata.get("type")})
-            self._jobs[job.job_id] = job
 
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(HEARTBEAT_SECONDS):
@@ -434,6 +442,8 @@ class JobStore:
             thread = threading.Thread(target=job._run, daemon=True)
             thread.start()
             job._thread = thread  # only a started thread can be joined by close()
+            with self._lock:
+                self._threads = [t for t in self._threads if t.is_alive()] + [thread]
         except BaseException as exc:
             # #229: a job whose thread never started must not show as running.
             job.returncode = 1
@@ -449,7 +459,8 @@ class JobStore:
         not cancelled. True when no store thread is still alive."""
         self._closed.set()
         deadline = time.monotonic() + timeout
-        threads = [self._heartbeat] + [job._thread for job in self.all()]
+        with self._lock:
+            threads = [self._heartbeat] + list(self._threads)
         for thread in threads:
             if thread is not None and thread is not threading.current_thread():
                 thread.join(max(0.0, deadline - time.monotonic()))
