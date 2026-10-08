@@ -179,8 +179,12 @@ def _config_secret_segments(text: str) -> List[Tuple[Any, str, str, str, str]]:
     cont holds any following deeper-indented lines (a multi-line or
     block-scalar value), which belong to the secret too.
 
-    Same no-regex, single-pass design as before: one indentation stack,
-    lstrip/partition per line, each line visited once, so O(len(text))."""
+    Config text is untrusted, so the scan stays linear: no regex, list-item
+    dashes are walked by index (no per-item copy of the line), each line is
+    read at most twice (once more only for blank lines after a secret's
+    continuation), and a path is built only for a secret line whose stack
+    depth is bounded by its own indentation. O(len(text)) overall
+    (regression test: test_pathological_dash_runs_stay_linear)."""
     segs: List[Tuple[Any, str, str, str, str]] = []
     stack: List[List[Any]] = []  # [column, key-or-list-index, is_list_item]
     lines = text.splitlines(keepends=True)
@@ -197,16 +201,20 @@ def _config_secret_segments(text: str) -> List[Tuple[Any, str, str, str, str]]:
         if not rest or rest.startswith(("#", "---", "...")):
             segs.append((None, line, "", "", ""))
             continue
-        while rest[:1] == "-" and rest[1:2] in (" ", ""):  # "- " list item(s)
+        p, m = 0, len(rest)
+        while rest[p:p + 1] == "-" and rest[p + 1:p + 2] in (" ", ""):  # "- " list item(s)
             while stack and stack[-1][0] > col:
                 stack.pop()
             idx = 0
             if stack and stack[-1][0] == col and stack[-1][2]:
                 idx = stack.pop()[1] + 1
             stack.append([col, idx, True])
-            nxt = rest[1:].lstrip(" ")
-            col += len(rest) - len(nxt)
-            rest = nxt
+            q = p + 1
+            while q < m and rest[q] == " ":  # index walk, no per-item copy: O(len(line))
+                q += 1
+            col += q - p
+            p = q
+        rest = rest[p:]
         key_part, sep, value = rest.partition(":")
         if not sep or (value and value[0] not in " \t"):
             segs.append((None, line, "", "", ""))
@@ -267,8 +275,13 @@ def _restore_redacted_config_secrets(submitted: str, stored: str) -> str:
     unchanged [REDACTED] placeholder. Lines are matched by full section path
     (plex.token and listenbrainz.token never swap). Refuses, never guesses,
     when a placeholder maps to zero or several stored values, or when the
-    placeholder appears anywhere else in a secret value. Callers pass the
-    snapshot the revision check ran against (config_manager.save_config)."""
+    placeholder appears anywhere else in a secret value. Paths come from the
+    line scanner, not a YAML parser: a placeholder line moved to a different
+    key path is refused, but one pasted inside another key's block scalar
+    at a path that still resolves to the same stored secret is restored
+    there (accepted in security review of #320: admin-only, the value stays
+    in the same file). Callers pass the snapshot the revision check ran
+    against (config_manager.save_config)."""
     if _REDACTED_SECRET not in submitted:
         return submitted
     stored_values: Dict[Tuple[Any, ...], List[Tuple[str, str]]] = {}

@@ -2596,10 +2596,10 @@
    "module": "backend/config_service.py",
    "lines": [
     172,
-    234
+    242
    ],
-   "size": 63,
-   "body_lines": 51,
+   "size": 71,
+   "body_lines": 55,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2618,8 +2618,8 @@
    "name": "_is_empty_config_value",
    "module": "backend/config_service.py",
    "lines": [
-    237,
-    239
+    245,
+    247
    ],
    "size": 3,
    "body_lines": 2,
@@ -2639,8 +2639,8 @@
    "name": "_redact_config_content",
    "module": "backend/config_service.py",
    "lines": [
-    245,
-    258
+    253,
+    266
    ],
    "size": 14,
    "body_lines": 9,
@@ -2662,8 +2662,8 @@
    "name": "_config_path_label",
    "module": "backend/config_service.py",
    "lines": [
-    261,
-    262
+    269,
+    270
    ],
    "size": 2,
    "body_lines": 1,
@@ -2682,10 +2682,10 @@
    "name": "_restore_redacted_config_secrets",
    "module": "backend/config_service.py",
    "lines": [
-    265,
-    307
+    273,
+    320
    ],
-   "size": 43,
+   "size": 48,
    "body_lines": 36,
    "route": null,
    "mutation_capable": false,
@@ -2705,8 +2705,8 @@
    "name": "_plugin_installed_map",
    "module": "backend/config_service.py",
    "lines": [
-    320,
-    325
+    333,
+    338
    ],
    "size": 6,
    "body_lines": 5,
@@ -2725,8 +2725,8 @@
    "name": "_plugin_status_payload",
    "module": "backend/config_service.py",
    "lines": [
-    328,
-    348
+    341,
+    361
    ],
    "size": 21,
    "body_lines": 20,

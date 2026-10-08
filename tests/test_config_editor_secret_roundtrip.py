@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 import unittest
 from functools import partial
 from pathlib import Path
@@ -141,11 +142,25 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
         with self.assertRaises(ConfigSecretMergeError):
             self._save(STORED, lambda s: s.replace("plex:\n", f'plex:\n    token: "{R}"\n', 1))
 
-    def test_placeholder_moved_to_another_section_is_refused(self):
+    def test_placeholder_under_a_key_path_with_no_stored_secret_is_refused(self):
+        # Covers a key-path change only. A placeholder pasted inside another
+        # key's block scalar that the line scanner maps to the same path as
+        # a stored secret is restored, not refused (accepted in review of #320).
         with self.assertRaises(ConfigSecretMergeError) as ctx:
             self._save(STORED, lambda s: s + f'lastfm:\n    token: "{R}"\n')
         self.assertIn("lastfm.token", str(ctx.exception))
         self.assertNotIn("SECRET", str(ctx.exception))
+
+    def test_pathological_dash_runs_stay_linear(self):
+        # Security review of #320 (F1): one "- " per list level used to copy
+        # the rest of the line, O(k*L) per GET on a saved block scalar.
+        text = "note: |\n  " + "- " * 262144 + "x\n"  # 512 KB, valid YAML
+        start = time.perf_counter()
+        self.assertEqual(_redact_config_content(text), text)
+        self.assertLess(time.perf_counter() - start, 1.0)
+        start = time.perf_counter()
+        _restore_redacted_config_secrets(f'token: "{R}"\n' + text, "token: abc\n" + text)
+        self.assertLess(time.perf_counter() - start, 1.0)
 
     @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_save_keeps_private_mode_of_config_with_secrets(self):
