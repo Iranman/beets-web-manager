@@ -219,6 +219,16 @@ def _audio_position_from_path(path: str) -> tuple:
     return max(int(disc or 1), 1), max(int(track or 0), 0)
 
 
+def _is_configured_root(path: Path) -> bool:
+    """True when ``path`` is the music library, the downloads mount, a staging
+    root or a configured download mount (playlist, torrent, qBittorrent)."""
+    from backend.app_runtime import PLAYLIST_DOWNLOAD_ROOT, QBIT_REPAIR_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS
+    roots = (MUSIC_ROOT, DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT, *TORRENT_SOURCE_ROOTS,
+             *QBIT_REPAIR_ALLOWED_ROOTS, *composite_workflows._get_staging_roots())
+    here = os.path.realpath(str(path))
+    return any(here == os.path.realpath(str(root)) for root in roots)
+
+
 def _folder_release_preflight(folder_path: str, mb_albumid: str,
                               existing_album_id: int = 0,
                               log: Optional[list] = None) -> Dict[str, Any]:
@@ -267,7 +277,9 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         return result
 
     source = Path(folder_path)
-    folder_artist = _artist_folder_name_without_mbid(
+    # A source directly under a configured root ("/downloads/<album>") has no
+    # artist folder: the root's own name is not artist evidence (#299 F1).
+    folder_artist = "" if _is_configured_root(source.parent) else _artist_folder_name_without_mbid(
         source.parent.name if source.parent else ""
     )
     result["folder_artist"] = folder_artist

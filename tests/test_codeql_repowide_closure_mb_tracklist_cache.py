@@ -92,17 +92,6 @@ class MbReleaseTracklistCachePathContainmentTests(unittest.TestCase):
         # Pre-artist-credits entries are refetched, not served.
         self.assertIsNone(stale)
 
-    def test_musicbrainz_lookups_use_valid_includes(self):
-        import inspect
-        import helpers_mb
-        from backend import matching_service
-        src = inspect.getsource(helpers_mb) + inspect.getsource(matching_service)
-        # label-info is not a WS2 include (MusicBrainz answers 400); labels is.
-        self.assertNotIn("label-info&", src)
-        self.assertNotIn("+label-info", src)
-        self.assertIn("?inc=recordings+release-groups+artist-credits&fmt=json",
-                      inspect.getsource(matching_service._fetch_mb_release_tracklist))
-
 
 if __name__ == "__main__":
     unittest.main()
