@@ -18,6 +18,8 @@ from .schemas import (
     resolve_safe_descendant,
     is_strict_descendant,
     validate_fields,
+    beets_native_fields,
+    unsupported_fields,
     ALLOWED_DUPLICATE_ACTIONS,
     DEFAULT_ALLOWED_ROOTS,
     DEFAULT_IMPORT_ROOTS,
@@ -840,8 +842,10 @@ def run_modify():
     lib = g.lib
     try:
         with mutation_lock:
-            item_fields = validate_fields(raw_fields, is_album=False)
-            album_fields = validate_fields(raw_fields, is_album=True)
+            from beets.library import Album, Item
+
+            item_fields = beets_native_fields(Item, validate_fields(raw_fields, is_album=False))
+            album_fields = beets_native_fields(Album, validate_fields(raw_fields, is_album=True))
 
             if not item_fields and not album_fields:
                 return jsonify({
@@ -862,22 +866,6 @@ def run_modify():
             elif query and not album_ids:
                 items_to_modify.extend(lib.items(query))
 
-            for item in items_to_modify:
-                if item_fields:
-                    item.update(item_fields)
-                    item.store()
-                    if write:
-                        try:
-                            item.try_write()
-                        except Exception as e:
-                            log.warning("Failed to write tags to %s: %s", item.path, e)
-                    if move:
-                        try:
-                            item.move()
-                        except Exception as e:
-                            log.warning("Failed to move item %s: %s", item.path, e)
-                    modified_items += 1
-
             # Process Albums
             albums_to_modify = []
             if album_ids:
@@ -888,16 +876,63 @@ def run_modify():
             elif query and album_ids:
                 albums_to_modify.extend(lib.albums(query))
 
+            # Refuse, before writing anything, a field this Beets cannot store:
+            # it would be saved as an unused flexible attribute and reported
+            # as written although no file tag or $field changed.
+            unsupported = sorted(set(
+                (unsupported_fields(Item, item_fields) if items_to_modify else [])
+                + (unsupported_fields(Album, album_fields) if albums_to_modify else [])))
+            if unsupported:
+                return jsonify({
+                    "error": "This Beets version has no field for: " + ", ".join(unsupported),
+                    "error_code": "UNSUPPORTED_FIELDS",
+                    "fields": unsupported,
+                }), 400
+
+            write_failed: List[int] = []
+
+            def _write(it):
+                try:
+                    ok = it.try_write()  # Beets logs and returns False on FileOperationError
+                except Exception as e:
+                    log.warning("Failed to write tags to %s: %s", it.path, e)
+                    ok = False
+                if ok is False:
+                    write_failed.append(it.id)
+
+            for item in items_to_modify:
+                if item_fields:
+                    item.update(item_fields)
+                    item.store()
+                    if write:
+                        _write(item)
+                    if move:
+                        try:
+                            item.move()
+                        except Exception as e:
+                            log.warning("Failed to move item %s: %s", item.path, e)
+                    modified_items += 1
+
             for alb in albums_to_modify:
                 if album_fields:
                     alb.update(album_fields)
-                    alb.store()
+                    alb.store()  # inherits the fields onto the album's items
+                    if write:  # like `beet modify -a`: write the items' tags
+                        for it in alb.items():
+                            _write(it)
                     if move:
                         try:
                             alb.move()
                         except Exception as e:
                             log.warning("Failed to move album %s: %s", alb.id, e)
                     modified_albums += 1
+
+            if write_failed:
+                return jsonify({
+                    "error": "Beets saved the change but could not write the file tags",
+                    "error_code": "WRITE_FAILED",
+                    "item_ids": write_failed,
+                }), 500
 
             return jsonify(
                 {

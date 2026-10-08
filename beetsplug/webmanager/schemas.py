@@ -170,6 +170,50 @@ def is_strict_descendant(target_path: str, allowed_roots: List[str]) -> bool:
     return resolve_safe_descendant(target_path, allowed_roots) is not None
 
 
+# Fields Beets itself keeps as flexible attributes (no fixed column, no tag).
+BEETS_FLEX_FIELDS: Set[str] = {"data_source"}
+
+_GENRE_SEPARATORS = ("; ", ", ", " / ")
+
+
+def _split_genres(value) -> list:
+    """Split a legacy genre string the way Beets' own genre migration does:
+    on the lastgenre separator if one is configured, else "; ", ", ", " / "."""
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value or "").strip()
+    separators = []
+    try:
+        from beets import config as beets_config
+        separators.append(beets_config["lastgenre"]["separator"].as_str())
+    except Exception:
+        pass
+    for sep in [*separators, *_GENRE_SEPARATORS]:
+        if sep and sep in text:
+            return [p.strip() for p in text.split(sep) if p.strip()]
+    return [text] if text else []
+
+
+def beets_native_fields(model_cls, fields: dict) -> dict:
+    """Beets 2.13+ replaced the ``genre`` string with the multi-valued
+    ``genres`` field; there ``genre`` would only become an unused flexible
+    attribute. Map it to ``genres``. Older Beets keeps ``genre``."""
+    model_fields = getattr(model_cls, "_fields", {})
+    if "genre" not in fields or "genre" in model_fields or "genres" not in model_fields:
+        return fields
+    out = dict(fields)
+    value = out.pop("genre")
+    out.setdefault("genres", _split_genres(value))
+    return out
+
+
+def unsupported_fields(model_cls, fields: dict) -> list:
+    """Requested fields this Beets has no fixed field for: they would land as
+    flexible attributes that no file tag or ``$field`` reads."""
+    model_fields = getattr(model_cls, "_fields", {})
+    return sorted(k for k in fields if k not in model_fields and k not in BEETS_FLEX_FIELDS)
+
+
 def validate_fields(fields: dict, is_album: bool = False) -> dict:
     """Filter dictionary of fields against allowlist and return safe fields."""
     if not isinstance(fields, dict):
