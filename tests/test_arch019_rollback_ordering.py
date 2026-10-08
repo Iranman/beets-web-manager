@@ -22,6 +22,7 @@ import app as app_module
 import routes_maintenance
 from backend.transaction_engine import TransactionStore
 from job_engine import JobStore
+from tests._job_store_cleanup import close_job_stores_at_cleanup
 
 
 def _rollback_tx(store):
@@ -36,6 +37,7 @@ class RollbackOrderingTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        close_job_stores_at_cleanup(self)
         self.store = TransactionStore(str(Path(self._tmp.name) / "tx"))
         for p in (mock.patch.object(routes_maintenance, "transactions", self.store),
                   mock.patch.object(routes_maintenance, "_run_item_metadata_restore", return_value=True),

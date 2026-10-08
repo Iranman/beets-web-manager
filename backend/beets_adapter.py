@@ -223,6 +223,19 @@ def _parse_query_term(term: str, target: str) -> "_ParsedQuery":
     return _ParsedQuery(target=target, field=None, value=q_str, operator="contains")
 
 
+def _with_legacy_genre(row: Any) -> Any:
+    """Beets 2.13+ stores genres in the multi-valued ``genres`` field; Web
+    Manager reads and edits ``genre``. Derive it from ``genres`` (which wins
+    over a stale ``genre`` flexible attribute); older Beets rows are unchanged."""
+    if isinstance(row, dict):
+        genres = row.get("genres")
+        if isinstance(genres, list):
+            row["genre"] = "; ".join(str(g) for g in genres if str(g).strip())
+        for nested in row["items"] if isinstance(row.get("items"), list) else []:
+            _with_legacy_genre(nested)
+    return row
+
+
 class BeetsAdapter:
     """Client for Stock Beets Web & WebManager Plugin APIs."""
 
@@ -482,14 +495,14 @@ class BeetsAdapter:
         path = self._build_query_path("item", query)
         res = self._request("GET", path)
         if isinstance(res, dict):
-            return res.get("items") or res.get("results") or []
+            return [_with_legacy_genre(r) for r in res.get("items") or res.get("results") or []]
         return []
 
     def get_item(self, item_id: int) -> Optional[Dict[str, Any]]:
         """Fetch single item by ID from GET /item/<id>."""
         try:
             res = self._request("GET", f"/item/{int(item_id)}")
-            return res if isinstance(res, dict) else None
+            return _with_legacy_genre(res) if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
 
@@ -498,7 +511,7 @@ class BeetsAdapter:
         path = self._build_query_path("album", query)
         res = self._request("GET", path)
         if isinstance(res, dict):
-            return res.get("albums") or res.get("results") or []
+            return [_with_legacy_genre(r) for r in res.get("albums") or res.get("results") or []]
         return []
 
     def get_album(self, album_id: int, expand: bool = True) -> Optional[Dict[str, Any]]:
@@ -506,7 +519,7 @@ class BeetsAdapter:
         params = {"expand": ""} if expand else None
         try:
             res = self._request("GET", f"/album/{int(album_id)}", params=params)
-            return res if isinstance(res, dict) else None
+            return _with_legacy_genre(res) if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
 

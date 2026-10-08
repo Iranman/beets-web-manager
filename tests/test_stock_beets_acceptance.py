@@ -259,7 +259,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         res = self.client.get(f"/item/{self.item1.id}")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.get_json()["title"], "Sands of Time (Remastered)")
-        self.assertEqual(res.get_json()["genre"], "Chillout")
+        self.assertEqual(res.get_json()["genres"], ["Chillout"])  # Beets 2.13+ field
 
 
 class StockBeetsDockerAcceptanceTests(unittest.TestCase):
@@ -607,7 +607,7 @@ webmanager:
                 req_verify = urllib.request.Request(f"{base_url}/item/{imported_item['id']}")
                 with _raw_urlopen(req_verify, timeout=5) as resp:
                     ver_res = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(ver_res["genre"], "Synthesized Electro")
+                    self.assertEqual(ver_res["genres"], ["Synthesized Electro"])  # Beets 2.13+ field
 
                 # Step 9: quarantine-remove on a real Werkzeug request thread
                 # (library-relative DB paths must resolve to the real file).

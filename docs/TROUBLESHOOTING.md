@@ -87,6 +87,11 @@ This guide covers common errors and resolution steps for Beets Web Manager.
   * Bind mount (a host folder): `sudo chown -R 1001:1001 /path/to/web-manager-data`
   * Named volume: `docker run --rm -v <volume-name>:/d alpine chown -R 1001:1001 /d`
 
+### 12. A tag, genre or MusicBrainz ID edit fails with `WRITE_FAILED`
+* **Cause**: Beets saved the change in its library, but could not write the tags into the music file. Usually the file is not writable by the user the `beets` container runs as (`PUID`:`PGID`). A common reason is files imported as root, for example with `docker exec beets beet import` without `--user abc`. Beets logs the exact error (`error writing ...`) in the `beets` container log.
+* **Effect**: the transaction is marked Failed. The library database already holds the new value, while the file keeps its old tag. A failed tag write cannot be rolled back from the Transactions page yet.
+* **Fix**: make the music files writable by `PUID`:`PGID` (for example `sudo chown -R <PUID>:<PGID> /path/to/music`), then apply the same edit again so Beets rewrites the tag. To undo the edit instead, edit the field back to its old value. When running Beets commands by hand in the container, use `docker exec --user abc beets beet ...`.
+
 ---
 
 ## Operational Diagnostics

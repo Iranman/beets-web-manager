@@ -40,7 +40,9 @@ class FailedResultTests(unittest.TestCase):
 
         def body(log, cancel):
             go.wait(5)
-            return {"ok": False}
+            if cancel.is_set():  # it sees the request and stops (D4: only then is it cancelled)
+                return {"ok": False}
+            return {"ok": True}
         job = JobStore().start_python(body, label="x")
         job.kill()
         go.set()
@@ -101,6 +103,7 @@ class ClearDoneTests(unittest.TestCase):
             _wait(done)
             stuck = store.start_python(lambda log: None, label="stuck")
             _wait(stuck)
+            store.close()  # #286: both jobs' own final writes land before the checks
             stuck._terminal = "recovery_required"
             stuck.save(force=True)
             store.clear_finished()
@@ -134,6 +137,9 @@ class TransactionHookTests(_RouteEnv):
             p.start()
             self.addCleanup(p.stop)
         ts._install_transaction_job_hooks()
+        # Joined before the patches stop, so a job's last transaction update
+        # still lands in self.store (#286).
+        self.addCleanup(store_jobs.close)
         return store_jobs
 
     def test_ok_false_result_fails_the_transaction(self):

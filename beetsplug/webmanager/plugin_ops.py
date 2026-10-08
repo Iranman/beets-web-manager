@@ -17,6 +17,7 @@ real, unmodified lscr.io/linuxserver/beets:latest image.
 """
 
 from typing import Any, Dict, List, Optional
+from .schemas import beets_native_fields
 
 
 class PluginCapabilityError(Exception):
@@ -285,14 +286,17 @@ def run_lastgenre(lib, album_ids: List[int], force: bool = False) -> Dict[str, A
     albums = [a for a in (lib.get_album(int(aid)) for aid in album_ids) if a is not None]
     updated = 0
     for album in albums:
-        if not force and getattr(album, "genre", ""):
+        # Beets 2.13+ keeps genres in the multi-valued ``genres`` field.
+        current = album.get("genres") if "genres" in type(album)._fields else album.get("genre")
+        if not force and current:
             continue
         try:
             genres, source = plugin._get_genre(album)
         except Exception as ex:
             raise PluginIncompatibleError(f"lastgenre plugin call failed: {type(ex).__name__}") from ex
         if genres:
-            album.genre = ", ".join(genres) if isinstance(genres, (list, tuple)) else str(genres)
+            value = ", ".join(genres) if isinstance(genres, (list, tuple)) else str(genres)
+            album.update(beets_native_fields(type(album), {"genre": value}))
             album.store()
             updated += 1
 

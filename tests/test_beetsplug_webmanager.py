@@ -406,7 +406,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         # Verify changes
         refreshed = self.lib.get_item(item.id)
         self.assertEqual(refreshed.title, "New Title")
-        self.assertEqual(refreshed.genre, "Electronic")
+        self.assertEqual(list(refreshed.genres), ["Electronic"])  # Beets 2.13+ field
 
     def test_idempotency_collision_safety(self):
         """Verify duplicate idempotency keys with matching payloads succeed, and differing payloads return 409 Conflict."""
