@@ -2295,7 +2295,9 @@ def rollback_folder_cleanup(
             return err
 
         def _defer(note: str, error: str, mutated: bool = False) -> Dict[str, Any]:
-            back = "Failed" if status == "Running" else str(status)
+            # Running here is the caller's claim from Completed or Failed;
+            # only a completed apply records completed_at.
+            back = ("Completed" if meta.get("completed_at") else "Failed") if status == "Running" else str(status)
             store.transition(operation_id, "Running", back)
             store.append_log(operation_id, f"Rollback deferred: {note}")
             return {**refused, "code": "rollback_deferred", "status": back, "mutated": mutated, "error": error}
