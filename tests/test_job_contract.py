@@ -15,6 +15,7 @@ from pathlib import Path
 import backend.job_contract as jc
 from backend.resource_locks import ResourceLocks, set_locks, validate_key
 from job_engine import JobStore
+from tests._job_store_cleanup import close_job_stores_at_cleanup
 
 
 #: A second OS process that holds a lock until its stdin closes. A plain
@@ -44,6 +45,7 @@ class JobContractTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        close_job_stores_at_cleanup(self)
         self.root = Path(self._tmp.name)
         self.locks = ResourceLocks(self.root / "locks")
         set_locks(self.locks)

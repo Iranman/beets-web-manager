@@ -15,6 +15,7 @@ from unittest import mock
 import backend.composite_workflows as cw
 from backend.beets_adapter import BeetsAdapterTimeoutError
 from backend.transaction_engine import TransactionStore
+from tests._job_store_cleanup import close_job_stores_at_cleanup
 
 REC = "5d39b3b9-290a-493e-93fc-30b5ec6c614a"
 OTHER = "11111111-2222-4333-8444-555555555555"
@@ -81,6 +82,7 @@ class _Env(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        close_job_stores_at_cleanup(self)
         self.root = Path(self._tmp.name)
         self.music = self.root / "music"
         self.dl = self.root / "downloads"
