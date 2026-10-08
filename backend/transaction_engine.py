@@ -115,6 +115,11 @@ def _get_apply_lock(operation_id: str) -> Any:
 #: already applied, or already undone.
 _APPLY_TERMINAL = frozenset({"Cancelled", "Completed", "Rolled Back", "Partially Rolled Back"})
 
+#: Statuses no apply leaves behind (#224): a rollback never starts from them,
+#: even when an apply record is present -- a Cancelled transaction is never
+#: marked Rolled Back, and a Running one is still being applied.
+ROLLBACK_UNAPPLIED_STATUSES = frozenset({"Pending", "Preview", "Approved", "Cancelled", "Running"})
+
 
 def _claim_apply_running(store: "TransactionStore", operation_id: str, observed_status: Any,
                          metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1456,62 +1461,73 @@ def rollback_import_review_cleanup(
     if not meta.get("rollback_available"):
         return {"ok": False, "error": "Rollback unavailable: transaction contains irreversible steps or has already been rolled back."}
 
+    # #224: claim (CAS) from an applied status before moving anything back.
+    status = tx.get("status")
+    if status in ROLLBACK_UNAPPLIED_STATUSES or store.transition(operation_id, str(status), "Running") is None:
+        return {"ok": False, "code": "rollback_not_eligible", "operation_id": operation_id, "mutated": False,
+                "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
     steps = meta.get("steps") or []
     log: List[str] = []
     restored: List[str] = []
 
-    for step in steps:
-        if step.get("type") == "move_quarantine" and step.get("status") == "completed":
-            src_str = step.get("source")
-            dest_str = step.get("destination")
-            if src_str and dest_str:
-                dest = Path(dest_str)
-                src = Path(src_str)
-                if not dest.exists() or dest.is_symlink():
-                    continue
-                # Refuse rather than silently overwrite/descend if something
-                # has since reappeared at the original path (a new file
-                # created there since quarantine, or -- via shutil.move's
-                # directory-descend behavior -- a directory), and refuse if
-                # any existing parent component of the restore target is a
-                # symlink.
-                if src.exists() or src.is_symlink():
-                    log.append(f"Skipped restore of {dest}: {src} already exists")
-                    continue
-                parent = src.parent
-                existing_parent = parent
-                while not existing_parent.exists() and existing_parent != existing_parent.parent:
-                    existing_parent = existing_parent.parent
-                if existing_parent.is_symlink():
-                    log.append(f"Skipped restore of {dest}: unsafe parent directory for {src}")
-                    continue
-                try:
-                    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        for step in steps:
+            if step.get("type") == "move_quarantine" and step.get("status") == "completed":
+                src_str = step.get("source")
+                dest_str = step.get("destination")
+                if src_str and dest_str:
+                    dest = Path(dest_str)
+                    src = Path(src_str)
+                    if not dest.exists() or dest.is_symlink():
+                        continue
+                    # Refuse rather than silently overwrite/descend if something
+                    # has since reappeared at the original path (a new file
+                    # created there since quarantine, or -- via shutil.move's
+                    # directory-descend behavior -- a directory), and refuse if
+                    # any existing parent component of the restore target is a
+                    # symlink.
                     if src.exists() or src.is_symlink():
                         log.append(f"Skipped restore of {dest}: {src} already exists")
                         continue
+                    parent = src.parent
+                    existing_parent = parent
+                    while not existing_parent.exists() and existing_parent != existing_parent.parent:
+                        existing_parent = existing_parent.parent
+                    if existing_parent.is_symlink():
+                        log.append(f"Skipped restore of {dest}: unsafe parent directory for {src}")
+                        continue
                     try:
-                        os.rename(str(dest), str(src))
-                    except OSError as exc:
-                        if getattr(exc, "errno", None) != errno.EXDEV:
-                            raise
-                        shutil.copyfile(str(dest), str(src))
+                        parent.mkdir(parents=True, exist_ok=True)
+                        if src.exists() or src.is_symlink():
+                            log.append(f"Skipped restore of {dest}: {src} already exists")
+                            continue
                         try:
-                            shutil.copystat(str(dest), str(src))
-                        except Exception:
-                            pass
-                        dest.unlink()
-                except Exception as ex:
-                    log.append(f"Failed to restore {dest} -> {src}: {ex}")
-                    continue
-                restored.append(src_str)
-                log.append(f"Restored {dest} -> {src}")
-                step["status"] = "rolled_back"
+                            os.rename(str(dest), str(src))
+                        except OSError as exc:
+                            if getattr(exc, "errno", None) != errno.EXDEV:
+                                raise
+                            shutil.copyfile(str(dest), str(src))
+                            try:
+                                shutil.copystat(str(dest), str(src))
+                            except Exception:
+                                pass
+                            dest.unlink()
+                    except Exception as ex:
+                        log.append(f"Failed to restore {dest} -> {src}: {ex}")
+                        continue
+                    restored.append(src_str)
+                    log.append(f"Restored {dest} -> {src}")
+                    step["status"] = "rolled_back"
+    except Exception:
+        # Never left Running: record what was restored so far.
+        store.transition(operation_id, "Running", "Recovery Required", metadata={**meta, "steps": steps},
+                         logs=tx.get("logs", []) + log + ["Rollback stopped on an unexpected error."])
+        raise
 
     tx_meta = {**meta, "rollback_available": False, "steps": steps}
-    store.update(
-        operation_id,
-        status="Rolled Back",
+    store.transition(
+        operation_id, "Running", "Rolled Back",
         applied_at=time.time(),
         metadata=tx_meta,
         logs=tx.get("logs", []) + log,

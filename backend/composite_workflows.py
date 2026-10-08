@@ -54,7 +54,7 @@ from backend.config_manager import (
     revert_config,
     save_config,
 )
-from backend.transaction_engine import TransactionStore
+from backend.transaction_engine import ROLLBACK_UNAPPLIED_STATUSES, TransactionStore
 
 log = logging.getLogger("beets.workflows")
 
@@ -153,6 +153,22 @@ def _rollback_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]
     status = st.get(operation_id).get("status")
     return {"ok": False, "code": "rollback_not_eligible", "operation_id": operation_id, "status": status,
             "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
+
+def engine_rollback_refusal(tx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Refusal for an engine-family rollback of ``tx`` in an unapplied
+    status, or None. The caller then finishes with a CAS from the status it
+    read (``st.transition(id, tx["status"], ...)``)."""
+    status = tx.get("status")
+    if status not in ROLLBACK_UNAPPLIED_STATUSES:
+        return None
+    return {"ok": False, "code": "rollback_not_eligible", "operation_id": tx.get("id"), "status": status,
+            "mutated": False, "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
+
+def _rollback_conflict(operation_id: str) -> Dict[str, Any]:
+    return {"ok": False, "code": "conflict", "operation_id": operation_id,
+            "error": "The transaction changed state during rollback; reload and check it."}
 
 
 def _rollback_noop(operation_id: str, store: Optional[TransactionStore]) -> Dict[str, Any]:
@@ -1445,15 +1461,18 @@ def rollback_track_replacement(
         return {"ok": False, "code": "not_applied", "error": "No applied item file replacement to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     res = ad.rollback_replace_item_file(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else res
-    st.update(
-        operation_id,
-        status="Rolled Back",
+    if st.transition(
+        operation_id, tx.get("status"), "Rolled Back",
         metadata={**meta, "rollback_result": result},
         logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
               f"replacement re-added as item {result.get('recreated_source_item_id')}"],
-    )
+    ) is None:
+        return _rollback_conflict(operation_id)
     out = {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     out.update({k: result.get(k) for k in ("restored_target_path", "recreated_source_item_id", "recreated_source_path")})
     return out
@@ -1942,6 +1961,9 @@ def rollback_track_quarantine(
         return {"ok": False, "code": "not_applied", "error": "No applied track quarantine to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
     result = res.get("result") if isinstance(res.get("result"), dict) else (res or {})
     if res.get("ok") is False or result.get("ok") is False:
@@ -1952,8 +1974,7 @@ def rollback_track_quarantine(
                           logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
                                 for r in result.get("restored") or []])
     if moved is None:
-        return {"ok": False, "code": "conflict", "operation_id": operation_id,
-                "error": "The transaction changed state during rollback; reload and check it."}
+        return _rollback_conflict(operation_id)
     return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored": result.get("restored") or []}
 
 
@@ -3133,11 +3154,11 @@ def rollback_import_review_cleanup(
                 and s.get("status") == "completed"]
     res = engine_rollback(st, operation_id)
     if not res.get("ok"):
-        return {**res, "ok": False, "code": "rollback_failed"}
+        return {"code": "rollback_failed", **res, "ok": False}
     restored = res.get("restored") or []
     if len(restored) < len(expected):
-        st.update(operation_id, status="Partially Rolled Back",
-                  logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
+        st.transition(operation_id, "Rolled Back", "Partially Rolled Back",
+                      logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
         return {**res, "ok": False, "code": "partial", "status": "Partially Rolled Back",
                 "error": f"Only {len(restored)} of {len(expected)} quarantined files were restored."}
     return res

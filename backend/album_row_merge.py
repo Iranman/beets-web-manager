@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import backend.album_duplicate_analysis as album_duplicate_analysis
 from backend.beets_adapter import BeetsAdapter, beets_adapter
-from backend.composite_workflows import _decode_path, _get_store, _s
+from backend.composite_workflows import _decode_path, _get_store, _rollback_conflict, _s, engine_rollback_refusal
 from backend.resource_locks import approve_preview, attempt_owner, claim_approved, claim_refusal, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
@@ -313,6 +313,9 @@ def rollback_album_row_merge(operation_id: str, *, adapter: Optional[BeetsAdapte
         return {"ok": False, "code": "not_applied", "error": "No applied album row merge to roll back."}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
     keys = [f"album-merge:{meta['release_group_id']}"] + [f"album:{a}" for a in
                                                            sorted([meta["target_album_id"]] + meta["source_album_ids"])]
     with resource_locks().hold(keys, attempt_owner(f"{operation_id}:rollback"), timeout=10):
@@ -326,7 +329,9 @@ def rollback_album_row_merge(operation_id: str, *, adapter: Optional[BeetsAdapte
             if not ad.get_album(int(sid)):
                 problems.append(f"album {sid} not restored")
         status = "Rolled Back" if not problems else "Recovery Required"
-        st.update(operation_id, status=status, metadata={"rollback_result": res, "rollback_problems": problems},
-                  logs=[f"Restored album rows {meta['source_album_ids']} and item ownership"]
-                  + [f"Rollback problem: {p}" for p in problems])
+        if st.transition(operation_id, tx.get("status"), status,
+                         metadata={"rollback_result": res, "rollback_problems": problems},
+                         logs=[f"Restored album rows {meta['source_album_ids']} and item ownership"]
+                         + [f"Rollback problem: {p}" for p in problems]) is None:
+            return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status, "rollback_problems": problems}

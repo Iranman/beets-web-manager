@@ -599,6 +599,25 @@ class PersistedStateVerificationTests(_AttachIntegrityTestCase):
         # apply and stays rollback-eligible.
         self.assertIs(tx["metadata"]["engine_result"]["verified"], False)
 
+    def test_b2_unverified_mutation_is_rolled_back_through_the_route(self):
+        """#224 item 2: the Failed-after-mutation MusicBrainz Match is
+        rollback-able, and the rollback restores the captured identity."""
+        iid = 43012
+        before = self.add_item(iid).mb_trackid
+        self.suppress_mutation.add(iid)  # the engine ran, but the id did not persist
+        resp = self._post_safe(iid)
+        audit_id = resp.get_json()["audit_id"]
+        _wait_job(resp.get_json()["job_id"])
+        tx = APP.transactions.get(audit_id)
+        self.assertEqual((tx["status"], tx["metadata"]["engine_result"]["mutated"]), ("Failed", True))
+
+        rb = self.client.post(f"/api/transactions/{audit_id}/rollback")
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        self.assertEqual(_wait_job(rb.get_json()["job_id"]).status, "success")
+        self.assertEqual(APP.transactions.get(audit_id)["status"], "Rolled Back")
+        restored = [fields for item_id, fields, _kw in self.item_metadata_calls if item_id == iid]
+        self.assertEqual([f["mb_trackid"] for f in restored], [(before or "").lower()])
+
     def test_c_relocation_dict_failure_fails_before_completed_status(self):
         iid = 43004
         self.add_item(iid, album_id=77)

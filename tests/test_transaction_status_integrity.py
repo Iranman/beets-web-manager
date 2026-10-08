@@ -109,5 +109,90 @@ class CompositeApplyCasTests(_Env):
         self.assertEqual(ad.move.call_count, 1)
 
 
+#: (name, rollback fn, adapter rollback method, metadata of an applied tx)
+_ENGINE_ROLLBACKS = [
+    ("track_replacement", cw.rollback_track_replacement, "rollback_replace_item_file",
+     {"mutation_family": cw.ITEM_FILE_REPLACEMENT_FAMILY, "engine_result": {"quarantine_id": "q1"},
+      "target_item_id": 1, "source_item_id": 2}),
+    ("track_quarantine", cw.rollback_track_quarantine, "rollback_quarantine_remove_items",
+     {"mutation_family": cw.TRACK_QUARANTINE_FAMILY, "engine_result": {"quarantine_id": "q1"}}),
+    ("reviewed_cleanup", duplicate_cleanup.rollback_reviewed_cleanup, "rollback_quarantine_remove_items",
+     {"mutation_family": duplicate_cleanup.REVIEWED_CLEANUP_FAMILY, "engine_result": {"quarantine_id": "q1"}}),
+    ("album_row_merge", album_row_merge.rollback_album_row_merge, "rollback_album_row_merge",
+     {"mutation_family": album_row_merge.ALBUM_ROW_MERGE_FAMILY, "engine_result": {"merge_id": "m1"}}),
+    ("untracked_recovery", untracked.rollback_recovery, "untracked_rollback",
+     {"mutation_family": untracked.ATTACH_FAMILY, "engine_result": {"record_id": "r1"}}),
+]
+
+
+class EngineRollbackStatusTests(_Env):
+    """#224 item 3: an engine-family rollback never runs for, or marks Rolled
+    Back, a transaction no apply left behind."""
+
+    def test_unapplied_status_is_refused_without_an_engine_call(self):
+        for name, fn, method, meta in _ENGINE_ROLLBACKS:
+            for status in ("Cancelled", "Preview", "Approved", "Running"):
+                with self.subTest(family=name, status=status):
+                    op = self.store.create(operation_type="Replace", status=status, metadata=meta)["id"]
+                    ad = mock.Mock()
+                    res = fn(op, adapter=ad, store=self.store)
+                    self.assertEqual((res["ok"], res["code"]), (False, "rollback_not_eligible"), res)
+                    getattr(ad, method).assert_not_called()
+                    self.assertEqual(self.store.get(op)["status"], status)
+
+    def test_track_replacement_rollback_still_runs_when_applied(self):
+        meta = _ENGINE_ROLLBACKS[0][3]
+        op = self.store.create(operation_type="Replace", status="Completed", metadata=meta)["id"]
+        ad = mock.Mock()
+        ad.rollback_replace_item_file.return_value = {"result": {"restored_target_path": "/m/a.flac"}}
+        self.assertTrue(cw.rollback_track_replacement(op, adapter=ad, store=self.store)["ok"])
+        self.assertEqual(self.store.get(op)["status"], "Rolled Back")
+
+    def test_track_replacement_rollback_does_not_overwrite_a_concurrent_change(self):
+        meta = _ENGINE_ROLLBACKS[0][3]
+        op = self.store.create(operation_type="Replace", status="Completed", metadata=meta)["id"]
+        ad = mock.Mock()
+
+        def other_rollback_finishes_first(*_a, **_k):
+            self.store.transition(op, "Completed", "Recovery Required")
+            return {"result": {}}
+
+        ad.rollback_replace_item_file.side_effect = other_rollback_finishes_first
+        res = cw.rollback_track_replacement(op, adapter=ad, store=self.store)
+        self.assertEqual((res["ok"], res["code"]), (False, "conflict"))
+        self.assertEqual(self.store.get(op)["status"], "Recovery Required")
+
+
+class ImportReviewCleanupRollbackTests(_Env):
+    """#224 item 3: rollback_import_review_cleanup claims with a CAS."""
+
+    def _tx(self, status):
+        src, dest = self.dl / "Album" / "a.flac", self.data / "q" / "a.flac"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"audio")
+        op = self.store.create(operation_type="Delete", status=status, metadata={
+            "mutation_family": cw.IMPORT_REVIEW_CLEANUP_FAMILY, "rollback_available": True,
+            "steps": [{"type": "move_quarantine", "status": "completed", "source": str(src),
+                       "destination": str(dest)}]})["id"]
+        return op, src, dest
+
+    def test_cancelled_is_refused_and_nothing_moves(self):
+        for status in ("Cancelled", "Preview", "Approved"):
+            with self.subTest(status=status):
+                op, src, dest = self._tx(status)
+                res = cw.rollback_import_review_cleanup(op, store=self.store)
+                self.assertEqual((res["ok"], res["code"]), (False, "rollback_not_eligible"), res)
+                self.assertEqual(self.store.get(op)["status"], status)
+                self.assertTrue(dest.exists() and not src.exists())
+
+    def test_completed_restores_and_rolls_back(self):
+        op, src, dest = self._tx("Completed")
+        res = cw.rollback_import_review_cleanup(op, store=self.store)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.store.get(op)["status"], "Rolled Back")
+        self.assertTrue(src.exists() and not dest.exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()
