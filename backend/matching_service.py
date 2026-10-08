@@ -18,7 +18,7 @@ from backend.album_match import build_album_match_plan
 from backend.mb_alignment import summarize_mb_track_alignment
 from backend.matching_contract import build_album_matching_decision
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
-from helpers_mb import _resolve_release_group_to_release
+from helpers_mb import _resolve_release_group_to_release, acoustid_api_key
 from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError, beets_adapter
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
@@ -277,11 +277,13 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         return result
 
     source = Path(folder_path)
-    # A source directly under a configured root ("/downloads/<album>") has no
-    # artist folder: the root's own name is not artist evidence (#299 F1).
-    folder_artist = "" if _is_configured_root(source.parent) else _artist_folder_name_without_mbid(
-        source.parent.name if source.parent else ""
-    )
+    # Only the Beets library has a known Artist/Album layout. Outside it the
+    # parent ("batch", "FLAC", a slskd user folder) is a container, not an
+    # artist, and a configured root's own name never is one either (#299 F1):
+    # neither is artist evidence.
+    folder_artist = _artist_folder_name_without_mbid(source.parent.name) if (
+        _path_is_under(source, MUSIC_ROOT) and not _is_configured_root(source.parent)
+    ) else ""
     result["folder_artist"] = folder_artist
     try:
         folder_key = _canonical_normalize_artist(folder_artist)
@@ -587,11 +589,13 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     # review-required candidate stays visible in the result (via
     # `matching_decision`) but `ok` reflects automatic-action authority
     # only.
+    tracklist_ok = gate_ok
     if not decision_dict.get("action_allowed"):
         gate_ok = False
 
     result.update({
         "ok": gate_ok,
+        "tracklist_ok": bool(tracklist_ok),
         "matches": matches,
         "min_required": min_required,
         "max_audio_allowed": max_audio_allowed,
@@ -604,6 +608,32 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         "matching_decision": decision_dict,
     })
     return result
+
+
+def _preflight_rejection_reason(pre: Optional[Dict[str, Any]]) -> str:
+    """The real reason a folder preflight refused a release, for logs and review.
+
+    A tracklist that matched can still be refused by the identity decision
+    (artist conflict, no fingerprint evidence, ...): say that, never
+    "rejected by folder tracklist: 2/2 matched"."""
+    pre = pre or {}
+    if pre.get("ok"):
+        return ""
+    if _s(pre.get("error")).strip():
+        return _s(pre.get("error")).strip()
+    counts = f"{pre.get('matches', 0)}/{pre.get('expected', 0)} track(s) matched"
+    if not pre.get("tracklist_ok"):
+        return f"folder tracklist: {counts}"
+    decision = pre.get("matching_decision") or {}
+    codes = [*(decision.get("conflicts") or []),
+             *[w for w in (decision.get("warnings") or []) if _s(w).startswith("acoustid_")]]
+    reason = (f"identity not verified "
+              f"({', '.join(codes) or decision.get('reason_code') or 'review_required'}), {counts}")
+    if "acoustid_unavailable" in codes:
+        reason += "; no fingerprint evidence for these tracks"
+        if not acoustid_api_key():
+            reason += " (AcoustID not configured: set ACOUSTID_API_KEY)"
+    return reason
 
 
 def _preflight_review_reason(preflight: Optional[Dict[str, Any]],
@@ -624,6 +654,12 @@ def _preflight_review_reason(preflight: Optional[Dict[str, Any]],
     if release_title or release_artist:
         release_name = " - ".join([v for v in (release_artist, release_title) if v])
         release_label = f"selected MusicBrainz release ({release_name})"
+
+    if preflight.get("tracklist_ok") and not preflight.get("ok") and not error:
+        # The tracklist passed; the identity decision refused it (F2).
+        return (f"The folder tracklist matched the {release_label}, but it was refused: "
+                f"{_preflight_rejection_reason(preflight)}. Review the identity "
+                "evidence before importing.")
 
     parts: List[str] = []
     if preflight.get("oversized_subset_complete"):

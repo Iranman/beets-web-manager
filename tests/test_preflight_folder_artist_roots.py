@@ -1,5 +1,6 @@
-"""#299 F1: a source directly under a configured root has no artist folder,
-so the root's name ("downloads") never fails the artist check."""
+"""#299 F1 / F2: only the library's Artist/Album layout makes the parent folder
+artist evidence. A configured root ("downloads") or a download container
+("batch") never fails the artist check."""
 
 import tempfile
 import unittest
@@ -14,10 +15,10 @@ MB = {"ok": True, "release_title": "Plain LP", "release_artist": "Bwm Synthetic"
 
 
 class FolderArtistRootTests(unittest.TestCase):
-    def _run(self, rel: str):
+    def _run(self, root: str, rel: str):
         with tempfile.TemporaryDirectory() as tmp:
             music, downloads = Path(tmp) / "music", Path(tmp) / "downloads"
-            src = downloads / rel
+            src = Path(tmp) / root / rel
             src.mkdir(parents=True)
             with mock.patch.object(ms, "MUSIC_ROOT", music), \
                  mock.patch.object(ms, "DOWNLOADS_ROOT", downloads), \
@@ -26,18 +27,28 @@ class FolderArtistRootTests(unittest.TestCase):
                                    return_value={"ok": True, "audio_files": []}):
                 return ms._folder_release_preflight(str(src), "11111111-1111-1111-1111-111111111111")
 
-    def test_matching_artist_folder(self):
-        res = self._run("Bwm Synthetic/Plain LP")
+    def test_matching_library_artist_folder(self):
+        res = self._run("music", "Bwm Synthetic/Plain LP")
         self.assertEqual(res["folder_artist"], "Bwm Synthetic")
         self.assertTrue(res["artist_ok"])
 
-    def test_non_matching_artist_folder(self):
-        res = self._run("Zzqx Unrelated/Plain LP")
+    def test_non_matching_library_artist_folder(self):
+        res = self._run("music", "Zzqx Unrelated/Plain LP")
         self.assertEqual(res["folder_artist"], "Zzqx Unrelated")
         self.assertFalse(res["artist_ok"])
 
+    def test_download_container_is_not_artist_evidence(self):
+        res = self._run("downloads", "batch/Plain LP")
+        self.assertEqual(res["folder_artist"], "")
+        self.assertTrue(res["artist_ok"])
+
     def test_downloads_root_parent_skips_artist_check(self):
-        res = self._run("Plain LP")
+        res = self._run("downloads", "Plain LP")
+        self.assertEqual(res["folder_artist"], "")
+        self.assertTrue(res["artist_ok"])
+
+    def test_music_root_parent_skips_artist_check(self):
+        res = self._run("music", "Plain LP")
         self.assertEqual(res["folder_artist"], "")
         self.assertTrue(res["artist_ok"])
 
