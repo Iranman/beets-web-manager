@@ -902,7 +902,6 @@
 "ai_batch_stop",
 "ai_batch_import_status",
 "ai_batch_import_recover",
-"_prefer_album_mb_release",
 "_fetch_artwork_after_retag",
 "_ai_import_folder",
 "start_ai_batch_import",

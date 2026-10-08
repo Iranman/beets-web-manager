@@ -288,7 +288,7 @@ class RecoverRouteConcurrencyGuardTests(unittest.TestCase):
         self.fn = _function_source(
             APP_SOURCE,
             "def ai_batch_import_recover():",
-            "\n\ndef _prefer_album_mb_release(",
+            "\n\ndef ",  # the next top-level definition
         )
 
     def test_promoted_worker_check_precedes_starting_a_new_worker(self):

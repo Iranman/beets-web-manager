@@ -385,8 +385,12 @@ class AiImportReleaseTests(unittest.TestCase):
             planned.update(payload)
             return {"ok": True, "operation_id": "op-1"}
 
-        with mock.patch.object(ai, "_preserve_torrent_source_path", return_value=False),                 mock.patch.object(ai, "_prefer_album_mb_release", side_effect=lambda rid, log: "44444444-4444-4444-4444-444444444444"),                 mock.patch.object(ai, "_validate_import_source_audio"),                 mock.patch.object(ai, "_fetch_mb_release_tracklist",
-                                  return_value={"ok": True, "release_group": RG, "tracks": []}),                 mock.patch.object(ai.composite_workflows, "plan_confirmed_import", side_effect=plan),                 mock.patch.object(ai.composite_workflows, "apply_confirmed_import",
+        with mock.patch.object(ai, "_preserve_torrent_source_path", return_value=False), \
+                mock.patch.object(ai, "_validate_import_source_audio"), \
+                mock.patch.object(ai, "_fetch_mb_release_tracklist",
+                                  return_value={"ok": True, "release_group": RG, "tracks": []}), \
+                mock.patch.object(ai.composite_workflows, "plan_confirmed_import", side_effect=plan), \
+                mock.patch.object(ai.composite_workflows, "apply_confirmed_import",
                                   return_value={"ok": False, "error": "stop here"}):
             with self.assertRaises(RuntimeError):
                 ai._ai_import_folder("/downloads/Artist - Single", REL, {}, [])

@@ -25,7 +25,7 @@ from backend.artwork_service import _fetch_artwork_after_retag
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_match_score
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
 from backend.app_runtime import jobs
-from backend.musicbrainz_service import _artist_folder_key, _discogs_release_fallback_candidate, _mb_release_search_by_folder_tracks, _prefer_album_mb_release
+from backend.musicbrainz_service import _artist_folder_key, _discogs_release_fallback_candidate, _mb_release_search_by_folder_tracks
 from backend.serializers import _compact_mb_candidate, _resolve_import_review_source_path
 from backend.pending_review_store import _import_review_folder_signature, _pending_review_has_path, _pending_review_path_key, _pending_review_path_set
 from backend.plex_service import _trigger_plex_refresh
@@ -635,9 +635,8 @@ def _ai_suggest_album_internal(
             sug["reason"] = sug.get("reason") or "No matching candidate selected"
             cand_idx = -1
         sug["candidate_index"] = cand_idx
-        # Prefer album releases over single/EP releases before surfacing to user
-        if mb_id:
-            mb_id = _prefer_album_mb_release(mb_id, [])
+        # The selected candidate's Release is surfaced as is: never swapped for
+        # a Release in another Release Group (a single stays a single).
         sug["mb_albumid"] = mb_id
         sug["representative_mb_albumid"] = mb_id
         rg_id = _s((selected_candidate or {}).get("mb_releasegroupid", "")).strip().lower()
