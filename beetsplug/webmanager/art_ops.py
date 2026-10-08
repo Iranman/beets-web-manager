@@ -336,22 +336,26 @@ def _album_art_rollback():
     folder = _manifest_dir(data.get("art_id"))
     if folder is None:
         return _error("art_id is not a valid engine id", "INVALID_ART_ID")
-    # Replay check first: after a rollback the manifest is no longer
-    # "applied", so a retry must replay the stored result.
-    op_id, _fingerprint, early = ops._idempotency_precheck("album_art_rollback", data)
+    # Replay check first, without registering: after a rollback the manifest
+    # is no longer "applied", so a retry must replay the stored result. A
+    # precondition refusal below is NOT recorded under the key: Web Manager
+    # retries with the same fixed key ("<txn>:rollback") once the cause is
+    # gone (e.g. ART_CHANGED after a later change was rolled back), and a
+    # stored refusal would be replayed for the registry's lifetime.
+    # The key is registered only right before the restore (mutation_lock is
+    # held by the caller, so nothing can register it in between).
+    _op_id, _fingerprint, early = ops._idempotency_precheck("album_art_rollback", data, register=False)
     if early is not None:
         return early
-
-    def fail(message: str, code: str, status: int = 400):
-        ops.update_operation(op_id, "failed", error=message, error_code=code)
-        return _error(message, code, status)
+    fail = _error
 
     try:
         with open(os.path.join(folder, MANIFEST_NAME), encoding="utf-8") as fh:
             manifest = json.load(fh)
     except (OSError, ValueError):
         return fail("no engine album-art record for this id", "ART_RECORD_NOT_FOUND", 404)
-    if not isinstance(manifest, dict) or manifest.get("kind") != MANIFEST_KIND             or manifest.get("status") != "applied":
+    if not isinstance(manifest, dict) or manifest.get("kind") != MANIFEST_KIND \
+            or manifest.get("status") != "applied":
         return fail("no applied album-art change for this id", "ART_RECORD_NOT_FOUND", 404)
     if not _manifest_ok(manifest):
         return fail("the engine album-art record is malformed", "SNAPSHOT_PATH_INVALID")
@@ -378,6 +382,9 @@ def _album_art_rollback():
         return fail("current cover is outside allowed roots", "SNAPSHOT_PATH_INVALID")
     if old_artpath and os.path.exists(old_artpath) and os.path.normpath(old_artpath) != os.path.normpath(current or "."):
         return fail("the previous cover's path is occupied", "OLD_ART_PATH_OCCUPIED", 409)
+    op_id, _fingerprint, early = ops._idempotency_precheck("album_art_rollback", data)
+    if early is not None:
+        return early
     try:
         with ops.mutation_lock:
             restored = _restore(lib, album, manifest, folder)

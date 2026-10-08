@@ -244,6 +244,25 @@ class AlbumArtRefusalTests(AlbumArtEngineTests):
         Image.new("1", (art_mod.MAX_IMAGE_SIDE + 1, 1)).save(buf, format="PNG")
         self.assertRefused(self._set(buf.getvalue()), 400, "INVALID_IMAGE")
 
+    def test_refused_rollback_can_be_retried_with_the_same_key(self):
+        """QA D5-R1: Web Manager always sends '<txn>:rollback'; a precondition
+        refusal must not be replayed once the cause is gone."""
+        res = self._set(image_bytes())
+        art_id = res.get_json()["art_id"]
+        applied = self.lib.get_album(self.album.id).artpath
+        self.album.load()
+        self.album.artpath = os.fsencode(os.path.join(self.album_dir, "other.jpg"))
+        self.album.store()
+        self.assertEqual(self._rollback(art_id, key="txn-1:rollback").status_code, 409)
+        self.album.load()
+        self.album.artpath = applied
+        self.album.store()
+        rb = self._rollback(art_id, key="txn-1:rollback")
+        self.assertEqual(rb.status_code, 200, rb.get_json())
+        self.assertEqual(self._artpath(), "")
+        replay = self._rollback(art_id, key="txn-1:rollback")
+        self.assertEqual((replay.status_code, replay.get_json()["status"]), (200, "succeeded"))
+
     def test_tampered_manifest_is_refused_before_any_write(self):
         res = self._set(image_bytes())
         art_id = res.get_json()["art_id"]

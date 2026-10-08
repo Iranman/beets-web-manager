@@ -107,6 +107,16 @@ class ReplaceAlbumArtTransactionTests(_Base):
         self.assertEqual(cw.rollback_album_art_replace(res["operation_id"], adapter=ad, store=self.store)["code"],
                          "not_applied")
 
+    def test_unknown_engine_failure_does_not_claim_nothing_changed(self):
+        ad = self.adapter()
+        ad.set_album_art.side_effect = BeetsAdapterError("raw", status_code=500, error_code="ALBUM_ART_FAILED")
+        res = cw.replace_album_art(7, jpeg(), adapter=ad, store=self.store)
+        self.assertIsNone(res["mutated"])
+        self.assertIn("check the album", res["error"])
+        tx = self.store.get(res["operation_id"])
+        self.assertEqual(tx["status"], "Failed")
+        self.assertIn("check the album", " ".join(str(line) for line in tx.get("logs") or []))
+
     def test_old_plugin_names_the_required_version(self):
         ad = self.adapter()
         ad.set_album_art.side_effect = BeetsAdapterNotFoundError("raw")

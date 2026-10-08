@@ -2185,9 +2185,13 @@ def apply_album_art_replace(
             message = _ART_REFUSALS.get(code)
             st.update(operation_id, status="Failed",
                       logs=[f"Beets refused the artwork change ({code or 'error'}); "
-                            + ("nothing was changed." if message else "Beets restored the previous artwork.")])
-            return {"ok": False, "code": code.lower() or "beets_error", "mutated": False, "operation_id": operation_id,
-                    "status": "Failed", "error": message or "Beets could not set the artwork; nothing was changed."}
+                            + ("nothing was changed." if message else
+                               "Beets tried to put the previous artwork back; check the album.")])
+            # Only a known refusal proves nothing changed; any other failure
+            # depends on the plugin's compensation, which may itself have failed.
+            return {"ok": False, "code": code.lower() or "beets_error", "mutated": False if message else None,
+                    "operation_id": operation_id, "status": "Failed",
+                    "error": message or "Beets could not set the artwork; check the album's cover."}
         return finish_album_art_replace(operation_id, res, adapter=ad, store=st)
 
 
