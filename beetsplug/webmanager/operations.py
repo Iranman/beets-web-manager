@@ -1,6 +1,7 @@
 """Operation implementations for the WebManager Beets integration plugin."""
 
 import os
+import re
 import shutil
 import time
 import uuid
@@ -427,6 +428,46 @@ def get_operation_status(op_id: str):
     return jsonify(op)
 
 
+_QUIET_FALLBACKS = ("skip", "asis")
+_MB_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _import_session_class(autotag: bool, tasks: List[Any]):
+    """Beets' own import session: the quiet terminal session (what
+    ``beet import -q`` runs) when autotagging, else the base session.
+
+    The returned subclass only records each task Beets decides on, so the
+    caller can report the ones Beets skipped (no strong match under
+    quiet_fallback=skip, or a duplicate with duplicate_action=skip)."""
+    from beets.importer import ImportSession
+
+    base = ImportSession
+    if autotag:
+        try:  # beets >= 2.4
+            from beets.ui.commands.import_.session import TerminalImportSession as base
+        except ImportError:  # older beets
+            from beets.ui.commands import TerminalImportSession as base
+
+    class _RecordingSession(base):
+        def choose_match(self, task):
+            tasks.append(task)
+            return super().choose_match(task)
+
+        def choose_item(self, task):
+            tasks.append(task)
+            return super().choose_item(task)
+
+        def get_duplicate_action(self, task, found_duplicates):
+            if task not in tasks:
+                tasks.append(task)
+            return super().get_duplicate_action(task, found_duplicates)
+
+    return _RecordingSession
+
+
+_LINK_MODES = ("link", "hardlink", "reflink")
+
+
 @webmanager_bp.route("/import", methods=["POST"])
 def run_import():
     """Confirmed non-interactive import execution inside Beets."""
@@ -438,11 +479,25 @@ def run_import():
     if not paths or not isinstance(paths, list):
         return jsonify({"error": "Missing or invalid 'paths' parameter", "error_code": "INVALID_PATHS"}), 400
 
-    # Policy 1: Autotag must be disabled for confirmed non-interactive imports
-    if bool(data.get("autotag", False)):
+    # Policy 1: Beets' own quiet importer. With autotag, Beets matches the
+    # files itself (beet import -q [--search-id]); quiet_fallback decides what
+    # happens to an album without a strong match (skip by default).
+    autotag = bool(data.get("autotag", False))
+    quiet_fallback = str(data.get("quiet_fallback") or "skip").lower()
+    if quiet_fallback not in _QUIET_FALLBACKS:
         return jsonify({
-            "error": "autotag must be disabled for confirmed import",
-            "error_code": "AUTOTAG_NOT_ALLOWED",
+            "error": "quiet_fallback must be 'skip' or 'asis'",
+            "error_code": "INVALID_QUIET_FALLBACK",
+        }), 400
+    search_ids = data.get("search_ids") or []
+    if (
+        not isinstance(search_ids, list)
+        or not all(isinstance(x, str) and _MB_UUID.match(x) for x in search_ids)
+        or (search_ids and not autotag)
+    ):
+        return jsonify({
+            "error": "search_ids must be lowercase MusicBrainz Release IDs and need autotag",
+            "error_code": "INVALID_SEARCH_IDS",
         }), 400
 
     # Policy 2: Validate duplicate_action strictly
@@ -463,6 +518,18 @@ def run_import():
     # destination) and /web-manager-data must never be valid import
     # sources just because they are allowed roots for another operation.
     import_roots = get_import_roots()
+    copy = bool(data.get("copy", False))
+    move = bool(data.get("move", True))
+    # In-place import (copy=no, move=no) may also target a folder strictly
+    # inside the Beets library directory: the files stay where they are.
+    library_dir = get_library_directory() if not copy and not move else None
+    if library_dir and _covers_config_dir(library_dir):
+        # Same guard as _derived_allowed_roots(): a library directory of `/`
+        # or one containing /config must not open the config dir to imports.
+        return jsonify({
+            "error": "In-place import is not allowed: the Beets library directory contains the config directory",
+            "error_code": "PATH_NOT_ALLOWED",
+        }), 400
     safe_paths: List[str] = []
     for p in paths:
         if not p or not isinstance(p, str) or "\x00" in p:
@@ -476,6 +543,8 @@ def run_import():
                 400,
             )
         safe_p = resolve_safe_descendant(p, import_roots)
+        if safe_p is None and library_dir:
+            safe_p = resolve_safe_descendant(p, [library_dir])
         if safe_p is None:
             return (
                 jsonify(
@@ -488,8 +557,6 @@ def run_import():
             )
         safe_paths.append(safe_p)
 
-    copy = bool(data.get("copy", False))
-    move = bool(data.get("move", True))
     write = bool(data.get("write", True))
     incremental = bool(data.get("incremental", False))
     singletons = bool(data.get("singletons", False))
@@ -571,34 +638,54 @@ def run_import():
             orig_singletons = beets_config["import"]["singletons"].get()
             orig_set_fields = beets_config["import"]["set_fields"].get()
             orig_resume = beets_config["import"]["resume"].get()
+            orig_search_ids = beets_config["import"]["search_ids"].get()
+            orig_quiet_fallback = beets_config["import"]["quiet_fallback"].get()
+            # ImportSession forces these off when move is on, and the change
+            # outlives the request; an in-place import must never link.
+            orig_links = {k: beets_config["import"][k].get() for k in _LINK_MODES}
 
             try:
                 beets_config["import"]["pretend"] = pretend
                 beets_config["import"]["copy"] = copy
                 beets_config["import"]["move"] = move
                 beets_config["import"]["write"] = write
-                beets_config["import"]["autotag"] = False
+                beets_config["import"]["autotag"] = autotag
+                beets_config["import"]["search_ids"] = list(search_ids)
+                beets_config["import"]["quiet_fallback"] = quiet_fallback
                 beets_config["import"]["duplicate_action"] = duplicate_action
                 beets_config["import"]["quiet"] = True
                 beets_config["import"]["timid"] = False
                 beets_config["import"]["resume"] = False
                 beets_config["import"]["incremental"] = incremental
                 beets_config["import"]["singletons"] = singletons
+                for k in _LINK_MODES:
+                    beets_config["import"][k] = False
                 if set_fields:
                     beets_config["import"]["set_fields"] = set_fields
 
-                from beets.importer import ImportSession
-
                 # Convert paths to bytestrings for Beets importer
                 path_bytes = [util.bytestring_path(p) for p in safe_paths]
-                session = ImportSession(lib, loghandler=None, paths=path_bytes, query=None)
+                tasks: List[Any] = []
+                session = _import_session_class(autotag, tasks)(
+                    lib, loghandler=None, paths=path_bytes, query=None
+                )
                 session.run()
 
+                skipped: List[str] = []
+                for task in tasks:
+                    if getattr(task, "skip", False):
+                        for tp in getattr(task, "paths", None) or []:
+                            shown = util.displayable_path(tp)
+                            if shown not in skipped:
+                                skipped.append(shown)
                 result = {
                     "success": True,
                     "imported_paths": safe_paths,
-                    "autotag": False,
+                    "autotag": autotag,
+                    "quiet_fallback": quiet_fallback,
+                    "search_ids": list(search_ids),
                     "duplicate_action": duplicate_action,
+                    "skipped_paths": skipped,
                 }
                 if op_id_arg:
                     update_operation(op_id_arg, "succeeded", result=result)
@@ -621,9 +708,13 @@ def run_import():
                 beets_config["import"]["quiet"] = orig_quiet
                 beets_config["import"]["timid"] = orig_timid
                 beets_config["import"]["resume"] = orig_resume
+                beets_config["import"]["search_ids"] = orig_search_ids
+                beets_config["import"]["quiet_fallback"] = orig_quiet_fallback
                 beets_config["import"]["incremental"] = orig_incremental
                 beets_config["import"]["singletons"] = orig_singletons
                 beets_config["import"]["set_fields"] = orig_set_fields
+                for k, v in orig_links.items():
+                    beets_config["import"][k] = v
 
     if is_async:
         lib = g.lib

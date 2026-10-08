@@ -331,11 +331,14 @@ class RecommendedPluginsTests(_TempConfigMixin, unittest.TestCase):
 
     def test_preview_is_linear_on_pathological_lines(self):
         """F2: no polynomial regex; a 100k-char line takes well under 1 s."""
-        from backend.beets_plugins import _mask_config_diff, preview_recommended_plugins
+        from backend.beets_plugins import BeetsConfigEditError, _mask_config_diff, preview_recommended_plugins
         for bad in (" " * 100_000, "key" * 33_334, "key:" * 25_000, "{," * 50_000, "://" * 33_334):
             path = self._make_config("plugins: web webmanager\n" + bad + "\n")
             start = time.perf_counter()
-            preview_recommended_plugins(path)
+            try:
+                preview_recommended_plugins(path)
+            except BeetsConfigEditError:
+                pass  # most of these are not valid YAML: refused, fail closed
             _mask_config_diff(["+" + bad + "\n", "-" + bad + "\n"])
             self.assertLess(time.perf_counter() - start, 1.0, bad[:8])
 
@@ -721,6 +724,19 @@ class SetupWarningTests(unittest.TestCase):
         warnings, _ = self.module._beets_setup_warnings(self._diag(report), "/music", "/downloads2")
         self.assertEqual(self._ids(warnings), ["downloads_root_not_import_root"])
 
+    def test_refused_config_edit_warns_to_add_plugins_manually(self):
+        with mock.patch("backend.beets_plugins._REFUSED_CONFIG_PLUGINS", ["musicbrainz"]):
+            warnings, actions = self.module._beets_setup_warnings(self._diag({}), "/music", "/downloads")
+        self.assertEqual(self._ids(warnings), ["beets_config_plugins_not_added"])
+        self.assertIn("musicbrainz", warnings[0]["message"])
+        self.assertEqual(actions, [])
+
+    def test_refused_pluginpath_edit_warns_n2(self):
+        with mock.patch("backend.beets_plugins._REFUSED_CONFIG_PLUGINPATH", ["/config/beetsplug"]):
+            warnings, _ = self.module._beets_setup_warnings(self._diag({}), "/music", "/downloads")
+        self.assertEqual(self._ids(warnings), ["beets_config_pluginpath_not_added"])
+        self.assertIn("/config/beetsplug", warnings[0]["message"])
+
     def test_restart_required_warning(self):
         warnings, _ = self.module._beets_setup_warnings(
             self._diag({}, {"restart_required": True, "message": "restart beets"}), "/music", "/downloads"
@@ -821,11 +837,19 @@ class ConfigFollowupTests(_TempConfigMixin, unittest.TestCase):
 
     def test_preview_without_trailing_newline_f2n(self):
         from backend.beets_plugins import preview_recommended_plugins
-        path = self._make_config("plugins: web webmanager\nmyplugin:\n  password: |\n    X1X")
+        path = self._make_config("plugins: web webmanager\nmyplugin:\n  password: X1X")
         diff = preview_recommended_plugins(path)["diff"]
         self.assertIn("fetchart", diff)
         self.assertNotIn("X1X", diff)
         self.assertEqual(diff.count("\n-"), 1, diff)  # only the plugins: line
+
+    def test_append_after_unterminated_literal_block_is_refused(self):
+        """Appending a settings block after `|` text with no final newline
+        would change that value to end in a newline: refuse, fail closed."""
+        from backend.beets_plugins import BeetsConfigEditError, preview_recommended_plugins
+        path = self._make_config("plugins: web webmanager\nmyplugin:\n  password: |\n    X1X")
+        with self.assertRaises(BeetsConfigEditError):
+            preview_recommended_plugins(path)
 
     def test_symlinked_beetsplug_dir_is_refused_before_mkdir_f5c(self):
         from backend.beets_plugins import provision_bundled_plugins
