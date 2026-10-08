@@ -33655,10 +33655,10 @@
    "module": "routes_maintenance.py",
    "lines": [
     738,
-    756
+    757
    ],
-   "size": 19,
-   "body_lines": 13,
+   "size": 20,
+   "body_lines": 14,
    "route": null,
    "mutation_capable": false,
    "domain": "REPLACEMENT",
@@ -33678,11 +33678,11 @@
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    797,
-    845
+    798,
+    850
    ],
-   "size": 49,
-   "body_lines": 31,
+   "size": 53,
+   "body_lines": 33,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -33699,8 +33699,8 @@
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    848,
-    852
+    853,
+    857
    ],
    "size": 5,
    "body_lines": 2,
@@ -33722,8 +33722,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    856,
-    878
+    861,
+    883
    ],
    "size": 23,
    "body_lines": 22,
@@ -33747,8 +33747,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    881,
-    901
+    886,
+    906
    ],
    "size": 21,
    "body_lines": 17,
@@ -33767,8 +33767,8 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    905,
-    1082
+    910,
+    1087
    ],
    "size": 178,
    "body_lines": 177,
@@ -33795,8 +33795,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1086,
-    1095
+    1091,
+    1100
    ],
    "size": 10,
    "body_lines": 9,
@@ -33816,8 +33816,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1098,
-    1103
+    1103,
+    1108
    ],
    "size": 6,
    "body_lines": 5,
