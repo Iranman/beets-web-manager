@@ -15,7 +15,12 @@ symlink in any component. A step never touches a path that holds a library
 item, and a target is never a path Beets still references: tracked files
 are relocated only by Beets' own ``item.move()`` / ``album.move()`` (POST
 /webmanager/move), never here. Each step holds ``ops.mutation_lock`` and a
-library transaction, like every other mutation endpoint.
+library transaction, like every other mutation endpoint. It never queues for
+the lock: when another mutation (typically an import) still holds it after
+``LOCK_WAIT_SECONDS``, the step is refused with 503 ``BUSY`` before its
+idempotency key is registered, so nothing runs later and a retry is safe
+(#300 R2). Final outcomes are saved next to the library DB, so a replayed key
+still reads its result after a Beets restart (#300 R3).
 
 Beets APIs are used where they are safe: ``util.move`` (no overwrite) and
 ``util.mkdirall``. Two steps call the OS directly:
@@ -40,6 +45,8 @@ from flask import g, jsonify, request
 
 from . import operations as ops
 from .engine_common import _error
+
+LOCK_WAIT_SECONDS = 2.0
 
 
 class _Refused(Exception):
@@ -132,18 +139,32 @@ def run_folder_op():
     root = _library_root(lib)
     if not root:
         return _error("Beets library directory is not configured", "LIBRARY_DIRECTORY_UNKNOWN", 503)
-    op_id, _fp, early = ops._idempotency_precheck("folder_op", data)
-    if early is not None:
-        return early
+    ops.bind_durable_registry(lib)
+    if not ops.mutation_lock.acquire(timeout=LOCK_WAIT_SECONDS):
+        # A known key still replays its outcome; an unknown one is refused
+        # unregistered, so nothing is left to run later (#300 R2).
+        _op_id, _fp, early = ops._idempotency_precheck("folder_op", data, register=False)
+        if early is not None:
+            return early
+        response, status = _error("Beets is busy with another library change (for example an import); "
+                                  "nothing was done, retry later", "BUSY", 503)
+        response.headers["Retry-After"] = "30"
+        return response, status
     try:
-        with ops.mutation_lock, lib.transaction():
-            result = {"success": True, **_step(lib, root, data)}
-    except _Refused as exc:
-        ops.update_operation(op_id, "failed", error=exc.message, error_code=exc.code)
-        return _error(exc.message, exc.code, exc.status)
-    except Exception:
-        ops.log.exception("folder op failed")
-        ops.update_operation(op_id, "failed", error="Folder operation failed", error_code="FOLDER_OP_FAILED")
-        return _error("Folder operation failed", "FOLDER_OP_FAILED", 500)
-    ops.update_operation(op_id, "succeeded", result=result)
+        op_id, _fp, early = ops._idempotency_precheck("folder_op", data)
+        if early is not None:
+            return early
+        try:
+            with lib.transaction():
+                result = {"success": True, **_step(lib, root, data)}
+        except _Refused as exc:
+            ops.update_operation(op_id, "failed", error=exc.message, error_code=exc.code)
+            return _error(exc.message, exc.code, exc.status)
+        except Exception:
+            ops.log.exception("folder op failed")
+            ops.update_operation(op_id, "failed", error="Folder operation failed", error_code="FOLDER_OP_FAILED")
+            return _error("Folder operation failed", "FOLDER_OP_FAILED", 500)
+        ops.update_operation(op_id, "succeeded", result=result)
+    finally:
+        ops.mutation_lock.release()
     return jsonify({"operation_id": op_id, **result})

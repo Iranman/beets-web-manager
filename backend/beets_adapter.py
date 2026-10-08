@@ -865,7 +865,10 @@ class BeetsAdapter:
     def folder_op(self, op: str, idempotency_key: str, **paths: str) -> Dict[str, Any]:
         """One folder_cleanup_v1 step inside Beets (plugin 1.7.0): ``move_file``
         or ``rename_dir`` (source, target), ``remove_empty_dir`` or
-        ``create_dir`` (path). Web Manager mounts the library read-only."""
+        ``create_dir`` (path). Web Manager mounts the library read-only.
+        Plugin 1.9.0 answers 503 ``BUSY`` (raised with ``error_code`` BUSY)
+        when another mutation holds its lock; the step was not registered
+        and did not run, so it is safe to retry later."""
         return self._request("POST", "/webmanager/folder-op", json_data={"op": op, **paths},
                              headers={"Idempotency-Key": idempotency_key})
 

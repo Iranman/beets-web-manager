@@ -269,6 +269,16 @@ class FolderRollbackUnconfirmedTests(_Env):
         err = te._folder_step(ad, "k", "move_file", source="/m/a", target="/m/b")
         self.assertTrue(err.startswith(te.FOLDER_OP_UNCONFIRMED), err)
 
+    def test_rollback_defers_while_beets_is_busy(self):
+        """#307 QA: BUSY on the re-query neither reads an outcome nor runs the
+        step, so a held copy of the apply request could still run later. The
+        rollback must defer, not trust the local view (#300 R1 with R2)."""
+        busy = mock.Mock()
+        busy.folder_op.side_effect = BeetsAdapterError("busy", status_code=503, error_code="BUSY")
+        res = te.rollback_folder_cleanup(self.store, self.op, adapter=busy)
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "rollback_deferred", False), res)
+        self.assertEqual(self.store.get(self.op)["status"], "Failed")
+
 
 def _busy():
     ad = mock.Mock()

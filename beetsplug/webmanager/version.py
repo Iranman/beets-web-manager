@@ -1,4 +1,4 @@
 """Version definitions for the WebManager Beets integration plugin."""
 
-PLUGIN_VERSION = "1.8.1"
+PLUGIN_VERSION = "1.9.0"
 PROTOCOL_VERSION = "1.0"

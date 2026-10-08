@@ -203,7 +203,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.8.1")
+        self.assertEqual(status_data["plugin_version"], "1.9.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -459,7 +459,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.8.1")
+                    self.assertEqual(status_res["plugin_version"], "1.9.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -629,6 +629,31 @@ webmanager:
                 # the real stock container (ARCH-020 / ARCH-021).
                 self._accept_merge_and_untracked(base_url, auth_header, container_name, downloads_dir, music_dir,
                                                  _raw_urlopen)
+
+                # Step 15 (#300 R3): a folder-op outcome survives a restart of the
+                # real container. A fresh run of the replayed removal would answer
+                # SOURCE_MISSING; the saved outcome answers "succeeded".
+                def folder_op(body, key):
+                    req = urllib.request.Request(f"{base_url}/webmanager/folder-op", data=json.dumps(body).encode("utf-8"),
+                                                 headers={**auth_header, "Idempotency-Key": key}, method="POST")
+                    with _raw_urlopen(req, timeout=15) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                remove = {"op": "remove_empty_dir", "path": "/music/AcceptanceRestart"}
+                self.assertTrue(folder_op({"op": "create_dir", "path": remove["path"]}, "acc-r3-create")["success"])
+                self.assertTrue(folder_op(remove, "acc-r3-remove")["success"])
+                self.assertTrue(os.path.isfile(os.path.join(config_dir, "webmanager_operations.json")))
+                subprocess.run(["docker", "restart", container_name], check=True, stdout=subprocess.DEVNULL)
+                for _ in range(90):
+                    time.sleep(1)
+                    try:
+                        with _raw_urlopen(urllib.request.Request(f"{base_url}/stats"), timeout=2) as resp:
+                            if resp.status == 200:
+                                break
+                    except Exception:
+                        pass
+                replay = folder_op(remove, "acc-r3-remove")
+                self.assertEqual(replay["status"], "succeeded", replay)
 
             finally:
                 if orig_allowlist is not None:

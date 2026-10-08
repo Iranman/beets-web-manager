@@ -2009,10 +2009,11 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
     retried with the same idempotency key, which makes the plugin report the
     first attempt's result instead of running the step twice; if it stays
     unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``. So does a refusal
-    that follows an unconfirmed attempt: Beets keeps its idempotency records in
-    memory, so after a Beets restart the replay runs the step afresh and a
-    refusal (say SOURCE_MISSING) cannot prove the first attempt did nothing
-    (#300 R3)."""
+    that follows an unconfirmed attempt: a key Beets has no record of (one
+    older than plugin 1.9.0, or a step Beets stopped in the middle of) runs
+    afresh, and a refusal (say SOURCE_MISSING) cannot prove the first attempt
+    did nothing (#300 R3). ``BUSY`` (plugin 1.9.0) means Beets did not
+    register the step: nothing ran, so it is retryable, not unconfirmed (#300 R2)."""
     last = None
     for attempt in range(_FOLDER_STEP_ATTEMPTS):
         if attempt:

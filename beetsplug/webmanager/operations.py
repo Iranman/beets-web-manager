@@ -37,6 +37,17 @@ _operations_lock = threading.Lock()
 DEFAULT_RETENTION_SECONDS = 3600
 MAX_COMPLETED_OPERATIONS = 1000
 
+# #300 R3: folder-op outcomes are kept on disk next to the library DB (the
+# Beets config dir in the shipped Compose files), so a replayed idempotency
+# key still reads its result after a Beets restart. Only final outcomes are
+# saved: a step that was running when Beets stopped is not running any more,
+# so replaying its key runs it (or refuses it) against the current files.
+_DURABLE_TYPES = frozenset({"folder_op"})
+DURABLE_RETENTION_SECONDS = 7 * 86400
+REGISTRY_FILENAME = "webmanager_operations.json"
+_FINAL = ("succeeded", "failed")
+_durable_file: Optional[str] = None
+
 webmanager_bp = Blueprint("webmanager", __name__, url_prefix="/webmanager")
 
 
@@ -76,8 +87,9 @@ def _prune_operations_locked():
     completed = []
 
     for op_id, op in _operations.items():
-        if op.get("status") in ("succeeded", "failed"):
-            if now - op.get("updated_at", now) > DEFAULT_RETENTION_SECONDS:
+        if op.get("status") in _FINAL:
+            keep = DURABLE_RETENTION_SECONDS if op.get("type") in _DURABLE_TYPES else DEFAULT_RETENTION_SECONDS
+            if now - op.get("updated_at", now) > keep:
                 to_delete.append(op_id)
             else:
                 completed.append((op.get("updated_at", 0), op_id))
@@ -94,12 +106,64 @@ def _prune_operations_locked():
                 del _operations[op_id]
 
 
+def _save_durable_locked() -> None:
+    """Write the final durable outcomes atomically (must hold _operations_lock)."""
+    if not _durable_file:
+        return
+    entries = [op for op in _operations.values() if op.get("type") in _DURABLE_TYPES and op.get("status") in _FINAL]
+    tmp = _durable_file + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, _durable_file)
+    except OSError as exc:
+        log.warning("webmanager: could not save the operation registry: %s", exc)
+
+
+def bind_durable_registry(lib) -> None:
+    """Load this library's saved folder-op outcomes, once (#300 R3)."""
+    global _durable_file
+    db = os.fsdecode(getattr(lib, "path", None) or "")
+    path = os.path.join(os.path.dirname(os.path.abspath(db)), REGISTRY_FILENAME) if db and db != ":memory:" else None
+    with _operations_lock:
+        if path == _durable_file:
+            return
+        _durable_file = path
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            log.warning("webmanager: ignoring an unreadable operation registry: %s", exc)
+            return
+        for op in saved if isinstance(saved, list) else []:
+            if not (isinstance(op, dict) and isinstance(op.get("operation_id"), str)
+                    and op.get("type") in _DURABLE_TYPES and op.get("status") in _FINAL):
+                continue
+            try:
+                created, updated = float(op.get("created_at") or 0), float(op.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                continue
+            _operations.setdefault(op["operation_id"], {
+                "operation_id": op["operation_id"], "type": op["type"], "_fingerprint": op.get("_fingerprint"),
+                "status": op["status"], "created_at": created, "updated_at": updated,
+                "result": op.get("result"), "error": op.get("error"), "error_code": op.get("error_code"),
+            })
+        _prune_operations_locked()
+
+
 def register_operation(
-    op_type: str, op_id: Optional[str] = None, fingerprint: Optional[str] = None
+    op_type: str, op_id: Optional[str] = None, fingerprint: Optional[str] = None, create: bool = True
 ) -> Tuple[str, str]:
     """Register a new operation in the registry with collision check.
 
-    Returns (op_id, status_code) where status_code is 'created', 'exists', or 'collision'.
+    Returns (op_id, status_code) where status_code is 'created', 'exists',
+    'collision', or 'absent' (an unknown key when ``create`` is False).
     """
     if not op_id:
         op_id = str(uuid.uuid4())
@@ -110,6 +174,8 @@ def register_operation(
             if fingerprint and existing.get("_fingerprint") and existing.get("_fingerprint") != fingerprint:
                 return op_id, "collision"
             return op_id, "exists"
+        if not create:
+            return op_id, "absent"
 
         _operations[op_id] = {
             "operation_id": op_id,
@@ -143,6 +209,8 @@ def update_operation(
                 _operations[op_id]["error"] = error
             if error_code is not None:
                 _operations[op_id]["error_code"] = error_code
+            if status in _FINAL and _operations[op_id].get("type") in _DURABLE_TYPES:
+                _save_durable_locked()
 
 
 def get_operation(op_id: str) -> Optional[Dict[str, Any]]:
@@ -833,17 +901,18 @@ def run_modify():
         return jsonify({"error": "Modify operation failed", "error_code": "MODIFY_FAILED"}), 500
 
 
-def _idempotency_precheck(op_type: str, data: Dict[str, Any]):
+def _idempotency_precheck(op_type: str, data: Dict[str, Any], register: bool = True):
     """Shared idempotency/collision handling for destructive/long operations.
 
     Returns (op_id, fingerprint, early_response) -- early_response is a
     Flask response tuple to return immediately (collision, or a replay of
     an existing running/succeeded/failed operation), or None if this is a
-    genuinely new operation the caller should now execute.
+    genuinely new operation the caller should now execute. With
+    ``register=False`` an unknown key is left unregistered.
     """
     op_id = request.headers.get("Idempotency-Key") or str(uuid.uuid4())
     fingerprint = compute_fingerprint(data)
-    reg_id, reg_status = register_operation(op_type, op_id, fingerprint=fingerprint)
+    reg_id, reg_status = register_operation(op_type, op_id, fingerprint=fingerprint, create=register)
 
     if reg_status == "collision":
         return op_id, fingerprint, (
