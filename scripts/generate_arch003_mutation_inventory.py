@@ -264,6 +264,11 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "ARCH-010 composite workflow migration: folder_cleanup rmdir on empty directories verified not tracked by Beets DB.",
         "reviewed_in_pr": 142,
     },
+    "reviewed-dup1-staging-tag-hint": {
+        "domain": "other",
+        "review_reason": "DUP-1: write_staging_tags writes playlist pre-import tag hints in place, only to a regular, single-link file under a staging root (never MUSIC_ROOT), opened fd-relative with O_NOFOLLOW and identity-checked; Beets' importer does the real tagging.",
+        "reviewed_in_pr": 316,
+    },
     "reviewed-composite-workflows-playlist-staging": {
         "domain": "other",
         "review_reason": "ARCH-010 composite workflow migration: playlist staging directory and m3u file creation under WEB_MANAGER_DATA_DIR.",
@@ -497,6 +502,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
                 # from the staging root (_staging_dir_fd opens each component
                 # O_NOFOLLOW; _copy_file_across_fs is the EXDEV file fallback).
                 return "STAGING_ONLY", "", "staging-root-contained-delete-move"
+            if func == "write_staging_tags":
+                return "STAGING_ONLY", "", "reviewed-dup1-staging-tag-hint"
             return "STAGING_ONLY", "", "reviewed-composite-workflows-playlist-staging"
         if file == "backend/web_manager_config_store.py":
             return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
