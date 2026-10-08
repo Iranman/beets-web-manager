@@ -219,6 +219,29 @@ class RejectedDownloadPreservedSourceTests(unittest.TestCase):
         self.assertIn("1 left in place", message)
         self.assertNotIn("manual cleanup", message)
 
+    def test_qa_marker_in_file_name_does_not_unpreserve_torrent_source(self):
+        # QA (PR #321): the per-file rule must not treat a seeded file as
+        # app-managed just because its own name contains a "- yt missing" marker.
+        for handling in ("quarantine", "delete"):
+            seeded = self._file("downloads", "torrents", "Some Album", f"Artist - YT missing Song {handling}.flac")
+            result, _ = self._handle(seeded, handling)
+            self.assertTrue(seeded.exists())
+            self.assertEqual(result["handling"], "kept")
+
+    def test_qa_per_file_rule_matches_folder_rule_for_marker_folder(self):
+        # QA (PR #321): per-file callers (reimport-disk, import-review subset)
+        # should reach the same decision as the folder import for an
+        # app-created "- YT missing" folder, which is quarantined.
+        import backend.library_service as lib
+        folder = self.downloads / "Artist - YT missing Album"
+        staged = self._file("downloads", "Artist - YT missing Album", "a.flac")
+        # Default deployment: TORRENT_SOURCE_ROOTS defaults to DOWNLOADS_ROOT.
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads,)):
+            self.assertFalse(lib._preserve_torrent_source_path(folder))
+            result, _ = self._handle(staged, "quarantine")
+        self.assertEqual(result["handling"], "quarantine")
+        self.assertFalse(staged.exists())
+
     def test_existing_file_not_removed_until_verified_replacement_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             final = Path(tmp) / "replacement.flac"
