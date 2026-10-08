@@ -152,6 +152,11 @@ class ReimportSourceTests(unittest.TestCase):
         res = cw.reimport_source("/downloads/A", {}, adapter=ad_with([0, 1], {"skipped_paths": ["/downloads/A/B"]}))
         self.assertEqual((res["albums_imported"], res["not_matched"], res["not_matched_known"]),
                          (1, ["/downloads/A/B"], True))
+        self.assertEqual(res["skipped"], [{"path": "/downloads/A/B", "reason": "not_matched"}])
+        # Plugin 1.10.0 says why.
+        res = cw.reimport_source("/downloads/A", {}, adapter=ad_with([0, 0], {
+            "skipped_paths": ["/downloads/A/B"], "skipped": [{"path": "/downloads/A/B", "reason": "duplicate"}]}))
+        self.assertEqual(res["skipped"], [{"path": "/downloads/A/B", "reason": "duplicate"}])
         # Nothing was added: the whole source is left in place for review.
         res = cw.reimport_source("/downloads/A", {}, adapter=ad_with([3, 3], {"success": True}))
         self.assertEqual((res["not_matched"], res["not_matched_known"]), (["/downloads/A"], True))
@@ -186,6 +191,11 @@ class ApiImportRouteTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.client = APP.app.test_client()
         self.logs = []
+        import backend.import_service as isvc
+        skips = mock.patch.object(isvc, "_IMPORT_SKIPPED_FILE",
+                                  isvc.Path(self.tmp.name) / "import_skipped.json")
+        skips.start()
+        self.addCleanup(skips.stop)
 
     def _post(self, preserved, **payload):
         def run_now(fn, label=""):
@@ -217,7 +227,8 @@ class ApiImportRouteTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(opts["quiet_fallback"], "skip")
         self.assertEqual(self.job_result["not_matched"],
-                         [{"path": "/downloads/A/Unmatched", "status": "not matched; left in place for review"}])
+                         [{"path": "/downloads/A/Unmatched", "status": "not matched; left in place for review",
+                           "reason": "not_matched"}])
         self.assertTrue(any("not matched; left in place for review" in line for line in self.logs))
         _, opts = self._post(False, fallback="asis")
         self.assertEqual(opts["quiet_fallback"], "asis")

@@ -528,6 +528,7 @@ def _import_session_class(autotag: bool, tasks: List[Any]):
             return super().choose_item(task)
 
         def get_duplicate_action(self, task, found_duplicates):
+            task.webmanager_duplicate = True
             if task not in tasks:
                 tasks.append(task)
             return super().get_duplicate_action(task, found_duplicates)
@@ -742,12 +743,20 @@ def run_import():
                 session.run()
 
                 skipped: List[str] = []
+                skipped_reasons: List[Dict[str, str]] = []
                 for task in tasks:
                     if getattr(task, "skip", False):
+                        if getattr(task, "webmanager_duplicate", False):
+                            reason = "duplicate"
+                        elif not getattr(task, "candidates", None):
+                            reason = "no_candidates"  # nothing found, or the source was unreachable
+                        else:
+                            reason = "no_strong_match"
                         for tp in getattr(task, "paths", None) or []:
                             shown = util.displayable_path(tp)
                             if shown not in skipped:
                                 skipped.append(shown)
+                                skipped_reasons.append({"path": shown, "reason": reason})
                 result = {
                     "success": True,
                     "imported_paths": safe_paths,
@@ -756,6 +765,7 @@ def run_import():
                     "search_ids": list(search_ids),
                     "duplicate_action": duplicate_action,
                     "skipped_paths": skipped,
+                    "skipped": skipped_reasons,
                 }
                 if op_id_arg:
                     update_operation(op_id_arg, "succeeded", result=result)
@@ -883,9 +893,11 @@ def run_modify():
 
             def _write(it):
                 try:
-                    it.try_write()
+                    ok = it.try_write()  # Beets logs and returns False on FileOperationError
                 except Exception as e:
                     log.warning("Failed to write tags to %s: %s", it.path, e)
+                    ok = False
+                if ok is False:
                     write_failed.append(it.id)
 
             for item in items_to_modify:

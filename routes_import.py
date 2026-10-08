@@ -19,7 +19,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _update_pending_review_revalidation
-from backend.import_service import _RECENT_IMPORTS_FILE, _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
+from backend.import_service import _RECENT_IMPORTS_FILE, _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import _album_folder_for_album_id, _delete_if_already_in_library, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache, _load_album_mb_suggestions
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
@@ -554,6 +554,7 @@ def import_review_queue():
                 "year": 0,
                 "path": s.get("path", ""),
                 "folder": s.get("folder", ""),
+                "reason": s.get("reason", ""),
                 "tracks": 0,
                 "sort_ts": 0,
             })
@@ -1601,12 +1602,20 @@ def start_import():
             raise RuntimeError(res.get("error") or "Beets import failed.")
         _delete_if_already_in_library(path, "", log)
         _invalidate_lib_cache()
-        not_matched = [{"path": p, "status": IMPORT_NOT_MATCHED_STATUS} for p in res.get("not_matched") or []]
+        not_matched = [{"path": r["path"], "status": IMPORT_NOT_MATCHED_STATUS, "reason": r["reason"]}
+                       for r in res.get("skipped")
+                       or [{"path": p, "reason": "not_matched"} for p in res.get("not_matched") or []]]
         for row in not_matched:
-            log.append(f"[import] {row['path']}: {IMPORT_NOT_MATCHED_STATUS}")
+            log.append(f"[import] {row['path']}: {IMPORT_NOT_MATCHED_STATUS} ({row['reason']})")
         if not res.get("not_matched_known", True):
             log.append("[import] Beets did not report which folders it skipped; "
                        f"check {path} for folders left in place.")
+        else:
+            # The Review Queue's Skipped source lists these (one row per folder).
+            try:
+                _record_import_skips(path, not_matched)
+            except RuntimeError as ex:
+                log.append(f"[import] WARN {ex} They are not in the Review Queue; see the list above.")
         return {"albums_imported": res.get("albums_imported"), "quiet_fallback": fallback,
                 "not_matched": not_matched, "not_matched_known": res.get("not_matched_known", True)}
 

@@ -22,7 +22,7 @@ from unittest import mock
 import mutagen.id3
 import mutagen.wave
 from beets import config as beets_config
-from beets.library import Album, Item, Library
+from beets.library import Album, Item, Library, WriteError
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
 from beetsplug.webmanager.auth import set_api_key_file
@@ -159,12 +159,15 @@ class GenreEditTests(unittest.TestCase):
         self.assertNotIn("media", self.lib.get_album(self.album.id)._values_flex)
 
     def test_failed_file_write_fails_the_apply(self):
-        with mock.patch.object(Item, "try_write", side_effect=OSError("read-only")):
-            res = self.client.post("/webmanager/modify", headers={"Authorization": f"Bearer {TOKEN}"},
-                                   json={"item_ids": [self.iid], "fields": {"title": "New"}})
-        self.assertEqual((res.status_code, res.get_json()["error_code"]), (500, "WRITE_FAILED"))
-        self.assertEqual(res.get_json()["item_ids"], [self.iid])
-        with mock.patch.object(Item, "try_write", side_effect=OSError("read-only")):
+        # Real Item.try_write: Beets catches the WriteError, logs it and returns False.
+        denied = WriteError(self.path, PermissionError(13, "Permission denied"))
+        with mock.patch.object(Item, "write", side_effect=denied):
+            for body in ({"item_ids": [self.iid], "fields": {"title": "New"}},
+                         {"album_ids": [self.album.id], "fields": {"album": "New"}}):
+                res = self.client.post("/webmanager/modify", headers={"Authorization": f"Bearer {TOKEN}"},
+                                       json=body)
+                self.assertEqual((res.status_code, res.get_json()["error_code"]), (500, "WRITE_FAILED"), body)
+                self.assertEqual(res.get_json()["item_ids"], [self.iid])
             with self.assertRaises(BeetsAdapterError):
                 self._edit({"title": "Newer"})
 

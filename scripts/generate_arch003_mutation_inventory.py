@@ -147,6 +147,7 @@ _APP_STATE_VERIFIED_FUNCTIONS = frozenset({
     "_load_pending_reviews",
     "_mark_pending_review_status",
     "_record_ai_review_decision",
+    "_record_import_skips",
     "_record_recent_import",
     "_remove_pending_review_for_path",
     "_update_pending_review_revalidation",
