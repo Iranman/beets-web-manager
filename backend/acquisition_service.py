@@ -182,8 +182,9 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 mb_albumid, artist, album, year, track_count, log)
             if resolved_mbid:
                 if supplied_mbid and supplied_mbid != _s(resolved_mbid).strip().lower():
+                    # Resolution stayed inside the supplied ID's Release Group;
+                    # that group is read from the resolved Release below.
                     release_group_requested = True
-                    resolved_release_group_id = supplied_mbid
                 mb_release = _fetch_mb_release_tracklist(resolved_mbid, log)
                 mb_tracks = len(mb_release.get("tracks") or []) if mb_release.get("ok") else 0
                 if mb_release.get("release_group"):
