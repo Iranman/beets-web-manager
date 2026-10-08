@@ -108,6 +108,23 @@ class CompositeApplyCasTests(_Env):
         self.assertFalse(cw.apply_album_relocation(op, adapter=ad, store=self.store)["ok"])
         self.assertEqual(ad.move.call_count, 1)
 
+    def test_restart_sweep_marks_an_interrupted_apply_recovery_required(self):
+        """N1: a crash mid-apply leaves Running; the startup sweep resolves it."""
+        import time
+        from backend import transaction_recovery
+        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        ad = _adapter()
+        ad.move.side_effect = KeyboardInterrupt  # the process dies inside the Beets call
+        with self.assertRaises(KeyboardInterrupt):
+            cw.apply_album_relocation(op, adapter=ad, store=self.store)
+        self.assertEqual(self.store.get(op)["status"], "Running")
+        # An apply written after the process started may still be live.
+        transaction_recovery.sweep(adapter=ad, store=self.store, before=self.store.get(op)["updated_at"])
+        self.assertEqual(self.store.get(op)["status"], "Running")
+        res = transaction_recovery.sweep(adapter=ad, store=self.store, before=time.time() + 1)
+        self.assertEqual(res, [{"operation_id": op, "action": "Recovery Required"}])
+        self.assertEqual(self.store.get(op)["status"], "Recovery Required")
+
 
 #: (name, rollback fn, adapter rollback method, metadata of an applied tx)
 _ENGINE_ROLLBACKS = [
@@ -220,8 +237,7 @@ class FolderRollbackUnconfirmedTests(_Env):
     def test_rollback_defers_while_beets_still_runs_the_step(self):
         running = mock.Mock()
         running.folder_op.return_value = {"operation_id": self.key, "status": "running"}
-        res = cw.rollback_folder_cleanup(self.op, store=self.store) if False else \
-            te.rollback_folder_cleanup(self.store, self.op, adapter=running)
+        res = te.rollback_folder_cleanup(self.store, self.op, adapter=running)
         self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "rollback_deferred", False))
         self.assertEqual(self.store.get(self.op)["status"], "Failed")
         self.assertEqual({c.args[1] for c in running.folder_op.call_args_list}, {self.key})
@@ -236,7 +252,7 @@ class FolderRollbackUnconfirmedTests(_Env):
         self.assertTrue((self.music / "Empty").is_dir())
         self.assertEqual(self.store.get(self.op)["status"], "Rolled Back")
 
-    def test_route_rollback_defers_with_409(self):
+    def test_composite_wrapper_defers_and_keeps_failed(self):
         running = mock.Mock()
         running.folder_op.return_value = {"operation_id": self.key, "status": "running"}
         with mock.patch.object(te, "_folder_adapter", return_value=running):

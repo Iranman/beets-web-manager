@@ -119,14 +119,30 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
     return mark("Failed", f"the engine reports {reg.get('status')!r} ({reg.get('error_code') or 'no code'})")
 
 
-def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None) -> List[Dict[str, Any]]:
+def _interrupted_apply(st: TransactionStore, op: str) -> Dict[str, Any]:
+    """A claimed composite apply (``_claim_apply``) records no engine evidence,
+    so a restart that left it Running cannot tell whether Beets wrote it."""
+    tx = st.transition(op, "Running", "Recovery Required", logs=[
+        "Recovered after restart: the apply was interrupted; check the library and roll back or re-run."])
+    return {"operation_id": op, "action": "Recovery Required" if tx else "skipped"}
+
+
+def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
+          before: Optional[float] = None) -> List[Dict[str, Any]]:
+    """``before``: claimed composite applies last written before this time
+    (the process start) are interrupted ones; later ones may still be live."""
     from backend.composite_workflows import _get_store
     st = _get_store(store)
     families = _families()
     results = []
     rows, _total = st.list(status="Running", limit=1000)
     for tx in rows:
-        if (tx.get("metadata") or {}).get("mutation_family") in families:
+        meta = tx.get("metadata") or {}
+        if (meta.get("mutation_family") not in families and before is not None
+                and (meta.get("engine_result") or {}).get("mutation_started")
+                and (tx.get("updated_at") or 0) < before):
+            results.append(_interrupted_apply(st, tx["id"]))
+        elif meta.get("mutation_family") in families:
             try:
                 results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st))
             except BeetsError as exc:
@@ -138,10 +154,12 @@ def start_background_sweep(*, attempts: int = 20, interval: float = 30.0,
                            sleep: Callable[[float], None] = time.sleep) -> threading.Thread:
     """Run the sweep at startup, retrying while the engine is unavailable or
     an engine operation is still running."""
+    started = time.time()
+
     def run():
         for _ in range(attempts):
             try:
-                results = sweep()
+                results = sweep(before=started)
             except Exception:
                 log.exception("transaction recovery sweep failed")
                 results = [{"action": "engine_unavailable"}]
