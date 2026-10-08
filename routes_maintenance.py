@@ -774,6 +774,10 @@ _ENGINE_FAMILIES = {
     untracked_recovery.ATTACH_ALBUM_FAMILY: (untracked_recovery.apply_recovery, untracked_recovery.rollback_recovery),
     composite_workflows.ALBUM_CLEANUP_FAMILY: (composite_workflows.apply_album_cleanup,
                                                composite_workflows.rollback_album_cleanup),
+    # Apply runs from the artwork upload/URL job (it needs the image bytes);
+    # the generic apply route refuses it with image_unavailable.
+    composite_workflows.ALBUM_ART_REPLACE_FAMILY: (composite_workflows.apply_album_art_replace,
+                                                   composite_workflows.rollback_album_art_replace),
 }
 
 #: Families whose rollback executor acquires its resource locks before any

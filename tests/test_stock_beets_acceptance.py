@@ -203,7 +203,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.10.0")
+        self.assertEqual(status_data["plugin_version"], "1.12.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -311,7 +311,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
             os.makedirs(target_plugin_dir, exist_ok=True)
             src_plugin_dir = os.path.join(repo_root, "beetsplug", "webmanager")
-            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "engine_common.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py", "folder_ops.py"]:
+            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "engine_common.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py", "folder_ops.py", "art_ops.py"]:
                 shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
             # 2. Provision 64-hex secret API key file (256-bit entropy)
@@ -326,7 +326,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
                     pass
 
             # 3. Write config.yaml
-            config_yaml = f"""plugins: web webmanager
+            config_yaml = f"""plugins: web webmanager embedart
 pluginpath:
   - /config/beetsplug
 directory: /music
@@ -468,7 +468,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.10.0")
+                    self.assertEqual(status_res["plugin_version"], "1.12.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -652,6 +652,9 @@ webmanager:
                 self._accept_merge_and_untracked(base_url, auth_header, container_name, downloads_dir, music_dir,
                                                  _raw_urlopen)
 
+                # Step 14b: album art set through Beets (set_art + embedart) and rolled back.
+                self._accept_album_art(base_url, auth_header, container_name, downloads_dir, _raw_urlopen)
+
                 # Step 15 (#300 R3): a folder-op outcome survives a restart of the
                 # real container. A fresh run of the replayed removal would answer
                 # SOURCE_MISSING; the saved outcome answers "succeeded".
@@ -693,6 +696,80 @@ webmanager:
                 )
             shutil.rmtree(td, ignore_errors=True)
 
+
+    def _accept_album_art(self, base_url, auth_header, container_name, downloads_dir, urlopen):
+        import base64
+        import hashlib
+        import io
+        from PIL import Image
+
+        def call(path, body, key=None):
+            headers = {**auth_header, **({"Idempotency-Key": key} if key else {})}
+            req = urllib.request.Request(f"{base_url}{path}", method="POST" if body is not None else "GET",
+                                         headers=headers,
+                                         data=json.dumps(body).encode("utf-8") if body is not None else None)
+            try:
+                with urlopen(req, timeout=120) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as ex:
+                return ex.code, json.loads(ex.read().decode("utf-8") or "{}")
+
+        def embedded(path):
+            out = subprocess.run(["docker", "exec", container_name, "/lsiopy/bin/python3", "-c",
+                                  "import sys,mediafile;print(len(mediafile.MediaFile(sys.argv[1]).images or []))",
+                                  path], capture_output=True, text=True, check=True).stdout
+            return int(out.strip())
+
+        folder = os.path.join(downloads_dir, "ArtLP")
+        os.makedirs(folder, exist_ok=True)
+        _create_synthetic_audio(os.path.join(folder, "01.wav"), title="Art 1", artist="Art Bot", album="Art LP")
+        if os.name != "nt":
+            os.chmod(folder, 0o777)
+            os.chmod(os.path.join(folder, "01.wav"), 0o666)
+        key = f"accept-art-import-{uuid.uuid4().hex[:6]}"
+        status, _ = call("/webmanager/import", {"paths": ["/downloads/ArtLP"], "autotag": False, "singletons": False,
+                                                 "move": True, "write": True, "duplicate_action": "keep"}, key=key)
+        self.assertIn(status, (200, 202))
+        for _ in range(60):
+            _s, op = call(f"/webmanager/operations/{key}", None)
+            if op.get("status") in ("succeeded", "failed"):
+                break
+            time.sleep(1)
+        self.assertEqual(op.get("status"), "succeeded", op)
+        _s, albums = call("/album/", None)
+        album_id = next(a["id"] for a in albums["albums"] if a["album"] == "Art LP")
+        _s, album = call(f"/album/{album_id}?expand", None)
+        item_path = album["items"][0]["path"]
+        item_path = item_path if item_path.startswith("/") else "/music/" + item_path
+
+        status, refused = call("/webmanager/album-art", {"album_id": album_id, "image_b64": base64.b64encode(
+            b"<html>" * 20).decode(), "image_sha256": "0" * 64})
+        self.assertEqual((status, refused.get("error_code")), (400, "INVALID_IMAGE"), refused)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (48, 48), (10, 120, 200)).save(buf, format="PNG")
+        png = buf.getvalue()
+        status, res = call("/webmanager/album-art", {"album_id": album_id, "image_b64": base64.b64encode(png).decode(),
+                                                     "image_sha256": hashlib.sha256(png).hexdigest()},
+                           key=f"accept-art-{uuid.uuid4().hex[:8]}")
+        self.assertEqual(status, 200, res)
+        cover = res["artpath"]
+        self.assertTrue(cover.startswith("/music/") and cover.endswith("/cover.png"), cover)
+        sha = subprocess.run(["docker", "exec", container_name, "sha256sum", cover],
+                             capture_output=True, text=True, check=True).stdout.split()[0]
+        self.assertEqual(sha, hashlib.sha256(png).hexdigest())
+        shown = call(f"/album/{album_id}", None)[1].get("artpath") or ""
+        self.assertTrue(cover.endswith(shown.lstrip("/")) and shown, shown)
+        self.assertEqual(embedded(item_path), 1)
+
+        status, bad = call("/webmanager/album-art/rollback", {"art_id": "../../config"})
+        self.assertEqual((status, bad.get("error_code")), (400, "INVALID_ART_ID"), bad)
+        status, rb = call("/webmanager/album-art/rollback", {"art_id": res["art_id"]},
+                          key=f"accept-art-rb-{uuid.uuid4().hex[:8]}")
+        self.assertEqual(status, 200, rb)
+        self.assertFalse(call(f"/album/{album_id}", None)[1].get("artpath"))
+        self.assertNotEqual(subprocess.run(["docker", "exec", container_name, "test", "-e", cover]).returncode, 0)
+        self.assertEqual(embedded(item_path), 0)
 
     def _accept_merge_and_untracked(self, base_url, auth_header, container_name, downloads_dir, music_dir, urlopen):
         rel = "45347542-db98-422a-a307-ae95d5371f60"

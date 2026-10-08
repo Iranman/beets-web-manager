@@ -2079,21 +2079,213 @@ def delete_album_art(
     return {"ok": True, "album_id": aid}
 
 
+#: Operator-supplied album cover set through Beets (plugin 1.12.0,
+#: POST /webmanager/album-art): Album.set_art + embedart's art_set listener.
+ALBUM_ART_REPLACE_FAMILY = "album_art_replace_v1"
+
+#: Engine refusals that changed nothing, with the text shown to the operator.
+_ART_REFUSALS = {
+    "INVALID_IMAGE": "The image is not a JPEG, PNG or WebP file.",
+    "IMAGE_TOO_LARGE": "The image is larger than 15 MB.",
+    "IMAGE_HASH_MISMATCH": "The image was damaged on the way to Beets; try again.",
+    "IDENTITY_CHANGED": "The album's release group changed since the artwork was chosen; nothing was changed.",
+    "ALBUM_NOT_FOUND": "Beets no longer has this album.",
+    "ALBUM_EMPTY": "The album has no tracks, so Beets has no folder for its artwork.",
+    "DESTINATION_PATH_INVALID": "The album folder is outside the folders Beets may write to.",
+    "OLD_ART_PATH_INVALID": "The album's current cover is outside the folders Beets may write to.",
+    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.12.0; nothing was changed.",
+}
+
+
+def plan_album_art_replace(
+    album_id: int,
+    image: bytes,
+    *,
+    source: str = "",
+    expected_mb_releasegroupid: str = "",
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Preview setting ``image`` as the album's cover: records the current
+    artpath and the image's hash. The image itself is not stored."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    aid = int(album_id)
+    if not image:
+        return {"ok": False, "code": "invalid_image", "error": "No image was supplied."}
+    album = ad.get_album(aid, expand=False)
+    if not album:
+        return {"ok": False, "code": "not_found", "error": "Album not found"}
+    rgid = _s(album.get("mb_releasegroupid")).strip().lower()
+    expected = _s(expected_mb_releasegroupid).strip().lower()
+    if expected and rgid != expected:
+        return {"ok": False, "code": "identity_changed", "error": _ART_REFUSALS["IDENTITY_CHANGED"]}
+    digest = hashlib.sha256(image).hexdigest()
+    old_artpath = _s(album.get("artpath"))
+    tx = st.create(
+        operation_type="Artwork Update",
+        status="Preview",
+        summary=f"Set the cover of album {aid} ({_s(album.get('album'))}) from {source or 'an uploaded image'}",
+        source=_s(source),
+        changes=[{"type": "album_art_replace", "album_id": aid, "old_artpath": old_artpath,
+                  "image_sha256": digest, "image_bytes": len(image)}],
+        rollback_available=True,
+        metadata={"mutation_family": ALBUM_ART_REPLACE_FAMILY, "album_id": aid, "image_sha256": digest,
+                  "image_bytes": len(image), "expected_mb_releasegroupid": expected or rgid,
+                  "before": {"artpath": old_artpath}, "source": _s(source)},
+    )
+    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview",
+            "album_id": aid, "old_artpath": old_artpath, "image_sha256": digest}
+
+
+def apply_album_art_replace(
+    operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+    *,
+    image: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """Apply an Approved cover replacement through Beets. ``image`` must be
+    the planned image (checked by hash); it is not kept between requests, so
+    an apply without it is refused and changes nothing."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != ALBUM_ART_REPLACE_FAMILY:
+        return {"ok": False, "code": "wrong_family", "error": "Not an album artwork replacement transaction."}
+    if meta.get("engine_result"):
+        return {"ok": False, "code": "already_applied", "error": "This artwork replacement was already applied."}
+    if tx.get("status") != "Approved":
+        return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
+    if not image or hashlib.sha256(image).hexdigest() != meta.get("image_sha256"):
+        return {"ok": False, "code": "image_unavailable", "mutated": False,
+                "error": "The planned image is not available; upload it again."}
+
+    aid = int(meta["album_id"])
+    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
+    with resource_locks().hold([f"album:{aid}"], attempt_owner(operation_id), timeout=10):
+        if claim_approved(st, operation_id) is None:
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
+        # Recorded before the engine call: a restart mid-call is finished from
+        # engine evidence by backend/transaction_recovery.py, never replayed.
+        st.update(operation_id, status="Running", metadata={"engine_request": {"operation_id": operation_id}})
+        try:
+            res = ad.set_album_art(aid, image, expected_mb_releasegroupid=meta.get("expected_mb_releasegroupid") or "",
+                                   idempotency_key=operation_id)
+        except BeetsAdapterError as exc:
+            if _transport_error(exc):
+                st.update(operation_id, status="Recovery Required",
+                          logs=["Beets did not answer; whether the artwork changed is unknown."])
+                raise
+            code = exc.error_code or ""
+            message = _ART_REFUSALS.get(code)
+            st.update(operation_id, status="Failed",
+                      logs=[f"Beets refused the artwork change ({code or 'error'}); "
+                            + ("nothing was changed." if message else "Beets restored the previous artwork.")])
+            return {"ok": False, "code": code.lower() or "beets_error", "mutated": False, "operation_id": operation_id,
+                    "status": "Failed", "error": message or "Beets could not set the artwork; nothing was changed."}
+        return finish_album_art_replace(operation_id, res, adapter=ad, store=st)
+
+
+def finish_album_art_replace(
+    operation_id: str,
+    res: Dict[str, Any],
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Verify the engine's result against live Beets and record it (also
+    used by restart recovery -- never re-applies)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    meta = st.get(operation_id).get("metadata") or {}
+    engine = res.get("result") if isinstance(res.get("result"), dict) else res
+    album = ad.get_album(int(meta["album_id"]), expand=False) or {}
+    artpath = _s(album.get("artpath"))
+    # embedart's remove_art_file may leave the art embedded only (artpath "").
+    same = album and (artpath == _s(engine.get("artpath")) or _same_library_path(artpath, engine.get("artpath")))
+    problems = [] if same else ["artpath"]
+    status = "Completed" if not problems else "Recovery Required"
+    st.update(
+        operation_id, status=status,
+        metadata={**meta, "engine_result": engine, "after": {"artpath": artpath}, "verification_problems": problems},
+        logs=[f"Album {meta['album_id']} cover is now {artpath or '(embedded only)'}",
+              f"Embedded into {engine.get('embedded_items', 0)} of {engine.get('item_count', 0)} tracks",
+              f"Previous cover kept by Beets (engine id {engine.get('art_id')})"]
+             + ([f"Verification mismatch: {', '.join(problems)}"] if problems else []),
+    )
+    return {"ok": not problems, "operation_id": operation_id, "status": status, "album_id": int(meta["album_id"]),
+            "artpath": artpath, "embedded_items": engine.get("embedded_items", 0),
+            "verification_problems": problems}
+
+
+def rollback_album_art_replace(
+    operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Put the previous cover file, artpath and embedded art back through
+    Beets (the engine restores from its own manifest)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    if meta.get("mutation_family") != ALBUM_ART_REPLACE_FAMILY or not engine.get("art_id"):
+        return {"ok": False, "code": "not_applied", "error": "No applied artwork replacement to roll back."}
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    refusal = engine_rollback_refusal(tx)
+    if refusal:
+        return refusal
+    res = ad.rollback_album_art(engine["art_id"], idempotency_key=f"{operation_id}:rollback")
+    result = res.get("result") if isinstance(res.get("result"), dict) else res
+    restored = _s(result.get("restored_artpath"))
+    if st.transition(
+        operation_id, tx.get("status"), "Rolled Back",
+        metadata={**meta, "rollback_result": result},
+        logs=[f"Restored album {meta['album_id']} cover to {restored or '(none)'}; "
+              f"embedded art restored on {result.get('restored_embedded_items', 0)} tracks"],
+    ) is None:
+        return _rollback_conflict(operation_id)
+    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored_artpath": restored}
+
+
 def replace_album_art(
     album_id: int,
     image_data: Any = b"",
     ext: str = "jpg",
     adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+    *,
+    source: str = "",
+    expected_mb_releasegroupid: str = "",
     **_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Replacing album art is refused (LT-18).
-
-    It wrote the image straight into the album folder from this container
-    (the music mount is read-only here) and set artpath with a bare modify,
-    with no audit or rollback; its caller also passed arguments it did not
-    accept. A correct version needs an engine artwork-write operation."""
-    return {"ok": False, "code": "not_supported", "album_id": int(album_id),
-            "error": "Replacing album artwork is not supported yet; nothing was changed."}
+    """Set an operator-supplied cover (upload or URL) through Beets as one
+    audited, reversible transaction: plan, record the operator's request as
+    the approval, apply. ``image_data`` is bytes or base64 text; ``ext`` is
+    ignored (Beets names the file from the image bytes)."""
+    try:
+        image = base64.b64decode(image_data, validate=True) if isinstance(image_data, str) else bytes(image_data or b"")
+    except (ValueError, TypeError):
+        return {"ok": False, "code": "invalid_image", "error": "The image data is not valid."}
+    st = _get_store(store)
+    plan = plan_album_art_replace(album_id, image, source=source,
+                                  expected_mb_releasegroupid=expected_mb_releasegroupid, adapter=adapter, store=st)
+    if not plan.get("ok"):
+        return plan
+    from backend.resource_locks import approve_preview
+    if approve_preview(st, plan["operation_id"], f"operator artwork {source or 'upload'}") is None:
+        return {"ok": False, "code": "not_preview", "operation_id": plan["operation_id"],
+                "error": "The artwork change was cancelled before it ran."}
+    return apply_album_art_replace(plan["operation_id"], adapter=adapter, store=st, image=image)
 
 
 def plan_album_artwork(
