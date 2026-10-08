@@ -84,8 +84,8 @@ def _contained(path: Any) -> Tuple[str, str]:
     root = _root_of(path)
     if not root:
         raise _no("restore path is outside the allowed roots", "PATH_OUTSIDE_ROOTS", 400)
-    folder_ops.contained_path(path, root)  # symlink components below the root
-    return path, root
+    # Use the contained value: refuses the root itself, NUL and symlink components below the root.
+    return folder_ops.contained_path(path, root), root
 
 
 def _safe_target(lib, path: Any, current: str) -> Tuple[str, str]:
