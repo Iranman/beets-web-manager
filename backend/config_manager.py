@@ -16,6 +16,7 @@ import logging
 import os
 import posixpath
 import shutil
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -222,20 +223,29 @@ def save_config(
         except Exception as exc:
             log.warning("Failed to create config backup for %s: %s", cfg, exc)
 
-    # Atomic write via temp file + replace
-    tmp_path = cfg.with_name(f".{cfg.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    # Atomic write via a unique temp file (mkstemp: created 0600) that gets
+    # config.yaml's current mode before the replace. config.yaml holds Beets'
+    # secrets, which Beets reads as plain YAML, so the protection is the file
+    # mode: a 0600 config.yaml never becomes umask-readable (as it did when
+    # the temp file was created with open()).
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        st = os.lstat(cfg)
+        mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
+    except FileNotFoundError:
+        mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{cfg.name}.", suffix=".tmp", dir=str(cfg.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(str(tmp_path), str(cfg))
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, str(cfg))
     except Exception as exc:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
         log.error("Failed to write configuration file %s: %s", cfg, exc)
         raise ConfigError("Failed to write configuration file.") from exc
 

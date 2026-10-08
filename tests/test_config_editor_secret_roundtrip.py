@@ -7,6 +7,8 @@ could never save. Now empty secrets are shown as-is and an unchanged
 placeholder keeps the stored value, matched by full section path.
 """
 import json
+import os
+import stat
 import tempfile
 import unittest
 from functools import partial
@@ -144,6 +146,14 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
             self._save(STORED, lambda s: s + f'lastfm:\n    token: "{R}"\n')
         self.assertIn("lastfm.token", str(ctx.exception))
         self.assertNotIn("SECRET", str(ctx.exception))
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_save_keeps_private_mode_of_config_with_secrets(self):
+        self.path.write_text(STORED, encoding="utf-8")
+        os.chmod(self.path, 0o600)
+        self._save(STORED, lambda s: s + "# edit\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        self.assertEqual([p.name for p in self.path.parent.glob(".config.yaml.*")], [])
 
     def test_save_route_merges_and_refuses_with_400(self):
         import app as app_module
