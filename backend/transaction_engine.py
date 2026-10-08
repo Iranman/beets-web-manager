@@ -190,32 +190,6 @@ def _path_has_symlink_under(path: Path, base: Path) -> bool:
     return False
 
 
-def _safe_rename(src: Path, dest: Path) -> None:
-    """Atomically move src to dest as the literal target, never descending
-    into dest if it happens to already exist as a directory.
-
-    shutil.move() silently moves src *inside* dest (using src's own
-    basename) when dest already exists as a directory, rather than
-    treating dest as the literal target -- the exact Wave 15 regression
-    this helper exists to make structurally impossible for every mutation
-    family, instead of re-deriving the same os.rename()+EXDEV-fallback
-    pattern inline in each one. Callers are still responsible for refusing
-    up front if something already exists at the exact destination leaf
-    (this only prevents the directory-descend ambiguity, not overwrites).
-    """
-    try:
-        os.rename(str(src), str(dest))
-    except OSError as exc:
-        if getattr(exc, "errno", None) != errno.EXDEV:
-            raise
-        shutil.copyfile(str(src), str(dest))
-        try:
-            shutil.copystat(str(src), str(dest))
-        except Exception:
-            pass
-        src.unlink()
-
-
 def _now() -> float:
     return time.time()
 
@@ -1970,13 +1944,75 @@ def create_folder_cleanup_plan(
         "removals_count": len(dir_removals),
     }
 
+def _folder_adapter(adapter: Any = None) -> Any:
+    if adapter is not None:
+        return adapter
+    from backend import beets_adapter as _beets_adapter  # at call time, so tests can patch it
+    return _beets_adapter.beets_adapter
+
+
+#: A step Beets may have done without confirming it (lost response, timeout,
+#: 202 still running). Its idempotency key is replayed to learn the outcome.
+FOLDER_OP_UNCONFIRMED = "FOLDER_OP_UNCONFIRMED"
+_FOLDER_STEP_ATTEMPTS = 3
+#: Operator text for a failed plugin step, by error code. Static on purpose:
+#: Beets' own reply text never reaches an API response.
+FOLDER_STEP_MESSAGES = {
+    "BEETS_NOT_FOUND": "the webmanager plugin needs 1.7.0; restart Beets after the plugin update",
+    "BEETS_UNREACHABLE": "Beets is unreachable",
+    FOLDER_OP_UNCONFIRMED: "Beets did not confirm the step; the transaction recorded it so rollback can undo it",
+    "NOT_EMPTY": "the folder is not empty",
+    "PATH_IS_TRACKED": "the path holds Beets library items; move them through Beets",
+    "TARGET_EXISTS": "the target already exists",
+    "TARGET_PARENT_MISSING": "the target's parent folder does not exist",
+    "SOURCE_MISSING": "the source is missing",
+    "SYMLINK_REJECTED": "a path component is a symlink",
+    "PATH_OUTSIDE_LIBRARY": "the path is outside the Beets library directory",
+    "REMOVE_FAILED": "Beets could not remove the folder",
+    "FOLDER_OP_FAILED": "Beets could not perform the step",
+    "LIBRARY_DIRECTORY_UNKNOWN": "the Beets library directory is not configured",
+}
+_FOLDER_STEP_RETRY_DELAY = 1.0
+
+
+def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]:
+    """Run one folder step inside Beets (Web Manager mounts the library
+    read-only). None when Beets confirmed it, else a short reason: an error
+    code, never raw upstream text. A reply that leaves the outcome unknown is
+    retried with the same idempotency key, which makes the plugin report the
+    first attempt's result instead of running the step twice; if it stays
+    unknown the reason starts with ``FOLDER_OP_UNCONFIRMED``."""
+    for attempt in range(_FOLDER_STEP_ATTEMPTS):
+        if attempt:
+            time.sleep(_FOLDER_STEP_RETRY_DELAY)
+        try:
+            res = adapter.folder_op(op, key, **paths)
+        except Exception as exc:
+            code = getattr(exc, "error_code", "") or type(exc).__name__
+            if not getattr(exc, "status_code", None):  # no HTTP reply (connection error/timeout)
+                last = f"{FOLDER_OP_UNCONFIRMED} ({code})"  # no reply: Beets may have done it
+                continue
+            if code == "BEETS_NOT_FOUND":
+                return "BEETS_NOT_FOUND (the webmanager plugin needs 1.7.0; restart Beets after the plugin update)"
+            return str(code)
+        if isinstance(res, dict) and (res.get("success") is True or res.get("status") == "succeeded"):
+            return None
+        last = FOLDER_OP_UNCONFIRMED
+    return last
+
+
 def execute_folder_cleanup_apply(
     store: TransactionStore,
     operation_id: str,
     *,
     music_allowed_roots: Optional[List[str]] = None,
+    adapter: Any = None,
 ) -> Dict[str, Any]:
-    """Execute folder cleanup apply with durable steps and resource locking."""
+    """Apply an Approved folder_cleanup_v1 plan. Web Manager re-checks every
+    step against its read-only view of the library, then Beets performs it
+    through the webmanager plugin (``folder_op``). Each confirmed step is
+    recorded at once (``engine_result``), so a failure part-way ends Failed
+    with exactly what changed and rollback can undo it."""
     if not _TRANSACTION_ID_RE.match(operation_id):
         return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
 
@@ -1990,18 +2026,46 @@ def execute_folder_cleanup_apply(
         if meta.get("mutation_family") != "folder_cleanup_v1":
             return {"ok": False, "error": "Transaction is not a folder_cleanup_v1 operation", "code": "folder_cleanup_family_mismatch"}
 
-        if tx.get("status") == "Completed":
-            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "idempotent": True}
+        status = tx.get("status")
+        if status == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed",
+                    "mutated": bool(meta.get("filesystem_mutated")), "idempotent": True}
+        # CAS source: Approved, or Running claimed by the caller (claim_approved)
+        # before any step started. Preview, Failed, Cancelled and an apply that
+        # already started are refused.
+        if not (status == "Approved" or (status == "Running" and not meta.get("mutation_started")
+                                         and not meta.get("engine_result"))):
+            return {"ok": False, "code": "not_approved", "operation_id": operation_id, "status": status, "mutated": False,
+                    "error": f"Only an Approved transaction can be applied (this one is {status}); nothing was changed."}
 
         resource_keys = meta.get("resource_keys") or []
         allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [_cfg_music_root()])
+        ad = _folder_adapter(adapter)
+        moved_records: List[Dict[str, Any]] = []
+        removed_dirs: List[str] = []
 
-        def _fail(msg: str, code: str) -> Dict[str, Any]:
-            curr = store.get(operation_id)
-            c_meta = curr.get("metadata") or {}
-            mutated = bool(c_meta.get("filesystem_mutated"))
-            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"], rollback={"available": mutated, "reason": "Rollback can restore recorded moves/directories." if mutated else "No mutation was performed."})
-            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated}
+        def _record(done: str) -> None:
+            result = {"moved_records": list(moved_records), "removed_dirs": list(removed_dirs)}
+            store.update(operation_id, metadata={"filesystem_mutated": True, "engine_result": result, **result})
+            store.append_log(operation_id, f"Beets: {done}")
+
+        def _step(op: str, **paths: str) -> Optional[str]:
+            return _folder_step(ad, f"{operation_id}:apply:{len(moved_records) + len(removed_dirs)}", op, **paths)
+
+        def _fail(msg: str, code: str, step_error: Optional[str] = None) -> Dict[str, Any]:
+            mutated = bool(moved_records or removed_dirs)
+            step_code = step_error.split(" ", 1)[0] if step_error else None
+            if step_code is not None and step_code not in FOLDER_STEP_MESSAGES:
+                step_code = "FOLDER_OP_FAILED"  # only allowlisted codes leave the engine
+            store.append_log(operation_id, f"Apply failed: {msg}")
+            store.update(operation_id, status="Failed", rollback={
+                "available": mutated,
+                "reason": "Rollback can restore recorded moves/directories." if mutated else "No mutation was performed."})
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated,
+                    "operation_id": operation_id, "status": "Failed",
+                    "moved_records": list(moved_records), "removed_dirs": list(removed_dirs),
+                    "step_error_code": step_code,
+                    "step_error_message": FOLDER_STEP_MESSAGES.get(step_code) if step_code else None}
 
         with _lock_resources(resource_keys):
             file_moves = meta.get("file_moves") or []
@@ -2027,32 +2091,26 @@ def execute_folder_cleanup_apply(
                 if tp.exists() or tp.is_symlink():
                     return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
 
-            if _claim_apply_running(store, operation_id, tx.get("status"), {**meta, "mutation_started": True}) is None:
+            if _claim_apply_running(store, operation_id, status, {"mutation_started": True}) is None:
                 return _claim_lost(store, operation_id)
 
-            moved_records = []
             for fm in file_moves:
                 sp = Path(fm["source"])
                 tp = Path(fm["target"])
                 if not sp.exists() or not sp.is_file():
                     return _fail(f"Source file missing: {sp}", "folder_cleanup_toctou_mismatch")
-                tp_root = _cleanup_root_for_path(tp, allowed_roots)
-                if tp_root is None:
-                    return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
-                if not tp.parent.exists() or not tp.parent.is_dir():
-                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
-                if _path_has_symlink_under(tp.parent, tp_root):
-                    return _fail(f"Symlink detected on target: {tp}", "folder_cleanup_symlink_rejected")
                 if tp.exists() or tp.is_symlink():
                     return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
-                try:
-                    _safe_rename(sp, tp)
-                    moved_records.append({"source": str(sp), "target": str(tp)})
-                except Exception as e:
-                    return _fail(f"Move failed {sp} -> {tp}: {e}", "folder_cleanup_move_failed")
+                err = _step("move_file", source=str(sp), target=str(tp))
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    moved_records.append({"source": str(sp), "target": str(tp), "kind": "file", "unconfirmed": True})
+                    _record(f"move {sp} -> {tp} not confirmed; recorded for rollback")
+                if err:
+                    return _fail(f"Move failed {sp} -> {tp}: {err}", "folder_cleanup_move_failed", err)
+                moved_records.append({"source": str(sp), "target": str(tp), "kind": "file"})
+                _record(f"moved {sp} -> {tp}")
 
-            dir_renames = meta.get("dir_renames") or []
-            for dr in dir_renames:
+            for dr in meta.get("dir_renames") or []:
                 sp = Path(dr["source"])
                 tp = Path(dr["target"])
                 root = _cleanup_root_for_path(sp, allowed_roots)
@@ -2069,15 +2127,16 @@ def execute_folder_cleanup_apply(
                     return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
                 if tp.exists() or tp.is_symlink():
                     return _fail(f"Rename target already exists: {tp}", "folder_cleanup_target_exists")
-                try:
-                    _safe_rename(sp, tp)
-                    moved_records.append({"source": str(sp), "target": str(tp)})
-                except Exception as e:
-                    return _fail(f"Folder rename failed {sp} -> {tp}: {e}", "folder_cleanup_rename_failed")
+                err = _step("rename_dir", source=str(sp), target=str(tp))
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
+                    moved_records.append({"source": str(sp), "target": str(tp), "kind": "dir", "unconfirmed": True})
+                    _record(f"folder rename {sp} -> {tp} not confirmed; recorded for rollback")
+                if err:
+                    return _fail(f"Folder rename failed {sp} -> {tp}: {err}", "folder_cleanup_rename_failed", err)
+                moved_records.append({"source": str(sp), "target": str(tp), "kind": "dir"})
+                _record(f"renamed folder {sp} -> {tp}")
 
-            dir_removals = meta.get("dir_removals") or []
-            removed_dirs = []
-            for dr in dir_removals:
+            for dr in meta.get("dir_removals") or []:
                 spec = dr if isinstance(dr, dict) else {"path": dr}
                 dp = Path(spec["path"])
                 root = _cleanup_root_for_path(dp, allowed_roots)
@@ -2095,7 +2154,7 @@ def execute_folder_cleanup_apply(
                     return _fail(f"Could not inspect directory before removal: {ex}", "folder_cleanup_scan_failed")
                 if unexpected:
                     return _fail(f"Directory is not empty: {dp}", "folder_cleanup_not_empty")
-                expected = spec.get("stat") if isinstance(spec, dict) else None
+                expected = spec.get("stat")
                 if expected:
                     try:
                         current = _cleanup_dir_stat_record(dp, root)
@@ -2103,15 +2162,17 @@ def execute_folder_cleanup_apply(
                         return _fail(f"Directory disappeared before removal: {dp}", "folder_cleanup_toctou_mismatch")
                     if current.get("dev") != expected.get("dev") or current.get("ino") != expected.get("ino"):
                         return _fail(f"Directory identity changed since plan: {dp}", "folder_cleanup_toctou_mismatch")
-                try:
-                    dp.rmdir()
+                err = _step("remove_empty_dir", path=str(dp))
+                if err and err.startswith(FOLDER_OP_UNCONFIRMED):
                     removed_dirs.append(str(dp))
-                except Exception as ex:
-                    return _fail(f"Directory removal failed {dp}: {ex}", "folder_cleanup_remove_failed")
+                    _record(f"removal of {dp} not confirmed; recorded for rollback")
+                if err:
+                    return _fail(f"Directory removal failed {dp}: {err}", "folder_cleanup_remove_failed", err)
+                removed_dirs.append(str(dp))
+                _record(f"removed empty folder {dp}")
 
             mutated = bool(moved_records or removed_dirs)
             store.update(operation_id, status="Completed", metadata={
-                **store.get(operation_id).get("metadata", {}),
                 "filesystem_mutated": mutated,
                 "moved_records": moved_records,
                 "removed_dirs": removed_dirs,
@@ -2128,13 +2189,22 @@ def execute_folder_cleanup_apply(
                 "changed_count": len(moved_records) + len(removed_dirs),
             }
 
+
+#: Statuses a folder cleanup rollback starts from; each also needs the apply
+#: record (``engine_result``). Running is a caller's own claim (#224 CAS).
+_FOLDER_ROLLBACK_FROM = frozenset({"Completed", "Failed", "Running"})
+
+
 def rollback_folder_cleanup(
     store: TransactionStore,
     operation_id: str,
     *,
     music_allowed_roots: Optional[List[str]] = None,
+    adapter: Any = None,
 ) -> Dict[str, Any]:
-    """Roll back a folder_cleanup_v1 transaction."""
+    """Roll back an applied folder_cleanup_v1 transaction through Beets:
+    re-create removed folders, then move every recorded file/folder back, in
+    reverse order. A step that cannot be proven restored is counted failed."""
     if not _TRANSACTION_ID_RE.match(operation_id):
         return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
 
@@ -2148,57 +2218,86 @@ def rollback_folder_cleanup(
         if meta.get("mutation_family") != "folder_cleanup_v1":
             return {"ok": False, "error": "Transaction is not a folder_cleanup_v1 operation", "code": "folder_cleanup_family_mismatch"}
 
-        if tx.get("status") == "Rolled Back":
-            return {"ok": False, "error": "Transaction is already rolled back.", "code": "folder_cleanup_already_rolled_back"}
+        status = tx.get("status")
+        if status == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.",
+                    "code": "folder_cleanup_already_rolled_back", "status": status}
+        refused = {"ok": False, "code": "rollback_not_eligible", "operation_id": operation_id, "mutated": False}
+        if not meta.get("engine_result") or status not in _FOLDER_ROLLBACK_FROM:
+            return {**refused, "status": status, "error": f"Only an applied transaction can be rolled back (status is {status})."}
+        if status != "Running" and store.transition(operation_id, str(status), "Running") is None:
+            now = store.get(operation_id).get("status")
+            return {**refused, "status": now, "error": f"Only an applied transaction can be rolled back (status is {now})."}
 
         resource_keys = meta.get("resource_keys") or []
         allowed_roots = _cleanup_normalize_roots(music_allowed_roots or meta.get("allowed_roots"), [_cfg_music_root()])
-        with _lock_resources(resource_keys):
-            moved_records = meta.get("moved_records") or []
-            files_restored = 0
-            files_failed = 0
-            for mr in moved_records:
-                sp = Path(mr["source"])
-                tp = Path(mr["target"])
-                if tp.exists() and not sp.exists():
-                    sp_root = _cleanup_root_for_path(sp, allowed_roots)
-                    if sp_root is None or _path_has_symlink_under(sp.parent, sp_root):
-                        files_failed += 1
-                        continue
-                    sp.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        _safe_rename(tp, sp)
-                        files_restored += 1
-                    except Exception:
-                        files_failed += 1
+        ad = _folder_adapter(adapter)
+        attempt = f"{operation_id}:rollback:{int(_now() * 1000)}"
+        steps = [0]
+        problems: List[str] = []
 
-            dirs_restored = 0
-            dirs_failed = 0
+        def _step(op: str, **paths: str) -> Optional[str]:
+            steps[0] += 1
+            return _folder_step(ad, f"{attempt}:{steps[0]}", op, **paths)
+
+        def _usable(p: Path) -> bool:
+            root = _cleanup_root_for_path(p, allowed_roots)
+            return root is not None and not _path_has_symlink_under(p.parent, root)
+
+        with _lock_resources(resource_keys):
+            dirs_restored = dirs_failed = 0
             for dr in reversed(meta.get("removed_dirs") or []):
                 dp = Path(dr)
-                root = _cleanup_root_for_path(dp, allowed_roots)
-                if root is None or _path_has_symlink_under(dp.parent, root):
+                if not _usable(dp):
                     dirs_failed += 1
+                    problems.append(f"Not restored (outside roots or symlink): {dp}")
                     continue
-                if dp.exists():
-                    dirs_restored += 1
-                    continue
-                try:
-                    dp.mkdir(parents=True, exist_ok=True)
-                    dirs_restored += 1
-                except Exception:
+                err = None if dp.is_dir() else _step("create_dir", path=str(dp))
+                if err:
                     dirs_failed += 1
+                    problems.append(f"Could not re-create {dp}: {err}")
+                else:
+                    dirs_restored += 1
+
+            files_restored = files_failed = 0
+            for mr in reversed(meta.get("moved_records") or []):
+                sp = Path(mr["source"])
+                tp = Path(mr["target"])
+                if sp.exists() and not tp.exists():
+                    files_restored += 1  # already back (an earlier attempt)
+                    continue
+                if not (tp.exists() and not sp.exists() and _usable(sp) and _usable(tp)):
+                    files_failed += 1
+                    problems.append(f"Cannot move back {tp} -> {sp}: paths changed since apply")
+                    continue
+                err = None if sp.parent.is_dir() else _step("create_dir", path=str(sp.parent))
+                kind = mr.get("kind") or ("dir" if tp.is_dir() else "file")
+                err = err or _step("rename_dir" if kind == "dir" else "move_file", source=str(tp), target=str(sp))
+                if err:
+                    files_failed += 1
+                    problems.append(f"Could not move back {tp} -> {sp}: {err}")
+                else:
+                    files_restored += 1
 
             ok = files_failed == 0 and dirs_failed == 0
             final_status = "Rolled Back" if ok else ("Partially Rolled Back" if files_restored or dirs_restored else "Failed")
-            store.update(operation_id, status=final_status, rollback={"available": not ok, "reason": "Folder cleanup rollback incomplete; manual recovery required." if not ok else ""}, metadata={
-                **meta,
-                "rollback_available": not ok,
-                "files_restored_count": files_restored,
-                "files_failed_count": files_failed,
-                "dirs_restored_count": dirs_restored,
-                "dirs_failed_count": dirs_failed,
-                "rolled_back_at": _now(),
-            })
+            for problem in problems:
+                store.append_log(operation_id, f"Rollback: {problem}")
+            store.append_log(operation_id, f"Rollback {final_status}: {files_restored + dirs_restored} restored, "
+                                           f"{files_failed + dirs_failed} failed.")
+            store.update(operation_id, status=final_status,
+                         rollback={"available": False,
+                                   "reason": "" if ok else "Folder cleanup rollback incomplete; manual recovery required."},
+                         metadata={
+                             "rollback_available": False,
+                             "files_restored_count": files_restored,
+                             "files_failed_count": files_failed,
+                             "dirs_restored_count": dirs_restored,
+                             "dirs_failed_count": dirs_failed,
+                             "rolled_back_at": _now(),
+                         })
 
-            return {"ok": ok, "operation_id": operation_id, "status": final_status, "files_restored": files_restored, "dirs_restored": dirs_restored, "files_failed": files_failed, "dirs_failed": dirs_failed}
+            return {"ok": ok, "operation_id": operation_id, "status": final_status,
+                    "mutated": bool(files_restored or dirs_restored),
+                    "files_restored": files_restored, "dirs_restored": dirs_restored,
+                    "files_failed": files_failed, "dirs_failed": dirs_failed}

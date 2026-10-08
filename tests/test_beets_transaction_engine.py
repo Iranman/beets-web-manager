@@ -10,6 +10,11 @@ from pathlib import Path
 
 from backend import transaction_engine
 
+try:
+    from _folder_ops_local import patch_local_folder_ops
+except ImportError:  # pragma: no cover
+    from tests._folder_ops_local import patch_local_folder_ops
+
 
 class TestBeetsTransactionEngineFamilies(unittest.TestCase):
     def setUp(self):
@@ -25,6 +30,11 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
 
         self.store_path = self.root / "transactions.db"
         self.store = transaction_engine.TransactionStore(str(self.store_path))
+        patch_local_folder_ops(self, self.root)
+
+    def _approved(self, plan):
+        self.store.transition(plan["operation_id"], "Preview", "Approved")
+        return plan["operation_id"]
 
     def tearDown(self):
         try:
@@ -64,7 +74,7 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             {"action": "safe_rename", "source": str(src), "target": str(dst)},
             music_allowed_roots=[str(self.music_dir)]
         )
-        op_id = plan["operation_id"]
+        op_id = self._approved(plan)
 
         apply1 = transaction_engine.execute_folder_cleanup_apply(
             self.store, op_id, music_allowed_roots=[str(self.music_dir)]
@@ -104,7 +114,7 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             {"action": "safe_rename", "source": str(src), "target": str(dst)},
             music_allowed_roots=[str(self.root)]
         )
-        op_id = plan["operation_id"]
+        op_id = self._approved(plan)
         transaction_engine.execute_folder_cleanup_apply(self.store, op_id, music_allowed_roots=[str(self.root)])
 
         rollback = transaction_engine.rollback_folder_cleanup(self.store, op_id, music_allowed_roots=[str(self.root)])
@@ -151,6 +161,7 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             music_allowed_roots=[str(self.music_dir)]
         )
         self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        self._approved(plan)
         track.unlink()
 
         apply = transaction_engine.execute_folder_cleanup_apply(
@@ -175,7 +186,7 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             music_allowed_roots=[str(self.music_dir)]
         )
         self.assertTrue(plan.get("ok"), msg=plan.get("error"))
-        op_id = plan["operation_id"]
+        op_id = self._approved(plan)
         apply_res = transaction_engine.execute_folder_cleanup_apply(
             self.store, op_id, music_allowed_roots=[str(self.music_dir)]
         )

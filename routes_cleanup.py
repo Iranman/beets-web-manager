@@ -1416,7 +1416,13 @@ def apply_folder_placeholder_action_api():
         elif code in {"folder_cleanup_path_out_of_root", "folder_cleanup_symlink_rejected", "folder_cleanup_root_refused"}:
             message = "Access denied for folder cleanup path"
             status = 403 if code != "folder_cleanup_root_refused" else 400
+        step_code = _s(result.get("step_error_code")).strip()
+        step_message = _s(result.get("step_error_message")).strip()  # allowlisted text set by the engine
+        if step_message and message == default_error:
+            message = f"{default_error}: {step_message}"
         body: Dict[str, Any] = {"ok": False, "error": message, "code": code or "folder_cleanup_rejected"}
+        if step_code:
+            body["step_error_code"] = step_code
         if blocking_reasons:
             body["blocking_reasons"] = blocking_reasons
         return jsonify(body), status

@@ -46,7 +46,6 @@ KNOWN_UNBOUND_CALLS = {
     ("routes_library.py", "get_mbid_sticking_candidates"),
     ("backend/ai_service.py", "discover_import_sources"),
     ("backend/import_service.py", "find_items_by_query"),
-    ("backend/matching_service.py", "get_artist_folder_album_mbids"),
     # library-transaction (later wave): mutation flows that would be switched ON
     ("backend/import_reconciliation_service.py", "apply_artist_folder_reconcile"),
     ("backend/import_service.py", "reimport_source"),
