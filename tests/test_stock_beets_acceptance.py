@@ -203,7 +203,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.13.0")
+        self.assertEqual(status_data["plugin_version"], "1.14.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -311,7 +311,7 @@ class StockBeetsDockerAcceptanceTests(unittest.TestCase):
             target_plugin_dir = os.path.join(config_dir, "beetsplug", "webmanager")
             os.makedirs(target_plugin_dir, exist_ok=True)
             src_plugin_dir = os.path.join(repo_root, "beetsplug", "webmanager")
-            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "engine_common.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py", "folder_ops.py", "art_ops.py"]:
+            for f in ["__init__.py", "compat.py", "auth.py", "schemas.py", "operations.py", "version.py", "plugin_ops.py", "engine_common.py", "replace_ops.py", "remove_ops.py", "merge_ops.py", "untracked_ops.py", "folder_ops.py", "art_ops.py", "relocation_ops.py"]:
                 shutil.copy2(os.path.join(src_plugin_dir, f), os.path.join(target_plugin_dir, f))
 
             # 2. Provision 64-hex secret API key file (256-bit entropy)
@@ -468,7 +468,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.13.0")
+                    self.assertEqual(status_res["plugin_version"], "1.14.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])

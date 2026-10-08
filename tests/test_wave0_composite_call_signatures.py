@@ -125,11 +125,18 @@ class NoFakeSuccessTests(unittest.TestCase):
 
     def test_move_album_to_library_uses_the_relocation_family(self):
         ad = mock.MagicMock()
+        ad.get_album.return_value = {"id": 7, "artpath": "", "items": [{"id": 1, "path": "/dl/a/1.flac"}]}
+        ad.relocate_album.side_effect = lambda *_a, **_k: (
+            ad.get_album.configure_mock(return_value={"id": 7, "artpath": "",
+                                                      "items": [{"id": 1, "path": "/music/A/1.flac"}]})
+            or {"before": {"items": {"1": "/dl/a/1.flac"}, "artpath": ""},
+                "after": {"items": {"1": "/music/A/1.flac"}, "artpath": ""}})
         with tempfile.TemporaryDirectory() as tmp:
             from backend.transaction_engine import TransactionStore
             res = cw.move_album_to_library(7, adapter=ad, store=TransactionStore(tmp))
-        self.assertTrue(res["ok"])
-        ad.move.assert_called_once_with(album_ids=[7])
+        self.assertTrue(res["ok"], res)
+        ad.relocate_album.assert_called_once_with(7, {"1": "/dl/a/1.flac"}, idempotency_key=res["operation_id"])
+        ad.move.assert_not_called()
 
     def test_create_hardlink_is_staging_contained(self):
         with tempfile.TemporaryDirectory() as tmp:

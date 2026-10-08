@@ -14,7 +14,8 @@ mutation:
   is written before any change, so "no manifest" proves nothing changed:
   Failed. For registry-backed ops (replacement, reviewed cleanup, whose
   in-memory registry a Beets restart loses) completion cannot be proven:
-  Recovery Required.
+  Recovery Required -- unless the family recorded the full before-state
+  (album relocation): live state equal to it proves nothing changed (Failed).
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ def _families() -> Dict[str, Dict[str, Any]]:
             "kind": "registry", "finish": composite_workflows.finish_album_cleanup},
         composite_workflows.ALBUM_ART_REPLACE_FAMILY: {
             "kind": "registry", "finish": composite_workflows.finish_album_art_replace},
+        composite_workflows.ALBUM_RELOCATION_FAMILY: {
+            "kind": "registry", "finish": composite_workflows.finish_album_relocation,
+            "unchanged": composite_workflows.album_relocation_unchanged},
         duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: {
             "kind": "registry", "finish": duplicate_cleanup.finish_reviewed_cleanup},
         album_row_merge.ALBUM_ROW_MERGE_FAMILY: {
@@ -111,6 +115,11 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
         return mark("Recovery Required", f"engine record is {status!r}; completion cannot be proven")
 
     reg = _registry_status(ad, op)
+    if fam.get("unchanged") and (reg is None or reg.get("status") not in ("running", "succeeded")):
+        # The plan recorded every path: live state equal to it proves nothing moved.
+        if fam["unchanged"](ad, meta):
+            return mark("Failed", "the library is exactly as planned; nothing was changed")
+        return mark("Recovery Required", "the library differs from the plan and the engine reports no success")
     if reg is None:
         return mark("Recovery Required", "the engine has no record (Beets restarted?); completion cannot be proven")
     if reg.get("status") == "running":
@@ -150,7 +159,29 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
                 results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st))
             except BeetsError as exc:
                 results.append({"operation_id": tx["id"], "action": "engine_unavailable", "error": exc.error_code})
+    if before is not None:
+        results.extend(_interrupted_relocation_rollbacks(st, before))
     return results
+
+
+def _interrupted_relocation_rollbacks(st: TransactionStore, before: float) -> List[Dict[str, Any]]:
+    """An album move rollback that recorded its request but no outcome before
+    this process started was cut off mid-call: some tracks may be back.
+    Never left Completed/Failed; the operator retries (Beets resumes) or checks."""
+    from backend.composite_workflows import ALBUM_RELOCATION_FAMILY
+    out = []
+    for status in ("Completed", "Failed"):
+        rows, _total = st.list(status=status, limit=1000)
+        for tx in rows:
+            meta = tx.get("metadata") or {}
+            req = meta.get("rollback_request")
+            if (meta.get("mutation_family") == ALBUM_RELOCATION_FAMILY and req and not req.get("outcome")
+                    and (tx.get("updated_at") or 0) < before
+                    and st.transition(tx["id"], status, "Recovery Required", logs=[
+                        "Recovered after restart: a rollback was interrupted; some tracks may already be back. "
+                        "Retry the rollback (Beets resumes from the recorded paths) or check the album's files."])):
+                out.append({"operation_id": tx["id"], "action": "Recovery Required", "note": "rollback interrupted"})
+    return out
 
 
 def start_background_sweep(*, attempts: int = 20, interval: float = 30.0,

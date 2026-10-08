@@ -817,6 +817,41 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/album-art/rollback", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
 
+    def relocate_album(
+        self,
+        album_id: int,
+        expected_paths: Dict[Any, str],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move one album to its path-template location with Beets' own
+        Album.move() (plugin 1.14.0). Refused (STALE_PLAN) unless the album
+        has exactly ``expected_paths`` ({item id: path}); returns every
+        item's absolute path and the cover path before and after."""
+        payload = {"album_id": int(album_id), "expected_paths": {str(k): str(v) for k, v in expected_paths.items()}}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-relocation", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
+    def rollback_album_relocation(
+        self,
+        album_id: int,
+        items: List[Dict[str, Any]],
+        artpath: str,
+        restore_artpath: str,
+        idempotency_key: Optional[str] = None,
+        art_evidence: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """Move a relocated album's files (``[{id, path, restore_path,
+        evidence}]``) and cover back through Beets (plugin 1.14.0). Refused,
+        changing nothing, when the album changed since or a restore path is
+        taken. ``evidence`` ([size, mtime] recorded at apply) lets Beets adopt
+        a file a crash left at its restore path without its row."""
+        payload = {"album_id": int(album_id), "items": items, "artpath": str(artpath or ""),
+                   "restore_artpath": str(restore_artpath or ""), "art_evidence": art_evidence}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-relocation/rollback", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
     def quarantine_remove_items(
         self,
         items: List[Dict[str, Any]],

@@ -753,6 +753,8 @@ def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None)
     if rollback_family is not None and not res.get("ok") and res.get("status") == "Recovery Required":
         res = {**res, "mutated": True}  # #228 F3: it ran, then failed verification
     refused = ("not_approved", "already_applied", "rollback_not_eligible", "rollback_deferred", "conflict")
+    if rollback_family == composite_workflows.ALBUM_RELOCATION_FAMILY:
+        refused += composite_workflows.RELOCATION_ROLLBACK_REFUSALS  # the album changed since
     status_code = 200 if res.get("ok") else (409 if res.get("code") in refused else 400)
     return jsonify(res), status_code
 
@@ -778,6 +780,10 @@ _ENGINE_FAMILIES = {
     # the generic apply route refuses it with image_unavailable.
     composite_workflows.ALBUM_ART_REPLACE_FAMILY: (composite_workflows.apply_album_art_replace,
                                                    composite_workflows.rollback_album_art_replace),
+    # Album rename / move to library: the rename and move-to-library jobs
+    # plan, approve (the operator's click) and apply it themselves.
+    composite_workflows.ALBUM_RELOCATION_FAMILY: (composite_workflows.apply_album_relocation,
+                                                  composite_workflows.rollback_album_relocation),
 }
 
 #: Families whose rollback executor acquires its resource locks before any
@@ -787,6 +793,7 @@ _ENGINE_FAMILIES = {
 _ROLLBACK_LOCKS_BEFORE_WRITE = frozenset({
     album_row_merge.ALBUM_ROW_MERGE_FAMILY, untracked_recovery.ATTACH_FAMILY,
     untracked_recovery.QUARANTINE_FAMILY, untracked_recovery.ATTACH_ALBUM_FAMILY,
+    composite_workflows.ALBUM_RELOCATION_FAMILY,
 })
 
 

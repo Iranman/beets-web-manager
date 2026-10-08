@@ -1759,7 +1759,7 @@ def album_remove(aid):
 
 @app.post("/api/albums/<int:aid>/rename")
 def album_rename(aid):
-    """Rename album files and relocate under library via album_relocation_v1 family."""
+    """Move an album's files to where Beets' path templates put them (album_move_v1)."""
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"})
@@ -1770,15 +1770,18 @@ def album_rename(aid):
         res = composite_workflows.relocate_album(aid, mode="rename")
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Album rename failed")
-        log.append(f"Album {aid} renamed and relocated to: {res.get('dest_dir')}")
+        log.append(f"Album {aid} renamed and relocated to: {res.get('dest_dir')} "
+                   f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
 
-    job = jobs.start_python(_do, label=label)
+    # The relocation records its own transaction; the job hook must not add a second row.
+    job = jobs.start_python(_do, label=label,
+                            metadata={"type": "album-rename", "album_id": aid, "transaction": False})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/move-to-library")
 def album_move_to_library(aid):
-    """Move an imported album into authoritative MUSIC_ROOT via album_relocation_v1 family."""
+    """Move an imported album into the Beets library directory (album_move_v1)."""
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"}), 404
@@ -1789,12 +1792,14 @@ def album_move_to_library(aid):
         res = composite_workflows.move_album_to_library(aid)
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Move to library failed")
-        log.append(f"Album {aid} relocated to: {res.get('dest_dir')}")
+        log.append(f"Album {aid} relocated to: {res.get('dest_dir')} "
+                   f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
 
+    # The relocation records its own transaction; the job hook must not add a second row.
     job = jobs.start_python(
         _do,
         label=label,
-        metadata={"type": "album-move-to-library", "album_id": aid},
+        metadata={"type": "album-move-to-library", "album_id": aid, "transaction": False},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
