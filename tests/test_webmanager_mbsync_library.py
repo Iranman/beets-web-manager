@@ -1,6 +1,7 @@
 """Plugin 1.13.0: POST /webmanager/mbsync/library runs Beets' own mbsync
 (MBSyncPlugin.albums/singletons, the real plugin class) over the whole
-library. MusicBrainz is replaced by a stub of metadata_plugins lookups."""
+library. MusicBrainz is replaced by a stub source plugin behind Beets' real
+metadata_plugins lookups (and their error handling)."""
 
 import os
 import shutil
@@ -57,8 +58,11 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         beets_config["import"]["write"] = False
         beets_config["import"]["move"] = False
         beets_config["import"]["copy"] = False
+        self._saved_raise = beets_config["raise_on_error"].get()
+        beets_config["raise_on_error"] = False  # Beets' default
 
     def tearDown(self):
+        beets_config["raise_on_error"] = self._saved_raise
         for k, v in self._saved_import.items():
             beets_config["import"][k] = v
         beets_plugins_mod._instances[:] = self._saved_instances
@@ -83,6 +87,30 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         album.store()
         return album
 
+    def _source(self, album=None, track=None):
+        """Patch in a MusicBrainz source plugin, so lookups go through Beets'
+        real metadata_plugins.album_for_id/track_for_id and its
+        maybe_handle_plugin_error wrapper (raise_on_error off, Beets'
+        default). ``album``/``track`` is a function of the ID, or an
+        exception the source raises."""
+        def call(fn, _id):
+            if isinstance(fn, BaseException):
+                raise fn
+            return fn(_id)
+
+        class Source:
+            data_source = "MusicBrainz"
+
+            def album_for_id(self, aid):
+                return call(album, aid)
+
+            def track_for_id(self, tid):
+                return call(track, tid)
+
+        metadata_plugins.get_metadata_source.cache_clear()
+        self.addCleanup(metadata_plugins.get_metadata_source.cache_clear)
+        return mock.patch.object(metadata_plugins, "find_metadata_source_plugins", return_value=[Source()])
+
     def _wait(self, op_id, timeout=10.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -98,11 +126,8 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         single = Item(path=os.path.join(self.files, "single.mp3").encode(), title="old single",
                       artist="Old", mb_trackid="rec-single")
         self.lib.add(single)
-        with mock.patch.object(metadata_plugins, "album_for_id",
-                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")), \
-             mock.patch.object(metadata_plugins, "track_for_id",
-                               side_effect=lambda tid, *a, **k: TrackInfo(title="new single", track_id=tid,
-                                                                          artist="Single Artist")):
+        with self._source(album=lambda aid: _album_info(aid, "New Title"),
+                          track=lambda tid: TrackInfo(title="new single", track_id=tid, artist="Single Artist")):
             res = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={})
             self.assertEqual(res.status_code, 202)
             body = res.get_json()
@@ -132,7 +157,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
             release.wait(5)
             return _album_info(aid, "New Title")
 
-        with mock.patch.object(metadata_plugins, "album_for_id", side_effect=slow):
+        with self._source(album=slow):
             op_id = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={}).get_json()["operation_id"]
             self.assertTrue(entered.wait(5))
             again = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={})
@@ -155,11 +180,11 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         self.assertEqual(late.status_code, 409)
         self.assertEqual(late.get_json()["error_code"], "NOT_RUNNING")
         # A new sync can start once the first one ended.
-        with mock.patch.object(metadata_plugins, "album_for_id", return_value=None):
+        with self._source(album=lambda aid: None):
             res = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={})
             self.assertEqual(res.status_code, 202)
             r = self._wait(res.get_json()["operation_id"])["result"]
-            self.assertEqual((r["unchanged"], r["not_found"], r["failed_count"]), (2, 2, 0))
+            self.assertEqual((r["unchanged"], r["not_found"], r["failed_count"]), (0, 2, 0))
 
     def test_partial_failure_records_the_album_and_goes_on_with_progress_per_album(self):
         bad, good = self._add_album("rel-bad"), self._add_album("rel-good")
@@ -170,7 +195,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
             return _album_info(aid, "New Title")
 
         seen = []
-        with mock.patch.object(metadata_plugins, "album_for_id", side_effect=lookup):
+        with self._source(album=lookup):
             res = plugin_ops.run_mbsync_library(self.lib, False, threading.Event(), threading.RLock(),
                                                 progress=lambda r: seen.append(r["processed"] + r["failed_count"]))
         self.assertEqual((res["processed"], res["failed_count"], res["changed_albums"], res["aborted"]), (1, 1, 1, False))
@@ -186,8 +211,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         # files do not exist, so Item.try_write() fails.
         album = self._add_album("rel-a", root=os.path.join(self.td, "music", "Old"))
         paths = sorted(i.path for i in album.items())
-        with mock.patch.object(metadata_plugins, "album_for_id",
-                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")):
+        with self._source(album=lambda aid, *a, **k: _album_info(aid, "New Title")):
             body = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={}).get_json()
             self.assertEqual((body["write"], body["move"]), (True, False))
             op = self._wait(body["operation_id"])
@@ -201,8 +225,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
     def test_successful_tag_writes_are_not_reported_as_failures(self):
         beets_config["import"]["write"] = True
         self._add_album("rel-a")
-        with mock.patch.object(metadata_plugins, "album_for_id",
-                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")), \
+        with self._source(album=lambda aid, *a, **k: _album_info(aid, "New Title")), \
              mock.patch.object(Item, "try_write", autospec=True, return_value=True) as tw:
             r = plugin_ops.run_mbsync_library(self.lib, True, threading.Event(), threading.RLock())
         self.assertEqual((tw.call_count, r["write_failed_count"], r["changed_items"]), (2, 0, 2))
@@ -210,7 +233,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
     def test_failures_are_recorded_and_a_run_of_them_aborts(self):
         for n in range(plugin_ops.MAX_CONSECUTIVE_FAILURES + 2):
             self._add_album(f"rel-{n}")
-        with mock.patch.object(metadata_plugins, "album_for_id", side_effect=RuntimeError("MusicBrainz down")):
+        with self._source(album=RuntimeError("MusicBrainz down")):
             op_id = self.client.post("/webmanager/mbsync/library", headers=self.auth, json={}).get_json()["operation_id"]
             op = self._wait(op_id)
         self.assertEqual(op["status"], "failed")
@@ -218,6 +241,43 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         self.assertTrue(op["result"]["aborted"])
         self.assertEqual(op["result"]["failed_count"], plugin_ops.MAX_CONSECUTIVE_FAILURES)
         self.assertIn("MusicBrainz down", op["result"]["failed"][0]["error"])
+        self.assertIn("album_for_id", op["result"]["failed"][0]["error"])
+        self.assertEqual(op["result"]["not_found"], 0)
+
+    def test_a_missing_release_is_not_found_and_an_outage_is_a_failure(self):
+        gone, down = self._add_album("rel-gone"), self._add_album("rel-down")
+
+        def lookup(aid):
+            if aid == "rel-down":
+                raise ConnectionError("Connection refused")
+            return None  # MusicBrainz answered: no such Release
+
+        with self._source(album=lookup):
+            r = plugin_ops.run_mbsync_library(self.lib, False, threading.Event(), threading.RLock())
+        self.assertEqual((r["not_found"], r["failed_count"], r["unchanged"], r["processed"]), (1, 1, 0, 1))
+        self.assertEqual(r["failed"][0]["id"], down.id)
+        self.assertEqual(self.lib.get_album(gone.id).album, "Old Title")
+
+    def test_lookup_errors_from_other_threads_are_ignored(self):
+        beets_log = __import__("logging").getLogger("beets")
+        with plugin_ops._catch_lookup_errors() as lookup:
+            t = threading.Thread(target=beets_log.error, args=("Error in 'MusicBrainz.album_for_id': other thread",))
+            t.start()
+            t.join()
+            beets_log.error("Error in 'MusicBrainz.track_for_id': this thread")
+            beets_log.error("Error in 'MusicBrainz.candidates': not a by-ID lookup")
+        self.assertEqual(lookup.errors, ["Error in 'MusicBrainz.track_for_id': this thread"])
+        self.assertNotIn(lookup, beets_log.handlers)
+
+    def test_an_unexpected_tag_write_error_is_recorded_and_the_run_goes_on(self):
+        beets_config["import"]["write"] = True
+        first, second = self._add_album("rel-a"), self._add_album("rel-b")
+        with self._source(album=lambda aid: _album_info(aid, "New Title")), \
+             mock.patch.object(Item, "try_write", autospec=True, side_effect=RuntimeError("boom")):
+            r = plugin_ops.run_mbsync_library(self.lib, True, threading.Event(), threading.RLock())
+        self.assertEqual((r["changed_albums"], r["write_failed_count"], r["failed_count"]), (2, 4, 0))
+        self.assertIn("RuntimeError: boom", r["write_failed"][0]["error"])
+        self.assertEqual({self.lib.get_album(a.id).album for a in (first, second)}, {"New Title"})
 
     def test_empty_album_rows_are_skipped_not_failed(self):
         album = self._add_album("rel-a")
@@ -272,8 +332,7 @@ class AdapterToPluginTests(MbsyncLibraryEndpointTests):
 
     def test_workflow_runs_beets_mbsync_end_to_end(self):
         album = self._add_album("rel-a")
-        with mock.patch.object(metadata_plugins, "album_for_id",
-                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")):
+        with self._source(album=lambda aid, *a, **k: _album_info(aid, "New Title")):
             res, tx, log = self._sync()
         self.assertTrue(res["ok"], res)
         self.assertEqual(self.lib.get_album(album.id).album, "New Title")
@@ -294,7 +353,7 @@ class AdapterToPluginTests(MbsyncLibraryEndpointTests):
             return _album_info(aid, "New Title")
 
         threading.Timer(0.3, release.set).start()
-        with mock.patch.object(metadata_plugins, "album_for_id", side_effect=slow):
+        with self._source(album=slow):
             res, tx, log = self._sync(cancel)
         self.assertTrue(res["cancelled"], log)
         self.assertEqual(res["summary"]["processed"], 1)
@@ -304,8 +363,7 @@ class AdapterToPluginTests(MbsyncLibraryEndpointTests):
     def test_workflow_fails_the_job_on_partial_failure_with_counts(self):
         beets_config["import"]["write"] = True
         self._add_album("rel-a")  # files missing: tag writes fail
-        with mock.patch.object(metadata_plugins, "album_for_id",
-                               side_effect=lambda aid, *a, **k: _album_info(aid, "New Title")):
+        with self._source(album=lambda aid, *a, **k: _album_info(aid, "New Title")):
             res, tx, log = self._sync()
         self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "MBSYNC_PARTIAL", True))
         self.assertEqual(res["summary"]["write_failed_count"], 2)

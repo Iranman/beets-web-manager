@@ -16,6 +16,9 @@ tests/test_stock_beets_acceptance.py for the acceptance proof against the
 real, unmodified lscr.io/linuxserver/beets:latest image.
 """
 
+import logging
+import threading
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from .schemas import beets_native_fields
 
@@ -208,7 +211,7 @@ def run_mbsync(
 MAX_LIBRARY_CHANGES = 200
 #: Most failures listed in a library sync result.
 MAX_LIBRARY_FAILURES = 100
-#: Stop a library sync after this many albums in a row raised (MusicBrainz
+#: Stop a library sync after this many albums in a row failed (MusicBrainz
 #: down, for example) instead of failing every remaining album.
 MAX_CONSECUTIVE_FAILURES = 10
 _VALUE_CHARS = 120
@@ -266,6 +269,43 @@ class _FoundProbe:
         return self._lib.transaction()
 
 
+class MetadataLookupError(Exception):
+    """The metadata source failed (MusicBrainz down, rate limited, ...)
+    while mbsync looked a target up."""
+
+
+class _LookupErrors(logging.Handler):
+    """Collects the record Beets' metadata_plugins.maybe_handle_plugin_error
+    logs ("Error in '<source>.album_for_id': <error>") when a source plugin
+    raises. With raise_on_error off (Beets' default) that log line is the
+    only trace: the lookup returns None, exactly as for a Release the source
+    no longer has. Only records from the thread that created the handler
+    count, so other Beets logging at the same time is ignored."""
+
+    def __init__(self):
+        super().__init__(logging.ERROR)
+        self.thread = threading.get_ident()
+        self.errors: List[str] = []
+
+    def emit(self, record):
+        if record.thread != self.thread:
+            return
+        msg = record.getMessage()
+        if msg.startswith("Error in '") and ("album_for_id'" in msg or "track_for_id'" in msg):
+            self.errors.append(msg)
+
+
+@contextmanager
+def _catch_lookup_errors():
+    handler = _LookupErrors()
+    beets_log = logging.getLogger("beets")
+    beets_log.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        beets_log.removeHandler(handler)
+
+
 def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[str, Any]:
     """Run Beets' own mbsync over the whole library, one album or singleton
     at a time: exactly the targets `beet mbsync` with no query visits
@@ -290,8 +330,11 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
     transaction per album).
 
     A target whose Release/Recording the source no longer has is counted as
-    ``not_found``. A target that raises is recorded as failed and the sync
-    goes on, unless MAX_CONSECUTIVE_FAILURES targets in a row raise
+    ``not_found`` (and not as unchanged). A target whose lookup failed
+    (MusicBrainz down or rate limited: Beets logs "Error in
+    '<source>.album_for_id'" and the lookup returns None, see
+    _LookupErrors) or that raises is recorded as failed and the sync goes
+    on, unless MAX_CONSECUTIVE_FAILURES targets in a row fail
     (``aborted``)."""
     plugin = _require_plugin("mbsync")
     if not hasattr(plugin, "singletons") or not hasattr(plugin, "albums"):
@@ -332,7 +375,8 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
                     if not before[1]:  # mbsync reads items()[0]: an empty album raises
                         res["skipped_empty"] += 1
                         continue
-                    plugin.albums(probe, [f"id:{tid}"], False, False, False)
+                    with _catch_lookup_errors() as lookup:
+                        plugin.albums(probe, [f"id:{tid}"], False, False, False)
                     after = _album_state(lib, tid) or ({}, {})
                 else:
                     item = lib.get_item(tid)
@@ -340,9 +384,12 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
                         res["skipped_missing"] += 1
                         continue
                     before = ({}, {tid: _field_values(item)})
-                    plugin.singletons(probe, [f"id:{tid}"], False, False, False)
+                    with _catch_lookup_errors() as lookup:
+                        plugin.singletons(probe, [f"id:{tid}"], False, False, False)
                     refreshed = lib.get_item(tid)
                     after = ({}, {tid: _field_values(refreshed)} if refreshed is not None else {})
+                if lookup.errors and not probe.applied:
+                    raise MetadataLookupError(lookup.errors[0][:200])
             except Exception as ex:
                 res["failed_count"] += 1
                 if len(res["failed"]) < MAX_LIBRARY_FAILURES:
@@ -354,8 +401,9 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
                 continue
             consecutive = 0
             res["processed"] += 1
-            if not probe.applied:
+            if not probe.applied:  # mbsync changed nothing: not "unchanged" either
                 res["not_found"] += 1
+                continue
             album_fields = _diff(before[0], after[0])
             items = []
             for iid, old in before[1].items():
@@ -366,15 +414,23 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
                          "fields": fields}
                 if write:
                     changed_item = lib.get_item(iid)
-                    if changed_item is not None and changed_item.try_write():
-                        changed_item.store()  # the new mtime, as apply_item_changes would
-                    else:
+                    written, error = False, ""
+                    try:
+                        if changed_item is not None and changed_item.try_write():
+                            changed_item.store()  # the new mtime, as apply_item_changes would
+                            written = True
+                    except Exception as ex:  # one item must not end the run and lose the counts
+                        error = f"{type(ex).__name__}: {str(ex)[:200]}"
+                    if not written:
                         entry["write_failed"] = True
                         res["write_failed_count"] += 1
                         if len(res["write_failed"]) < MAX_LIBRARY_FAILURES:
                             path = changed_item.path if changed_item is not None else b""
-                            res["write_failed"].append({"item_id": iid, "title": entry["title"],
-                                                        "path": _short(util.displayable_path(path))})
+                            failure = {"item_id": iid, "title": entry["title"],
+                                       "path": _short(util.displayable_path(path))}
+                            if error:
+                                failure["error"] = error
+                            res["write_failed"].append(failure)
                 items.append(entry)
         if not (album_fields or items):
             res["unchanged"] += 1
