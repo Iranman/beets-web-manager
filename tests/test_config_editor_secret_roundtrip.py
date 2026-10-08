@@ -154,6 +154,10 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
         self._save(STORED, lambda s: s + "# edit\n")
         self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
         self.assertEqual([p.name for p in self.path.parent.glob(".config.yaml.*")], [])
+        rev = config_manager.get_config(self.path)["revision"]
+        config_manager.revert_config(expected_revision=rev, config_path=self.path)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), STORED)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
 
     def test_save_route_merges_and_refuses_with_400(self):
         import app as app_module

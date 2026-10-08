@@ -173,6 +173,35 @@ def get_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     }
 
 
+def _replace_config_file(cfg: Path, text: str) -> None:
+    """Atomically replace ``cfg`` with ``text``, keeping its file mode.
+
+    config.yaml holds Beets' secrets, which Beets reads as plain YAML, so the
+    protection is the file mode. The unique temp file is created 0600
+    (mkstemp) and gets the current file's mode before the replace, so a 0600
+    config.yaml never becomes umask-readable (it did when the temp file was
+    created with open()). A missing or non-regular file gets 0600."""
+    try:
+        st = os.lstat(cfg)
+        mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
+    except FileNotFoundError:
+        mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{cfg.name}.", suffix=".tmp", dir=str(cfg.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, str(cfg))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def save_config(
     content: str,
     expected_revision: Optional[str] = None,
@@ -223,29 +252,9 @@ def save_config(
         except Exception as exc:
             log.warning("Failed to create config backup for %s: %s", cfg, exc)
 
-    # Atomic write via a unique temp file (mkstemp: created 0600) that gets
-    # config.yaml's current mode before the replace. config.yaml holds Beets'
-    # secrets, which Beets reads as plain YAML, so the protection is the file
-    # mode: a 0600 config.yaml never becomes umask-readable (as it did when
-    # the temp file was created with open()).
     try:
-        st = os.lstat(cfg)
-        mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
-    except FileNotFoundError:
-        mode = 0o600
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{cfg.name}.", suffix=".tmp", dir=str(cfg.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, str(cfg))
+        _replace_config_file(cfg, content)
     except Exception as exc:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
         log.error("Failed to write configuration file %s: %s", cfg, exc)
         raise ConfigError("Failed to write configuration file.") from exc
 
@@ -283,20 +292,9 @@ def revert_config(
     if not valid:
         raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}")
 
-    # Atomic replace
-    tmp_path = cfg.with_name(f".{cfg.name}.tmp.{os.getpid()}.{time.time_ns()}")
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(backup_content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(str(tmp_path), str(cfg))
+        _replace_config_file(cfg, backup_content)
     except Exception as exc:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
         log.error("Failed to revert configuration %s: %s", cfg, exc)
         raise ConfigError("Failed to revert configuration.") from exc
 
