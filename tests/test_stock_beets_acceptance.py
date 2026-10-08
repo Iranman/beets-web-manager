@@ -203,7 +203,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.9.0")
+        self.assertEqual(status_data["plugin_version"], "1.11.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -259,7 +259,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         res = self.client.get(f"/item/{self.item1.id}")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.get_json()["title"], "Sands of Time (Remastered)")
-        self.assertEqual(res.get_json()["genre"], "Chillout")
+        self.assertEqual(res.get_json()["genres"], ["Chillout"])  # Beets 2.13+ field
 
 
 class StockBeetsDockerAcceptanceTests(unittest.TestCase):
@@ -459,7 +459,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.9.0")
+                    self.assertEqual(status_res["plugin_version"], "1.11.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -585,7 +585,7 @@ webmanager:
                 req_verify = urllib.request.Request(f"{base_url}/item/{imported_item['id']}")
                 with _raw_urlopen(req_verify, timeout=5) as resp:
                     ver_res = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(ver_res["genre"], "Synthesized Electro")
+                    self.assertEqual(ver_res["genres"], ["Synthesized Electro"])  # Beets 2.13+ field
 
                 # Step 9: quarantine-remove on a real Werkzeug request thread
                 # (library-relative DB paths must resolve to the real file).
