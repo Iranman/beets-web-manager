@@ -2738,7 +2738,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 target_tracks=wanted_tracks,
             )
         else:
-            _validate_import_source_audio(folder_path, log, reject_downloads=True)
+            _validate_import_source_audio(folder_path, log, reject_downloads=True,
+                                          preserve_source=preserve_torrent_source)
         log.append(f"[1/2] Importing '{Path(folder_path).name}' with MB ID {mb_albumid}…")
         import_timeout = _beet_import_timeout(import_folder_path)
 

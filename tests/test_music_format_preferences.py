@@ -185,6 +185,24 @@ class RejectedDownloadPreservedSourceTests(unittest.TestCase):
         self.assertTrue(Path(result["quarantined_to"]).is_relative_to(self.quarantine))
         self.assertIn("quarantined", log[0])
 
+    def test_caller_folder_decision_wins_for_app_managed_marker_folder(self):
+        # The marker matches the folder name, not the file path: the caller's
+        # folder decision (app-managed, preserve_source=False) must be honoured.
+        staged = self._file("downloads", "Artist - YT missing Album", "a.flac")
+        result, _ = self._handle(staged, "quarantine", preserve_source=False)
+        self.assertFalse(staged.exists())
+        self.assertTrue(result["removed"])
+        self.assertTrue(Path(result["quarantined_to"]).is_relative_to(self.quarantine))
+
+    def test_validate_import_source_audio_passes_folder_decision(self):
+        import backend.ai_service as ai
+        report = {"accepted": [], "rejected": [{"path": "/downloads/x/a.flac", "message": "Rejected"}]}
+        with mock.patch.object(ai, "_validate_audio_tree_preferences", return_value=report), \
+                mock.patch.object(ai, "_handle_rejected_audio_download", return_value={"removed": True}) as handle:
+            with self.assertRaises(RuntimeError):
+                ai._validate_import_source_audio("/downloads/x", [], preserve_source=False)
+        self.assertIs(handle.call_args.kwargs["preserve_source"], False)
+
     def test_music_library_file_is_never_moved(self):
         for handling in ("quarantine", "delete"):
             lib_file = self._file("music", "Artist", "Album", f"{handling}.flac")

@@ -70,7 +70,11 @@ def _music_format_policy_rejection_error(rejected_count: int,
     )
 
 
-def _validate_import_source_audio(path_value: str, log: list, *, reject_downloads: bool = True) -> Dict[str, Any]:
+def _validate_import_source_audio(path_value: str, log: list, *, reject_downloads: bool = True,
+                                  preserve_source: Optional[bool] = None) -> Dict[str, Any]:
+    """``preserve_source``: the caller's folder-level torrent-source decision, so a
+    rejected file is kept/moved consistently with the import mode. ``None`` lets
+    ``handle_rejected_download`` apply the shared rule to each file."""
     prefs = _music_format_preferences()
     root = Path(path_value)
     try:
@@ -89,7 +93,8 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
         msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
         log.append(f"  [audio] {msg}: {Path(row.get('path') or '').name}")
         if reject_downloads and not root_is_library and row.get("path"):
-            handled_results.append(_handle_rejected_audio_download(row["path"], prefs, log=log))
+            handled_results.append(_handle_rejected_audio_download(row["path"], prefs, log=log,
+                                                                   preserve_source=preserve_source))
     if root_is_library:
         _mark_music_format_needs_replacement([
             {
@@ -2396,7 +2401,8 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     # the first place.
     # The AI-chosen candidate is imported as chosen: never swapped for another
     # Release (or Release Group) here.
-    _validate_import_source_audio(folder_path, log, reject_downloads=True)
+    _validate_import_source_audio(folder_path, log, reject_downloads=True,
+                                  preserve_source=preserve_torrent_source)
     mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb_identity.get("ok"):
         raise RuntimeError(
