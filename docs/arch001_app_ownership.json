@@ -28318,10 +28318,10 @@
    "module": "backend/transaction_service.py",
    "lines": [
     115,
-    170
+    174
    ],
-   "size": 56,
-   "body_lines": 55,
+   "size": 60,
+   "body_lines": 59,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -28338,8 +28338,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    173,
-    182
+    177,
+    186
    ],
    "size": 10,
    "body_lines": 9,
@@ -28360,8 +28360,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    187,
-    198
+    191,
+    202
    ],
    "size": 12,
    "body_lines": 11,
@@ -28382,8 +28382,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    201,
-    231
+    205,
+    235
    ],
    "size": 31,
    "body_lines": 30,
@@ -28405,8 +28405,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    234,
-    282
+    238,
+    286
    ],
    "size": 49,
    "body_lines": 48,

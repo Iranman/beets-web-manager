@@ -13,7 +13,7 @@ import backend.composite_workflows as composite_workflows
 from backend.matching_service import _invalidate_lib_cache
 from backend.app_runtime import jobs, transactions
 from backend.job_service import _call_job_fn
-from job_engine import DuplicateJobError, reports_failure
+from job_engine import DuplicateJobError, cancel_honoured, cancel_requested, reports_failure
 from backend.import_review_service import _metadata_transaction_pending_fields
 
 from backend.auth_service import _transaction_user_label
@@ -134,25 +134,29 @@ def _install_transaction_job_hooks() -> None:
             metadata_payload["transaction_id"] = tx_id
 
             def wrapped(log, cancel=None, update_state=None):
-                # The final status mirrors job_engine's own rule: a set cancel
-                # event (or a "cancelled" exception) makes the job cancelled,
-                # so the transaction is Cancelled too. Job sync no longer
-                # corrects a final status afterwards (QA-217-7).
-                def cancelled(ex=None):
-                    return bool(cancel is not None and cancel.is_set()) or \
-                        (ex is not None and str(ex).strip().lower() == "cancelled")
+                # The final status mirrors job_engine's own rule
+                # (cancel_honoured): Cancelled only when the job stopped
+                # because of the cancel. A request the job never saw cannot
+                # undo work it already did, so the real outcome stands (D4).
+                # Job sync no longer corrects a final status afterwards
+                # (QA-217-7).
+                def finish(status):
+                    transactions.update(tx_id, status=status)
+                    if status != "Cancelled" and cancel_requested(cancel):
+                        transactions.append_log(tx_id, "Cancel requested, but the job had already done "
+                                                       f"its work: recorded as {status}.")
 
                 transactions.update(tx_id, status="Running")
                 try:
                     result = _call_job_fn(fn, log, cancel, update_state)
                 except Exception as ex:
-                    transactions.update(tx_id, status="Cancelled" if cancelled(ex) else "Failed")
+                    finish("Cancelled" if cancel_honoured(cancel, ex) else "Failed")
                     transactions.append_log(tx_id, f"ERROR: {ex}")
                     raise
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
                 if reports_failure(result):
                     next_status = "Failed"  # BA-3: the same rule as job_engine
-                transactions.update(tx_id, status="Cancelled" if cancelled() else next_status)
+                finish("Cancelled" if cancel_honoured(cancel) else next_status)
                 return result
         else:
             wrapped = fn
