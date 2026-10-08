@@ -6,10 +6,11 @@ from __future__ import annotations
 import os, re, stat
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, _plugin_install_log, _read_beets_plugin_list
 from backend.app_runtime import _REDACTED_SECRET
 from backend.beets_adapter import BeetsError
+from backend.config_manager import ConfigError
 from backend import config_layers
 from backend.auth_service import _auth_secret_is_usable, _browser_password_is_usable, _security_auth_password, _security_auth_token
 
@@ -160,44 +161,163 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
 _CONFIG_SECRET_KEYS = config_layers.SECRET_CONFIG_KEYS
 
 
-def _redact_config_line(line: str) -> str:
-    """Redact a single YAML-style "key: value" line if its key is a known
-    secret key, preserving indentation, original key spelling/case, and
-    the line's own ending (LF/CRLF/none). No regex: leading indentation is
-    stripped with a fixed-charset lstrip(), the key is isolated with a
-    single partition() on the first colon, and the key is matched against
-    a fixed set -- every step is O(len(line)), so a single call is
-    O(len(line)) and a full-document scan is O(len(text)) overall."""
-    body = line.rstrip("\r\n")
-    ending = line[len(body):]
-    stripped = body.lstrip(" \t")
-    indent = body[:len(body) - len(stripped)]
-    key_part, sep, _value = stripped.partition(":")
-    if not sep or key_part.strip().lower() not in _CONFIG_SECRET_KEYS:
-        return line
-    return f'{indent}{key_part.rstrip(" \t")}: "{_REDACTED_SECRET}"{ending}'
+class ConfigSecretMergeError(ConfigError):
+    """A [REDACTED] placeholder in a submitted config.yaml cannot be mapped
+    to exactly one stored secret. Messages name only key paths, never values."""
+
+    def __init__(self, message: str, error_code: str = "config_secret_ambiguous"):
+        super().__init__(message, error_code=error_code, status_code=400)
+
+
+def _config_secret_segments(text: str) -> List[Tuple[Any, str, str, str, str]]:
+    """Split config text into (path, head, value, ending, cont) segments.
+
+    path is None for a line that is not a secret key (head is then the whole
+    line). For a secret-key line, path is the section path from the root
+    (keys as str, list items as their int position), head is everything up
+    to and including the key's colon, value is the rest of the line, and
+    cont holds any following deeper-indented lines (a multi-line or
+    block-scalar value), which belong to the secret too.
+
+    Config text is untrusted, so the scan stays linear: no regex, list-item
+    dashes are walked by index (no per-item copy of the line), each line is
+    read at most twice (once more only for blank lines after a secret's
+    continuation), and a path is built only for a secret line whose stack
+    depth is bounded by its own indentation. O(len(text)) overall
+    (regression test: test_pathological_dash_runs_stay_linear)."""
+    segs: List[Tuple[Any, str, str, str, str]] = []
+    stack: List[List[Any]] = []  # [column, key-or-list-index, is_list_item]
+    lines = text.splitlines(keepends=True)
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        i += 1
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        rest = body.lstrip(" \t")
+        col = len(body) - len(rest)
+        if rest.startswith(("---", "...")):
+            stack.clear()
+        if not rest or rest.startswith(("#", "---", "...")):
+            segs.append((None, line, "", "", ""))
+            continue
+        p, m = 0, len(rest)
+        while rest[p:p + 1] == "-" and rest[p + 1:p + 2] in (" ", ""):  # "- " list item(s)
+            while stack and stack[-1][0] > col:
+                stack.pop()
+            idx = 0
+            if stack and stack[-1][0] == col and stack[-1][2]:
+                idx = stack.pop()[1] + 1
+            stack.append([col, idx, True])
+            q = p + 1
+            while q < m and rest[q] == " ":  # index walk, no per-item copy: O(len(line))
+                q += 1
+            col += q - p
+            p = q
+        rest = rest[p:]
+        key_part, sep, value = rest.partition(":")
+        if not sep or (value and value[0] not in " \t"):
+            segs.append((None, line, "", "", ""))
+            continue
+        while stack and stack[-1][0] >= col:
+            stack.pop()
+        key = key_part.strip(" \t").strip("'\"")
+        if key.lower() not in _CONFIG_SECRET_KEYS:
+            if _is_empty_config_value(value):
+                stack.append([col, key, False])
+            segs.append((None, line, "", "", ""))
+            continue
+        path = tuple(frame[1] for frame in stack) + (key,)
+        cont_end = j = i
+        while j < n:
+            cbody = lines[j].rstrip("\r\n")
+            cstripped = cbody.lstrip(" \t")
+            if cstripped and len(cbody) - len(cstripped) <= col:
+                break
+            j += 1
+            if cstripped:
+                cont_end = j
+        segs.append((path, body[:len(body) - len(value)], value, ending, "".join(lines[i:cont_end])))
+        i = cont_end
+    return segs
+
+
+def _is_empty_config_value(value: str) -> bool:
+    v = value.strip(" \t")
+    return v in ("", '""', "''", "~", "null") or v.startswith("#")
+
+
+_REDACTED_VALUE_FORMS = frozenset({f'"{_REDACTED_SECRET}"', f"'{_REDACTED_SECRET}'", _REDACTED_SECRET})
 
 
 def _redact_config_content(text: str) -> str:
+    """Replace every non-empty secret value with the [REDACTED] placeholder,
+    keeping indentation, key spelling and line endings. An empty secret is
+    shown as-is: there is nothing to hide, and showing the placeholder there
+    made the editor unable to save its own output."""
     if not text:
         return text or ""
-    return "".join(_redact_config_line(line) for line in text.splitlines(keepends=True))
+    out = []
+    for path, head, value, ending, cont in _config_secret_segments(text):
+        if path is None or (not cont and _is_empty_config_value(value)):
+            out.append(head + value + ending + cont)
+        else:
+            out.append(f'{head} "{_REDACTED_SECRET}"{ending}')
+    return "".join(out)
 
 
-def _contains_redacted_config_secret(text: str) -> bool:
-    """True if a secret-key line's value carries the literal [REDACTED]
-    placeholder -- guards against the browser round-tripping a previously
-    redacted GET response straight back into a POST without supplying a
-    real secret. The cheap substring check short-circuits the common case
-    (no placeholder anywhere) before the linear line scan runs at all."""
-    if not text or _REDACTED_SECRET not in text:
-        return False
-    for line in text.splitlines():
-        stripped = line.lstrip(" \t")
-        key_part, sep, value = stripped.partition(":")
-        if sep and key_part.strip().lower() in _CONFIG_SECRET_KEYS and _REDACTED_SECRET in value:
-            return True
-    return False
+def _config_path_label(path: Tuple[Any, ...]) -> str:
+    return ".".join(f"[{p}]" if isinstance(p, int) else p for p in path)
+
+
+def _restore_redacted_config_secrets(submitted: str, stored: str) -> str:
+    """Put the stored value back on every secret line the user left as the
+    unchanged [REDACTED] placeholder. Lines are matched by full section path
+    (plex.token and listenbrainz.token never swap). Refuses, never guesses,
+    when a placeholder maps to zero or several stored values, or when the
+    placeholder appears anywhere else in a secret value. Paths come from the
+    line scanner, not a YAML parser: a placeholder line moved to a different
+    key path is refused, but one pasted inside another key's block scalar
+    at a path that still resolves to the same stored secret is restored
+    there (accepted in security review of #320: admin-only, the value stays
+    in the same file). Callers pass the snapshot the revision check ran
+    against (config_manager.save_config)."""
+    if _REDACTED_SECRET not in submitted:
+        return submitted
+    stored_values: Dict[Tuple[Any, ...], List[Tuple[str, str]]] = {}
+    for path, _head, value, _ending, cont in _config_secret_segments(stored):
+        if path is not None:
+            stored_values.setdefault(path, []).append((value, cont))
+    segs = _config_secret_segments(submitted)
+    counts: Dict[Tuple[Any, ...], int] = {}
+    for seg in segs:
+        if seg[0] is not None:
+            counts[seg[0]] = counts.get(seg[0], 0) + 1
+    out = []
+    for path, head, value, ending, cont in segs:
+        if path is None:
+            out.append(head)
+            continue
+        if cont or value.strip(" \t") not in _REDACTED_VALUE_FORMS:
+            if _REDACTED_SECRET in value or _REDACTED_SECRET in cont:
+                raise ConfigSecretMergeError(
+                    f"Refusing to save redacted secret placeholders: {_config_path_label(path)}. Replace the whole "
+                    f"{_REDACTED_SECRET} placeholder with the new value, or leave it unchanged to keep the stored one.",
+                    error_code="config_redacted_placeholder",
+                )
+            out.append(head + value + ending + cont)
+            continue
+        found = stored_values.get(path, [])
+        if counts[path] != 1 or len(found) != 1:
+            raise ConfigSecretMergeError(
+                f"{_config_path_label(path)}: cannot tell which stored secret {_REDACTED_SECRET} stands for "
+                f"(found {len(found)} stored, {counts[path]} submitted). Type the value, or reload the page."
+            )
+        stored_value, stored_cont = found[0]
+        if stored_cont and not stored_cont.endswith(("\n", "\r")):
+            stored_cont += "\n"
+        out.append(head + stored_value + ending + stored_cont)
+    return "".join(out)
 
 
 # ── Plugin Control Endpoints ─────────────────────────────────────────────────
