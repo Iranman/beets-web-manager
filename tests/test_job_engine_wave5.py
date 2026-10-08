@@ -40,7 +40,9 @@ class FailedResultTests(unittest.TestCase):
 
         def body(log, cancel):
             go.wait(5)
-            return {"ok": False}
+            if cancel.is_set():  # it sees the request and stops (D4: only then is it cancelled)
+                return {"ok": False}
+            return {"ok": True}
         job = JobStore().start_python(body, label="x")
         job.kill()
         go.set()

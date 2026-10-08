@@ -163,6 +163,10 @@ class HookJobCancelTests(_RouteEnv):
 
         def body(log, cancel_event=None):
             go.wait(5)
+            # A cooperative job checks for a cancel before it continues; D4
+            # covers a job that never sees the request.
+            if cancel_event is not None:
+                cancel_event.is_set()
             if raise_:
                 raise RuntimeError("body failed")
             return {"ok": True}

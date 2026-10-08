@@ -76,6 +76,55 @@ def _summarize_result(value):
     return {"type": type(value).__name__, "value": str(value)[:160]}
 
 
+class CancelSignal(threading.Event):
+    """A job's cancel event that remembers whether the job saw the request.
+
+    ``is_set()``/``wait()`` returning True mark the request ``observed``: the
+    job had the chance to stop. ``requested`` reads the flag without marking.
+    """
+
+    observed = False
+
+    @property
+    def requested(self) -> bool:
+        return super().is_set()
+
+    def is_set(self) -> bool:
+        if super().is_set():
+            self.observed = True
+            return True
+        return False
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        if super().wait(timeout):
+            self.observed = True
+            return True
+        return False
+
+
+def cancel_honoured(cancel: Any, exc: Optional[BaseException] = None) -> bool:
+    """Did a finished job function stop because of a cancel request?
+
+    True when it raised ``"cancelled"``, or when a cancel was requested and
+    the function saw it (it had the chance to stop). A request the function
+    never saw arrived after its work was done, or while a step it does not
+    interrupt ran: the real outcome stands. Job status and the hook-created
+    transaction both use this rule.
+    """
+    if exc is not None and str(exc).strip().lower() == "cancelled":
+        return True
+    observed = getattr(cancel, "observed", None)
+    if observed is None:  # a plain Event (not started by a JobStore)
+        return bool(cancel is not None and cancel.is_set())
+    return bool(observed)
+
+
+def cancel_requested(cancel: Any) -> bool:
+    """Whether a cancel was requested, without marking it observed."""
+    requested = getattr(cancel, "requested", None)
+    return bool(requested) if requested is not None else bool(cancel is not None and cancel.is_set())
+
+
 class PythonJob:
     """Runs a Python callable in a background thread.
     The callable receives (log, cancel_event) and should periodically check
@@ -98,7 +147,7 @@ class PythonJob:
         self._terminal: Optional[str]     = None  # set only for recovered records
         self._lock        = threading.Lock()
         self._fn          = fn
-        self._cancel      = threading.Event()
+        self._cancel      = CancelSignal()
         self._persist     = persist
         self._last_persist = 0.0
         self._thread: Optional[threading.Thread] = None
@@ -111,7 +160,7 @@ class PythonJob:
         if self._terminal:
             return self._terminal
         if self.finished_at is not None:
-            if self._cancel.is_set() or self.returncode == -1:
+            if self.returncode == -1:  # a late cancel never rewrites the outcome
                 return "cancelled"
             return "success" if self.returncode == 0 else "failed"
         return "running"
@@ -186,7 +235,7 @@ class PythonJob:
                 ret = self._fn(self.log)
             if ret is not None:
                 self.result = ret
-            if self._cancel.is_set():
+            if self._cancel.requested and cancel_honoured(self._cancel):
                 self.returncode = -1
             elif reports_failure(ret):
                 # BA-3: a job that returns {"ok": False, ...} failed, even
@@ -195,8 +244,11 @@ class PythonJob:
                 self.log.append(f"ERROR: {str(ret.get('error') or 'the job reported a failed result')[:300]}")
             else:
                 self.returncode = 0
+            if self.returncode != -1 and self._cancel.requested:
+                self.log.append("[cancel requested, but the job had already done its work: "
+                                f"recorded as {'failed' if self.returncode else 'success'}]")
         except Exception as exc:
-            if self._cancel.is_set() or str(exc).strip().lower() == "cancelled":
+            if cancel_honoured(self._cancel, exc):
                 self.returncode = -1
                 if not any("cancel" in str(line).lower() for line in self.log[-3:]):
                     self.log.append("Job cancelled by user.")
