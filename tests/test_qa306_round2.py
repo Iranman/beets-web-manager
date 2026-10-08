@@ -24,12 +24,12 @@ def _adapter():
 class SweepSafety(_Env):
     def test_a_live_apply_claimed_after_start_is_never_touched(self):
         started = time.time()
-        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad, seen = _adapter(), []
         # The background sweep retries for minutes; one pass lands mid-write.
-        ad.move.side_effect = lambda **_k: seen.append(
+        ad.lastgenre.side_effect = lambda **_k: seen.append(
             transaction_recovery.sweep(adapter=ad, store=self.store, before=started))
-        res = cw.apply_album_relocation(op, adapter=ad, store=self.store)
+        res = cw.apply_album_genre_repair(op, adapter=ad, store=self.store)
         self.assertEqual(seen, [[]])
         self.assertEqual((res["status"], self.store.get(op)["status"]), ("Completed", "Completed"))
 
@@ -53,11 +53,11 @@ class SweepSafety(_Env):
         for name, plan, apply, rollback in [
             ("item_metadata", lambda: cw.plan_item_metadata({"item_id": 5, "updates": {"title": "T"}}, store=self.store),
              cw.apply_item_metadata, cw.rollback_item_metadata),
-            ("album_relocation", lambda: cw.plan_album_relocation({"album_id": 1}, store=self.store),
-             cw.apply_album_relocation, cw.rollback_album_relocation)]:
+            ("album_genre_repair", lambda: cw.plan_album_genre_repair({"album_id": 1}, store=self.store),
+             cw.apply_album_genre_repair, cw.rollback_album_genre_repair)]:
             op = plan()["operation_id"]
             ad = _adapter()
-            ad.modify.side_effect = ad.move.side_effect = KeyboardInterrupt
+            ad.modify.side_effect = ad.lastgenre.side_effect = KeyboardInterrupt
             with self.assertRaises(KeyboardInterrupt):
                 apply(op, adapter=ad, store=self.store)
             transaction_recovery.sweep(adapter=ad, store=self.store, before=time.time() + 1)

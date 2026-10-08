@@ -42,8 +42,6 @@ def _adapter():
 
 #: (name, plan(store) -> operation_id, apply(op, adapter, store))
 _FAMILIES = [
-    ("album_relocation", lambda st: cw.plan_album_relocation({"album_id": 1}, store=st)["operation_id"],
-     lambda op, ad, st: cw.apply_album_relocation(op, adapter=ad, store=st)),
     ("item_metadata", lambda st: cw.plan_item_metadata({"item_id": 5, "updates": {"title": "T"}},
                                                         store=st)["operation_id"],
      lambda op, ad, st: cw.apply_item_metadata(op, adapter=ad, store=st)),
@@ -89,11 +87,11 @@ class CompositeApplyCasTests(_Env):
                 self.assertEqual(self.store.get(op)["status"], "Completed")
 
     def test_adapter_failure_is_never_left_running(self):
-        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad = _adapter()
-        ad.move.side_effect = RuntimeError("refused")
+        ad.lastgenre.side_effect = RuntimeError("refused")
         with self.assertRaises(RuntimeError):
-            cw.apply_album_relocation(op, adapter=ad, store=self.store)
+            cw.apply_album_genre_repair(op, adapter=ad, store=self.store)
         self.assertEqual(self.store.get(op)["status"], "Failed")
         op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad.lastgenre.side_effect = BeetsAdapterTimeoutError("timed out")
@@ -102,21 +100,21 @@ class CompositeApplyCasTests(_Env):
         self.assertEqual(self.store.get(op)["status"], "Recovery Required")
 
     def test_second_apply_is_refused(self):
-        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad = _adapter()
-        self.assertTrue(cw.apply_album_relocation(op, adapter=ad, store=self.store)["ok"])
-        self.assertFalse(cw.apply_album_relocation(op, adapter=ad, store=self.store)["ok"])
-        self.assertEqual(ad.move.call_count, 1)
+        self.assertTrue(cw.apply_album_genre_repair(op, adapter=ad, store=self.store)["ok"])
+        self.assertFalse(cw.apply_album_genre_repair(op, adapter=ad, store=self.store)["ok"])
+        self.assertEqual(ad.lastgenre.call_count, 1)
 
     def test_restart_sweep_marks_an_interrupted_apply_recovery_required(self):
         """N1: a crash mid-apply leaves Running; the startup sweep resolves it."""
         import time
         from backend import transaction_recovery
-        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad = _adapter()
-        ad.move.side_effect = KeyboardInterrupt  # the process dies inside the Beets call
+        ad.lastgenre.side_effect = KeyboardInterrupt  # the process dies inside the Beets call
         with self.assertRaises(KeyboardInterrupt):
-            cw.apply_album_relocation(op, adapter=ad, store=self.store)
+            cw.apply_album_genre_repair(op, adapter=ad, store=self.store)
         self.assertEqual(self.store.get(op)["status"], "Running")
         # An apply written after the process started may still be live.
         transaction_recovery.sweep(adapter=ad, store=self.store, before=self.store.get(op)["updated_at"])

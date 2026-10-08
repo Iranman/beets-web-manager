@@ -86,9 +86,9 @@ _ENGINE_FUNCTION_FAMILY = {
     "create_library_cleanup_plan": "library_cleanup_v1",
     "create_playlist_media_cleanup_plan": "playlist_media_cleanup_v1",
     "create_import_folder_plan": "import_folder_v1",
-    "create_album_relocation_plan": "album_relocation_v1",
-    "execute_album_relocation_apply": "album_relocation_v1",
-    "rollback_album_relocation": "album_relocation_v1",
+    "create_album_relocation_plan": "album_move_v1",
+    "execute_album_relocation_apply": "album_move_v1",
+    "rollback_album_relocation": "album_move_v1",
     "create_album_metadata_plan": "album_metadata_repair_v1",
     "execute_album_metadata_apply": "album_metadata_repair_v1",
     "rollback_album_metadata": "album_metadata_repair_v1",
@@ -406,13 +406,13 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     if file == "backend/beets_control_agent.py":
         if func in ("ControlAgentHandler.do_POST", "ControlAgentHandler.do_DELETE", "ControlAgentHandler.do_PATCH", "ControlAgentHandler.do_GET"):
             if "UPDATE items SET path" in text or "UPDATE albums SET artpath" in text:
-                return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "library-rewrite-path-endpoint"
+                return "CONTROLLED_MEDIA_MUTATION", "album_move_v1", "library-rewrite-path-endpoint"
             if "UPDATE albums SET artpath = ?" in text:
                 return "CONTROLLED_MEDIA_MUTATION", "album_artwork_v1", "albums-artpath-clear-endpoint"
             if "mf.save()" in text or "f.save()" in text:
                 return "CONTROLLED_MEDIA_MUTATION", "album_metadata_repair_v1", "control-agent-files-tags-write"
             if "shutil.move" in text:
-                return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "control-agent-files-move"
+                return "CONTROLLED_MEDIA_MUTATION", "album_move_v1", "control-agent-files-move"
             if "shutil.rmtree" in text or "safe_target.unlink" in text or "safe_dst.unlink" in text or "safe_m3u.unlink" in text:
                 return "CONTROLLED_MEDIA_MUTATION", "album_maintenance_v1", "control-agent-files-delete"
             if "mkdir" in text:
@@ -550,7 +550,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     if any(k in text for k in ("beets_client.update_album_metadata", "beets_client.plan_album_metadata", "beets_client.apply_album_metadata", "beets_client.rollback_album_metadata", "composite_workflows.update_album_metadata", "composite_workflows.plan_album_metadata", "composite_workflows.apply_album_metadata", "composite_workflows.rollback_album_metadata", "beets_adapter.update_album_metadata")):
         return "CONTROLLED_MEDIA_MUTATION", "album_metadata_repair_v1", "reviewed-wave27-beetsclient-album-metadata-repair"
     if any(k in text for k in ("beets_client.relocate_album", "beets_client.plan_album_relocation", "beets_client.apply_album_relocation", "beets_client.rollback_album_relocation", "composite_workflows.relocate_album", "composite_workflows.plan_album_relocation", "composite_workflows.apply_album_relocation", "composite_workflows.rollback_album_relocation")):
-        return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "reviewed-wave27-beetsclient-album-relocation"
+        return "CONTROLLED_MEDIA_MUTATION", "album_move_v1", "reviewed-wave27-beetsclient-album-relocation"
 
     mapped = _EXPLICIT_FUNCTION_CLASSIFICATION.get(func)
     if mapped:
@@ -654,7 +654,7 @@ def _determine_domain(sink: MutationSink, classification: str, family: str, rule
         return "album_metadata"
 
     # 3. Album Relocation / Rename / Move / Merge
-    if family in ("album_relocation_v1", "artist_folder_reconcile_v1", "existing_album_reconcile_v1"):
+    if family in ("album_move_v1", "artist_folder_reconcile_v1", "existing_album_reconcile_v1"):
         return "album_relocation"
     if any(k in func for k in ("album_rename", "move_to_library", "relocate_album")) and "playlist" not in func:
         return "album_relocation"

@@ -14,7 +14,8 @@ mutation:
   is written before any change, so "no manifest" proves nothing changed:
   Failed. For registry-backed ops (replacement, reviewed cleanup, whose
   in-memory registry a Beets restart loses) completion cannot be proven:
-  Recovery Required.
+  Recovery Required -- unless the family recorded the full before-state
+  (album relocation): live state equal to it proves nothing changed (Failed).
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ def _families() -> Dict[str, Dict[str, Any]]:
             "kind": "registry", "finish": composite_workflows.finish_album_cleanup},
         composite_workflows.ALBUM_ART_REPLACE_FAMILY: {
             "kind": "registry", "finish": composite_workflows.finish_album_art_replace},
+        composite_workflows.ALBUM_RELOCATION_FAMILY: {
+            "kind": "registry", "finish": composite_workflows.finish_album_relocation,
+            "unchanged": composite_workflows.album_relocation_unchanged},
         duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: {
             "kind": "registry", "finish": duplicate_cleanup.finish_reviewed_cleanup},
         album_row_merge.ALBUM_ROW_MERGE_FAMILY: {
@@ -111,6 +115,11 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
         return mark("Recovery Required", f"engine record is {status!r}; completion cannot be proven")
 
     reg = _registry_status(ad, op)
+    if fam.get("unchanged") and (reg is None or reg.get("status") not in ("running", "succeeded")):
+        # The plan recorded every path: live state equal to it proves nothing moved.
+        if fam["unchanged"](ad, meta):
+            return mark("Failed", "the library is exactly as planned; nothing was changed")
+        return mark("Recovery Required", "the library differs from the plan and the engine reports no success")
     if reg is None:
         return mark("Recovery Required", "the engine has no record (Beets restarted?); completion cannot be proven")
     if reg.get("status") == "running":

@@ -38,15 +38,15 @@ class CompositeApplyEdges(_Env):
         self.assertEqual(self.store.get(op)["status"], "Failed")
 
     def test_failed_after_a_write_attempt_keeps_its_apply_record(self):
-        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad = _adapter()
-        ad.move.side_effect = RuntimeError("refused")
+        ad.lastgenre.side_effect = RuntimeError("refused")
         with self.assertRaises(RuntimeError):
-            cw.apply_album_relocation(op, adapter=ad, store=self.store)
+            cw.apply_album_genre_repair(op, adapter=ad, store=self.store)
         tx = self.store.get(op)
         self.assertEqual(tx["status"], "Failed")
         self.assertTrue(tx["metadata"]["engine_result"]["mutation_started"])
-        self.assertEqual(cw.rollback_album_relocation(op, store=self.store)["status"], "Rolled Back")
+        self.assertEqual(cw.rollback_album_genre_repair(op, store=self.store)["status"], "Rolled Back")
 
     def test_recovery_required_is_never_marked_rolled_back(self):
         op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
@@ -87,10 +87,10 @@ class EngineRollbackEdges(_Env):
 
 class RouteEdges(_RouteEnv):
     def test_cancel_after_the_claim_is_refused_and_apply_completes(self):
-        op = cw.plan_album_relocation({"album_id": 1}, store=self.store)["operation_id"]
+        op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]
         ad, seen = _adapter(), []
-        ad.move.side_effect = lambda **_k: seen.append(self.client.post(f"/api/transactions/{op}/cancel"))
-        res = cw.apply_album_relocation(op, adapter=ad, store=self.store)
+        ad.lastgenre.side_effect = lambda **_k: seen.append(self.client.post(f"/api/transactions/{op}/cancel"))
+        res = cw.apply_album_genre_repair(op, adapter=ad, store=self.store)
         self.assertEqual((seen[0].status_code, seen[0].get_json()["code"]), (409, "not_cancellable"))
         self.assertEqual((res["status"], self.store.get(op)["status"]), ("Completed", "Completed"))
 

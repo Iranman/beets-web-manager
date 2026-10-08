@@ -521,6 +521,7 @@ class BeetsClientRequiredWrapperTests(unittest.TestCase):
 
     def test_relocate_album_apply_failure_is_returned(self):
         with mock.patch.object(self.client, "plan_album_relocation", return_value={"ok": True, "operation_id": "txn_1"}), \
+             mock.patch("backend.resource_locks.approve_preview", return_value={"status": "Approved"}), \
              mock.patch.object(self.client, "apply_album_relocation", return_value={"ok": False, "error": "move failed"}):
             res = self.client.relocate_album(1)
         self.assertFalse(res["ok"])
