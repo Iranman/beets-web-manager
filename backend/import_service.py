@@ -2485,7 +2485,25 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # re-tagging/re-validating a folder that is already inside the music
         # library, as opposed to importing from staging/downloads.
         source_is_library = _path_is_under(Path(folder_path), Path(music_root))
+
+        def _review_and_raise(reason: str) -> None:
+            # A provided ID that cannot be imported inside its own Release
+            # Group goes to review (D1); it never falls back to a free search.
+            if queue_review_on_uncertain or light_confirm:
+                _queue_folder_for_manual_review(
+                    folder_path,
+                    {**(ai_suggestion or {}),
+                     "mb_albumid": "" if input_looks_like_release_group else mb_albumid,
+                     "mb_releasegroupid": selected_releasegroupid,
+                     "provided_mb_id": raw_mb_input,
+                     "album": Path(folder_path).name, "reason": reason},
+                    reason, log, allow_existing=bool(existing_album_id or source_is_library))
+            else:
+                log.append(f"  Skipped Pending Review (no-review): {reason}")
+            raise RuntimeError(f"{reason} No library files were changed.")
+
         if input_looks_like_release_group:
+            log_start = len(log)
             resolved_release = _resolve_album_release_for_import(
                 mb_albumid,
                 Path(folder_path).parent.name,
@@ -2497,10 +2515,12 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 existing_album_id=existing_album_id,
             )
             if not resolved_release:
-                raise RuntimeError(
-                    "The selected MusicBrainz release-group ID did not resolve "
-                    "to an importable representative release. Import was not started."
-                )
+                refusal = " ".join([line.strip() for line in log[log_start:]
+                                    if "REFUSED" in line or "rejected by" in line
+                                    or "WARN" in line][-3:])
+                _review_and_raise(
+                    f"Release group {selected_releasegroupid} has no release that matches "
+                    f"this folder; it was not imported. {refusal}".strip())
             log.append(
                 "[import] Using representative MusicBrainz release "
                 f"{resolved_release} for selected release group {selected_releasegroupid}."
@@ -2696,16 +2716,15 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         resolved_releasegroupid = _s(mb_identity.get("release_group") or "").strip().lower()
         if selected_releasegroupid and resolved_releasegroupid and selected_releasegroupid != resolved_releasegroupid:
-            raise RuntimeError(
-                "The representative MusicBrainz release is not in the selected "
-                "release group. Import was blocked before files were moved or tagged."
-            )
+            _review_and_raise(
+                f"MusicBrainz release {mb_albumid} is in release group {resolved_releasegroupid}, "
+                f"not the selected release group {selected_releasegroupid}; it was not imported.")
         if resolved_releasegroupid and not selected_releasegroupid:
             selected_releasegroupid = resolved_releasegroupid
         if not selected_releasegroupid:
-            raise RuntimeError(
-                "The Release Group of the selected MusicBrainz release is unknown, so the "
-                "import could not be verified. Import was not started.")
+            _review_and_raise(
+                f"The Release Group of MusicBrainz release {mb_albumid} is unknown, so the "
+                "import could not be verified; it was not imported.")
         log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
         if selected_subset_import:
             active_selected_source_files = _filter_import_review_selected_audio_files(selected_source_files, log)
@@ -2790,6 +2809,10 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     folder_path, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
                                   "kept_album_ids": kept_ids, "reason": reason},
                     reason, log, allow_existing=True)
+            elif apply_res.get("code") == "not_imported":
+                _review_and_raise(
+                    f"Beets could not confidently match this source to MusicBrainz release "
+                    f"{mb_albumid} (release group {selected_releasegroupid}): {reason}")
             raise RuntimeError(reason)
         log.append(f"[import] Beets import completed: {import_folder_path}")
         # Beets applied the confirmed Release (tags, placement, write) and
