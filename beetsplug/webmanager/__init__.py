@@ -69,3 +69,7 @@ class WebManagerPlugin(BeetsPlugin):
             }
         )
         register_webmanager_blueprint(self)
+        # Copy-on-write: a tag write never reaches a hard-linked torrent file (#332).
+        from .relocation_ops import break_hard_link, note_library_write
+        self.register_listener("write", break_hard_link)
+        self.register_listener("after_write", note_library_write)

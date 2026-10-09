@@ -50,12 +50,28 @@ Those are never moved: Beets' ``Item.move()``/``move_art()`` run with
 path, bytes and inode. The result lists each changed track's ``methods``
 (``moved``/``linked``/``copied``) and ``art_method``, and the evidence holds
 [size, mtime, dev, inode] of every original and of each library file made.
-Their rollback never moves anything: once the original is proven unchanged
-(same inode, size and mtime; else ``SOURCE_CHANGED``) and the library file
-proven to be the one this relocation made (the original's inode for a link,
-the recorded evidence for a copy; else ``LIBRARY_FILE_CHANGED``), the row is
-pointed back at the original, and only then is the library file unlinked,
-when it is untracked. A library file that is already gone is not an error.
+Their rollback never moves anything and trusts only this plugin's own
+durable record of the apply (``apply_operation_id``, kept
+``DURABLE_RETENTION_SECONDS``): methods, paths and evidence come from it,
+never from the request. Once the original is proven unchanged (same inode,
+size and mtime; else ``SOURCE_CHANGED``) and the library file proven to be
+the one this relocation made (the original's inode for a link, else the
+recorded library evidence; else ``LIBRARY_FILE_CHANGED``), the row is pointed
+back at the original, and only then is the library file unlinked: untracked,
+strictly inside the Beets library directory, and re-checked by inode through
+an ``O_NOFOLLOW`` directory walk right before ``unlinkat``. Without the record
+(expired, or another Beets) the row is still pointed back, the library file is
+kept and listed in ``kept_library_files``. A library file already gone is not
+an error.
+
+Copy-on-write (``break_hard_link``, on Beets' ``write`` event, which every
+``Item.write``/``try_write`` sends first: Web Manager edits, mbsync, embedart,
+``beet write``): a file with more than one link is first replaced by its own
+copy (``os.replace`` of a same-folder copy, ``copystat``, owner kept when
+allowed), so a tag or embedded-art write never reaches a seeding torrent's
+bytes. ``after_write`` refreshes the library evidence in the relocation record,
+so a rollback still proves and removes the copy. Covers are never written in
+place: ``Album.set_art`` removes the name and copies a new file.
 
 Both hold ``ops.mutation_lock``. Refusals and undone failures (``UNDONE``:
 every moved file was put back) are not kept under the Idempotency-Key, so a
@@ -64,11 +80,15 @@ retry after the operator fixes the cause runs.
 
 from __future__ import annotations
 
+import copy
 import os
+import shutil
 import stat
-from typing import Any, Dict, List, Tuple
+import tempfile
+from typing import Any, Dict, List, Optional, Tuple
 
 from beets import util
+from beets.library import WriteError
 from beets.util import MoveOperation
 from flask import g, jsonify, request
 
@@ -166,14 +186,16 @@ def _same_file(path: str, ev: Any) -> bool:
 
 def _ours(path: str, method: Any, origin: Any, library: Any) -> bool:
     """``path`` is the library file this relocation made: a hard link of the
-    original (its inode) or the copy whose evidence it recorded."""
+    original (its inode), or the file its recorded library evidence matches
+    (a copy, or a link a tag write broke into its own copy)."""
     if method == "linked":
         try:
             st = os.lstat(path)
-            return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == (int(origin[2]), int(origin[3]))
+            if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == (int(origin[2]), int(origin[3])):
+                return True
         except (OSError, TypeError, ValueError, IndexError):
             return False
-    return method == "copied" and _same_file(path, library)
+    return method in _LINKED and _same_file(path, library)
 
 
 def _original(lib, restore: Any, now: str, origin: Any) -> Tuple[str, str]:
@@ -183,8 +205,7 @@ def _original(lib, restore: Any, now: str, origin: Any) -> Tuple[str, str]:
     if os.path.splitext(path)[1].lower() != os.path.splitext(now)[1].lower():
         raise _no("restore path has another file extension", "EXTENSION_CHANGED", 400)
     if not _same_file(path, origin):
-        raise _no("the original in the torrent folder is gone or changed since the relocation "
-                  "(a tag write through a hard link changes it too)", "SOURCE_CHANGED")
+        raise _no("the original in the torrent folder is gone or changed since the relocation", "SOURCE_CHANGED")
     try:
         folder_ops._refuse_tracked(lib, path)
     except folder_ops._Refused:
@@ -192,33 +213,93 @@ def _original(lib, restore: Any, now: str, origin: Any) -> Tuple[str, str]:
     return path, root
 
 
-def _place(move, link: bool) -> str:
+def _place(lib, move, link: bool, dest: str = "") -> str:
     """Run one Beets move: MOVE, or for a preserved torrent source HARDLINK,
-    then COPY when a hard link is impossible. Never MOVE a linked file."""
+    then COPY when a hard link is impossible. Never MOVE a linked file. A
+    failure after the link or copy was made (a partial copy, or the row store)
+    leaves a file at ``dest`` no row points at: removed when ``dest`` was free
+    before, is untracked and inside the library; else logged."""
     if not link:
         move(MoveOperation.MOVE)
         return "moved"
+    was_free = bool(dest) and not os.path.lexists(dest)
     try:
-        move(MoveOperation.HARDLINK)
-        return "linked"
-    except util.FilesystemError as exc:  # EXDEV, EPERM (protected_hardlinks), no link support
-        ops.log.info("hard link impossible (%s); copying instead", exc)
-    move(MoveOperation.COPY)
-    return "copied"
+        try:
+            move(MoveOperation.HARDLINK)
+            return "linked"
+        except util.FilesystemError as exc:  # EXDEV, EPERM (protected_hardlinks), no link support
+            ops.log.info("hard link impossible (%s); copying instead", exc)
+        move(MoveOperation.COPY)
+        return "copied"
+    except Exception:
+        if was_free and os.path.lexists(dest) and not _unlink_new(lib, dest):
+            ops.log.warning("a failed link or copy left an untracked file in the library: %s", dest)
+        raise
+
+
+def _lib_root(lib) -> str:
+    return os.path.abspath(os.fsdecode(lib.directory))
+
+
+def _unlink_at(root: str, path: str, ident: Tuple[int, int]) -> bool:
+    """Unlink ``path`` (strictly below ``root``) only while it is still the
+    regular file ``ident`` (dev, inode). The parent is reached from ``root``
+    with ``O_NOFOLLOW`` directory fds, so a folder swapped for a symlink after
+    the checks is refused, and the inode is re-checked right before
+    ``unlinkat``."""
+    parts = os.path.relpath(path, root).split(os.sep)
+    if os.unlink not in os.supports_dir_fd:  # ponytail: no dir_fd (Windows): path-based, same checks
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != ident:
+            return False
+        os.unlink(path)
+        return True
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    fd = os.open(root, flags)
+    try:
+        for name in parts[:-1]:
+            nfd = os.open(name, flags | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != ident:
+            return False
+        os.unlink(parts[-1], dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _unlink_new(lib, path: str) -> bool:
+    """Remove an untracked file inside the Beets library directory (one this
+    relocation just created). Never anything outside the library."""
+    root = _lib_root(lib)
+    try:
+        path = folder_ops.contained_path(path, root)
+        folder_ops._refuse_tracked(lib, path)
+        st = os.lstat(path)
+        return _unlink_at(root, path, (st.st_dev, st.st_ino))
+    except (folder_ops._Refused, OSError):
+        return False
 
 
 def _unlink_ours(lib, path: str, original: str, method: Any, origin: Any, library: Any) -> bool:
     """Remove a library file this relocation made, only while it is provably
-    ours, untracked, and the original is still intact at its path."""
+    ours, untracked, strictly inside the Beets library directory, and the
+    original is still intact at its own (other) path."""
+    root = _lib_root(lib)
     try:
         path, _root = _contained(path)
+        path = folder_ops.contained_path(path, root)
         folder_ops._refuse_tracked(lib, path)
     except folder_ops._Refused:
         return False
-    if not (_ours(path, method, origin, library) and _same_file(original, origin)):
+    if path == original or not (_ours(path, method, origin, library) and _same_file(original, origin)):
         return False
     try:
-        os.unlink(path)
+        st = os.lstat(path)
+        if not _unlink_at(root, path, (st.st_dev, st.st_ino)):
+            return False
     except OSError:
         return False
     _remove_empty_dirs(os.path.dirname(path))
@@ -265,13 +346,15 @@ def _relocate(lib, album, before, link_ops, art_op) -> Dict[str, Any]:
         moved_dir = None
         for item in album.items():
             iid, old = str(item.id), item.path
-            how = _place(lambda op, it=item: it.move(op, with_album=False), link_ops.get(iid) == "link")
+            how = _place(lib, lambda op, it=item: it.move(op, with_album=False), link_ops.get(iid) == "link",
+                         _abs(lib, item.destination()))
             if item.path != old:
                 methods[iid] = how
                 evidence["library"][iid] = _evidence(_abs(lib, item.path))
                 moved_dir = moved_dir or os.path.dirname(item.path)
         old_art = album.artpath
-        how = _place(lambda op: album.move_art(op, item_dir=moved_dir), art_op == "link")
+        art_dest = _abs(lib, album.art_destination(old_art, item_dir=moved_dir)) if old_art else ""
+        how = _place(lib, lambda op: album.move_art(op, item_dir=moved_dir), art_op == "link", art_dest)
         album.store()
         if album.artpath and album.artpath != old_art:
             art_method = how
@@ -306,6 +389,31 @@ def _relocate(lib, album, before, link_ops, art_op) -> Dict[str, Any]:
             "renamed": renamed, "evidence": evidence, "methods": methods, "art_method": art_method}
 
 
+def _apply_record(op_id: Any, album_id: int) -> Optional[Dict[str, Any]]:
+    """This plugin's own durable result of the relocation being rolled back
+    (its Idempotency-Key), or None when it is unknown or expired."""
+    if not isinstance(op_id, str) or not op_id:
+        return None
+    with ops._operations_lock:
+        op = ops._operations.get(op_id)
+        if not op or op.get("type") != "album_relocation" or op.get("status") != "succeeded":
+            return None
+        rec = copy.deepcopy(op.get("result") or {})
+    return rec if rec.get("album_id") == album_id else None
+
+
+def _from_record(rec: Dict[str, Any], iid: str, restore: Any) -> Tuple[Any, Tuple[Any, Any], str]:
+    """(method, (original evidence, library evidence), library path made) of
+    one track, from the record; a linked/copied track must be restored to the
+    original path the record holds."""
+    ev = rec.get("evidence") or {}
+    method = (rec.get("methods") or {}).get(iid)
+    if method in _LINKED and restore != ((rec.get("before") or {}).get("items") or {}).get(iid):
+        raise _no(f"item {iid}'s restore path is not the one the relocation recorded", "STALE_PLAN")
+    return (method, ((ev.get("items") or {}).get(iid), (ev.get("library") or {}).get(iid)),
+            ((rec.get("after") or {}).get("items") or {}).get(iid) or "")
+
+
 def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str, str]], Tuple[str, str]]:
     album = lib.get_album(int(data.get("album_id") or 0))
     if not album:
@@ -315,16 +423,20 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
     if not wanted or set(wanted) != set(live["items"]):
         raise _no("the album's tracks changed since it was relocated", "ALBUM_CHANGED")
     by_id = {str(it.id): it for it in album.items()}
+    rec = _apply_record(data.get("apply_operation_id"), album.id)
     steps, targets, cleanup = [], set(), []
     for iid, entry in wanted.items():
         now = live["items"][iid]
         restore = entry.get("restore_path")
-        method, origin, library = entry.get("method"), entry.get("evidence"), entry.get("library_evidence")
+        if rec is not None:  # the plugin's own record decides; payload copies are ignored
+            method, (origin, library), made = _from_record(rec, iid, restore)
+        else:  # no record: the row may still go back, but no library file is ever removed
+            method, origin, library, made = entry.get("method"), entry.get("evidence"), None, ""
         if restore == now:
             # Never moved (skipped by the apply), or already back (an interrupted
             # rollback): a linked/copied track may still have its library file.
-            if method in _LINKED and isinstance(entry.get("path"), str) and entry["path"] != now:
-                cleanup.append((entry["path"], now, method, origin, library))
+            if method in _LINKED and made and made != now:
+                cleanup.append((made, now, method, origin, library))
             continue
         if _abs(lib, entry.get("path")) != now:
             raise _no(f"item {iid} was moved again since the relocation", "ITEM_MOVED")
@@ -332,9 +444,9 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
             # The original never moved: point the row back, then drop our library file.
             target, root = _original(lib, restore, now, origin)
             if os.path.lexists(now):
-                if not _ours(now, method, origin, library):
+                if rec is not None and not _ours(now, method, origin, library):
                     raise _no(f"item {iid}'s library file changed since the relocation", "LIBRARY_FILE_CHANGED")
-                cleanup.append((now, target, method, origin, library))
+                cleanup.append((now, target, method if rec is not None else None, origin, library))
             mode = "repoint"
         elif not os.path.isfile(now):
             # A crash after Beets moved the file back but before the row was stored.
@@ -350,12 +462,18 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
         steps.append((by_id[iid], now, target, root, mode))
     art_now, art_back = live["artpath"], str(data.get("restore_artpath") or "")
     art_root, art_mode = "", "move"
-    art_method, art_origin = data.get("art_method"), data.get("art_evidence")
-    art_library = data.get("art_library_evidence")
+    if rec is not None:
+        ev = rec.get("evidence") or {}
+        art_method, art_origin, art_library = rec.get("art_method"), ev.get("artpath"), ev.get("library_art")
+        art_made = (rec.get("after") or {}).get("artpath") or ""
+        if art_method in _LINKED and art_back != (rec.get("before") or {}).get("artpath"):
+            raise _no("the cover's restore path is not the one the relocation recorded", "STALE_PLAN")
+    else:
+        art_method, art_origin, art_library, art_made = data.get("art_method"), data.get("art_evidence"), None, ""
     if art_now == art_back:
         # Unchanged by the apply, or already back: a linked/copied cover may still have its library file.
-        if art_method in _LINKED and isinstance(data.get("artpath"), str) and data["artpath"] not in ("", art_now):
-            cleanup.append((data["artpath"], art_now, art_method, art_origin, art_library))
+        if art_method in _LINKED and art_made and art_made != art_now:
+            cleanup.append((art_made, art_now, art_method, art_origin, art_library))
     elif _abs(lib, data.get("artpath")) != art_now:
         raise _no("the album's cover changed since the relocation", "ART_CHANGED")
     elif art_now and art_back:
@@ -364,9 +482,9 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
         if art_method in _LINKED:
             art_back, art_root = _original(lib, art_back, art_now, art_origin)
             if os.path.lexists(art_now):
-                if not _ours(art_now, art_method, art_origin, art_library):
+                if rec is not None and not _ours(art_now, art_method, art_origin, art_library):
                     raise _no("the album's library cover changed since the relocation", "LIBRARY_FILE_CHANGED")
-                cleanup.append((art_now, art_back, art_method, art_origin, art_library))
+                cleanup.append((art_now, art_back, art_method if rec is not None else None, art_origin, art_library))
             art_mode = "repoint"
         elif not os.path.isfile(art_now):
             art_back, art_mode = _adoptable(lib, art_now, art_back, art_origin), "adopt"
@@ -468,6 +586,74 @@ def _rollback(lib, album, steps, art, live, cleanup) -> Dict[str, Any]:
     return {"album_id": album.id, "restored_items": len(steps), "adopted_items": adopted,
             "repointed_items": repointed, "removed_library_files": len(cleanup) - len(kept),
             "kept_library_files": kept, "restored_art": art_set, "after": _state(lib, lib.get_album(album.id))}
+
+
+def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
+    """Beets ``write`` listener: before a tag write, give a file with more
+    than one link its own inode, so the write never reaches the other name
+    (a seeding torrent's file). The copy is made in the same folder,
+    ``copystat``-ed, its owner kept when allowed, and ``os.replace``-d onto
+    the name. Any failure raises ``WriteError``: ``try_write`` logs it and
+    skips the write, so the shared bytes are never written."""
+    p = os.fsdecode(path if path is not None else item.path)
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return  # Beets reports the missing file itself
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink < 2:
+        return
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".webmanager-cow-", dir=os.path.dirname(p))
+    except OSError as exc:
+        raise WriteError(util.bytestring_path(p), exc) from exc
+    try:
+        with os.fdopen(fd, "wb") as out, open(p, "rb") as src:
+            if (os.fstat(src.fileno()).st_dev, os.fstat(src.fileno()).st_ino) != (st.st_dev, st.st_ino):
+                raise OSError("the file changed while its hard link was being broken")
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        shutil.copystat(p, tmp)
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except (OSError, AttributeError):
+            pass  # not allowed (or Windows): the copy keeps Beets' own owner
+        os.replace(tmp, p)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise WriteError(util.bytestring_path(p), exc) from exc
+    ops.log.info("broke a hard link before a tag write: %s now has its own copy", p)
+    note_library_write(item=item, path=path)
+
+
+def note_library_write(item=None, path=None, **_kw) -> None:
+    """Beets ``after_write`` listener: when the written file is a library file
+    a relocation linked or copied, record its new size, mtime and inode in that
+    relocation's durable result, so its rollback still proves the file is ours.
+    Only in the process serving Web Manager (the registry is bound there); a
+    ``beet write`` elsewhere leaves the record as it was, and the rollback then
+    keeps the file (``LIBRARY_FILE_CHANGED``) rather than guess."""
+    if not ops._durable_file:
+        return
+    p = os.path.normpath(os.fsdecode(path if path is not None else item.path))
+    ev = _evidence(p)
+    changed = False
+    with ops._operations_lock:
+        # ponytail: linear scan of at most MAX_COMPLETED_OPERATIONS records per write; index by path if it shows up
+        for op in ops._operations.values():
+            rec = op.get("result") if op.get("type") == "album_relocation" else None
+            if not isinstance(rec, dict) or op.get("status") != "succeeded":
+                continue
+            methods = rec.get("methods") or {}
+            for iid, made in ((rec.get("after") or {}).get("items") or {}).items():
+                if made == p and methods.get(iid) in _LINKED:
+                    rec.setdefault("evidence", {}).setdefault("library", {})[iid] = ev
+                    changed = True
+        if changed:
+            ops._save_durable_locked()
 
 
 def _run(op_type: str, check, run, failure_code: str):

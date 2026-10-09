@@ -191,6 +191,140 @@ class TorrentSourceRelocationTests(_Engine):
         with mock.patch.object(ls, "TORRENT_SOURCE_MOVE_ALLOWED", True):
             self.assertFalse(cw._preserved_torrent_file(os.path.join(self.downloads, "torrentA", "t.flac")))
 
+    # --- F1: the rollback trusts only the plugin's own record -------------
+
+    def forged_rollback(self, op, method):
+        """The reported attack: ask the plugin to 'clean up' the torrent original."""
+        def ev(path):
+            st = os.stat(path)
+            return [st.st_size, st.st_mtime, st.st_dev, st.st_ino]
+
+        now, art = self.beets_state(self.album.id)
+        items = [{"id": int(k), "path": self.old[0][k], "restore_path": p, "method": method,
+                  "evidence": ev(p), "library_evidence": ev(self.old[0][k])} for k, p in now.items()]
+        body = {"album_id": self.album.id, "items": items, "artpath": art, "restore_artpath": art,
+                "art_method": method, "art_evidence": None, **({"apply_operation_id": op} if op else {})}
+        return self.client.post("/webmanager/album-relocation/rollback", json=body,
+                                headers={"Authorization": f"Bearer {self.token}", "Idempotency-Key": f"forged-{op}-{method}"})
+
+    def test_forged_rollback_never_removes_the_torrent_original(self):
+        op = self.relocate()["operation_id"]
+        made = self.beets_state(self.album.id)
+        for apply_id in (op, ""):
+            for method in ("linked", "copied"):
+                self.forged_rollback(apply_id, method)
+                self.assert_originals_untouched()
+                self.assertTrue(all(os.path.exists(p) for p in made[0].values()))
+        self.assertEqual(self.beets_state(self.album.id), made)
+
+    def test_unlink_never_leaves_the_library_directory(self):
+        from beetsplug.webmanager import relocation_ops as ro
+        self.relocate()
+        torrent = next(iter(self.old[0].values()))
+        st = os.stat(torrent)
+        ev = [st.st_size, st.st_mtime, st.st_dev, st.st_ino]
+        self.assertFalse(ro._unlink_ours(self.lib, torrent, os.path.join(self.music, "x.flac"), "copied", ev, ev))
+        self.assert_originals_untouched()
+
+    def test_expired_record_points_rows_back_and_keeps_library_files(self):
+        import beetsplug.webmanager.operations as ops_mod
+        op = self.relocate()["operation_id"]
+        made = set(self.beets_state(self.album.id)[0].values())
+        with ops_mod._operations_lock:
+            ops_mod._operations.pop(op)
+        rb = cw.rollback_album_relocation(op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["ok"], rb["status"]), (True, "Rolled Back"), rb)
+        self.assertEqual(self.beets_state(self.album.id), self.old)
+        self.assert_originals_untouched()
+        self.assertTrue(all(os.path.exists(p) for p in made))
+        result = self.store.get(op)["metadata"]["rollback_result"]
+        self.assertEqual(set(result["kept_library_files"]) & made, made)
+        self.assertEqual(result["removed_library_files"], 0)
+
+    # --- F4: a failed copy leaves no orphan -------------------------------
+
+    def test_failed_copy_leaves_no_partial_file(self):
+        def partial_copy(src, dest, *a, **k):
+            with open(dest, "wb") as f:
+                f.write(b"half")
+            raise util.FilesystemError("No space left on device", "copy", (src, dest))
+
+        before = self.snapshot(self.album.id)
+        with mock.patch.object(util, "hardlink", side_effect=exdev), \
+                mock.patch.object(util, "copy", side_effect=partial_copy):
+            res = cw.relocate_album(self.album.id, mode="move", adapter=self.ad, store=self.store)
+        self.assertEqual(res["code"], "undone", res)
+        self.assertEqual(self.snapshot(self.album.id), before)
+        self.assertEqual(tree(self.music), {})
+        self.assert_originals_untouched()
+
+    # --- B: copy-on-write before any tag write -----------------------------
+
+    def linked_item(self):
+        op = self.relocate()["operation_id"]
+        item = next(iter(self.lib.get_album(self.album.id).items()))
+        original = self.old[0][item.id]
+        self.assertTrue(os.path.samefile(os.fsdecode(item.path), original))
+        return op, item, original
+
+    def assert_link_broken(self, item, original):
+        self.assert_originals_untouched()  # torrent bytes, inode, size, mtime
+        self.assertEqual(os.stat(original).st_nlink, 1)
+        self.assertFalse(os.path.samefile(os.fsdecode(item.path), original))
+
+    def test_tag_write_breaks_the_link_and_leaves_the_torrent_untouched(self):
+        from mediafile import MediaFile
+        op, item, original = self.linked_item()
+        item.title = "Edited"
+        self.assertTrue(item.try_write())
+        self.assert_link_broken(item, original)
+        self.assertEqual(MediaFile(os.fsdecode(item.path)).title, "Edited")
+        self.assertNotEqual(MediaFile(original).title, "Edited")
+        self.rolled_back(op)  # the recorded copy-on-write evidence proves the library file is ours
+
+    def test_embedded_art_write_breaks_the_link(self):
+        from mediafile import Image, MediaFile
+        _op, item, original = self.linked_item()
+        jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+        self.assertTrue(item.try_write(tags={"images": [Image(data=jpeg)]}))  # what embedart's embed_item calls
+        self.assert_link_broken(item, original)
+        self.assertEqual(len(MediaFile(os.fsdecode(item.path)).images), 1)
+        self.assertFalse(MediaFile(original).images)
+
+    def test_cover_replace_never_writes_into_the_torrent_cover(self):
+        op = self.relocate()["operation_id"]
+        album = self.lib.get_album(self.album.id)
+        new = os.path.join(self.td, "new.jpg")
+        with open(new, "wb") as f:
+            f.write(b"\xff\xd8\xff-new-cover")
+        album.set_art(os.fsencode(new))  # the call the plugin's album-art endpoint makes
+        album.store()
+        self.assert_originals_untouched()
+        self.assertEqual(os.stat(self.old[1]).st_nlink, 1)
+        self.assertTrue(op)
+
+    def test_copy_on_write_unrecorded_refuses_the_rollback_safely(self):
+        import beetsplug.webmanager.operations as ops_mod
+        op, item, original = self.linked_item()
+        with mock.patch.object(ops_mod, "_durable_file", None):  # a `beet write` in another process
+            item.title = "Edited"
+            self.assertTrue(item.try_write())
+        self.assert_link_broken(item, original)
+        before = self.snapshot(self.album.id)
+        rb = cw.rollback_album_relocation(op, adapter=self.ad, store=self.store)
+        self.assertEqual((rb["code"], rb["mutated"]), ("library_file_changed", False), rb)
+        self.assertEqual(self.snapshot(self.album.id), before)
+        self.assert_originals_untouched()
+
+    def test_copy_on_write_failure_skips_the_write(self):
+        op, item, original = self.linked_item()
+        with mock.patch("tempfile.mkstemp", side_effect=OSError("read-only")):
+            item.title = "Edited"
+            self.assertFalse(item.try_write())  # logged by Beets; nothing written through the link
+        self.assert_originals_untouched()
+        self.assertTrue(os.path.samefile(os.fsdecode(item.path), original))
+        self.assertTrue(op)
+
     def test_unevaluable_rule_keeps_the_original(self):
         with mock.patch.object(ls, "_preserve_torrent_source_file", side_effect=OSError("boom")):
             self.assertTrue(cw._preserved_torrent_file(os.path.join(self.music, "x", "t.flac")))

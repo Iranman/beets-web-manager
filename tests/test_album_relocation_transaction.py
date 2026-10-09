@@ -409,6 +409,9 @@ class RollbackRefusalTests(_Engine):
         meta = self.store.get(self.op)["metadata"]
         engine = {**meta["engine_result"], "evidence": {}}
         self.store.update(self.op, metadata={"engine_result": engine})
+        import beetsplug.webmanager.operations as ops_mod
+        with ops_mod._operations_lock:  # and the plugin's own record of the apply has expired
+            ops_mod._operations.pop(self.op, None)
         self.refused("file_missing")
 
     def test_beets_dying_mid_rollback_is_recovery_required_never_completed(self):

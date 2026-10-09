@@ -3023,7 +3023,7 @@ _RELOCATION_REFUSALS = {
     "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.15.0; nothing was changed.",
     "INVALID_REQUEST": "Beets refused the request as malformed; nothing was changed.",
     "SOURCE_CHANGED": "A torrent original is gone or changed since the album was linked into the library "
-                      "(a tag write through a hard link changes it too); nothing was changed.",
+                      "(the torrent client or another tool changed it); nothing was changed.",
     "LIBRARY_FILE_CHANGED": "A library file made from a torrent original changed since; nothing was changed.",
 }
 
@@ -3306,6 +3306,7 @@ def rollback_album_relocation(
         try:
             res = ad.rollback_album_relocation(aid, items, _s(after.get("artpath")), _s(before.get("artpath")),
                                                idempotency_key=key, art_evidence=evidence.get("artpath"),
+                                               apply_operation_id=operation_id,
                                                **({"art_method": art_kept,
                                                    "art_library_evidence": evidence.get("library_art")}
                                                   if art_kept else {}))

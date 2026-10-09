@@ -850,6 +850,7 @@ class BeetsAdapter:
         art_evidence: Optional[List[Any]] = None,
         art_method: str = "",
         art_library_evidence: Optional[List[Any]] = None,
+        apply_operation_id: str = "",
     ) -> Dict[str, Any]:
         """Move a relocated album's files (``[{id, path, restore_path,
         evidence, method, library_evidence}]``) and cover back through Beets
@@ -857,9 +858,12 @@ class BeetsAdapter:
         since or a restore path is taken. ``evidence`` ([size, mtime, ...]
         recorded at apply) lets Beets adopt a file a crash left at its restore
         path without its row. A ``linked``/``copied`` track (plugin 1.15.0)
-        is pointed back at its untouched original and its library file removed."""
+        is pointed back at its untouched original; its library file is removed
+        only as proven by the plugin's own record of the apply
+        (``apply_operation_id``, the apply's Idempotency-Key), else kept."""
         payload = {"album_id": int(album_id), "items": items, "artpath": str(artpath or ""),
-                   "restore_artpath": str(restore_artpath or ""), "art_evidence": art_evidence}
+                   "restore_artpath": str(restore_artpath or ""), "art_evidence": art_evidence,
+                   "apply_operation_id": str(apply_operation_id or "")}
         if art_method:
             payload.update(art_method=art_method, art_library_evidence=art_library_evidence)
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
