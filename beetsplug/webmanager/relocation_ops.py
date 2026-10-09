@@ -228,12 +228,12 @@ def _place(lib, move, link: bool, dest: str = "") -> str:
             move(MoveOperation.HARDLINK)
             return "linked"
         except util.FilesystemError as exc:  # EXDEV, EPERM (protected_hardlinks), no link support
-            ops.log.info("hard link impossible (%s); copying instead", exc)
+            ops.log.info("hard link impossible ({}); copying instead", exc)
         move(MoveOperation.COPY)
         return "copied"
     except Exception:
         if was_free and os.path.lexists(dest) and not _unlink_new(lib, dest):
-            ops.log.warning("a failed link or copy left an untracked file in the library: %s", dest)
+            ops.log.warning("a failed link or copy left an untracked file in the library: {}", dest)
         raise
 
 
@@ -625,7 +625,7 @@ def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
         except OSError:
             pass
         raise WriteError(util.bytestring_path(p), exc) from exc
-    ops.log.info("broke a hard link before a tag write: %s now has its own copy", p)
+    ops.log.info("broke a hard link before a tag write: {} now has its own copy", p)
     note_library_write(item=item, path=path)
 
 
