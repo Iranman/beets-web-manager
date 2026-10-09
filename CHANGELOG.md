@@ -6,6 +6,9 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+- **TrueNAS rollout script: Web Manager data folder.** `scripts/deploy_truenas_web_manager.sh` now uses the mount at the container's own `WEB_MANAGER_DATA_DIR`. Before, any mount at `/data` won, so a stray anonymous `/data` volume made the script back up an empty folder and then fail after the recreate. If `WEB_MANAGER_DATA_DIR` is set and nothing is mounted at exactly that path, the dry run and the deploy stop with `webmgr_data_dir_unmounted`. If the data folder holds no auth token while the app requires authentication, they stop with `webmgr_data_source_without_token` before anything changes. Each backup now records the folder its Web Manager state came from, and `--rollback` stops with `backup_data_source_mismatch` instead of restoring into another folder, which would move that folder's live state aside. Script-only; no new image.
+
 ## v0.2.0 - 2026-10-09
 
 ### Upgrade Notes
