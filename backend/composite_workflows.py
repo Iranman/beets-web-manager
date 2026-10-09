@@ -3025,9 +3025,10 @@ _RELOCATION_REFUSALS = {
     "SOURCE_CHANGED": "A torrent original is gone or changed since the album was linked into the library "
                       "(the torrent client or another tool changed it); nothing was changed.",
     "LIBRARY_FILE_CHANGED": "A library file made from a torrent original changed since; nothing was changed.",
-    "RELOCATION_RECORD_MISSING": "Beets no longer holds its record of this move (kept 7 days), so the tracks it "
-                                 "linked or copied from torrent originals cannot be proven and are not moved back; "
-                                 "the library files and the originals are both kept; nothing was changed.",
+    "RELOCATION_RECORD_MISSING": "Beets no longer holds its record of this move (kept 7 days or the last 1000 "
+                                 "operations), so the tracks it linked or copied from torrent originals cannot be "
+                                 "proven and are not moved back. The library files and the originals are both kept; "
+                                 "remove the library copies by hand if you no longer want them (see TROUBLESHOOTING).",
 }
 
 
