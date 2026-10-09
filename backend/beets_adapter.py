@@ -822,12 +822,20 @@ class BeetsAdapter:
         album_id: int,
         expected_paths: Dict[Any, str],
         idempotency_key: Optional[str] = None,
+        operations: Optional[Dict[Any, str]] = None,
+        art_operation: str = "move",
     ) -> Dict[str, Any]:
         """Move one album to its path-template location with Beets' own
         Album.move() (plugin 1.14.0). Refused (STALE_PLAN) unless the album
         has exactly ``expected_paths`` ({item id: path}); returns every
-        item's absolute path and the cover path before and after."""
+        item's absolute path and the cover path before and after.
+        ``operations`` ({item id: "link"}) and ``art_operation="link"`` mark
+        preserved torrent sources, which Beets hard links (or copies) instead
+        of moving (plugin 1.15.0, capability ``album_relocation_link``)."""
         payload = {"album_id": int(album_id), "expected_paths": {str(k): str(v) for k, v in expected_paths.items()}}
+        if operations or art_operation != "move":
+            payload.update(operations={str(k): str(v) for k, v in (operations or {}).items()},
+                           art_operation=art_operation)
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/album-relocation", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
@@ -840,14 +848,24 @@ class BeetsAdapter:
         restore_artpath: str,
         idempotency_key: Optional[str] = None,
         art_evidence: Optional[List[Any]] = None,
+        art_method: str = "",
+        art_library_evidence: Optional[List[Any]] = None,
+        apply_operation_id: str = "",
     ) -> Dict[str, Any]:
         """Move a relocated album's files (``[{id, path, restore_path,
-        evidence}]``) and cover back through Beets (plugin 1.14.0). Refused,
-        changing nothing, when the album changed since or a restore path is
-        taken. ``evidence`` ([size, mtime] recorded at apply) lets Beets adopt
-        a file a crash left at its restore path without its row."""
+        evidence, method, library_evidence}]``) and cover back through Beets
+        (plugin 1.14.0). Refused, changing nothing, when the album changed
+        since or a restore path is taken. ``evidence`` ([size, mtime, ...]
+        recorded at apply) lets Beets adopt a file a crash left at its restore
+        path without its row. A ``linked``/``copied`` track (plugin 1.15.0)
+        is pointed back at its untouched original; its library file is removed
+        only as proven by the plugin's own record of the apply
+        (``apply_operation_id``, the apply's Idempotency-Key), else kept."""
         payload = {"album_id": int(album_id), "items": items, "artpath": str(artpath or ""),
-                   "restore_artpath": str(restore_artpath or ""), "art_evidence": art_evidence}
+                   "restore_artpath": str(restore_artpath or ""), "art_evidence": art_evidence,
+                   "apply_operation_id": str(apply_operation_id or "")}
+        if art_method:
+            payload.update(art_method=art_method, art_library_evidence=art_library_evidence)
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         return self._request("POST", "/webmanager/album-relocation/rollback", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
