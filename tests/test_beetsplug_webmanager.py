@@ -174,7 +174,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.14.0")
+        self.assertEqual(data["plugin_version"], "1.15.0")
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
         for key in ("allowed_roots", "import_roots", "library_directory", "fpcalc_available", "ffmpeg_available"):
@@ -187,7 +187,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.14.0")
+        self.assertEqual(PLUGIN_VERSION, "1.15.0")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(

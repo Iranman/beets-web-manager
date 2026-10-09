@@ -61,8 +61,13 @@ def _bind_library_music_dir():
     thread that created it. Werkzeug serves each request on another thread,
     where the var is empty and every item.path loads relative -- so file
     checks, moves and tag writes would act on the wrong path. Bind the
-    library's directory for this request's thread."""
-    bind_music_dir(getattr(g, "lib", None))
+    library's directory for this request's thread. Also loads the durable
+    registry on the first request after a restart, so a tag write (a Web
+    Manager edit, mbsync) keeps relocation records current (#332)."""
+    lib = getattr(g, "lib", None)
+    bind_music_dir(lib)
+    if lib is not None:
+        bind_durable_registry(lib)
     return None
 
 
@@ -412,7 +417,7 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
-_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_relocation", "operations", "status"]
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_relocation", "album_relocation_link", "operations", "status"]
 _PLUGIN_GATED_CAPABILITIES = ["mbsync", "mbsync_library", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 

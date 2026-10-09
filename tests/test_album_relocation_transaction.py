@@ -1,6 +1,6 @@
 """Album rename / move to library through Beets (album_move_v1).
 
-Real BeetsAdapter -> real webmanager plugin (plugin 1.14.0) -> real Beets
+Real BeetsAdapter -> real webmanager plugin (plugin 1.15.0) -> real Beets
 library and files (Flask test client in place of HTTP). The plan records every
 path; the operator's click is the approval; the apply is Beets' Album.move();
 the rollback moves every file and the cover back through Beets, and Beets
@@ -409,6 +409,9 @@ class RollbackRefusalTests(_Engine):
         meta = self.store.get(self.op)["metadata"]
         engine = {**meta["engine_result"], "evidence": {}}
         self.store.update(self.op, metadata={"engine_result": engine})
+        import beetsplug.webmanager.operations as ops_mod
+        with ops_mod._operations_lock:  # and the plugin's own record of the apply has expired
+            ops_mod._operations.pop(self.op, None)
         self.refused("file_missing")
 
     def test_beets_dying_mid_rollback_is_recovery_required_never_completed(self):
@@ -531,7 +534,8 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         self.store.transition(op, "Approved", "Running", metadata={"engine_request": {"operation_id": op}})
         self.ad.relocate_album(self.album.id, planned, idempotency_key=op)
         with ops_mod._operations_lock:
-            ops_mod._operations.pop(op, None)  # Beets restarted and lost the record
+            ops_mod._operations.pop(op, None)  # Beets restarted and lost the record,
+            ops_mod._save_durable_locked()  # saved registry included (a request reloads it)
         with mock.patch.object(ops_mod, "_durable_file", None):
             out = recovery.sweep(adapter=self.ad, store=self.store, before=time.time() + 1)
         self.assertEqual(out[0]["action"], "Recovery Required", out)
@@ -589,7 +593,7 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         with mock.patch.object(self.ad, "relocate_album",
                                side_effect=BeetsAdapterNotFoundError("x", error_code="BEETS_NOT_FOUND")):
             res = cw.apply_album_relocation(op, adapter=self.ad, store=self.store)
-        self.assertIn("1.14.0", res["error"])
+        self.assertIn("1.15.0", res["error"])
         self.assertEqual(self.store.get(op)["status"], "Failed")
 
 

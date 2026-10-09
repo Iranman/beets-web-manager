@@ -3020,18 +3020,38 @@ _RELOCATION_REFUSALS = {
     "EXTENSION_CHANGED": "A track's file type changed since it was moved; nothing was changed.",
     "PATH_INVALID": "The recorded old locations are not usable; nothing was changed.",
     "UNDONE": "Beets could not finish and put every file back; nothing was changed.",
-    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.14.0; nothing was changed.",
+    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.15.0; nothing was changed.",
+    "INVALID_REQUEST": "Beets refused the request as malformed; nothing was changed.",
+    "SOURCE_CHANGED": "A torrent original is gone or changed since the album was linked into the library "
+                      "(the torrent client or another tool changed it); nothing was changed.",
+    "LIBRARY_FILE_CHANGED": "A library file made from a torrent original changed since; nothing was changed.",
+    "RELOCATION_RECORD_MISSING": "Beets no longer holds its record of this move (kept 7 days or the last 1000 "
+                                 "operations), so the tracks it linked or copied from torrent originals cannot be "
+                                 "proven and are not moved back. The library files and the originals are both kept; "
+                                 "remove the library copies by hand if you no longer want them (see TROUBLESHOOTING).",
 }
 
 
 #: Rollback refusals (HTTP 409): the album changed since it was moved.
 RELOCATION_ROLLBACK_REFUSALS = ("album_not_found", "album_changed", "item_moved", "art_changed", "file_missing",
-                                "target_exists")
+                                "target_exists", "source_changed", "library_file_changed",
+                                "relocation_record_missing")
 
 
 def _album_item_paths(album: Dict[str, Any], ad: BeetsAdapter, aid: int) -> Dict[str, str]:
     items = album.get("items") if isinstance(album.get("items"), list) else ad.get_items(f"album_id:{aid}")
     return {str(it.get("id")): _s(it.get("path")) for it in items or []}
+
+
+def _preserved_torrent_file(path: str) -> bool:
+    """The shared torrent-source rule for one file (#321); fails closed."""
+    try:
+        # Lazy: library_service sits above this module and imports it.
+        from backend.library_service import _preserve_torrent_source_file
+        return bool(_preserve_torrent_source_file(path))
+    except Exception:
+        log.warning("Could not evaluate the torrent-source rule for %s; keeping the original", path)
+        return True
 
 
 def plan_album_relocation(
@@ -3060,13 +3080,17 @@ def plan_album_relocation(
                 "error": "Beets reported no file paths for this album (no tracks, or web.include_paths is off)."}
     before = {"items": paths, "artpath": _s(album.get("artpath")),
               "folders": sorted({os.path.dirname(p) for p in paths.values()})}
+    # A preserved torrent source (a seeding folder) is hard linked or copied, never moved (#332).
+    before["operations"] = {k: "link" if _preserved_torrent_file(p) else "move" for k, p in paths.items()}
+    before["art_operation"] = "link" if before["artpath"] and _preserved_torrent_file(before["artpath"]) else "move"
     verb = "Move to library" if mode == "move" else "Rename"
     tx = st.create(
         operation_type="Move" if mode == "move" else "Rename",
         status="Preview",
         summary=f"{verb}: album {aid} ({_s(album.get('albumartist'))} - {_s(album.get('album'))})",
         changes=[{"type": "album_relocation", "album_id": aid, "mode": mode, "old_paths": paths,
-                  "old_artpath": before["artpath"], "old_folders": before["folders"]}],
+                  "old_artpath": before["artpath"], "old_folders": before["folders"],
+                  "operations": before["operations"], "art_operation": before["art_operation"]}],
         rollback_available=True,
         metadata={"mutation_family": ALBUM_RELOCATION_FAMILY, "album_id": aid, "mode": mode, "before": before},
     )
@@ -3100,13 +3124,31 @@ def apply_album_relocation(
     if tx.get("status") != "Approved":
         return {"ok": False, "code": "not_approved", "error": "Approve the transaction before applying it."}
     aid = int(meta["album_id"])
+    links = {k: v for k, v in (meta["before"].get("operations") or {}).items() if v == "link"}
+    art_op = meta["before"].get("art_operation") or "move"
+    if links or art_op == "link":
+        # An older plugin ignores "operations" and would MOVE a seeding torrent.
+        try:
+            capable = "album_relocation_link" in (ad.get_plugin_status().get("capabilities") or [])
+        except BeetsAdapterError:
+            capable = False
+        if not capable:
+            st.update(op_id, status="Failed", logs=[
+                "Not moved: the album is in a preserved torrent source and Beets has no webmanager plugin "
+                "1.15.0 (capability album_relocation_link) to link it; nothing was changed."])
+            return {"ok": False, "code": "plugin_outdated", "mutated": False, "operation_id": op_id,
+                    "status": "Failed",
+                    "error": "Restart the beets container so it loads webmanager plugin 1.15.0, which links "
+                             "a seeding torrent's files instead of moving them; nothing was changed."}
     from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"], attempt_owner(op_id), timeout=10):
         if claim_approved(st, op_id) is None:
             return {"ok": False, "code": "not_approved", "error": claim_refusal(st, op_id)}
         st.update(op_id, status="Running", metadata={"engine_request": {"operation_id": op_id}})
         try:
-            res = ad.relocate_album(aid, meta["before"]["items"], idempotency_key=op_id)
+            res = ad.relocate_album(aid, meta["before"]["items"], idempotency_key=op_id,
+                                    **({"operations": links, "art_operation": art_op}
+                                       if links or art_op == "link" else {}))
         except BeetsAdapterError as exc:
             if _transport_error(exc):
                 st.update(op_id, status="Recovery Required",
@@ -3166,6 +3208,12 @@ def finish_album_relocation(
     if not _paths_match(meta["before"]["items"], engine_before):
         problems.append("planned paths")
     moved = sum(1 for k, p in after_items.items() if p != engine_before.get(k))
+    methods = engine.get("methods") or {}
+    planned = meta["before"].get("operations") or {}
+    if any(planned.get(k) == "link" and p != engine_before.get(k) and methods.get(k) not in ("linked", "copied")
+           for k, p in after_items.items()):
+        problems.append("torrent source moved")  # never expected: the plugin links or copies these
+    kept = {m: sum(1 for v in methods.values() if v == m) for m in ("linked", "copied")}
     # Item.move() skips a track whose file is missing: a partial move. Failed
     # (with the engine result) stays rollbackable; the rollback moves back
     # only the tracks that moved.
@@ -3178,6 +3226,10 @@ def finish_album_relocation(
         metadata={"engine_result": engine, "after": {**after, "folders": folders}, "verification_problems": problems},
         logs=[f"Beets moved {moved} of {len(after_items)} tracks of album {aid} to "
               f"{', '.join(folders) or '(nowhere)'}; cover: {_s(after.get('artpath')) or '(none)'}"]
+             + ([f"Preserved torrent source left in place: {kept['linked']} track(s) hard linked and "
+                 f"{kept['copied']} copied into the library"
+                 + (f"; cover {engine['art_method']}" if engine.get("art_method") in ("linked", "copied") else "")]
+                if kept["linked"] or kept["copied"] or engine.get("art_method") in ("linked", "copied") else [])
              + ([f"Partial move: Beets skipped tracks {', '.join(skipped)} (file missing); "
                  "roll back to move the others back"] if skipped else [])
              + ([f"Beets cleared the cover path {art_before} (file missing); rollback restores it"]
@@ -3188,7 +3240,8 @@ def finish_album_relocation(
     )
     out = {"ok": not problems and not skipped, "operation_id": operation_id, "status": status, "album_id": aid,
            "dest_dir": folders[0] if folders else "", "moved_count": moved, "skipped": skipped,
-           "renamed": list(engine.get("renamed") or []), "verification_problems": problems}
+           "renamed": list(engine.get("renamed") or []), "linked_count": kept["linked"],
+           "copied_count": kept["copied"], "verification_problems": problems}
     if skipped:
         out.update(code="partial_move", error=f"Beets skipped {len(skipped)} track(s) whose file is missing; "
                                               "the others moved. Roll back from Transactions to undo.")
@@ -3237,9 +3290,13 @@ def rollback_album_relocation(
     aid = int(meta["album_id"])
     before, after = engine.get("before") or {}, engine["after"]
     evidence = engine.get("evidence") or {}
+    methods = engine.get("methods") or {}
     items = [{"id": int(k), "path": p, "restore_path": (before.get("items") or {}).get(k),
-              "evidence": (evidence.get("items") or {}).get(k)}
+              "evidence": (evidence.get("items") or {}).get(k),
+              **({"method": methods[k], "library_evidence": (evidence.get("library") or {}).get(k)}
+                 if methods.get(k) in ("linked", "copied") else {})}
              for k, p in (after.get("items") or {}).items()]
+    art_kept = engine.get("art_method") if engine.get("art_method") in ("linked", "copied") else ""
     key = f"{operation_id}:rollback"
     # An earlier attempt whose outcome was never recorded (Beets or Web Manager
     # died mid-rollback) may have moved some tracks back.
@@ -3253,7 +3310,11 @@ def rollback_album_relocation(
         st.update(operation_id, metadata={"rollback_request": request_meta})
         try:
             res = ad.rollback_album_relocation(aid, items, _s(after.get("artpath")), _s(before.get("artpath")),
-                                               idempotency_key=key, art_evidence=evidence.get("artpath"))
+                                               idempotency_key=key, art_evidence=evidence.get("artpath"),
+                                               apply_operation_id=operation_id,
+                                               **({"art_method": art_kept,
+                                                   "art_library_evidence": evidence.get("library_art")}
+                                                  if art_kept else {}))
         except BeetsAdapterError as exc:
             if _transport_error(exc):
                 st.transition(operation_id, tx.get("status"), "Recovery Required", logs=[
@@ -3289,12 +3350,18 @@ def rollback_album_relocation(
         if st.transition(
             operation_id, tx.get("status"), status,
             metadata={"rollback_result": result, "rollback_request": {**request_meta, "outcome": "succeeded"}},
-            logs=[f"Moved {result.get('restored_items', 0) - (result.get('adopted_items') or 0)} tracks of album {aid} back to "
+            logs=[f"Moved {result.get('restored_items', 0) - (result.get('adopted_items') or 0) - (result.get('repointed_items') or 0)} "
+                  f"tracks of album {aid} back to "
                   f"{', '.join(meta['before'].get('folders') or []) or '(unknown)'}"
                   + ("; cover restored" if result.get("restored_art") else "")]
                  + ([f"{result['adopted_items']} track(s) were already back after an interrupted rollback "
                      "(size and mtime matched); their rows were updated without moving anything"]
                     if result.get("adopted_items") else [])
+                 + ([f"{result['repointed_items']} track(s) point at their untouched torrent originals again; "
+                     f"removed {result.get('removed_library_files') or 0} library file(s) this move had linked "
+                     "or copied"] if result.get("repointed_items") or result.get("removed_library_files") else [])
+                 + ([f"Kept library file(s) that could not be proven to be this move's: "
+                     f"{', '.join(result['kept_library_files'])}"] if result.get("kept_library_files") else [])
                  + ([] if ok else ["Verification mismatch: paths after rollback"]),
         ) is None:
             return _rollback_conflict(operation_id)
