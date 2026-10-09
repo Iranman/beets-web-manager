@@ -43,9 +43,10 @@ $STACK_DIR/beets-web-manager/.auth_token                      persistent web tok
 
 **These paths are never trusted as given.** The script resolves the real
 bind-mount sources from `docker inspect beets` (destination `/config`) and
-`docker inspect beets-web-manager` (destination `/web-manager-data`) before
-touching anything, and refuses to continue if either source can't be
-determined, if they're the same path, or if the authoritative/stale DB paths
+`docker inspect beets-web-manager` (the destination named by the container's
+`WEB_MANAGER_DATA_DIR`; only when that is unset, `/data` and then
+`/web-manager-data`, as the app itself falls back) before touching anything,
+and refuses to continue if either source can't be determined, if they're the same path, or if the authoritative/stale DB paths
 land somewhere unexpected relative to those sources.
 
 ## Dry run first, always
@@ -334,6 +335,8 @@ meaning gets a new code.
 | `setup_status_unavailable` | `setup-status-after` | `/api/setup/status` did not answer 200 after the recreate |
 | `setup_new_blocking_reason` | `setup-status-after` | the new version reports a blocking reason that was not there before |
 | `compose_too_old` | `compose-version-check` | `docker compose up --help` does not list `--pull` (Docker Compose older than v2.22); checked before anything changes, in the deploy, the dry run and `--rollback` |
+| `webmgr_data_dir_unmounted` | `mount-discovery` | the container sets `WEB_MANAGER_DATA_DIR`, but nothing is mounted at exactly that path (or the value is not a plain absolute path); checked before anything changes |
+| `webmgr_data_source_without_token` | `token-inspection` | the resolved Web Manager data folder holds no `.auth_token` (and no legacy token to migrate) while an unauthenticated `/api/library` does not answer 200, so it is not the folder the app uses; checked before anything changes |
 | `compose_image_mismatch` | `compose-image-verification` | the Compose file names neither `:latest` nor `:<VERSION>` |
 | `latest_image_not_requested_version` | `image-pull-verification` | the pulled `:latest` image's version label is not `VERSION` |
 | `image_version_label_mismatch` | `image-pull-verification` | the pulled `:<VERSION>` image's version label is not `VERSION` |

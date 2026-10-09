@@ -4,7 +4,8 @@ for the fixed set of paths the rollout script probes, honoring `-o FILE`,
 `-w FORMAT`, and reading FAKE_CURL_STATE (a JSON file: {"item_count": N,
 "fail_paths": [...], "blocking_reasons_by_image": {image_ref: [...]},
 "blocking_reason_codes_by_image": {image_ref: [...]},
-"setup_status_http_by_image": {image_ref: "503"}}) so
+"setup_status_http_by_image": {image_ref: "503"},
+"auth_required": true -> /api/library answers 401 without an -H header}) so
 tests can control counts and simulate failures without a real HTTP server.
 
 /health/live and /api/setup/status answer for whatever image the fake
@@ -36,6 +37,7 @@ def main():
     out_file = None
     write_fmt = ""
     url = ""
+    has_header = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -50,6 +52,7 @@ def main():
         elif a == "--max-time":
             i += 2
         elif a == "-H":
+            has_header = True
             i += 2
         else:
             url = a
@@ -70,7 +73,10 @@ def main():
     if path.startswith("/api/setup/status"):
         ref, _version = _running_webmgr()
         setup_http = str((state.get("setup_status_http_by_image") or {}).get(ref, ""))
-    if any(path.startswith(p) for p in fail_paths) or setup_http not in ("", "200"):
+    if state.get("auth_required") and path.startswith("/api/library") and not has_header:
+        body = json.dumps({"error": "authentication required"})
+        status = "401"
+    elif any(path.startswith(p) for p in fail_paths) or setup_http not in ("", "200"):
         body = json.dumps({"error": "simulated failure"})
         status = setup_http if setup_http not in ("", "200") else "500"
     else:

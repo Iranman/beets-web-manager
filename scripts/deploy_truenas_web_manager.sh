@@ -604,17 +604,45 @@ discover_and_verify_mounts() {
   ENGINE_CONFIG_SRC="$(mount_source_for_dest "$ENGINE_CID" /config)"
   [[ -n "$ENGINE_CONFIG_SRC" ]] || die "could not determine the Beets engine's /config host source from 'docker inspect ${ENGINE_SERVICE}'"
 
-  # Where the running app keeps its state: every shipped Compose file mounts
-  # /web-manager-data and sets WEB_MANAGER_DATA_DIR=/web-manager-data. When
-  # WEB_MANAGER_DATA_DIR is NOT set, backend/app_runtime.py falls back to
-  # /data whenever /data exists in the container (a legacy single-mount
-  # layout), and to /web-manager-data otherwise. /data is checked first so a
-  # legacy deployment that still mounts it is verified against the directory
-  # the app actually uses. Only an exact /data mount matches here; media
-  # mounted below it (/data/music) does not.
-  WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /data)"
-  if [[ -z "$WEBMGR_DATA_SRC" ]]; then
-    WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /web-manager-data)"
+  # Where the running app keeps its state. When the container sets
+  # WEB_MANAGER_DATA_DIR (every shipped Compose file sets /web-manager-data),
+  # the app uses exactly that directory, so exactly its mount is used here:
+  # a stray mount at /data (for example an anonymous volume carried across
+  # recreates) must never win. A set value with no mount at exactly that
+  # path is refused, never guessed. Only when it is NOT set does
+  # backend/app_runtime.py fall back to /data whenever /data exists in the
+  # container (a legacy single-mount layout), and to /web-manager-data
+  # otherwise; that fallback is mirrored here. Only an exact mount matches;
+  # media mounted below it (/data/music) does not.
+  local data_dir_env
+  data_dir_env="$(docker inspect --format '{{json .Config.Env}}' "$WEBMGR_CID" | _py -c '
+import json, sys
+try:
+    env = json.load(sys.stdin) or []
+except Exception:
+    env = []
+found = ""
+for entry in env:
+    if isinstance(entry, str) and entry.startswith("WEB_MANAGER_DATA_DIR="):
+        found = entry.split("=", 1)[1]
+print(found)')"
+  if [[ -n "$data_dir_env" ]]; then
+    if [[ ! "$data_dir_env" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+      REASON_CODE="webmgr_data_dir_unmounted"
+      die "${SERVICE} sets WEB_MANAGER_DATA_DIR to a value that is not a plain absolute path -- refusing to guess its data folder"
+    fi
+    local data_dir_dest="${data_dir_env%/}"
+    WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" "$data_dir_dest")"
+    if [[ -z "$WEBMGR_DATA_SRC" ]]; then
+      REASON_CODE="webmgr_data_dir_unmounted"
+      die "${SERVICE} sets WEB_MANAGER_DATA_DIR=${data_dir_dest}, but nothing is mounted at exactly that path -- its state would not persist, and the script will not guess another mount. Mount a host folder at ${data_dir_dest}."
+    fi
+    log "web-manager data folder from WEB_MANAGER_DATA_DIR: ${data_dir_dest}"
+  else
+    WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /data)"
+    if [[ -z "$WEBMGR_DATA_SRC" ]]; then
+      WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /web-manager-data)"
+    fi
   fi
   [[ -n "$WEBMGR_DATA_SRC" ]] || die "could not determine web-manager's data host source from 'docker inspect ${SERVICE}' -- is /data or /web-manager-data mounted at all?"
 
@@ -833,6 +861,26 @@ inspect_auth_token() {
     fi
   fi
   ACTIVE_AUTH_TOKEN_PATH=""
+}
+
+# A data source with no token while the app enforces auth means the script
+# resolved a folder the app does not use: the backup would miss the real
+# state and the post-deploy checks would fail after the recreate. Refused
+# before anything changes. Auth counts as enforced unless an unauthenticated
+# /api/library answers 200 (fail closed when the app cannot be reached).
+assert_data_source_holds_token() {
+  STAGE="token-inspection"
+  [[ -z "$ACTIVE_AUTH_TOKEN_PATH" ]] || return 0
+  local status entries
+  status="$(probe_endpoint "/api/library?limit=1" 0)"
+  status="${status%%|*}"
+  if [[ "$status" == "200" ]]; then
+    log "No Web Manager token in the data source, and the app does not require one (unauthenticated /api/library answered 200)."
+    return 0
+  fi
+  entries="$(find "$(canon_path "$WEBMGR_DATA_SRC")" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+  REASON_CODE="webmgr_data_source_without_token"
+  die "the resolved web-manager data source ($(canon_path "$WEBMGR_DATA_SRC"), ${entries} entries) holds no ${TOKEN_FILENAME}, and the app requires authentication (unauthenticated /api/library answered HTTP ${status}). It is not the folder the app uses -- a backup of it would miss the real state. Nothing was changed."
 }
 
 # ---------------------------------------------------------------------------
@@ -1629,6 +1677,7 @@ run_dry_run() {
   verify_authoritative_database
   inspect_stale_database
   inspect_auth_token
+  assert_data_source_holds_token
   plan_backup_dir
   log "Pulling image for label verification only (no recreate)..."
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
@@ -2118,6 +2167,7 @@ run_deploy() {
   verify_authoritative_database
   inspect_stale_database
   inspect_auth_token
+  assert_data_source_holds_token
   record_setup_status_before
   plan_backup_dir
   pull_and_verify_image
