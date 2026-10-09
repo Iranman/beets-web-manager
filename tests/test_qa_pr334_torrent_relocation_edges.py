@@ -11,10 +11,11 @@ from tests.test_album_relocation_transaction import tree
 
 class TorrentRelocationEdgeTests(TorrentSourceRelocationTests):
     # Run only the QA tests below, not the inherited ones again.
-    def _plugin_rollback(self, op, made, key):
-        items = [{"id": int(k), "path": made[0][k], "restore_path": self.old[0][k]} for k in made[0]]
+    def _plugin_rollback(self, op, made, key, method=None):
+        m = {"method": method} if method else {}
+        items = [{"id": int(k), "path": made[0][k], "restore_path": self.old[0][k], **m} for k in made[0]]
         body = {"album_id": self.album.id, "items": items, "artpath": made[1], "restore_artpath": self.old[1],
-                "apply_operation_id": op}
+                "apply_operation_id": op, **({"art_method": method} if method else {})}
         return self.client.post("/webmanager/album-relocation/rollback", json=body,
                                 headers={"Authorization": f"Bearer {self.token}", "Idempotency-Key": key})
 
@@ -54,6 +55,24 @@ class TorrentRelocationEdgeTests(TorrentSourceRelocationTests):
         self.assertEqual(self.beets_state(self.album.id), self.old)
         # Files already gone are "not an error" per the docs; they should not be reported as kept.
         self.assertEqual(body.get("kept_library_files"), [], body)
+
+    def test_qa_rolled_back_record_never_undoes_a_later_reapply(self):
+        # The old apply id, replayed after a rollback and a fresh re-apply, proves nothing.
+        import beetsplug.webmanager.operations as ops_mod
+        op1 = self.relocate()["operation_id"]
+        self.rolled_back(op1)
+        self.assertTrue(ops_mod._operations[op1]["result"].get("rolled_back"))
+        op2 = self.relocate()["operation_id"]
+        made = self.beets_state(self.album.id)
+        for n, method in enumerate((None, "linked")):
+            r = self._plugin_rollback(op1, made, f"qa-stale-op1-{n}", method)
+            self.assertEqual(r.status_code, 409, r.get_json())
+            if method:
+                self.assertEqual(r.get_json().get("error_code"), "RELOCATION_RECORD_MISSING", r.get_json())
+            self.assertEqual(self.beets_state(self.album.id), made)
+            self.assertTrue(all(os.path.exists(p) for p in [*made[0].values(), made[1]]))
+            self.assert_originals_untouched()
+        self.rolled_back(op2)  # the live apply still rolls back
 
     def test_qa_tag_write_after_beets_restart_keeps_rollback_usable(self):
         # A Beets restart: the registry is unbound until a folder-op/relocation request binds it.
