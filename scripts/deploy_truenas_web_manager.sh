@@ -621,21 +621,26 @@ try:
     env = json.load(sys.stdin) or []
 except Exception:
     env = []
-found = ""
+# "=<value>" when the key is present (the last entry wins, as in a
+# process environment), nothing when it is absent.
+found = None
 for entry in env:
     if isinstance(entry, str) and entry.startswith("WEB_MANAGER_DATA_DIR="):
         found = entry.split("=", 1)[1]
-print(found)')"
+print("" if found is None else "=" + found)')"
   if [[ -n "$data_dir_env" ]]; then
-    if [[ ! "$data_dir_env" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    data_dir_env="${data_dir_env#=}"
+    # A plain absolute path only: no empty value, no "." or ".." segment,
+    # nothing the embedded Python in mount_source_for_dest could misread.
+    if [[ ! "$data_dir_env" =~ ^/[A-Za-z0-9._/-]+$ || "/${data_dir_env}/" == *"/./"* || "/${data_dir_env}/" == *"/../"* ]]; then
       REASON_CODE="webmgr_data_dir_unmounted"
-      die "${SERVICE} sets WEB_MANAGER_DATA_DIR to a value that is not a plain absolute path -- refusing to guess its data folder"
+      die "${SERVICE} sets WEB_MANAGER_DATA_DIR to an empty value or one that is not a plain absolute path -- refusing to guess its data folder"
     fi
     local data_dir_dest="${data_dir_env%/}"
     WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" "$data_dir_dest")"
     if [[ -z "$WEBMGR_DATA_SRC" ]]; then
       REASON_CODE="webmgr_data_dir_unmounted"
-      die "${SERVICE} sets WEB_MANAGER_DATA_DIR=${data_dir_dest}, but nothing is mounted at exactly that path -- its state would not persist, and the script will not guess another mount. Mount a host folder at ${data_dir_dest}."
+      die "${SERVICE} sets WEB_MANAGER_DATA_DIR=${data_dir_dest}, but there is no mount at exactly ${data_dir_dest} (a mount of a parent folder does not count) -- the script requires a dedicated mount there and will not guess another one."
     fi
     log "web-manager data folder from WEB_MANAGER_DATA_DIR: ${data_dir_dest}"
   else
@@ -878,9 +883,15 @@ assert_data_source_holds_token() {
     log "No Web Manager token in the data source, and the app does not require one (unauthenticated /api/library answered 200)."
     return 0
   fi
+  local why
+  if [[ "$status" == "000" ]]; then
+    why="the app is unreachable at ${ENDPOINT_BASE_URL}, so authentication cannot be ruled out"
+  else
+    why="the app requires authentication (unauthenticated /api/library answered HTTP ${status})"
+  fi
   entries="$(find "$(canon_path "$WEBMGR_DATA_SRC")" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
   REASON_CODE="webmgr_data_source_without_token"
-  die "the resolved web-manager data source ($(canon_path "$WEBMGR_DATA_SRC"), ${entries} entries) holds no ${TOKEN_FILENAME}, and the app requires authentication (unauthenticated /api/library answered HTTP ${status}). It is not the folder the app uses -- a backup of it would miss the real state. Nothing was changed."
+  die "the resolved web-manager data source ($(canon_path "$WEBMGR_DATA_SRC"), ${entries} entries) holds no ${TOKEN_FILENAME}, and ${why}. Either this is not the folder the app keeps its state in (a backup of it would miss that state), or the app takes its token from BEETS_WEB_AUTH_TOKEN or from a BEETS_WEB_AUTH_TOKEN_FILE elsewhere; this script backs up and verifies only ${TOKEN_FILENAME} in the data folder. Nothing was changed."
 }
 
 # ---------------------------------------------------------------------------
@@ -1472,6 +1483,34 @@ backup_state_files() {
 
 # Restores what backup_state_files saved. Every file it replaces is first
 # kept as <backup>/pre-rollback/<path> so the rollback itself is reversible.
+# A backup restores web-manager-data/ only into the folder it was taken
+# from: restoring into another one would move that folder's live state aside
+# as "created after the deploy". The folder is the manifest's
+# webmgr_data_src= line or, for a backup made before that line existed, the
+# folder of token-metadata.txt's persistent_token_path. A different folder
+# is refused before anything is stopped. With neither record the rollback
+# restores the files the backup holds and moves nothing aside.
+ROLLBACK_RESTORE_ONLY=0
+check_rollback_data_source() {
+  local recorded current
+  current="$(canon_path "$WEBMGR_DATA_SRC")"
+  recorded="$(grep '^webmgr_data_src=' "$ROLLBACK_DIR/state-manifest.txt" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  if [[ -z "$recorded" ]]; then
+    recorded="$(grep '^persistent_token_path=' "$ROLLBACK_DIR/token-metadata.txt" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+    [[ -z "$recorded" ]] || recorded="$(dirname "$recorded")"
+  fi
+  if [[ -z "$recorded" ]]; then
+    ROLLBACK_RESTORE_ONLY=1
+    warn "${ROLLBACK_DIR} does not record which folder web-manager-data/ was backed up from -- restoring only the files it holds into ${current}; files it did not hold are left in place"
+    return 0
+  fi
+  if [[ "$recorded" != "$current" ]]; then
+    REASON_CODE="backup_data_source_mismatch"
+    die "${ROLLBACK_DIR} backed up Web Manager state from ${recorded}, but ${SERVICE}'s data folder now resolves to ${current} -- restoring it there would move live state aside. Nothing was stopped or changed. Recreate ${SERVICE} on the previous image by hand (see ${ROLLBACK_DIR}/previous-image.txt) and restore files from ${ROLLBACK_DIR}/web-manager-data/ only after checking them."
+  fi
+  log "Backup data folder matches the current one: ${current}"
+}
+
 restore_state_files() {
   local data_src engine_src pre="$ROLLBACK_DIR/pre-rollback-$(date -u +%Y%m%d-%H%M%S)"
   data_src="$(canon_path "$WEBMGR_DATA_SRC")"
@@ -1492,7 +1531,7 @@ restore_state_files() {
       else
         warn "web-manager-data/${f} was NOT restored"
       fi
-    elif [[ -f "${data_src}/${f}" ]] && grep -q "^web-manager-data/${f} absent$" "$ROLLBACK_DIR/state-manifest.txt" 2>/dev/null; then
+    elif [[ "$ROLLBACK_RESTORE_ONLY" -eq 0 && -f "${data_src}/${f}" ]] && grep -q "^web-manager-data/${f} absent$" "$ROLLBACK_DIR/state-manifest.txt" 2>/dev/null; then
       # Did not exist before the deploy: move it aside (never delete).
       mv "${data_src}/${f}" "$pre/web-manager-data/${f}"
       log "Moved web-manager-data/${f} (created after the deploy) aside to ${pre}/web-manager-data/"
@@ -1744,6 +1783,9 @@ create_backup_dir() {
   # Checksum manifest from the start; if the run fails before the backup is
   # complete, seal_failed_backup checksums what it holds so far.
   echo "$STATE_MANIFEST_VERSION" > "$BACKUP_DIR/state-manifest.txt"
+  # The folder web-manager-data/ is backed up from: --rollback restores into
+  # it only if it resolves the same folder (check_rollback_data_source).
+  echo "webmgr_data_src=$(canon_path "$WEBMGR_DATA_SRC")" >> "$BACKUP_DIR/state-manifest.txt"
   chmod 600 "$BACKUP_DIR/state-manifest.txt"
   BACKUP_BUILDING=1
 
@@ -2198,6 +2240,8 @@ run_rollback() {
   resolve_compose_file
   require_compose_pull_flag
   discover_and_verify_mounts
+  # An incomplete backup restores no state (only the image), so it is not checked.
+  [[ -n "$INCOMPLETE_BACKUP_STAGE" ]] || check_rollback_data_source
 
   log "Stopping ${SERVICE} for rollback..."
   # A failed stop is not fatal on its own: the recreate below uses

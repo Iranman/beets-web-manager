@@ -1138,6 +1138,19 @@ class DryRunTests(EndToEndFixture):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("Reason code:           webmgr_data_dir_unmounted", res.stderr)
 
+    def test_web_manager_data_dir_env_set_but_empty_is_refused(self):
+        self._anon_data_plus_bind_web_manager_data(["WEB_MANAGER_DATA_DIR="])
+        res = self.run_script("--dry-run")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           webmgr_data_dir_unmounted", res.stderr)
+
+    def test_web_manager_data_dir_env_with_dot_segments_is_refused(self):
+        for value in ("/web-manager-data/../data", "/./web-manager-data", "/web-manager-data/."):
+            self._anon_data_plus_bind_web_manager_data([f"WEB_MANAGER_DATA_DIR={value}"])
+            res = self.run_script("--dry-run")
+            self.assertNotEqual(res.returncode, 0, value)
+            self.assertIn("Reason code:           webmgr_data_dir_unmounted", res.stderr, value)
+
     def test_token_less_data_source_is_refused_when_auth_is_required(self):
         # No WEB_MANAGER_DATA_DIR: the legacy fallback picks the empty /data
         # volume, which has no token while the app enforces auth.
@@ -1567,6 +1580,68 @@ class RollbackProofTests(VersionedStackFixture):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("'docker compose stop beets-web-manager' failed", res.stderr)
         self.assertNotIn("Rollback complete", res.stderr)
+
+
+class RollbackDataSourceTests(VersionedStackFixture):
+    """--rollback restores web-manager-data/ only into the folder the backup
+    was taken from; it never moves another folder's live state aside."""
+
+    def _manifest(self):
+        return Path(self.backup_dir(), "state-manifest.txt")
+
+    def _drop_manifest_data_src(self):
+        m = self._manifest()
+        lines = m.read_text(encoding="utf-8").splitlines()
+        m.write_text("\n".join(l for l in lines if not l.startswith("webmgr_data_src=")) + "\n", encoding="utf-8")
+
+    def test_backup_records_its_data_folder(self):
+        self.deploy()
+        canon = os.path.realpath(self.webmgr_dir).replace("\\", "/")
+        self.assertIn(f"webmgr_data_src={canon}\n", self._manifest().read_text(encoding="utf-8"))
+
+    def test_rollback_into_another_data_folder_is_refused_before_anything_changes(self):
+        self.deploy()
+        other = os.path.join(self.stack_dir, "other-data")
+        os.makedirs(other)
+        Path(other, ".env").write_text("live\n", encoding="utf-8")
+        st = self.load_state()
+        cont = st["containers"][st["service_containers"]["beets-web-manager"]]
+        cont["Mounts"] = [{"Destination": "/web-manager-data", "Source": other}]
+        self.save_state(st)
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           backup_data_source_mismatch", res.stderr)
+        self.assertEqual(Path(other, ".env").read_text(encoding="utf-8"), "live\n")
+        self.assertEqual(self.webmgr_container()["Config"]["Image"], self.GOOD_IMAGE)
+        self.assertEqual(self.webmgr_container()["State"]["Status"], "running")
+
+    def test_older_backup_falls_back_to_the_token_path_and_rolls_back_normally(self):
+        self.deploy()
+        self._drop_manifest_data_src()
+        Path(self.webmgr_dir, ".browser_setup_state").write_text("new", encoding="utf-8")
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Backup data folder matches the current one", res.stderr)
+        self.assertFalse(Path(self.webmgr_dir, ".browser_setup_state").exists(),
+                         "a file created after the deploy is still moved aside")
+
+    def test_backup_without_any_data_folder_record_restores_only_its_own_files(self):
+        self.deploy()
+        self._drop_manifest_data_src()
+        meta = Path(self.backup_dir(), "token-metadata.txt")
+        meta.write_text("\n".join(l for l in meta.read_text(encoding="utf-8").splitlines()
+                                  if not l.startswith("persistent_token_path=")) + "\n", encoding="utf-8")
+        digest = hashlib.sha256(meta.read_bytes()).hexdigest()
+        m = self._manifest()
+        m.write_text(re.sub(r"^token-metadata\.txt sha256=\w+$", f"token-metadata.txt sha256={digest}",
+                            m.read_text(encoding="utf-8"), flags=re.M), encoding="utf-8")
+        Path(self.webmgr_dir, ".browser_setup_state").write_text("new", encoding="utf-8")
+        Path(self.webmgr_dir, ".flask_secret_key").write_text("flask-key-after", encoding="utf-8")
+        res = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("does not record which folder", res.stderr)
+        self.assertEqual(Path(self.webmgr_dir, ".browser_setup_state").read_text(encoding="utf-8"), "new")
+        self.assertEqual(Path(self.webmgr_dir, ".flask_secret_key").read_text(encoding="utf-8"), "flask-key-before")
 
 
 class BackupManifestTests(VersionedStackFixture):

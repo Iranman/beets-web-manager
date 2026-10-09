@@ -288,6 +288,18 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    added back, but records written after the deploy are never overwritten or
    removed. Backups made by older versions of this script have no state
    folders; the script warns and leaves the state as it is.
+
+   The rollback resolves the data folder the same way the deploy does, from
+   `WEB_MANAGER_DATA_DIR`, and restores `web-manager-data/` only into the
+   folder the backup was taken from. That folder is recorded as
+   `webmgr_data_src=` in `state-manifest.txt`. For a backup made before that
+   line existed, it is the folder of `persistent_token_path` in
+   `token-metadata.txt`. If the folder differs from the current one, the
+   rollback stops with `backup_data_source_mismatch` before anything is
+   stopped or changed, because restoring there would move that folder's live
+   state aside. Recreate the service on the previous image by hand and restore
+   files only after checking them. A backup that records neither line
+   restores only the files it holds and moves nothing aside.
 4. Only when the Compose file uses `${BEETS_WEB_MANAGER_VERSION}`: **edits
    the stack `.env`**, setting `BEETS_WEB_MANAGER_VERSION=` back to the value
    in `.env.bak` (or, if that had none, to the tag of the previous image). No
@@ -337,6 +349,7 @@ meaning gets a new code.
 | `compose_too_old` | `compose-version-check` | `docker compose up --help` does not list `--pull` (Docker Compose older than v2.22); checked before anything changes, in the deploy, the dry run and `--rollback` |
 | `webmgr_data_dir_unmounted` | `mount-discovery` | the container sets `WEB_MANAGER_DATA_DIR`, but nothing is mounted at exactly that path (or the value is not a plain absolute path); checked before anything changes |
 | `webmgr_data_source_without_token` | `token-inspection` | the resolved Web Manager data folder holds no `.auth_token` (and no legacy token to migrate) while an unauthenticated `/api/library` does not answer 200, so it is not the folder the app uses; checked before anything changes |
+| `backup_data_source_mismatch` | `rollback` | `--rollback`: the backup's Web Manager state came from another folder than the one the data folder resolves to now; nothing was stopped or changed |
 | `compose_image_mismatch` | `compose-image-verification` | the Compose file names neither `:latest` nor `:<VERSION>` |
 | `latest_image_not_requested_version` | `image-pull-verification` | the pulled `:latest` image's version label is not `VERSION` |
 | `image_version_label_mismatch` | `image-pull-verification` | the pulled `:<VERSION>` image's version label is not `VERSION` |
