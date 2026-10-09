@@ -3025,12 +3025,16 @@ _RELOCATION_REFUSALS = {
     "SOURCE_CHANGED": "A torrent original is gone or changed since the album was linked into the library "
                       "(the torrent client or another tool changed it); nothing was changed.",
     "LIBRARY_FILE_CHANGED": "A library file made from a torrent original changed since; nothing was changed.",
+    "RELOCATION_RECORD_MISSING": "Beets no longer holds its record of this move (kept 7 days), so the tracks it "
+                                 "linked or copied from torrent originals cannot be proven and are not moved back; "
+                                 "the library files and the originals are both kept; nothing was changed.",
 }
 
 
 #: Rollback refusals (HTTP 409): the album changed since it was moved.
 RELOCATION_ROLLBACK_REFUSALS = ("album_not_found", "album_changed", "item_moved", "art_changed", "file_missing",
-                                "target_exists", "source_changed", "library_file_changed")
+                                "target_exists", "source_changed", "library_file_changed",
+                                "relocation_record_missing")
 
 
 def _album_item_paths(album: Dict[str, Any], ad: BeetsAdapter, aid: int) -> Dict[str, str]:

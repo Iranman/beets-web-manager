@@ -61,8 +61,13 @@ def _bind_library_music_dir():
     thread that created it. Werkzeug serves each request on another thread,
     where the var is empty and every item.path loads relative -- so file
     checks, moves and tag writes would act on the wrong path. Bind the
-    library's directory for this request's thread."""
-    bind_music_dir(getattr(g, "lib", None))
+    library's directory for this request's thread. Also loads the durable
+    registry on the first request after a restart, so a tag write (a Web
+    Manager edit, mbsync) keeps relocation records current (#332)."""
+    lib = getattr(g, "lib", None)
+    bind_music_dir(lib)
+    if lib is not None:
+        bind_durable_registry(lib)
     return None
 
 

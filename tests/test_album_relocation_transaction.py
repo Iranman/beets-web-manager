@@ -534,7 +534,8 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         self.store.transition(op, "Approved", "Running", metadata={"engine_request": {"operation_id": op}})
         self.ad.relocate_album(self.album.id, planned, idempotency_key=op)
         with ops_mod._operations_lock:
-            ops_mod._operations.pop(op, None)  # Beets restarted and lost the record
+            ops_mod._operations.pop(op, None)  # Beets restarted and lost the record,
+            ops_mod._save_durable_locked()  # saved registry included (a request reloads it)
         with mock.patch.object(ops_mod, "_durable_file", None):
             out = recovery.sweep(adapter=self.ad, store=self.store, before=time.time() + 1)
         self.assertEqual(out[0]["action"], "Recovery Required", out)

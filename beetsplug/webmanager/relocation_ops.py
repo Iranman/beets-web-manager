@@ -59,18 +59,21 @@ the one this relocation made (the original's inode for a link, else the
 recorded library evidence; else ``LIBRARY_FILE_CHANGED``), the row is pointed
 back at the original, and only then is the library file unlinked: untracked,
 strictly inside the Beets library directory, and re-checked by inode through
-an ``O_NOFOLLOW`` directory walk right before ``unlinkat``. Without the record
-(expired, or another Beets) the row is still pointed back, the library file is
-kept and listed in ``kept_library_files``. A library file already gone is not
+an ``O_NOFOLLOW`` directory walk right before ``unlinkat``. A successful
+rollback marks the record ``rolled_back``. Without a valid record (expired,
+unknown, another album's, failed, or rolled back) a linked/copied track or
+cover is never pointed back (``RELOCATION_RECORD_MISSING``: both files stay),
+and request evidence never adopts a file. A library file already gone is not
 an error.
 
 Copy-on-write (``break_hard_link``, on Beets' ``write`` event, which every
 ``Item.write``/``try_write`` sends first: Web Manager edits, mbsync, embedart,
 ``beet write``): a file with more than one link is first replaced by its own
-copy (``os.replace`` of a same-folder copy, ``copystat``, owner kept when
-allowed), so a tag or embedded-art write never reaches a seeding torrent's
-bytes. ``after_write`` refreshes the library evidence in the relocation record,
-so a rollback still proves and removes the copy. Covers are never written in
+copy (``os.replace`` of a same-folder copy; mode, owner when allowed and times
+set on its descriptor), so a tag or embedded-art write never reaches a seeding
+torrent's bytes. ``after_write`` refreshes the library evidence in the
+relocation record for that same item when the file before the write was the
+one the record proved ours, so a rollback still proves and removes the copy. Covers are never written in
 place: ``Album.set_art`` removes the name and copies a new file.
 
 Both hold ``ops.mutation_lock``. Refusals and undone failures (``UNDONE``:
@@ -174,28 +177,48 @@ def _evidence(path: str) -> Any:
 _LINKED = ("linked", "copied")
 
 
+def _ev_of(st: os.stat_result) -> List[Any]:
+    return [st.st_size, st.st_mtime, st.st_dev, st.st_ino]
+
+
+def _same_inode(a: Any, ev: Any) -> bool:
+    try:
+        return (int(a[2]), int(a[3])) == (int(ev[2]), int(ev[3]))
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def _matches(a: Any, ev: Any) -> bool:
+    """Evidence ``a`` is the file ``ev`` recorded: size, mtime (1 s), dev, inode."""
+    try:
+        return int(a[0]) == int(ev[0]) and abs(float(a[1]) - float(ev[1])) < 1 and _same_inode(a, ev)
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
 def _same_file(path: str, ev: Any) -> bool:
     """``path`` is a regular file (no symlink) matching ``ev`` exactly."""
     try:
         st = os.lstat(path)
-        return (stat.S_ISREG(st.st_mode) and st.st_size == int(ev[0]) and abs(st.st_mtime - float(ev[1])) < 1
-                and (st.st_dev, st.st_ino) == (int(ev[2]), int(ev[3])))
-    except (OSError, TypeError, ValueError, IndexError):
+    except (OSError, ValueError):
         return False
+    return stat.S_ISREG(st.st_mode) and _matches(_ev_of(st), ev)
+
+
+def _ours_ev(a: Any, method: Any, origin: Any, library: Any) -> bool:
+    """Evidence ``a`` (of a regular file) is the library file this relocation
+    made: a hard link of the original (its inode), or the file its recorded
+    library evidence matches (a copy, or a link a tag write broke into its own
+    copy)."""
+    return method in _LINKED and ((method == "linked" and _same_inode(a, origin)) or _matches(a, library))
 
 
 def _ours(path: str, method: Any, origin: Any, library: Any) -> bool:
-    """``path`` is the library file this relocation made: a hard link of the
-    original (its inode), or the file its recorded library evidence matches
-    (a copy, or a link a tag write broke into its own copy)."""
-    if method == "linked":
-        try:
-            st = os.lstat(path)
-            if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == (int(origin[2]), int(origin[3])):
-                return True
-        except (OSError, TypeError, ValueError, IndexError):
-            return False
-    return method in _LINKED and _same_file(path, library)
+    try:
+        st = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(st.st_mode) and _ours_ev(_ev_of(st), method, origin, library)
 
 
 def _original(lib, restore: Any, now: str, origin: Any) -> Tuple[str, str]:
@@ -294,11 +317,11 @@ def _unlink_ours(lib, path: str, original: str, method: Any, origin: Any, librar
         folder_ops._refuse_tracked(lib, path)
     except folder_ops._Refused:
         return False
-    if path == original or not (_ours(path, method, origin, library) and _same_file(original, origin)):
-        return False
     try:
-        st = os.lstat(path)
-        if not _unlink_at(root, path, (st.st_dev, st.st_ino)):
+        st = os.lstat(path)  # one lstat: the identity proven ours is the one unlinked
+        if (path == original or not stat.S_ISREG(st.st_mode)
+                or not (_ours_ev(_ev_of(st), method, origin, library) and _same_file(original, origin))
+                or not _unlink_at(root, path, (st.st_dev, st.st_ino))):
             return False
     except OSError:
         return False
@@ -391,12 +414,14 @@ def _relocate(lib, album, before, link_ops, art_op) -> Dict[str, Any]:
 
 def _apply_record(op_id: Any, album_id: int) -> Optional[Dict[str, Any]]:
     """This plugin's own durable result of the relocation being rolled back
-    (its Idempotency-Key), or None when it is unknown or expired."""
+    (its Idempotency-Key), or None when it is unknown, expired, or already
+    rolled back (a replay then proves nothing and removes nothing)."""
     if not isinstance(op_id, str) or not op_id:
         return None
     with ops._operations_lock:
         op = ops._operations.get(op_id)
-        if not op or op.get("type") != "album_relocation" or op.get("status") != "succeeded":
+        if (not op or op.get("type") != "album_relocation" or op.get("status") != "succeeded"
+                or (op.get("result") or {}).get("rolled_back")):
             return None
         rec = copy.deepcopy(op.get("result") or {})
     return rec if rec.get("album_id") == album_id else None
@@ -430,23 +455,26 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
         restore = entry.get("restore_path")
         if rec is not None:  # the plugin's own record decides; payload copies are ignored
             method, (origin, library), made = _from_record(rec, iid, restore)
-        else:  # no record: the row may still go back, but no library file is ever removed
-            method, origin, library, made = entry.get("method"), entry.get("evidence"), None, ""
+        else:  # no record: payload evidence proves nothing; only a plain move goes back
+            method, origin, library, made = entry.get("method"), None, None, ""
         if restore == now:
             # Never moved (skipped by the apply), or already back (an interrupted
             # rollback): a linked/copied track may still have its library file.
-            if method in _LINKED and made and made != now:
+            if method in _LINKED and made and made != now and os.path.lexists(made):
                 cleanup.append((made, now, method, origin, library))
             continue
         if _abs(lib, entry.get("path")) != now:
             raise _no(f"item {iid} was moved again since the relocation", "ITEM_MOVED")
+        if method in _LINKED and rec is None:
+            raise _no(f"item {iid} was linked or copied and this relocation's record is gone; both files "
+                      "are kept as they are", "RELOCATION_RECORD_MISSING")
         if method in _LINKED:
             # The original never moved: point the row back, then drop our library file.
             target, root = _original(lib, restore, now, origin)
             if os.path.lexists(now):
-                if rec is not None and not _ours(now, method, origin, library):
+                if not _ours(now, method, origin, library):
                     raise _no(f"item {iid}'s library file changed since the relocation", "LIBRARY_FILE_CHANGED")
-                cleanup.append((now, target, method if rec is not None else None, origin, library))
+                cleanup.append((now, target, method, origin, library))
             mode = "repoint"
         elif not os.path.isfile(now):
             # A crash after Beets moved the file back but before the row was stored.
@@ -469,22 +497,25 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
         if art_method in _LINKED and art_back != (rec.get("before") or {}).get("artpath"):
             raise _no("the cover's restore path is not the one the relocation recorded", "STALE_PLAN")
     else:
-        art_method, art_origin, art_library, art_made = data.get("art_method"), data.get("art_evidence"), None, ""
+        art_method, art_origin, art_library, art_made = data.get("art_method"), None, None, ""
     if art_now == art_back:
         # Unchanged by the apply, or already back: a linked/copied cover may still have its library file.
-        if art_method in _LINKED and art_made and art_made != art_now:
+        if art_method in _LINKED and art_made and art_made != art_now and os.path.lexists(art_made):
             cleanup.append((art_made, art_now, art_method, art_origin, art_library))
     elif _abs(lib, data.get("artpath")) != art_now:
         raise _no("the album's cover changed since the relocation", "ART_CHANGED")
     elif art_now and art_back:
         if art_back in targets:
             raise _no("the cover would be restored onto a track", "PATH_INVALID", 400)
+        if art_method in _LINKED and rec is None:
+            raise _no("the cover was linked or copied and this relocation's record is gone; both files are kept "
+                      "as they are", "RELOCATION_RECORD_MISSING")
         if art_method in _LINKED:
             art_back, art_root = _original(lib, art_back, art_now, art_origin)
             if os.path.lexists(art_now):
-                if rec is not None and not _ours(art_now, art_method, art_origin, art_library):
+                if not _ours(art_now, art_method, art_origin, art_library):
                     raise _no("the album's library cover changed since the relocation", "LIBRARY_FILE_CHANGED")
-                cleanup.append((art_now, art_back, art_method if rec is not None else None, art_origin, art_library))
+                cleanup.append((art_now, art_back, art_method, art_origin, art_library))
             art_mode = "repoint"
         elif not os.path.isfile(art_now):
             art_back, art_mode = _adoptable(lib, art_now, art_back, art_origin), "adopt"
@@ -502,7 +533,8 @@ def _check_rollback(lib, data: Dict[str, Any]) -> Tuple[Any, List[Tuple[Any, str
             folder_ops._refuse_tracked(lib, art_back)
         except folder_ops._Refused:
             raise _no("restore cover path is a library item's path", "TARGET_EXISTS") from None
-    return album, steps, (art_now, art_back, art_root, art_mode), live, cleanup
+    return album, steps, (art_now, art_back, art_root, art_mode), live, cleanup, (
+        data.get("apply_operation_id") if rec is not None else "")
 
 
 def _move_item(lib, item, dest: str, root: str = "") -> None:
@@ -537,7 +569,7 @@ def _adopt_item(lib, item, dest: str) -> None:
         item.store()
 
 
-def _rollback(lib, album, steps, art, live, cleanup) -> Dict[str, Any]:
+def _rollback(lib, album, steps, art, live, cleanup, apply_id) -> Dict[str, Any]:
     art_now, art_back, art_root, art_mode = art
     done: List[Tuple[Any, str, str]] = []
     art_moved = art_set = False
@@ -583,24 +615,39 @@ def _rollback(lib, album, steps, art, live, cleanup) -> Dict[str, Any]:
     for vacated in {os.path.dirname(s[1]) for s in steps} | (
             {os.path.dirname(art_now)} if art_set and art_now else set()):
         _remove_empty_dirs(vacated)
+    if apply_id:  # a replay (any key) then proves nothing and removes nothing
+        with ops._operations_lock:
+            op = ops._operations.get(apply_id)
+            if op and isinstance(op.get("result"), dict):
+                op["result"]["rolled_back"] = True
+                ops._save_durable_locked()
     return {"album_id": album.id, "restored_items": len(steps), "adopted_items": adopted,
             "repointed_items": repointed, "removed_library_files": len(cleanup) - len(kept),
             "kept_library_files": kept, "restored_art": art_set, "after": _state(lib, lib.get_album(album.id))}
 
 
+_pre_write: Dict[str, Any] = {}  # path -> evidence of the file just before Beets wrote it
+
+
 def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
     """Beets ``write`` listener: before a tag write, give a file with more
     than one link its own inode, so the write never reaches the other name
-    (a seeding torrent's file). The copy is made in the same folder,
-    ``copystat``-ed, its owner kept when allowed, and ``os.replace``-d onto
-    the name. Any failure raises ``WriteError``: ``try_write`` logs it and
-    skips the write, so the shared bytes are never written."""
+    (a seeding torrent's file). The copy is made in the same folder; mode,
+    owner (when allowed) and times are set on its open descriptor, never by
+    name, and both names are re-checked by inode right before ``os.replace``.
+    Any failure raises ``WriteError``: ``try_write`` logs it and skips the
+    write, so the shared bytes are never written. Also notes the file's
+    identity before the write, for ``note_library_write``."""
     p = os.fsdecode(path if path is not None else item.path)
+    key = os.path.normpath(p)
     try:
         st = os.lstat(p)
     except OSError:
         return  # Beets reports the missing file itself
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink < 2:
+    if not stat.S_ISREG(st.st_mode):
+        return
+    _pre_write[key] = _ev_of(st)
+    if st.st_nlink < 2:
         return
     try:
         fd, tmp = tempfile.mkstemp(prefix=".webmanager-cow-", dir=os.path.dirname(p))
@@ -612,12 +659,24 @@ def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
                 raise OSError("the file changed while its hard link was being broken")
             shutil.copyfileobj(src, out)
             out.flush()
-            os.fsync(out.fileno())
-        shutil.copystat(p, tmp)
-        try:
-            os.chown(tmp, st.st_uid, st.st_gid)
-        except (OSError, AttributeError):
-            pass  # not allowed (or Windows): the copy keeps Beets' own owner
+            ofd = out.fileno()
+            if hasattr(os, "fchown"):  # POSIX: on the descriptor, never by name
+                os.fchmod(ofd, stat.S_IMODE(st.st_mode))
+                try:
+                    os.fchown(ofd, st.st_uid, st.st_gid)
+                except OSError:
+                    pass  # not allowed: the copy keeps Beets' own owner
+                os.utime(ofd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.fsync(ofd)
+            made = os.fstat(ofd)
+        tst = os.lstat(tmp)
+        if (tst.st_dev, tst.st_ino) != (made.st_dev, made.st_ino):
+            raise OSError("the copy was swapped while a hard link was being broken")
+        if not hasattr(os, "fchown"):  # ponytail: Windows has no fchown/fd utime; by name, after the check above
+            shutil.copystat(p, tmp, follow_symlinks=False)
+        now = os.lstat(p)
+        if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+            raise OSError("the file was swapped while its hard link was being broken")
         os.replace(tmp, p)
     except OSError as exc:
         try:
@@ -626,32 +685,43 @@ def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
             pass
         raise WriteError(util.bytestring_path(p), exc) from exc
     ops.log.info("broke a hard link before a tag write: {} now has its own copy", p)
-    note_library_write(item=item, path=path)
+    _refresh_library_evidence(item, key, _ev_of(st))
+    _pre_write[key] = _evidence(key)
 
 
 def note_library_write(item=None, path=None, **_kw) -> None:
-    """Beets ``after_write`` listener: when the written file is a library file
-    a relocation linked or copied, record its new size, mtime and inode in that
-    relocation's durable result, so its rollback still proves the file is ours.
-    Only in the process serving Web Manager (the registry is bound there); a
-    ``beet write`` elsewhere leaves the record as it was, and the rollback then
-    keeps the file (``LIBRARY_FILE_CHANGED``) rather than guess."""
-    if not ops._durable_file:
+    """Beets ``after_write`` listener: see ``_refresh_library_evidence``."""
+    key = os.path.normpath(os.fsdecode(path if path is not None else item.path))
+    _refresh_library_evidence(item, key, _pre_write.pop(key, None))
+
+
+def _refresh_library_evidence(item, p: str, pre: Any) -> None:
+    """When ``item`` was written at the library path a relocation linked or
+    copied for that same item, and the file just before the write (``pre``)
+    was the one the record proves ours, record its new size, mtime and inode
+    in that relocation's durable result, so its rollback still proves the
+    file is ours. Anything else (another item or file at that path, no
+    pre-write identity, a rolled-back record) leaves the record as it was,
+    and the rollback then keeps the file (``LIBRARY_FILE_CHANGED``) rather
+    than guess. Only in the process serving Web Manager (any webmanager
+    request binds the registry); a ``beet write`` elsewhere changes nothing."""
+    iid = str(getattr(item, "id", None) or "")
+    if not ops._durable_file or not iid or pre is None:
         return
-    p = os.path.normpath(os.fsdecode(path if path is not None else item.path))
     ev = _evidence(p)
     changed = False
     with ops._operations_lock:
         # ponytail: linear scan of at most MAX_COMPLETED_OPERATIONS records per write; index by path if it shows up
         for op in ops._operations.values():
             rec = op.get("result") if op.get("type") == "album_relocation" else None
-            if not isinstance(rec, dict) or op.get("status") != "succeeded":
+            if not isinstance(rec, dict) or op.get("status") != "succeeded" or rec.get("rolled_back"):
                 continue
-            methods = rec.get("methods") or {}
-            for iid, made in ((rec.get("after") or {}).get("items") or {}).items():
-                if made == p and methods.get(iid) in _LINKED:
-                    rec.setdefault("evidence", {}).setdefault("library", {})[iid] = ev
-                    changed = True
+            evs = rec.get("evidence") or {}
+            if (((rec.get("after") or {}).get("items") or {}).get(iid) == p
+                    and _ours_ev(pre, (rec.get("methods") or {}).get(iid), (evs.get("items") or {}).get(iid),
+                                 (evs.get("library") or {}).get(iid))):
+                rec.setdefault("evidence", {}).setdefault("library", {})[iid] = ev
+                changed = True
         if changed:
             ops._save_durable_locked()
 
