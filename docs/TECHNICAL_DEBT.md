@@ -176,7 +176,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Folder cleanup paths are sent to Beets unchanged, so Web Manager and Beets must mount the library at the same path (the shipped Compose files use `/music` in both).
   - Folder reference checks compare Beets-reported item paths only; an album `artpath` under the folder is not checked.
 - Desired state: every composite family captures before-state, claims with a CAS and is reachable from the generic rollback route.
-- Priority: P2. Status: Open.
+- Priority: P2. Status: Open (narrowed). Album rename and move-to-library (`album_move_v1`, plugin 1.14.0) ship in v0.2.0: IMPLEMENTED and CI VERIFIED, not yet LIVE VERIFIED. The unmarked items above remain open.
 
 ## ARCH-024 Imports Need Beets' Autotagger In The webmanager Plugin
 
