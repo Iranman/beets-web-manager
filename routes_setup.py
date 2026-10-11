@@ -506,7 +506,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_OUTBOUND_MAX_RESPONSE_BYTES": {
         "section": "Authentication & Security",
-        "default": "10485760",
+        "default": "20971520",
         "description": "Maximum response payload size in bytes for outbound requests",
         "secret": False,
         "editable": True,
@@ -515,10 +515,15 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_OUTBOUND_ALLOWLIST": {
         "section": "Authentication & Security",
-        "default": "",
-        "description": "Comma-separated whitelist of allowed external hostnames/IPs",
+        "default": "127.0.0.1:8337,localhost:8337,beets:8337",
+        "description": (
+            "Operator-only (set in Docker Compose). Extra local-network endpoints the app may contact, as "
+            "exact host:port, IP:port, CIDR:port or [IPv6]:port entries. Public internet addresses need no "
+            "entry, and each service's own configured URL (PLEX_URL, LIDARR_URL, SLSKD_URL, ...) is trusted "
+            "for that service when it is a private LAN, CGNAT or IPv6 ULA address."
+        ),
         "secret": False,
-        "editable": True,
+        "editable": False,
         "restart_required": False,
         "type": "string",
     },
@@ -1646,6 +1651,13 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
         # and reporting success.
         if _SETTING_METADATA.get(key, {}).get("editable", True) is False:
             raise ValueError(f"{key} cannot be changed from this application -- it is a host-side deployment setting")
+        # Docker/Compose set it at boot: it overrides a saved value at every
+        # restart, so a save would apply now and silently revert later.
+        if config_layers.pinned_by_boot_environment(key):
+            raise ValueError(
+                f"{key} is set in the Docker/Compose environment, which overrides a saved value at every "
+                "restart -- change it there and recreate the container"
+            )
 
     for key, value in list(updates.items()):
         _reject_if_not_editable(key)
@@ -1659,6 +1671,21 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
                 # #208: refused at save, not only after the next restart;
                 # the constant message never echoes the value.
                 raise ValueError(BEETS_WEB_URL_USERINFO_MESSAGE)
+        if key == "PLEX_URL" and value.strip():
+            # The token is a setting of its own (PLEX_TOKEN, sent as a header);
+            # a URL carrying credentials or a ?X-Plex-Token= query would be
+            # echoed by status APIs and break every request path built on it.
+            # The constant message never echoes the value.
+            try:
+                parts = urllib.parse.urlparse(value.strip())
+                port = parts.port
+                invalid = (config_layers.url_has_userinfo(value) or parts.query or parts.fragment or "?" in value
+                           or ";" in value or parts.scheme.lower() not in ("http", "https") or not parts.hostname
+                           or (port is not None and not 1 <= port <= 65535))
+            except ValueError:  # e.g. a fullwidth "＠" in the netloc, or a port out of range
+                invalid = True
+            if invalid:
+                raise ValueError(PLEX_URL_INVALID_MESSAGE)
     if updates.get("BEETS_WEB_PASSWORD"):
         unmet = _password_requirements_unmet(updates["BEETS_WEB_PASSWORD"])
         if unmet:
@@ -2322,6 +2349,19 @@ def _plugin_failure_for(failures: List[str], plugin: str) -> str:
     return ""
 
 
+PLEX_URL_INVALID_MESSAGE = (
+    "PLEX_URL must be a plain http:// or https:// address such as http://192.168.1.20:32400, without a "
+    "user name, password, query string (?X-Plex-Token=...) or fragment. Put the token in PLEX_TOKEN."
+)
+
+
+def _plex_integration_configured() -> bool:
+    """Plex is configured exactly when the Plex workflows can use it: a URL
+    and a token from the environment or the Beets config.yaml plex: stanza."""
+    from backend.plex_service import _plex_configured
+    return _plex_configured()
+
+
 def _integration_status(
     *,
     configured: bool,
@@ -2928,7 +2968,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         ),
         "replaygain": _replaygain_integration_status(diagnostics, ffmpeg_path),
         "plex": _integration_status(
-            configured=bool(os.environ.get("PLEX_URL") and os.environ.get("PLEX_TOKEN")),
+            configured=_plex_integration_configured(),
             note="Application Plex workflow; no default Beets plexsync plugin is required.",
         ),
         "lidarr": _integration_status(
@@ -3364,6 +3404,16 @@ def setup_env_reveal(name: str):
     return response
 
 
+def _probe_targets_configured(supplied_url: str, configured_url: str) -> bool:
+    """True when a setup probe calls the configured endpoint itself (no URL
+    supplied, or the same endpoint), so its implicit outbound trust may
+    apply; never for a different, caller-supplied URL."""
+    from backend.security import same_endpoint_url
+    if not configured_url:
+        return False
+    return not supplied_url or same_endpoint_url(supplied_url, configured_url)
+
+
 @app.post("/api/setup/test/ai")
 def setup_test_ai():
     """Live connectivity test against the configured (or posted) AI provider."""
@@ -3393,7 +3443,8 @@ def setup_test_ai():
             f"{base_url.rstrip('/')}/models/{model}" if is_openai_host else f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}"},
         )
-        with provider_boundary.opened("ai", req, timeout=10, max_attempts=1) as r:
+        trust = _probe_targets_configured(supplied_base_url, provider_boundary.configured_url("ai"))
+        with provider_boundary.opened("ai", req, timeout=10, max_attempts=1, trust_configured=trust) as r:
             r.read()
         return jsonify({"ok": True, "status": "ready", "model": model})
     except urllib.error.HTTPError as exc:
@@ -3406,6 +3457,9 @@ def setup_test_ai():
         return jsonify({"ok": False, "status": "failed", "error": error}), 200
     except Exception as ex:
         app.logger.warning("AI provider connectivity test failed: %s", type(ex).__name__)
+        block = provider_boundary.outbound_block(ex, "ai", base_url)
+        if block:
+            return jsonify({"ok": False, "status": "failed", **block}), 200
         return jsonify({"ok": False, "status": "failed",
                          "error": "Could not reach the AI provider."}), 200
 
@@ -3580,20 +3634,27 @@ def setup_test_plex():
 
     payload = request.get_json(silent=True) or {}
     from backend.auth_service import probe_may_use_stored_secret
-    configured_plex_url = (os.environ.get("PLEX_URL") or "").strip()
+    from backend.plex_service import _plex_failure, _plex_settings
+    # Same resolution as every Plex workflow: env, then the Beets config.yaml
+    # plex: stanza (#7).
+    plex_settings = _plex_settings()
+    configured_plex_url = (plex_settings.get("url") or "").strip()
     supplied_plex_url = str(payload.get("url") or "").strip()
     plex_url = (supplied_plex_url or configured_plex_url).rstrip("/")
     plex_token = str(payload.get("token") or "").strip()
     if not plex_token and configured_plex_url and probe_may_use_stored_secret(supplied_plex_url, configured_plex_url):
         # SEC-1: the stored PLEX_TOKEN only ever goes to the configured
         # PLEX_URL, and only for an authenticated caller.
-        plex_token = os.environ.get("PLEX_TOKEN") or ""
+        plex_token = plex_settings.get("token") or ""
     if not plex_url or not plex_token:
         return jsonify({"ok": False, "status": "not_configured",
                          "error": "A Plex URL and token are both required to test Plex. Enter the token for this URL, or set PLEX_URL and PLEX_TOKEN."}), 200
     try:
         req = urllib.request.Request(f"{plex_url}/library/sections", headers={"X-Plex-Token": plex_token})
-        with provider_boundary.opened("plex", req, timeout=10, max_attempts=1) as r:
+        # The configured Plex URL's implicit outbound trust never extends to
+        # a URL the caller typed (this endpoint is public during first run).
+        trust = _probe_targets_configured(supplied_plex_url, provider_boundary.configured_url("plex"))
+        with provider_boundary.opened("plex", req, timeout=10, max_attempts=1, trust_configured=trust) as r:
             body = r.read()
         libraries = []
         try:
@@ -3603,13 +3664,10 @@ def setup_test_plex():
         except Exception:
             pass
         return jsonify({"ok": True, "status": "ready", "music_libraries": libraries})
-    except urllib.error.HTTPError as exc:
-        error = "Plex token is invalid or expired." if exc.code in (401, 403) else f"Plex returned HTTP {exc.code}."
-        return jsonify({"ok": False, "status": "failed", "error": error}), 200
     except Exception as ex:
-        app.logger.warning("Plex connectivity test failed: %s", type(ex).__name__)
-        return jsonify({"ok": False, "status": "failed",
-                         "error": "Could not reach Plex."}), 200
+        failure = _plex_failure(ex, plex_url)
+        app.logger.warning("Plex connectivity test failed: %s (%s)", failure["reason"], type(ex).__name__)
+        return jsonify({"ok": False, "status": "failed", **failure}), 200
 
 
 @app.get("/api/setup/settings")

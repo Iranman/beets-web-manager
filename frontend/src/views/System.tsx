@@ -54,6 +54,7 @@ function integrationBadge(
   if (test) {
     if (test.status === 'ready') return { icon: '✓', label: 'Connected', tone: 'ok' };
     if (test.status === 'not_configured') return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
+    if (test.reason === 'outbound_not_allowlisted') return { icon: '⚠', label: 'Blocked by outbound policy', tone: 'warn' };
     return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
   }
   const state = integration.state || (integration.configured ? 'configured' : 'not_configured');

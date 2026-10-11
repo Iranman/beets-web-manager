@@ -1,6 +1,8 @@
 """Security helpers for outbound requests and abuse controls."""
 from __future__ import annotations
 
+import contextvars
+import functools
 import http.client
 import io
 import ipaddress
@@ -13,8 +15,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 LOG = logging.getLogger("beets_web.security")
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -73,16 +76,31 @@ _INSTALLED_ATTR = "_beets_secure_urlopen_installed"
 
 
 class OutboundPolicyError(ValueError):
-    """Raised when an outbound request violates the SSRF policy."""
+    """Raised when an outbound request violates the SSRF policy.
+
+    ``entry`` is the exact ``host:port`` allowlist entry that would admit the
+    refused target (no userinfo, path, query or fragment), or "" when no
+    entry could (metadata, link-local, a public-looking failure ...).
+    ``hint`` is a fixed, non-secret sentence naming that entry."""
+
+    def __init__(self, message: str = "", *, entry: str = ""):
+        super().__init__(message)
+        self.entry = entry
+        self.hint = f"add {entry} to BEETS_OUTBOUND_ALLOWLIST" if entry else ""
 
 
 @dataclass(frozen=True)
 class OutboundAllowRule:
+    """One allowlist rule. Operator entries (BEETS_OUTBOUND_ALLOWLIST) match
+    any scheme; an ``implicit`` rule is derived from a service's configured
+    URL and also pins the scheme (see ``implicit_rule_for_url``)."""
     kind: str
     port: int
     host: str = ""
     ip: Optional[ipaddress._BaseAddress] = None
     network: Optional[ipaddress._BaseNetwork] = None
+    scheme: str = ""
+    implicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,16 +154,29 @@ def _parse_host_port(raw: str) -> Tuple[str, int]:
     return host, port
 
 
-def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRule, ...]:
-    """Parse BEETS_OUTBOUND_ALLOWLIST.
+DEFAULT_OUTBOUND_ALLOWLIST = "127.0.0.1:8337,localhost:8337,beets:8337"
 
-    Entries must be exact and port-scoped, for example:
-      192.168.1.100:32400,lidarr:8686,10.0.0.0/24:8080
-    Wildcards and suffix matching are deliberately unsupported.
-    """
-    default_allow = "127.0.0.1:8337,localhost:8337,beets:8337"
-    value = os.environ.get("BEETS_OUTBOUND_ALLOWLIST", default_allow) if raw is None else raw
+# The local-network address floor. A service URL the operator configured
+# (PLEX_URL, LIDARR_URL, ...) is trusted only when every address it resolves
+# to lies in one of these: RFC 1918, CGNAT/shared (RFC 6598, e.g. Tailscale)
+# and IPv6 ULA. Loopback is added only for explicit operator entries.
+_PRIVATE_FLOOR = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"))
+_LOOPBACK_NETS = tuple(ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/128"))
+
+
+def _network_within_floor(network: ipaddress._BaseNetwork) -> bool:
+    """True when a CIDR entry lies wholly inside the private floor or
+    loopback. Anything wider (0.0.0.0/0, ::/0, a range spanning public or
+    link-local space) is a catch-all and is never honoured."""
+    return any(network.version == base.version and network.subnet_of(base)  # type: ignore[arg-type]
+               for base in _PRIVATE_FLOOR + _LOOPBACK_NETS)
+
+
+def _parse_allowlist(value: str) -> Tuple[Tuple[OutboundAllowRule, ...], Tuple[str, ...]]:
+    """(rules, ignored catch-all CIDR entries). Malformed entries raise."""
     rules: List[OutboundAllowRule] = []
+    ignored: List[str] = []
     for item in (value or "").split(","):
         item = item.strip()
         if not item:
@@ -156,6 +187,9 @@ def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRu
                 network = ipaddress.ip_network(host, strict=False)
             except ValueError as exc:
                 raise OutboundPolicyError("invalid outbound allowlist CIDR") from exc
+            if not _network_within_floor(network):
+                ignored.append(item)
+                continue
             rules.append(OutboundAllowRule(kind="network", port=port, network=network))
             continue
         try:
@@ -166,7 +200,31 @@ def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRu
         if not _ALLOWLIST_HOSTNAME_RE.match(host):
             raise OutboundPolicyError("invalid outbound allowlist host")
         rules.append(OutboundAllowRule(kind="host", port=port, host=host))
-    return tuple(rules)
+    return tuple(rules), tuple(ignored)
+
+
+def _allowlist_setting() -> str:
+    return os.environ.get("BEETS_OUTBOUND_ALLOWLIST", DEFAULT_OUTBOUND_ALLOWLIST)
+
+
+def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRule, ...]:
+    """Parse BEETS_OUTBOUND_ALLOWLIST (operator-only: Compose/Docker env).
+
+    Entries must be exact and port-scoped, for example:
+      192.168.1.100:32400,lidarr:8686,10.0.0.0/24:8080
+    Wildcards and suffix matching are deliberately unsupported. A CIDR entry
+    wider than the private/CGNAT/ULA/loopback ranges (0.0.0.0/0 and the
+    like) is ignored and reported at startup (``outbound_allowlist_ignored``).
+    """
+    return _parse_allowlist(_allowlist_setting() if raw is None else raw)[0]
+
+
+def outbound_allowlist_ignored(raw: Optional[str] = None) -> Tuple[str, ...]:
+    """Catch-all CIDR entries that are ignored. Never raises."""
+    try:
+        return _parse_allowlist(_allowlist_setting() if raw is None else raw)[1]
+    except OutboundPolicyError:
+        return ()
 
 
 def outbound_allowlist_problem(raw: Optional[str] = None) -> Optional[str]:
@@ -262,12 +320,43 @@ def _address_is_prohibited(ip: ipaddress._BaseAddress) -> bool:
     """Operator-path policy (BA-4/SEC-6): anything that is not a globally
     routable unicast address -- private, loopback, link-local, CGNAT/shared
     (100.64/10, e.g. Tailscale), benchmarking, documentation, reserved, and
-    IPv6 forms embedding such an IPv4 -- needs an explicit allowlist entry."""
+    IPv6 forms embedding such an IPv4 -- needs an allowlist rule."""
     return not address_is_public(ip)
 
 
-def _allow_rule_matches(rule: OutboundAllowRule, host: str, port: int, addresses: Tuple[ipaddress._BaseAddress, ...]) -> bool:
-    if rule.port != port:
+def _plain_address(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
+    """An IPv4-mapped IPv6 address (::ffff:a.b.c.d) as the IPv4 it maps."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def _is_metadata_address(ip: ipaddress._BaseAddress) -> bool:
+    """Cloud-metadata endpoints, also in any IPv6 form embedding one."""
+    return ip in _METADATA_IPS or _embedded_ipv4(ip) in _METADATA_IPS
+
+
+def address_in_private_floor(ip: ipaddress._BaseAddress, *, allow_loopback: bool = False) -> bool:
+    """True for RFC 1918, CGNAT (100.64/10) and IPv6 ULA addresses (and, with
+    ``allow_loopback``, loopback) -- never a cloud-metadata address, even
+    one inside those ranges (100.100.100.200)."""
+    if _is_metadata_address(ip):
+        return False
+    plain = _plain_address(ip)
+    nets = _PRIVATE_FLOOR + (_LOOPBACK_NETS if allow_loopback else ())
+    return any(plain.version == net.version and plain in net for net in nets)
+
+
+def _allow_rule_matches(rule: OutboundAllowRule, host: str, port: int, addresses: Tuple[ipaddress._BaseAddress, ...],
+                        scheme: str = "") -> bool:
+    """Whether ``rule`` admits this target. Every rule also requires every
+    resolved address to be on the local-network floor (private, CGNAT, ULA;
+    loopback too for an explicit operator entry), so no entry -- host,
+    IP or CIDR -- can ever admit metadata, link-local, unspecified,
+    multicast or reserved space (F3)."""
+    if rule.port != port or (rule.scheme and rule.scheme != scheme):
+        return False
+    if not addresses or not all(address_in_private_floor(a, allow_loopback=not rule.implicit) for a in addresses):
         return False
     clean_host = _clean_host(host)
     if rule.kind == "host":
@@ -279,16 +368,79 @@ def _allow_rule_matches(rule: OutboundAllowRule, host: str, port: int, addresses
             return False
         return host_ip == rule.ip
     if rule.kind == "network" and rule.network is not None:
-        return bool(addresses) and all(((addr.ipv4_mapped if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped else addr) in rule.network) for addr in addresses)
+        return all(_plain_address(addr) in rule.network for addr in addresses)
     return False
 
 
-def _is_allowlisted(host: str, port: int, addresses: Tuple[ipaddress._BaseAddress, ...], policy: OutboundPolicy) -> bool:
-    return any(_allow_rule_matches(rule, host, port, addresses) for rule in policy.allow_rules)
+def _is_allowlisted(host: str, port: int, addresses: Tuple[ipaddress._BaseAddress, ...], policy: OutboundPolicy,
+                    scheme: str = "", trusted: Optional[OutboundAllowRule] = None) -> bool:
+    rules = policy.allow_rules + ((trusted,) if trusted is not None else ())
+    return any(_allow_rule_matches(rule, host, port, addresses, scheme) for rule in rules)
 
 
-def validate_outbound_url(url: str, *, policy: Optional[OutboundPolicy] = None) -> None:
-    policy = policy or current_outbound_policy()
+def allowlist_entry(url: str) -> str:
+    """The exact ``host:port`` BEETS_OUTBOUND_ALLOWLIST entry for ``url``
+    (IPv6 bracketed; userinfo, path, query and fragment dropped), or ""
+    for a URL that has no such entry. Never raises."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+        host = _clean_host(parsed.hostname or "")
+        if parsed.scheme.lower() not in _ALLOWED_SCHEMES or not host or any(ord(ch) <= 32 for ch in host):
+            return ""
+        port = _url_port(parsed)
+    except ValueError:
+        return ""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def implicit_rule_for_url(url: str) -> Optional[OutboundAllowRule]:
+    """The one exact scheme+host+port rule a service's configured URL
+    (PLEX_URL, LIDARR_URL, ...) earns for that service's own calls, or None
+    for a blank, malformed or credential-bearing URL. The rule only ever
+    admits addresses on the private floor (never loopback or metadata)."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+        scheme = parsed.scheme.lower()
+        host = _clean_host(parsed.hostname or "")
+        if scheme not in _ALLOWED_SCHEMES or not host or parsed.username or parsed.password:
+            return None
+        if any(ord(ch) <= 32 for ch in host):
+            return None
+        port = _url_port(parsed)
+    except ValueError:
+        return None
+    try:
+        return OutboundAllowRule(kind="ip", port=port, ip=ipaddress.ip_address(host), scheme=scheme, implicit=True)
+    except ValueError:
+        pass
+    if not _ALLOWLIST_HOSTNAME_RE.match(host):
+        return None
+    return OutboundAllowRule(kind="host", port=port, host=host, scheme=scheme, implicit=True)
+
+
+# The implicit rule of the provider call in progress (provider_boundary.opened
+# sets it around exactly one urlopen); a context variable, so it never leaks
+# into another thread's or another provider's request.
+_TRUSTED_RULE: "contextvars.ContextVar[Optional[OutboundAllowRule]]" = contextvars.ContextVar(
+    "beets_trusted_outbound_rule", default=None)
+
+
+@contextmanager
+def trusted_service_endpoint(rule: Optional[OutboundAllowRule]) -> Iterator[None]:
+    """Admit ``rule`` (from ``implicit_rule_for_url``) for the operator-path
+    requests made inside this block, and for nothing else."""
+    token = _TRUSTED_RULE.set(rule)
+    try:
+        yield
+    finally:
+        _TRUSTED_RULE.reset(token)
+
+
+def _check_operator_target(url: str, policy: OutboundPolicy,
+                           trusted: Optional[OutboundAllowRule] = None) -> Tuple[Tuple[ipaddress._BaseAddress, ...], int]:
+    """Validate an operator-path URL and return the addresses it may be
+    connected to and the port. The caller connects only to these (no second
+    lookup)."""
     parsed = urllib.parse.urlsplit(str(url or ""))
     scheme = parsed.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
@@ -296,24 +448,40 @@ def validate_outbound_url(url: str, *, policy: Optional[OutboundPolicy] = None) 
     if parsed.username or parsed.password:
         raise OutboundPolicyError("outbound URL credentials are not allowed")
     host = _clean_host(parsed.hostname or "")
-    if not host or any(ord(ch) < 32 for ch in host):
+    if not host or any(ord(ch) <= 32 for ch in host):
         raise OutboundPolicyError("outbound URL host is invalid")
-    port = _url_port(parsed)
+    try:
+        port = _url_port(parsed)
+    except ValueError as exc:
+        raise OutboundPolicyError("outbound URL port is invalid") from exc
     try:
         addresses = _resolve_host(host, port)
     except OutboundPolicyError:
         LOG.warning("blocked outbound request to unresolved host: %s", redact_url_for_log(url))
         raise
-    allowlisted = _is_allowlisted(host, port, addresses, policy)
-    if not allowlisted and _host_is_local_or_internal(host):
+    if any(_is_metadata_address(addr) for addr in addresses):
+        LOG.warning("blocked outbound request to a cloud-metadata address: %s", redact_url_for_log(url))
+        raise OutboundPolicyError("outbound host resolves to a cloud-metadata address")
+    if _is_allowlisted(host, port, addresses, policy, scheme, trusted):
+        return addresses, port
+    # An entry can only help when every address is on the floor (loopback
+    # included: explicit entries may name it).
+    entry = allowlist_entry(url) if all(address_in_private_floor(a, allow_loopback=True) for a in addresses) else ""
+    if _host_is_local_or_internal(host):
         LOG.warning("blocked outbound request to internal host: %s", redact_url_for_log(url))
-        raise OutboundPolicyError("outbound host is internal and not allowlisted")
-    prohibited = [addr for addr in addresses if _address_is_prohibited(addr)]
-    if prohibited and not allowlisted:
+        raise OutboundPolicyError("outbound host is internal and not allowlisted", entry=entry)
+    if not all(address_is_public(addr) for addr in addresses):
         LOG.warning("blocked outbound request to prohibited address: %s", redact_url_for_log(url))
-        raise OutboundPolicyError("outbound host resolves to a prohibited address")
-    if allowlisted:
-        return
+        raise OutboundPolicyError("outbound host resolves to a prohibited address", entry=entry)
+    return addresses, port
+
+
+def validate_outbound_url(url: str, *, policy: Optional[OutboundPolicy] = None,
+                          trusted: Optional[OutboundAllowRule] = None) -> None:
+    """Raise OutboundPolicyError unless the operator path may reach ``url``.
+    A check only: the connection itself is made by ``secure_urlopen``,
+    which validates and pins in one step."""
+    _check_operator_target(url, policy or current_outbound_policy(), trusted)
 
 
 def _request_url(req_or_url: Any) -> str:
@@ -332,19 +500,101 @@ def strip_cross_origin_sensitive_headers(req: urllib.request.Request, old_url: s
     return req
 
 
+def rule_names_origin(rule: OutboundAllowRule, url: str) -> bool:
+    """True when ``url``'s scheme, host and port are exactly ``rule``'s."""
+    try:
+        scheme, host, port = _origin(url)
+    except ValueError:
+        return False
+    if port != rule.port or (rule.scheme and scheme != rule.scheme):
+        return False
+    if rule.kind == "host":
+        return host == rule.host
+    try:
+        return rule.ip is not None and ipaddress.ip_address(host) == rule.ip
+    except ValueError:
+        return False
+
+
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def __init__(self, policy: Optional[OutboundPolicy] = None):
+    """Re-checks every redirect hop (the pinned handlers below also re-resolve,
+    re-check and re-pin it before connecting). A request admitted by a
+    service's implicit rule may only be redirected within that same origin
+    (``secure_urlopen`` drops the rule unless the first URL names it)."""
+
+    def __init__(self, policy: Optional[OutboundPolicy] = None, trusted: Optional[OutboundAllowRule] = None):
         self.policy = policy or current_outbound_policy()
+        self.trusted = trusted
         self.max_redirections = self.policy.max_redirects
         self.max_repeats = self.policy.max_redirects
         super().__init__()
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        validate_outbound_url(newurl, policy=self.policy)
+        if self.trusted is not None and not rule_names_origin(self.trusted, newurl):
+            LOG.warning("blocked cross-origin redirect from a configured service URL: %s",
+                        redact_url_for_log(req.full_url))
+            raise OutboundPolicyError("cross-origin redirect from a configured service URL is refused")
+        validate_outbound_url(newurl, policy=self.policy, trusted=self.trusted)
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is not None:
             strip_cross_origin_sensitive_headers(new_req, req.full_url, newurl)
         return new_req
+
+
+class _PinnedConnectionMixin:
+    """Connect to the validated addresses only (tried in resolver order) --
+    never to whatever a second DNS lookup of ``host`` would return (F2). The
+    original hostname stays ``self.host``, so urllib's Host header, TLS SNI
+    and certificate verification all use it."""
+
+    def __init__(self, host, port=None, *, bwm_addresses: Tuple[str, ...] = (), bwm_port: int = 0, **kwargs):
+        super().__init__(host, port, **kwargs)  # type: ignore[call-arg]
+        self._bwm_addresses = tuple(bwm_addresses)
+        self._bwm_port = int(bwm_port)
+        self._create_connection = self._bwm_create_connection
+
+    def _bwm_create_connection(self, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+        # Connect to the port that was validated, and refuse if http.client
+        # parsed the URL differently.
+        if address[1] != self._bwm_port:
+            raise OutboundPolicyError("outbound connection port does not match the validated port")
+        last_exc: Optional[OSError] = None
+        for ip in self._bwm_addresses:
+            try:
+                return socket.create_connection((ip, self._bwm_port), timeout, source_address)
+            except OSError as exc:
+                last_exc = exc
+        raise last_exc or OSError("no validated address to connect to")
+
+
+class _OperatorHTTPConnection(_PinnedConnectionMixin, http.client.HTTPConnection):
+    pass
+
+
+class _OperatorHTTPSConnection(_PinnedConnectionMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, policy: OutboundPolicy, trusted: Optional[OutboundAllowRule]):
+        super().__init__()
+        self._policy, self._trusted = policy, trusted
+
+    def http_open(self, req):
+        addresses, port = _check_operator_target(req.full_url, self._policy, self._trusted)
+        return self.do_open(functools.partial(_OperatorHTTPConnection, bwm_addresses=tuple(map(str, addresses)),
+                                              bwm_port=port), req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, policy: OutboundPolicy, trusted: Optional[OutboundAllowRule], context=None):
+        super().__init__(context=context)
+        self._policy, self._trusted = policy, trusted
+
+    def https_open(self, req):
+        addresses, port = _check_operator_target(req.full_url, self._policy, self._trusted)
+        return self.do_open(functools.partial(_OperatorHTTPSConnection, bwm_addresses=tuple(map(str, addresses)),
+                                              bwm_port=port), req, context=self._context)
 
 
 class OutboundDeadlineExceeded(TimeoutError):
@@ -421,12 +671,26 @@ class LimitedHTTPResponse:
 
 
 def secure_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *, cafile=None, capath=None, cadefault=False, context=None):
+    """The operator path (installed as ``urllib.request.urlopen``).
+
+    Each hop is resolved once, every answer checked, and the socket connected
+    to a checked address (no rebinding window, F2). Admitted: public
+    addresses; BEETS_OUTBOUND_ALLOWLIST entries; and, inside
+    ``trusted_service_endpoint``, the calling service's own configured URL
+    when it resolves to the private floor. HTTP(S)_PROXY is not used: a
+    proxy would make the connection to an address we never checked."""
     policy = current_outbound_policy()
     target = _request_url(url)
-    validate_outbound_url(target, policy=policy)
-    handlers: List[Any] = [SafeRedirectHandler(policy)]
-    if context is not None:
-        handlers.append(urllib.request.HTTPSHandler(context=context))
+    trusted = _TRUSTED_RULE.get()
+    if trusted is not None and not rule_names_origin(trusted, target):
+        trusted = None  # a redirect from elsewhere must not land on the trusted origin
+    validate_outbound_url(target, policy=policy, trusted=trusted)
+    handlers: List[Any] = [
+        urllib.request.ProxyHandler({}),
+        SafeRedirectHandler(policy, trusted),
+        _PinnedHTTPHandler(policy, trusted),
+        _PinnedHTTPSHandler(policy, trusted, context=context),
+    ]
     opener = urllib.request.build_opener(*handlers)
     effective_timeout = policy.timeout_seconds if timeout is socket._GLOBAL_DEFAULT_TIMEOUT else timeout
     response = opener.open(url, data=data, timeout=effective_timeout)
@@ -447,6 +711,12 @@ def install_secure_urllib() -> None:
             "operator-configured services will be refused until it is fixed. "
             "Use comma-separated host:port, IP:port, CIDR:port or [IPv6]:port entries.",
             problem,
+        )
+    for entry in outbound_allowlist_ignored():
+        LOG.error(
+            "BEETS_OUTBOUND_ALLOWLIST entry %s is ignored: a CIDR entry must lie inside the private "
+            "(10/8, 172.16/12, 192.168/16), CGNAT (100.64/10), IPv6 ULA (fc00::/7) or loopback ranges.",
+            entry,
         )
     setattr(urllib.request, _ORIGINAL_URLOPEN_ATTR, urllib.request.urlopen)
     urllib.request.urlopen = secure_urlopen
@@ -491,6 +761,9 @@ class PinnedTarget:
         return host if self.port == default else f"{host}:{self.port}"
 
 
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
 def _embedded_ipv4(ip: ipaddress._BaseAddress) -> Optional[ipaddress.IPv4Address]:
     if not isinstance(ip, ipaddress.IPv6Address):
         return None
@@ -511,6 +784,8 @@ def address_is_public(ip: ipaddress._BaseAddress) -> bool:
     benchmarking, documentation and any IPv6 form embedding a non-public
     IPv4 address (IPv4-mapped, 6to4, Teredo, NAT64)."""
     if ip in _METADATA_IPS or not ip.is_global or ip.is_multicast:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _IPV4_COMPATIBLE:  # deprecated ::a.b.c.d
         return False
     embedded = _embedded_ipv4(ip)
     if embedded is not None and (embedded in _METADATA_IPS or not embedded.is_global or embedded.is_multicast):

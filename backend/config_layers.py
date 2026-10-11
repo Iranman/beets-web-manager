@@ -70,8 +70,33 @@ HOST_KEYS = frozenset({
     "BEETS_WEB_BIND_ADDRESS",
 })
 
-# Pinned by every shipped Compose file's environment: block.
-DEPLOYMENT_KEYS = frozenset({"PUID", "PGID", "TZ", "WEBCONTROL_PORT"})
+# Operator-only: they run commands, name files the app reads or moves files
+# into, or control a security boundary. A web session must never be able to
+# change them (an XSS or a stolen session would otherwise widen its own
+# reach), so they are set only in the Compose/Docker environment. A value
+# saved by an earlier release is removed by the settings migration.
+OPERATOR_KEYS = frozenset({
+    "BEETS_OUTBOUND_ALLOWLIST",          # outbound network boundary (SSRF)
+    "BEETS_WEB_AUTH_DISABLED",           # turns authentication off
+    "BEETS_TRUSTED_PROXIES",             # whose X-Forwarded-For is believed
+    "BEETS_WEB_SESSION_COOKIE_SECURE",   # session cookie transport security
+    "BEETS_AUTH_RATE_LIMIT",             # login brute-force limits
+    "BEETS_AUTH_RATE_WINDOW",
+    "BEETS_AUTH_ACCOUNT_RATE_LIMIT",
+    "BEETS_AUTH_ACCOUNT_RATE_WINDOW",
+    "SPOTIFLAC_CMD",                     # command line that is executed
+    "YTDLP_JS_RUNTIMES",                 # may name an executable path (node:/path)
+    "YTDLP_COOKIE_FILE",                 # credential file path read by yt-dlp
+    "YTDLP_NETRC_FILE",                  # credential file path read by yt-dlp
+    "YTDLP_ALLOW_BROWSER_COOKIES",       # lets yt-dlp read browser credential stores
+    "SLSKD_API_KEY_FILE",                # file whose first line is sent to SLSKD_URL
+    "IMPORT_REVIEW_QUARANTINE_DIR",      # directory library files are moved into
+    "MUSIC_FORMAT_QUARANTINE_DIR",       # directory library files are moved into
+})
+
+# Pinned by every shipped Compose file's environment: block, plus the
+# operator-only keys above (same layer: Compose environment only).
+DEPLOYMENT_KEYS = frozenset({"PUID", "PGID", "TZ", "WEBCONTROL_PORT"}) | OPERATOR_KEYS
 
 # Container-side absolute paths (must match the Compose mount targets).
 CONTAINER_KEYS = frozenset({
@@ -111,25 +136,15 @@ APP_KEYS = frozenset({
     "BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS",
     "BEETS_VERSION_PROBE_TIMEOUT_SECONDS",
     "BEETS_WEB_USERNAME",
-    "BEETS_WEB_AUTH_DISABLED",
     "BEETS_WEB_AUTH_MIN_LENGTH",
     "BEETS_WEB_PASSWORD_MIN_LENGTH",
-    "BEETS_TRUSTED_PROXIES",
-    "BEETS_WEB_SESSION_COOKIE_SECURE",
-    "BEETS_AUTH_RATE_LIMIT",
-    "BEETS_AUTH_RATE_WINDOW",
-    "BEETS_AUTH_ACCOUNT_RATE_LIMIT",
-    "BEETS_AUTH_ACCOUNT_RATE_WINDOW",
     "BEETS_OUTBOUND_TIMEOUT_SECONDS",
     "BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS",
     "BEETS_OUTBOUND_MAX_REDIRECTS",
     "BEETS_OUTBOUND_MAX_RESPONSE_BYTES",
-    "BEETS_OUTBOUND_ALLOWLIST",
     "BEETS_WEB_URL",
     "AI_BASE_URL",
     "AI_MODEL",
-    "IMPORT_REVIEW_QUARANTINE_DIR",
-    "MUSIC_FORMAT_QUARANTINE_DIR",
     "PLEX_URL",
     "PLEX_MUSIC_SECTION",
     "LIDARR_URL",
@@ -143,15 +158,9 @@ APP_KEYS = frozenset({
     "PLAYLIST_AUTO_SYNC_INTERVAL",
     "PLAYLIST_DOWNLOAD_METHODS",
     "PLAYLIST_MIN_DOWNLOAD_SECONDS",
-    "YTDLP_JS_RUNTIMES",
     "YTDLP_PO_PROVIDER_URL",
-    "YTDLP_COOKIE_FILE",
-    "YTDLP_ALLOW_BROWSER_COOKIES",
-    "YTDLP_NETRC_FILE",
     "SPOTIFLAC_SERVICES",
-    "SPOTIFLAC_CMD",
     "SPOTIFLAC_AUTO_INSTALL",
-    "SLSKD_API_KEY_FILE",
 })
 
 SECRET_KEYS = frozenset({
@@ -187,8 +196,8 @@ _RESTART_APP_KEYS = frozenset({
     "BEETS_WEB_SESSION_COOKIE_SECURE",
     "BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS",
     "DEMO_MODE",
-    "PLEX_URL",
-    "PLEX_TOKEN",
+    # PLEX_URL/PLEX_TOKEN are absent on purpose: plex_service._plex_settings
+    # reads os.environ on every call, so they apply live.
     "LIDARR_URL",
     "LIDARR_API_KEY",
     "SLSKD_URL",
@@ -243,6 +252,26 @@ def is_loadable(name: str) -> bool:
 def is_saveable(name: str) -> bool:
     """True when the Settings page may save ``name``."""
     return classify(name) in LOADABLE_LAYERS
+
+
+# Names that had a non-blank value in the process environment before the
+# saved settings file was loaded: values Docker/Compose set. Such a value
+# wins over a saved one at every restart (load_saved_env_into_environ never
+# overrides it), so saving one from the Settings page would apply until the
+# next restart and then silently revert. None until the boot loader records it.
+_BOOT_ENV_PINNED: Optional[frozenset] = None
+
+
+def record_boot_environment(environ: Optional[Dict[str, str]] = None) -> None:
+    """Snapshot the Docker-set names; called once, before the saved file loads."""
+    global _BOOT_ENV_PINNED
+    env = os.environ if environ is None else environ
+    _BOOT_ENV_PINNED = frozenset(k for k, v in env.items() if str(v or "").strip())
+
+
+def pinned_by_boot_environment(name: str) -> bool:
+    """True when Docker/Compose set ``name`` (non-blank) at boot."""
+    return _BOOT_ENV_PINNED is not None and name in _BOOT_ENV_PINNED
 
 
 # ── Container paths ──────────────────────────────────────────────────────────

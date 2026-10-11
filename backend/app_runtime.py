@@ -89,6 +89,9 @@ def _load_persisted_setup_env_at_boot() -> None:
     from backend import config_layers
 
     env_file = _setup_env_file_path()
+    # Before anything from the saved file enters os.environ: the names
+    # Docker/Compose set, which the Settings page must refuse to save.
+    config_layers.record_boot_environment()
     config_layers.migrate_saved_env_file(env_file)
     config_layers.load_saved_env_into_environ(
         env_file,

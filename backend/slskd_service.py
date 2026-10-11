@@ -52,6 +52,12 @@ def _slskd_req(method: str, path: str, body=None) -> Any:
     except urllib.error.HTTPError as e:
         # Never echo the provider body: it can carry tokens, paths or peer data.
         raise RuntimeError(f"slskd {method} /{path} → HTTP {e.code}") from None
+    except Exception as e:
+        block = provider_boundary.outbound_block(e, "slskd")
+        if block:
+            # Fixed text naming the allowlist entry, wherever slskd errors show.
+            raise RuntimeError(block["error"]) from None
+        raise
 
 
 def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:

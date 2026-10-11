@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
+from backend import config_layers
+from backend.security import OutboundPolicyError
 import json, math, os, re, socket, threading, time, unicodedata, uuid
 import urllib.error, urllib.parse, urllib.request
 from collections import Counter
@@ -160,6 +162,11 @@ def _plex_settings() -> Dict[str, str]:
     return {"url": url, "token": token, "section": section,
             "plex_music_roots": plex_roots, "beets_music_root": beets_root,
             "plex_scan_timeout": scan_timeout, "plex_index_timeout": index_timeout}
+
+
+# The Plex endpoint the outbound policy trusts for Plex calls is exactly the
+# one _plex_settings() resolves (env, then the Beets config.yaml stanza).
+provider_boundary.register_configured_url("plex", lambda: _plex_settings().get("url", ""))
 
 
 def _plex_split_roots(value: str) -> List[str]:
@@ -1354,13 +1361,42 @@ def _plex_track_file(track: Dict[str, Any]) -> str:
     return paths[0] if paths else ""
 
 
+def _plex_failure(exc: BaseException, url: Optional[str] = None) -> Dict[str, str]:
+    """A fixed, user-facing description of a failed Plex call:
+    ``{"reason", "error", "hint"}``. Never the exception text (it can carry
+    paths or provider detail); ``hint`` names only host:port."""
+    block = provider_boundary.outbound_block(exc, "plex", url)
+    if block:
+        return block
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            return {"reason": "auth_failed", "error": "Plex token is invalid or expired.", "hint": ""}
+        return {"reason": "http_error", "error": f"Plex returned HTTP {int(exc.code)}.", "hint": ""}
+    if _plex_timeout_error(exc):
+        return {"reason": "timeout", "error": "Plex did not answer in time.", "hint": ""}
+    if isinstance(exc, (urllib.error.URLError, ConnectionError, socket.gaierror, OutboundPolicyError)):
+        return {"reason": "unreachable", "error": "Could not reach Plex.", "hint": ""}
+    return {"reason": "plex_error", "error": "The Plex operation failed; see the server log.", "hint": ""}
+
+
+def _plex_configured(settings: Optional[Dict[str, str]] = None) -> bool:
+    """Both a Plex URL and a token resolve (env, then the Beets config)."""
+    settings = settings if settings is not None else _plex_settings()
+    return bool(settings.get("url") and settings.get("token"))
+
+
+def _plex_display_url(url: str) -> str:
+    """``url`` for API responses: no user:pass@, query or fragment."""
+    return config_layers.redact_url_userinfo(url) if url else ""
+
+
 def _plex_status_payload(force: bool = False) -> Dict[str, Any]:
     settings = _plex_settings()
     payload = {
         "ok": True,
-        "configured": bool(settings.get("url") and settings.get("token")),
+        "configured": _plex_configured(settings),
         "connected": False,
-        "url": settings.get("url") or "",
+        "url": _plex_display_url(settings.get("url") or ""),
         "section_preference": settings.get("section") or "",
         "beets_music_root": settings.get("beets_music_root") or "",
         "plex_music_root": settings.get("plex_music_roots") or "",
@@ -1371,9 +1407,12 @@ def _plex_status_payload(force: bool = False) -> Dict[str, Any]:
         "section_title": None,
         "section_locations": [],
         "error": None,
+        "reason": None,
+        "hint": "",
     }
     if not payload["configured"]:
         payload["error"] = "Plex URL/token is not configured"
+        payload["reason"] = "not_configured"
         return payload
     try:
         machine_id, section_key, section_title = _plex_find_music_section(force=force)
@@ -1386,13 +1425,12 @@ def _plex_status_payload(force: bool = False) -> Dict[str, Any]:
         })
         if not section_key:
             payload["error"] = "No Plex music library section found"
-    except urllib.error.HTTPError as ex:
-        payload["error"] = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
+            payload["reason"] = "no_music_section"
     except Exception as ex:
-        _app_logger.warning("Plex status check failed: %s", type(ex).__name__)
-        payload["error"] = "Could not reach Plex."
+        failure = _plex_failure(ex)
+        _app_logger.warning("Plex status check failed: %s (%s)", failure["reason"], type(ex).__name__)
+        payload.update(failure)
     return payload
-
 
 def _playlist_status_id(track: Dict[str, Any]) -> str:
     artist = _norm(track.get("artist") or track.get("query_artist") or "")

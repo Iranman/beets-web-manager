@@ -7,6 +7,7 @@ import copy, os, re, threading
 from typing import Any, Dict, List
 from flask import jsonify, request
 import backend.job_contract as job_contract
+import backend.provider_boundary as provider_boundary
 from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses
 from backend.acquisition_service import _DOWNLOAD_METHODS, _acq_download_all_record, _acq_download_payload, _acq_item_mbid, _acq_start_download_job, _acq_trim_batch_log, _build_acquisition_queue_payload, _load_acq_download_all_last, _qbit_hardlink_missing_impl, _qbit_status_payload, _save_acq_download_all_last, start_album_download
 from backend.app_runtime import QBIT_CATEGORY, QBIT_FILTER, QBIT_URL, YTDLP_ALLOW_BROWSER_COOKIES, _app_logger, _s, _ytdlp_ready, jobs
@@ -424,6 +425,9 @@ def qbit_hardlink_missing():
             )
         except Exception as ex:
             _app_logger.warning("qBittorrent hardlink-missing dry-run failed: %s", type(ex).__name__)
+            block = provider_boundary.outbound_block(ex, "qbittorrent")
+            if block:
+                return jsonify({"ok": False, **block, "log": log}), 502
             return jsonify({"ok": False, "error": "Could not run hardlink-missing scan.", "log": log}), 500
         return jsonify({
             "ok": True,

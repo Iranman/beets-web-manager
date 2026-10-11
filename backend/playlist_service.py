@@ -26,7 +26,7 @@ from backend.matching_service import _MB_VARIOUS_ARTISTS_ID, _artist_folder_name
 from backend.app_runtime import jobs
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
 from backend.serializers import _json_from_flask_response
-from backend.plex_service import _plex_timeout_error, _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
+from backend.plex_service import _plex_configured, _plex_failure, _plex_timeout_error, _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
 
 # ── ARCH-001 extracted code ──
 
@@ -1715,7 +1715,7 @@ def _plex_delete_playlist_by_rating_key(rating_key: str, log=None, *, raise_erro
         return 0
     except Exception as exc:
         if log is not None:
-            log.append(f"  [plex] Could not delete playlist by ratingKey {key!r}: {exc}")
+            log.append(f"  [plex] Could not delete playlist by ratingKey {key!r}: {_plex_failure(exc)['error']}")
         if raise_errors:
             raise
         return 0
@@ -2447,7 +2447,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         "matched_track_ids": [],
         "summary_message": "",
     }
-    if sync_plex and _plex_settings().get("token"):
+    if sync_plex and _plex_configured(_plex_settings()):
         try:
             machine_id, sec, section_title = _plex_find_music_section()
             if sec:
@@ -2578,9 +2578,10 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                             plex["issue_reason"] = "playlist verification count was lower than matched tracks"
                             plex["action_needed"] = "Open Plex and refresh the playlist if the count does not update"
                     except Exception as exc:
-                        plex["verification_error"] = str(exc)
+                        plex["verification_error"] = _plex_failure(exc)["error"]
+                        _app_logger.warning("Plex playlist verification failed: %s", type(exc).__name__)
                         if log is not None:
-                            log.append(f"  [plex] Playlist verification failed: {exc}")
+                            log.append(f"  [plex] Playlist verification failed: {plex['verification_error']}")
                     if log is not None:
                         log.append(
                             f"  [plex] Playlist partially synced ({len(keys)}/{len(items)} matched; "
@@ -2603,10 +2604,20 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                 plex["issue_reason"] = "Plex music section not found"
                 plex["action_needed"] = "Configure plex_music_section"
         except Exception as exc:
-            plex["error"] = str(exc)
+            # Fixed text and a reason code only: the manifest and job log
+            # reach API responses, so no exception text goes there (#8).
+            failure = _plex_failure(exc)
+            plex["error"] = failure["error"]
+            plex["reason"] = failure["reason"]
+            if failure["hint"]:
+                plex["hint"] = failure["hint"]
+            _app_logger.warning("Plex playlist sync failed: %s (%s)", failure["reason"], type(exc).__name__)
             plex["status"] = "failed"
             plex["issue_reason"] = "filesystem or Plex API operation failed"
             plex["action_needed"] = "Check the Plex job log"
+            if failure["reason"] == provider_boundary.OUTBOUND_NOT_ALLOWLISTED:
+                plex["issue_reason"] = "Plex is blocked by the outbound network policy"
+                plex["action_needed"] = failure["hint"] or plex["action_needed"]
             if not plex.get("created") and _plex_timeout_error(exc):
                 # IA-02: a create that timed out is never re-sent; Plex may
                 # or may not have applied it.
@@ -2615,9 +2626,9 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                     "Plex may have created the playlist anyway; check Plex for a duplicate before syncing again"
                 )
             if log is not None:
-                log.append(f"  [plex] Playlist sync error: {exc}")
+                log.append(f"  [plex] Playlist sync error: {plex['error']}")
 
-    if sync_plex and _plex_settings().get("token") and (plex.get("error") or not plex.get("created")):
+    if sync_plex and _plex_configured(_plex_settings()) and (plex.get("error") or not plex.get("created")):
         try:
             target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
             existing_keys, found_rkey, is_ambig, is_stale = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
@@ -2637,7 +2648,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                 log.append(f"  [plex] Current Plex playlist count: {len(existing_keys)}")
         except Exception as exc:
             if not plex.get("verification_error"):
-                plex["verification_error"] = str(exc)
+                plex["verification_error"] = _plex_failure(exc)["error"]
 
     if sync_plex:
         latest_manifest = _playlist_read_manifest(name, playlist_id=pid) or dict(manifest)
