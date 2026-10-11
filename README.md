@@ -270,7 +270,7 @@ Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key,
 Passwords must be at least 16 characters by default (`BEETS_WEB_PASSWORD_MIN_LENGTH`) and must not be obvious placeholders. Long passphrases are supported; uppercase letters, numbers, and symbols are allowed but not mandatory.
 
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
-`GET /api/setup/status` calls the stock Beets `webmanager` integration plugin for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.
+`GET /api/setup/status` calls the stock Beets `webmanager` integration plugin for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity, and `GET /api/plex/status` for the Plex library. A failed test returns a `reason`: `outbound_not_allowlisted` means Web Manager's outbound network policy refused the address (the message names the `host:port` to set or allow), while `unreachable`, `timeout` and `auth_failed` are real network or credential problems. See [Troubleshooting](docs/TROUBLESHOOTING.md) sections 15 and 16.
 
 ## Demo Mode
 
