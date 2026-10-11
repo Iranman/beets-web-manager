@@ -437,9 +437,10 @@ def trusted_service_endpoint(rule: Optional[OutboundAllowRule]) -> Iterator[None
 
 
 def _check_operator_target(url: str, policy: OutboundPolicy,
-                           trusted: Optional[OutboundAllowRule] = None) -> Tuple[ipaddress._BaseAddress, ...]:
+                           trusted: Optional[OutboundAllowRule] = None) -> Tuple[Tuple[ipaddress._BaseAddress, ...], int]:
     """Validate an operator-path URL and return the addresses it may be
-    connected to. The caller connects only to these (no second lookup)."""
+    connected to and the port. The caller connects only to these (no second
+    lookup)."""
     parsed = urllib.parse.urlsplit(str(url or ""))
     scheme = parsed.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
@@ -462,7 +463,7 @@ def _check_operator_target(url: str, policy: OutboundPolicy,
         LOG.warning("blocked outbound request to a cloud-metadata address: %s", redact_url_for_log(url))
         raise OutboundPolicyError("outbound host resolves to a cloud-metadata address")
     if _is_allowlisted(host, port, addresses, policy, scheme, trusted):
-        return addresses
+        return addresses, port
     # An entry can only help when every address is on the floor (loopback
     # included: explicit entries may name it).
     entry = allowlist_entry(url) if all(address_in_private_floor(a, allow_loopback=True) for a in addresses) else ""
@@ -472,7 +473,7 @@ def _check_operator_target(url: str, policy: OutboundPolicy,
     if not all(address_is_public(addr) for addr in addresses):
         LOG.warning("blocked outbound request to prohibited address: %s", redact_url_for_log(url))
         raise OutboundPolicyError("outbound host resolves to a prohibited address", entry=entry)
-    return addresses
+    return addresses, port
 
 
 def validate_outbound_url(url: str, *, policy: Optional[OutboundPolicy] = None,
@@ -518,7 +519,8 @@ def rule_names_origin(rule: OutboundAllowRule, url: str) -> bool:
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-checks every redirect hop (the pinned handlers below also re-resolve,
     re-check and re-pin it before connecting). A request admitted by a
-    service's implicit rule may only be redirected within that same origin."""
+    service's implicit rule may only be redirected within that same origin
+    (``secure_urlopen`` drops the rule unless the first URL names it)."""
 
     def __init__(self, policy: Optional[OutboundPolicy] = None, trusted: Optional[OutboundAllowRule] = None):
         self.policy = policy or current_outbound_policy()
@@ -528,8 +530,7 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         super().__init__()
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if (self.trusted is not None and rule_names_origin(self.trusted, req.full_url)
-                and _origin(newurl) != _origin(req.full_url)):
+        if self.trusted is not None and not rule_names_origin(self.trusted, newurl):
             LOG.warning("blocked cross-origin redirect from a configured service URL: %s",
                         redact_url_for_log(req.full_url))
             raise OutboundPolicyError("cross-origin redirect from a configured service URL is refused")
@@ -546,16 +547,21 @@ class _PinnedConnectionMixin:
     original hostname stays ``self.host``, so urllib's Host header, TLS SNI
     and certificate verification all use it."""
 
-    def __init__(self, host, port=None, *, bwm_addresses: Tuple[str, ...] = (), **kwargs):
+    def __init__(self, host, port=None, *, bwm_addresses: Tuple[str, ...] = (), bwm_port: int = 0, **kwargs):
         super().__init__(host, port, **kwargs)  # type: ignore[call-arg]
         self._bwm_addresses = tuple(bwm_addresses)
+        self._bwm_port = int(bwm_port)
         self._create_connection = self._bwm_create_connection
 
     def _bwm_create_connection(self, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+        # Connect to the port that was validated, and refuse if http.client
+        # parsed the URL differently.
+        if address[1] != self._bwm_port:
+            raise OutboundPolicyError("outbound connection port does not match the validated port")
         last_exc: Optional[OSError] = None
         for ip in self._bwm_addresses:
             try:
-                return socket.create_connection((ip, address[1]), timeout, source_address)
+                return socket.create_connection((ip, self._bwm_port), timeout, source_address)
             except OSError as exc:
                 last_exc = exc
         raise last_exc or OSError("no validated address to connect to")
@@ -575,8 +581,9 @@ class _PinnedHTTPHandler(urllib.request.HTTPHandler):
         self._policy, self._trusted = policy, trusted
 
     def http_open(self, req):
-        addresses = tuple(str(a) for a in _check_operator_target(req.full_url, self._policy, self._trusted))
-        return self.do_open(functools.partial(_OperatorHTTPConnection, bwm_addresses=addresses), req)
+        addresses, port = _check_operator_target(req.full_url, self._policy, self._trusted)
+        return self.do_open(functools.partial(_OperatorHTTPConnection, bwm_addresses=tuple(map(str, addresses)),
+                                              bwm_port=port), req)
 
 
 class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
@@ -585,9 +592,9 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         self._policy, self._trusted = policy, trusted
 
     def https_open(self, req):
-        addresses = tuple(str(a) for a in _check_operator_target(req.full_url, self._policy, self._trusted))
-        return self.do_open(functools.partial(_OperatorHTTPSConnection, bwm_addresses=addresses), req,
-                            context=self._context)
+        addresses, port = _check_operator_target(req.full_url, self._policy, self._trusted)
+        return self.do_open(functools.partial(_OperatorHTTPSConnection, bwm_addresses=tuple(map(str, addresses)),
+                                              bwm_port=port), req, context=self._context)
 
 
 class OutboundDeadlineExceeded(TimeoutError):
@@ -673,8 +680,10 @@ def secure_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *, ca
     when it resolves to the private floor. HTTP(S)_PROXY is not used: a
     proxy would make the connection to an address we never checked."""
     policy = current_outbound_policy()
-    trusted = _TRUSTED_RULE.get()
     target = _request_url(url)
+    trusted = _TRUSTED_RULE.get()
+    if trusted is not None and not rule_names_origin(trusted, target):
+        trusted = None  # a redirect from elsewhere must not land on the trusted origin
     validate_outbound_url(target, policy=policy, trusted=trusted)
     handlers: List[Any] = [
         urllib.request.ProxyHandler({}),
@@ -752,6 +761,9 @@ class PinnedTarget:
         return host if self.port == default else f"{host}:{self.port}"
 
 
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
 def _embedded_ipv4(ip: ipaddress._BaseAddress) -> Optional[ipaddress.IPv4Address]:
     if not isinstance(ip, ipaddress.IPv6Address):
         return None
@@ -772,6 +784,8 @@ def address_is_public(ip: ipaddress._BaseAddress) -> bool:
     benchmarking, documentation and any IPv6 form embedding a non-public
     IPv4 address (IPv4-mapped, 6to4, Teredo, NAT64)."""
     if ip in _METADATA_IPS or not ip.is_global or ip.is_multicast:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _IPV4_COMPATIBLE:  # deprecated ::a.b.c.d
         return False
     embedded = _embedded_ipv4(ip)
     if embedded is not None and (embedded in _METADATA_IPS or not embedded.is_global or embedded.is_multicast):

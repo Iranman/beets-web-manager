@@ -193,6 +193,21 @@ class RebindingAndRedirectTests(_TrustBase):
             self.fetch("plex", "http://plex.test:32400/start")
         self.assertEqual(len(net.connected), 1)
 
+    def test_redirect_from_elsewhere_into_the_trusted_origin_is_refused(self):
+        # QA F1: the first URL is not the configured origin, so no hop gets its trust.
+        net = _Net(self, {"plex.test": ["192.168.0.250"], "pub.example.test": ["93.184.216.34"]})
+        net.server.redirects["/start"] = "http://plex.test:32400/next"
+        with self.assertRaises(OutboundPolicyError):
+            self.fetch("plex", "http://pub.example.test/start")
+        self.assertEqual([c[0] for c in net.connected], ["93.184.216.34"])
+
+    def test_connection_uses_only_the_validated_port(self):
+        # security N4: a port http.client parsed differently is refused.
+        conn = security._OperatorHTTPConnection("plex.test", 32400, bwm_addresses=("192.168.0.250",),
+                                                bwm_port=32401)
+        with self.assertRaises(OutboundPolicyError):
+            conn._create_connection(("plex.test", 32400), 5)
+
     def test_same_origin_redirect_from_trusted_endpoint_is_followed(self):
         net = _Net(self, {"plex.test": ["192.168.0.250"]})
         net.server.redirects["/start"] = "/next"
@@ -268,6 +283,11 @@ class ExplicitRuleFloorTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def test_ipv4_compatible_ipv6_is_not_public(self):
+        # security N3: deprecated ::a.b.c.d forms (here ::127.0.0.1)
+        for ip in ("::7f00:1", "::a9fe:a9fe", "::808:808"):
+            self.assertFalse(security.address_is_public(ipaddress.ip_address(ip)), ip)
+
     def test_malformed_or_credentialed_configured_urls_earn_no_rule(self):
         for url in ("", "plex", "ftp://plex.test:21", "http://u:p@plex.test:32400", "http://plex.test:99999",
                     "http://[bad", "http://", "http://a b:80", None):

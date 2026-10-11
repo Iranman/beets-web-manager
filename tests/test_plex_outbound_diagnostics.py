@@ -216,12 +216,16 @@ class PlexUrlSaveValidationTests(_StubSetup):
 
     def test_credentials_query_and_fragment_are_refused_without_echo(self):
         for url in (f"http://admin:{TOKEN}@plex.lan:32400", f"http://plex.lan:32400/?X-Plex-Token={TOKEN}",
-                    "http://plex.lan:32400#x", "http://plex.lan:32400?", "plex.lan:32400", "ftp://plex.lan"):
+                    "http://plex.lan:32400#x", "http://plex.lan:32400?", "plex.lan:32400", "ftp://plex.lan",
+                    # security review N1/N2: NFKC userinfo (urlsplit raises), ;params, out-of-range ports
+                    f"http://admin:{TOKEN}＠plex.lan:32400", f"http://plex.lan:32400/;X-Plex-Token={TOKEN}",
+                    "http://plex.lan:99999", "http://plex.lan:0"):
             with self.subTest(url=url):
                 resp = self.save(url)
                 self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
                 self.assertEqual(resp.get_json()["error"], self.module.PLEX_URL_INVALID_MESSAGE)
                 self.assertNotIn(TOKEN, resp.get_data(as_text=True))
+                self.assertNotIn(url, resp.get_data(as_text=True))
                 self.assertNotIn("PLEX_URL", self.env_file.read_text(encoding="utf-8"))
 
     def test_plain_url_and_clearing_still_save(self):

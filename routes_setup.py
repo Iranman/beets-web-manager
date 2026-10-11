@@ -1676,9 +1676,15 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
             # a URL carrying credentials or a ?X-Plex-Token= query would be
             # echoed by status APIs and break every request path built on it.
             # The constant message never echoes the value.
-            parts = urllib.parse.urlsplit(value.strip())
-            if (config_layers.url_has_userinfo(value) or parts.query or parts.fragment or "?" in value
-                    or parts.scheme.lower() not in ("http", "https") or not parts.hostname):
+            try:
+                parts = urllib.parse.urlparse(value.strip())
+                port = parts.port
+                invalid = (config_layers.url_has_userinfo(value) or parts.query or parts.fragment or "?" in value
+                           or parts.params or parts.scheme.lower() not in ("http", "https") or not parts.hostname
+                           or (port is not None and not 1 <= port <= 65535))
+            except ValueError:  # e.g. a fullwidth "＠" in the netloc, or a port out of range
+                invalid = True
+            if invalid:
                 raise ValueError(PLEX_URL_INVALID_MESSAGE)
     if updates.get("BEETS_WEB_PASSWORD"):
         unmet = _password_requirements_unmet(updates["BEETS_WEB_PASSWORD"])
