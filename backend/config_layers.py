@@ -196,8 +196,8 @@ _RESTART_APP_KEYS = frozenset({
     "BEETS_WEB_SESSION_COOKIE_SECURE",
     "BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS",
     "DEMO_MODE",
-    "PLEX_URL",
-    "PLEX_TOKEN",
+    # PLEX_URL/PLEX_TOKEN are absent on purpose: plex_service._plex_settings
+    # reads os.environ on every call, so they apply live.
     "LIDARR_URL",
     "LIDARR_API_KEY",
     "SLSKD_URL",

@@ -286,6 +286,14 @@ class HelperTests(unittest.TestCase):
                          "add x.test:443 to BEETS_OUTBOUND_ALLOWLIST")
         self.assertEqual(provider_boundary.allowlist_hint("not a url", "plex"), "")
 
+    def test_allowlist_hint_omits_the_setting_when_the_url_already_is_it(self):
+        with mock.patch.dict(provider_boundary._CONFIGURED_URL_RESOLVERS, {"plex": lambda: "http://Plex.Test:32400/"}):
+            self.assertEqual(provider_boundary.allowlist_hint("http://plex.test:32400/identity", "plex"),
+                             "add plex.test:32400 to BEETS_OUTBOUND_ALLOWLIST")
+            for other in ("https://plex.test:32400/", "http://plex.test:32401/", "http://other.test:32400/"):
+                with self.subTest(url=other):
+                    self.assertTrue(provider_boundary.allowlist_hint(other, "plex").endswith(" or set PLEX_URL to it"))
+
     def test_every_operator_provider_has_a_configured_url_setting(self):
         for provider in ("plex", "lidarr", "slskd", "qbittorrent", "ytdlp-po", "ai"):
             self.assertIn(provider, provider_boundary.CONFIGURED_URL_SETTINGS)

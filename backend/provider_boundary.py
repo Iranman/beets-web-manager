@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, Optional
 
 from backend.security import (OutboundPolicyError, allowlist_entry, implicit_rule_for_url, open_public_url,
-                              trusted_service_endpoint)
+                              rule_names_origin, trusted_service_endpoint)
 
 
 class ProviderOutcome(str, enum.Enum):
@@ -459,6 +459,11 @@ def allowlist_hint(url: str, provider: Optional[str] = None) -> str:
     if not entry:
         return ""
     setting = CONFIGURED_URL_SETTINGS.get(provider or "")
+    if setting:
+        # Setting the service URL to the URL it already is would not help.
+        rule = implicit_rule_for_url(configured_url(provider or ""))
+        if rule is not None and rule_names_origin(rule, url):
+            setting = ""
     return f"add {entry} to BEETS_OUTBOUND_ALLOWLIST" + (f" or set {setting} to it" if setting else "")
 
 
@@ -483,11 +488,8 @@ def outbound_block(exc: BaseException, provider: str, url: Optional[str] = None)
     from the exception text, so it is safe to return from an API."""
     if not _not_allowlisted(exc):
         return None
-    configured = configured_url(provider)
-    target = configured if url is None else url
-    # Suggest setting the service URL only when it is not already that URL.
-    same = bool(configured) and allowlist_entry(target) == allowlist_entry(configured)
-    hint = allowlist_hint(target, None if same else provider)
+    target = configured_url(provider) if url is None else url
+    hint = allowlist_hint(target, provider)
     name = PROVIDER_DISPLAY_NAMES.get(provider, "The service")
     error = f"{name} is blocked by the outbound network policy."
     if hint:

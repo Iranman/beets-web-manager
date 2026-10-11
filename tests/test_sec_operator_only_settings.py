@@ -34,6 +34,13 @@ class OperatorOnlyClassificationTests(unittest.TestCase):
                 self.assertFalse(cl.is_loadable(key))
         self.assertFalse(cl.OPERATOR_KEYS & cl.APP_KEYS)
 
+    def test_plex_url_and_token_apply_live(self):
+        # plex_service._plex_settings reads os.environ on every call.
+        for key in ("PLEX_URL", "PLEX_TOKEN"):
+            self.assertEqual(cl.apply_mode(key), cl.APPLY_LIVE, key)
+        for key in ("LIDARR_URL", "SLSKD_URL", "QBITTORRENT_URL", "YTDLP_PO_PROVIDER_URL"):  # import-time constants
+            self.assertEqual(cl.apply_mode(key), cl.APPLY_RESTART, key)
+
     def test_service_urls_stay_web_editable(self):
         for key in ("PLEX_URL", "LIDARR_URL", "SLSKD_URL", "QBITTORRENT_URL", "AI_BASE_URL", "YTDLP_PO_PROVIDER_URL"):
             self.assertTrue(cl.is_saveable(key), key)

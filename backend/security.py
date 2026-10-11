@@ -499,7 +499,7 @@ def strip_cross_origin_sensitive_headers(req: urllib.request.Request, old_url: s
     return req
 
 
-def _rule_names_origin(rule: OutboundAllowRule, url: str) -> bool:
+def rule_names_origin(rule: OutboundAllowRule, url: str) -> bool:
     """True when ``url``'s scheme, host and port are exactly ``rule``'s."""
     try:
         scheme, host, port = _origin(url)
@@ -528,7 +528,7 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         super().__init__()
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if (self.trusted is not None and _rule_names_origin(self.trusted, req.full_url)
+        if (self.trusted is not None and rule_names_origin(self.trusted, req.full_url)
                 and _origin(newurl) != _origin(req.full_url)):
             LOG.warning("blocked cross-origin redirect from a configured service URL: %s",
                         redact_url_for_log(req.full_url))
