@@ -63,10 +63,12 @@ class _ProbeHarness(unittest.TestCase):
         app_module._migrate_or_initialize_setup_state()
         self.assertEqual(app_module._first_run_setup_required(), not self.claimed)
         self.sent = []
+        self.trust = []
 
         @contextlib.contextmanager
         def fake_opened(provider, req, **_kw):
             self.sent.append((provider, req.full_url, {k.lower(): v for k, v in req.header_items()}))
+            self.trust.append(_kw.get("trust_configured", True))
 
             class _Resp:
                 def read(self, *_a):
@@ -123,6 +125,14 @@ class FirstRunAnonymousProbeTests(_ProbeHarness):
         self.assertEqual(resp.get_json()["status"], "not_configured")
         self.assertEqual(self.sent, [])
 
+    def test_typed_urls_never_get_the_configured_urls_outbound_trust(self):
+        # T1: the configured PLEX_URL / AI_BASE_URL is implicitly trusted by
+        # the outbound policy; a first-run caller's own URL must not be.
+        self.post("/api/setup/test/plex", {"url": "http://192.168.9.9:32400", "token": "body-token"})
+        self.post("/api/setup/test/ai", {"base_url": "http://192.168.9.9:8080/v1", "api_key": "body-key"})
+        self.assertEqual([s[0] for s in self.sent], ["plex", "ai"])
+        self.assertEqual(self.trust, [False, False])
+
     def test_plex_configured_url_still_needs_body_token_anonymously(self):
         resp = self.post("/api/setup/test/plex", {})
         self.assertEqual(resp.get_json()["status"], "not_configured")
@@ -176,6 +186,12 @@ class ClaimedAuthenticatedProbeTests(_ProbeHarness):
         self.assertTrue(resp.get_json()["ok"])
         self.assertEqual(self.sent[0][1], "http://plex.example:32400/library/sections")
         self.assertEqual(self.sent[0][2].get("x-plex-token"), _STORED_PLEX)
+        self.assertEqual(self.trust, [True])
+
+    def test_same_endpoint_typed_url_keeps_configured_trust(self):
+        self.post("/api/setup/test/plex", {"url": "http://PLEX.example:32400/", "token": "t"}, auth=True)
+        self.post("/api/setup/test/plex", {"url": "http://plex.example:32401", "token": "t"}, auth=True)
+        self.assertEqual(self.trust, [True, False])
 
 
 class SetupEnvMaskTests(_ProbeHarness):

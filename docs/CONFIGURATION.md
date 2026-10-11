@@ -90,9 +90,46 @@ Absolute paths inside the Web Manager container. They must match the mount targe
 | `BEETS_TRANSACTION_DIR` | `/web-manager-data/transactions` | Transaction and audit records. |
 | `BEETS_LIBRARY` | | Deprecated. Web Manager does not open the Beets database. This variable will be removed. |
 
+### Operator-only settings (Compose `environment:` only)
+
+These run commands, name files the app reads or moves files into, or control a security boundary, so a web session must never be able to change them. Set them in the Web Manager service's `environment:` block (or the Compose `.env` when the Compose file forwards them) and recreate the container. The System page shows them read-only, and the Settings API refuses to save them. A value an earlier release saved to `/web-manager-data/.env` is removed by the startup settings migration (only the key name is logged; a `.env.bak-migration-*` backup is kept).
+
+| Variable | Meaning |
+|---|---|
+| `BEETS_OUTBOUND_ALLOWLIST` | Extra non-public endpoints the operator path may contact, as comma-separated `host:port`, `IP:port`, `CIDR:port` or `[IPv6]:port` / `[IPv6-CIDR]:port` entries (for example `beets:8337,192.168.1.10:8080,10.0.0.0/24:8080,[fd00::5]:5030`). Default `127.0.0.1:8337,localhost:8337,beets:8337`; the shipped Compose files forward `${BEETS_OUTBOUND_ALLOWLIST:-beets:8337}` (`docker-compose.full.yml`: `beets:8337,bgutil-provider:4416`). You normally do **not** need an entry for Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider or the AI endpoint: see *Configured service URLs are trusted* below. Every entry still requires every resolved address to be private (10/8, 172.16/12, 192.168/16), CGNAT (`100.64.0.0/10`), IPv6 ULA (`fc00::/7`) or loopback, so no entry can admit cloud-metadata (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`), link-local, unspecified, multicast or reserved addresses. A CIDR entry wider than those ranges (`0.0.0.0/0`, `::/0`, `128.0.0.0/1`, ...) is ignored and logged at startup. A malformed entry is logged at startup, and every operator-path request is refused until it is fixed. It never applies to URLs a user pastes or a provider response supplies (reference URLs, artwork image URLs): those are fetched from public internet addresses only, with the connection pinned to the validated address. |
+| `BEETS_TRUSTED_PROXIES` | Comma-separated proxy CIDRs whose forwarded client IP headers may be trusted. `X-Forwarded-For` is read right to left: entries added by trusted proxies are skipped and the first untrusted address is the client, so a client cannot spoof its address by sending its own `X-Forwarded-For`. Leave empty when the app is not behind a reverse proxy. |
+| `BEETS_AUTH_RATE_LIMIT` / `BEETS_AUTH_RATE_WINDOW` | Failed sign-in attempts allowed per client IP per window (default 30 per 60 s). While a client is over the limit every attempt, including one with the correct password, gets HTTP 429 without the password being checked. |
+| `BEETS_AUTH_ACCOUNT_RATE_LIMIT` / `BEETS_AUTH_ACCOUNT_RATE_WINDOW` | Failed password attempts allowed across all client IPs per window (default 100 per 300 s), so rotating IPs does not bypass the per-IP limit. Existing signed-in sessions and bearer-token clients are not affected while it is exhausted. |
+| `BEETS_WEB_AUTH_DISABLED` | `1` turns authentication off. Only for isolated local development. |
+| `BEETS_WEB_SESSION_COOKIE_SECURE` | Marks the session cookie `Secure`. |
+| `SPOTIFLAC_CMD` | Command line used to run SpotiFLAC (split with shell rules and executed). |
+| `YTDLP_JS_RUNTIMES` | JavaScript runtimes for yt-dlp; `name:/path` names an executable. |
+| `YTDLP_COOKIE_FILE`, `YTDLP_NETRC_FILE`, `YTDLP_ALLOW_BROWSER_COOKIES` | Credential files and browser cookie stores yt-dlp may read. |
+| `SLSKD_API_KEY_FILE` | File whose first line is sent to `SLSKD_URL` as the slskd API key. |
+| `IMPORT_REVIEW_QUARANTINE_DIR`, `MUSIC_FORMAT_QUARANTINE_DIR` | Directories that rejected or quarantined files are moved into. |
+
+#### Configured service URLs are trusted
+
+Each operator-hosted service trusts exactly the scheme, host and port of its own configured URL, only for its own calls, and only when every address that URL resolves to is private (RFC 1918), CGNAT (`100.64.0.0/10`) or IPv6 ULA (`fc00::/7`):
+
+| Service | Setting |
+|---|---|
+| Plex | `PLEX_URL` (or the Beets `config.yaml` `plex:` stanza, as Plex itself resolves it) |
+| Lidarr | `LIDARR_URL` (or `LIDARR_URL_FILE`) |
+| slskd | `SLSKD_URL` |
+| qBittorrent | `QBITTORRENT_URL` / `QBIT_URL` / `QB_URL` (or `QBITTORRENT_URL_FILE`) |
+| yt-dlp PO token provider | `YTDLP_PO_PROVIDER_URL` |
+| AI provider | `AI_BASE_URL` |
+
+So `PLEX_URL=http://192.168.1.20:32400` lets Plex calls reach that address without an allowlist entry, and a Docker service name such as the default `SLSKD_URL=http://slskd:5030` works because it resolves to a Docker network (private) address. Loopback (`127.0.0.0/8`, `::1`) and cloud-metadata addresses are never trusted this way; a configured URL that resolves to a public address follows the normal public-internet rules. The trust does not extend to another service, port or scheme, nor to a URL typed into a setup connectivity test that differs from the configured one. A request it admits may not be redirected to another origin.
+
+Every operator-path connection is pinned: the host is resolved once, every answer is checked, and the socket connects to a checked address (TLS still verifies the certificate for the hostname), so a DNS change between the check and the connection cannot redirect it. Each redirect hop is checked and pinned the same way. The operator path does not use `HTTP_PROXY`/`HTTPS_PROXY`.
+
+When a request is refused, the error and the provider status name the entry that would admit it, for example `add 192.168.1.20:32400 to BEETS_OUTBOUND_ALLOWLIST or set PLEX_URL to it`.
+
 ### 4. Application settings and secrets (System page, `/web-manager-data/.env`)
 
-Only these keys may be saved from the System page, and only these keys are loaded from `/web-manager-data/.env` at startup. A non-blank Docker value always wins.
+Only these keys may be saved from the System page, and only these keys are loaded from `/web-manager-data/.env` at startup. A non-blank Docker value always wins, so the Settings API refuses to save a key the Docker/Compose environment set at startup (it would apply until the next restart and then silently revert); change it in Compose instead.
 
 | Variable | Applies | Meaning |
 |---|---|---|
@@ -101,11 +138,7 @@ Only these keys may be saved from the System page, and only these keys are loade
 | `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
 | `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |
 | `BEETS_WEB_USERNAME` | live | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_ALLOWLIST` | live | Comma-separated `host:port`, `IP:port`, `CIDR:port` or `[IPv6]:port` / `[IPv6-CIDR]:port` entries (for example `beets:8337,lidarr:8686,192.168.1.10:32400,10.0.0.0/24:8080,[fd00::5]:5030`) for non-public services the web manager may contact. Any address that is not globally routable needs an entry, including private LAN ranges, CGNAT/Tailscale `100.64.0.0/10`, and IPv6 forms that embed such an IPv4 address. A malformed entry is reported in the log at startup, and every request to an operator-configured service is refused until it is fixed. Applies only to operator-configured services (Beets, Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider). `docker-compose.full.yml` defaults it to `beets:8337,bgutil-provider:4416` so its bundled PO provider is reachable; keep that entry if you override the list. It never applies to URLs a user pastes or a provider response supplies (reference URLs, artwork image URLs): those are fetched from public internet addresses only, with the connection pinned to the validated address, and they do not use `HTTP_PROXY`/`HTTPS_PROXY`. |
 | `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is not a positive number is ignored with a warning in the log, and 60 s is used. |
-| `BEETS_TRUSTED_PROXIES` | restart | Comma-separated proxy CIDRs whose forwarded client IP headers may be trusted. `X-Forwarded-For` is read right to left: entries added by trusted proxies are skipped and the first untrusted address is the client, so a client cannot spoof its address by sending its own `X-Forwarded-For`. Leave empty when the app is not behind a reverse proxy. |
-| `BEETS_AUTH_RATE_LIMIT` / `BEETS_AUTH_RATE_WINDOW` | live | Failed sign-in attempts allowed per client IP per window (default 30 per 60 s). While a client is over the limit every attempt, including one with the correct password, gets HTTP 429 without the password being checked. |
-| `BEETS_AUTH_ACCOUNT_RATE_LIMIT` / `BEETS_AUTH_ACCOUNT_RATE_WINDOW` | live | Failed password attempts allowed across all client IPs per window (default 100 per 300 s), so rotating IPs does not bypass the per-IP limit. Existing signed-in sessions and bearer-token clients are not affected while it is exhausted. |
 
 The provider settings in the next section are application settings too.
 
@@ -237,7 +270,7 @@ Folder imports (`POST /api/import`), imports with a MusicBrainz ID, disk re-impo
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MUSIC_FORMAT_QUARANTINE_DIR` | `/config/music_format_quarantine` | Where rejected downloads are moved. In the shipped Compose files, Web Manager's `/config` is the Beets config folder (`BEETS_CONFIG_PATH`, default `./beets`), so the files end up on the host in `<Beets config folder>/music_format_quarantine/`. It is a Web Manager setting: set it on the System page (it applies without a restart) or in the service's `environment:`. `docker-compose.yml` does not forward it from the Compose `.env`. |
+| `MUSIC_FORMAT_QUARANTINE_DIR` | `/config/music_format_quarantine` | Where rejected downloads are moved. In the shipped Compose files, Web Manager's `/config` is the Beets config folder (`BEETS_CONFIG_PATH`, default `./beets`), so the files end up on the host in `<Beets config folder>/music_format_quarantine/`. It is operator-only: set it in the Web Manager service's `environment:` block (`docker-compose.yml` does not forward it from the Compose `.env`) and recreate the container. |
 
 The quarantine move is not a library transaction. It does not appear on the Transactions page and cannot be rolled back there. Nothing empties the quarantine folder. To use a quarantined file, move it back yourself, change the preferences so that it is accepted, and import again.
 
