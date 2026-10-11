@@ -131,6 +131,7 @@ class AddressTests(unittest.TestCase):
 class PlexUrlSaveExtraTests(PlexUrlSaveValidationTests):
     def test_more_token_smuggling_shapes_refused_without_echo(self):
         for url in (f"http://plex.lan:32400;X-Plex-Token={TOKEN}", f"http://plex.lan:32400/a;X-Plex-Token={TOKEN}",
+                    f"http://plex.lan:32400/a;X-Plex-Token={TOKEN}/b",
                     "http://plex.lan:-1", "http://plex.lan:65536", "http://plex.lan:３２４００",
                     "http://[fd00::1", "javascript://plex.lan/"):
             with self.subTest(url=url):

@@ -22,7 +22,7 @@ The project uses Semantic Versioning.
 - **"Blocked by outbound URL policy" now says what to add.** The error and the provider status name the exact entry, for example `add 192.168.1.20:32400 to BEETS_OUTBOUND_ALLOWLIST or set PLEX_URL to it` (host and port only; no credentials, path or query). `provider_boundary.allowlist_hint(url, provider)` returns the same sentence for UI messages.
 - **The Settings API refuses to save a key the Docker/Compose environment set at startup.** Such a save applied until the next restart and was then silently reverted by the Compose value.
 - The operator path no longer uses `HTTP_PROXY`/`HTTPS_PROXY` (see Upgrade Notes): a proxy would connect to an address the policy never checked.
-- Saving `PLEX_URL` also refuses a value that cannot be parsed (for example look-alike userinfo characters), `;parameters` and an out-of-range port, with the same fixed message (the value is never echoed). IPv4-compatible IPv6 addresses (`::a.b.c.d`) are treated as non-public.
+- Saving `PLEX_URL` also refuses a value that cannot be parsed (for example look-alike userinfo characters), any `;` and an out-of-range port, with the same fixed message (the value is never echoed). IPv4-compatible IPv6 addresses (`::a.b.c.d`) are treated as non-public.
 - The System page reports `PLEX_URL` and `PLEX_TOKEN` as applying live (they always did; they were labelled restart-required).
 - The System page describes `BEETS_OUTBOUND_ALLOWLIST` correctly (exact `host:port` entries for non-public services) and shows it read-only.
 
