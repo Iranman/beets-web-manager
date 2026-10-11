@@ -650,6 +650,9 @@ export interface SetupIntegrationTestResponse {
   ok: boolean;
   status: 'ready' | 'failed' | 'not_configured' | string;
   error?: string;
+  /** e.g. 'outbound_not_allowlisted' (the error then names the allowlist entry). */
+  reason?: string;
+  hint?: string;
   model?: string;
   fpcalc_available?: boolean;
   fpcalc_version?: string;
@@ -2073,6 +2076,8 @@ export interface PlexStatusResponse extends ApiOkResponse {
   section_key: number | null;
   section_title: string | null;
   error: string | null;
+  reason?: string | null;
+  hint?: string;
 }
 
 // ── Plugin controls ──────────────────────────────────────────────────────────
