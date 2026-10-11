@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
+from backend import config_layers
 import copy, difflib, json, os, re, time
 import urllib.error
 from pathlib import Path
@@ -1084,6 +1085,9 @@ _LIDARR_WANTED_MAX_PAGES = 200  # 20,000 wanted albums; a paging bug must not lo
 
 def _lidarr_wanted_error(exc: BaseException) -> str:
     """A fixed, user-facing reason (IA-08); never the provider's body."""
+    block = provider_boundary.outbound_block(exc, "lidarr")
+    if block:  # before the ValueError branch: OutboundPolicyError is one
+        return block["error"]
     err = provider_boundary.classify_exception(exc)
     if err.outcome == provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR:
         return "Lidarr rejected the API key"
@@ -1444,7 +1448,7 @@ def _qbit_status_payload() -> Dict[str, Any]:
     return {
         "ok": True,
         "configured": bool(QBIT_URL),
-        "url": QBIT_URL,
+        "url": config_layers.redact_url_userinfo(QBIT_URL) if QBIT_URL else "",
         "username_configured": bool(QBIT_USERNAME),
         "password_configured": bool(QBIT_PASSWORD),
         "category": QBIT_CATEGORY,

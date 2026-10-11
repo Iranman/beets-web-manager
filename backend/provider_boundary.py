@@ -135,7 +135,8 @@ class ProviderError(Exception):
 PROVIDER_DISPLAY_NAMES = {
     "musicbrainz": "MusicBrainz", "acoustid": "AcoustID", "discogs": "Discogs", "plex": "Plex",
     "lidarr": "Lidarr", "slskd": "slskd", "spotify": "Spotify", "listenbrainz": "ListenBrainz",
-    "artwork": "The artwork source", "ai": "The AI provider",
+    "artwork": "The artwork source", "ai": "The AI provider", "qbittorrent": "qBittorrent",
+    "ytdlp-po": "The yt-dlp PO token provider",
 }
 
 
@@ -300,7 +301,7 @@ def _provider_answered(outcome: ProviderOutcome, status_code: Optional[int]) -> 
 
 
 def _record(provider: str, outcome: ProviderOutcome, *, attempts: int, status_code: Optional[int] = None,
-            message: str = "") -> None:
+            message: str = "", reason: Optional[str] = None) -> None:
     now = time.time()
     with _HEALTH_LOCK:
         row = _HEALTH.setdefault(provider, {"provider": provider, "calls": 0, "failures": 0, "retries": 0,
@@ -308,7 +309,7 @@ def _record(provider: str, outcome: ProviderOutcome, *, attempts: int, status_co
         row["calls"] += 1
         row["retries"] += max(0, attempts - 1)
         row.update(last_outcome=outcome.value, last_status_code=status_code, last_attempts=attempts,
-                   last_message=redact(message))
+                   last_message=redact(message), last_reason=reason)
         if _provider_answered(outcome, status_code):
             row["last_success_at"] = now
         else:
@@ -354,7 +355,9 @@ def _after_failure(provider: str, policy: ProviderPolicy, exc: BaseException, *,
     the backoff and returns True (try again)."""
     err = classify_exception(exc)
     if err.outcome not in RETRYABLE or attempts >= limit:
-        _record(provider, err.outcome, attempts=attempts, status_code=err.status_code, message=str(err))
+        reason = OUTBOUND_NOT_ALLOWLISTED if _not_allowlisted(exc) else None
+        _record(provider, err.outcome, attempts=attempts, status_code=err.status_code, message=str(err),
+                reason=reason)
         return False
     delay = err.retry_after if err.retry_after is not None else policy.base_backoff * (2 ** (attempts - 1))
     sleep(min(MAX_RETRY_AFTER_SECONDS, delay))
@@ -458,6 +461,38 @@ def allowlist_hint(url: str, provider: Optional[str] = None) -> str:
     setting = CONFIGURED_URL_SETTINGS.get(provider or "")
     return f"add {entry} to BEETS_OUTBOUND_ALLOWLIST" + (f" or set {setting} to it" if setting else "")
 
+
+#: Reason code for a request the outbound policy refused that an allowlist
+#: entry (or setting the service's own URL) would admit.
+OUTBOUND_NOT_ALLOWLISTED = "outbound_not_allowlisted"
+
+
+def _not_allowlisted(exc: BaseException) -> bool:
+    # Only a refusal an entry could fix: a DNS failure or a cloud-metadata
+    # target is also an OutboundPolicyError, but carries no entry.
+    return isinstance(exc, OutboundPolicyError) and bool(getattr(exc, "entry", ""))
+
+
+def outbound_block(exc: BaseException, provider: str, url: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """User-facing details for a call ``provider`` could not make because the
+    outbound policy refused ``url`` (default: the provider's configured URL),
+    or None for any other failure.
+
+    Returns ``{"reason", "error", "hint"}``. The text is built from fixed
+    sentences and the target's host:port only (``allowlist_hint``), never
+    from the exception text, so it is safe to return from an API."""
+    if not _not_allowlisted(exc):
+        return None
+    configured = configured_url(provider)
+    target = configured if url is None else url
+    # Suggest setting the service URL only when it is not already that URL.
+    same = bool(configured) and allowlist_entry(target) == allowlist_entry(configured)
+    hint = allowlist_hint(target, None if same else provider)
+    name = PROVIDER_DISPLAY_NAMES.get(provider, "The service")
+    error = f"{name} is blocked by the outbound network policy."
+    if hint:
+        error += f" To allow it, {hint}."
+    return {"reason": OUTBOUND_NOT_ALLOWLISTED, "error": error, "hint": hint}
 
 def _request_url(request: Any) -> str:
     if isinstance(request, str):

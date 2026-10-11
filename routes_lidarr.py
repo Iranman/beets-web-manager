@@ -53,6 +53,9 @@ def _lidarr_request_json(path: str, *, params: Dict[str, Any] | None = None,
 
 
 def _http_error_message(exc: Exception) -> Tuple[str, int]:
+    block = provider_boundary.outbound_block(exc, "lidarr")
+    if block:  # before the ValueError branch: OutboundPolicyError is one
+        return block["error"], 502
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in (401, 403):
             return "Lidarr rejected the API key", 502
