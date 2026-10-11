@@ -44,6 +44,7 @@ import os
 import re
 import socket
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -52,7 +53,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, Optional
 
-from backend.security import OutboundPolicyError, open_public_url
+from backend.security import (OutboundPolicyError, allowlist_entry, implicit_rule_for_url, open_public_url,
+                              trusted_service_endpoint)
 
 
 class ProviderOutcome(str, enum.Enum):
@@ -213,7 +215,10 @@ def classify_exception(exc: BaseException) -> ProviderError:
     if isinstance(exc, OutboundPolicyError):
         # The outbound URL policy refused the target: asking again cannot
         # help, and a retry would only repeat the DNS lookup and request.
-        return ProviderError(ProviderOutcome.REJECTED, "blocked by outbound URL policy")
+        # The hint is a fixed sentence naming only host:port (F6).
+        hint = getattr(exc, "hint", "")
+        return ProviderError(ProviderOutcome.REJECTED,
+                             "blocked by outbound URL policy" + (f"; {hint}" if hint else ""))
     if isinstance(exc, ValueError):
         return ProviderError(ProviderOutcome.TRANSIENT_ERROR, "malformed response")
     return ProviderError(ProviderOutcome.TRANSIENT_ERROR, type(exc).__name__)
@@ -391,30 +396,110 @@ def _yielding(provider: str, response: Any, attempts: int) -> Iterator[Any]:
             close()
 
 
+# -- the configured endpoint each operator-hosted provider trusts ---------------
+
+#: provider -> the setting that names its endpoint. Each of these providers
+#: implicitly trusts exactly the scheme, host and port of its own configured
+#: URL, for its own calls only, and only when that URL resolves to private
+#: (RFC 1918), CGNAT or IPv6 ULA addresses (security.implicit_rule_for_url).
+#: Fixed public APIs (MusicBrainz, AcoustID, ...) need no trust.
+CONFIGURED_URL_SETTINGS: Dict[str, str] = {
+    "plex": "PLEX_URL",
+    "lidarr": "LIDARR_URL",
+    "slskd": "SLSKD_URL",
+    "qbittorrent": "QBITTORRENT_URL",
+    "ytdlp-po": "YTDLP_PO_PROVIDER_URL",
+    "ai": "AI_BASE_URL",
+}
+#: The backend.app_runtime constant each service actually calls (read at
+#: boot, with its *_FILE fallback and default), so the trusted endpoint is
+#: always the one the service uses. AI reads AI_BASE_URL live; Plex
+#: registers its own resolver (env, then the Beets config.yaml stanza).
+_RUNTIME_URL_CONSTANTS = {"lidarr": "LIDARR_URL", "slskd": "SLSKD_URL", "qbittorrent": "QBIT_URL",
+                          "ytdlp-po": "YTDLP_PO_PROVIDER_URL"}
+_CONFIGURED_URL_RESOLVERS: Dict[str, Callable[[], str]] = {}
+
+
+def register_configured_url(provider: str, resolver: Callable[[], str]) -> None:
+    """Let the service that owns a provider's settings resolve its URL."""
+    if provider not in CONFIGURED_URL_SETTINGS:
+        raise ValueError(f"{provider!r} has no configured URL setting")
+    _CONFIGURED_URL_RESOLVERS[provider] = resolver
+
+
+def configured_url(provider: str) -> str:
+    """The URL ``provider`` is configured to call, or "" (never raises)."""
+    setting = CONFIGURED_URL_SETTINGS.get(provider)
+    if not setting:
+        return ""
+    try:
+        resolver = _CONFIGURED_URL_RESOLVERS.get(provider)
+        if resolver is not None:
+            return str(resolver() or "").strip()
+        constant = _RUNTIME_URL_CONSTANTS.get(provider)
+        # Looked up, never imported: importing app_runtime here would run the
+        # process boot from a low-level module. Every running app has it.
+        runtime = sys.modules.get("backend.app_runtime")
+        if constant and runtime is not None:
+            return str(getattr(runtime, constant, "") or "").strip()
+        return (os.environ.get(setting) or "").strip()
+    except Exception:
+        return ""
+
+
+def allowlist_hint(url: str, provider: Optional[str] = None) -> str:
+    """A fixed, non-secret sentence telling the operator how to admit
+    ``url``, e.g. "add 192.168.1.20:32400 to BEETS_OUTBOUND_ALLOWLIST or set
+    PLEX_URL to it". Names only host:port (no userinfo, path, query or
+    fragment); "" for a URL that has no allowlist entry."""
+    entry = allowlist_entry(url)
+    if not entry:
+        return ""
+    setting = CONFIGURED_URL_SETTINGS.get(provider or "")
+    return f"add {entry} to BEETS_OUTBOUND_ALLOWLIST" + (f" or set {setting} to it" if setting else "")
+
+
+def _request_url(request: Any) -> str:
+    if isinstance(request, str):
+        return request
+    return str(getattr(request, "full_url", "") or "")
+
+
 @contextmanager
 def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_attempts: Optional[int] = None,
-           sleep: Callable[[float], None] = time.sleep) -> Iterator[Any]:
+           sleep: Callable[[float], None] = time.sleep, trust_configured: bool = True) -> Iterator[Any]:
     """Open ``request`` at ``provider`` and yield the response (see module doc).
 
     For operator-configured endpoints and fixed provider APIs only: the
-    connection is made by ``urllib.request.urlopen`` (the allowlist-aware
-    ``backend.security.secure_urlopen`` once installed). A URL supplied by a
-    user or by a provider response must use ``opened_public`` instead.
+    connection is made by ``urllib.request.urlopen`` (the allowlist-aware,
+    address-pinned ``backend.security.secure_urlopen`` once installed). A
+    URL supplied by a user or by a provider response must use
+    ``opened_public`` instead.
 
-    Raises the original exception after the last attempt. ``max_attempts``
+    The provider's own configured URL (``configured_url``) is trusted for
+    this call when it resolves to private/CGNAT/ULA addresses. A caller that
+    sends a URL it did not take from configuration (a setup probe testing a
+    typed-in URL) passes ``trust_configured=False``.
+
+    Raises the original exception after the last attempt; an
+    OutboundPolicyError carries ``hint`` (``allowlist_hint``). ``max_attempts``
     overrides the provider's policy (a connectivity test passes 1)."""
     policy = policy_for(provider)
     limit = _attempt_limit(policy, max_attempts, _method_of(request))
+    trusted = implicit_rule_for_url(configured_url(provider)) if trust_configured else None
     attempts = 0
     while True:
         attempts += 1
         try:
-            if timeout is None:
-                response = urllib.request.urlopen(request)
-            else:
-                response = urllib.request.urlopen(request, timeout=timeout)
+            with trusted_service_endpoint(trusted):
+                if timeout is None:
+                    response = urllib.request.urlopen(request)
+                else:
+                    response = urllib.request.urlopen(request, timeout=timeout)
             break
         except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
+            if isinstance(exc, OutboundPolicyError) and getattr(exc, "entry", ""):
+                exc.hint = allowlist_hint(_request_url(request), provider)
             if not _after_failure(provider, policy, exc, attempts=attempts, limit=limit, sleep=sleep):
                 raise
     with _yielding(provider, response, attempts) as entered:

@@ -162,6 +162,11 @@ def _plex_settings() -> Dict[str, str]:
             "plex_scan_timeout": scan_timeout, "plex_index_timeout": index_timeout}
 
 
+# The Plex endpoint the outbound policy trusts for Plex calls is exactly the
+# one _plex_settings() resolves (env, then the Beets config.yaml stanza).
+provider_boundary.register_configured_url("plex", lambda: _plex_settings().get("url", ""))
+
+
 def _plex_split_roots(value: str) -> List[str]:
     out: List[str] = []
     for raw in _s(value).split(","):

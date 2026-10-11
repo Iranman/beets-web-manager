@@ -515,10 +515,15 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_OUTBOUND_ALLOWLIST": {
         "section": "Authentication & Security",
-        "default": "",
-        "description": "Comma-separated whitelist of allowed external hostnames/IPs",
+        "default": "127.0.0.1:8337,localhost:8337,beets:8337",
+        "description": (
+            "Operator-only (set in Docker Compose). Extra local-network endpoints the app may contact, as "
+            "exact host:port, IP:port, CIDR:port or [IPv6]:port entries. Public internet addresses need no "
+            "entry, and each service's own configured URL (PLEX_URL, LIDARR_URL, SLSKD_URL, ...) is trusted "
+            "for that service when it is a private LAN, CGNAT or IPv6 ULA address."
+        ),
         "secret": False,
-        "editable": True,
+        "editable": False,
         "restart_required": False,
         "type": "string",
     },
@@ -1646,6 +1651,13 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
         # and reporting success.
         if _SETTING_METADATA.get(key, {}).get("editable", True) is False:
             raise ValueError(f"{key} cannot be changed from this application -- it is a host-side deployment setting")
+        # Docker/Compose set it at boot: it overrides a saved value at every
+        # restart, so a save would apply now and silently revert later.
+        if config_layers.pinned_by_boot_environment(key):
+            raise ValueError(
+                f"{key} is set in the Docker/Compose environment, which overrides a saved value at every "
+                "restart -- change it there and recreate the container"
+            )
 
     for key, value in list(updates.items()):
         _reject_if_not_editable(key)
@@ -3364,6 +3376,16 @@ def setup_env_reveal(name: str):
     return response
 
 
+def _probe_targets_configured(supplied_url: str, configured_url: str) -> bool:
+    """True when a setup probe calls the configured endpoint itself (no URL
+    supplied, or the same endpoint), so its implicit outbound trust may
+    apply; never for a different, caller-supplied URL."""
+    from backend.security import same_endpoint_url
+    if not configured_url:
+        return False
+    return not supplied_url or same_endpoint_url(supplied_url, configured_url)
+
+
 @app.post("/api/setup/test/ai")
 def setup_test_ai():
     """Live connectivity test against the configured (or posted) AI provider."""
@@ -3393,7 +3415,8 @@ def setup_test_ai():
             f"{base_url.rstrip('/')}/models/{model}" if is_openai_host else f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}"},
         )
-        with provider_boundary.opened("ai", req, timeout=10, max_attempts=1) as r:
+        trust = _probe_targets_configured(supplied_base_url, provider_boundary.configured_url("ai"))
+        with provider_boundary.opened("ai", req, timeout=10, max_attempts=1, trust_configured=trust) as r:
             r.read()
         return jsonify({"ok": True, "status": "ready", "model": model})
     except urllib.error.HTTPError as exc:
@@ -3593,7 +3616,10 @@ def setup_test_plex():
                          "error": "A Plex URL and token are both required to test Plex. Enter the token for this URL, or set PLEX_URL and PLEX_TOKEN."}), 200
     try:
         req = urllib.request.Request(f"{plex_url}/library/sections", headers={"X-Plex-Token": plex_token})
-        with provider_boundary.opened("plex", req, timeout=10, max_attempts=1) as r:
+        # The configured Plex URL's implicit outbound trust never extends to
+        # a URL the caller typed (this endpoint is public during first run).
+        trust = _probe_targets_configured(supplied_plex_url, provider_boundary.configured_url("plex"))
+        with provider_boundary.opened("plex", req, timeout=10, max_attempts=1, trust_configured=trust) as r:
             body = r.read()
         libraries = []
         try:
