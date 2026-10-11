@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.3.0 - 2026-10-11
+
 ### Upgrade Notes
 - **Some settings are now operator-only and a saved value for them is dropped.** `BEETS_OUTBOUND_ALLOWLIST`, `BEETS_WEB_AUTH_DISABLED`, `BEETS_TRUSTED_PROXIES`, `BEETS_WEB_SESSION_COOKIE_SECURE`, `BEETS_AUTH_RATE_LIMIT`, `BEETS_AUTH_RATE_WINDOW`, `BEETS_AUTH_ACCOUNT_RATE_LIMIT`, `BEETS_AUTH_ACCOUNT_RATE_WINDOW`, `SPOTIFLAC_CMD`, `YTDLP_JS_RUNTIMES`, `YTDLP_COOKIE_FILE`, `YTDLP_NETRC_FILE`, `YTDLP_ALLOW_BROWSER_COOKIES`, `SLSKD_API_KEY_FILE`, `IMPORT_REVIEW_QUARANTINE_DIR` and `MUSIC_FORMAT_QUARANTINE_DIR` can no longer be saved from the System page. On first start the settings migration removes any of them from `/web-manager-data/.env` (backup `.env.bak-migration-<timestamp>`; only key names are logged). If you had set one of them on the System page, set it again in the Web Manager service's `environment:` block (or the Compose `.env` where the Compose file forwards it) and recreate the container. In the shipped Compose files a web-saved `BEETS_OUTBOUND_ALLOWLIST` never took effect anyway, because Compose always sets it.
 - You no longer need allowlist entries for Plex, Lidarr, slskd, qBittorrent, the yt-dlp PO provider or a LAN AI endpoint when their URL is set to a private LAN, CGNAT or IPv6 ULA address; existing entries keep working. An entry whose host now resolves to cloud-metadata, link-local, unspecified, multicast or reserved space, and a catch-all CIDR such as `0.0.0.0/0`, no longer admit anything.
