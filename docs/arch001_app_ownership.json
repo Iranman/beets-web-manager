@@ -573,10 +573,10 @@
    "module": "backend/app_runtime.py",
    "lines": [
     80,
-    97
+    100
    ],
-   "size": 18,
-   "body_lines": 9,
+   "size": 21,
+   "body_lines": 12,
    "route": null,
    "mutation_capable": false,
    "domain": "SETUP",
@@ -593,8 +593,8 @@
    "name": "_config_file_first_line",
    "module": "backend/app_runtime.py",
    "lines": [
-    134,
-    140
+    137,
+    143
    ],
    "size": 7,
    "body_lines": 6,
@@ -611,8 +611,8 @@
    "name": "_env_flag",
    "module": "backend/app_runtime.py",
    "lines": [
-    143,
-    147
+    146,
+    150
    ],
    "size": 5,
    "body_lines": 4,
@@ -629,8 +629,8 @@
    "name": "_env_int",
    "module": "backend/app_runtime.py",
    "lines": [
-    150,
-    159
+    153,
+    162
    ],
    "size": 10,
    "body_lines": 9,
@@ -651,8 +651,8 @@
    "name": "_env_float",
    "module": "backend/app_runtime.py",
    "lines": [
-    162,
-    171
+    165,
+    174
    ],
    "size": 10,
    "body_lines": 9,
@@ -669,8 +669,8 @@
    "name": "validated_downloads_root",
    "module": "backend/app_runtime.py",
    "lines": [
-    322,
-    327
+    325,
+    330
    ],
    "size": 6,
    "body_lines": 3,
@@ -690,8 +690,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    493,
-    494
+    496,
+    497
    ],
    "size": 2,
    "body_lines": 1,
@@ -714,8 +714,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    587,
-    594
+    590,
+    597
    ],
    "size": 8,
    "body_lines": 6,
@@ -745,8 +745,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    603,
-    623
+    606,
+    626
    ],
    "size": 21,
    "body_lines": 19,
@@ -765,8 +765,8 @@
    "name": "_sqlite_is_locked_error",
    "module": "backend/app_runtime.py",
    "lines": [
-    635,
-    639
+    638,
+    642
    ],
    "size": 5,
    "body_lines": 4,
@@ -785,8 +785,8 @@
    "name": "_sqlite_write_retry",
    "module": "backend/app_runtime.py",
    "lines": [
-    642,
-    652
+    645,
+    655
    ],
    "size": 11,
    "body_lines": 10,
@@ -805,8 +805,8 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    688,
-    691
+    691,
+    694
    ],
    "size": 4,
    "body_lines": 3,
@@ -825,8 +825,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    708,
-    712
+    711,
+    715
    ],
    "size": 5,
    "body_lines": 4,
@@ -865,8 +865,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    715,
-    725
+    718,
+    728
    ],
    "size": 11,
    "body_lines": 10,
@@ -888,8 +888,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    728,
-    733
+    731,
+    736
    ],
    "size": 6,
    "body_lines": 5,
@@ -932,8 +932,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    736,
-    747
+    739,
+    750
    ],
    "size": 12,
    "body_lines": 10,
@@ -960,8 +960,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    750,
-    767
+    753,
+    770
    ],
    "size": 18,
    "body_lines": 11,
@@ -983,8 +983,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    770,
-    777
+    773,
+    780
    ],
    "size": 8,
    "body_lines": 7,
@@ -1007,8 +1007,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    780,
-    794
+    783,
+    797
    ],
    "size": 15,
    "body_lines": 14,
@@ -1036,8 +1036,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    824,
-    827
+    827,
+    830
    ],
    "size": 4,
    "body_lines": 3,
@@ -1061,8 +1061,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    830,
-    840
+    833,
+    843
    ],
    "size": 11,
    "body_lines": 10,
@@ -1097,8 +1097,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    843,
-    857
+    846,
+    860
    ],
    "size": 15,
    "body_lines": 14,
@@ -1123,8 +1123,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    860,
-    864
+    863,
+    867
    ],
    "size": 5,
    "body_lines": 4,
@@ -1145,8 +1145,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    867,
-    886
+    870,
+    889
    ],
    "size": 20,
    "body_lines": 11,
@@ -1167,8 +1167,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    889,
-    898
+    892,
+    901
    ],
    "size": 10,
    "body_lines": 7,
@@ -1191,8 +1191,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    901,
-    910
+    904,
+    913
    ],
    "size": 10,
    "body_lines": 7,
@@ -1213,8 +1213,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    913,
-    923
+    916,
+    926
    ],
    "size": 11,
    "body_lines": 7,
@@ -1235,8 +1235,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    928,
-    929
+    931,
+    932
    ],
    "size": 2,
    "body_lines": 1,
@@ -1279,8 +1279,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    934,
-    942
+    937,
+    945
    ],
    "size": 9,
    "body_lines": 2,
@@ -1297,8 +1297,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    958,
-    963
+    961,
+    966
    ],
    "size": 6,
    "body_lines": 3,
@@ -1315,8 +1315,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    976,
-    978
+    979,
+    981
    ],
    "size": 3,
    "body_lines": 2,
@@ -1333,8 +1333,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    981,
-    984
+    984,
+    987
    ],
    "size": 4,
    "body_lines": 3,
@@ -3447,8 +3447,8 @@
    "name": "_playlist_resolve_item_path",
    "module": "backend/plex_service.py",
    "lines": [
-    31,
-    75
+    33,
+    77
    ],
    "size": 45,
    "body_lines": 44,
@@ -3476,8 +3476,8 @@
    "name": "_plex_config_from_beets",
    "module": "backend/plex_service.py",
    "lines": [
-    84,
-    120
+    86,
+    122
    ],
    "size": 37,
    "body_lines": 35,
@@ -3496,8 +3496,8 @@
    "name": "_plex_settings",
    "module": "backend/plex_service.py",
    "lines": [
-    123,
-    162
+    125,
+    164
    ],
    "size": 40,
    "body_lines": 39,
@@ -3512,6 +3512,7 @@
     "_playlist_run_plex_sync",
     "_plex_beets_music_root",
     "_plex_beets_path_candidates",
+    "_plex_configured",
     "_plex_effective_music_roots",
     "_plex_find_music_section",
     "_plex_music_roots",
@@ -3524,7 +3525,7 @@
     "_trigger_plex_refresh",
     "playlist_delete"
    ],
-   "caller_count": 16,
+   "caller_count": 17,
    "dependencies": [
     "_plex_config_from_beets"
    ]
@@ -3533,8 +3534,8 @@
    "name": "_plex_split_roots",
    "module": "backend/plex_service.py",
    "lines": [
-    165,
-    171
+    172,
+    178
    ],
    "size": 7,
    "body_lines": 6,
@@ -3556,8 +3557,8 @@
    "name": "_plex_music_roots",
    "module": "backend/plex_service.py",
    "lines": [
-    174,
-    181
+    181,
+    188
    ],
    "size": 8,
    "body_lines": 7,
@@ -3583,8 +3584,8 @@
    "name": "_plex_beets_music_root",
    "module": "backend/plex_service.py",
    "lines": [
-    184,
-    186
+    191,
+    193
    ],
    "size": 3,
    "body_lines": 2,
@@ -3610,8 +3611,8 @@
    "name": "_plex_norm_path",
    "module": "backend/plex_service.py",
    "lines": [
-    189,
-    208
+    196,
+    215
    ],
    "size": 20,
    "body_lines": 19,
@@ -3643,8 +3644,8 @@
    "name": "_plex_path_case_key",
    "module": "backend/plex_service.py",
    "lines": [
-    211,
-    212
+    218,
+    219
    ],
    "size": 2,
    "body_lines": 1,
@@ -3667,8 +3668,8 @@
    "name": "_plex_path_is_under",
    "module": "backend/plex_service.py",
    "lines": [
-    215,
-    219
+    222,
+    226
    ],
    "size": 5,
    "body_lines": 4,
@@ -3690,8 +3691,8 @@
    "name": "_plex_relative_path",
    "module": "backend/plex_service.py",
    "lines": [
-    222,
-    232
+    229,
+    239
    ],
    "size": 11,
    "body_lines": 10,
@@ -3714,8 +3715,8 @@
    "name": "_plex_effective_music_roots",
    "module": "backend/plex_service.py",
    "lines": [
-    235,
-    249
+    242,
+    256
    ],
    "size": 15,
    "body_lines": 13,
@@ -3739,8 +3740,8 @@
    "name": "_plex_selected_path_map",
    "module": "backend/plex_service.py",
    "lines": [
-    252,
-    271
+    259,
+    278
    ],
    "size": 20,
    "body_lines": 18,
@@ -3766,8 +3767,8 @@
    "name": "_plex_translate_beets_path",
    "module": "backend/plex_service.py",
    "lines": [
-    274,
-    332
+    281,
+    339
    ],
    "size": 59,
    "body_lines": 55,
@@ -3797,8 +3798,8 @@
    "name": "_plex_suffix_keys_for_path",
    "module": "backend/plex_service.py",
    "lines": [
-    335,
-    347
+    342,
+    354
    ],
    "size": 13,
    "body_lines": 12,
@@ -3821,8 +3822,8 @@
    "name": "_plex_mapped_beets_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    350,
-    359
+    357,
+    366
    ],
    "size": 10,
    "body_lines": 6,
@@ -3843,8 +3844,8 @@
    "name": "_plex_timeout_error",
    "module": "backend/plex_service.py",
    "lines": [
-    362,
-    369
+    369,
+    376
    ],
    "size": 8,
    "body_lines": 7,
@@ -3855,9 +3856,10 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_create_playlist_outputs",
+    "_plex_failure",
     "_plex_track_keys_for_items"
    ],
-   "caller_count": 2,
+   "caller_count": 3,
    "dependencies": [
     "_s"
    ]
@@ -3866,8 +3868,8 @@
    "name": "_plex_client_identifier_file",
    "module": "backend/plex_service.py",
    "lines": [
-    375,
-    378
+    382,
+    385
    ],
    "size": 4,
    "body_lines": 3,
@@ -3886,8 +3888,8 @@
    "name": "_plex_client_identifier",
    "module": "backend/plex_service.py",
    "lines": [
-    381,
-    409
+    388,
+    416
    ],
    "size": 29,
    "body_lines": 19,
@@ -3908,8 +3910,8 @@
    "name": "_plex_client_headers",
    "module": "backend/plex_service.py",
    "lines": [
-    412,
-    419
+    419,
+    426
    ],
    "size": 8,
    "body_lines": 7,
@@ -3930,8 +3932,8 @@
    "name": "_plex_request",
    "module": "backend/plex_service.py",
    "lines": [
-    422,
-    449
+    429,
+    456
    ],
    "size": 28,
    "body_lines": 25,
@@ -3963,8 +3965,8 @@
    "name": "_plex_machine_identifier",
    "module": "backend/plex_service.py",
    "lines": [
-    452,
-    457
+    459,
+    464
    ],
    "size": 6,
    "body_lines": 5,
@@ -3987,8 +3989,8 @@
    "name": "_plex_find_music_section",
    "module": "backend/plex_service.py",
    "lines": [
-    460,
-    489
+    467,
+    496
    ],
    "size": 30,
    "body_lines": 28,
@@ -4014,8 +4016,8 @@
    "name": "_plex_section_locations",
    "module": "backend/plex_service.py",
    "lines": [
-    492,
-    530
+    499,
+    537
    ],
    "size": 39,
    "body_lines": 38,
@@ -4039,8 +4041,8 @@
    "name": "_trigger_plex_refresh",
    "module": "backend/plex_service.py",
    "lines": [
-    536,
-    561
+    543,
+    568
    ],
    "size": 26,
    "body_lines": 24,
@@ -4082,8 +4084,8 @@
    "name": "_plex_is_final_library_path",
    "module": "backend/plex_service.py",
    "lines": [
-    564,
-    586
+    571,
+    593
    ],
    "size": 23,
    "body_lines": 22,
@@ -4110,8 +4112,8 @@
    "name": "_plex_beets_path_candidates",
    "module": "backend/plex_service.py",
    "lines": [
-    589,
-    627
+    596,
+    634
    ],
    "size": 39,
    "body_lines": 37,
@@ -4137,8 +4139,8 @@
    "name": "_plex_path_keys_for_beets_item",
    "module": "backend/plex_service.py",
    "lines": [
-    630,
-    635
+    637,
+    642
    ],
    "size": 6,
    "body_lines": 4,
@@ -4160,8 +4162,8 @@
    "name": "_plex_path_keys_for_plex_file",
    "module": "backend/plex_service.py",
    "lines": [
-    638,
-    650
+    645,
+    657
    ],
    "size": 13,
    "body_lines": 11,
@@ -4185,8 +4187,8 @@
    "name": "_plex_track_part_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    653,
-    660
+    660,
+    667
    ],
    "size": 8,
    "body_lines": 7,
@@ -4209,8 +4211,8 @@
    "name": "_plex_duration_seconds",
    "module": "backend/plex_service.py",
    "lines": [
-    663,
-    672
+    670,
+    679
    ],
    "size": 10,
    "body_lines": 9,
@@ -4230,8 +4232,8 @@
    "name": "_plex_track_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    675,
-    683
+    682,
+    690
    ],
    "size": 9,
    "body_lines": 8,
@@ -4253,8 +4255,8 @@
    "name": "_plex_item_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    686,
-    687
+    693,
+    694
    ],
    "size": 2,
    "body_lines": 1,
@@ -4276,8 +4278,8 @@
    "name": "_plex_duration_values",
    "module": "backend/plex_service.py",
    "lines": [
-    690,
-    692
+    697,
+    699
    ],
    "size": 3,
    "body_lines": 2,
@@ -4299,8 +4301,8 @@
    "name": "_plex_track_mbids",
    "module": "backend/plex_service.py",
    "lines": [
-    695,
-    700
+    702,
+    707
    ],
    "size": 6,
    "body_lines": 5,
@@ -4321,8 +4323,8 @@
    "name": "_plex_item_lookup_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    703,
-    722
+    710,
+    729
    ],
    "size": 20,
    "body_lines": 19,
@@ -4346,8 +4348,8 @@
    "name": "_plex_track_lookup_rows",
    "module": "backend/plex_service.py",
    "lines": [
-    725,
-    747
+    732,
+    754
    ],
    "size": 23,
    "body_lines": 22,
@@ -4373,8 +4375,8 @@
    "name": "_plex_find_track",
    "module": "backend/plex_service.py",
    "lines": [
-    750,
-    761
+    757,
+    768
    ],
    "size": 12,
    "body_lines": 10,
@@ -4396,8 +4398,8 @@
    "name": "_plex_section_track_index",
    "module": "backend/plex_service.py",
    "lines": [
-    764,
-    932
+    771,
+    939
    ],
    "size": 169,
    "body_lines": 167,
@@ -4434,8 +4436,8 @@
    "name": "_plex_section_track_lookup",
    "module": "backend/plex_service.py",
    "lines": [
-    935,
-    937
+    942,
+    944
    ],
    "size": 3,
    "body_lines": 1,
@@ -4454,8 +4456,8 @@
    "name": "_plex_request_with_wall_timeout",
    "module": "backend/plex_service.py",
    "lines": [
-    940,
-    960
+    947,
+    967
    ],
    "size": 21,
    "body_lines": 16,
@@ -4476,8 +4478,8 @@
    "name": "_plex_unique_index_value",
    "module": "backend/plex_service.py",
    "lines": [
-    963,
-    967
+    970,
+    974
    ],
    "size": 5,
    "body_lines": 4,
@@ -4496,8 +4498,8 @@
    "name": "_plex_pending_match_reason",
    "module": "backend/plex_service.py",
    "lines": [
-    970,
-    997
+    977,
+    1004
    ],
    "size": 28,
    "body_lines": 24,
@@ -4521,8 +4523,8 @@
    "name": "_plex_pending_match_row",
    "module": "backend/plex_service.py",
    "lines": [
-    1000,
-    1016
+    1007,
+    1023
    ],
    "size": 17,
    "body_lines": 13,
@@ -4545,8 +4547,8 @@
    "name": "_plex_track_keys_for_items",
    "module": "backend/plex_service.py",
    "lines": [
-    1019,
-    1309
+    1026,
+    1316
    ],
    "size": 291,
    "body_lines": 288,
@@ -4588,8 +4590,8 @@
    "name": "_playlist_path_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    1312,
-    1349
+    1319,
+    1356
    ],
    "size": 38,
    "body_lines": 37,
@@ -4614,8 +4616,8 @@
    "name": "_plex_track_file",
    "module": "backend/plex_service.py",
    "lines": [
-    1352,
-    1354
+    1359,
+    1361
    ],
    "size": 3,
    "body_lines": 2,
@@ -4633,14 +4635,81 @@
    ]
   },
   {
+   "name": "_plex_failure",
+   "module": "backend/plex_service.py",
+   "lines": [
+    1364,
+    1379
+   ],
+   "size": 16,
+   "body_lines": 12,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_create_playlist_outputs",
+    "_plex_delete_playlist_by_rating_key",
+    "_plex_status_payload"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_plex_timeout_error"
+   ]
+  },
+  {
+   "name": "_plex_configured",
+   "module": "backend/plex_service.py",
+   "lines": [
+    1382,
+    1385
+   ],
+   "size": 4,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_create_playlist_outputs",
+    "_plex_status_payload"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_plex_settings"
+   ]
+  },
+  {
+   "name": "_plex_display_url",
+   "module": "backend/plex_service.py",
+   "lines": [
+    1388,
+    1390
+   ],
+   "size": 3,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_plex_status_payload"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_plex_status_payload",
    "module": "backend/plex_service.py",
    "lines": [
-    1357,
-    1394
+    1393,
+    1433
    ],
-   "size": 38,
-   "body_lines": 37,
+   "size": 41,
+   "body_lines": 40,
    "route": null,
    "mutation_capable": false,
    "domain": "PLEX",
@@ -4653,6 +4722,9 @@
    ],
    "caller_count": 3,
    "dependencies": [
+    "_plex_configured",
+    "_plex_display_url",
+    "_plex_failure",
     "_plex_find_music_section",
     "_plex_section_locations",
     "_plex_settings"
@@ -4662,8 +4734,8 @@
    "name": "_playlist_status_id",
    "module": "backend/plex_service.py",
    "lines": [
-    1397,
-    1400
+    1435,
+    1438
    ],
    "size": 4,
    "body_lines": 3,
@@ -6485,10 +6557,10 @@
    "module": "backend/slskd_service.py",
    "lines": [
     35,
-    54
+    60
    ],
-   "size": 20,
-   "body_lines": 18,
+   "size": 26,
+   "body_lines": 24,
    "route": null,
    "mutation_capable": false,
    "domain": "SLSKD",
@@ -6507,8 +6579,8 @@
    "name": "_normalise_wanted_tracks",
    "module": "backend/slskd_service.py",
    "lines": [
-    57,
-    99
+    63,
+    105
    ],
    "size": 43,
    "body_lines": 41,
@@ -6550,8 +6622,8 @@
    "name": "_strip_feat_tail",
    "module": "backend/slskd_service.py",
    "lines": [
-    108,
-    122
+    114,
+    128
    ],
    "size": 15,
    "body_lines": 7,
@@ -6570,8 +6642,8 @@
    "name": "_slskd_title_norm",
    "module": "backend/slskd_service.py",
    "lines": [
-    125,
-    131
+    131,
+    137
    ],
    "size": 7,
    "body_lines": 5,
@@ -6597,8 +6669,8 @@
    "name": "_slskd_track_numbers_from_name",
    "module": "backend/slskd_service.py",
    "lines": [
-    134,
-    160
+    140,
+    166
    ],
    "size": 27,
    "body_lines": 26,
@@ -6621,8 +6693,8 @@
    "name": "_slskd_title_guess_from_name",
    "module": "backend/slskd_service.py",
    "lines": [
-    163,
-    204
+    169,
+    210
    ],
    "size": 42,
    "body_lines": 38,
@@ -6649,8 +6721,8 @@
    "name": "_wanted_track_key",
    "module": "backend/slskd_service.py",
    "lines": [
-    207,
-    216
+    213,
+    222
    ],
    "size": 10,
    "body_lines": 9,
@@ -6674,8 +6746,8 @@
    "name": "_wanted_track_label",
    "module": "backend/slskd_service.py",
    "lines": [
-    219,
-    223
+    225,
+    229
    ],
    "size": 5,
    "body_lines": 4,
@@ -6701,8 +6773,8 @@
    "name": "_slskd_file_wanted_match_score",
    "module": "backend/slskd_service.py",
    "lines": [
-    226,
-    303
+    232,
+    309
    ],
    "size": 78,
    "body_lines": 75,
@@ -6731,8 +6803,8 @@
    "name": "_slskd_file_matches_wanted",
    "module": "backend/slskd_service.py",
    "lines": [
-    306,
-    307
+    312,
+    313
    ],
    "size": 2,
    "body_lines": 1,
@@ -6751,8 +6823,8 @@
    "name": "_wanted_tracks_remaining_after_satisfied",
    "module": "backend/slskd_service.py",
    "lines": [
-    310,
-    318
+    316,
+    324
    ],
    "size": 9,
    "body_lines": 5,
@@ -6774,8 +6846,8 @@
    "name": "_slskd_search_and_queue",
    "module": "backend/slskd_service.py",
    "lines": [
-    321,
-    621
+    327,
+    627
    ],
    "size": 301,
    "body_lines": 290,
@@ -6802,8 +6874,8 @@
    "name": "_slskd_download_candidate_roots",
    "module": "backend/slskd_service.py",
    "lines": [
-    624,
-    628
+    630,
+    634
    ],
    "size": 5,
    "body_lines": 3,
@@ -6822,8 +6894,8 @@
    "name": "_slskd_cancel_queued_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    631,
-    650
+    637,
+    656
    ],
    "size": 20,
    "body_lines": 18,
@@ -6845,8 +6917,8 @@
    "name": "_slskd_cleanup_failed_candidate_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    653,
-    657
+    659,
+    663
    ],
    "size": 5,
    "body_lines": 3,
@@ -6865,8 +6937,8 @@
    "name": "_find_slskd_downloaded_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    660,
-    938
+    666,
+    944
    ],
    "size": 279,
    "body_lines": 266,
@@ -6891,8 +6963,8 @@
    "name": "_slskd_wait_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    941,
-    1131
+    947,
+    1137
    ],
    "size": 191,
    "body_lines": 188,
@@ -6916,8 +6988,8 @@
    "name": "_normalise_download_method",
    "module": "backend/slskd_service.py",
    "lines": [
-    1150,
-    1153
+    1156,
+    1159
    ],
    "size": 4,
    "body_lines": 3,
@@ -6958,8 +7030,8 @@
    "name": "_download_method_list",
    "module": "backend/slskd_service.py",
    "lines": [
-    1156,
-    1162
+    1162,
+    1168
    ],
    "size": 7,
    "body_lines": 6,
@@ -6983,8 +7055,8 @@
    "name": "_slskd_fallback_methods",
    "module": "backend/slskd_service.py",
    "lines": [
-    1165,
-    1174
+    1171,
+    1180
    ],
    "size": 10,
    "body_lines": 9,
@@ -7006,8 +7078,8 @@
    "name": "_strip_track_filename_id_suffix",
    "module": "backend/slskd_service.py",
    "lines": [
-    1177,
-    1182
+    1183,
+    1188
    ],
    "size": 6,
    "body_lines": 5,
@@ -14470,6 +14542,7 @@
    ],
    "caller_count": 4,
    "dependencies": [
+    "_plex_failure",
     "_plex_request",
     "_s"
    ]
@@ -15283,10 +15356,10 @@
    "module": "backend/playlist_service.py",
    "lines": [
     2367,
-    2701
+    2712
    ],
-   "size": 335,
-   "body_lines": 329,
+   "size": 346,
+   "body_lines": 340,
    "route": null,
    "mutation_capable": false,
    "domain": "PLAYLIST",
@@ -15313,8 +15386,10 @@
     "_playlist_status_id",
     "_playlist_store_track_state",
     "_playlist_write_manifest",
+    "_plex_configured",
     "_plex_create_audio_playlist",
     "_plex_delete_playlist_by_rating_key",
+    "_plex_failure",
     "_plex_find_music_section",
     "_plex_machine_identifier",
     "_plex_playlist_rating_keys_by_key_or_title",
@@ -15331,8 +15406,8 @@
    "name": "_playlist_item_identity",
    "module": "backend/playlist_service.py",
    "lines": [
-    2718,
-    2729
+    2729,
+    2740
    ],
    "size": 12,
    "body_lines": 11,
@@ -15357,8 +15432,8 @@
    "name": "_playlist_library_index",
    "module": "backend/playlist_service.py",
    "lines": [
-    2732,
-    2774
+    2743,
+    2785
    ],
    "size": 43,
    "body_lines": 42,
@@ -15395,8 +15470,8 @@
    "name": "_playlist_item_from_path",
    "module": "backend/playlist_service.py",
    "lines": [
-    2777,
-    2783
+    2788,
+    2794
    ],
    "size": 7,
    "body_lines": 6,
@@ -15420,8 +15495,8 @@
    "name": "_playlist_item_from_text",
    "module": "backend/playlist_service.py",
    "lines": [
-    2786,
-    2818
+    2797,
+    2829
    ],
    "size": 33,
    "body_lines": 32,
@@ -15448,8 +15523,8 @@
    "name": "_playlist_parse_extinf_label",
    "module": "backend/playlist_service.py",
    "lines": [
-    2821,
-    2826
+    2832,
+    2837
    ],
    "size": 6,
    "body_lines": 5,
@@ -15468,8 +15543,8 @@
    "name": "_playlist_m3u_items",
    "module": "backend/playlist_service.py",
    "lines": [
-    2829,
-    2854
+    2840,
+    2865
    ],
    "size": 26,
    "body_lines": 25,
@@ -15496,8 +15571,8 @@
    "name": "_plex_audio_playlists",
    "module": "backend/playlist_service.py",
    "lines": [
-    2857,
-    2867
+    2868,
+    2878
    ],
    "size": 11,
    "body_lines": 10,
@@ -15521,8 +15596,8 @@
    "name": "_plex_playlist_items_path",
    "module": "backend/playlist_service.py",
    "lines": [
-    2870,
-    2880
+    2881,
+    2891
    ],
    "size": 11,
    "body_lines": 10,
@@ -15544,8 +15619,8 @@
    "name": "_plex_playlist_rating_keys",
    "module": "backend/playlist_service.py",
    "lines": [
-    2883,
-    2890
+    2894,
+    2901
    ],
    "size": 8,
    "body_lines": 7,
@@ -15568,8 +15643,8 @@
    "name": "_plex_playlist_by_rating_key",
    "module": "backend/playlist_service.py",
    "lines": [
-    2893,
-    2901
+    2904,
+    2912
    ],
    "size": 9,
    "body_lines": 8,
@@ -15591,8 +15666,8 @@
    "name": "_plex_playlist_rating_keys_by_key_or_title",
    "module": "backend/playlist_service.py",
    "lines": [
-    2904,
-    2931
+    2915,
+    2942
    ],
    "size": 28,
    "body_lines": 14,
@@ -15617,8 +15692,8 @@
    "name": "_plex_playlist_rating_keys_by_title",
    "module": "backend/playlist_service.py",
    "lines": [
-    2934,
-    2936
+    2945,
+    2947
    ],
    "size": 3,
    "body_lines": 2,
@@ -15637,8 +15712,8 @@
    "name": "_plex_playlist_items",
    "module": "backend/playlist_service.py",
    "lines": [
-    2939,
-    2955
+    2950,
+    2966
    ],
    "size": 17,
    "body_lines": 16,
@@ -15666,8 +15741,8 @@
    "name": "_merge_playlist_items",
    "module": "backend/playlist_service.py",
    "lines": [
-    2958,
-    2968
+    2969,
+    2979
    ],
    "size": 11,
    "body_lines": 10,
@@ -15688,8 +15763,8 @@
    "name": "_playlist_match_reference_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
-    2971,
-    2984
+    2982,
+    2995
    ],
    "size": 14,
    "body_lines": 11,
@@ -15713,8 +15788,8 @@
    "name": "_playlist_append_external_additions",
    "module": "backend/playlist_service.py",
    "lines": [
-    2987,
-    2997
+    2998,
+    3008
    ],
    "size": 11,
    "body_lines": 9,
@@ -15735,8 +15810,8 @@
    "name": "_playlist_sync_all",
    "module": "backend/playlist_service.py",
    "lines": [
-    3000,
-    3132
+    3011,
+    3143
    ],
    "size": 133,
    "body_lines": 132,
@@ -15775,8 +15850,8 @@
    "name": "_playlist_sync_all_locked",
    "module": "backend/playlist_service.py",
    "lines": [
-    3135,
-    3157
+    3146,
+    3168
    ],
    "size": 23,
    "body_lines": 22,
@@ -15799,8 +15874,8 @@
    "name": "_spotify_error",
    "module": "backend/playlist_service.py",
    "lines": [
-    3164,
-    3185
+    3175,
+    3196
    ],
    "size": 22,
    "body_lines": 20,
@@ -15819,8 +15894,8 @@
    "name": "_fetch_spotify_playlist_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
-    3188,
-    3231
+    3199,
+    3242
    ],
    "size": 44,
    "body_lines": 38,
@@ -15842,8 +15917,8 @@
    "name": "_playlist_url_host",
    "module": "backend/playlist_service.py",
    "lines": [
-    3234,
-    3244
+    3245,
+    3255
    ],
    "size": 11,
    "body_lines": 4,
@@ -15862,8 +15937,8 @@
    "name": "_playlist_url_host_is",
    "module": "backend/playlist_service.py",
    "lines": [
-    3247,
-    3248
+    3258,
+    3259
    ],
    "size": 2,
    "body_lines": 1,
@@ -15883,8 +15958,8 @@
    "name": "_playlist_url_host_is_any",
    "module": "backend/playlist_service.py",
    "lines": [
-    3251,
-    3252
+    3262,
+    3263
    ],
    "size": 2,
    "body_lines": 1,
@@ -15905,8 +15980,8 @@
    "name": "parse_playlist_request",
    "module": "backend/playlist_service.py",
    "lines": [
-    3257,
-    3421
+    3268,
+    3432
    ],
    "size": 165,
    "body_lines": 164,
@@ -15942,8 +16017,8 @@
    "name": "_playlist_pipeline_runtime_lock",
    "module": "backend/playlist_service.py",
    "lines": [
-    3444,
-    3451
+    3455,
+    3462
    ],
    "size": 8,
    "body_lines": 7,
@@ -15965,8 +16040,8 @@
    "name": "_playlist_running_pipeline_job_id",
    "module": "backend/playlist_service.py",
    "lines": [
-    3454,
-    3476
+    3465,
+    3487
    ],
    "size": 23,
    "body_lines": 22,
@@ -15991,8 +16066,8 @@
    "name": "_playlist_job_track_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    3479,
-    3483
+    3490,
+    3494
    ],
    "size": 5,
    "body_lines": 4,
@@ -16013,8 +16088,8 @@
    "name": "_playlist_job_key_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    3486,
-    3510
+    3497,
+    3521
    ],
    "size": 25,
    "body_lines": 21,
@@ -16040,8 +16115,8 @@
    "name": "_playlist_job_id_for_key",
    "module": "backend/playlist_service.py",
    "lines": [
-    3513,
-    3515
+    3524,
+    3526
    ],
    "size": 3,
    "body_lines": 2,
@@ -16060,8 +16135,8 @@
    "name": "_playlist_valid_job_id",
    "module": "backend/playlist_service.py",
    "lines": [
-    3521,
-    3522
+    3532,
+    3533
    ],
    "size": 2,
    "body_lines": 1,
@@ -16083,8 +16158,8 @@
    "name": "_playlist_job_state_path",
    "module": "backend/playlist_service.py",
    "lines": [
-    3525,
-    3529
+    3536,
+    3540
    ],
    "size": 5,
    "body_lines": 4,
@@ -16109,8 +16184,8 @@
    "name": "_playlist_job_state_safe_read_text",
    "module": "backend/playlist_service.py",
    "lines": [
-    3532,
-    3543
+    3543,
+    3554
    ],
    "size": 12,
    "body_lines": 3,
@@ -16130,8 +16205,8 @@
    "name": "_playlist_load_job_state",
    "module": "backend/playlist_service.py",
    "lines": [
-    3546,
-    3563
+    3557,
+    3574
    ],
    "size": 18,
    "body_lines": 17,
@@ -16154,8 +16229,8 @@
    "name": "_playlist_sanitize_job_state_for_persistence",
    "module": "backend/playlist_service.py",
    "lines": [
-    3566,
-    3608
+    3577,
+    3619
    ],
    "size": 43,
    "body_lines": 42,
@@ -16176,8 +16251,8 @@
    "name": "_playlist_save_job_state",
    "module": "backend/playlist_service.py",
    "lines": [
-    3611,
-    3632
+    3622,
+    3643
    ],
    "size": 22,
    "body_lines": 21,
@@ -16204,8 +16279,8 @@
    "name": "_playlist_job_state_path_for_delete",
    "module": "backend/playlist_service.py",
    "lines": [
-    3635,
-    3653
+    3646,
+    3664
    ],
    "size": 19,
    "body_lines": 18,
@@ -16226,8 +16301,8 @@
    "name": "_playlist_delete_job_state",
    "module": "backend/playlist_service.py",
    "lines": [
-    3656,
-    3663
+    3667,
+    3674
    ],
    "size": 8,
    "body_lines": 7,
@@ -16249,8 +16324,8 @@
    "name": "_playlist_interrupted_saved_job_state",
    "module": "backend/playlist_service.py",
    "lines": [
-    3666,
-    3680
+    3677,
+    3691
    ],
    "size": 15,
    "body_lines": 14,
@@ -16273,8 +16348,8 @@
    "name": "_playlist_job_state_stamp",
    "module": "backend/playlist_service.py",
    "lines": [
-    3683,
-    3690
+    3694,
+    3701
    ],
    "size": 8,
    "body_lines": 7,
@@ -16296,8 +16371,8 @@
    "name": "_playlist_job_is_live",
    "module": "backend/playlist_service.py",
    "lines": [
-    3693,
-    3696
+    3704,
+    3707
    ],
    "size": 4,
    "body_lines": 3,
@@ -16318,8 +16393,8 @@
    "name": "_playlist_job_state_name",
    "module": "backend/playlist_service.py",
    "lines": [
-    3699,
-    3710
+    3710,
+    3721
    ],
    "size": 12,
    "body_lines": 11,
@@ -16343,8 +16418,8 @@
    "name": "_playlist_saved_job_states_for_name",
    "module": "backend/playlist_service.py",
    "lines": [
-    3713,
-    3811
+    3724,
+    3822
    ],
    "size": 99,
    "body_lines": 94,
@@ -16382,8 +16457,8 @@
    "name": "_playlist_latest_job_state_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    3814,
-    3838
+    3825,
+    3849
    ],
    "size": 25,
    "body_lines": 23,
@@ -16411,8 +16486,8 @@
    "name": "_playlist_saved_playlist_exists",
    "module": "backend/playlist_service.py",
    "lines": [
-    3841,
-    3855
+    3852,
+    3866
    ],
    "size": 15,
    "body_lines": 14,
@@ -16441,8 +16516,8 @@
    "name": "_playlist_missing_track_label",
    "module": "backend/playlist_service.py",
    "lines": [
-    3858,
-    3861
+    3869,
+    3872
    ],
    "size": 4,
    "body_lines": 3,
@@ -16463,8 +16538,8 @@
    "name": "_playlist_requested_track_key",
    "module": "backend/playlist_service.py",
    "lines": [
-    3864,
-    3868
+    3875,
+    3879
    ],
    "size": 5,
    "body_lines": 4,
@@ -16485,8 +16560,8 @@
    "name": "_playlist_download_methods",
    "module": "backend/playlist_service.py",
    "lines": [
-    3871,
-    3880
+    3882,
+    3891
    ],
    "size": 10,
    "body_lines": 9,
@@ -16510,8 +16585,8 @@
    "name": "_playlist_set_track_status",
    "module": "backend/playlist_service.py",
    "lines": [
-    3883,
-    3934
+    3894,
+    3945
    ],
    "size": 52,
    "body_lines": 47,
@@ -16537,8 +16612,8 @@
    "name": "_playlist_safe_filename",
    "module": "backend/playlist_service.py",
    "lines": [
-    3937,
-    3940
+    3948,
+    3951
    ],
    "size": 4,
    "body_lines": 3,
@@ -16559,8 +16634,8 @@
    "name": "_playlist_validate_downloaded_files",
    "module": "backend/playlist_service.py",
    "lines": [
-    3943,
-    3991
+    3954,
+    4002
    ],
    "size": 49,
    "body_lines": 44,
@@ -16587,8 +16662,8 @@
    "name": "_playlist_inspect_staged_file",
    "module": "backend/playlist_service.py",
    "lines": [
-    3994,
-    4007
+    4005,
+    4018
    ],
    "size": 14,
    "body_lines": 9,
@@ -16614,8 +16689,8 @@
    "name": "_is_safe_playlist_staged_file",
    "module": "backend/playlist_service.py",
    "lines": [
-    4010,
-    4029
+    4021,
+    4040
    ],
    "size": 20,
    "body_lines": 15,
@@ -16636,8 +16711,8 @@
    "name": "_playlist_reconcile_staged_files",
    "module": "backend/playlist_service.py",
    "lines": [
-    4032,
-    4067
+    4043,
+    4078
    ],
    "size": 36,
    "body_lines": 31,
@@ -16663,8 +16738,8 @@
    "name": "_playlist_download_missing_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
-    4070,
-    4249
+    4081,
+    4260
    ],
    "size": 180,
    "body_lines": 171,
@@ -16702,8 +16777,8 @@
    "name": "start_playlist_download",
    "module": "backend/playlist_service.py",
    "lines": [
-    4254,
-    5035
+    4265,
+    5046
    ],
    "size": 782,
    "body_lines": 781,
@@ -16764,8 +16839,8 @@
    "name": "_playlist_quality_row_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    5038,
-    5094
+    5049,
+    5105
    ],
    "size": 57,
    "body_lines": 56,
@@ -16787,8 +16862,8 @@
    "name": "_playlist_quality_cleanup_candidates",
    "module": "backend/playlist_service.py",
    "lines": [
-    5097,
-    5109
+    5108,
+    5120
    ],
    "size": 13,
    "body_lines": 10,
@@ -16810,8 +16885,8 @@
    "name": "_playlist_repair_metadata",
    "module": "backend/playlist_service.py",
    "lines": [
-    5112,
-    5127
+    5123,
+    5138
    ],
    "size": 16,
    "body_lines": 15,
@@ -16835,8 +16910,8 @@
    "name": "_playlist_int",
    "module": "backend/playlist_service.py",
    "lines": [
-    5130,
-    5134
+    5141,
+    5145
    ],
    "size": 5,
    "body_lines": 4,
@@ -16862,8 +16937,8 @@
    "name": "_playlist_duration_seconds",
    "module": "backend/playlist_service.py",
    "lines": [
-    5137,
-    5152
+    5148,
+    5163
    ],
    "size": 16,
    "body_lines": 15,
@@ -16884,8 +16959,8 @@
    "name": "_playlist_canonical_placement_evidence",
    "module": "backend/playlist_service.py",
    "lines": [
-    5155,
-    5200
+    5166,
+    5211
    ],
    "size": 46,
    "body_lines": 12,
@@ -16907,8 +16982,8 @@
    "name": "_playlist_log",
    "module": "backend/playlist_service.py",
    "lines": [
-    5203,
-    5205
+    5214,
+    5216
    ],
    "size": 3,
    "body_lines": 2,
@@ -16934,8 +17009,8 @@
    "name": "_playlist_artist_credit_text",
    "module": "backend/playlist_service.py",
    "lines": [
-    5208,
-    5209
+    5219,
+    5220
    ],
    "size": 2,
    "body_lines": 1,
@@ -16954,8 +17029,8 @@
    "name": "_playlist_albumartist_info_from_values",
    "module": "backend/playlist_service.py",
    "lines": [
-    5212,
-    5229
+    5223,
+    5240
    ],
    "size": 18,
    "body_lines": 15,
@@ -16977,8 +17052,8 @@
    "name": "_playlist_release_group_albumartist_info",
    "module": "backend/playlist_service.py",
    "lines": [
-    5232,
-    5251
+    5243,
+    5262
    ],
    "size": 20,
    "body_lines": 18,
@@ -17002,8 +17077,8 @@
    "name": "_playlist_release_group_albumartist",
    "module": "backend/playlist_service.py",
    "lines": [
-    5254,
-    5257
+    5265,
+    5268
    ],
    "size": 4,
    "body_lines": 2,
@@ -17022,8 +17097,8 @@
    "name": "_playlist_resolve_albumartist_info_for_release_group",
    "module": "backend/playlist_service.py",
    "lines": [
-    5260,
-    5305
+    5271,
+    5316
    ],
    "size": 46,
    "body_lines": 38,
@@ -17050,8 +17125,8 @@
    "name": "_playlist_resolve_albumartist_for_release_group",
    "module": "backend/playlist_service.py",
    "lines": [
-    5308,
-    5323
+    5319,
+    5334
    ],
    "size": 16,
    "body_lines": 9,
@@ -17071,8 +17146,8 @@
    "name": "_playlist_expected_album_path_hint",
    "module": "backend/playlist_service.py",
    "lines": [
-    5326,
-    5337
+    5337,
+    5348
    ],
    "size": 12,
    "body_lines": 11,
@@ -17097,8 +17172,8 @@
    "name": "_playlist_validate_final_album_path",
    "module": "backend/playlist_service.py",
    "lines": [
-    5340,
-    5453
+    5351,
+    5464
    ],
    "size": 114,
    "body_lines": 111,
@@ -17125,8 +17200,8 @@
    "name": "_playlist_row_id",
    "module": "backend/playlist_service.py",
    "lines": [
-    5456,
-    5467
+    5467,
+    5478
    ],
    "size": 12,
    "body_lines": 11,
@@ -17143,8 +17218,8 @@
    "name": "_playlist_recording_search_candidates",
    "module": "backend/playlist_service.py",
    "lines": [
-    5470,
-    5498
+    5481,
+    5509
    ],
    "size": 29,
    "body_lines": 27,
@@ -17166,8 +17241,8 @@
    "name": "_playlist_release_looks_like_track_single",
    "module": "backend/playlist_service.py",
    "lines": [
-    5501,
-    5514
+    5512,
+    5525
    ],
    "size": 14,
    "body_lines": 10,
@@ -17190,8 +17265,8 @@
    "name": "_playlist_album_tag_release_placement",
    "module": "backend/playlist_service.py",
    "lines": [
-    5517,
-    5722
+    5528,
+    5733
    ],
    "size": 206,
    "body_lines": 197,
@@ -17224,8 +17299,8 @@
    "name": "_playlist_resolve_album_placement",
    "module": "backend/playlist_service.py",
    "lines": [
-    5725,
-    5998
+    5736,
+    6009
    ],
    "size": 274,
    "body_lines": 271,
@@ -17260,8 +17335,8 @@
    "name": "_playlist_reusable_download_files",
    "module": "backend/playlist_service.py",
    "lines": [
-    6001,
-    6044
+    6012,
+    6055
    ],
    "size": 44,
    "body_lines": 38,
@@ -17287,8 +17362,8 @@
    "name": "_playlist_copy_source_files",
    "module": "backend/playlist_service.py",
    "lines": [
-    6047,
-    6076
+    6058,
+    6087
    ],
    "size": 30,
    "body_lines": 28,
@@ -17309,8 +17384,8 @@
    "name": "_playlist_slskd_download_track",
    "module": "backend/playlist_service.py",
    "lines": [
-    6079,
-    6108
+    6090,
+    6119
    ],
    "size": 30,
    "body_lines": 26,
@@ -17334,8 +17409,8 @@
    "name": "_playlist_validate_staged_download",
    "module": "backend/playlist_service.py",
    "lines": [
-    6111,
-    6155
+    6122,
+    6166
    ],
    "size": 45,
    "body_lines": 41,
@@ -17360,8 +17435,8 @@
    "name": "_playlist_apply_album_placement",
    "module": "backend/playlist_service.py",
    "lines": [
-    6158,
-    6205
+    6169,
+    6216
    ],
    "size": 48,
    "body_lines": 44,
@@ -17386,8 +17461,8 @@
    "name": "_playlist_repair_quality_candidate",
    "module": "backend/playlist_service.py",
    "lines": [
-    6208,
-    6223
+    6219,
+    6234
    ],
    "size": 16,
    "body_lines": 13,
@@ -17411,8 +17486,8 @@
    "name": "_playlist_manual_placement_from_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    6226,
-    6321
+    6237,
+    6332
    ],
    "size": 96,
    "body_lines": 94,
@@ -17436,8 +17511,8 @@
    "name": "_playlist_place_quality_candidate_job",
    "module": "backend/playlist_service.py",
    "lines": [
-    6324,
-    6372
+    6335,
+    6383
    ],
    "size": 49,
    "body_lines": 46,
@@ -17461,8 +17536,8 @@
    "name": "_playlist_move_singleton_candidate",
    "module": "backend/playlist_service.py",
    "lines": [
-    6375,
-    6420
+    6386,
+    6431
    ],
    "size": 46,
    "body_lines": 43,
@@ -17485,8 +17560,8 @@
    "name": "_playlist_candidate_text_pairs",
    "module": "backend/playlist_service.py",
    "lines": [
-    6423,
-    6444
+    6434,
+    6455
    ],
    "size": 22,
    "body_lines": 21,
@@ -17510,8 +17585,8 @@
    "name": "_playlist_candidate_matches_track",
    "module": "backend/playlist_service.py",
    "lines": [
-    6447,
-    6461
+    6458,
+    6472
    ],
    "size": 15,
    "body_lines": 13,
@@ -17535,8 +17610,8 @@
    "name": "_playlist_place_recent_imports_for_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
-    6464,
-    6531
+    6475,
+    6542
    ],
    "size": 68,
    "body_lines": 64,
@@ -17564,8 +17639,8 @@
    "name": "_playlist_run_quality_cleanup_job",
    "module": "backend/playlist_service.py",
    "lines": [
-    6534,
-    6656
+    6545,
+    6667
    ],
    "size": 123,
    "body_lines": 118,
@@ -17590,8 +17665,8 @@
    "name": "_playlist_match_reference_track",
    "module": "backend/playlist_service.py",
    "lines": [
-    6659,
-    6685
+    6670,
+    6696
    ],
    "size": 27,
    "body_lines": 24,
@@ -17619,8 +17694,8 @@
    "name": "_playlist_m3u_track_rows",
    "module": "backend/playlist_service.py",
    "lines": [
-    6688,
-    6719
+    6699,
+    6730
    ],
    "size": 32,
    "body_lines": 31,
@@ -17648,8 +17723,8 @@
    "name": "_playlist_rows_for_saved_playlist",
    "module": "backend/playlist_service.py",
    "lines": [
-    6722,
-    6761
+    6733,
+    6772
    ],
    "size": 40,
    "body_lines": 37,
@@ -17676,8 +17751,8 @@
    "name": "_playlist_count_value",
    "module": "backend/playlist_service.py",
    "lines": [
-    6764,
-    6768
+    6775,
+    6779
    ],
    "size": 5,
    "body_lines": 4,
@@ -17703,8 +17778,8 @@
    "name": "_playlist_manifest_list_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    6771,
-    6808
+    6782,
+    6819
    ],
    "size": 38,
    "body_lines": 36,
@@ -17729,8 +17804,8 @@
    "name": "_playlist_summary_waiting_count",
    "module": "backend/playlist_service.py",
    "lines": [
-    6811,
-    6819
+    6822,
+    6830
    ],
    "size": 9,
    "body_lines": 8,
@@ -17751,8 +17826,8 @@
    "name": "_playlist_checkpoint_is_actionable",
    "module": "backend/playlist_service.py",
    "lines": [
-    6822,
-    6836
+    6833,
+    6847
    ],
    "size": 15,
    "body_lines": 13,
@@ -17774,8 +17849,8 @@
    "name": "_playlist_visible_checkpoint_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    6839,
-    6858
+    6850,
+    6869
    ],
    "size": 20,
    "body_lines": 18,
@@ -17798,8 +17873,8 @@
    "name": "_playlist_apply_checkpoint_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    6861,
-    6876
+    6872,
+    6887
    ],
    "size": 16,
    "body_lines": 14,
@@ -17823,8 +17898,8 @@
    "name": "_playlist_checkpoint_list_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    6879,
-    6914
+    6890,
+    6925
    ],
    "size": 36,
    "body_lines": 34,
@@ -17850,8 +17925,8 @@
    "name": "_playlist_engine_m3u_count_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    6917,
-    6946
+    6928,
+    6957
    ],
    "size": 30,
    "body_lines": 28,
@@ -17873,8 +17948,8 @@
    "name": "_playlist_m3u_summary",
    "module": "backend/playlist_service.py",
    "lines": [
-    6949,
-    6999
+    6960,
+    7010
    ],
    "size": 51,
    "body_lines": 47,
@@ -17905,8 +17980,8 @@
    "name": "_playlist_manifest_name_from_file",
    "module": "backend/playlist_service.py",
    "lines": [
-    7002,
-    7020
+    7013,
+    7031
    ],
    "size": 19,
    "body_lines": 18,
@@ -17929,8 +18004,8 @@
    "name": "_playlist_saved_playlist_records",
    "module": "backend/playlist_service.py",
    "lines": [
-    7023,
-    7092
+    7034,
+    7103
    ],
    "size": 70,
    "body_lines": 69,
@@ -17957,8 +18032,8 @@
    "name": "_playlist_find_track_row",
    "module": "backend/playlist_service.py",
    "lines": [
-    7095,
-    7101
+    7106,
+    7112
    ],
    "size": 7,
    "body_lines": 5,
@@ -17980,8 +18055,8 @@
    "name": "_playlist_write_local_membership",
    "module": "backend/playlist_service.py",
    "lines": [
-    7104,
-    7130
+    7115,
+    7141
    ],
    "size": 27,
    "body_lines": 25,
@@ -18014,8 +18089,8 @@
    "name": "_playlist_delete_staged_track_file",
    "module": "backend/playlist_service.py",
    "lines": [
-    7133,
-    7220
+    7144,
+    7231
    ],
    "size": 88,
    "body_lines": 85,
@@ -18042,8 +18117,8 @@
    "name": "_playlist_apply_track_action",
    "module": "backend/playlist_service.py",
    "lines": [
-    7223,
-    7300
+    7234,
+    7311
    ],
    "size": 78,
    "body_lines": 74,
@@ -18073,8 +18148,8 @@
    "name": "_playlist_state_for_track",
    "module": "backend/playlist_service.py",
    "lines": [
-    7303,
-    7314
+    7314,
+    7325
    ],
    "size": 12,
    "body_lines": 9,
@@ -18100,8 +18175,8 @@
    "name": "_playlist_track_with_state",
    "module": "backend/playlist_service.py",
    "lines": [
-    7317,
-    7330
+    7328,
+    7341
    ],
    "size": 14,
    "body_lines": 10,
@@ -18124,8 +18199,8 @@
    "name": "_playlist_manifest_state_counts",
    "module": "backend/playlist_service.py",
    "lines": [
-    7333,
-    7344
+    7344,
+    7355
    ],
    "size": 12,
    "body_lines": 11,
@@ -18146,8 +18221,8 @@
    "name": "_playlist_detail_summary_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    7347,
-    7395
+    7358,
+    7406
    ],
    "size": 49,
    "body_lines": 48,
@@ -18180,8 +18255,8 @@
    "name": "_playlist_m3u_reference_track_rows",
    "module": "backend/playlist_service.py",
    "lines": [
-    7398,
-    7421
+    7409,
+    7432
    ],
    "size": 24,
    "body_lines": 23,
@@ -18204,8 +18279,8 @@
    "name": "_playlist_desired_reference_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
-    7424,
-    7428
+    7435,
+    7439
    ],
    "size": 5,
    "body_lines": 4,
@@ -18228,8 +18303,8 @@
    "name": "_playlist_state_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    7431,
-    7443
+    7442,
+    7454
    ],
    "size": 13,
    "body_lines": 12,
@@ -18250,8 +18325,8 @@
    "name": "_playlist_row_group",
    "module": "backend/playlist_service.py",
    "lines": [
-    7446,
-    7452
+    7457,
+    7463
    ],
    "size": 7,
    "body_lines": 6,
@@ -18273,8 +18348,8 @@
    "name": "_playlist_page_slice",
    "module": "backend/playlist_service.py",
    "lines": [
-    7455,
-    7457
+    7466,
+    7468
    ],
    "size": 3,
    "body_lines": 2,
@@ -18293,8 +18368,8 @@
    "name": "_playlist_state_rows_page",
    "module": "backend/playlist_service.py",
    "lines": [
-    7460,
-    7491
+    7471,
+    7502
    ],
    "size": 32,
    "body_lines": 31,
@@ -18320,8 +18395,8 @@
    "name": "_playlist_matched_rows_page",
    "module": "backend/playlist_service.py",
    "lines": [
-    7494,
-    7522
+    7505,
+    7533
    ],
    "size": 29,
    "body_lines": 28,
@@ -18348,8 +18423,8 @@
    "name": "_playlist_group_known_total",
    "module": "backend/playlist_service.py",
    "lines": [
-    7525,
-    7540
+    7536,
+    7551
    ],
    "size": 16,
    "body_lines": 15,
@@ -18370,8 +18445,8 @@
    "name": "_playlist_detail_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    7543,
-    7599
+    7554,
+    7610
    ],
    "size": 57,
    "body_lines": 56,
@@ -18415,8 +18490,8 @@
    "name": "_playlist_desired_or_m3u_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
-    7602,
-    7607
+    7613,
+    7618
    ],
    "size": 6,
    "body_lines": 4,
@@ -18439,8 +18514,8 @@
    "name": "_playlist_apply_manifest_replacements",
    "module": "backend/playlist_service.py",
    "lines": [
-    7610,
-    7672
+    7621,
+    7683
    ],
    "size": 63,
    "body_lines": 58,
@@ -18472,8 +18547,8 @@
    "name": "_playlist_suggestion_key",
    "module": "backend/playlist_service.py",
    "lines": [
-    7675,
-    7676
+    7686,
+    7687
    ],
    "size": 2,
    "body_lines": 1,
@@ -18495,8 +18570,8 @@
    "name": "_playlist_add_suggestion",
    "module": "backend/playlist_service.py",
    "lines": [
-    7679,
-    7707
+    7690,
+    7718
    ],
    "size": 29,
    "body_lines": 19,
@@ -18518,8 +18593,8 @@
    "name": "_playlist_suggestions_for_track",
    "module": "backend/playlist_service.py",
    "lines": [
-    7710,
-    7797
+    7721,
+    7808
    ],
    "size": 88,
    "body_lines": 83,
@@ -18550,8 +18625,8 @@
    "name": "_playlist_record_pipeline",
    "module": "backend/playlist_service.py",
    "lines": [
-    7800,
-    7809
+    7811,
+    7820
    ],
    "size": 10,
    "body_lines": 9,
@@ -18577,8 +18652,8 @@
    "name": "_playlist_run_source_sync",
    "module": "backend/playlist_service.py",
    "lines": [
-    7812,
-    7865
+    7823,
+    7876
    ],
    "size": 54,
    "body_lines": 53,
@@ -18613,8 +18688,8 @@
    "name": "_playlist_run_reconcile_state",
    "module": "backend/playlist_service.py",
    "lines": [
-    7868,
-    7881
+    7879,
+    7892
    ],
    "size": 14,
    "body_lines": 13,
@@ -18640,8 +18715,8 @@
    "name": "_playlist_staged_entries",
    "module": "backend/playlist_service.py",
    "lines": [
-    7884,
-    7935
+    7895,
+    7946
    ],
    "size": 52,
    "body_lines": 49,
@@ -18669,8 +18744,8 @@
    "name": "_enrich_playlist_file_tags",
    "module": "backend/playlist_service.py",
    "lines": [
-    7938,
-    7976
+    7949,
+    7987
    ],
    "size": 39,
    "body_lines": 37,
@@ -18691,8 +18766,8 @@
    "name": "_playlist_run_import_downloaded",
    "module": "backend/playlist_service.py",
    "lines": [
-    7979,
-    8180
+    7990,
+    8191
    ],
    "size": 202,
    "body_lines": 198,
@@ -18726,8 +18801,8 @@
    "name": "_playlist_sync_items_from_m3u",
    "module": "backend/playlist_service.py",
    "lines": [
-    8183,
-    8207
+    8194,
+    8218
    ],
    "size": 25,
    "body_lines": 24,
@@ -18752,8 +18827,8 @@
    "name": "_playlist_run_plex_sync",
    "module": "backend/playlist_service.py",
    "lines": [
-    8210,
-    8269
+    8221,
+    8280
    ],
    "size": 60,
    "body_lines": 59,
@@ -18780,8 +18855,8 @@
    "name": "_playlist_start_direct_action",
    "module": "backend/playlist_service.py",
    "lines": [
-    8272,
-    8329
+    8283,
+    8340
    ],
    "size": 58,
    "body_lines": 57,
@@ -18812,8 +18887,8 @@
    "name": "_playlist_start_download_action",
    "module": "backend/playlist_service.py",
    "lines": [
-    8332,
-    8393
+    8343,
+    8404
    ],
    "size": 62,
    "body_lines": 59,
@@ -18847,8 +18922,8 @@
    "name": "_playlist_auto_sync_worker",
    "module": "backend/playlist_service.py",
    "lines": [
-    8396,
-    8405
+    8407,
+    8416
    ],
    "size": 10,
    "body_lines": 9,
@@ -18870,8 +18945,8 @@
    "name": "_start_playlist_auto_sync_worker",
    "module": "backend/playlist_service.py",
    "lines": [
-    8408,
-    8411
+    8419,
+    8422
    ],
    "size": 4,
    "body_lines": 3,
@@ -18890,8 +18965,8 @@
    "name": "_playlist_index_warm_worker",
    "module": "backend/playlist_service.py",
    "lines": [
-    8414,
-    8423
+    8425,
+    8434
    ],
    "size": 10,
    "body_lines": 9,
@@ -18913,8 +18988,8 @@
    "name": "_start_playlist_index_warm_worker",
    "module": "backend/playlist_service.py",
    "lines": [
-    8426,
-    8427
+    8437,
+    8438
    ],
    "size": 2,
    "body_lines": 1,
@@ -18933,8 +19008,8 @@
    "name": "playlist_sync_status_payload",
    "module": "backend/playlist_service.py",
    "lines": [
-    8430,
-    8434
+    8441,
+    8445
    ],
    "size": 5,
    "body_lines": 3,
@@ -24714,8 +24789,8 @@
    "name": "_wanted_tracks_satisfied_by_names",
    "module": "backend/acquisition_service.py",
    "lines": [
-    32,
-    56
+    33,
+    57
    ],
    "size": 25,
    "body_lines": 23,
@@ -24739,8 +24814,8 @@
    "name": "_download_method_job_label",
    "module": "backend/acquisition_service.py",
    "lines": [
-    62,
-    69
+    63,
+    70
    ],
    "size": 8,
    "body_lines": 7,
@@ -24761,8 +24836,8 @@
    "name": "_download_folder_segment",
    "module": "backend/acquisition_service.py",
    "lines": [
-    76,
-    83
+    77,
+    84
    ],
    "size": 8,
    "body_lines": 2,
@@ -24781,8 +24856,8 @@
    "name": "_download_dest_under",
    "module": "backend/acquisition_service.py",
    "lines": [
-    86,
-    94
+    87,
+    95
    ],
    "size": 9,
    "body_lines": 7,
@@ -24801,8 +24876,8 @@
    "name": "start_album_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    99,
-    759
+    100,
+    760
    ],
    "size": 661,
    "body_lines": 658,
@@ -24861,8 +24936,8 @@
    "name": "_validate_wanted_download_identity_before_import",
    "module": "backend/acquisition_service.py",
    "lines": [
-    762,
-    862
+    763,
+    863
    ],
    "size": 101,
    "body_lines": 96,
@@ -24891,8 +24966,8 @@
    "name": "_deno_download_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    865,
-    866
+    866,
+    867
    ],
    "size": 2,
    "body_lines": 1,
@@ -24909,8 +24984,8 @@
    "name": "_acq_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    871,
-    872
+    872,
+    873
    ],
    "size": 2,
    "body_lines": 1,
@@ -24932,8 +25007,8 @@
    "name": "_acq_display_year",
    "module": "backend/acquisition_service.py",
    "lines": [
-    875,
-    877
+    876,
+    878
    ],
    "size": 3,
    "body_lines": 2,
@@ -24955,8 +25030,8 @@
    "name": "_acq_release_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    880,
-    885
+    881,
+    886
    ],
    "size": 6,
    "body_lines": 5,
@@ -24979,8 +25054,8 @@
    "name": "_acq_release_identity",
    "module": "backend/acquisition_service.py",
    "lines": [
-    888,
-    897
+    889,
+    898
    ],
    "size": 10,
    "body_lines": 7,
@@ -25002,8 +25077,8 @@
    "name": "_acq_release_group_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    900,
-    904
+    901,
+    905
    ],
    "size": 5,
    "body_lines": 2,
@@ -25027,8 +25102,8 @@
    "name": "_acq_album_has_no_track_rows",
    "module": "backend/acquisition_service.py",
    "lines": [
-    907,
-    913
+    908,
+    914
    ],
    "size": 7,
    "body_lines": 6,
@@ -25051,8 +25126,8 @@
    "name": "_acq_expected_track_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    916,
-    929
+    917,
+    930
    ],
    "size": 14,
    "body_lines": 13,
@@ -25078,8 +25153,8 @@
    "name": "_acq_imported_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    932,
-    943
+    933,
+    944
    ],
    "size": 12,
    "body_lines": 11,
@@ -25104,8 +25179,8 @@
    "name": "_acq_track_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    946,
-    949
+    947,
+    950
    ],
    "size": 4,
    "body_lines": 3,
@@ -25126,8 +25201,8 @@
    "name": "_acq_is_extra_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    952,
-    962
+    953,
+    963
    ],
    "size": 11,
    "body_lines": 10,
@@ -25151,8 +25226,8 @@
    "name": "_acq_is_leftover_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    965,
-    974
+    966,
+    975
    ],
    "size": 10,
    "body_lines": 9,
@@ -25176,8 +25251,8 @@
    "name": "_acq_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    977,
-    996
+    978,
+    997
    ],
    "size": 20,
    "body_lines": 19,
@@ -25203,8 +25278,8 @@
    "name": "_acq_health",
    "module": "backend/acquisition_service.py",
    "lines": [
-    999,
-    1047
+    1000,
+    1048
    ],
    "size": 49,
    "body_lines": 48,
@@ -25232,8 +25307,8 @@
    "name": "_acq_needs_acquisition",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1050,
-    1055
+    1051,
+    1056
    ],
    "size": 6,
    "body_lines": 4,
@@ -25256,8 +25331,8 @@
    "name": "_acq_locally_satisfies_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1058,
-    1069
+    1059,
+    1070
    ],
    "size": 12,
    "body_lines": 10,
@@ -25282,8 +25357,8 @@
    "name": "_acq_local_issue",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1072,
-    1079
+    1073,
+    1080
    ],
    "size": 8,
    "body_lines": 7,
@@ -25306,11 +25381,11 @@
    "name": "_lidarr_wanted_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1085,
-    1096
+    1086,
+    1100
    ],
-   "size": 12,
-   "body_lines": 10,
+   "size": 15,
+   "body_lines": 13,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -25326,8 +25401,8 @@
    "name": "_acq_fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1099,
-    1150
+    1103,
+    1154
    ],
    "size": 52,
    "body_lines": 48,
@@ -25350,8 +25425,8 @@
    "name": "_acq_item_mbid",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1153,
-    1157
+    1157,
+    1161
    ],
    "size": 5,
    "body_lines": 4,
@@ -25377,8 +25452,8 @@
    "name": "_acq_can_import_disk",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1160,
-    1166
+    1164,
+    1170
    ],
    "size": 7,
    "body_lines": 6,
@@ -25400,8 +25475,8 @@
    "name": "_acq_can_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1169,
-    1183
+    1173,
+    1187
    ],
    "size": 15,
    "body_lines": 14,
@@ -25423,8 +25498,8 @@
    "name": "_acq_action_flags",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1186,
-    1208
+    1190,
+    1212
    ],
    "size": 23,
    "body_lines": 22,
@@ -25447,8 +25522,8 @@
    "name": "_build_acquisition_queue_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1211,
-    1335
+    1215,
+    1339
    ],
    "size": 125,
    "body_lines": 122,
@@ -25485,8 +25560,8 @@
    "name": "_acq_download_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1341,
-    1363
+    1345,
+    1367
    ],
    "size": 23,
    "body_lines": 21,
@@ -25507,8 +25582,8 @@
    "name": "_acq_start_download_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1366,
-    1371
+    1370,
+    1375
    ],
    "size": 6,
    "body_lines": 5,
@@ -25531,8 +25606,8 @@
    "name": "_acq_start_import_disk_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1374,
-    1386
+    1378,
+    1390
    ],
    "size": 13,
    "body_lines": 12,
@@ -25554,8 +25629,8 @@
    "name": "_acq_trim_batch_log",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1389,
-    1395
+    1393,
+    1399
    ],
    "size": 7,
    "body_lines": 6,
@@ -25574,8 +25649,8 @@
    "name": "_acq_download_all_record",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1398,
-    1420
+    1402,
+    1424
    ],
    "size": 23,
    "body_lines": 15,
@@ -25594,8 +25669,8 @@
    "name": "_save_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1423,
-    1430
+    1427,
+    1434
    ],
    "size": 8,
    "body_lines": 7,
@@ -25614,8 +25689,8 @@
    "name": "_load_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1433,
-    1440
+    1437,
+    1444
    ],
    "size": 8,
    "body_lines": 7,
@@ -25634,8 +25709,8 @@
    "name": "_qbit_status_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1443,
-    1455
+    1447,
+    1459
    ],
    "size": 13,
    "body_lines": 12,
@@ -25655,8 +25730,8 @@
    "name": "_qbit_login_cookie",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1458,
-    1483
+    1462,
+    1487
    ],
    "size": 26,
    "body_lines": 25,
@@ -25675,8 +25750,8 @@
    "name": "_qbit_request_json",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1486,
-    1494
+    1490,
+    1498
    ],
    "size": 9,
    "body_lines": 7,
@@ -25695,8 +25770,8 @@
    "name": "_qbit_post",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1497,
-    1504
+    1501,
+    1508
    ],
    "size": 8,
    "body_lines": 7,
@@ -25715,8 +25790,8 @@
    "name": "_qbit_path_alias_pairs",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1507,
-    1517
+    1511,
+    1521
    ],
    "size": 11,
    "body_lines": 10,
@@ -25735,8 +25810,8 @@
    "name": "_qbit_map_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1520,
-    1535
+    1524,
+    1539
    ],
    "size": 16,
    "body_lines": 8,
@@ -25758,8 +25833,8 @@
    "name": "_qbit_allowed_repair_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1538,
-    1545
+    1542,
+    1549
    ],
    "size": 8,
    "body_lines": 7,
@@ -25780,8 +25855,8 @@
    "name": "_qbit_candidate_target_paths",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1548,
-    1582
+    1552,
+    1586
    ],
    "size": 35,
    "body_lines": 33,
@@ -25803,8 +25878,8 @@
    "name": "_library_file_candidates_for_qbit",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1585,
-    1631
+    1589,
+    1635
    ],
    "size": 47,
    "body_lines": 46,
@@ -25826,8 +25901,8 @@
    "name": "_qbit_scene_text",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1640,
-    1644
+    1644,
+    1648
    ],
    "size": 5,
    "body_lines": 4,
@@ -25849,8 +25924,8 @@
    "name": "_qbit_torrent_scene_artist_slug",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1647,
-    1649
+    1651,
+    1653
    ],
    "size": 3,
    "body_lines": 2,
@@ -25871,8 +25946,8 @@
    "name": "_qbit_torrent_album_guess",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1652,
-    1662
+    1656,
+    1666
    ],
    "size": 11,
    "body_lines": 10,
@@ -25894,8 +25969,8 @@
    "name": "_qbit_track_guess_from_scene_file",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1665,
-    1687
+    1669,
+    1691
    ],
    "size": 23,
    "body_lines": 22,
@@ -25918,8 +25993,8 @@
    "name": "_library_file_candidates_for_qbit_metadata",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1690,
-    1779
+    1694,
+    1783
    ],
    "size": 90,
    "body_lines": 87,
@@ -25946,8 +26021,8 @@
    "name": "_qbit_hardlink_public_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1797,
-    1811
+    1801,
+    1815
    ],
    "size": 15,
    "body_lines": 6,
@@ -25966,8 +26041,8 @@
    "name": "_qbit_hardlink_missing_impl",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1814,
-    2050
+    1818,
+    2054
    ],
    "size": 237,
    "body_lines": 231,
@@ -25996,8 +26071,8 @@
    "name": "_audio_files_under",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2053,
-    2062
+    2057,
+    2066
    ],
    "size": 10,
    "body_lines": 9,
@@ -33982,8 +34057,8 @@
    "name": "ytdlp_status",
    "module": "routes_acquisition.py",
    "lines": [
-    26,
-    92
+    27,
+    93
    ],
    "size": 67,
    "body_lines": 66,
@@ -34021,8 +34096,8 @@
    "name": "ytdlp_test_youtube",
    "module": "routes_acquisition.py",
    "lines": [
-    96,
-    163
+    97,
+    164
    ],
    "size": 68,
    "body_lines": 67,
@@ -34052,8 +34127,8 @@
    "name": "api_download_album",
    "module": "routes_acquisition.py",
    "lines": [
-    167,
-    170
+    168,
+    171
    ],
    "size": 4,
    "body_lines": 2,
@@ -34076,8 +34151,8 @@
    "name": "acquisition_queue",
    "module": "routes_acquisition.py",
    "lines": [
-    174,
-    176
+    175,
+    177
    ],
    "size": 3,
    "body_lines": 2,
@@ -34099,8 +34174,8 @@
    "name": "acquisition_download_all",
    "module": "routes_acquisition.py",
    "lines": [
-    183,
-    358
+    184,
+    359
    ],
    "size": 176,
    "body_lines": 175,
@@ -34132,8 +34207,8 @@
    "name": "acquisition_download_all_active",
    "module": "routes_acquisition.py",
    "lines": [
-    362,
-    377
+    363,
+    378
    ],
    "size": 16,
    "body_lines": 15,
@@ -34155,8 +34230,8 @@
    "name": "qbit_status",
    "module": "routes_acquisition.py",
    "lines": [
-    381,
-    382
+    382,
+    383
    ],
    "size": 2,
    "body_lines": 1,
@@ -34178,11 +34253,11 @@
    "name": "qbit_hardlink_missing",
    "module": "routes_acquisition.py",
    "lines": [
-    386,
-    461
+    387,
+    465
    ],
-   "size": 76,
-   "body_lines": 75,
+   "size": 79,
+   "body_lines": 78,
    "route": {
     "method": "POST",
     "path": "/api/qbittorrent/hardlink-missing"
@@ -34203,8 +34278,8 @@
    "name": "music_format_replacement_statuses",
    "module": "routes_acquisition.py",
    "lines": [
-    465,
-    469
+    469,
+    473
    ],
    "size": 5,
    "body_lines": 4,
@@ -34224,8 +34299,8 @@
    "name": "start_music_format_library_scan",
    "module": "routes_acquisition.py",
    "lines": [
-    473,
-    485
+    477,
+    489
    ],
    "size": 13,
    "body_lines": 12,
@@ -34247,8 +34322,8 @@
    "name": "start_music_format_replacement_retry",
    "module": "routes_acquisition.py",
    "lines": [
-    489,
-    510
+    493,
+    514
    ],
    "size": 22,
    "body_lines": 21,
