@@ -8,6 +8,7 @@ socket was opened to; when a request is admitted, the recorded connection is
 redirected to a local test server so the full urllib response path runs.
 """
 import http.server
+import ipaddress
 import logging
 import socket
 import threading
@@ -155,7 +156,7 @@ class ImplicitTrustTests(_TrustBase):
                 net = _Net(self, {"plex.test": [ip], "fd12::5": [ip]})
                 url = configured + "/identity"
                 self.assertEqual(self.fetch("plex", url), b"ok")
-                self.assertEqual(net.connected[0][0], ip)
+                self.assertEqual(ipaddress.ip_address(net.connected[0][0]), ipaddress.ip_address(ip))
 
     def test_public_configured_url_follows_the_public_path(self):
         net = _Net(self, {"plex.test": ["93.184.216.34"]})
