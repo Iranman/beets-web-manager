@@ -72,7 +72,9 @@ def _audio_cache_file_identity(file_path: str) -> Tuple[Optional[Path], Optional
         path = Path(file_path).resolve(strict=False)
         st = path.stat()
         cache_key = hashlib.sha1(
-            f"v2|{path}|{st.st_size}|{getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))}".encode("utf-8")
+            # v3 (QA 0.4.0 B2): v2 entries may hold a "no match" written when
+            # fpcalc's non-zero exit was misread as unfingerprintable audio.
+            f"v3|{path}|{st.st_size}|{getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))}".encode("utf-8")
         ).hexdigest()
         return path, cache_key
     except OSError:
@@ -116,9 +118,9 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
 ACOUSTID_FAILURE_MESSAGES = {
     "not_configured": "AcoustID not configured (set ACOUSTID_API_KEY); fingerprints were not checked.",
     "auth_failed": "AcoustID rejected the API key (check ACOUSTID_API_KEY); fingerprints were not checked.",
-    # #297 N3: this status also covers a missing or timed-out fpcalc.
-    "lookup_failed": ("AcoustID lookup failed (service unavailable or rate limited, or fpcalc missing "
-                      "or timed out); fingerprints were not checked."),
+    # #297 N3: this status also covers a missing, timed-out or failed fpcalc.
+    "lookup_failed": ("AcoustID lookup failed (service unavailable or rate limited, or fpcalc missing, "
+                      "timed out or unable to fingerprint the file); fingerprints were not checked."),
 }
 
 

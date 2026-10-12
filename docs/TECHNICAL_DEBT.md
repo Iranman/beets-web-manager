@@ -223,7 +223,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Accepted (by design, conservative):
   - #244 F3: an embedded Recording ID contradicted by the fingerprint is a conflict and goes to review.
   - #244 F4: one AcoustID result linked to several recordings does not confirm any of them.
-  - #244 F5: the AcoustID file cache key is versioned (`v2|`) but its payload is not; the only consumer is display, so a format change needs a key bump.
+  - #244 F5: the AcoustID file cache key is versioned (`v3|`) but its payload is not; the only consumer is display, so a format change needs a key bump.
   - #261 N-6: an operator Release that the resolver swaps into another Release Group is refused at the stamp step (fail-safe).
   - #303: with no fingerprint evidence, `identity_proof` is INSUFFICIENT and the candidate goes to review; the reason now says how to resolve it.
 - Priority: P3. Status: Open.

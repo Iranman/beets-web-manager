@@ -759,17 +759,27 @@ def acoustid_lookup_outcome(file_path: str):
         return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc is not installed")
     try:
         r = subprocess.run([fpcalc, "-json", file_path], capture_output=True, text=True, timeout=30)
-        fp_data = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+        # QA 0.4.0 B2: fpcalc 1.5.1 (Debian bookworm) exits 3 with "Error
+        # decoding audio frame (End of file)" yet prints a valid fingerprint,
+        # so the exit code alone is not proof of failure; the JSON is.
+        if r.returncode != 0:
+            logging.getLogger("helpers_mb").debug("fpcalc exited %s for %s: %s", r.returncode, file_path, (r.stderr or "").strip()[:200])
+        fp_data = json.loads(r.stdout) if r.stdout.strip() else {}
+        if not isinstance(fp_data, dict):
+            fp_data = {}
     except subprocess.TimeoutExpired:
         return ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out")
     except (OSError, ValueError):
         fp_data = {}
-    duration = int(fp_data.get("duration") or 0)
-    fingerprint = (fp_data.get("fingerprint") or "").strip()
+    try:
+        duration = int(fp_data.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    fingerprint = str(fp_data.get("fingerprint") or "").strip()
     if not fingerprint or duration < 5:
-        # The file itself cannot be fingerprinted: an answer about this
-        # exact file, not a provider failure.
-        return ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[],
+        # No usable fingerprint means AcoustID was never asked: "not
+        # checked", never NO_RESULT, so callers do not cache it (D11/#252).
+        return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[],
                               message="audio could not be fingerprinted", evidence={"fingerprintable": False})
     params = _up.urlencode({
         "client":      aid_key,
