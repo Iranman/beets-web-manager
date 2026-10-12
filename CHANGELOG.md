@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.4.0 - 2026-10-12
+
 ### Upgrade Notes
 
 - Restart the Beets container so it loads webmanager plugin 1.16.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, item audio/file downloads stay broken on Beets 2.14.
