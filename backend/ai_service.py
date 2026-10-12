@@ -15,6 +15,7 @@ from backend.pending_review_store import _add_to_pending, _remove_pending_review
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
+from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
 from backend.app_runtime import _path_is_under
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate
@@ -1819,25 +1820,34 @@ def _ai_batch_initial_state(batch_job_id: str, source_path: str, job_id: str = "
     }
 
 
-def _ai_batch_find_audio_dirs(root: str) -> List[str]:
-    result: List[str] = []
-    cursor = None
-    try:
-        while True:
-            res = composite_workflows.discover_import_sources(root, operation="ai_batch_discovery", cursor=cursor)
-            if not res.get("ok"):
-                raise RuntimeError(f"Engine discovery failed for {root}: {res.get('error_code', 'unknown_error')}")
-            candidates = res.get("candidates") or []
-            for cand in candidates:
-                cpath = cand.get("canonical_path")
-                if cpath and cpath not in result:
-                    result.append(cpath)
-            if res.get("complete") or not res.get("continuation"):
-                break
-            cursor = res.get("continuation")
-        return sorted(result)
-    except (BeetsError, BeetsUnavailableError, BeetsAuthError) as exc:
-        raise RuntimeError(f"Engine discovery failed for {root}: {exc}") from exc
+def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None) -> List[str]:
+    """Album folders under a validated scan root (F1): every folder that holds
+    audio, with a Disc N / CD N subfolder folded into its album folder. A
+    local walk: Web Manager mounts the downloads root. Symlinks and hidden
+    folders are not followed. A folder the per-folder import checks refuse
+    (an approved root itself, e.g. loose files directly in Downloads) is
+    logged and left in place, never imported."""
+    base = Path(root)
+    if not base.is_dir():
+        raise RuntimeError(f"Import source folder not found: {root}")
+    found = set()
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        here = Path(dirpath)
+        if not any(Path(f).suffix.lower() in AUDIO_EXT and not (here / f).is_symlink() for f in filenames):
+            continue
+        if here != base and _AI_EVIDENCE_DISC_FOLDER_RE.match(here.name):
+            here = here.parent
+        found.add(str(here))
+    result = []
+    for folder in sorted(found):
+        _ok, err = _resolve_import_review_source_path(folder, allow_music=True, expected_type="dir")
+        if err:
+            if log is not None:
+                log.append(f"folder left in place (not importable as a folder: {err}): {folder}")
+            continue
+        result.append(folder)
+    return result
 
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
@@ -2283,6 +2293,8 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
     state["status"] = "running"
     state["current_step"] = "source scan started"
     state["last_error"] = ""
+    # #288: the batch never needs AI; this only labels the run for the UI.
+    state["ai_configured"] = bool(_ai_api_key())
     if recover:
         state["retry_count"] = int(state.get("retry_count") or 0) + 1
     log.append("batch created" if not recover else ("batch retry started" if retry_failed else "batch recovery started"))
@@ -2298,7 +2310,7 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         # runs. The single commit after the if/else below always sees
         # fully-reconciled folder_states first.
         _ai_batch_commit(state, update_state)
-        folders = _ai_batch_find_audio_dirs(scan_path)
+        folders = _ai_batch_find_audio_dirs(scan_path, log)
         log.append(f"folders discovered count: {len(folders)}")
         for folder in folders:
             fid = _ai_batch_folder_id(folder)
@@ -2392,6 +2404,62 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         )
         _ai_batch_commit(state, update_state)
     return _ai_batch_public_state(state)
+
+
+# ── Recent imports (History tab) ─────────────────────────────────────────────
+# Lives here, the lowest layer with an import completion path (batch import);
+# import_service and routes_import record through it too (F9).
+
+_RECENT_IMPORTS_FILE = Path("/config/recent_imports.json")
+
+
+_recent_imports_lock = threading.Lock()
+
+
+def _record_recent_import(artist: str, album: str, year: int,
+                          track_count: int, mb_albumid: str, aldir: str):
+    """Append an album-level entry to the recent imports log."""
+    entry = {
+        "artist": artist,
+        "album": album,
+        "year": year,
+        "tracks": track_count,
+        "mb_albumid": mb_albumid,
+        "aldir": aldir,
+        "imported_at": int(time.time()),
+    }
+    with _recent_imports_lock:
+        try:
+            existing = json.loads(_RECENT_IMPORTS_FILE.read_text()) if _RECENT_IMPORTS_FILE.exists() else []
+        except Exception:
+            existing = []
+        existing.insert(0, entry)
+        _RECENT_IMPORTS_FILE.write_text(json.dumps(existing[:100], indent=2))
+
+
+def _record_recent_import_for_album(album_id: Any, log: List[str], *, mb_albumid: str = "", aldir: str = "") -> None:
+    """One History row for an album an import just added. Reads the album
+    back from Beets for artist/album/year/tracks; a failed read still records
+    the folder. Never fails the import."""
+    try:
+        artist, album, year, tracks = "", Path(aldir).name if aldir else "", 0, 0
+        if album_id:
+            try:
+                row = composite_workflows.get_album(int(album_id))
+                items = composite_workflows.find_all_items_by_album_id(int(album_id)) or []
+            except Exception:
+                row, items = None, []
+            tracks = len(items)
+            if not aldir and items:
+                aldir = str(Path(_s(items[0].get("path"))).parent)
+            if row:
+                artist = _s(row.get("albumartist"))
+                album = _s(row.get("album")) or album or Path(aldir).name
+                year = int(row.get("year") or 0)
+                mb_albumid = mb_albumid or _s(row.get("mb_albumid"))
+        _record_recent_import(artist, album, year, tracks, mb_albumid, aldir)
+    except Exception as ex:
+        log.append(f"  [recent] Warning: {ex}")
 
 
 def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
@@ -2499,6 +2567,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         except Exception:
             pass
 
+    _record_recent_import_for_album(aid, log, mb_albumid=mb_albumid)
     _remove_pending_review_for_path(folder_path, log)
     try:
         imported_album = lib.get_album(int(aid))

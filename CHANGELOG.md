@@ -6,6 +6,13 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+
+- The Import page's batch import (`POST /api/ai-batch-import`) works again. Before, every batch failed while it looked for folders, because it called a folder-discovery helper with arguments the helper does not take. The batch now walks the chosen folder itself: each folder that holds audio is one album, and `Disc N` / `CD N` subfolders count as part of their album folder. Hidden folders and symlinks are skipped. Audio files lying directly in the downloads folder are not imported; the job log lists them.
+- The batch import no longer needs an AI provider (#288). Without an AI key it matches with MusicBrainz and AcoustID, imports only what passes the same track-match check as before, and sends everything else to the Review Queue. With a key, AI only re-ranks the MusicBrainz candidates. The batch status now has `ai_configured` so the page can say which way the run matched.
+- The batch import can now scan the downloads folder itself ("import everything in Downloads"). Before, it refused that folder, although it was the default. The music library folder itself is still refused, because the batch moves files. The batch job is now labelled "Import: <folder>".
+- Albums imported by the batch import and by `POST /api/import` now appear in the History tab. Before, only re-imports from disk did. `POST /api/import` records them only with a webmanager plugin that reports the imported album IDs (1.16.0 or later).
+
 ### Changed
 
 - The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.

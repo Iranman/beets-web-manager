@@ -323,7 +323,7 @@ class ConfirmedImportJobTests(unittest.TestCase):
             (isvc, "_remove_pending_review_for_path", {}),
             (isvc, "_invalidate_lib_cache", {}),
             (isvc, "_trigger_plex_refresh", {}),
-            (isvc, "_record_recent_import", {}),
+            (isvc, "_record_recent_import_for_album", {}),
             (isvc, "_maybe_queue_review", {"create": True}),
             (isvc, "_queue_folder_for_manual_review", {"return_value": True}),
             (isvc, "_library_album_ids_for_folder", {"return_value": []}),

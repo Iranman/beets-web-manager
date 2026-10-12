@@ -9,7 +9,7 @@ from backend.matching import verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_if_already_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _library_album_ids_for_folder, _queue_folder_for_manual_review, _remove_pending_review_for_path
@@ -34,7 +34,7 @@ from backend.matching_service import _album_mb_completeness, _album_track_score,
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
-from backend.serializers import _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
+from backend.serializers import _import_review_cleanup_roots, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
 from backend.plex_service import _trigger_plex_refresh
 
@@ -379,34 +379,7 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
     return False
 
 
-# ── Recent imports tracking ───────────────────────────────────────────────────
-
-_RECENT_IMPORTS_FILE = Path("/config/recent_imports.json")
-
-
-_recent_imports_lock = threading.Lock()
-
-
-def _record_recent_import(artist: str, album: str, year: int,
-                          track_count: int, mb_albumid: str, aldir: str):
-    """Append an album-level entry to the recent imports log."""
-    entry = {
-        "artist": artist,
-        "album": album,
-        "year": year,
-        "tracks": track_count,
-        "mb_albumid": mb_albumid,
-        "aldir": aldir,
-        "imported_at": int(time.time()),
-    }
-    with _recent_imports_lock:
-        try:
-            existing = json.loads(_RECENT_IMPORTS_FILE.read_text()) if _RECENT_IMPORTS_FILE.exists() else []
-        except Exception:
-            existing = []
-        existing.insert(0, entry)
-        _RECENT_IMPORTS_FILE.write_text(json.dumps(existing[:100], indent=2))
-
+# Recent imports (History) live in ai_service, the lowest layer that records them.
 
 _IMPORT_JOB_LOCK = threading.Lock()
 
@@ -1267,26 +1240,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except Exception as _ae:
                 log.append(f"  [artwork] Warning: {_ae}")
 
-        # ── Record recent import ───────────────────────────────────────────────
-        try:
-            _ri_artist, _ri_album, _ri_year, _ri_tracks = "", Path(aldir).name, 0, 0
-            _aid_for_rec = album_ids[0] if album_ids else None
-            if _aid_for_rec:
-                try:
-                    _rrow = composite_workflows.get_album(_aid_for_rec)
-                    _ri_items = composite_workflows.find_all_items_by_album_id(_aid_for_rec)
-                    _ri_tracks = len(_ri_items)
-                except Exception:
-                    _rrow = None
-                    _ri_tracks = 0
-                if _rrow:
-                    _ri_artist = _rrow.get("albumartist") or ""
-                    _ri_album  = _rrow.get("album") or Path(aldir).name
-                    _ri_year   = int(_rrow.get("year") or 0)
-            _record_recent_import(_ri_artist, _ri_album, _ri_year,
-                                  _ri_tracks, mb_albumid, aldir)
-        except Exception as _rce:
-            log.append(f"  [recent] Warning: {_rce}")
+        _record_recent_import_for_album(album_ids[0] if album_ids else None, log,
+                                        mb_albumid=mb_albumid, aldir=aldir)
 
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
@@ -3171,3 +3126,20 @@ def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]
     ):
         return None, "Path is outside the allowed import source roots"
     return resolved, None
+
+
+def _resolve_import_scan_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """The folder a batch import scans (F3/F4). The same checks as an Import
+    Review source folder (no symlinks, no encoded tricks, under an approved
+    root), except that a download root itself is allowed, so "import
+    everything in Downloads" works. The music library root stays refused: the
+    batch moves files. Existence is not checked here; the scan does that."""
+    error = _import_review_path_text_error(raw, allow_relative=False)
+    if error:
+        return None, error
+    candidate = Path(_s(raw).strip())
+    # allow_music=False: these roots are already contained (never "/" and
+    # never overlapping the library) and resolved.
+    if candidate in _import_review_cleanup_roots(allow_music=False):
+        return candidate, None
+    return _resolve_import_review_source_path(raw, allow_music=True, expected_type="dir", require_exists=False)
