@@ -172,6 +172,50 @@ class CleanupHardeningTests(unittest.TestCase):  # #281
             self.assertTrue(f.exists())
 
 
+class SlskdRequestFailureModeTests(unittest.TestCase):
+    """slskd transport: success, timeout, unavailable, auth, rate limit, bad data."""
+
+    def _req(self, effect):
+        from tests.test_integrations_reliability import http_error  # noqa: F401
+        with mock.patch.multiple(slskd, SLSKD_API_KEY="sk-test-123", SLSKD_URL="http://slskd.test:5030"), \
+                mock.patch.object(slskd.urllib.request, "urlopen", side_effect=effect):
+            return slskd._slskd_req("GET", "searches/x")
+
+    def _body(self, raw):
+        resp = mock.MagicMock()
+        resp.status = 200
+        resp.read.return_value = raw
+        resp.__enter__.return_value = resp
+        return resp
+
+    def test_success_and_empty_body(self):
+        self.assertEqual(self._req([self._body(b'{"a": 1}')]), {"a": 1})
+        self.assertEqual(self._req([self._body(b"  ")]), {})
+
+    def test_auth_failure_names_the_setting_never_the_key(self):
+        from tests.test_integrations_reliability import http_error
+        for code in (401, 403):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._req(http_error(code, body=b"sk-test-123 secret body"))
+            self.assertIn(f"HTTP {code}", str(ctx.exception))
+            self.assertIn("SLSKD_API_KEY", str(ctx.exception))
+            self.assertNotIn("sk-test-123", str(ctx.exception))
+
+    def test_rate_limit_and_unavailable_report_the_status(self):
+        from tests.test_integrations_reliability import http_error
+        with self.assertRaisesRegex(RuntimeError, "HTTP 429$"):
+            self._req(http_error(429))
+        with self.assertRaisesRegex(RuntimeError, "HTTP 503$"):
+            self._req([http_error(503), http_error(503)])
+
+    def test_timeout_and_malformed_data_raise(self):
+        import socket
+        with self.assertRaises(OSError):
+            self._req([socket.timeout("slow"), socket.timeout("slow")])
+        with self.assertRaises(ValueError):
+            self._req([self._body(b"<html>not json")])
+
+
 class _SlowBody:
     def __init__(self, chunks, clock, step):
         self.chunks, self.clock, self.step = list(chunks), clock, step

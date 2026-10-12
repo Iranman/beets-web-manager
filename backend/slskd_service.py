@@ -51,7 +51,8 @@ def _slskd_req(method: str, path: str, body=None) -> Any:
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         # Never echo the provider body: it can carry tokens, paths or peer data.
-        raise RuntimeError(f"slskd {method} /{path} → HTTP {e.code}") from None
+        hint = " (slskd rejected the API key; check SLSKD_API_KEY)" if e.code in (401, 403) else ""
+        raise RuntimeError(f"slskd {method} /{path} → HTTP {e.code}{hint}") from None
     except Exception as e:
         block = provider_boundary.outbound_block(e, "slskd")
         if block:
