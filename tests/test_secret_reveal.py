@@ -185,6 +185,20 @@ class RevealRouteLogicTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.get_json()["value"], "environment-live-value")
 
+    # 9b. D12: a saved key the boot loader copied into os.environ is the saved
+    # key, not a Docker override; only a Docker-set (boot-pinned) one is.
+    def test_saved_secret_loaded_into_environ_is_not_a_docker_override(self):
+        import backend.config_layers as config_layers
+        self.env_file.write_text("DISCOGS_TOKEN=saved-token-value\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"DISCOGS_TOKEN": "saved-token-value"}, clear=False):
+            for pinned, source, overridden in ((False, "persisted", False), (True, "environment", True)):
+                with mock.patch.object(config_layers, "pinned_by_boot_environment", lambda n, p=pinned: p):
+                    r = self.client.get("/api/setup/env")
+                    var = {v["name"]: v for v in r.get_json()["variables"]}["DISCOGS_TOKEN"]
+                    self.assertEqual((var["source"], var["is_overridden"], var["configured"]),
+                                     (source, overridden, True), pinned)
+                    self.assertNotIn("saved-token-value", json.dumps(r.get_json()))
+
     # 10. No environment override: reveal returns the persisted value.
     def test_reveal_returns_persisted_value_when_no_environment_override(self):
         self.env_file.write_text("PLEX_TOKEN=persisted-plex-token-0001\n", encoding="utf-8")

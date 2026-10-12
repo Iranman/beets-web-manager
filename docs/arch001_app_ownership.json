@@ -21506,7 +21506,7 @@
    "desired_owner": "backend/library_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_auto_scan_loop",
+    "_auto_scan_tick",
     "_record_scan",
     "get_library_payload"
    ],
@@ -22079,7 +22079,7 @@
    "desired_owner": "backend/library_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_auto_scan_loop"
+    "_auto_scan_tick"
    ],
    "caller_count": 1,
    "dependencies": [
@@ -26464,17 +26464,17 @@
    "module": "backend/maintenance_service.py",
    "lines": [
     36,
-    97
+    89
    ],
-   "size": 62,
-   "body_lines": 59,
+   "size": 54,
+   "body_lines": 51,
    "route": null,
    "mutation_capable": true,
    "domain": "MAINTENANCE",
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_auto_scan_loop",
+    "_auto_scan_tick",
     "library_scan"
    ],
    "caller_count": 2,
@@ -26483,14 +26483,38 @@
    ]
   },
   {
-   "name": "_auto_scan_loop",
+   "name": "_auto_scan_tick",
    "module": "backend/maintenance_service.py",
    "lines": [
-    100,
-    145
+    98,
+    131
    ],
-   "size": 46,
-   "body_lines": 41,
+   "size": 34,
+   "body_lines": 28,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "start_auto_scan_schedule"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_do_scan_job",
+    "_refresh_library_cache",
+    "_run_normalize_artists_if_needed"
+   ]
+  },
+  {
+   "name": "start_auto_scan_schedule",
+   "module": "backend/maintenance_service.py",
+   "lines": [
+    134,
+    141
+   ],
+   "size": 8,
+   "body_lines": 5,
    "route": null,
    "mutation_capable": false,
    "domain": "MAINTENANCE",
@@ -26499,17 +26523,15 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_do_scan_job",
-    "_refresh_library_cache",
-    "_run_normalize_artists_if_needed"
+    "_auto_scan_tick"
    ]
   },
   {
    "name": "_library_health_payload",
    "module": "backend/maintenance_service.py",
    "lines": [
-    148,
-    208
+    144,
+    204
    ],
    "size": 61,
    "body_lines": 57,
@@ -26534,8 +26556,8 @@
    "name": "_maintenance_safe_folder_renames",
    "module": "backend/maintenance_service.py",
    "lines": [
-    211,
-    276
+    207,
+    272
    ],
    "size": 66,
    "body_lines": 58,
@@ -26556,8 +26578,8 @@
    "name": "_maintenance_initial_task_state",
    "module": "backend/maintenance_service.py",
    "lines": [
-    297,
-    301
+    293,
+    297
    ],
    "size": 5,
    "body_lines": 4,
@@ -26577,8 +26599,8 @@
    "name": "_maintenance_load_last_report",
    "module": "backend/maintenance_service.py",
    "lines": [
-    304,
-    312
+    300,
+    308
    ],
    "size": 9,
    "body_lines": 8,
@@ -26601,8 +26623,8 @@
    "name": "_maintenance_checkpoint_results",
    "module": "backend/maintenance_service.py",
    "lines": [
-    315,
-    324
+    311,
+    320
    ],
    "size": 10,
    "body_lines": 9,
@@ -26623,8 +26645,8 @@
    "name": "_maintenance_resume_from_report",
    "module": "backend/maintenance_service.py",
    "lines": [
-    327,
-    413
+    323,
+    409
    ],
    "size": 87,
    "body_lines": 86,
@@ -26648,8 +26670,8 @@
    "name": "_maintenance_resume_summary",
    "module": "backend/maintenance_service.py",
    "lines": [
-    416,
-    428
+    412,
+    424
    ],
    "size": 13,
    "body_lines": 12,
@@ -26671,8 +26693,8 @@
    "name": "_maintenance_artist_folder_merge_step",
    "module": "backend/maintenance_service.py",
    "lines": [
-    431,
-    606
+    427,
+    602
    ],
    "size": 176,
    "body_lines": 148,
@@ -26699,8 +26721,8 @@
    "name": "_maintenance_running_job",
    "module": "backend/maintenance_service.py",
    "lines": [
-    609,
-    614
+    605,
+    610
    ],
    "size": 6,
    "body_lines": 5,
@@ -26720,8 +26742,8 @@
    "name": "_maintenance_extract_child_job_id",
    "module": "backend/maintenance_service.py",
    "lines": [
-    617,
-    621
+    613,
+    617
    ],
    "size": 5,
    "body_lines": 4,
@@ -26744,8 +26766,8 @@
    "name": "_maintenance_task_result_summary",
    "module": "backend/maintenance_service.py",
    "lines": [
-    624,
-    668
+    620,
+    664
    ],
    "size": 45,
    "body_lines": 44,
@@ -26764,8 +26786,8 @@
    "name": "_maintenance_clean_all_counts",
    "module": "backend/maintenance_service.py",
    "lines": [
-    671,
-    766
+    667,
+    762
    ],
    "size": 96,
    "body_lines": 95,
@@ -26787,8 +26809,8 @@
    "name": "_maintenance_save_last_report",
    "module": "backend/maintenance_service.py",
    "lines": [
-    769,
-    780
+    765,
+    776
    ],
    "size": 12,
    "body_lines": 11,
@@ -26814,8 +26836,8 @@
    "name": "_maintenance_same_file_hash",
    "module": "backend/maintenance_service.py",
    "lines": [
-    783,
-    784
+    779,
+    780
    ],
    "size": 2,
    "body_lines": 1,
@@ -26834,8 +26856,8 @@
    "name": "_maintenance_remove_missing_file_rows",
    "module": "backend/maintenance_service.py",
    "lines": [
-    787,
-    840
+    783,
+    836
    ],
    "size": 54,
    "body_lines": 53,
@@ -26857,8 +26879,8 @@
    "name": "_maintenance_release_group_merge",
    "module": "backend/maintenance_service.py",
    "lines": [
-    843,
-    891
+    839,
+    887
    ],
    "size": 49,
    "body_lines": 47,
@@ -26882,8 +26904,8 @@
    "name": "_maintenance_root_folder_repair",
    "module": "backend/maintenance_service.py",
    "lines": [
-    894,
-    930
+    890,
+    926
    ],
    "size": 37,
    "body_lines": 35,
@@ -26907,8 +26929,8 @@
    "name": "_maintenance_artwork_collision_leftovers",
    "module": "backend/maintenance_service.py",
    "lines": [
-    933,
-    954
+    929,
+    950
    ],
    "size": 22,
    "body_lines": 21,
@@ -26927,8 +26949,8 @@
    "name": "_maintenance_duplicate_recording_mbid_groups",
    "module": "backend/maintenance_service.py",
    "lines": [
-    957,
-    962
+    953,
+    958
    ],
    "size": 6,
    "body_lines": 5,
@@ -26947,8 +26969,8 @@
    "name": "_maintenance_final_verification",
    "module": "backend/maintenance_service.py",
    "lines": [
-    965,
-    1021
+    961,
+    1017
    ],
    "size": 57,
    "body_lines": 55,
@@ -31010,11 +31032,32 @@
    ]
   },
   {
+   "name": "_album_mb_error_response",
+   "module": "routes_library.py",
+   "lines": [
+    4019,
+    4024
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MATCHING",
+   "desired_owner": "backend/matching_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "album_duplicate_resolver",
+    "album_mb_completeness"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
    "name": "album_duplicate_resolver",
    "module": "routes_library.py",
    "lines": [
-    4008,
-    4014
+    4028,
+    4034
    ],
    "size": 7,
    "body_lines": 6,
@@ -31029,15 +31072,16 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_album_duplicate_resolver_plan"
+    "_album_duplicate_resolver_plan",
+    "_album_mb_error_response"
    ]
   },
   {
    "name": "apply_album_duplicate_resolver",
    "module": "routes_library.py",
    "lines": [
-    4018,
-    4288
+    4038,
+    4308
    ],
    "size": 271,
    "body_lines": 270,
@@ -31065,8 +31109,8 @@
    "name": "album_mb_completeness",
    "module": "routes_library.py",
    "lines": [
-    4292,
-    4299
+    4312,
+    4319
    ],
    "size": 8,
    "body_lines": 7,
@@ -31081,15 +31125,16 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_album_mb_completeness"
+    "_album_mb_completeness",
+    "_album_mb_error_response"
    ]
   },
   {
    "name": "repair_album_mb_tracks",
    "module": "routes_library.py",
    "lines": [
-    4303,
-    4383
+    4323,
+    4403
    ],
    "size": 81,
    "body_lines": 80,
@@ -31113,8 +31158,8 @@
    "name": "library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    4387,
-    4394
+    4407,
+    4414
    ],
    "size": 8,
    "body_lines": 7,
@@ -31136,8 +31181,8 @@
    "name": "library_mb_full_sync",
    "module": "routes_library.py",
    "lines": [
-    4398,
-    4405
+    4418,
+    4425
    ],
    "size": 8,
    "body_lines": 7,
@@ -31159,8 +31204,8 @@
    "name": "_db_path_value",
    "module": "routes_library.py",
    "lines": [
-    4408,
-    4411
+    4428,
+    4431
    ],
    "size": 4,
    "body_lines": 3,
@@ -31179,8 +31224,8 @@
    "name": "library_template_token_cleanup",
    "module": "routes_library.py",
    "lines": [
-    4415,
-    4452
+    4435,
+    4472
    ],
    "size": 38,
    "body_lines": 37,
@@ -31205,8 +31250,8 @@
    "name": "scan_leaked_db_paths_job",
    "module": "routes_library.py",
    "lines": [
-    4456,
-    4506
+    4476,
+    4526
    ],
    "size": 51,
    "body_lines": 46,
@@ -31229,8 +31274,8 @@
    "name": "fix_leaked_db_paths",
    "module": "routes_library.py",
    "lines": [
-    4510,
-    4659
+    4530,
+    4679
    ],
    "size": 150,
    "body_lines": 145,
@@ -31254,8 +31299,8 @@
    "name": "scan_folder_placeholders_job",
    "module": "routes_library.py",
    "lines": [
-    4663,
-    4719
+    4683,
+    4739
    ],
    "size": 57,
    "body_lines": 55,
@@ -31278,8 +31323,8 @@
    "name": "item_replacement_plan",
    "module": "routes_library.py",
    "lines": [
-    4723,
-    4758
+    4743,
+    4778
    ],
    "size": 36,
    "body_lines": 29,
@@ -31301,8 +31346,8 @@
    "name": "item_replacement_apply",
    "module": "routes_library.py",
    "lines": [
-    4762,
-    4783
+    4782,
+    4803
    ],
    "size": 22,
    "body_lines": 16,
@@ -31324,8 +31369,8 @@
    "name": "_start_library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    4786,
-    5064
+    4806,
+    5084
    ],
    "size": 279,
    "body_lines": 271,
@@ -33505,10 +33550,10 @@
    "module": "routes_import.py",
    "lines": [
     1549,
-    1624
+    1627
    ],
-   "size": 76,
-   "body_lines": 75,
+   "size": 79,
+   "body_lines": 78,
    "route": {
     "method": "POST",
     "path": "/api/import"
@@ -33534,8 +33579,8 @@
    "name": "import_preflight",
    "module": "routes_import.py",
    "lines": [
-    1628,
-    1733
+    1631,
+    1736
    ],
    "size": 106,
    "body_lines": 105,
@@ -33560,8 +33605,8 @@
    "name": "_ai_batch_reconnect_response",
    "module": "routes_import.py",
    "lines": [
-    1736,
-    1811
+    1739,
+    1814
    ],
    "size": 76,
    "body_lines": 45,
@@ -33587,8 +33632,8 @@
    "name": "_start_ai_batch_job",
    "module": "routes_import.py",
    "lines": [
-    1814,
-    1976
+    1817,
+    1979
    ],
    "size": 163,
    "body_lines": 149,
@@ -33622,8 +33667,8 @@
    "name": "restart_app",
    "module": "routes_maintenance.py",
    "lines": [
-    29,
-    46
+    30,
+    47
    ],
    "size": 18,
    "body_lines": 16,
@@ -33643,8 +33688,8 @@
    "name": "maintenance_runner_report",
    "module": "routes_maintenance.py",
    "lines": [
-    80,
-    106
+    81,
+    107
    ],
    "size": 27,
    "body_lines": 26,
@@ -33669,8 +33714,8 @@
    "name": "_run_with_app_context",
    "module": "routes_maintenance.py",
    "lines": [
-    109,
-    114
+    110,
+    115
    ],
    "size": 6,
    "body_lines": 4,
@@ -33691,11 +33736,11 @@
    "name": "start_maintenance_runner",
    "module": "routes_maintenance.py",
    "lines": [
-    118,
-    618
+    119,
+    627
    ],
-   "size": 501,
-   "body_lines": 495,
+   "size": 509,
+   "body_lines": 503,
    "route": {
     "method": "POST",
     "path": "/api/jobs/maintenance-runner"
@@ -33740,8 +33785,8 @@
    "name": "api_transaction_settings",
    "module": "routes_maintenance.py",
    "lines": [
-    622,
-    623
+    631,
+    632
    ],
    "size": 2,
    "body_lines": 1,
@@ -33761,8 +33806,8 @@
    "name": "api_transaction_settings_save",
    "module": "routes_maintenance.py",
    "lines": [
-    627,
-    634
+    636,
+    643
    ],
    "size": 8,
    "body_lines": 7,
@@ -33782,8 +33827,8 @@
    "name": "api_transactions_list",
    "module": "routes_maintenance.py",
    "lines": [
-    638,
-    664
+    647,
+    673
    ],
    "size": 27,
    "body_lines": 17,
@@ -33807,8 +33852,8 @@
    "name": "api_transaction_detail",
    "module": "routes_maintenance.py",
    "lines": [
-    668,
-    685
+    677,
+    694
    ],
    "size": 18,
    "body_lines": 11,
@@ -33832,8 +33877,8 @@
    "name": "api_transaction_approve",
    "module": "routes_maintenance.py",
    "lines": [
-    689,
-    718
+    698,
+    727
    ],
    "size": 30,
    "body_lines": 21,
@@ -33853,8 +33898,8 @@
    "name": "api_transaction_cancel",
    "module": "routes_maintenance.py",
    "lines": [
-    722,
-    735
+    731,
+    744
    ],
    "size": 14,
    "body_lines": 11,
@@ -33874,8 +33919,8 @@
    "name": "_item_file_replacement_response",
    "module": "routes_maintenance.py",
    "lines": [
-    738,
-    759
+    747,
+    768
    ],
    "size": 22,
    "body_lines": 16,
@@ -33898,8 +33943,8 @@
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    809,
-    861
+    818,
+    870
    ],
    "size": 53,
    "body_lines": 33,
@@ -33919,8 +33964,8 @@
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    864,
-    868
+    873,
+    877
    ],
    "size": 5,
    "body_lines": 2,
@@ -33942,8 +33987,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    872,
-    894
+    881,
+    903
    ],
    "size": 23,
    "body_lines": 22,
@@ -33967,8 +34012,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    897,
-    917
+    906,
+    926
    ],
    "size": 21,
    "body_lines": 17,
@@ -33987,8 +34032,8 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    921,
-    1098
+    930,
+    1107
    ],
    "size": 178,
    "body_lines": 177,
@@ -34015,8 +34060,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1102,
-    1111
+    1111,
+    1120
    ],
    "size": 10,
    "body_lines": 9,
@@ -34036,8 +34081,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1114,
-    1119
+    1123,
+    1128
    ],
    "size": 6,
    "body_lines": 5,

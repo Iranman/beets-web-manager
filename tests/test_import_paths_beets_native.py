@@ -198,7 +198,7 @@ class ApiImportRouteTests(unittest.TestCase):
         self.addCleanup(skips.stop)
 
     def _post(self, preserved, **payload):
-        def run_now(fn, label=""):
+        def run_now(fn, label="", metadata=None):
             self.job_result = fn(self.logs)
             return types.SimpleNamespace(job_id="j1")
         captured = {}

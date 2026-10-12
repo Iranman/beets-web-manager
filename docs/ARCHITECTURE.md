@@ -65,7 +65,7 @@ Both containers share these filesystem mounts:
 
 - **Library State**: `/config/musiclibrary.blb` is the authoritative Beets library, owned exclusively by the stock Beets container.
 - **Web Manager Durable State**: `/web-manager-data` (`WEB_MANAGER_DATA_DIR`, mounted to `./web-manager` by default) holds `app_settings.json`, `.setup_complete`, `.auth_token`, and session encryption keys.
-- **Job State**: Lives in `JobStore` in memory; structured progress and logs are exposed via `/api/jobs/*`.
+- **Job State**: `JobStore` (`job_engine.py`), durable under `<WEB_MANAGER_DATA_DIR>/jobs/<job_id>.json` when the data dir is set explicitly (every shipped Compose file) or `BEETS_WEB_DURABLE_JOBS=1`; structured progress and logs are exposed via `/api/jobs/*`.
 - **Audit & Transaction State**: Stored in `backend.transaction_engine.TransactionStore` under `/web-manager-data/transactions` (`BEETS_TRANSACTION_DIR`).
 - **Import Review State**: Staged under `/downloads` and tracked in `/web-manager-data/unmatched_drafts`.
 
@@ -78,6 +78,14 @@ Existing lifecycle:
 3. `/api/jobs/*` serializes job status, logs, metadata, and compact results.
 4. Some workflows add their own checkpoint files and resume logic, especially playlist and AI-batch/import flows.
 5. There is no generic remote "run this Beets command" job abstraction — a narrow, operation-specific `BeetsAdapter` call (e.g. `mbsubmit`, `modify`) runs synchronously inside a `PythonJob`, and a job is never reported `cancelled` once stock Beets has already completed the underlying operation.
+6. **Duplicate starts.** Every mutating request (POST/PUT/PATCH/DELETE) gets a start scope (`routes_jobs.py` → `job_engine.enter_start_scope`). The first job it starts records the request fingerprint (method, path, query, body, upload bytes) and the optional `Idempotency-Key` header (8–128 of `A-Za-z0-9._:-`). Responses, all with nothing started:
+   - identical request while that job runs (mutating jobs only): `409 {"code": "job_already_running", "job_id", "status": "running", "replay": false}`;
+   - same `Idempotency-Key` again, any status, also after a restart while the record is kept: `409 {"code": "job_already_started" | "job_already_running", "job_id", "status", "replay": true}`;
+   - same key with a different request: `422 {"code": "idempotency_key_reused", "job_id"}`; a malformed key: `400 {"code": "invalid_idempotency_key"}`.
+   A client that retries a start (lost response, timeout) sends the same key and follows `job_id` on a 409. A start that must be single whatever its body names a workflow or resource key, `metadata["dedupe_key"]` (`workflow:maintenance-runner`, `workflow:maintenance-duplicates`, `import-source:<path>`): `start_python` checks for a running job with that key and registers the new one under one `JobStore` lock, so racing starts cannot both pass a separate "is one running?" check (D1). The job contract (`backend/job_contract.py`), the import slot and transaction CAS guards still apply on top. Jobs started outside a request (schedules, other jobs) are not scoped.
+7. **Restarts.** A job persisted as running when the process stopped is never re-run: read-only jobs become `failed`, others `recovery_required`; the row carries `interrupted: true` and `recovery` (`interrupted_at`, `last_heartbeat_at`, `checkpoint`). Resume is the workflow's own, from its checkpoint (Clean All, playlist download, AI batch).
+8. **Recurring work and watchers.** `JobStore.every(name, interval_seconds, tick, initial_delay=0)` runs `tick()` on a store-owned schedule until `JobStore.close()`; the tick starts tracked jobs with `start_python` and may return the job, in which case later ticks are skipped until it finishes. `PythonJob.add_done_callback(fn)` runs `fn(job)` once the job is terminal. Neither needs an ad hoc thread.
+9. **Persisted records are redacted** (`job_engine.redact_for_persistence`): `log_tail` and `result` on disk never carry `key=value` secrets, bearer tokens, sensitive dict keys or URL userinfo, whatever the producer logged (#272).
 
 Intended direction:
 

@@ -1620,7 +1620,10 @@ def start_import():
         return {"albums_imported": res.get("albums_imported"), "quiet_fallback": fallback,
                 "not_matched": not_matched, "not_matched_known": res.get("not_matched_known", True)}
 
-    job = jobs.start_python(_do, label=label)
+    # D2: one import per source folder at a time. albums_imported is the
+    # library album-count delta, so a second concurrent import of the same
+    # folder would count the first one's albums as its own.
+    job = jobs.start_python(_do, label=label, metadata={"dedupe_key": f"import-source:{path}"})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 

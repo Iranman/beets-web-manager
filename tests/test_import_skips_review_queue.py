@@ -38,7 +38,7 @@ class ImportSkipsReachReviewQueueTests(unittest.TestCase):
         self.client = APP.app.test_client()
 
     def _import(self, skipped):
-        def run_now(fn, label=""):
+        def run_now(fn, label="", metadata=None):
             self.job_result = fn([])
             return types.SimpleNamespace(job_id="j1")
 

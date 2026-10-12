@@ -4004,6 +4004,26 @@ def browse():
         return jsonify({"ok": False, "error": "could not list directory"})
 
 
+# D15: the album checks raise RuntimeError for both actionable preconditions
+# and internal failures. Only these fixed messages reach the client (never
+# the exception text itself); anything else keeps the generic message.
+_ALBUM_MB_ACTIONABLE = (
+    (re.compile(r"^Album does not have a (selected )?MusicBrainz release ID$"), 400, "no_release_id",
+     "Album does not have a MusicBrainz release ID. Set one (or a Release Group) on the album first."),
+    (re.compile(r"^Album \d+ not found$"), 404, "album_not_found", "Album not found."),
+    (re.compile(r"^Requested release belongs to a different Release Group"), 409, "release_group_mismatch",
+     "The requested release belongs to a different Release Group than this album."),
+)
+
+
+def _album_mb_error_response(ex: Exception, generic: str):
+    text = str(ex) if isinstance(ex, RuntimeError) else ""
+    for pattern, status, code, message in _ALBUM_MB_ACTIONABLE:
+        if pattern.match(text):
+            return jsonify({"ok": False, "error": message, "code": code}), status
+    return jsonify({"ok": False, "error": generic}), 400
+
+
 @app.get("/api/albums/<int:aid>/duplicate-resolver")
 def album_duplicate_resolver(aid):
     mbid = (request.args.get("mb_albumid") or "").strip()
@@ -4011,7 +4031,7 @@ def album_duplicate_resolver(aid):
         return jsonify(_album_duplicate_resolver_plan(aid, mbid))
     except Exception as ex:
         _app_logger.warning("album_duplicate_resolver failed for album %s: %s", aid, type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not build duplicate-resolver plan."}), 400
+        return _album_mb_error_response(ex, "Could not build duplicate-resolver plan.")
 
 
 @app.post("/api/albums/<int:aid>/duplicate-resolver/apply")
@@ -4296,7 +4316,7 @@ def album_mb_completeness(aid):
         return jsonify(data)
     except Exception as ex:
         _app_logger.warning("album_mb_completeness failed for album %s: %s", aid, type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not check MusicBrainz completeness."}), 400
+        return _album_mb_error_response(ex, "Could not check MusicBrainz completeness.")
 
 
 @app.post("/api/albums/<int:aid>/repair-mb-tracks")

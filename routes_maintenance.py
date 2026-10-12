@@ -11,6 +11,7 @@ import backend.composite_workflows as composite_workflows
 import backend.duplicate_cleanup as duplicate_cleanup
 import backend.album_row_merge as album_row_merge
 import backend.untracked_recovery_service as untracked_recovery
+from job_engine import DuplicateJobError
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
 import backend.job_contract as job_contract
@@ -597,12 +598,20 @@ def start_maintenance_runner():
             persist_checkpoint("failed", failed_message)
             log.append(f"Clean All failed: {failed_message}")
             raise
-    job = jobs.start_python(
-        job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner"),
-        label="Clean All",
-        metadata={"type": "maintenance-runner", "workflow": "clean-all", "category": "Cleanup", "resumed": resume_requested,
-                  **job_contract.contract_metadata("maintenance-runner")},
-    )
+    try:
+        # D1: the workflow key makes the running check and the start one atomic
+        # step under the JobStore lock; the check above is only a fast path.
+        job = jobs.start_python(
+            job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner"),
+            label="Clean All",
+            metadata={"type": "maintenance-runner", "workflow": "clean-all", "category": "Cleanup", "resumed": resume_requested,
+                      "dedupe_key": "workflow:maintenance-runner",
+                      **job_contract.contract_metadata("maintenance-runner")},
+        )
+    except DuplicateJobError as exc:
+        if exc.replay:
+            raise
+        return jsonify({"ok": True, "job_id": exc.job.job_id, "already_running": True})
     resume_payload = _maintenance_resume_summary({
         "last_run": {
             "status": "failed",
