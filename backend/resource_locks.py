@@ -327,6 +327,21 @@ def approve_preview(store, operation_id: str, approved_by: str) -> Optional[Dict
     return tx
 
 
+@contextmanager
+def cancel_unclaimed_on_error(store, operation_id: str):
+    """For a one-shot plan -> approve -> apply call: if the apply raises
+    before it claimed the transaction (a busy or stale lock, Beets down),
+    Approved -> Cancelled, so it is never left Approved with nobody to apply
+    it (#328 N1). Nothing ran before the claim; once claimed the CAS loses."""
+    try:
+        yield
+    except BaseException:
+        store.transition(operation_id, "Approved", "Cancelled", append_logs=[
+            "Not run: the apply stopped before it started (the album was busy or Beets was unavailable); "
+            "nothing was changed. Start the operation again."])
+        raise
+
+
 _override: Optional[ResourceLocks] = None
 _by_root: Dict[str, ResourceLocks] = {}
 _default_lock = threading.Lock()

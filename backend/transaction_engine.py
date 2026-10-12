@@ -577,6 +577,11 @@ class TransactionStore:
                     tx.setdefault("metadata", {}).update(value)
                 elif key == "rollback" and isinstance(value, dict):
                     tx.setdefault("rollback", {}).update(value)
+                elif key == "append_logs":
+                    # ``logs=`` replaces the whole log (job wrappers pass the
+                    # job's full log); a step's own lines append, so recovery
+                    # and apply history is never overwritten.
+                    tx["logs"] = (list(tx.get("logs") or []) + [str(m) for m in value])[-500:]
                 else:
                     tx[key] = value
             return self._write(tx)

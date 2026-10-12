@@ -443,7 +443,7 @@ def apply_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = None,
                 res = ad.untracked_quarantine([{"path": f["path"], "sha256": f["sha256"]} for f in meta["files"]],
                                               idempotency_key=operation_id)
         except Exception:
-            st.update(operation_id, status="Failed", logs=["Engine refused or failed; it kept nothing."])
+            st.update(operation_id, status="Failed", append_logs=["Engine refused or failed; it kept nothing."])
             raise
         return finish_recovery(operation_id, res, adapter=ad, store=st)
 
@@ -513,7 +513,7 @@ def finish_recovery(operation_id: str, res: Dict[str, Any], *, adapter: Optional
     st.update(operation_id, status=status,
               metadata={"engine_result": engine, "verification_problems": problems, "items_after": items_after,
                         "replacement_plan": next_plan},
-              logs=[f"Engine record {engine.get('record_id')}: {meta['mutation_family']} applied"]
+              append_logs=[f"Engine record {engine.get('record_id')}: {meta['mutation_family']} applied"]
               + [f"Verification problem: {p}" for p in problems])
     return {"ok": not problems, "operation_id": operation_id, "status": status, "record_id": engine.get("record_id"),
             "item_id": engine.get("item_id"), "album_id": engine.get("album_id"),
@@ -561,7 +561,7 @@ def rollback_recovery(operation_id: str, *, adapter: Optional[BeetsAdapter] = No
         status = "Rolled Back" if not problems else "Recovery Required"
         if st.transition(operation_id, tx.get("status"), status,
                          metadata={"rollback_result": res, "rollback_problems": problems},
-                         logs=["Rolled back through the engine record"]
+                         append_logs=["Rolled back through the engine record"]
                          + [f"Rollback problem: {p}" for p in problems]) is None:
             return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status, "rollback_problems": problems}

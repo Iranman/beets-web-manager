@@ -346,6 +346,9 @@ def _adoptable(lib, now: str, restore: Any, evidence: Any) -> str:
             or os.path.islink(target) or not os.path.isfile(target)):
         return ""
     st = _evidence(target)
+    # ponytail: size + mtime (±1 s) is the proof (#328 N2). A foreign file planted
+    # at the restore path with the same size and mtime would be adopted; that
+    # cannot lose or overwrite data. A content hash recorded at apply closes it.
     if st is None or st[0] != size or abs(st[1] - mtime) >= 1:
         return ""
     try:

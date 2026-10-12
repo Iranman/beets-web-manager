@@ -128,7 +128,7 @@ def _apply_claimed(st: TransactionStore, operation_id: str,
     except Exception as exc:
         unknown = _transport_error(exc)
         st.transition(operation_id, "Running", "Recovery Required" if unknown else "Failed",
-                      logs=[f"Apply raised {type(exc).__name__}"
+                      append_logs=[f"Apply raised {type(exc).__name__}"
                             + ("; the outcome is unknown, so it is not retried." if unknown else ".")])
         raise
     logs = {"logs": [res.pop("log")]} if res.get("log") else {}
@@ -1542,7 +1542,7 @@ def apply_track_replacement(
                                        displace_destination_sha256=displace.get("sha256") or None)
         except Exception:
             st.update(operation_id, status="Failed",
-                      logs=["Engine replace-item-file failed; the engine restored the original file."])
+                      append_logs=["Engine replace-item-file failed; the engine restored the original file."])
             raise
         return finish_track_replacement(operation_id, res, adapter=ad, store=st)
 
@@ -1572,7 +1572,7 @@ def finish_track_replacement(
         operation_id,
         status=status,
         metadata={**meta, "engine_result": engine, "after": after, "verification_problems": problems},
-        logs=[
+        append_logs=[
             f"Item {target_id} now points to {engine.get('new_target_path')}",
             f"Old file quarantined at {engine.get('quarantine_path') or '(none)'}",
             f"Replacement item {source_id} row removed (its file now belongs to item {target_id})",
@@ -1616,7 +1616,7 @@ def rollback_track_replacement(
     if st.transition(
         operation_id, tx.get("status"), "Rolled Back",
         metadata={**meta, "rollback_result": result},
-        logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
+        append_logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
               f"replacement re-added as item {result.get('recreated_source_item_id')}"],
     ) is None:
         return _rollback_conflict(operation_id)
@@ -1714,7 +1714,7 @@ def apply_folder_cleanup(
     meta = st.get(operation_id).get("metadata") or {}
     refusal = _refs_refusal(meta.get("source") or "", meta.get("action"))
     if refusal:
-        st.transition(operation_id, "Approved", "Failed", logs=["Apply refused: the folder gained Beets items."])
+        st.transition(operation_id, "Approved", "Failed", append_logs=["Apply refused: the folder gained Beets items."])
         return {**refusal, "operation_id": operation_id}
     if claim_approved(st, operation_id) is None:
         return {"ok": False, "code": "not_applicable", "operation_id": operation_id, "mutated": False,
@@ -1722,7 +1722,7 @@ def apply_folder_cleanup(
     try:
         return execute_folder_cleanup_apply(st, operation_id)
     except Exception as exc:
-        st.update(operation_id, status="Failed", logs=[f"Apply raised: {type(exc).__name__}"])
+        st.update(operation_id, status="Failed", append_logs=[f"Apply raised: {type(exc).__name__}"])
         raise
 
 
@@ -1754,7 +1754,8 @@ def safe_rename_library_folder(
     Beets DB still references; it re-checks the folder identity at apply and
     records the rename so it can be rolled back. Never deletes media."""
     from backend.transaction_engine import create_folder_cleanup_plan, execute_folder_cleanup_apply
-    from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
+    from backend.resource_locks import attempt_owner, cancel_unclaimed_on_error, claim_approved, claim_refusal, \
+        locks as resource_locks
     st = _get_store(store)
     refusal = _refs_refusal(source, "safe_rename")
     if refusal:
@@ -1768,14 +1769,15 @@ def safe_rename_library_folder(
     if not _approve_preview(st, op_id, approved_by):
         return {"ok": False, "renamed": False, "operation_id": op_id, "code": "not_approved",
                 "error": "The rename preview could not be approved (status changed)."}
-    with resource_locks().hold(["workflow:folder-safe-rename"], attempt_owner(op_id), timeout=10):
+    with cancel_unclaimed_on_error(st, op_id), \
+            resource_locks().hold(["workflow:folder-safe-rename"], attempt_owner(op_id), timeout=10):
         if claim_approved(st, op_id) is None:
             return {"ok": False, "renamed": False, "operation_id": op_id, "code": "already_applied",
                     "error": claim_refusal(st, op_id)}
         try:
             res = execute_folder_cleanup_apply(st, op_id)
         except Exception as exc:
-            st.update(op_id, status="Failed", logs=[f"Apply raised: {exc}"])
+            st.update(op_id, status="Failed", append_logs=[f"Apply raised: {exc}"])
             raise
     if not res.get("ok"):
         return {"ok": False, "renamed": False, "operation_id": op_id,
@@ -1881,7 +1883,7 @@ def apply_album_cleanup(
                     "error": claim_refusal(st, operation_id)}
         live = sorted(int(it.get("id")) for it in ad.find_all_items_by_album_id(aid) if it.get("id"))
         if not ad.get_album(aid) or live != list(meta.get("item_ids") or []):
-            st.update(operation_id, status="Failed", logs=["Album changed since the plan; nothing was removed."])
+            st.update(operation_id, status="Failed", append_logs=["Album changed since the plan; nothing was removed."])
             return {"ok": False, "code": "stale_plan", "mutated": False,
                     "error": "The album changed since it was planned; nothing was removed. Plan again."}
         st.update(operation_id, metadata={"engine_request": {"album_id": aid}})
@@ -1893,12 +1895,12 @@ def apply_album_cleanup(
                 st.append_log(operation_id, "Engine call outcome unknown (transport error); left Running "
                                             "for verification -- do not re-apply.")
             else:
-                st.update(operation_id, status="Failed", logs=["Engine refused the album removal."])
+                st.update(operation_id, status="Failed", append_logs=["Engine refused the album removal."])
             raise
         gone = not ad.get_album(aid)
         status = "Completed" if gone else "Recovery Required"
         st.update(operation_id, status=status, metadata={"engine_result": res if isinstance(res, dict) else {}},
-                  logs=[f"Removed album {aid} and {len(live)} item row(s); "
+                  append_logs=[f"Removed album {aid} and {len(live)} item row(s); "
                         f"files {'deleted' if meta.get('delete_files') else 'kept on disk'}."])
     return {"ok": gone, "operation_id": operation_id, "status": status, "mutated": True,
             "delete_files": bool(meta.get("delete_files")), "removed_item_ids": live,
@@ -1922,7 +1924,7 @@ def finish_album_cleanup(
     status = "Completed" if gone else "Recovery Required"
     engine = res.get("result") if isinstance(res.get("result"), dict) else res
     st.update(operation_id, status=status, metadata={"engine_result": engine or {"recovered": True}},
-              logs=[f"Recovered after restart: album {aid} {'is gone' if gone else 'is still present'}."])
+              append_logs=[f"Recovered after restart: album {aid} {'is gone' if gone else 'is still present'}."])
     return {"ok": gone, "operation_id": operation_id, "status": status}
 
 
@@ -2058,7 +2060,7 @@ def apply_track_quarantine(
                 st.append_log(operation_id, "Engine call outcome unknown (transport error); left Running for "
                                             "the recovery sweep -- do not re-apply.")
             else:
-                st.update(operation_id, status="Failed", logs=["Engine refused the quarantine; nothing was removed."])
+                st.update(operation_id, status="Failed", append_logs=["Engine refused the quarantine; nothing was removed."])
             raise
         return finish_track_quarantine(operation_id, res, adapter=ad, store=st)
 
@@ -2084,7 +2086,7 @@ def finish_track_quarantine(
     status = "Completed" if not problems else "Recovery Required"
     st.update(operation_id, status=status,
               metadata={"engine_result": engine, "verification_problems": problems, "items_after": items_after},
-              logs=[f"Quarantined item {r.get('item_id')}: {r.get('quarantine_path')}" for r in engine.get("removed") or []]
+              append_logs=[f"Quarantined item {r.get('item_id')}: {r.get('quarantine_path')}" for r in engine.get("removed") or []]
               + [f"Verification problem: {p}" for p in problems])
     return {"ok": not problems, "operation_id": operation_id, "status": status,
             "quarantine_id": engine.get("quarantine_id"), "removed": engine.get("removed") or [],
@@ -2119,7 +2121,7 @@ def rollback_track_quarantine(
         return {"ok": False, "code": "rollback_failed", "operation_id": operation_id,
                 "status": tx.get("status"), "error": result.get("error") or res.get("error") or "Rollback failed."}
     moved = st.transition(operation_id, tx.get("status"), "Rolled Back", metadata={"rollback_result": result},
-                          logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
+                          append_logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
                                 for r in result.get("restored") or []])
     if moved is None:
         return _rollback_conflict(operation_id)
@@ -2243,12 +2245,13 @@ def delete_album_art(
                   "expected_mb_releasegroupid": rgid, "before": {"artpath": old_artpath}},
     )
     op_id = tx["id"]
-    from backend.resource_locks import approve_preview, attempt_owner, claim_approved, claim_refusal, \
-        locks as resource_locks
+    from backend.resource_locks import approve_preview, attempt_owner, cancel_unclaimed_on_error, claim_approved, \
+        claim_refusal, locks as resource_locks
     if approve_preview(st, op_id, "operator artwork remove") is None:
         return {"ok": False, "code": "not_preview", "operation_id": op_id,
                 "error": "The artwork change was cancelled before it ran."}
-    with resource_locks().hold([f"album:{aid}"], attempt_owner(op_id), timeout=10):
+    with cancel_unclaimed_on_error(st, op_id), \
+            resource_locks().hold([f"album:{aid}"], attempt_owner(op_id), timeout=10):
         if claim_approved(st, op_id) is None:
             return {"ok": False, "code": "not_approved", "error": claim_refusal(st, op_id)}
         st.update(op_id, status="Running", metadata={"engine_request": {"operation_id": op_id}})
@@ -2257,11 +2260,11 @@ def delete_album_art(
         except BeetsAdapterError as exc:
             if _transport_error(exc):
                 st.update(op_id, status="Recovery Required",
-                          logs=["Beets did not answer; whether the cover was removed is unknown."])
+                          append_logs=["Beets did not answer; whether the cover was removed is unknown."])
                 raise
             code = exc.error_code or ""
             known = code in ("NO_ART", "OLD_ART_PATH_INVALID", "ALBUM_NOT_FOUND", "IDENTITY_CHANGED", "BEETS_NOT_FOUND")
-            st.update(op_id, status="Failed", logs=[f"Beets refused to remove the cover ({code or 'error'}); "
+            st.update(op_id, status="Failed", append_logs=[f"Beets refused to remove the cover ({code or 'error'}); "
                                                     + ("nothing was changed." if known else
                                                        "Beets tried to put it back; check the album.")])
             return {"ok": False, "code": code.lower() or "beets_error", "operation_id": op_id, "status": "Failed",
@@ -2377,12 +2380,12 @@ def apply_album_art_replace(
         except BeetsAdapterError as exc:
             if _transport_error(exc):
                 st.update(operation_id, status="Recovery Required",
-                          logs=["Beets did not answer; whether the artwork changed is unknown."])
+                          append_logs=["Beets did not answer; whether the artwork changed is unknown."])
                 raise
             code = exc.error_code or ""
             message = _ART_REFUSALS.get(code)
             st.update(operation_id, status="Failed",
-                      logs=[f"Beets refused the artwork change ({code or 'error'}); "
+                      append_logs=[f"Beets refused the artwork change ({code or 'error'}); "
                             + ("nothing was changed." if message else
                                "Beets tried to put the previous artwork back; check the album.")])
             # Only a known refusal proves nothing changed; any other failure
@@ -2414,7 +2417,7 @@ def finish_album_art_replace(
     st.update(
         operation_id, status=status,
         metadata={**meta, "engine_result": engine, "after": {"artpath": artpath}, "verification_problems": problems},
-        logs=([f"Album {meta['album_id']} cover file removed: {', '.join(engine.get('removed') or []) or '(none)'}"]
+        append_logs=([f"Album {meta['album_id']} cover file removed: {', '.join(engine.get('removed') or []) or '(none)'}"]
               if meta.get("remove") else
               [f"Album {meta['album_id']} cover is now {artpath or '(embedded only)'}",
                f"Embedded into {engine.get('embedded_items', 0)} of {engine.get('item_count', 0)} tracks"])
@@ -2454,7 +2457,7 @@ def rollback_album_art_replace(
     if st.transition(
         operation_id, tx.get("status"), "Rolled Back",
         metadata={**meta, "rollback_result": result},
-        logs=[f"Restored album {meta['album_id']} cover to {restored or '(none)'}; "
+        append_logs=[f"Restored album {meta['album_id']} cover to {restored or '(none)'}; "
               f"embedded art restored on {result.get('restored_embedded_items', 0)} tracks"],
     ) is None:
         return _rollback_conflict(operation_id)
@@ -2485,11 +2488,12 @@ def replace_album_art(
                                   expected_mb_releasegroupid=expected_mb_releasegroupid, adapter=adapter, store=st)
     if not plan.get("ok"):
         return plan
-    from backend.resource_locks import approve_preview
+    from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
     if approve_preview(st, plan["operation_id"], f"operator artwork {source or 'upload'}") is None:
         return {"ok": False, "code": "not_preview", "operation_id": plan["operation_id"],
                 "error": "The artwork change was cancelled before it ran."}
-    return apply_album_art_replace(plan["operation_id"], adapter=adapter, store=st, image=image)
+    with cancel_unclaimed_on_error(st, plan["operation_id"]):
+        return apply_album_art_replace(plan["operation_id"], adapter=adapter, store=st, image=image)
 
 
 def plan_album_artwork(
@@ -2720,7 +2724,7 @@ def apply_album_mb_track_repair(
                 stale = f"Item {iid} changed since the plan."
                 break
     if stale:
-        st.transition(operation_id, tx.get("status"), "Failed", logs=[f"Apply refused: {stale} Nothing was changed."])
+        st.transition(operation_id, tx.get("status"), "Failed", append_logs=[f"Apply refused: {stale} Nothing was changed."])
         return {"ok": False, "code": "repair_plan_stale", "operation_id": operation_id, "mutated": False,
                 "error": f"{stale} Nothing was changed; re-plan it."}
     target_rel, target_rg = plan.get("release_id") or "", plan.get("release_group_id") or ""
@@ -2740,12 +2744,12 @@ def apply_album_mb_track_repair(
             _engine_ok(ad.mbsync(album_ids=[aid], write=write_tags, move=write_tags))
         after = _album_identity_snapshot(ad.get_album(aid) or {})
     except Exception as ex:
-        st.transition(operation_id, "Running", "Failed", logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
+        st.transition(operation_id, "Running", "Failed", append_logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
         return {"ok": False, "code": "repair_apply_failed", "operation_id": operation_id, "mutated": True,
                 "rollback_available": True, "error": f"MusicBrainz repair failed: {str(ex)[:200]}"}
     if target_rel and after != {"mb_albumid": target_rel, "mb_releasegroupid": target_rg}:
         st.transition(operation_id, "Running", "Failed",
-                      logs=[f"Album identity did not verify after the sync: {after}"])
+                      append_logs=[f"Album identity did not verify after the sync: {after}"])
         return {"ok": False, "code": "repair_identity_unverified", "operation_id": operation_id, "mutated": True,
                 "rollback_available": True,
                 "error": "The album's Release/Release Group did not verify after the sync; roll it back."}
@@ -2946,7 +2950,7 @@ def apply_album_metadata(
         live = ad.get_album(int(snap["id"])) if kind == "album" else ad.get_item(int(snap["id"]))
         if not live or _restorable(live, (snap.get("fields") or {}).keys()) != snap.get("fields"):
             st.transition(op_id, tx.get("status"), "Failed",
-                          logs=[f"Apply refused: {kind} {snap.get('id')} changed since the plan. Nothing was changed."])
+                          append_logs=[f"Apply refused: {kind} {snap.get('id')} changed since the plan. Nothing was changed."])
             return {"ok": False, "code": "metadata_plan_stale", "operation_id": op_id, "mutated": False,
                     "error": f"The {kind} {snap.get('id')} changed since the plan; nothing was changed. Re-plan it."}
     write = meta.get("write_tags", True)
@@ -2960,7 +2964,7 @@ def apply_album_metadata(
             if iup:
                 _engine_ok(_modify(ad, iup, item_ids=[int(iid)], write=write, move=move))
     except Exception as ex:
-        st.transition(op_id, "Running", "Failed", logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
+        st.transition(op_id, "Running", "Failed", append_logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
         return {"ok": False, "code": "metadata_apply_failed", "operation_id": op_id, "mutated": True,
                 "rollback_available": True, "error": f"Metadata update failed: {str(ex)[:200]}"}
     st.transition(op_id, "Running", "Completed", metadata={"engine_result": {"album_fields": sorted(updates),
@@ -3336,7 +3340,7 @@ def apply_album_relocation(
         except BeetsAdapterError:
             capable = False
         if not capable:
-            st.update(op_id, status="Failed", logs=[
+            st.update(op_id, status="Failed", append_logs=[
                 "Not moved: the album is in a preserved torrent source and Beets has no webmanager plugin "
                 "1.15.0 (capability album_relocation_link) to link it; nothing was changed."])
             return {"ok": False, "code": "plugin_outdated", "mutated": False, "operation_id": op_id,
@@ -3355,14 +3359,14 @@ def apply_album_relocation(
         except BeetsAdapterError as exc:
             if _transport_error(exc):
                 st.update(op_id, status="Recovery Required",
-                          logs=["Beets did not answer; whether the album moved is unknown."])
+                          append_logs=[f"Beets did not answer; whether the album moved is unknown. {RELOCATION_UNKNOWN_ADVICE}."])
                 raise
             code = exc.error_code or ""
             message = _RELOCATION_REFUSALS.get(code)
             # Only a known refusal (or a move Beets undid) proves nothing changed.
             status = "Failed" if message else "Recovery Required"
             st.update(op_id, status=status,
-                      logs=[f"Beets refused the album move ({code or 'error'}); "
+                      append_logs=[f"Beets refused the album move ({code or 'error'}); "
                             + ("nothing was changed." if message else "check the album's files.")])
             return {"ok": False, "code": code.lower() or "beets_error", "mutated": False if message else None,
                     "operation_id": op_id, "status": status,
@@ -3427,7 +3431,7 @@ def finish_album_relocation(
     st.update(
         operation_id, status=status,
         metadata={"engine_result": engine, "after": {**after, "folders": folders}, "verification_problems": problems},
-        logs=[f"Beets moved {moved} of {len(after_items)} tracks of album {aid} to "
+        append_logs=[f"Beets moved {moved} of {len(after_items)} tracks of album {aid} to "
               f"{', '.join(folders) or '(nowhere)'}; cover: {_s(after.get('artpath')) or '(none)'}"]
              + ([f"Preserved torrent source left in place: {kept['linked']} track(s) hard linked and "
                  f"{kept['copied']} copied into the library"
@@ -3449,6 +3453,12 @@ def finish_album_relocation(
         out.update(code="partial_move", error=f"Beets skipped {len(skipped)} track(s) whose file is missing; "
                                               "the others moved. Roll back from Transactions to undo.")
     return out
+
+
+#: #328 F2: an interrupted move has no engine "after", so it cannot be rolled
+#: back; moving the album again finishes it (Beets moves only what is not in place).
+RELOCATION_UNKNOWN_ADVICE = ("Beets never reported where the tracks went, so this move cannot be rolled back: "
+                             "move the album to the library again to finish it, then check its files")
 
 
 def album_relocation_unchanged(ad: BeetsAdapter, meta: Dict[str, Any]) -> bool:
@@ -3484,7 +3494,8 @@ def rollback_album_relocation(
     meta = tx.get("metadata") or {}
     engine = meta.get("engine_result") or {}
     if meta.get("mutation_family") != ALBUM_RELOCATION_FAMILY or not engine.get("after"):
-        return {"ok": False, "code": "not_applied", "error": "No applied album move to roll back."}
+        return {"ok": False, "code": "not_applied", "error": "No applied album move to roll back."
+                + (f" {RELOCATION_UNKNOWN_ADVICE}." if tx.get("status") == "Recovery Required" else "")}
     if tx.get("status") == "Rolled Back":
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     refusal = engine_rollback_refusal(tx)
@@ -3520,7 +3531,7 @@ def rollback_album_relocation(
                                                   if art_kept else {}))
         except BeetsAdapterError as exc:
             if _transport_error(exc):
-                st.transition(operation_id, tx.get("status"), "Recovery Required", logs=[
+                st.transition(operation_id, tx.get("status"), "Recovery Required", append_logs=[
                     "Beets did not answer the rollback; some tracks may already be back. Retry the rollback: "
                     "Beets resumes from the recorded paths and refuses what it cannot prove."])
                 raise
@@ -3529,7 +3540,7 @@ def rollback_album_relocation(
             if message and interrupted:
                 st.transition(operation_id, tx.get("status"), "Recovery Required",
                               metadata={"rollback_request": {**request_meta, "outcome": "refused"}},
-                              logs=[f"Rollback refused by Beets ({code}) after an earlier rollback attempt was "
+                              append_logs=[f"Rollback refused by Beets ({code}) after an earlier rollback attempt was "
                                     "interrupted; the album may be partly moved back. Check its files."])
                 return {"ok": False, "code": code.lower(), "mutated": None, "operation_id": operation_id,
                         "status": "Recovery Required",
@@ -3537,11 +3548,11 @@ def rollback_album_relocation(
                                  f"({code}); the album may be partly moved back. Check its files."}
             if message:
                 st.update(operation_id, metadata={"rollback_request": {**request_meta, "outcome": "refused"}},
-                          logs=[f"Rollback refused by Beets ({code}); nothing was changed."])
+                          append_logs=[f"Rollback refused by Beets ({code}); nothing was changed."])
                 return {"ok": False, "code": code.lower(), "mutated": False, "operation_id": operation_id,
                         "status": tx.get("status"), "error": message}
             st.transition(operation_id, tx.get("status"), "Recovery Required",
-                          logs=[f"Rollback failed in Beets ({code or 'error'}); check the album's files."])
+                          append_logs=[f"Rollback failed in Beets ({code or 'error'}); check the album's files."])
             return {"ok": False, "code": code.lower() or "beets_error", "mutated": None,
                     "operation_id": operation_id, "status": "Recovery Required",
                     "error": "Beets could not move the album back; check its files."}
@@ -3553,7 +3564,7 @@ def rollback_album_relocation(
         if st.transition(
             operation_id, tx.get("status"), status,
             metadata={"rollback_result": result, "rollback_request": {**request_meta, "outcome": "succeeded"}},
-            logs=[f"Moved {result.get('restored_items', 0) - (result.get('adopted_items') or 0) - (result.get('repointed_items') or 0)} "
+            append_logs=[f"Moved {result.get('restored_items', 0) - (result.get('adopted_items') or 0) - (result.get('repointed_items') or 0)} "
                   f"tracks of album {aid} back to "
                   f"{', '.join(meta['before'].get('folders') or []) or '(unknown)'}"
                   + ("; cover restored" if result.get("restored_art") else "")]
@@ -3569,7 +3580,8 @@ def rollback_album_relocation(
         ) is None:
             return _rollback_conflict(operation_id)
     return {"ok": ok, "operation_id": operation_id, "status": status,
-            "restored": int(result.get("restored_items") or 0)}
+            "restored": int(result.get("restored_items") or 0),
+            "adopted": int(result.get("adopted_items") or 0)}  # #328 N4: restored includes these
 
 
 def relocate_album(
@@ -3585,11 +3597,12 @@ def relocate_album(
     if not plan.get("ok"):
         return {"ok": False, "error": plan.get("error") or "Relocation plan rejected", "code": plan.get("code")}
     op_id = plan["operation_id"]
-    from backend.resource_locks import approve_preview
+    from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
     if approve_preview(st, op_id, f"operator album {plan.get('mode') or mode}") is None:
         return {"ok": False, "code": "not_preview", "operation_id": op_id,
                 "error": "The album move was cancelled before it ran."}
-    res = apply_album_relocation(op_id, adapter=adapter, store=st)
+    with cancel_unclaimed_on_error(st, op_id):
+        res = apply_album_relocation(op_id, adapter=adapter, store=st)
     if not res.get("ok"):
         return {"ok": False, "operation_id": op_id, "code": res.get("code"), "status": res.get("status"),
                 "error": res.get("error") or "Relocation apply failed"}
@@ -3821,7 +3834,7 @@ def apply_import_review_cleanup(
             log.exception("Import Review cleanup apply failed; the transaction is marked Failed")
             reason = f"Cleanup failed ({type(exc).__name__}); see server logs."
             st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": reason}},
-                      logs=[reason])
+                      append_logs=[reason])
             return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
                     "error": reason, "deleted": [], "moved": [], "skipped": []}
 
@@ -3843,7 +3856,7 @@ def _apply_engine_import_review_cleanup(st: TransactionStore, operation_id: str)
                                   or f"engine finished with status {current}")
     st.update(operation_id, status=final,
               metadata={"engine_result": {"ok": False, "status": final, "failures": failures, "error": detail}},
-              logs=[f"Cleanup did not complete: {detail}"])
+              append_logs=[f"Cleanup did not complete: {detail}"])
     return {**res, "ok": False, "code": "partial" if partial else "failed", "status": final,
             "operation_id": operation_id, "error": f"Cleanup did not complete: {detail}",
             "failures": failures, "deleted": deleted, "moved": moved, "skipped": skipped}
@@ -3855,13 +3868,13 @@ def _apply_legacy_folder_cleanup(st: TransactionStore, operation_id: str, meta: 
     folder = meta.get("folder") or meta.get("folder_path") or meta.get("source") or meta.get("path")
     if not folder:
         st.update(operation_id, status="Failed", metadata={"engine_result": {"ok": False, "error": "no folder"}},
-                  logs=["Cleanup plan names no folder; nothing was deleted."])
+                  append_logs=["Cleanup plan names no folder; nothing was deleted."])
         return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
                 "error": "Cleanup plan names no folder.", "deleted": [], "moved": [], "skipped": []}
     p = Path(folder)
     if not p.exists() and not p.is_symlink():
         st.update(operation_id, status="Completed", metadata={"engine_result": {"ok": True, "deleted": []}},
-                  logs=[f"{folder} was already gone; nothing to delete."])
+                  append_logs=[f"{folder} was already gone; nothing to delete."])
         return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted": [], "moved": [],
                 "skipped": [{"file": str(folder), "reason": "not_found"}]}
     resolved = _validated_staging_target(p, "delete")
@@ -3869,11 +3882,11 @@ def _apply_legacy_folder_cleanup(st: TransactionStore, operation_id: str, meta: 
     if os.path.lexists(str(resolved)):
         st.update(operation_id, status="Failed",
                   metadata={"engine_result": {"ok": False, "error": "folder still exists after delete"}},
-                  logs=[f"{resolved} still exists after the delete; reported as failed."])
+                  append_logs=[f"{resolved} still exists after the delete; reported as failed."])
         return {"ok": False, "code": "failed", "operation_id": operation_id, "status": "Failed",
                 "error": f"{resolved} still exists after the delete.", "deleted": [], "moved": [], "skipped": []}
     st.update(operation_id, status="Completed", metadata={"engine_result": {"ok": True, "deleted": [str(resolved)]}},
-              logs=[f"Deleted {resolved}"])
+              append_logs=[f"Deleted {resolved}"])
     return {"ok": True, "operation_id": operation_id, "status": "Completed", "deleted": [str(resolved)],
             "moved": [], "skipped": []}
 
@@ -3904,7 +3917,7 @@ def rollback_import_review_cleanup(
     restored = res.get("restored") or []
     if len(restored) < len(expected):
         st.transition(operation_id, "Rolled Back", "Partially Rolled Back",
-                      logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
+                      append_logs=[f"Only {len(restored)} of {len(expected)} quarantined files were restored."])
         return {**res, "ok": False, "code": "partial", "status": "Partially Rolled Back",
                 "error": f"Only {len(restored)} of {len(expected)} quarantined files were restored."}
     return res
@@ -3998,7 +4011,7 @@ def apply_confirmed_import(
               album_ids: Optional[List[int]] = None) -> Dict[str, Any]:
         # album_ids: the rows Beets imported and this failure keeps (never removed here).
         extra = {"metadata": {"engine_result": {"mutation_started": True, "kept_album_ids": album_ids}}}             if album_ids else {}
-        st.transition(operation_id, expected, "Failed", logs=[f"Apply failed ({code}): {error}"], **extra)
+        st.transition(operation_id, expected, "Failed", append_logs=[f"Apply failed ({code}): {error}"], **extra)
         return {"ok": False, "code": code, "operation_id": operation_id, "status": "Failed",
                 "mutated": mutated, "error": error, "album_ids": album_ids or []}
 
@@ -4964,7 +4977,7 @@ def mbsync_library(
             st.update(transaction_id, changes=_mbsync_change_rows(last.get("changes") or []),
                       counts={"albums": counts["changed_albums"], "items": counts["changed_items"]},
                       metadata={"engine_result": {**counts, "outcome_unknown": True, "lost": code}},
-                      logs=[note])
+                      append_logs=[note])
         return {"ok": False, "code": code, "operation_id": op_id, "mutated": None, "summary": counts,
                 "outcome_partly_unknown": True, "error": f"{error} {note}"}
 

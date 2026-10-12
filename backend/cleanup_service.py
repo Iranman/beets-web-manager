@@ -482,7 +482,7 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
 def controlled_apply_error(ex: BaseException, operation_id: str, *,
                            refused: str = "The engine refused the operation.",
                            busy: str = "Another operation is using these library items; nothing was changed. "
-                                       "Try again shortly.",
+                                       "Try again shortly (a lock left by an interrupted attempt expires within about 2 minutes).",
                            failed: str = "The operation failed.") -> Tuple[Dict[str, Any], int]:
     """Map an exception raised by a transaction apply (or rollback) executor
     to a controlled (JSON body, HTTP status) -- shared by every engine family
@@ -541,7 +541,7 @@ def controlled_rollback_error(ex: BaseException, operation_id: str, *,
         if lock_before_write:
             return {"ok": False, "mutated": False, "code": "resource_busy",
                     "error": "Another operation is using these library items; nothing was changed. "
-                             "Try again shortly."}, 409
+                             "Try again shortly (a lock left by an interrupted attempt expires within about 2 minutes)."}, 409
         return {"ok": False, "code": "resource_busy",
                 "error": "Another operation is using these library items. Reload the transaction "
                          "to check its state before retrying."}, 409
