@@ -119,6 +119,17 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **`auth_failed`** ("Plex token is invalid or expired."): set a current `PLEX_TOKEN`. **`timeout`**: Plex answered too slowly; it is often busy scanning. **`not_configured`**: Plex needs both a URL and a token, from `PLEX_URL`/`PLEX_TOKEN` or the Beets `config.yaml` `plex:` stanza; playlist sync skips Plex until both are set.
 * `PLEX_URL` must be a plain `http://` or `https://` address without `user:pass@`, a query (`?X-Plex-Token=...`) or a fragment; the System page refuses to save one. Put the token in `PLEX_TOKEN`. Status responses never show the token or URL credentials.
 
+### 16a. A playlist sync shows pending tracks, "Plex playlist update did not finish", or 409 `job_already_running`
+* **Pending tracks**: each has a reason. "not in the Beets library": download or import the track. "file exists but Plex has not indexed it": let Plex finish scanning (or refresh the library), then sync again.
+* **"Plex playlist update did not finish"**: Plex failed partway through adding, removing or moving entries. Sync again: the next run continues from what Plex now holds, and the playlist keeps its Plex ID.
+* **409 `job_already_running`**: a playlist sync (manual or automatic) is already running; wait for it on the Jobs page.
+* **A playlist was skipped with `pipeline_running`**: its download/import job is running; the next sync picks it up.
+* **A track came back after being removed in Plex**: remove it in Web Manager instead. The Web Manager list is the master copy; Plex-only removals are not applied.
+* **A playlist from an older version is missing**: it is imported once from `MUSIC_ROOT/playlists` at the next sync, unless Web Manager already has a list with that name.
+
+### 16b. slskd says "HTTP 401" / "slskd rejected the API key"
+* Set `SLSKD_API_KEY` (or `SLSKD_API_KEY_FILE`) to a key slskd accepts. A cancelled or failed playlist track cancels its queued slskd transfer and removes only the partial files proven to belong to it.
+
 ### Check Container Health
 ```bash
 docker compose ps beets-web-manager
