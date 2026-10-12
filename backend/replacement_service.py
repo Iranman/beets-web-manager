@@ -16,7 +16,7 @@ from backend.beets_adapter import beets_adapter
 import backend.composite_workflows as composite_workflows
 import backend.item_replacement as _item_replacement
 import backend.recording_review as recording_review
-from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_lookup_cached, _playlist_artist_name_score, _playlist_title_score, _read_file_media_tags
+from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_hits_or_none, _playlist_artist_name_score, _playlist_title_score, _read_file_media_tags
 from backend.job_service import _wait_for_child_job
 from backend.serializers import _json_from_flask_response
 
@@ -239,7 +239,7 @@ def _music_format_resolve_replacement_identity(row: Dict[str, Any], log: list) -
     acoustid_hits: Optional[List[Dict[str, Any]]] = None
     if path_text and path.is_file():
         try:
-            acoustid_hits = _acoustid_lookup_cached(str(path))
+            acoustid_hits = _acoustid_hits_or_none(str(path))
         except Exception as ex:
             log.append(f"  AcoustID lookup failed: {ex}")
         if acoustid_hits:

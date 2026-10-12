@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import backend.ai_service as ai
+from backend.provider_boundary import ProviderOutcome, ProviderResult
 import backend.library_service as lsvc
 import backend.musicbrainz_service as msvc
 
@@ -48,7 +49,7 @@ class SuggestionKeepsTheCandidateReleaseTests(unittest.TestCase):
         with mock.patch.object(ai, "_ai_api_key", return_value=""), \
                 mock.patch.object(ai, "_album_preflight_folder", return_value=""), \
                 mock.patch.object(ai, "_acoustid_multi_file", return_value={}), \
-                mock.patch.object(ai, "_acoustid_lookup_cached", return_value=[]), \
+                mock.patch.object(ai, "_acoustid_lookup_cached_outcome", return_value=ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[])), \
                 mock.patch.object(ai, "_mb_release_search", return_value=[cand]), \
                 mock.patch.object(ai, "_score_mb_release_candidate", return_value={"total": 0.9}), \
                 mock.patch.object(ai, "_fetch_mb_release_tracklist", side_effect=fetch), \

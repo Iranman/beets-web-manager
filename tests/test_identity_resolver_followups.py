@@ -97,5 +97,72 @@ class ReleaseGroupResolverTests(unittest.TestCase):
         self.assertIn("mb_albumid required", body["error"])
 
 
+class ProviderOutageReportingTests(unittest.TestCase):
+    """#252 NF-1, #297 N4: an outage is reported as not checked, never as
+    "no candidates", and evidence already gathered is kept."""
+
+    def setUp(self):
+        import tempfile, os
+        fd, self.audio = tempfile.mkstemp(suffix=".flac")
+        os.close(fd)
+        self.addCleanup(os.remove, self.audio)
+
+    def _album_suggest(self, aid_result, mb_side_effect):
+        import types
+        import backend.ai_service as ai
+        track = types.SimpleNamespace(path=self.audio, title="Song", track=1)
+        album = types.SimpleNamespace(id=7, album="Album", albumartist="Artist", year=2001, items=lambda: [track])
+        with patch.object(ai, "_ai_api_key", return_value=""), \
+             patch.object(ai, "_album_preflight_folder", return_value=""), \
+             patch.object(ai, "_acoustid_multi_file", return_value={}), \
+             patch.object(ai, "_acoustid_lookup_cached_outcome", return_value=aid_result), \
+             patch.object(ai, "_mb_release_search", side_effect=mb_side_effect), \
+             patch.object(ai, "_ai_match_evidence_packet", return_value={}):
+            return ai._ai_suggest_album_internal(album, [])
+
+    def test_album_suggest_mb_outage_keeps_acoustid_evidence(self):
+        from backend.provider_boundary import ProviderError, ProviderOutcome, ProviderResult
+        hit = {"mb_trackid": "r1", "score": 95}
+        out = self._album_suggest(ProviderResult("acoustid", ProviderOutcome.CONFIRMED, data=[hit]),
+                                  ProviderError(ProviderOutcome.UNAVAILABLE, "503"))
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["musicbrainz_unavailable"])
+        self.assertEqual(out["acoustid_candidates"], [hit])
+        self.assertEqual(out["acoustid_status"], "")
+        self.assertIn("could not be reached", out["suggestion"]["reason"])
+
+    def test_album_suggest_reports_acoustid_not_checked(self):
+        from backend.provider_boundary import ProviderOutcome, ProviderResult
+        for outcome, status in ((ProviderOutcome.NOT_CONFIGURED, "not_configured"),
+                                (ProviderOutcome.AUTHENTICATION_ERROR, "auth_failed"),
+                                (ProviderOutcome.UNAVAILABLE, "lookup_failed")):
+            with self.subTest(status):
+                out = self._album_suggest(ProviderResult("acoustid", outcome), lambda *a, **k: [])
+                self.assertEqual(out["acoustid_status"], status)
+                self.assertTrue(out["acoustid_unavailable"])
+                self.assertFalse(out["musicbrainz_unavailable"])
+                self.assertIn("No MusicBrainz release candidates", out["suggestion"]["reason"])
+
+    def _track_candidates(self, aid_result):
+        import types
+        item = types.SimpleNamespace(path=self.audio, title="Song", artist="Artist", album="Album",
+                                     albumartist="Artist", year=2001, track=1, length=200.0)
+        captured = {}
+        with patch.object(ls, "_item_ai_abs_path", return_value=self.audio), \
+             patch.object(ls, "_acoustid_lookup_cached_outcome", return_value=aid_result), \
+             patch.object(ls, "_mb_recording_search", return_value=[]), \
+             patch.object(ls.recording_review, "enrich_and_index",
+                          side_effect=lambda c, f, hits: captured.setdefault("hits", hits)):
+            ls._reconstruct_track_recording_candidates(item, 1)
+        return captured["hits"]
+
+    def test_track_candidates_pass_none_when_acoustid_did_not_answer(self):
+        from backend.provider_boundary import ProviderOutcome, ProviderResult
+        self.assertIsNone(self._track_candidates(ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE)))
+        self.assertIsNone(self._track_candidates(ProviderResult("acoustid", ProviderOutcome.NOT_CONFIGURED)))
+        # A real "no result" answer is still an answer.
+        self.assertIsNotNone(self._track_candidates(ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[])))
+
+
 if __name__ == "__main__":
     unittest.main()

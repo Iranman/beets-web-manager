@@ -66,7 +66,7 @@ class ReplacementWorkflowTests(unittest.TestCase):
     def _run(self, row, *, hits, text=()):
         log = []
         with patch_app_family(app_module, "_music_format_read_embedded_identity", return_value={}), \
-                patch_app_family(app_module, "_acoustid_lookup_cached", return_value=hits), \
+                patch_app_family(app_module, "_acoustid_hits_or_none", return_value=hits), \
                 patch_app_family(app_module, "_mb_recording_search", return_value=list(text)) as search, \
                 patch_app_family(app_module, "_fetch_mb_recording_details", return_value={}), \
                 patch_app_family(app_module, "_fetch_mb_release_candidate", return_value={}), \

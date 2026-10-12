@@ -23,7 +23,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
 import backend.recording_review as recording_review
-from backend.acoustid_service import _acoustid_lookup_cached, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags
 from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
@@ -1190,7 +1190,15 @@ def _reconstruct_track_recording_candidates(item, iid: int):
 
     _mb_t, _mb_a = _clean_for_mb(search_title, search_artist)
 
-    acoustid_cands = _acoustid_lookup_cached(item_path) if item_path else []
+    # #297 N4: None when AcoustID was not asked or did not answer, so the
+    # evaluator sees UNAVAILABLE, never NO_RESULT. Exceptions propagate (the
+    # attach route reports matching_evidence_unavailable).
+    acoustid_hits = None
+    if item_path:
+        lookup = _acoustid_lookup_cached_outcome(item_path)
+        if lookup.answered:
+            acoustid_hits = list(lookup.data or [])
+    acoustid_cands = acoustid_hits or []
     mb_text_cands = _mb_recording_search(_mb_t, _mb_a, limit=6)
     if not mb_text_cands and _mb_a:
         mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
@@ -1202,7 +1210,7 @@ def _reconstruct_track_recording_candidates(item, iid: int):
     recording_review.enrich_and_index(
         mb_candidates,
         lambda c, hits: _enrich_track_ai_candidate(current, c, item_id=iid, acoustid_hits=hits),
-        recording_review.acoustid_hits_for(item_path, acoustid_cands),
+        recording_review.acoustid_hits_for(item_path, acoustid_cands) if acoustid_hits is not None else None,
     )
     return current, mb_candidates, item_path, filename
 
