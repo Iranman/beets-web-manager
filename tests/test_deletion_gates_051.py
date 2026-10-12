@@ -41,20 +41,24 @@ class SourceDeletionProofGateTests(unittest.TestCase):
         self.album = {"id": 7, "mb_releasegroupid": RG}
         self.deleted = []
 
-        def fake_delete(path, log):
-            self.deleted.append(path)
-            shutil.rmtree(path)
-            return True
+        def fake_remove(target):
+            # Stands in for the fd-relative rmtree (POSIX-only); location
+            # checks before it run for real.
+            self.deleted.append(str(target))
+            shutil.rmtree(target)
 
-        for name, kw in (
-                ("get_album", {"side_effect": lambda aid: self.album}),
-                ("find_all_items_by_album_id", {"side_effect": lambda aid: self.items})):
-            p = mock.patch.object(ls.composite_workflows, name, **kw)
+        for target, name, kw in (
+                (ls.composite_workflows, "get_album", {"side_effect": lambda aid: self.album}),
+                (ls.composite_workflows, "find_all_items_by_album_id", {"side_effect": lambda aid: self.items}),
+                (ls.composite_workflows, "_validated_staging_target",
+                 {"side_effect": lambda p, what: Path(p).resolve()}),
+                (ls.composite_workflows, "_remove_resolved", {"side_effect": fake_remove}),
+                (ls, "MUSIC_ROOT", {"new": (base / "music").resolve()}),
+                (ls, "_DOWNLOADS_ROOTS", {"new": [str((base / "downloads").resolve())]}),
+                (ls, "_preserve_torrent_source_path", {"return_value": False})):
+            p = mock.patch.object(target, name, **kw)
             p.start()
             self.addCleanup(p.stop)
-        p = mock.patch.object(ls, "_delete_source_folder_already_in_library", side_effect=fake_delete)
-        p.start()
-        self.addCleanup(p.stop)
 
     def _run(self, proof=None, rg=RG):
         proof = proof or (lambda drop, keep, rid="": NOT_PROVEN)
@@ -110,6 +114,48 @@ class SourceDeletionProofGateTests(unittest.TestCase):
         ev, _ = self._run(self._fingerprint_all)
         self.assertFalse(ev["deleted"])
         self.assertTrue((self.src / "cd2" / "03 Bonus.flac").exists())
+
+    def test_items_imported_in_place_cannot_prove_themselves(self):
+        # B1: the album's items ARE the source files (in-place import).
+        self.items = [{"id": i, "path": str(p), "mb_trackid": ""}
+                      for i, p in enumerate(sorted(self.src.iterdir()), 1)]
+        ev, _ = self._run(lambda d, k, r="": {**NOT_PROVEN, "proven": True})
+        self.assertEqual((ev["deleted"], ev["reason"]), (False, "no_library_files"))
+        self.assertTrue(self.src.exists())
+
+    def test_library_item_outside_music_root_is_not_proof(self):
+        outside = self.src.parent.parent / "elsewhere"
+        shutil.copytree(self.lib, outside)
+        for item in self.items:
+            item["path"] = str(outside / Path(item["path"]).name)
+            shutil.copyfile(item["path"], self.src / Path(item["path"]).name)
+        ev, _ = self._run()
+        self.assertFalse(ev["deleted"])
+        self.assertTrue(self.src.exists())
+
+    def test_unlisted_audio_format_keeps_the_folder(self):
+        # B2: a proven album plus a bonus track in a format outside AUDIO_EXT.
+        (self.src / "03 Bonus.wma").write_bytes(b"bonus")
+        ev, _ = self._run(self._fingerprint_all)
+        self.assertEqual((ev["deleted"], ev["reason"]), (False, "unrecognised_file"))
+        self.assertTrue((self.src / "03 Bonus.wma").exists())
+
+    def test_sidecars_do_not_block_a_proven_folder(self):
+        (self.src / "cover.jpg").write_bytes(b"art")
+        (self.src / "rip.log").write_text("log")
+        ev, _ = self._run(self._fingerprint_all)
+        self.assertTrue(ev["deleted"])
+
+    def test_file_added_during_proof_keeps_the_folder(self):
+        # B3: a download finishing into the folder after the snapshot.
+        def proof(drop, keep, rid=""):
+            (self.src / "late.flac").write_bytes(b"late")
+            return self._fingerprint_all(drop, keep, rid)
+        ev, log = self._run(proof)
+        self.assertTrue(ev["proven"])
+        self.assertFalse(ev["deleted"])
+        self.assertTrue((self.src / "late.flac").exists())
+        self.assertTrue(any("changed since proof" in line for line in log))
 
     def test_fingerprint_unavailable_keeps_the_folder(self):
         def unavailable(drop, keep, rid=""):

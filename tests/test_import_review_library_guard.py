@@ -117,6 +117,13 @@ class ReviewFolderDeleteAlbumGateTests(unittest.TestCase):
                 self.assertEqual(self._call(False, payload={"path": "/downloads/A", flag: True}),
                                  (400, None))
 
+    def test_symlinked_component_into_the_library_is_refused(self):
+        # Security N1: /downloads/link/Album resolving into MUSIC_ROOT.
+        import routes_import
+        with mock.patch.object(routes_import, "_path_is_under", return_value=True):
+            self.assertEqual(self._call(False, pending=True, payload={"path": "/downloads/link/Album"}),
+                             (400, None))
+
     def test_server_decides_library_path_not_the_client(self):
         # Pending item in the library, client says "not library": still quarantine mode.
         _, kw = self._call(False, pending=True,

@@ -122,6 +122,13 @@ def delete_import_review_folder():
 
     resolved = Path(src_path).resolve(strict=False)
     is_library_path = _path_is_under(resolved, MUSIC_ROOT)
+    lexical = Path(os.path.normpath(src_path))
+    lexical_library = lexical == Path(os.path.normpath(str(MUSIC_ROOT))) or \
+        Path(os.path.normpath(str(MUSIC_ROOT))) in lexical.parents
+    if is_library_path != lexical_library:
+        # A symlinked component moves the path into or out of the library:
+        # refuse rather than guess which side the operator meant.
+        return jsonify({"ok": False, "error": "Symlinks are not permitted."}), 400
     missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
 
     if not missing_mbid_album_match and not _pending_review_matches(src_path, ""):
