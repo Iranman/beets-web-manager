@@ -718,9 +718,10 @@ class BeetsAdapter:
         album_ids: Optional[List[int]] = None,
         query: Optional[str] = None,
         write: bool = True,
-        move: bool = True,
+        move: bool = False,
     ) -> Dict[str, Any]:
-        """Modify metadata fields on items or albums."""
+        """Modify metadata fields on items or albums. Files move only when
+        ``move`` is asked for explicitly (#335)."""
         payload = {
             "fields": fields,
             "item_ids": item_ids or [],

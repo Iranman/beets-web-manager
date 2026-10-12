@@ -852,6 +852,29 @@ def run_import():
         return jsonify({"error": "Import failed", "error_code": "IMPORT_FAILED"}), 500
 
 
+_ART_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+
+
+def _artpath_refusal(value: Any) -> Optional[str]:
+    """Why ``artpath`` may not be stored through modify, or None (#327).
+    Clearing it is always allowed. Otherwise it must name an existing regular
+    image file strictly inside the allowed roots with no symlink component,
+    the checks relocation rollback applies to a restored cover."""
+    if value in (None, "", b""):
+        return None
+    from . import folder_ops, relocation_ops  # they import this module
+    path = os.fsdecode(value) if isinstance(value, (bytes, str)) else None
+    try:
+        path, _root = relocation_ops._contained(path)
+    except folder_ops._Refused as exc:
+        return f"artpath: {exc.message}"
+    if os.path.splitext(path)[1].lower() not in _ART_EXTENSIONS:
+        return "artpath is not an image file"
+    if not os.path.isfile(path):
+        return "artpath is not an existing file"
+    return None
+
+
 @webmanager_bp.route("/modify", methods=["POST"])
 def run_modify():
     """Modify metadata of items or albums."""
@@ -861,7 +884,7 @@ def run_modify():
     query = data.get("query")
     raw_fields = data.get("fields") or {}
     write = bool(data.get("write", True))
-    move = bool(data.get("move", True))
+    move = bool(data.get("move", False))  # a move is never implied (#335)
 
     if not item_ids and not album_ids and not query:
         return jsonify({
@@ -888,6 +911,9 @@ def run_modify():
                     "error": "No valid fields provided for modification",
                     "error_code": "INVALID_FIELDS",
                 }), 400
+            refused = _artpath_refusal(album_fields.get("artpath"))
+            if refused:
+                return jsonify({"error": refused, "error_code": "ARTPATH_INVALID"}), 400
 
             modified_items = 0
             modified_albums = 0

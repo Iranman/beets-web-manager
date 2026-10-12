@@ -199,6 +199,53 @@ def _restorable(row: Optional[Dict[str, Any]], fields: Optional[Any] = None) -> 
             if k not in _RESTORE_SKIP and (row.get(k) is None or isinstance(row.get(k), (str, int, float, bool)))}
 
 
+def _modify(ad: BeetsAdapter, fields: Dict[str, Any], *, item_ids: Optional[List[int]] = None,
+            album_ids: Optional[List[int]] = None, write: bool = False, move: bool = False) -> Dict[str, Any]:
+    """Every composite ``modify`` (#335). A tag write or a move never reaches
+    a preserved torrent source (the shared rule, ``_preserved_torrent_file``):
+    a target with any file there gets its fields stored in Beets only -- no
+    file write, no move -- and is listed under ``preserved_item_ids`` /
+    ``preserved_album_ids``. When the paths cannot be read the target is
+    treated as preserved (fails closed)."""
+    item_ids = [int(x) for x in item_ids or []]
+    album_ids = [int(x) for x in album_ids or []]
+    kept_items: List[int] = []
+    kept_albums: List[int] = []
+    if write or move:
+        for iid in item_ids:
+            try:
+                path = _s((ad.get_item(iid) or {}).get("path"))
+            except Exception:
+                path = ""
+            if not path or _preserved_torrent_file(path):
+                kept_items.append(iid)
+        for aid in album_ids:
+            try:
+                paths = list(_album_item_paths(ad.get_album(aid) or {}, ad, aid).values())
+            except Exception:
+                paths = [""]
+            if any(not p or _preserved_torrent_file(p) for p in paths):
+                kept_albums.append(aid)
+    free_items = [i for i in item_ids if i not in kept_items]
+    free_albums = [a for a in album_ids if a not in kept_albums]
+    res: Dict[str, Any] = {}
+    if free_items or free_albums:
+        res = ad.modify(fields=fields, **_ids(free_items, free_albums), write=write, move=move)
+    if kept_items or kept_albums:
+        log.info("Preserved torrent source: stored %s in Beets only (no tag write, no move) for items %s albums %s",
+                 sorted(fields), kept_items, kept_albums)
+        kept = ad.modify(fields=fields, **_ids(kept_items, kept_albums), write=False, move=False)
+        if not res or (isinstance(kept, dict) and kept.get("ok") is False):
+            res = kept
+        res = {**(res if isinstance(res, dict) else {}),
+               "preserved_item_ids": kept_items, "preserved_album_ids": kept_albums}
+    return res
+
+
+def _ids(item_ids: List[int], album_ids: List[int]) -> Dict[str, List[int]]:
+    return {k: v for k, v in (("item_ids", item_ids), ("album_ids", album_ids)) if v}
+
+
 def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool) -> Tuple[int, int]:
     """Write captured values back where they differ from the live row.
     ``before`` = {"album": {"id", "fields"}, "items": [{"id", "fields"}]}.
@@ -217,7 +264,7 @@ def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool) -> Tupl
             diff = {k: v for k, v in (snap.get("fields") or {}).items() if live.get(k) != v}
             if diff:
                 ids = {"album_ids": [rid]} if kind == "album" else {"item_ids": [rid]}
-                res = ad.modify(fields=diff, write=write, move=True, **ids)
+                res = _modify(ad, diff, write=write, move=True, **ids)
                 if isinstance(res, dict) and res.get("ok") is False:
                     failed += 1
                     continue
@@ -796,10 +843,17 @@ def apply_artist_folder_reconcile(
     canonical_name = meta.get("canonical_name")
     album_ids = meta.get("album_ids", [])
 
-    def write() -> None:
-        if album_ids and canonical_name:
-            ad.modify(fields={"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
-                      write=True, move=True)
+    def write() -> Optional[Dict[str, Any]]:
+        if not (album_ids and canonical_name):
+            return None
+        res = _engine_ok(_modify(ad, {"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
+                                 write=True, move=True))
+        kept = (res or {}).get("preserved_album_ids") if isinstance(res, dict) else None
+        if not kept:
+            return None
+        return {"preserved_album_ids": kept,
+                "log": (f"Albums {kept} are in a preserved torrent source: the album artist was stored in "
+                        "Beets only; their files were not moved and their tags were not written.")}
 
     return _apply_claimed(st, operation_id, write)
 
@@ -2103,7 +2157,7 @@ def delete_album_art(
     """Clear album artpath and art."""
     ad = adapter or beets_adapter
     aid = int(album_id)
-    ad.modify(fields={"artpath": ""}, album_ids=[aid])
+    ad.modify(fields={"artpath": ""}, album_ids=[aid], write=False, move=False)
     return {"ok": True, "album_id": aid}
 
 
@@ -2561,9 +2615,9 @@ def apply_album_mb_track_repair(
     try:
         if target_rel and (target_rel, target_rg) != (plan["live_identity"]["mb_albumid"],
                                                      plan["live_identity"]["mb_releasegroupid"]):
-            _engine_ok(ad.modify(fields=album_fields, album_ids=[aid], write=write_tags, move=False))
+            _engine_ok(_modify(ad, album_fields, album_ids=[aid], write=write_tags, move=False))
         for iid, mbid in (plan.get("track_mbids") or {}).items():
-            _engine_ok(ad.modify(fields={"mb_trackid": mbid}, item_ids=[int(iid)], write=write_tags, move=False))
+            _engine_ok(_modify(ad, {"mb_trackid": mbid}, item_ids=[int(iid)], write=write_tags, move=False))
         if target_rel:
             _engine_ok(ad.mbsync(album_ids=[aid], write=write_tags, move=write_tags))
         after = _album_identity_snapshot(ad.get_album(aid) or {})
@@ -2763,10 +2817,10 @@ def apply_album_metadata(
         return _apply_refused(st, op_id)
     try:
         if aid and updates:
-            _engine_ok(ad.modify(fields=updates, album_ids=[aid], write=write, move=move))
+            _engine_ok(_modify(ad, updates, album_ids=[aid], write=write, move=move))
         for iid, iup in item_updates.items():
             if iup:
-                _engine_ok(ad.modify(fields=iup, item_ids=[int(iid)], write=write, move=move))
+                _engine_ok(_modify(ad, iup, item_ids=[int(iid)], write=write, move=move))
     except Exception as ex:
         st.transition(op_id, "Running", "Failed", logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
         return {"ok": False, "code": "metadata_apply_failed", "operation_id": op_id, "mutated": True,
@@ -2894,7 +2948,7 @@ def apply_item_metadata(
 
     def _write() -> None:
         if iid and updates:
-            ad.modify(fields=updates, item_ids=[int(iid)], write=write, move=move)
+            _engine_ok(_modify(ad, updates, item_ids=[int(iid)], write=write, move=move))
 
     return _apply_claimed(st, op_id, _write)
 
@@ -4422,7 +4476,7 @@ def repoint_item_db_path(
     adapter: Optional[BeetsAdapter] = None,
 ) -> Dict[str, Any]:
     ad = adapter or beets_adapter
-    ad.modify(fields={"path": new_path}, item_ids=[int(item_id)])
+    ad.modify(fields={"path": new_path}, item_ids=[int(item_id)], write=False, move=False)
     return {"ok": True, "item_id": item_id, "new_path": new_path}
 
 
@@ -4452,7 +4506,7 @@ def clear_album_artpath(
     album_id: int, adapter: Optional[BeetsAdapter] = None
 ) -> Dict[str, Any]:
     ad = adapter or beets_adapter
-    ad.modify(fields={"artpath": ""}, album_ids=[int(album_id)], write=False)
+    ad.modify(fields={"artpath": ""}, album_ids=[int(album_id)], write=False, move=False)
     return {"ok": True, "album_id": album_id}
 
 
@@ -4460,7 +4514,7 @@ def set_album_artpath(
     album_id: int, artpath: str, adapter: Optional[BeetsAdapter] = None
 ) -> Dict[str, Any]:
     ad = adapter or beets_adapter
-    ad.modify(fields={"artpath": artpath}, album_ids=[int(album_id)], write=False)
+    ad.modify(fields={"artpath": artpath}, album_ids=[int(album_id)], write=False, move=False)
     return {"ok": True, "album_id": album_id, "artpath": artpath}
 
 
