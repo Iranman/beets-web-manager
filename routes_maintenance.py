@@ -133,6 +133,13 @@ def start_maintenance_runner():
     running = _maintenance_running_job()
     if running:
         return jsonify({"ok": True, "job_id": running.job_id, "already_running": True})
+    if job_contract.live_holder("maintenance-runner"):
+        # NB-1: another process runs Clean All. Refuse before a job or a
+        # transaction is recorded; nothing was started or changed. (The guard
+        # below still refuses a start that races past this check.)
+        return jsonify({"ok": False, "code": "workflow_busy",
+                        "error": "Clean All is already running in another Web Manager process; "
+                                 "nothing new was started. Try again when it has finished."}), 409
 
     # A checkpoint can be resumable but not worth resuming -- e.g. left
     # behind by an app restart mid-run (JobStore is in-memory only and

@@ -2823,7 +2823,7 @@ def plan_album_metadata(
             **kwargs,
         }
     payload = dict(payload)
-    initiating_user = _s(payload.pop("initiating_user", "")) or "operator"
+    initiating_user = _s(payload.pop("initiating_user", "")) or None  # None: the store names the actor
     aid = int(payload.get("album_id") or 0)
     album_updates = dict(payload.get("updates") or {})
     per_item = {str(k): dict(v or {}) for k, v in (payload.get("item_updates") or {}).items()}

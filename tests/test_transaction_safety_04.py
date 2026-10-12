@@ -2,10 +2,24 @@
 matrix). Real BeetsAdapter -> real webmanager plugin -> real Beets library
 and files (Flask test client in place of HTTP), on synthetic fixtures."""
 
+import atexit
 import os
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# Self-contained (NB-6): importing app defaults BEETSDIR to /config, and the
+# first beets.config read (Library(..., timeout=config["timeout"])) then fails
+# outside the container. Give Beets a throwaway config dir BEFORE app is
+# imported, as tests/test_post_retag_artwork_fetch.py does. atexit, not a
+# module cleanup: see that module for why.
+_BEETSDIR = tempfile.mkdtemp(prefix="bwm_tx_safety_04_beets_")
+atexit.register(shutil.rmtree, _BEETSDIR, ignore_errors=True)
+_env_patcher = mock.patch.dict(os.environ, {"BEETSDIR": _BEETSDIR})
+_env_patcher.start()
+atexit.register(_env_patcher.stop)
 
 import app  # noqa: F401  (registers the routes rollback_eligibility lives in)
 import backend.composite_workflows as cw

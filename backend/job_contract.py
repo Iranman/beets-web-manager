@@ -7,7 +7,9 @@ its HTTP behaviour:
   restarts.** The job holds the durable lock ``workflow:<name>``
   (backend/resource_locks.py) for as long as it runs. A second process
   starting the same workflow waits for it; a lock left by a process that died
-  is reclaimed once its heartbeat expires, so a restart never runs two.
+  is reclaimed once its heartbeat expires, so a restart never runs two. When
+  job_engine marks the job recovery_required after a restart it releases that
+  job's own locks at once (``release_interrupted``), so a resume need not wait.
 * **A heartbeat** kept fresh while the job runs.
 * **A persisted checkpoint** in the durable job record: which workflow, which
   locks, which stage -- and, when the workflow passes ``progress``, its own
@@ -68,9 +70,27 @@ def _publish(update_state: Optional[Callable[..., None]], checkpoint: Dict[str, 
     if update_state is None:
         return
     try:
-        update_state({"checkpoint": checkpoint})
+        # ``workflow_lock`` is kept apart from ``checkpoint``, which the
+        # workflow may replace with its own resumable position: after a
+        # restart job_engine reads it to release this job's locks (NB-1).
+        update_state({"checkpoint": checkpoint,
+                      "workflow_lock": {"owner": checkpoint["owner"], "keys": checkpoint["lock_keys"]}})
     except Exception:
         pass
+
+
+def release_interrupted(workflow_lock: Dict[str, Any]) -> List[str]:
+    """Release the locks of a job a restart interrupted (its ``workflow_lock``
+    state), so the operator can resume it at once instead of after the
+    heartbeat ttl. Only that job's owner; a live holder keeps its locks."""
+    owner = str((workflow_lock or {}).get("owner") or "")
+    return resource_locks().release_interrupted(owner) if owner else []
+
+
+def live_holder(workflow: str, keys: Optional[Iterable[str]] = None) -> Optional[Dict[str, Any]]:
+    """The live lock record that would make ``held(workflow)`` wait or fail,
+    or None. For a start route to refuse before it records a job (NB-1)."""
+    return resource_locks().blocker(list(keys or [workflow_key(workflow)]))
 
 
 @contextmanager

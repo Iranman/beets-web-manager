@@ -352,17 +352,20 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self.assertIn("artist_folder_merge", self.call_order)
 
     def test_a_second_clean_all_never_runs_while_one_holds_the_lock(self):
-        """D1: a duplicate start fails at once instead of queueing a full
-        second mutating run behind the first."""
+        """D1: a duplicate start is refused at once instead of queueing a full
+        second mutating run behind the first -- and (NB-1) refused before a
+        job or a transaction is recorded, so nothing shows as Failed."""
         import backend.job_contract as job_contract
         health = self._patch(patch_app_family(app_module, "_library_health_payload",
                                               return_value=_task_results()["library_health"]))
         started = time.time()
+        jobs_before = list(self.store.started)
         with job_contract.held("maintenance-runner"):
-            parent, _data = self._post_clean_all(force_fresh=True)
+            response = self.client.post("/api/jobs/maintenance-runner", headers={"X-Beets-CSRF": "1"},
+                                        json={"force_fresh": True})
         self.assertLess(time.time() - started, 30)
-        self.assertEqual(parent.returncode, 1, parent.log)
-        self.assertIn("already running", "\n".join(parent.log))
+        self.assertEqual((response.status_code, response.get_json()["code"]), (409, "workflow_busy"))
+        self.assertEqual(self.store.started, jobs_before)
         self.assertEqual(health.call_count, 0)
 
     def test_cancelled_run_is_recorded_and_reported_as_cancelled(self):
