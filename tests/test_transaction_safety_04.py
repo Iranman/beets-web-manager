@@ -10,6 +10,7 @@ import backend.composite_workflows as cw
 import backend.library_service as ls
 from tests.test_album_relocation_torrent_source import ident
 from tests.test_album_relocation_transaction import _Engine, tree
+from tests.test_staging_mutation_hardening import _RouteEnv as _RouteEnvBase
 
 
 class _TorrentEnv(_Engine):
@@ -117,6 +118,68 @@ class PluginModifyContractTests(_Engine):
         r = self.post({"album_ids": [album.id], "fields": {"artpath": cover}, "write": False})
         self.assertEqual(r.status_code, 200, r.get_json())
         self.assertEqual(os.fsdecode(self.lib.get_album(album.id).artpath), cover)
+
+
+class PartialCancelAuditTests(_RouteEnvBase):
+    """#317: a cooperative cancel after the job started changing the library
+    is never audited as Cancelled ("nothing happened")."""
+
+    def _run(self, body):
+        import threading
+        import time
+        import backend.transaction_service as ts
+        from job_engine import JobStore
+        store_jobs = JobStore(self.data / "jobs")
+        for p in (mock.patch.object(ts, "jobs", store_jobs), mock.patch.object(ts, "transactions", self.store)):
+            p.start()
+            self.addCleanup(p.stop)
+        ts._install_transaction_job_hooks()
+        self.addCleanup(store_jobs.close)
+        started, release = threading.Event(), threading.Event()
+
+        def gated(log, cancel, update_state=None):
+            started.set()
+            release.wait(5)
+            return body(log, cancel, update_state)
+
+        job = store_jobs.start_python(gated, label="Clean All", metadata={"transaction": {"operation_type": "Library Cleanup"}})
+        self.assertTrue(started.wait(5))
+        job.kill()
+        release.set()
+        deadline = time.time() + 5
+        tx_id = job.metadata["transaction_id"]
+        while time.time() < deadline and self.store.get(tx_id)["status"] == "Running":
+            time.sleep(0.01)
+        return job, self.store.get(tx_id)
+
+    def test_cancel_after_a_mutation_started_is_failed_partially_applied(self):
+        def body(log, cancel, update_state):
+            update_state({"mutation_started": True})
+            if cancel.is_set():
+                raise RuntimeError("cancelled")
+        _job, tx = self._run(body)
+        self.assertEqual(tx["status"], "Failed")
+        self.assertTrue(tx["metadata"]["engine_result"]["partial_cancel"])
+        logs = " ".join(map(str, tx.get("logs") or []))
+        self.assertIn("partially applied", logs)
+        self.assertNotIn("had already done its work", logs)
+
+    def test_cooperative_return_after_a_mutation_is_failed_too(self):
+        def body(log, cancel, update_state):
+            update_state(mutation_started=True)
+            if cancel.is_set():
+                return {"ok": False, "partial": True}
+        _job, tx = self._run(body)
+        self.assertEqual(tx["status"], "Failed")
+
+    def test_cancel_before_any_mutation_stays_cancelled(self):
+        def body(log, cancel, update_state):
+            if cancel.is_set():
+                raise RuntimeError("cancelled")
+            update_state({"mutation_started": True})
+        _job, tx = self._run(body)
+        self.assertEqual(tx["status"], "Cancelled")
+        self.assertFalse((tx["metadata"].get("engine_result") or {}).get("partial_cancel"))
 
 
 if __name__ == "__main__":

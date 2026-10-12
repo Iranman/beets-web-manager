@@ -75,6 +75,13 @@ CLEAN_ALL_TASK_PHASES = {
     "playlist_refs": "Syncing",
 }
 
+#: Clean All tasks that can change the library (#317): once one starts, a
+#: cancel is no longer audited as "nothing happened".
+CLEAN_ALL_MUTATING_TASKS = frozenset({
+    "missing_files", "root_folder_repair", "artist_folder_merge", "release_group_merge",
+    "duplicates", "artwork", "genres",
+})
+
 
 @app.get("/api/jobs/maintenance-runner/report")
 def maintenance_runner_report():
@@ -217,6 +224,9 @@ def start_maintenance_runner():
             emit(task_id, message)
             return True
         def set_task(task_id: str, status: str, detail: str = "", result: Any = None):
+            if status == "running" and task_id in CLEAN_ALL_MUTATING_TASKS and update_state:
+                # #317: from here a cancel may leave the library partly changed.
+                update_state({"mutation_started": True})
             idx = task_index[task_id]
             tasks[idx] = {**tasks[idx], "status": status}
             if detail:
@@ -268,6 +278,7 @@ def start_maintenance_runner():
             log.append(f"Clean All partially completed: {failed_message}")
             return {"ok": False, "partial": True, "status": "partial", "error": failed_message, "tasks": tasks, "results": results}
 
+        root_repair_error = ""
         log.append("Clean All started.")
         if resume_requested:
             log.append(
@@ -322,17 +333,30 @@ def start_maintenance_runner():
                 pass
             else:
                 set_task("root_folder_repair", "running", "Repairing misplaced root-level folders")
-                root_repair_result = _maintenance_root_folder_repair(
-                    log,
-                    cancel_event=cancel_event,
-                    progress=lambda updates: emit("root_folder_repair", _s(updates.get("current_result") or "")),
-                )
-                set_task(
-                    "root_folder_repair",
-                    "complete" if not root_repair_result.get("skipped") else "skipped",
-                    "Root folder repair complete",
-                    root_repair_result,
-                )
+                try:
+                    root_repair_result = _maintenance_root_folder_repair(
+                        log,
+                        cancel_event=cancel_event,
+                        progress=lambda updates: emit("root_folder_repair", _s(updates.get("current_result") or "")),
+                    )
+                except Exception as ex:
+                    # #298 N5: one stuck folder no longer stops Clean All. The
+                    # failure is recorded, the layout-dependent folder merges
+                    # wait for the next run, every independent task still runs,
+                    # and the job ends failed.
+                    if _s(ex).strip().lower() == "cancelled" or (cancel_event and cancel_event.is_set()):
+                        raise
+                    root_repair_error = _s(ex) or "root folder repair failed"
+                    log.append(f"[root-folder-repair] failed: {root_repair_error}; continuing with the "
+                               "tasks that do not depend on the folder layout.")
+                    set_task("root_folder_repair", "failed", f"Root folder repair failed: {root_repair_error}")
+                else:
+                    set_task(
+                        "root_folder_repair",
+                        "complete" if not root_repair_result.get("skipped") else "skipped",
+                        "Root folder repair complete",
+                        root_repair_result,
+                    )
 
             # 4. Resolve artist identity variants before album-level moves.
             ensure_not_cancelled()
@@ -361,6 +385,9 @@ def start_maintenance_runner():
             ensure_not_cancelled()
             if skip_completed_task("artist_folder_merge"):
                 pass
+            elif root_repair_error:
+                set_task("artist_folder_merge", "failed",
+                         "Not run: root folder repair failed; retried on the next run")
             else:
                 resume_op_id = _s(tasks[task_index["artist_folder_merge"]].get("operation_id")).strip()
                 set_task("artist_folder_merge", "running", "Merging safe MusicBrainz artist folder variants")
@@ -423,6 +450,9 @@ def start_maintenance_runner():
             ensure_not_cancelled()
             if skip_completed_task("release_group_merge"):
                 pass
+            elif root_repair_error:
+                set_task("release_group_merge", "failed",
+                         "Not run: root folder repair failed; retried on the next run")
             else:
                 set_task("release_group_merge", "running", "Merging duplicate Release Group album folders")
                 result = _maintenance_release_group_merge(
@@ -531,6 +561,9 @@ def start_maintenance_runner():
             )
             set_task("playlist_refs", "complete", "Playlist reference status checked", playlist_report)
 
+            failed_tasks = [task["label"] for task in tasks if task["status"] == "failed"]
+            if failed_tasks:
+                return finish_partial("Finished with failed task(s): " + ", ".join(failed_tasks))
             if update_state:
                 clean_counts = _maintenance_clean_all_counts(tasks, results)
                 update_state({
