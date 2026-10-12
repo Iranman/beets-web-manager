@@ -88,9 +88,14 @@ def release_interrupted(workflow_lock: Dict[str, Any]) -> List[str]:
 
 
 def live_holder(workflow: str, keys: Optional[Iterable[str]] = None) -> Optional[Dict[str, Any]]:
-    """The live lock record that would make ``held(workflow)`` wait or fail,
-    or None. For a start route to refuse before it records a job (NB-1)."""
-    return resource_locks().blocker(list(keys or [workflow_key(workflow)]))
+    """The live lock record ANOTHER process holds that would make
+    ``held(workflow)`` wait or fail, or None. For a start route to refuse
+    before it records a job (NB-1). A holder in this process is a running job
+    the JobStore's own duplicate check already answers with that job."""
+    rec = resource_locks().blocker(list(keys or [workflow_key(workflow)]))
+    if rec and rec.get("host") == HOST and rec.get("pid") == PID:
+        return None
+    return rec
 
 
 @contextmanager

@@ -355,14 +355,23 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         """D1: a duplicate start is refused at once instead of queueing a full
         second mutating run behind the first -- and (NB-1) refused before a
         job or a transaction is recorded, so nothing shows as Failed."""
-        import backend.job_contract as job_contract
+        import subprocess
+        import sys
+        from backend.resource_locks import locks
+        from tests.test_job_contract import _HOLDER, REPO
         health = self._patch(patch_app_family(app_module, "_library_health_payload",
                                               return_value=_task_results()["library_health"]))
+        # The running Clean All lives in another Web Manager process.
+        proc = subprocess.Popen([sys.executable, "-c", _HOLDER, str(locks().root), "workflow:maintenance-runner"],
+                                cwd=str(REPO), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(lambda: proc.stdin.closed or proc.stdin.close())
+        self.assertEqual(proc.stdout.readline().strip(), "ready")
         started = time.time()
         jobs_before = list(self.store.started)
-        with job_contract.held("maintenance-runner"):
-            response = self.client.post("/api/jobs/maintenance-runner", headers={"X-Beets-CSRF": "1"},
-                                        json={"force_fresh": True})
+        response = self.client.post("/api/jobs/maintenance-runner", headers={"X-Beets-CSRF": "1"},
+                                    json={"force_fresh": True})
         self.assertLess(time.time() - started, 30)
         self.assertEqual((response.status_code, response.get_json()["code"]), (409, "workflow_busy"))
         self.assertEqual(self.store.started, jobs_before)
