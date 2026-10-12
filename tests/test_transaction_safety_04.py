@@ -734,6 +734,45 @@ class RestartAndOrphanTests(_RouteEnvBase):
         other = self._running()
         self.assertEqual(self.client.post(f"/api/transactions/{other}/cancel").status_code, 409)
 
+class PathQueryTests(_Engine):
+    """BeetsAdapter.find_item_by_path against the in-process stock web app:
+    a "/" inside a query term travels as "\\" (stock QueryConverter), and a
+    path with spaces stays one term."""
+
+    def test_absolute_path_with_spaces_is_found_exactly(self):
+        album = self.make_album(os.path.join(self.music, "The Artist", "An Album (2001)"))
+        for item in album.items():
+            path = os.fsdecode(item.path)
+            self.assertEqual(self.ad.find_item_by_path(path)["id"], item.id, path)
+        # A folder matches every item under it in Beets; this helper wants one file.
+        self.assertIsNone(self.ad.find_item_by_path(os.path.join(self.music, "The Artist")))
+        self.assertIsNone(self.ad.find_item_by_path(os.path.join(self.music, "nope.flac")))
+        # Other "/"-bearing terms are no longer split either.
+        self.assertEqual(len(self.ad.get_items([f"path:{os.path.join(self.music, 'The Artist')}"])), 2)
+
+    def test_stale_wanted_row_cleanup_never_removes_a_row_whose_file_exists(self):
+        """Only Beets item rows (never files, never Web Manager state) of
+        files that are provably gone are removed before a re-import."""
+        import backend.import_service as isvc
+        album = self.make_album(os.path.join(self.music, "A B"), art=False)
+        kept, gone = sorted(album.items(), key=lambda i: i.track)
+        os.remove(os.fsdecode(gone.path))
+        wanted = [{"disc": 1, "track": 1, "title": "T1"}, {"disc": 1, "track": 2, "title": "T2"}]
+        log = []
+        with mock.patch.object(cw, "beets_adapter", self.ad), mock.patch.object(cw, "_default_store", self.store), \
+             mock.patch.dict(os.environ, {"MUSIC_ROOT": self.music}):
+            removed = isvc._prune_stale_wanted_rows_before_import(album.id, "", wanted, log)
+        self.assertEqual(removed, 1, log)
+        self.assertIsNotNone(self.lib.get_item(kept.id))
+        self.assertTrue(os.path.exists(os.fsdecode(kept.path)))
+        self.assertIsNone(self.lib.get_item(gone.id))
+        # An unusable music mount proves nothing missing: nothing is removed.
+        log = []
+        with mock.patch.object(cw, "beets_adapter", self.ad), mock.patch.object(cw, "_default_store", self.store), \
+             mock.patch.dict(os.environ, {"MUSIC_ROOT": os.path.join(self.td, "unmounted")}):
+            self.assertEqual(isvc._prune_stale_wanted_rows_before_import(album.id, "", wanted, log), 0)
+        self.assertIsNotNone(self.lib.get_item(kept.id))
+
 
 if __name__ == "__main__":
     unittest.main()

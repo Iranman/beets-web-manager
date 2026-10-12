@@ -1048,6 +1048,19 @@ def _music_root_usable() -> Tuple[bool, str]:
     return True, ""
 
 
+def item_file_missing(raw: Any) -> bool:
+    """True only when an item's file is provably gone: the music mount is
+    usable, the path lies inside it and nothing exists there. "Cannot tell"
+    (no path, unusable mount, a path outside the mount) is never missing."""
+    path = _item_abs_path(raw)
+    if not path or not _music_root_usable()[0]:
+        return False
+    root, norm = str(_music_root()), os.path.normpath(path)
+    if norm != root and not norm.startswith(os.path.join(root, "")):
+        return False
+    return not os.path.lexists(norm)
+
+
 def _record_row_removal(store: Optional[TransactionStore], *, summary: str, rows: List[Dict[str, Any]],
                         reason: str) -> str:
     """Audit record for a row-only removal (files untouched). The row

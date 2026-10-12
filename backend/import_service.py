@@ -146,14 +146,12 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
             iid = int(row.get("id") or 0)
             if not iid:
                 continue
-            if raw_path:
-                try:
-                    if composite_workflows.find_item_by_path(raw_path):
-                        continue
-                except (BeetsUnavailableError, BeetsError):
-                    raise
-                except Exception:
-                    pass
+            # Only a Beets item row whose file is provably gone (path-query fix).
+            # This used to ask Beets whether an item had this path -- always
+            # true for the row itself, and with the broken path query always
+            # false, so rows of files that still existed were removed.
+            if not composite_workflows.item_file_missing(raw_path):
+                continue
             if not _row_matches_wanted(row):
                 continue
             delete_ids.append(iid)

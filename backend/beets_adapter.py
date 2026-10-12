@@ -493,7 +493,10 @@ class BeetsAdapter:
         if not terms:
             return f"/{entity}/"
 
-        encoded = "/".join(urllib.parse.quote(t, safe="") for t in terms)
+        # Stock Beets' QueryConverter splits the decoded URL on "/" and turns
+        # "\\" back into os.sep, so a "/" inside a term must travel as "\\"
+        # (%2F is decoded before the split and never matched a path query).
+        encoded = "/".join(urllib.parse.quote(t.replace("/", "\\"), safe="") for t in terms)
         return f"/{entity}/query/{encoded}"
 
     def get_items(self, query: Optional[Union[str, List[str]]] = None) -> List[Dict[str, Any]]:
@@ -1184,8 +1187,19 @@ class BeetsAdapter:
 
     def find_item_by_path(self, path: str) -> Optional[Dict[str, Any]]:
         """Compatibility helper finding a single item by path."""
-        items = self.get_items(f"path:{path}")
-        return items[0] if items else None
+        # One term (no shell-style split on spaces or quotes). Beets' path:
+        # also matches everything under a directory, so keep the exact file.
+        want = os.path.normpath(str(path))
+        items = self.get_items([f"path:{path}"])
+        if len(items) == 1 and "path" not in items[0]:  # web.include_paths off: Beets' own match
+            return items[0]
+        for item in items:
+            got = item.get("path")
+            if isinstance(got, bytes):
+                got = got.decode("utf-8", "surrogateescape")
+            if got and os.path.normpath(str(got)) == want:
+                return item
+        return None
 
     def find_items_by_query(self, query: str) -> List[Dict[str, Any]]:
         """Compatibility helper finding items matching query."""
