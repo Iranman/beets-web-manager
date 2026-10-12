@@ -8,7 +8,7 @@ import copy, importlib, json, os, re, shlex, shutil, subprocess, sys, time
 import importlib.util
 import logging
 import urllib.error
-from backend.security import OutboundPolicyError, implicit_rule_for_url, parse_spotiflac_services, validate_outbound_url
+from backend.security import OutboundPolicyError, implicit_rule_for_url, parse_spotiflac_services, redact_url_for_log, validate_outbound_url
 from backend.ytdlp_guard import ytdlp_guarded_options
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1673,7 +1673,7 @@ def _ytdlp_po_provider_status() -> Dict[str, Any]:
     url = YTDLP_PO_PROVIDER_URL
     result: Dict[str, Any] = {
         "configured": bool(url),
-        "url": url,
+        "url": redact_url_for_log(url) if url else "",  # never userinfo or path
         "reachable": False,
     }
     if not url:

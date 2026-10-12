@@ -14,12 +14,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import app as app_module  # noqa: F401  -- loads the module family in order
-import backend.acquisition_service as acq
-import backend.app_runtime as rt
-import backend.slskd_service as slskd
-import backend.ytdlp_service as yts
-from backend.security import OutboundPolicyError
+acq = rt = slskd = yts = OutboundPolicyError = None
+
+
+def setUpModule():
+    # Deferred to run time: this module sorts before test_ai_batch_retry_race,
+    # which must be the first to import app (at collection, in its temp env).
+    global acq, rt, slskd, yts, OutboundPolicyError
+    import app  # noqa: F401  -- loads the module family in order
+    import backend.acquisition_service as acq
+    import backend.app_runtime as rt
+    import backend.slskd_service as slskd
+    import backend.ytdlp_service as yts
+    from backend.security import OutboundPolicyError
 
 NOT_CONFIGURED = "slskd is not configured (SLSKD_API_KEY)"
 
@@ -44,8 +51,9 @@ class _AcquisitionJobCase(unittest.TestCase):
         for patcher in patches:
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.jobs = mock.patch.object(acq, "jobs").start()
-        self.addCleanup(mock.patch.stopall)
+        jobs_patcher = mock.patch.object(acq, "jobs")
+        self.jobs = jobs_patcher.start()
+        self.addCleanup(jobs_patcher.stop)
 
     def _direct_download(self, artist, album, year, dest_dir, log, track_count=0, source="ytdlp"):
         self.direct_calls.append(source)
@@ -242,6 +250,14 @@ class PoProviderTests(unittest.TestCase):  # ACQ-3, ACQ-13
             self.assertEqual(yts._ytdlp_base_extractor_args_for_source("ytdlp"), {})
         probe.assert_not_called()
         self.assertIn("blocked by the outbound network policy", logs.output[0])
+
+    def test_status_never_echoes_userinfo_or_path(self):
+        with mock.patch.object(yts, "YTDLP_PO_PROVIDER_URL", "http://u:hunter2@10.0.0.5:4416/tok"), \
+                mock.patch.object(yts.provider_boundary, "opened", side_effect=OSError("down")):
+            status = yts._ytdlp_po_provider_status()
+        self.assertNotIn("hunter2", repr(status))
+        self.assertNotIn("/tok", repr(status))
+        self.assertTrue(status["url"].startswith("http://10.0.0.5:4416"))
 
     def test_unreachable_provider_is_dropped_with_a_warning(self):
         with mock.patch.object(yts, "YTDLP_PO_PROVIDER_URL", self.URL), \

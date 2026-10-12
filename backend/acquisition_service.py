@@ -149,11 +149,6 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "'ytdlp', or 'soundcloud'"
             ),
         }, 200
-    # ACQ-1: without an API key slskd cannot run. With a direct-source
-    # fallback the job skips straight to it (and logs why); without one
-    # there is nothing to start.
-    if method == "slskd" and not slskd_configured() and not try_source_fallback:
-        return {"ok": False, "error": SLSKD_NOT_CONFIGURED}, 200
     try:
         downloads_root = validated_downloads_root()
     except RuntimeError as exc:
@@ -168,6 +163,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             downloads_root, safe_artist, safe_album and safe_album + yr_sfx))
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}, 200
+    # ACQ-1: without an API key slskd cannot run. With a direct-source
+    # fallback the job skips straight to it (and logs why); without one
+    # there is nothing to start.
+    if method == "slskd" and not slskd_configured() and not try_source_fallback:
+        return {"ok": False, "error": SLSKD_NOT_CONFIGURED}, 200
 
     def _do(log, cancel_event=None):
         download_result: Dict[str, Any]
