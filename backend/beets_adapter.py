@@ -9,6 +9,7 @@ import base64
 import hashlib
 import http.client
 import os
+import posixpath
 from pathlib import Path
 import json
 import logging
@@ -270,6 +271,7 @@ class BeetsAdapter:
             or "/config/.webmanager_api_key"
         )
         self.timeout = timeout
+        self._libdir = ""
 
         # Bounded cache for get_items_page() -- see the note on
         # _ITEMS_PAGE_CACHE_TTL_SECONDS above get_items_page() for why this
@@ -490,19 +492,57 @@ class BeetsAdapter:
         encoded = "/".join(urllib.parse.quote(t, safe="") for t in terms)
         return f"/{entity}/query/{encoded}"
 
+    def _library_directory(self) -> str:
+        """Beets' library directory from /webmanager/status (plugin >= 1.6.0),
+        cached once known; "" while it cannot be read."""
+        # ponytail: cached for the process; a changed Beets `directory` needs a Web Manager restart.
+        if not getattr(self, "_libdir", ""):
+            try:
+                status = self.get_plugin_status()
+                self._libdir = str(status.get("library_directory") or "") if isinstance(status, dict) else ""
+            except BeetsAdapterError:
+                return ""
+        return self._libdir
+
+    def _rows(self, rows: List[Any]) -> List[Any]:
+        """Normalise Beets rows for every consumer: legacy ``genre``, and
+        absolute ``path``/``artpath``. Beets 2.14 stores paths relative to
+        its library directory and stock web routes served them relative
+        until the webmanager plugin bound that directory app-wide (D4, #302);
+        a relative path is joined to the directory Beets reports."""
+        libdir: List[str] = []  # looked up at most once per call
+
+        def fix(row: Any) -> None:
+            _with_legacy_genre(row)
+            if not isinstance(row, dict):
+                return
+            for key in ("path", "artpath"):
+                value = row.get(key)
+                if isinstance(value, str) and value and not posixpath.isabs(value):
+                    if not libdir:
+                        libdir.append(self._library_directory())
+                    if libdir[0]:
+                        row[key] = posixpath.normpath(posixpath.join(libdir[0], value))
+            for nested in row["items"] if isinstance(row.get("items"), list) else []:
+                fix(nested)
+
+        for row in rows:
+            fix(row)
+        return rows
+
     def get_items(self, query: Optional[Union[str, List[str]]] = None) -> List[Dict[str, Any]]:
         """Fetch items matching query (or all items) from GET /item/ or /item/query/<queries>."""
         path = self._build_query_path("item", query)
         res = self._request("GET", path)
         if isinstance(res, dict):
-            return [_with_legacy_genre(r) for r in res.get("items") or res.get("results") or []]
+            return self._rows(list(res.get("items") or res.get("results") or []))
         return []
 
     def get_item(self, item_id: int) -> Optional[Dict[str, Any]]:
         """Fetch single item by ID from GET /item/<id>."""
         try:
             res = self._request("GET", f"/item/{int(item_id)}")
-            return _with_legacy_genre(res) if isinstance(res, dict) else None
+            return self._rows([res])[0] if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
 
@@ -511,7 +551,7 @@ class BeetsAdapter:
         path = self._build_query_path("album", query)
         res = self._request("GET", path)
         if isinstance(res, dict):
-            return [_with_legacy_genre(r) for r in res.get("albums") or res.get("results") or []]
+            return self._rows(list(res.get("albums") or res.get("results") or []))
         return []
 
     def get_album(self, album_id: int, expand: bool = True) -> Optional[Dict[str, Any]]:
@@ -519,7 +559,7 @@ class BeetsAdapter:
         params = {"expand": ""} if expand else None
         try:
             res = self._request("GET", f"/album/{int(album_id)}", params=params)
-            return _with_legacy_genre(res) if isinstance(res, dict) else None
+            return self._rows([res])[0] if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
 

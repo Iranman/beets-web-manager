@@ -575,16 +575,30 @@ webmanager:
                     imported_item = items[0]
                     self.assertEqual(imported_item["title"], "Synthetic Anthem")
                     self.assertEqual(imported_item["artist"], "Acceptance Bot")
-                    # include_paths shows the path. Beets 2.x stores it relative to
-                    # the library directory (/music) when the importing thread has
-                    # the library's music-dir context -- as /webmanager requests now
-                    # do -- so accept library-relative or absolute-under-/music.
+                    # include_paths shows the path. Beets 2.14 stores it relative to
+                    # the library directory; the webmanager plugin binds that
+                    # directory on every request thread, stock routes included (D4),
+                    # so stock /item/ shows it absolute.
                     shown = imported_item.get("path", "")
                     self.assertTrue(shown, "include_paths must show the item path")
-                    resolved = shown if shown.startswith("/") else "/music/" + shown
+                    resolved = shown
                     self.assertTrue(resolved.startswith("/music/"), shown)
                     self.assertNotIn("..", shown.split("/"))
                     self.assertTrue(resolved.endswith("Synthetic Anthem.wav"), shown)
+
+                # Step 6b (D4): stock GET /item/<id>/file streams the real file
+                # (500 on Beets 2.14 while request threads had no music dir).
+                with _raw_urlopen(urllib.request.Request(f"{base_url}/item/{imported_item['id']}/file"), timeout=10) as resp:
+                    self.assertEqual(resp.status, 200)
+                    streamed = resp.read()
+                with open(os.path.join(music_dir, *resolved.split("/")[2:]), "rb") as fh:
+                    self.assertEqual(streamed, fh.read())
+                # ... and so does Web Manager's adapter (the /api/items/<id>/audio proxy).
+                from backend.beets_adapter import BeetsAdapter
+                adapter = BeetsAdapter(base_url=base_url, api_key=token)
+                self.assertEqual(adapter.get_item(imported_item["id"])["path"], resolved)
+                with adapter.open_item_file(imported_item["id"]) as resp:
+                    self.assertEqual(resp.read(), streamed)
 
                 # Step 7: Exercise Disposable Mutation (POST /webmanager/modify)
                 modify_payload = {
