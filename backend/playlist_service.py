@@ -28,7 +28,7 @@ from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
 from backend.serializers import _json_from_flask_response
-from backend.plex_service import _plex_configured, _plex_failure, _plex_timeout_error, _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
+from backend.plex_service import _plex_configured, _plex_failure, _plex_mapped_beets_paths, _plex_path_case_key, _plex_track_part_paths, _plex_timeout_error, _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
 
 # ── ARCH-001 extracted code ──
 
@@ -1801,13 +1801,36 @@ def _plex_sync_playlist_in_place(machine_id: str,
     return result
 
 
-def _plex_track_removed_in_web_manager(track: Dict[str, Any], manifest: Dict[str, Any]) -> bool:
-    """True when this Plex entry's track has a Web Manager tombstone."""
-    title = _s((track or {}).get("title") or "").strip()
-    if not title or not isinstance(manifest, dict):
+def _plex_track_removed_in_web_manager(track: Dict[str, Any],
+                                       manifest: Dict[str, Any],
+                                       section_locations: Optional[Iterable[str]] = None) -> bool:
+    """True when this Plex entry is provably a track removed in Web Manager.
+
+    File identity decides (B1): a tombstone with a path matches only the
+    Plex entry whose file is that path through the Beets -> Plex mapping,
+    whatever either side's title text says. When both sides have a file and
+    the files differ, it is another track (e.g. one added in Plex) and is
+    kept. Artist/title text is the fallback only when one side has no file.
+    """
+    track = track if isinstance(track, dict) else {}
+    if not isinstance(manifest, dict):
         return False
-    for artist in {_s(track.get("originalTitle") or "").strip(), _s(track.get("grandparentTitle") or "").strip()}:
-        if _playlist_track_is_tombstoned({"artist": artist, "title": title}, manifest):
+    plex_files = {_plex_path_case_key(path) for path in _plex_track_part_paths(track)}
+    title = _s(track.get("title") or "").strip()
+    text_keys = set()
+    if title:
+        for artist in {_s(track.get("originalTitle") or "").strip(), _s(track.get("grandparentTitle") or "").strip()}:
+            text_keys |= _playlist_manifest_match_keys({"artist": artist, "title": title})
+    for row in _playlist_tombstone_rows(manifest):
+        tomb_path = _s(row.get("path") or "").strip()
+        if tomb_path and plex_files:
+            mapped = {_plex_path_case_key(tomb_path)}
+            mapped |= {_plex_path_case_key(path) for path in _plex_mapped_beets_paths(
+                tomb_path, section_locations=section_locations)}
+            if plex_files & mapped:
+                return True
+            continue
+        if text_keys & {key for key in _playlist_manifest_match_keys(row) if key[0] != "path"}:
             return True
     return False
 
@@ -2655,7 +2678,8 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         tombstones = _playlist_read_manifest(name, playlist_id=pid) or manifest or {}
                         in_place = _plex_sync_playlist_in_place(
                             machine_id, target_key, playlist_keys,
-                            removable=lambda track: _plex_track_removed_in_web_manager(track, tombstones),
+                            removable=lambda track: _plex_track_removed_in_web_manager(
+                                track, tombstones, match_details.get("plex_library_locations")),
                             log=log)
                         plex["created"] = True  # "the Plex playlist holds this sync" (UI contract)
                         plex["rating_key"] = target_key
@@ -3275,6 +3299,15 @@ def _playlist_local_file_tracks(name: str) -> List[Dict[str, Any]]:
     return []
 
 
+def _playlist_legacy_library_metadata(track: Dict[str, Any], index: Dict[str, Any]) -> Dict[str, Any]:
+    """``track`` with the library item's artist/title when its path is a library file."""
+    path = _s(track.get("path") or "").strip()
+    item = _playlist_item_from_path(path, index) if path and index else None
+    if not item or not _s(item.get("title") or "").strip():
+        return track
+    return {**track, "artist": _s(item.get("artist") or track.get("artist") or ""), "title": _s(item.get("title"))}
+
+
 def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
     """Import the playlists older versions kept in ``PLAYLIST_LEGACY_IMPORT_DIR``
     (default ``<MUSIC_ROOT>/playlists``) once, read-only.
@@ -3297,6 +3330,7 @@ def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
     existing = {_norm(n) for n in _playlist_web_manager_names()}
     imported: List[str] = []
     changed = False
+    index: Optional[Dict[str, Any]] = None  # built only when a file is imported
     for path in files:
         try:
             if path.stat().st_size > _PLAYLIST_LEGACY_MAX_BYTES:
@@ -3314,11 +3348,22 @@ def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
                            "at": time.time()}
             changed = True
             continue
-        tracks = _playlist_clean_track_list(tracks)
+        if index is None:
+            try:
+                index = _playlist_library_index()
+            except Exception as exc:
+                _app_logger.warning("Library index unavailable for legacy import: %s", type(exc).__name__)
+                index = {}
+        # NB-7: a path the library knows takes the library's artist/title,
+        # not text guessed from the file name. NB-9: the list's counts are
+        # known from the start.
+        tracks = _playlist_clean_track_list(_playlist_legacy_library_metadata(t, index) for t in tracks)
         if not tracks:
             continue
+        matched, missing = _playlist_match_reference_tracks(tracks, index) if index else ([], [])
         try:
-            _playlist_write_manifest(name, tracks, source="legacy_import", content=path.name, log=log)
+            _playlist_write_manifest(name, tracks, matched_tracks=matched, missing_tracks=missing,
+                                     source="legacy_import", content=path.name, log=log)
         except Exception as exc:
             _app_logger.warning("Legacy playlist %s import failed: %s", path.name, type(exc).__name__)
             log.append(f"  [playlist-sync] Could not import legacy playlist {name!r}")

@@ -776,13 +776,15 @@ def _plex_track_lookup_rows(track: Dict[str, Any]) -> List[Tuple[Tuple[Any, ...]
     return rows
 
 
-def _plex_find_track(section_key, artist, title):
-    """Return ratingKey of first Plex track matching artist+title, or None."""
+def _plex_find_track(section_key, artist, title, deadline: Optional[float] = None):
+    """Return ratingKey of first Plex track matching artist+title, or None.
+    ``deadline`` (a time.time() value) bounds the whole request."""
     d = _plex_request(
         f"/library/sections/{section_key}/all",
         {"type": 10, "track.title": title},
         timeout=PLEX_API_TIMEOUT,
         attempts=1,
+        deadline=deadline,
     )
     for t in d.get("MediaContainer", {}).get("Metadata", []):
         if _norm(t.get("grandparentTitle","")) == _norm(artist) or not artist:
@@ -1042,6 +1044,11 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
     index_info: Dict[str, Any] = {}
     fallback_searches = 0
     max_fallback = PLEX_SYNC_MAX_FALLBACK_SEARCHES
+    # NB-2: per-track title searches together get one request timeout's
+    # worth of time, so a slow Plex cannot stretch them to minutes.
+    search_budget = PLEX_API_TIMEOUT
+    search_deadline = 0.0  # starts at the first title search
+    search_budget_spent = False
     while True:
         attempt += 1
         lookup: Dict[tuple, str] = {}
@@ -1066,7 +1073,8 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
             index_error = str(exc)
             if log is not None:
                 log.append(
-                    f"  [plex] Path index unavailable; bounded title search only: {exc}"
+                    f"  [plex] Path index unavailable; falling back to title search "
+                    f"(at most {max_fallback} searches, {search_budget}s total): {exc}"
                 )
         for idx, it in enumerate(items):
             if idx in keys_by_index:
@@ -1149,17 +1157,27 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
                 if key:
                     methods_by_index[idx] = "text"
             if not key and fallback_searches < max_fallback:
-                fallback_searches += 1
-                try:
-                    key = _plex_find_track(section_key, it.get("artist", ""), it.get("title", ""))
-                    if key:
-                        methods_by_index[idx] = "bounded_search"
-                except Exception as exc:
-                    if _plex_timeout_error(exc):
-                        index_status = "timeout"
-                        max_fallback = fallback_searches
-                    if log is not None and fallback_searches == 1:
-                        log.append(f"  [plex] Bounded title search failed: {exc}")
+                search_deadline = search_deadline or (time.time() + search_budget)
+                if time.time() >= search_deadline:
+                    # NB-2: all title searches share one total time budget.
+                    max_fallback = fallback_searches
+                    search_budget_spent = True
+                else:
+                    fallback_searches += 1
+                    try:
+                        key = _plex_find_track(section_key, it.get("artist", ""), it.get("title", ""),
+                                               deadline=search_deadline)
+                        if key:
+                            methods_by_index[idx] = "bounded_search"
+                    except Exception as exc:
+                        if _plex_timeout_error(exc):
+                            index_status = "timeout"
+                            max_fallback = fallback_searches
+                            search_budget_spent = time.time() >= search_deadline
+                        if log is not None and fallback_searches == 1:
+                            log.append(f"  [plex] Title search failed: {exc}")
+            if not key and search_budget_spent:
+                pending_reason_by_index.setdefault(idx, "Plex title search time limit reached; retry later")
             if key:
                 keys_by_index[idx] = str(key)
         if len(keys_by_index) >= len(final_items) or time.time() >= deadline:
@@ -1306,7 +1324,9 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
         if missing_indexes:
             log.append(
                 f"  [plex] Missing in Plex: {len(missing_indexes)}; "
-                f"fallback searches used {fallback_searches}/{max_fallback}"
+                f"fallback searches used {fallback_searches}/{PLEX_SYNC_MAX_FALLBACK_SEARCHES}"
+                + (f"; title searches stopped at the {search_budget}s time limit"
+                   if search_budget_spent else "")
             )
             for row in missing_examples[:5]:
                 log.append(
