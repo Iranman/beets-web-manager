@@ -104,7 +104,7 @@ These run commands, name files the app reads or moves files into, or control a s
 | `BEETS_WEB_SESSION_COOKIE_SECURE` | Marks the session cookie `Secure`. |
 | `SPOTIFLAC_CMD` | Command line used to run SpotiFLAC (split with shell rules and executed). |
 | `SPOTIFLAC_SERVICES` | SpotiFLAC `--service` list in priority order (default `tidal,qobuz,deezer,amazon,soundcloud`). Only SpotiFLAC's own service names (`tidal`, `qobuz`, `deezer`, `amazon`, `soundcloud`, `apple`, `youtube`, `youtube-music`, `gdstudio`, `pandora`) and `ext:<extension id>` are accepted, on save and again before each run, so the value can never add other SpotiFLAC options. After a SpotiFLAC run, a symlink it left in the download folder is removed (the link only) and files reached through one are not counted or imported. |
-| `YTDLP_JS_RUNTIMES` | JavaScript runtimes for yt-dlp; `name:/path` names an executable. |
+| `YTDLP_JS_RUNTIMES` | JavaScript runtimes for yt-dlp's YouTube challenge solving, in order (default `deno,node,quickjs`); `name:/path` names an executable. The image ships Deno at `/usr/local/bin/deno`, so the default works without changes. |
 | `YTDLP_COOKIE_FILE`, `YTDLP_NETRC_FILE`, `YTDLP_ALLOW_BROWSER_COOKIES` | Credential files and browser cookie stores yt-dlp may read. |
 | `SLSKD_API_KEY_FILE` | File whose first line is sent to `SLSKD_URL` as the slskd API key. |
 | `IMPORT_REVIEW_QUARANTINE_DIR`, `MUSIC_FORMAT_QUARANTINE_DIR` | Directories that rejected or quarantined files are moved into. |

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Changed
+
+- The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.
+
 ## v0.5.0 - 2026-10-12
 
 ### Upgrade Notes
