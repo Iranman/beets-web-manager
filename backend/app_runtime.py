@@ -279,6 +279,13 @@ PLAYLIST_AUTO_SYNC_ENABLED = os.environ.get("PLAYLIST_AUTO_SYNC", "1").strip().l
 PLAYLIST_AUTO_SYNC_INTERVAL = max(60, int(os.environ.get("PLAYLIST_AUTO_SYNC_INTERVAL", "300") or "300"))
 
 
+# Where versions before 0.4.0 kept playlists (<MUSIC_ROOT>/playlists). Each
+# list there is imported once, read-only, when Web Manager has none with that
+# name. Deliberately not a setting: a configurable read path would need an
+# operator-only classification for no known need.
+PLAYLIST_LEGACY_IMPORT_DIR: Optional[Path] = _MUSIC_ROOT_SETTING / "playlists"
+
+
 PLAYLIST_MIN_DOWNLOAD_SECONDS = max(0, int(os.environ.get("PLAYLIST_MIN_DOWNLOAD_SECONDS", "45") or "45"))
 
 
