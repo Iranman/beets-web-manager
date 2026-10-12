@@ -6,11 +6,18 @@ import os
 from pathlib import Path
 from unittest import mock
 
+import app  # noqa: F401  (registers the routes rollback_eligibility lives in)
 import backend.composite_workflows as cw
 import backend.library_service as ls
+from backend import transaction_engine as te
+from backend.beets_adapter import BeetsAdapterError, BeetsAdapterTimeoutError
+from routes_maintenance import rollback_eligibility
+from tests._folder_ops_local import LocalFolderOps
 from tests.test_album_relocation_torrent_source import ident
 from tests.test_album_relocation_transaction import _Engine, tree
+from tests.test_arch003_wave33_library_mbsync_move_all import LibraryTablesFixture as _MoveAllFixture
 from tests.test_staging_mutation_hardening import _RouteEnv as _RouteEnvBase
+from tests.test_wave0_s1_containment import _Env as _FolderEnv
 
 
 class _TorrentEnv(_Engine):
@@ -180,6 +187,118 @@ class PartialCancelAuditTests(_RouteEnvBase):
         _job, tx = self._run(body)
         self.assertEqual(tx["status"], "Cancelled")
         self.assertFalse((tx["metadata"].get("engine_result") or {}).get("partial_cancel"))
+
+
+class _Beets(LocalFolderOps):
+    """Plugin step code with a durable key registry (as plugin 1.10+). Steps
+    whose key ends with one of ``silent`` run but their reply is lost; steps
+    whose target ends with one of ``fail`` are refused."""
+
+    def __init__(self, root, silent=(), fail=()):
+        super().__init__(root)
+        self.registry, self.silent, self.fail = {}, set(silent), set(fail)
+
+    def folder_op(self, op, key, **paths):
+        if any(key.endswith(s) for s in self.silent):  # done once, never answered
+            if key not in self.registry:
+                self.registry[key] = super().folder_op(op, key, **paths)
+            raise BeetsAdapterTimeoutError("read timed out")
+        if key in self.registry:
+            self.calls.append((op, key, paths))
+            return {"operation_id": key, "status": "succeeded", "result": self.registry[key]}
+        if any(str(paths.get("target", "")).endswith(s) for s in self.fail):
+            self.calls.append((op, key, paths))
+            raise BeetsAdapterError("refused", status_code=500, error_code="FOLDER_OP_FAILED")
+        self.registry[key] = res = super().folder_op(op, key, **paths)
+        return res
+
+
+class FolderCleanupRollbackRetryTests(_FolderEnv):
+    """#298 N4/L1/L2 on the folder cleanup engine, steps run by plugin code."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(te, "_FOLDER_STEP_RETRY_DELAY", 0)
+        p.start()
+        self.addCleanup(p.stop)
+        self.src, self.dst = self.music / "Old", self.music / "New"
+        self.src.mkdir()
+        self.dst.mkdir()
+        for name in ("a.txt", "b.txt"):
+            (self.src / name).write_text(name)
+        plan = te.create_folder_cleanup_plan(self.store, {"action": "merge", "source": str(self.src),
+                                                          "target": str(self.dst)})
+        self.op = plan["operation_id"]
+        self.store.transition(self.op, "Preview", "Approved")
+
+    def use(self, beets):
+        p = mock.patch("backend.beets_adapter.beets_adapter.folder_op", beets.folder_op)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_partially_rolled_back_retries_the_rest_without_replaying_apply_keys(self):
+        beets = _Beets(self.music, silent={":apply:1"})
+        self.use(beets)
+        res = te.execute_folder_cleanup_apply(self.store, self.op)
+        self.assertEqual((res["status"], res["mutated"]), ("Failed", True))  # the second move is unconfirmed
+        self.assertEqual(len(self.store.get(self.op)["metadata"]["unconfirmed_steps"]), 1)
+
+        beets.silent, beets.fail = set(), {"a.txt"}
+        first = cw.rollback_folder_cleanup(self.op, store=self.store)
+        self.assertEqual(first["status"], "Partially Rolled Back", first)
+        tx = self.store.get(self.op)
+        self.assertTrue(rollback_eligibility(tx)["allowed"], rollback_eligibility(tx))
+
+        beets.fail, beets.calls = set(), []
+        beets.registry.clear()  # pruned: a replayed apply key would run afresh
+        again = cw.rollback_folder_cleanup(self.op, store=self.store)
+        self.assertEqual((again["ok"], again["status"]), (True, "Rolled Back"), again)
+        self.assertFalse([c for c in beets.calls if ":apply:" in c[1]], beets.calls)
+        self.assertEqual(sorted(p.name for p in self.src.iterdir()), ["a.txt", "b.txt"])
+        self.assertEqual(list(self.dst.iterdir()), [])
+
+    def test_5xx_without_a_plugin_code_is_unconfirmed(self):
+        """L2: a proxy 502 / crashed handler is not proof the step did nothing."""
+        beets = mock.Mock()
+        beets.folder_op.side_effect = BeetsAdapterError("bad gateway", status_code=502,
+                                                        error_code="BEETS_UPSTREAM_ERROR")
+        res = te.execute_folder_cleanup_apply(self.store, self.op, adapter=beets)
+        self.assertEqual(beets.folder_op.call_count, te._FOLDER_STEP_ATTEMPTS)
+        self.assertEqual(res["step_error_code"], "FOLDER_OP_UNCONFIRMED")
+        self.assertEqual(len(self.store.get(self.op)["metadata"]["unconfirmed_steps"]), 1)
+
+    def test_failure_log_names_the_code_not_the_reply(self):
+        """L1: Beets' reply text and unknown codes never reach the audit log."""
+        beets = mock.Mock()
+        beets.folder_op.side_effect = BeetsAdapterError("<b>secret-ish text</b>", status_code=500,
+                                                        error_code="WEIRD<b>")
+        te.execute_folder_cleanup_apply(self.store, self.op, adapter=beets)
+        logs = " ".join(self.store.get(self.op)["logs"])
+        self.assertIn("FOLDER_OP_FAILED", logs)
+        self.assertNotIn("WEIRD", logs)
+        self.assertNotIn("secret-ish", logs)
+
+
+class MoveAllFolderCleanupFailureTests(_MoveAllFixture):
+    """#298: a folder cleanup that stopped part-way fails Move All, naming the
+    transaction to roll back; a refused (unchanged) one stays a warning."""
+
+    def _move_all(self, apply_res):
+        with mock.patch.object(app.composite_workflows, "list_distinct_item_paths", return_value=["A/B/t.mp3"]), \
+             mock.patch.object(app.composite_workflows, "move_library",
+                               return_value={"ok": True, "returncode": 0, "stdout": ""}), \
+             mock.patch.object(app.composite_workflows, "plan_folder_cleanup",
+                               return_value={"ok": True, "operation_id": "txn_x"}), \
+             mock.patch.object(app.composite_workflows, "apply_folder_cleanup", return_value=apply_res):
+            return self._run(app.library_move_all, "/api/library/move-all")
+
+    def test_part_way_failure_fails_the_job(self):
+        with self.assertRaises(RuntimeError):
+            self._move_all({"ok": False, "mutated": True, "error": "Move failed"})
+
+    def test_refusal_without_change_is_a_warning(self):
+        log = self._move_all({"ok": False, "mutated": False, "error": "not empty"})
+        self.assertTrue(any("[warn]" in line for line in log))
 
 
 if __name__ == "__main__":

@@ -845,8 +845,8 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     Mirrors, without changing, the gate that route and the engine rollback
     executors apply, so the UI reads it instead of copying it:
 
-    * folder cleanup: needs ``metadata.engine_result`` and status Completed
-      or Failed (a part-way apply);
+    * folder cleanup: needs ``metadata.engine_result`` and status Completed,
+      Failed (a part-way apply) or Partially Rolled Back (retry the rest);
     * engine family (``_ENGINE_FAMILIES``): needs ``metadata.engine_result``
       and a status an apply leaves behind (not Rolled Back, nor one of
       composite_workflows.ROLLBACK_UNAPPLIED_STATUSES); album cleanup has
@@ -870,7 +870,7 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
-        if status not in ("Completed", "Failed"):
+        if status not in ("Completed", "Failed", "Partially Rolled Back"):  # #298 N4: retry the rest
             return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
     if meta.get("mutation_family") in _ENGINE_FAMILIES:
@@ -889,7 +889,7 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
         return refused("unavailable", rollback.get("reason") or "Rollback unavailable.")
     if any(op.get("type") not in _LOCAL_ROLLBACK_OPS for op in operations):
         return refused("unsupported_operation", "Rollback unavailable for one or more recorded operation types.")
-    if status == "Completed" or (status == "Failed" and meta.get("engine_result")):
+    if status in ("Completed", "Partially Rolled Back") or (status == "Failed" and meta.get("engine_result")):
         return {"allowed": True, "code": "allowed", "reason": ""}
     return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
 
@@ -1070,7 +1070,10 @@ def api_transaction_rollback(transaction_id):
     # apply record (metadata.engine_result, the same proof claim_approved
     # uses); these local families record none, so a Failed one is refused.
     status = tx.get("status")
-    source = "Failed" if status == "Failed" and (tx.get("metadata") or {}).get("engine_result") else "Completed"
+    # Partially Rolled Back retries the rest; each restore is a no-op when the
+    # value is already back (#298 N4).
+    source = ("Failed" if status == "Failed" and (tx.get("metadata") or {}).get("engine_result")
+              else "Partially Rolled Back" if status == "Partially Rolled Back" else "Completed")
     if transactions.transition(transaction_id, source, "Running") is None:
         status = transactions.get(transaction_id).get("status")
         return jsonify({

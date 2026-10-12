@@ -141,12 +141,14 @@ def _apply_claimed(st: TransactionStore, operation_id: str,
 
 
 def _claim_rollback(st: TransactionStore, operation_id: str, to: str = "Running") -> Optional[Dict[str, Any]]:
-    """CAS Completed (or Failed with an apply record) -> ``to`` (#224). A
-    Preview, Approved or Cancelled transaction never wrote anything, so it is
-    never marked Rolled Back."""
+    """CAS Completed (or Failed with an apply record, or Partially Rolled
+    Back for a retry of the rest, #298 N4) -> ``to`` (#224). A Preview,
+    Approved or Cancelled transaction never wrote anything, so it is never
+    marked Rolled Back."""
     tx = st.get(operation_id)
-    applied_failed = tx.get("status") == "Failed" and (tx.get("metadata") or {}).get("engine_result")
-    source = "Failed" if applied_failed else "Completed"
+    status = tx.get("status")
+    applied_failed = status == "Failed" and (tx.get("metadata") or {}).get("engine_result")
+    source = status if applied_failed or status == "Partially Rolled Back" else "Completed"
     claimed = st.transition(operation_id, source, to)
     return None if claimed is None else {**claimed, "claimed_from": source}
 

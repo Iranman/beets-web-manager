@@ -1643,7 +1643,9 @@ def apply_safe_folder_placeholder_renames_job():
                     raise RuntimeError(plan_res.get("error") or "Folder cleanup planning failed")
                 apply_res = composite_workflows.apply_folder_cleanup(plan_res["operation_id"])
                 if not apply_res.get("ok"):
-                    raise RuntimeError(apply_res.get("error") or "Folder cleanup execution failed")
+                    # #298: name the transaction, so a part-way apply can be rolled back.
+                    raise RuntimeError(f"{apply_res.get('error') or 'Folder cleanup execution failed'} "
+                                       f"(transaction {plan_res['operation_id']})")
 
                 log.append(f"  [{i + 1}/{total}] RENAMED: {src.name} (engine controlled)")
                 log.append(f"           → {dst.name}")
@@ -1667,7 +1669,8 @@ def apply_safe_folder_placeholder_renames_job():
         summary = f"Safe rename complete: {renamed} renamed, {skipped} skipped, {failed} failed."
         log.append(summary)
         return {
-            "ok": True,
+            "ok": failed == 0,  # #298: a failed rename fails the job, not just a count
+            "partial": bool(failed),
             "renamed": renamed,
             "skipped": skipped,
             "failed": failed,

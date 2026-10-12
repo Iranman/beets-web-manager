@@ -3716,6 +3716,7 @@ def library_move_all():
 
         # Step 3: ask the engine to remove empty candidate directories
         removed_dirs = 0
+        folder_failures = 0
         for cdir in sorted(candidate_dirs, key=len, reverse=True):
             if cancel_event and cancel_event.is_set():
                 log.append("[cancelled]"); return
@@ -3742,6 +3743,11 @@ def library_move_all():
                 for removed in apply_res.get("removed_dirs") or []:
                     removed_dirs += 1
                     log.append(f"  Removed empty folder: {removed}")
+            elif apply_res.get("mutated"):
+                # #298: part-way through, so it is an error with its transaction, not a warning.
+                folder_failures += 1
+                log.append(f"  ERROR: folder cleanup for {cdir} stopped part-way: {apply_res.get('error')} "
+                           f"(transaction {op_id}; roll it back from Transactions)")
             else:
                 log.append(f"  [warn] Folder cleanup apply rejected for {cdir}: {apply_res.get('error')}")
         if removed_dirs:
@@ -3749,7 +3755,9 @@ def library_move_all():
 
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
-        log.append("✓ Done." if rc == 0 else "⚠ Finished with some errors (see above).")
+        log.append("✓ Done." if rc == 0 and not folder_failures else "⚠ Finished with some errors (see above).")
+        if folder_failures:
+            raise RuntimeError(f"{folder_failures} folder cleanup(s) stopped part-way; see the log.")
 
     job = jobs.start_python(_do, label="Move all library files", metadata={"type": "move-all", "dedupe_key": "library:move-all"})
     return jsonify({"ok": True, "job_id": job.job_id})
