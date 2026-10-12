@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
 import copy, importlib, json, os, re, shlex, shutil, subprocess, sys, time
+import importlib.util
 import logging
 import urllib.error
-from backend.security import OutboundPolicyError, parse_spotiflac_services, validate_outbound_url
+from backend.security import OutboundPolicyError, implicit_rule_for_url, parse_spotiflac_services, validate_outbound_url
 from backend.ytdlp_guard import ytdlp_guarded_options
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -554,7 +555,7 @@ def _ytdlp_album_queries(source: str, artist: str, album: str, max_tracks: int) 
 
 def _ytdlp_track_queries(source: str, artist: str, album: str, title: str, year: str = "") -> List[str]:
     source = _normalise_download_method(source, "ytdlp")
-    prefix = "scsearch1" if source == "soundcloud" else "ytsearch1"
+    prefix = f"scsearch{_SOUNDCLOUD_CANDIDATES}" if source == "soundcloud" else "ytsearch1"
     queries = [f"{prefix}:{artist} {album} {title}"]
     if year:
         queries.append(f"{prefix}:{artist} {album} {title} {year}")
@@ -590,13 +591,39 @@ def _merge_ytdlp_extractor_args(*groups: Optional[Dict[str, Any]]) -> Dict[str, 
     return merged
 
 
+_PO_PROVIDER_CHECK_TTL = 300.0
+_po_provider_check: Dict[str, Any] = {"url": "", "at": 0.0, "usable": False}
+
+
+def _ytdlp_po_provider_usable() -> bool:
+    """ACQ-3: the configured PO token provider is used only when the outbound
+    policy admits it (implicit trust for its own configured URL) and it
+    answers. Otherwise YouTube runs without PO tokens rather than failing.
+    Rechecked at most every five minutes."""
+    url = YTDLP_PO_PROVIDER_URL
+    now = time.monotonic()
+    cached = _po_provider_check
+    if cached["url"] == url and cached["at"] and now - cached["at"] < _PO_PROVIDER_CHECK_TTL:
+        return cached["usable"]
+    try:
+        validate_outbound_url(url, trusted=implicit_rule_for_url(url))
+        usable = bool(_ytdlp_po_provider_status().get("reachable"))
+        problem = "unreachable"
+    except OutboundPolicyError:
+        usable, problem = False, "blocked by the outbound network policy"
+    if not usable:
+        logging.getLogger("app").warning(
+            "yt-dlp PO token provider (YTDLP_PO_PROVIDER_URL) is %s; "
+            "YouTube downloads continue without PO tokens", problem)
+    cached.update(url=url, at=now, usable=usable)
+    return usable
+
+
 def _ytdlp_base_extractor_args_for_source(source: str) -> Dict[str, Any]:
     if _normalise_download_method(source) != "ytdlp" or not YTDLP_PO_PROVIDER_URL:
         return {}
-    try:
-        validate_outbound_url(YTDLP_PO_PROVIDER_URL)
-    except OutboundPolicyError as ex:
-        raise RuntimeError("Configured yt-dlp PO provider URL is blocked by outbound policy") from ex
+    if not _ytdlp_po_provider_usable():
+        return {}
     return {"youtubepot-bgutilhttp": {"base_url": [YTDLP_PO_PROVIDER_URL]}}
 
 
@@ -702,6 +729,82 @@ def _spotiflac_command(log: Optional[list] = None) -> List[str]:
     raise RuntimeError(
         "SpotiFLAC is not available. Install the pinned SpotiFLAC CLI during the container image build."
     )
+
+
+_DOWNLOAD_PROGRESS_RE = re.compile(r"^\[download\]\s+(?:\x1b\[[0-9;]*m)?\s*(\d+(?:\.\d+)?)%")
+
+
+class _YtdlpJobLogger:
+    """yt-dlp logger that writes to a job log. Per-chunk "[download] x%"
+    lines are dropped except 0% and 100% (ACQ-7), so a long download cannot
+    push the start of the job out of the persisted log tail."""
+
+    def __init__(self, log: list, bot_check_seen: Dict[str, int]):
+        self.log = log
+        self.bot_check_seen = bot_check_seen
+
+    def debug(self, msg):
+        if msg.startswith('[debug]'):
+            return
+        progress = _DOWNLOAD_PROGRESS_RE.match(msg)
+        if progress and 0.0 < float(progress.group(1)) < 100.0:
+            return
+        self.log.append(f"  [yt-dlp] {msg[:200]}")
+
+    def warning(self, msg):
+        self.log.append(f"  [yt-dlp] WARN: {msg[:200]}")
+
+    def error(self, msg):
+        self.log.append(f"  [yt-dlp] ERR: {msg[:200]}")
+        if _yt_bot_check_message(msg):
+            self.bot_check_seen["count"] += 1
+
+
+#: ACQ-6: SoundCloud search results tried per query, and the shortest track
+#: accepted (Go+ tracks come as 30 s previews). With a MusicBrainz length a
+#: result must also be within 10% of it.
+_SOUNDCLOUD_CANDIDATES = 5
+_SOUNDCLOUD_MIN_SECONDS = 45.0
+_SOUNDCLOUD_LENGTH_TOLERANCE = 0.10
+
+
+def _soundcloud_duration_ok(duration: Any, expected_ms: int) -> bool:
+    try:
+        seconds = float(duration)
+    except (TypeError, ValueError):
+        return True  # unknown length: identity verification still runs after download
+    expected = expected_ms / 1000.0
+    if expected > 0:
+        within = abs(seconds - expected) <= expected * _SOUNDCLOUD_LENGTH_TOLERANCE
+        # A genuinely short track (an interlude) is exempt from the floor.
+        return within and (seconds > _SOUNDCLOUD_MIN_SECONDS or expected <= _SOUNDCLOUD_MIN_SECONDS)
+    return seconds > _SOUNDCLOUD_MIN_SECONDS
+
+
+def _soundcloud_track_candidates(yt_dlp: Any, base_opts: Dict[str, Any], query: str,
+                                 expected_ms: int, log: list) -> List[str]:
+    """Up to five SoundCloud results for ``query`` (flat search, nothing
+    downloaded), in search order, without clips whose length rules them out."""
+    opts = dict(base_opts, skip_download=True, extract_flat="in_playlist")
+    try:
+        with yt_dlp.YoutubeDL(ytdlp_guarded_options(opts, [query])) as ydl:
+            info = ydl.extract_info(query, download=False)
+    except Exception as ex:
+        log.append(f"  [yt-dlp] SoundCloud search error: {ex}")
+        return []
+    urls: List[str] = []
+    entries = info.get("entries") if isinstance(info, dict) else None
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        url = _s(entry.get("webpage_url") or entry.get("url")).strip()
+        if not url.startswith("https://"):
+            continue
+        if not _soundcloud_duration_ok(entry.get("duration"), expected_ms):
+            log.append(f"  [yt-dlp] Skipping {url}: length does not match")
+            continue
+        urls.append(url)
+    return urls
 
 
 def _audio_files_in_dir(dest_dir: str) -> set:
@@ -973,19 +1076,6 @@ def _ytdlp_album_download(artist: str, album: str, year: str,
         max_tracks = 25
     bot_check_seen = {"count": 0}
 
-    # Custom logger so yt-dlp errors/warnings appear in the job log
-    _ytlog = log
-    class _YdlLogger:
-        def debug(self, msg):
-            if not msg.startswith('[debug]'):
-                _ytlog.append(f"  [yt-dlp] {msg[:200]}")
-        def warning(self, msg):
-            _ytlog.append(f"  [yt-dlp] WARN: {msg[:200]}")
-        def error(self, msg):
-            _ytlog.append(f"  [yt-dlp] ERR: {msg[:200]}")
-            if _yt_bot_check_message(msg):
-                bot_check_seen["count"] += 1
-
     # outtmpl: %(title)s avoids the %(playlist_index)02d silent-failure bug
     # (playlist_index is None for non-playlist downloads, causing ignoreerrors
     # to silently discard the file when using the %02d format spec).
@@ -993,7 +1083,7 @@ def _ytdlp_album_download(artist: str, album: str, year: str,
         'format': _ytdlp_audio_format_for_source(source),
         'postprocessors': _ytdlp_postprocessors_for_source(source),
         'outtmpl': outtmpl,
-        'logger': _YdlLogger(),
+        'logger': _YtdlpJobLogger(log, bot_check_seen),
         'quiet': True,
         'no_warnings': False,
         'ignoreerrors': False,
@@ -1101,20 +1191,6 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
     _ytdlp_outtmpl(dest_dir, "")  # refuse an unusable folder before creating it
     os.makedirs(dest_dir, exist_ok=True)
     bot_check_seen = {"count": 0}
-    _ytlog = log
-
-    class _YdlLogger:
-        def debug(self, msg):
-            if not msg.startswith('[debug]'):
-                _ytlog.append(f"  [yt-dlp] {msg[:200]}")
-
-        def warning(self, msg):
-            _ytlog.append(f"  [yt-dlp] WARN: {msg[:200]}")
-
-        def error(self, msg):
-            _ytlog.append(f"  [yt-dlp] ERR: {msg[:200]}")
-            if _yt_bot_check_message(msg):
-                bot_check_seen["count"] += 1
 
     def _audio_files() -> set[str]:
         try:
@@ -1135,7 +1211,7 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
     base_opts = {
         'format': _ytdlp_audio_format_for_source(source),
         'postprocessors': _ytdlp_postprocessors_for_source(source),
-        'logger': _YdlLogger(),
+        'logger': _YtdlpJobLogger(log, bot_check_seen),
         'quiet': True,
         'no_warnings': False,
         'ignoreerrors': False,
@@ -1194,43 +1270,53 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
             auth_failed = False
             for query in queries:
                 for client_label, extractor_args in client_profiles:
-                    before = _audio_files()
-                    log.append(f"  [yt-dlp] Trying: {query!r} (client {client_label})")
                     ydl_opts = dict(auth_opts)
                     ydl_opts["outtmpl"] = outtmpl
                     merged_extractor_args = _ytdlp_source_extractor_args(source, extractor_args)
                     if merged_extractor_args:
                         ydl_opts["extractor_args"] = merged_extractor_args
-                    try:
-                        with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [query])) as ydl:
-                            ydl.download([query])
-                        if cookie_auth and bot_check_seen["count"]:
-                            last_auth_error = _mark_ytdlp_auth_rejected(cookie_auth)
-                            auth_failed = True
+                    targets = (
+                        _soundcloud_track_candidates(
+                            yt_dlp, ydl_opts, query, int(track.get("duration_ms") or 0), log)
+                        if source == "soundcloud" else [query]
+                    )
+                    for target in targets:
+                        before = _audio_files()
+                        log.append(f"  [yt-dlp] Trying: {target!r} (client {client_label})")
+                        try:
+                            with yt_dlp.YoutubeDL(ytdlp_guarded_options(ydl_opts, [target])) as ydl:
+                                ydl.download([target])
+                            if cookie_auth and bot_check_seen["count"]:
+                                last_auth_error = _mark_ytdlp_auth_rejected(cookie_auth)
+                                auth_failed = True
+                                log.append(
+                                    f"  [yt-dlp] Auth source failed: {cookie_auth.get('label')}; "
+                                    "trying next auth source..."
+                                )
+                                break
+                        except Exception as ex:
+                            if cookie_auth and (_yt_auth_source_failed_message(str(ex)) or bot_check_seen["count"]):
+                                last_auth_error = _mark_ytdlp_auth_rejected(cookie_auth, str(ex))
+                                auth_failed = True
+                                log.append(
+                                    f"  [yt-dlp] Auth source failed: {cookie_auth.get('label')}; "
+                                    "trying next auth source..."
+                                )
+                                break
+                            if "drm" in str(ex).lower():
+                                log.append(f"  [yt-dlp] Skipping {target}: DRM protected")
+                            else:
+                                log.append(f"  [yt-dlp] Error: {ex}")
+                            continue
+                        new_files = sorted(_audio_files() - before)
+                        if new_files:
+                            downloaded += len(new_files)
+                            track_downloaded = True
                             log.append(
-                                f"  [yt-dlp] Auth source failed: {cookie_auth.get('label')}; "
-                                "trying next auth source..."
+                                f"  [yt-dlp] Downloaded {Path(new_files[0]).name}"
                             )
                             break
-                    except Exception as ex:
-                        if cookie_auth and (_yt_auth_source_failed_message(str(ex)) or bot_check_seen["count"]):
-                            last_auth_error = _mark_ytdlp_auth_rejected(cookie_auth, str(ex))
-                            auth_failed = True
-                            log.append(
-                                f"  [yt-dlp] Auth source failed: {cookie_auth.get('label')}; "
-                                "trying next auth source..."
-                            )
-                            break
-                        log.append(f"  [yt-dlp] Error: {ex}")
-                        continue
-                    after = _audio_files()
-                    new_files = sorted(after - before)
-                    if new_files:
-                        downloaded += len(new_files)
-                        track_downloaded = True
-                        log.append(
-                            f"  [yt-dlp] Downloaded {Path(new_files[0]).name}"
-                        )
+                    if track_downloaded or auth_failed:
                         break
                 if track_downloaded or auth_failed:
                     break
@@ -1252,6 +1338,23 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
     if last_auth_error:
         raise RuntimeError(last_auth_error)
     raise RuntimeError("yt-dlp: no missing tracks downloaded")
+
+
+def _direct_source_unavailable_reason(method: str) -> str:
+    """Why a direct download source cannot run here, or "" (ACQ-5). Cheap,
+    local checks only: an installed package, a JS runtime, a CLI on disk."""
+    method = _normalise_download_method(method, "")
+    if method in _YTDLP_SOURCE_METHODS:
+        if importlib.util.find_spec("yt_dlp") is None:
+            return "yt-dlp is not installed"
+        if _ytdlp_source_requires_js(method) and not _ytdlp_js_runtime_status().get("available"):
+            return "no JavaScript runtime (Deno) for YouTube"
+        return ""
+    if method == "spotiflac":
+        if _spotiflac_status().get("available"):
+            return ""
+        return "SpotiFLAC CLI is not installed (SPOTIFLAC_CMD)"
+    return "unknown source"
 
 
 def _run_version_probe(binary: str) -> str:

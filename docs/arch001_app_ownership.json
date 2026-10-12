@@ -504,7 +504,6 @@
     "_acoustid_verify_match",
     "_acq_display_year",
     "_acq_download_payload",
-    "_acq_fetch_lidarr_wanted",
     "_acq_health",
     "_acq_item_mbid",
     "_acq_local_issue",
@@ -523,9 +522,10 @@
     "_ai_batch_process_decisions",
     "_ai_batch_public_state",
     "_ai_batch_queue_pending_review",
-    "_ai_batch_recalculate_batch_state"
+    "_ai_batch_recalculate_batch_state",
+    "_ai_batch_recompute_counts"
    ],
-   "caller_count": 601,
+   "caller_count": 602,
    "dependencies": []
   },
   {
@@ -690,8 +690,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    503,
-    504
+    502,
+    503
    ],
    "size": 2,
    "body_lines": 1,
@@ -714,8 +714,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    597,
-    604
+    596,
+    603
    ],
    "size": 8,
    "body_lines": 6,
@@ -746,8 +746,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    613,
-    633
+    612,
+    632
    ],
    "size": 21,
    "body_lines": 19,
@@ -766,8 +766,8 @@
    "name": "_sqlite_is_locked_error",
    "module": "backend/app_runtime.py",
    "lines": [
-    645,
-    649
+    644,
+    648
    ],
    "size": 5,
    "body_lines": 4,
@@ -786,8 +786,8 @@
    "name": "_sqlite_write_retry",
    "module": "backend/app_runtime.py",
    "lines": [
-    652,
-    662
+    651,
+    661
    ],
    "size": 11,
    "body_lines": 10,
@@ -806,8 +806,8 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    698,
-    701
+    697,
+    700
    ],
    "size": 4,
    "body_lines": 3,
@@ -826,8 +826,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    718,
-    722
+    717,
+    721
    ],
    "size": 5,
    "body_lines": 4,
@@ -854,9 +854,10 @@
     "create_unmatched_draft",
     "item_attach_recording",
     "playlist_create",
-    "playlist_delete"
+    "playlist_delete",
+    "start_album_download"
    ],
-   "caller_count": 18,
+   "caller_count": 19,
    "dependencies": [
     "_redact_secret_assignment_match",
     "_s"
@@ -866,8 +867,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    725,
-    735
+    724,
+    734
    ],
    "size": 11,
    "body_lines": 10,
@@ -889,8 +890,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    738,
-    743
+    737,
+    742
    ],
    "size": 6,
    "body_lines": 5,
@@ -933,8 +934,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    746,
-    757
+    745,
+    756
    ],
    "size": 12,
    "body_lines": 10,
@@ -961,8 +962,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    760,
-    777
+    759,
+    776
    ],
    "size": 18,
    "body_lines": 11,
@@ -984,8 +985,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    780,
-    787
+    779,
+    786
    ],
    "size": 8,
    "body_lines": 7,
@@ -1008,8 +1009,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    790,
-    804
+    789,
+    803
    ],
    "size": 15,
    "body_lines": 14,
@@ -1037,8 +1038,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    834,
-    837
+    833,
+    836
    ],
    "size": 4,
    "body_lines": 3,
@@ -1062,8 +1063,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    840,
-    850
+    839,
+    849
    ],
    "size": 11,
    "body_lines": 10,
@@ -1098,8 +1099,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    853,
-    867
+    852,
+    866
    ],
    "size": 15,
    "body_lines": 14,
@@ -1124,8 +1125,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    870,
-    874
+    869,
+    873
    ],
    "size": 5,
    "body_lines": 4,
@@ -1146,8 +1147,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    877,
-    896
+    876,
+    895
    ],
    "size": 20,
    "body_lines": 11,
@@ -1168,8 +1169,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    899,
-    908
+    898,
+    907
    ],
    "size": 10,
    "body_lines": 7,
@@ -1192,8 +1193,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    911,
-    920
+    910,
+    919
    ],
    "size": 10,
    "body_lines": 7,
@@ -1214,8 +1215,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    923,
-    933
+    922,
+    932
    ],
    "size": 11,
    "body_lines": 7,
@@ -1236,8 +1237,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    938,
-    939
+    937,
+    938
    ],
    "size": 2,
    "body_lines": 1,
@@ -1280,8 +1281,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    944,
-    952
+    943,
+    951
    ],
    "size": 9,
    "body_lines": 2,
@@ -1298,8 +1299,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    968,
-    973
+    967,
+    972
    ],
    "size": 6,
    "body_lines": 3,
@@ -1316,8 +1317,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    986,
-    988
+    985,
+    987
    ],
    "size": 3,
    "body_lines": 2,
@@ -1334,8 +1335,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    991,
-    994
+    990,
+    993
    ],
    "size": 4,
    "body_lines": 3,
@@ -1367,11 +1368,9 @@
    "callers": [
     "_wait_for_child_job",
     "_yt_auth_source_failed_message",
-    "_ytdlp_album_download",
-    "_ytdlp_cookie_rejection_seen",
-    "_ytdlp_missing_tracks_download"
+    "_ytdlp_cookie_rejection_seen"
    ],
-   "caller_count": 5,
+   "caller_count": 3,
    "dependencies": []
   },
   {
@@ -6589,14 +6588,35 @@
    "dependencies": []
   },
   {
+   "name": "slskd_configured",
+   "module": "backend/slskd_service.py",
+   "lines": [
+    36,
+    37
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "SLSKD",
+   "desired_owner": "backend/slskd_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_download_sources_status",
+    "start_album_download"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
    "name": "_slskd_req",
    "module": "backend/slskd_service.py",
    "lines": [
-    35,
-    61
+    42,
+    75
    ],
-   "size": 27,
-   "body_lines": 25,
+   "size": 34,
+   "body_lines": 32,
    "route": null,
    "mutation_capable": false,
    "domain": "SLSKD",
@@ -6615,11 +6635,11 @@
    "name": "_normalise_wanted_tracks",
    "module": "backend/slskd_service.py",
    "lines": [
-    64,
-    106
+    78,
+    127
    ],
-   "size": 43,
-   "body_lines": 41,
+   "size": 50,
+   "body_lines": 48,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -6658,8 +6678,8 @@
    "name": "_strip_feat_tail",
    "module": "backend/slskd_service.py",
    "lines": [
-    115,
-    129
+    136,
+    150
    ],
    "size": 15,
    "body_lines": 7,
@@ -6678,8 +6698,8 @@
    "name": "_slskd_title_norm",
    "module": "backend/slskd_service.py",
    "lines": [
-    132,
-    138
+    153,
+    159
    ],
    "size": 7,
    "body_lines": 5,
@@ -6705,8 +6725,8 @@
    "name": "_slskd_track_numbers_from_name",
    "module": "backend/slskd_service.py",
    "lines": [
-    141,
-    167
+    162,
+    188
    ],
    "size": 27,
    "body_lines": 26,
@@ -6729,8 +6749,8 @@
    "name": "_slskd_title_guess_from_name",
    "module": "backend/slskd_service.py",
    "lines": [
-    170,
-    211
+    191,
+    232
    ],
    "size": 42,
    "body_lines": 38,
@@ -6757,8 +6777,8 @@
    "name": "_wanted_track_key",
    "module": "backend/slskd_service.py",
    "lines": [
-    214,
-    223
+    235,
+    244
    ],
    "size": 10,
    "body_lines": 9,
@@ -6782,8 +6802,8 @@
    "name": "_wanted_track_label",
    "module": "backend/slskd_service.py",
    "lines": [
-    226,
-    230
+    247,
+    251
    ],
    "size": 5,
    "body_lines": 4,
@@ -6809,8 +6829,8 @@
    "name": "_slskd_file_wanted_match_score",
    "module": "backend/slskd_service.py",
    "lines": [
-    233,
-    310
+    254,
+    331
    ],
    "size": 78,
    "body_lines": 75,
@@ -6839,8 +6859,8 @@
    "name": "_slskd_file_matches_wanted",
    "module": "backend/slskd_service.py",
    "lines": [
-    313,
-    314
+    334,
+    335
    ],
    "size": 2,
    "body_lines": 1,
@@ -6859,8 +6879,8 @@
    "name": "_wanted_tracks_remaining_after_satisfied",
    "module": "backend/slskd_service.py",
    "lines": [
-    317,
-    325
+    338,
+    346
    ],
    "size": 9,
    "body_lines": 5,
@@ -6882,8 +6902,8 @@
    "name": "_slskd_pause",
    "module": "backend/slskd_service.py",
    "lines": [
-    328,
-    333
+    349,
+    354
    ],
    "size": 6,
    "body_lines": 4,
@@ -6902,8 +6922,8 @@
    "name": "_slskd_bounded_walk",
    "module": "backend/slskd_service.py",
    "lines": [
-    336,
-    347
+    357,
+    368
    ],
    "size": 12,
    "body_lines": 8,
@@ -6923,8 +6943,8 @@
    "name": "_slskd_search_and_queue",
    "module": "backend/slskd_service.py",
    "lines": [
-    350,
-    650
+    371,
+    671
    ],
    "size": 301,
    "body_lines": 290,
@@ -6952,8 +6972,8 @@
    "name": "_slskd_download_candidate_roots",
    "module": "backend/slskd_service.py",
    "lines": [
-    653,
-    657
+    674,
+    678
    ],
    "size": 5,
    "body_lines": 3,
@@ -6972,8 +6992,8 @@
    "name": "_slskd_cancel_queued_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    660,
-    679
+    681,
+    700
    ],
    "size": 20,
    "body_lines": 18,
@@ -6996,8 +7016,8 @@
    "name": "_slskd_cleanup_failed_candidate_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    682,
-    686
+    703,
+    707
    ],
    "size": 5,
    "body_lines": 3,
@@ -7017,8 +7037,8 @@
    "name": "_find_slskd_downloaded_files",
    "module": "backend/slskd_service.py",
    "lines": [
-    689,
-    971
+    710,
+    992
    ],
    "size": 283,
    "body_lines": 270,
@@ -7044,8 +7064,8 @@
    "name": "_slskd_wait_downloads",
    "module": "backend/slskd_service.py",
    "lines": [
-    974,
-    1166
+    995,
+    1187
    ],
    "size": 193,
    "body_lines": 190,
@@ -7070,8 +7090,8 @@
    "name": "_normalise_download_method",
    "module": "backend/slskd_service.py",
    "lines": [
-    1185,
-    1188
+    1208,
+    1211
    ],
    "size": 4,
    "body_lines": 3,
@@ -7081,6 +7101,7 @@
    "desired_owner": "backend/acquisition_service.py",
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
+    "_direct_source_unavailable_reason",
     "_download_method_job_label",
     "_download_method_label",
     "_download_method_list",
@@ -7103,7 +7124,7 @@
     "start_album_download",
     "start_music_format_replacement_retry"
    ],
-   "caller_count": 21,
+   "caller_count": 22,
    "dependencies": [
     "_s"
    ]
@@ -7112,8 +7133,8 @@
    "name": "_download_method_list",
    "module": "backend/slskd_service.py",
    "lines": [
-    1191,
-    1197
+    1214,
+    1220
    ],
    "size": 7,
    "body_lines": 6,
@@ -7137,8 +7158,8 @@
    "name": "_slskd_fallback_methods",
    "module": "backend/slskd_service.py",
    "lines": [
-    1200,
-    1209
+    1223,
+    1232
    ],
    "size": 10,
    "body_lines": 9,
@@ -7148,9 +7169,10 @@
    "desired_owner": "backend/slskd_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_download_sources_status",
     "start_album_download"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": [
     "_download_method_list",
     "_normalise_download_method"
@@ -7160,8 +7182,8 @@
    "name": "_strip_track_filename_id_suffix",
    "module": "backend/slskd_service.py",
    "lines": [
-    1212,
-    1217
+    1235,
+    1240
    ],
    "size": 6,
    "body_lines": 5,
@@ -10710,8 +10732,8 @@
    "name": "_prepend_ytdlp_runtime_path",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    24,
-    28
+    25,
+    29
    ],
    "size": 5,
    "body_lines": 4,
@@ -10732,8 +10754,8 @@
    "name": "_probe_js_runtime",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    31,
-    54
+    32,
+    55
    ],
    "size": 24,
    "body_lines": 23,
@@ -10755,8 +10777,8 @@
    "name": "_js_runtime_binary_names",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    57,
-    61
+    58,
+    62
    ],
    "size": 5,
    "body_lines": 4,
@@ -10775,8 +10797,8 @@
    "name": "_js_runtime_candidate_paths",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    64,
-    89
+    65,
+    90
    ],
    "size": 26,
    "body_lines": 25,
@@ -10799,8 +10821,8 @@
    "name": "_ytdlp_js_runtime_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    92,
-    126
+    93,
+    127
    ],
    "size": 35,
    "body_lines": 34,
@@ -10810,13 +10832,14 @@
    "desired_owner": "backend/ytdlp_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_direct_source_unavailable_reason",
     "_install_ytdlp",
     "_require_ytdlp_js_runtime",
     "_ytdlp_js_runtime_options",
     "_ytdlp_youtube_status",
     "ytdlp_status"
    ],
-   "caller_count": 5,
+   "caller_count": 6,
    "dependencies": [
     "_js_runtime_candidate_paths",
     "_prepend_ytdlp_runtime_path",
@@ -10828,8 +10851,8 @@
    "name": "_require_ytdlp_js_runtime",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    129,
-    137
+    130,
+    138
    ],
    "size": 9,
    "body_lines": 8,
@@ -10853,8 +10876,8 @@
    "name": "_ytdlp_js_runtime_names",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    140,
-    143
+    141,
+    144
    ],
    "size": 4,
    "body_lines": 3,
@@ -10875,8 +10898,8 @@
    "name": "_ytdlp_js_runtime_options",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    146,
-    161
+    147,
+    162
    ],
    "size": 16,
    "body_lines": 15,
@@ -10904,8 +10927,8 @@
    "name": "_ytdlp_remote_components",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    164,
-    167
+    165,
+    168
    ],
    "size": 4,
    "body_lines": 3,
@@ -10930,8 +10953,8 @@
    "name": "_ytdlp_cookie_help",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    170,
-    176
+    171,
+    177
    ],
    "size": 7,
    "body_lines": 6,
@@ -10951,8 +10974,8 @@
    "name": "_ytdlp_cookie_rejected_help",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    179,
-    190
+    180,
+    191
    ],
    "size": 12,
    "body_lines": 11,
@@ -10971,8 +10994,8 @@
    "name": "_ytdlp_cookie_signature",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    193,
-    203
+    194,
+    204
    ],
    "size": 11,
    "body_lines": 10,
@@ -10992,8 +11015,8 @@
    "name": "_mark_ytdlp_cookie_rejected",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    206,
-    218
+    207,
+    219
    ],
    "size": 13,
    "body_lines": 12,
@@ -11014,8 +11037,8 @@
    "name": "_ytdlp_cookie_rejection_state",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    221,
-    239
+    222,
+    240
    ],
    "size": 19,
    "body_lines": 18,
@@ -11042,8 +11065,8 @@
    "name": "_ytdlp_cookie_rejected_error",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    242,
-    244
+    243,
+    245
    ],
    "size": 3,
    "body_lines": 2,
@@ -11065,8 +11088,8 @@
    "name": "_normalise_ytdlp_browser_cookie_spec",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    247,
-    264
+    248,
+    265
    ],
    "size": 18,
    "body_lines": 17,
@@ -11087,8 +11110,8 @@
    "name": "_parse_ytdlp_browser_cookie_spec",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    267,
-    287
+    268,
+    288
    ],
    "size": 21,
    "body_lines": 20,
@@ -11109,8 +11132,8 @@
    "name": "_configured_ytdlp_browser_cookie_spec",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    290,
-    300
+    291,
+    301
    ],
    "size": 11,
    "body_lines": 10,
@@ -11131,8 +11154,8 @@
    "name": "_fallback_ytdlp_browser_cookie_spec",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    303,
-    306
+    304,
+    307
    ],
    "size": 4,
    "body_lines": 3,
@@ -11153,8 +11176,8 @@
    "name": "_configured_ytdlp_cookie_file",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    309,
-    337
+    310,
+    338
    ],
    "size": 29,
    "body_lines": 28,
@@ -11173,8 +11196,8 @@
    "name": "_ytdlp_browser_cookie_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    340,
-    347
+    341,
+    348
    ],
    "size": 8,
    "body_lines": 7,
@@ -11195,8 +11218,8 @@
    "name": "_ytdlp_cookie_file_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    350,
-    356
+    351,
+    357
    ],
    "size": 7,
    "body_lines": 6,
@@ -11215,8 +11238,8 @@
    "name": "_configured_ytdlp_netrc_file",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    359,
-    378
+    360,
+    379
    ],
    "size": 20,
    "body_lines": 19,
@@ -11236,8 +11259,8 @@
    "name": "_apply_ytdlp_netrc",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    381,
-    388
+    382,
+    389
    ],
    "size": 8,
    "body_lines": 7,
@@ -11260,8 +11283,8 @@
    "name": "_configured_ytdlp_cookie_auths",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    391,
-    414
+    392,
+    415
    ],
    "size": 24,
    "body_lines": 23,
@@ -11290,8 +11313,8 @@
    "name": "_usable_ytdlp_cookie_auths",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    417,
-    423
+    418,
+    424
    ],
    "size": 7,
    "body_lines": 6,
@@ -11316,8 +11339,8 @@
    "name": "_describe_ytdlp_cookie_auths",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    426,
-    435
+    427,
+    436
    ],
    "size": 10,
    "body_lines": 9,
@@ -11340,8 +11363,8 @@
    "name": "_mark_ytdlp_auth_rejected",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    438,
-    445
+    439,
+    446
    ],
    "size": 8,
    "body_lines": 7,
@@ -11366,8 +11389,8 @@
    "name": "_ytdlp_cookie_auth_rejection_key",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    448,
-    453
+    449,
+    454
    ],
    "size": 6,
    "body_lines": 5,
@@ -11395,8 +11418,8 @@
    "name": "_apply_ytdlp_cookie_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    456,
-    468
+    457,
+    469
    ],
    "size": 13,
    "body_lines": 8,
@@ -11416,8 +11439,8 @@
    "name": "_ytdlp_youtube_client_profiles",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    471,
-    493
+    472,
+    494
    ],
    "size": 23,
    "body_lines": 22,
@@ -11437,8 +11460,8 @@
    "name": "_download_method_label",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    502,
-    510
+    503,
+    511
    ],
    "size": 9,
    "body_lines": 8,
@@ -11463,8 +11486,8 @@
    "name": "_ytdlp_source_needs_youtube_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    513,
-    514
+    514,
+    515
    ],
    "size": 2,
    "body_lines": 1,
@@ -11485,8 +11508,8 @@
    "name": "_ytdlp_source_requires_js",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    517,
-    518
+    518,
+    519
    ],
    "size": 2,
    "body_lines": 1,
@@ -11496,11 +11519,12 @@
    "desired_owner": "backend/ytdlp_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_direct_source_unavailable_reason",
     "_ytdlp_album_download",
     "_ytdlp_find_first_url",
     "_ytdlp_missing_tracks_download"
    ],
-   "caller_count": 3,
+   "caller_count": 4,
    "dependencies": [
     "_normalise_download_method"
    ]
@@ -11509,8 +11533,8 @@
    "name": "_ytdlp_client_profiles_for_source",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    521,
-    524
+    522,
+    525
    ],
    "size": 4,
    "body_lines": 3,
@@ -11535,8 +11559,8 @@
    "name": "_ytdlp_cookie_auths_for_source",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    527,
-    539
+    528,
+    540
    ],
    "size": 13,
    "body_lines": 12,
@@ -11563,8 +11587,8 @@
    "name": "_ytdlp_album_queries",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    542,
-    552
+    543,
+    553
    ],
    "size": 11,
    "body_lines": 10,
@@ -11586,8 +11610,8 @@
    "name": "_ytdlp_track_queries",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    555,
-    562
+    556,
+    563
    ],
    "size": 8,
    "body_lines": 7,
@@ -11609,8 +11633,8 @@
    "name": "_ytdlp_apply_cookie_auth_if_needed",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    565,
-    569
+    566,
+    570
    ],
    "size": 5,
    "body_lines": 2,
@@ -11634,8 +11658,8 @@
    "name": "_ytdlp_apply_source_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    572,
-    577
+    573,
+    578
    ],
    "size": 6,
    "body_lines": 3,
@@ -11660,8 +11684,8 @@
    "name": "_merge_ytdlp_extractor_args",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    580,
-    590
+    581,
+    591
    ],
    "size": 11,
    "body_lines": 10,
@@ -11677,14 +11701,36 @@
    "dependencies": []
   },
   {
+   "name": "_ytdlp_po_provider_usable",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    598,
+    619
+   ],
+   "size": 22,
+   "body_lines": 17,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "YTDLP",
+   "desired_owner": "backend/ytdlp_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ytdlp_base_extractor_args_for_source"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_ytdlp_po_provider_status"
+   ]
+  },
+  {
    "name": "_ytdlp_base_extractor_args_for_source",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    593,
-    600
+    622,
+    627
    ],
-   "size": 8,
-   "body_lines": 7,
+   "size": 6,
+   "body_lines": 5,
    "route": null,
    "mutation_capable": false,
    "domain": "YTDLP",
@@ -11695,15 +11741,16 @@
    ],
    "caller_count": 1,
    "dependencies": [
-    "_normalise_download_method"
+    "_normalise_download_method",
+    "_ytdlp_po_provider_usable"
    ]
   },
   {
    "name": "_ytdlp_source_extractor_args",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    603,
-    605
+    630,
+    632
    ],
    "size": 3,
    "body_lines": 1,
@@ -11729,8 +11776,8 @@
    "name": "_ytdlp_audio_format_for_source",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    608,
-    611
+    635,
+    638
    ],
    "size": 4,
    "body_lines": 3,
@@ -11752,8 +11799,8 @@
    "name": "_ytdlp_audio_codec_for_source",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    614,
-    615
+    641,
+    642
    ],
    "size": 2,
    "body_lines": 1,
@@ -11774,8 +11821,8 @@
    "name": "_ytdlp_postprocessors_for_source",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    618,
-    623
+    645,
+    650
    ],
    "size": 6,
    "body_lines": 5,
@@ -11797,8 +11844,8 @@
    "name": "_ytdlp_youtube_impersonate_target",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    626,
-    636
+    653,
+    663
    ],
    "size": 11,
    "body_lines": 10,
@@ -11817,8 +11864,8 @@
    "name": "_ytdlp_apply_source_network_options",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    639,
-    645
+    666,
+    672
    ],
    "size": 7,
    "body_lines": 5,
@@ -11843,8 +11890,8 @@
    "name": "_spotiflac_list_from_env",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    648,
-    653
+    675,
+    680
    ],
    "size": 6,
    "body_lines": 5,
@@ -11863,8 +11910,8 @@
    "name": "_spotiflac_input_sources",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    656,
-    662
+    683,
+    689
    ],
    "size": 7,
    "body_lines": 6,
@@ -11888,8 +11935,8 @@
    "name": "_spotiflac_services",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    665,
-    669
+    692,
+    696
    ],
    "size": 5,
    "body_lines": 3,
@@ -11909,8 +11956,8 @@
    "name": "_spotiflac_command",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    672,
-    704
+    699,
+    731
    ],
    "size": 33,
    "body_lines": 32,
@@ -11926,11 +11973,54 @@
    "dependencies": []
   },
   {
+   "name": "_soundcloud_duration_ok",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    771,
+    781
+   ],
+   "size": 11,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_soundcloud_track_candidates"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_soundcloud_track_candidates",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    784,
+    807
+   ],
+   "size": 24,
+   "body_lines": 20,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ytdlp_missing_tracks_download"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s",
+    "_soundcloud_duration_ok"
+   ]
+  },
+  {
    "name": "_audio_files_in_dir",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    707,
-    715
+    810,
+    818
    ],
    "size": 9,
    "body_lines": 8,
@@ -11950,8 +12040,8 @@
    "name": "_ytdlp_find_first_url",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    718,
-    779
+    821,
+    882
    ],
    "size": 62,
    "body_lines": 61,
@@ -11984,8 +12074,8 @@
    "name": "_spotiflac_download_url",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    782,
-    825
+    885,
+    928
    ],
    "size": 44,
    "body_lines": 43,
@@ -12011,8 +12101,8 @@
    "name": "_symlinks_in_dir",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    828,
-    832
+    931,
+    935
    ],
    "size": 5,
    "body_lines": 4,
@@ -12032,8 +12122,8 @@
    "name": "_remove_new_symlinks",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    835,
-    846
+    938,
+    949
    ],
    "size": 12,
    "body_lines": 6,
@@ -12054,8 +12144,8 @@
    "name": "_spotiflac_missing_tracks_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    849,
-    904
+    952,
+    1007
    ],
    "size": 56,
    "body_lines": 53,
@@ -12085,8 +12175,8 @@
    "name": "_spotiflac_album_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    907,
-    935
+    1010,
+    1038
    ],
    "size": 29,
    "body_lines": 25,
@@ -12114,8 +12204,8 @@
    "name": "_ytdlp_outtmpl",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    938,
-    948
+    1041,
+    1051
    ],
    "size": 11,
    "body_lines": 4,
@@ -12135,11 +12225,11 @@
    "name": "_ytdlp_album_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    951,
-    1079
+    1054,
+    1169
    ],
-   "size": 129,
-   "body_lines": 123,
+   "size": 116,
+   "body_lines": 110,
    "route": null,
    "mutation_capable": false,
    "domain": "YTDLP",
@@ -12156,7 +12246,6 @@
     "_normalise_download_method",
     "_require_ytdlp_js_runtime",
     "_yt_auth_source_failed_message",
-    "_yt_bot_check_message",
     "_ytdlp_album_queries",
     "_ytdlp_apply_cookie_auth_if_needed",
     "_ytdlp_apply_source_auth",
@@ -12177,11 +12266,11 @@
    "name": "_ytdlp_missing_tracks_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1082,
-    1254
+    1172,
+    1340
    ],
-   "size": 173,
-   "body_lines": 168,
+   "size": 169,
+   "body_lines": 164,
    "route": null,
    "mutation_capable": false,
    "domain": "YTDLP",
@@ -12199,9 +12288,9 @@
     "_normalise_wanted_tracks",
     "_require_ytdlp_js_runtime",
     "_s",
+    "_soundcloud_track_candidates",
     "_wanted_track_label",
     "_yt_auth_source_failed_message",
-    "_yt_bot_check_message",
     "_ytdlp_album_download",
     "_ytdlp_apply_cookie_auth_if_needed",
     "_ytdlp_apply_source_auth",
@@ -12221,11 +12310,37 @@
    ]
   },
   {
+   "name": "_direct_source_unavailable_reason",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    1343,
+    1357
+   ],
+   "size": 15,
+   "body_lines": 12,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_download_sources_status",
+    "start_album_download"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_normalise_download_method",
+    "_spotiflac_status",
+    "_ytdlp_js_runtime_status",
+    "_ytdlp_source_requires_js"
+   ]
+  },
+  {
    "name": "_run_version_probe",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1257,
-    1258
+    1360,
+    1361
    ],
    "size": 2,
    "body_lines": 1,
@@ -12244,8 +12359,8 @@
    "name": "_js_runtime_available",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1261,
-    1266
+    1364,
+    1369
    ],
    "size": 6,
    "body_lines": 5,
@@ -12266,8 +12381,8 @@
    "name": "_cleanup_broken_managed_runtime",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1269,
-    1295
+    1372,
+    1398
    ],
    "size": 27,
    "body_lines": 26,
@@ -12287,8 +12402,8 @@
    "name": "_install_ytdlp",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1298,
-    1313
+    1401,
+    1416
    ],
    "size": 16,
    "body_lines": 15,
@@ -12308,8 +12423,8 @@
    "name": "_ytdlp_cookie_rejection_seen",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1316,
-    1321
+    1419,
+    1424
    ],
    "size": 6,
    "body_lines": 5,
@@ -12328,8 +12443,8 @@
    "name": "_ytdlp_netrc_machines",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1324,
-    1335
+    1427,
+    1438
    ],
    "size": 12,
    "body_lines": 11,
@@ -12348,8 +12463,8 @@
    "name": "_configured_ytdlp_cookie_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1338,
-    1346
+    1441,
+    1449
    ],
    "size": 9,
    "body_lines": 8,
@@ -12370,8 +12485,8 @@
    "name": "_ytdlp_auth_smoke_check",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1349,
-    1449
+    1452,
+    1552
    ],
    "size": 101,
    "body_lines": 99,
@@ -12402,8 +12517,8 @@
    "name": "_usable_ytdlp_cookie_auths_with_smoke",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1452,
-    1472
+    1555,
+    1575
    ],
    "size": 21,
    "body_lines": 20,
@@ -12426,8 +12541,8 @@
    "name": "_ytdlp_cookie_candidates",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1475,
-    1486
+    1578,
+    1589
    ],
    "size": 12,
    "body_lines": 11,
@@ -12446,8 +12561,8 @@
    "name": "_package_version",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1489,
-    1493
+    1592,
+    1596
    ],
    "size": 5,
    "body_lines": 4,
@@ -12469,8 +12584,8 @@
    "name": "_yt_dlp_install_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1496,
-    1512
+    1599,
+    1615
    ],
    "size": 17,
    "body_lines": 16,
@@ -12492,8 +12607,8 @@
    "name": "_ffmpeg_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1515,
-    1519
+    1618,
+    1622
    ],
    "size": 5,
    "body_lines": 4,
@@ -12515,8 +12630,8 @@
    "name": "_ytdlp_netrc_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1522,
-    1528
+    1625,
+    1631
    ],
    "size": 7,
    "body_lines": 6,
@@ -12538,8 +12653,8 @@
    "name": "_spotiflac_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1531,
-    1559
+    1634,
+    1662
    ],
    "size": 29,
    "body_lines": 28,
@@ -12549,9 +12664,10 @@
    "desired_owner": "backend/ytdlp_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_direct_source_unavailable_reason",
     "ytdlp_status"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": [
     "_package_version",
     "_spotiflac_input_sources",
@@ -12562,8 +12678,8 @@
    "name": "_spotiflac_services_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1562,
-    1566
+    1665,
+    1669
    ],
    "size": 5,
    "body_lines": 4,
@@ -12584,8 +12700,8 @@
    "name": "_ytdlp_po_provider_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1569,
-    1587
+    1672,
+    1690
    ],
    "size": 19,
    "body_lines": 18,
@@ -12595,17 +12711,18 @@
    "desired_owner": "backend/ytdlp_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_ytdlp_po_provider_usable",
     "_ytdlp_youtube_status"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": []
   },
   {
    "name": "_ytdlp_bgutil_plugin_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1590,
-    1596
+    1693,
+    1699
    ],
    "size": 7,
    "body_lines": 6,
@@ -12626,8 +12743,8 @@
    "name": "_ytdlp_youtube_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1599,
-    1621
+    1702,
+    1724
    ],
    "size": 23,
    "body_lines": 22,
@@ -12653,8 +12770,8 @@
    "name": "_redacted_ytdlp_auth_label",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1624,
-    1630
+    1727,
+    1733
    ],
    "size": 7,
    "body_lines": 6,
@@ -12675,8 +12792,8 @@
    "name": "_redacted_ytdlp_rejection",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1633,
-    1640
+    1736,
+    1743
    ],
    "size": 8,
    "body_lines": 7,
@@ -12697,8 +12814,8 @@
    "name": "_redacted_ytdlp_candidate_labels",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1643,
-    1645
+    1746,
+    1748
    ],
    "size": 3,
    "body_lines": 2,
@@ -25435,10 +25552,10 @@
    "module": "backend/acquisition_service.py",
    "lines": [
     100,
-    760
+    793
    ],
-   "size": 661,
-   "body_lines": 658,
+   "size": 694,
+   "body_lines": 691,
    "route": null,
    "mutation_capable": true,
    "domain": "ACQUISITION",
@@ -25458,6 +25575,7 @@
     "_artist_folder_name_without_mbid",
     "_build_folder_evidence",
     "_delete_staged_import_folder",
+    "_direct_source_unavailable_reason",
     "_download_dest_under",
     "_download_folder_segment",
     "_download_method_job_label",
@@ -25468,6 +25586,7 @@
     "_normalise_download_method",
     "_normalise_wanted_tracks",
     "_queue_folder_for_manual_review",
+    "_redact_security_text",
     "_resolve_album_release_for_import",
     "_s",
     "_slskd_cancel_queued_downloads",
@@ -25487,6 +25606,7 @@
     "_wanted_tracks_satisfied_by_names",
     "_ytdlp_album_download",
     "_ytdlp_missing_tracks_download",
+    "slskd_configured",
     "validated_downloads_root"
    ]
   },
@@ -25494,8 +25614,8 @@
    "name": "_validate_wanted_download_identity_before_import",
    "module": "backend/acquisition_service.py",
    "lines": [
-    763,
-    863
+    796,
+    896
    ],
    "size": 101,
    "body_lines": 96,
@@ -25524,8 +25644,8 @@
    "name": "_deno_download_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    866,
-    867
+    899,
+    900
    ],
    "size": 2,
    "body_lines": 1,
@@ -25542,8 +25662,8 @@
    "name": "_acq_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    872,
-    873
+    905,
+    906
    ],
    "size": 2,
    "body_lines": 1,
@@ -25565,8 +25685,8 @@
    "name": "_acq_display_year",
    "module": "backend/acquisition_service.py",
    "lines": [
-    876,
-    878
+    909,
+    911
    ],
    "size": 3,
    "body_lines": 2,
@@ -25588,8 +25708,8 @@
    "name": "_acq_release_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    881,
-    886
+    914,
+    919
    ],
    "size": 6,
    "body_lines": 5,
@@ -25612,8 +25732,8 @@
    "name": "_acq_release_identity",
    "module": "backend/acquisition_service.py",
    "lines": [
-    889,
-    898
+    922,
+    931
    ],
    "size": 10,
    "body_lines": 7,
@@ -25635,8 +25755,8 @@
    "name": "_acq_release_group_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    901,
-    905
+    934,
+    938
    ],
    "size": 5,
    "body_lines": 2,
@@ -25646,9 +25766,9 @@
    "desired_owner": "backend/acquisition_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_acq_fetch_lidarr_wanted",
     "_acq_item_mbid",
     "_build_acquisition_queue_payload",
+    "_lidarr_wanted_row",
     "start_album_download"
    ],
    "caller_count": 4,
@@ -25660,8 +25780,8 @@
    "name": "_acq_album_has_no_track_rows",
    "module": "backend/acquisition_service.py",
    "lines": [
-    908,
-    914
+    941,
+    947
    ],
    "size": 7,
    "body_lines": 6,
@@ -25684,8 +25804,8 @@
    "name": "_acq_expected_track_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    917,
-    930
+    950,
+    963
    ],
    "size": 14,
    "body_lines": 13,
@@ -25711,8 +25831,8 @@
    "name": "_acq_imported_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    933,
-    944
+    966,
+    977
    ],
    "size": 12,
    "body_lines": 11,
@@ -25737,8 +25857,8 @@
    "name": "_acq_track_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    947,
-    950
+    980,
+    983
    ],
    "size": 4,
    "body_lines": 3,
@@ -25759,8 +25879,8 @@
    "name": "_acq_is_extra_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    953,
-    963
+    986,
+    996
    ],
    "size": 11,
    "body_lines": 10,
@@ -25784,8 +25904,8 @@
    "name": "_acq_is_leftover_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    966,
-    975
+    999,
+    1008
    ],
    "size": 10,
    "body_lines": 9,
@@ -25809,8 +25929,8 @@
    "name": "_acq_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    978,
-    997
+    1011,
+    1030
    ],
    "size": 20,
    "body_lines": 19,
@@ -25836,8 +25956,8 @@
    "name": "_acq_health",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1000,
-    1048
+    1033,
+    1081
    ],
    "size": 49,
    "body_lines": 48,
@@ -25865,8 +25985,8 @@
    "name": "_acq_needs_acquisition",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1051,
-    1056
+    1084,
+    1089
    ],
    "size": 6,
    "body_lines": 4,
@@ -25889,8 +26009,8 @@
    "name": "_acq_locally_satisfies_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1059,
-    1070
+    1092,
+    1103
    ],
    "size": 12,
    "body_lines": 10,
@@ -25915,8 +26035,8 @@
    "name": "_acq_local_issue",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1073,
-    1080
+    1106,
+    1113
    ],
    "size": 8,
    "body_lines": 7,
@@ -25939,8 +26059,8 @@
    "name": "_lidarr_wanted_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1086,
-    1100
+    1122,
+    1136
    ],
    "size": 15,
    "body_lines": 13,
@@ -25950,20 +26070,87 @@
    "desired_owner": "backend/acquisition_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_acq_fetch_lidarr_wanted"
+    "fetch_lidarr_wanted"
    ],
    "caller_count": 1,
    "dependencies": []
   },
   {
+   "name": "_lidarr_wanted_page",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1139,
+    1155
+   ],
+   "size": 17,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "fetch_lidarr_wanted"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_lidarr_wanted_row",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1158,
+    1182
+   ],
+   "size": 25,
+   "body_lines": 21,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "fetch_lidarr_wanted"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_acq_release_group_url",
+    "_s"
+   ]
+  },
+  {
+   "name": "fetch_lidarr_wanted",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1185,
+    1234
+   ],
+   "size": 50,
+   "body_lines": 33,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_acq_fetch_lidarr_wanted"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_lidarr_wanted_error",
+    "_lidarr_wanted_page",
+    "_lidarr_wanted_row"
+   ]
+  },
+  {
    "name": "_acq_fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1103,
-    1154
+    1237,
+    1238
    ],
-   "size": 52,
-   "body_lines": 48,
+   "size": 2,
+   "body_lines": 1,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -25974,17 +26161,15 @@
    ],
    "caller_count": 1,
    "dependencies": [
-    "_acq_release_group_url",
-    "_lidarr_wanted_error",
-    "_s"
+    "fetch_lidarr_wanted"
    ]
   },
   {
    "name": "_acq_item_mbid",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1157,
-    1161
+    1241,
+    1245
    ],
    "size": 5,
    "body_lines": 4,
@@ -26010,8 +26195,8 @@
    "name": "_acq_can_import_disk",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1164,
-    1170
+    1248,
+    1254
    ],
    "size": 7,
    "body_lines": 6,
@@ -26033,8 +26218,8 @@
    "name": "_acq_can_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1173,
-    1187
+    1257,
+    1271
    ],
    "size": 15,
    "body_lines": 14,
@@ -26056,8 +26241,8 @@
    "name": "_acq_action_flags",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1190,
-    1212
+    1274,
+    1296
    ],
    "size": 23,
    "body_lines": 22,
@@ -26080,11 +26265,11 @@
    "name": "_build_acquisition_queue_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1215,
-    1339
+    1299,
+    1424
    ],
-   "size": 125,
-   "body_lines": 122,
+   "size": 126,
+   "body_lines": 123,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -26108,6 +26293,7 @@
     "_acq_release_identity",
     "_acq_release_text_key",
     "_acq_text_key",
+    "_download_sources_status",
     "_s",
     "get_library_payload",
     "health",
@@ -26115,11 +26301,35 @@
    ]
   },
   {
+   "name": "_download_sources_status",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1427,
+    1439
+   ],
+   "size": 13,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_build_acquisition_queue_payload"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_direct_source_unavailable_reason",
+    "_slskd_fallback_methods",
+    "slskd_configured"
+   ]
+  },
+  {
    "name": "_acq_download_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1345,
-    1367
+    1445,
+    1467
    ],
    "size": 23,
    "body_lines": 21,
@@ -26140,8 +26350,8 @@
    "name": "_acq_start_download_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1370,
-    1375
+    1470,
+    1475
    ],
    "size": 6,
    "body_lines": 5,
@@ -26164,8 +26374,8 @@
    "name": "_acq_start_import_disk_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1378,
-    1390
+    1478,
+    1490
    ],
    "size": 13,
    "body_lines": 12,
@@ -26187,8 +26397,8 @@
    "name": "_acq_trim_batch_log",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1393,
-    1399
+    1493,
+    1499
    ],
    "size": 7,
    "body_lines": 6,
@@ -26207,8 +26417,8 @@
    "name": "_acq_download_all_record",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1402,
-    1424
+    1502,
+    1524
    ],
    "size": 23,
    "body_lines": 15,
@@ -26227,8 +26437,8 @@
    "name": "_save_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1427,
-    1434
+    1527,
+    1534
    ],
    "size": 8,
    "body_lines": 7,
@@ -26247,8 +26457,8 @@
    "name": "_load_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1437,
-    1444
+    1537,
+    1544
    ],
    "size": 8,
    "body_lines": 7,
@@ -26267,8 +26477,8 @@
    "name": "_qbit_status_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1447,
-    1461
+    1547,
+    1561
    ],
    "size": 15,
    "body_lines": 14,
@@ -26288,8 +26498,8 @@
    "name": "_qbit_login_cookie",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1464,
-    1496
+    1564,
+    1596
    ],
    "size": 33,
    "body_lines": 32,
@@ -26308,8 +26518,8 @@
    "name": "_qbit_request_json",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1499,
-    1507
+    1599,
+    1607
    ],
    "size": 9,
    "body_lines": 7,
@@ -26328,8 +26538,8 @@
    "name": "_qbit_post",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1510,
-    1517
+    1610,
+    1617
    ],
    "size": 8,
    "body_lines": 7,
@@ -26348,8 +26558,8 @@
    "name": "_qbit_path_alias_pairs",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1520,
-    1530
+    1620,
+    1630
    ],
    "size": 11,
    "body_lines": 10,
@@ -26368,8 +26578,8 @@
    "name": "_qbit_map_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1533,
-    1548
+    1633,
+    1648
    ],
    "size": 16,
    "body_lines": 8,
@@ -26391,8 +26601,8 @@
    "name": "_qbit_allowed_repair_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1551,
-    1558
+    1651,
+    1658
    ],
    "size": 8,
    "body_lines": 7,
@@ -26413,8 +26623,8 @@
    "name": "_qbit_candidate_target_paths",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1561,
-    1595
+    1661,
+    1695
    ],
    "size": 35,
    "body_lines": 33,
@@ -26436,8 +26646,8 @@
    "name": "_library_file_candidates_for_qbit",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1598,
-    1644
+    1698,
+    1744
    ],
    "size": 47,
    "body_lines": 46,
@@ -26459,8 +26669,8 @@
    "name": "_qbit_scene_text",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1653,
-    1657
+    1753,
+    1757
    ],
    "size": 5,
    "body_lines": 4,
@@ -26482,8 +26692,8 @@
    "name": "_qbit_torrent_scene_artist_slug",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1660,
-    1662
+    1760,
+    1762
    ],
    "size": 3,
    "body_lines": 2,
@@ -26504,8 +26714,8 @@
    "name": "_qbit_torrent_album_guess",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1665,
-    1675
+    1765,
+    1775
    ],
    "size": 11,
    "body_lines": 10,
@@ -26527,8 +26737,8 @@
    "name": "_qbit_track_guess_from_scene_file",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1678,
-    1700
+    1778,
+    1800
    ],
    "size": 23,
    "body_lines": 22,
@@ -26551,8 +26761,8 @@
    "name": "_library_file_candidates_for_qbit_metadata",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1703,
-    1792
+    1803,
+    1892
    ],
    "size": 90,
    "body_lines": 87,
@@ -26579,8 +26789,8 @@
    "name": "_qbit_hardlink_public_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1810,
-    1824
+    1910,
+    1924
    ],
    "size": 15,
    "body_lines": 6,
@@ -26599,8 +26809,8 @@
    "name": "_qbit_hardlink_missing_impl",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1827,
-    2063
+    1927,
+    2163
    ],
    "size": 237,
    "body_lines": 231,
@@ -26629,8 +26839,8 @@
    "name": "_audio_files_under",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2066,
-    2075
+    2166,
+    2175
    ],
    "size": 10,
    "body_lines": 9,

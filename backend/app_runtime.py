@@ -412,9 +412,8 @@ YTDLP_REQUIRE_YOUTUBE_AUTH = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
-YTDLP_PO_PROVIDER_URL = os.environ.get(
-    "YTDLP_PO_PROVIDER_URL", "http://bgutil-provider:4416"
-).strip().rstrip("/")
+# Blank by default: the bgutil PO token sidecar is opt-in (ACQ-13).
+YTDLP_PO_PROVIDER_URL = os.environ.get("YTDLP_PO_PROVIDER_URL", "").strip().rstrip("/")
 
 
 YTDLP_ALLOW_BROWSER_COOKIES = os.environ.get(
