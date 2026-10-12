@@ -255,7 +255,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
 
         self._patch(patch_app_family(APP, "_preserve_torrent_source_path", return_value=False))
         self._patch(patch_app_family(APP, "_validate_import_source_audio", return_value=None))
-        self._patch(patch_app_family(APP, "_delete_if_already_in_library", return_value=None))
+        self._patch(patch_app_family(APP, "_delete_source_if_proven_in_library", return_value={"deleted": False}))
         self._patch(patch_app_family(APP, "_repair_album_mbid_sticking_once",
             side_effect=lambda *a, **k: self.call_order.append(("recording_id_repair",)) or {"changed": False},
         ))
