@@ -49,6 +49,7 @@ The project uses Semantic Versioning.
 ### Changed
 
 - Dependencies: eslint 10.12.0, jsdom 30.1.2, react-router 8.4.0, @tanstack/react-query 5.104.1, postcss 8.5.29.
+- Web UI follows the 0.4.0 API: job starts send an `Idempotency-Key` and follow an already-running job instead of erroring; interrupted jobs show "Recovery required"; imports point as-is refusals to the Review Queue; Playlists gets Sync All to Plex with failed, busy and pending (with reasons) results; AcoustID/MusicBrainz outages show "not checked", never "no match"; Library Changes offers Retry Rollback, shows restored/adopted counts, cancels orphaned library syncs and reports rejected settings; System shows the build revision; Torrent Repair shows qBittorrent login failures.
 - CI pulls stock Beets authenticated from GHCR with retries (#234), runs Python tests with faulthandler, and runs the frontend Vitest suite. The ARCH-002 caller audit no longer needs git; `Dockerfile.test` is the supported full-suite environment.
 ## v0.3.0 - 2026-10-11
 

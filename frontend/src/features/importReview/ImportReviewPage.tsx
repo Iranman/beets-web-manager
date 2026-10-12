@@ -63,7 +63,7 @@ import {
   blockedActionHint,
 } from './importReviewDecision';
 import type { MatchBucket, MatchConfidenceLevel, TrackRow, TargetPreviewState, SelectedMatch } from './importReviewDecision';
-import { MusicBrainzUnavailableNotice } from '../../components/MusicBrainzUnavailableNotice';
+import { MusicBrainzUnavailableNotice, acoustidNotCheckedText, fingerprintNotCheckedLabel } from '../../components/MusicBrainzUnavailableNotice';
 import type {
   AiSuggestResponse,
   AiSuggestion,
@@ -775,8 +775,21 @@ function localEvidenceForItem(item: ReviewItem, response?: AiSuggestResponse): R
     mb_trackid: current.mb_trackid || item.mb_trackid || '',
     mb_albumid: current.mb_albumid || item.mb_albumid || '',
     mb_releasegroupid: current.mb_releasegroupid || item.mb_releasegroupid || '',
-    fingerprint_status: current.fingerprint_status || evidence?.fingerprint?.status || evidence?.fingerprint?.acoustid_status || 'not checked',
+    fingerprint_status: fingerprintNotCheckedLabel(
+      current.fingerprint_status || evidence?.fingerprint?.status || evidence?.fingerprint?.acoustid_status,
+      evidence?.fingerprint?.unavailable_reason,
+    ) || current.fingerprint_status || evidence?.fingerprint?.status || evidence?.fingerprint?.acoustid_status || 'not checked',
   };
+}
+
+/** Why a Find Match result is "not checked" rather than "no match" (#252
+ * NF-4): a provider outage or missing key. '' when every source answered. */
+function notCheckedReason(response: { musicbrainz_unavailable?: boolean; acoustid_status?: string | null }): string {
+  const parts: string[] = [];
+  if (response.musicbrainz_unavailable) parts.push('MusicBrainz was unavailable.');
+  const acoustid = acoustidNotCheckedText(response.acoustid_status);
+  if (acoustid) parts.push(acoustid);
+  return parts.join(' ');
 }
 
 type RecordingCandidateMetric = {
@@ -2775,7 +2788,7 @@ export function ReviewCard({
               />
             ) : null}
             <TargetPathPreviewPanel state={targetPreviewState} />
-            <MusicBrainzUnavailableNotice show={suggestion?.musicbrainz_unavailable} />
+            <MusicBrainzUnavailableNotice show={suggestion?.musicbrainz_unavailable} acoustidStatus={suggestion?.acoustid_status} />
 
             {actionState?.message ? (
               <Alert severity={actionTone(actionState)} sx={{ mt: 2 }}>
@@ -3990,15 +4003,18 @@ export function ImportReviewPage({
         }
         const aiAvailable = s?.ai_available ?? response.ai_available;
         const aiReason = s?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
+        const notChecked = notCheckedReason(response);
         setAction(item.id, {
-          status: aiAvailable === false ? 'warning' : 'success',
+          status: aiAvailable === false || notChecked ? 'warning' : 'success',
           message: s?.reason || backendCandidate?.reason || (mbTrackId
             ? aiAvailable === false
               ? `Recording evidence ready. ${aiReason}`
               : 'Recording match evidence ready. Review the backend recording evidence before attaching.'
-            : aiAvailable === false
-              ? `No confident recording match found. ${aiReason}`
-              : 'No confident recording match found.'),
+            : notChecked
+              ? `Not checked: ${notChecked} This is not a "no match"; run Find Match again once the service is back.`
+              : aiAvailable === false
+                ? `No confident recording match found. ${aiReason}`
+                : 'No confident recording match found.'),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -4031,15 +4047,18 @@ export function ImportReviewPage({
       }
       const aiAvailable = suggestion?.ai_available ?? response.ai_available;
       const aiReason = suggestion?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
+      const notChecked = notCheckedReason(response);
       setAction(item.id, {
-        status: aiAvailable === false ? 'warning' : 'success',
+        status: aiAvailable === false || notChecked ? 'warning' : 'success',
         message: suggestion?.reason || (backendSelectedMatch
           ? aiAvailable === false
             ? `Matched using MusicBrainz and AcoustID. ${aiReason}`
             : 'Match ready. Verify the release-group ID before applying.'
-          : aiAvailable === false
-            ? `No verified MusicBrainz match was selected. ${aiReason}`
-            : 'Find Match completed. Verify the release-group ID before applying.'),
+          : notChecked
+            ? `Not checked: ${notChecked} This is not a "no match"; run Find Match again once the service is back.`
+            : aiAvailable === false
+              ? `No verified MusicBrainz match was selected. ${aiReason}`
+              : 'Find Match completed. Verify the release-group ID before applying.'),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

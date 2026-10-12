@@ -12,6 +12,18 @@ import type { QbitHardlinkRepairResult, QbitStatusResponse } from '../../api/typ
 import { LogViewer } from '../../components/LogViewer';
 import { useJobPoll } from '../../lib/hooks';
 
+/** The last qBittorrent call's failure, from the provider health record;
+ * '' when it succeeded or has not run. */
+export function qbitHealthProblem(outcome?: string | null): string {
+  if (outcome === 'authentication_error') {
+    return 'qBittorrent rejected the Web Manager login, so torrent lookups and repairs cannot run. Check QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD in the Web Manager environment, then reload this page.';
+  }
+  if (outcome === 'unavailable' || outcome === 'transient_error' || outcome === 'rate_limited') {
+    return `The last qBittorrent request failed (${outcome.replace(/_/g, ' ')}). Check that qBittorrent is running and QBITTORRENT_URL is reachable from Web Manager, then try again.`;
+  }
+  return '';
+}
+
 function metric(label: string, value: number, tone = 'text-zinc-100') {
   return (
     <div key={label} className="rounded border border-graphite-800 bg-graphite-950/70 px-3 py-3">
@@ -181,6 +193,11 @@ export function TorrentRepairPanel() {
       {!configured ? (
         <Alert severity="warning">
           qBittorrent URL is missing from the Beets container environment.
+        </Alert>
+      ) : null}
+      {configured && qbitHealthProblem(status?.health?.last_outcome) ? (
+        <Alert severity={status?.health?.last_outcome === 'authentication_error' ? 'error' : 'warning'}>
+          {qbitHealthProblem(status?.health?.last_outcome)}
         </Alert>
       ) : null}
 

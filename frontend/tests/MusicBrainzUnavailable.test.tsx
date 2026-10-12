@@ -47,6 +47,11 @@ describe('musicbrainz_unavailable notice (#252 NF-4)', () => {
     renderCard({ ok: true, musicbrainz_unavailable: false });
     expect(screen.queryByText(MUSICBRAINZ_UNAVAILABLE_TEXT)).toBeNull();
   });
+
+  it('shows an AcoustID not-checked notice for a failing acoustid_status', () => {
+    renderCard({ ok: true, acoustid_status: 'not_configured', acoustid_unavailable: true });
+    expect(screen.getByRole('status').textContent).toMatch(/fingerprints were not checked/);
+  });
 });
 
 describe('provider 503 {ok:false, error, unavailable:true}', () => {

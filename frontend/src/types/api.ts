@@ -80,6 +80,10 @@ export interface Job {
   result?: Record<string, unknown>;
   result_summary?: JobResultSummary;
   state?: JobState;
+  /** Set when a restart stopped this job; it is never re-run (status
+   * recovery_required for mutating jobs, failed for read-only ones). */
+  interrupted?: boolean;
+  recovery?: { interrupted_at?: number; last_heartbeat_at?: number; checkpoint?: unknown } | null;
 }
 
 export interface JobListResponse {
