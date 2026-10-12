@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, ARTIST_IMAGE_CACHE_DIR, ART_REPAIR_LAST_FILE, METADATA_CACHE_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, _s, _up, _ur
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _redact_security_text
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError
+from backend.config_manager import get_config_path
 import backend.composite_workflows as composite_workflows
 from backend.transaction_engine import _sniff_unsupported_image_format
 
@@ -19,8 +20,10 @@ from backend.transaction_engine import _sniff_unsupported_image_format
 
 
 def _beets_config_discogs_token() -> str:
-    cfg_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
     try:
+        # BEETSDIR containment, like every other config.yaml reader: a
+        # BEETS_CONFIG pointing elsewhere is never read (#239 / #183).
+        cfg_path = get_config_path()
         in_discogs = False
         discogs_indent = 0
         for raw in cfg_path.read_text(encoding="utf-8", errors="ignore").splitlines():

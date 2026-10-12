@@ -1,5 +1,6 @@
 """Job management routes — registered on app after app.py initializes."""
 import hashlib
+import hmac
 import os
 import re
 import time
@@ -49,8 +50,14 @@ _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:\-]{8,128}$")
 
 def _request_fingerprint() -> str:
     """What makes two requests the same operation: method, path, query and
-    body (JSON/raw bytes, form fields, uploaded file names)."""
-    digest = hashlib.sha256()
+    body (JSON/raw bytes, form fields, uploaded file names).
+
+    It is persisted in the job record, so it is an HMAC keyed per install
+    (derived from the Flask secret key, which lives in the data dir or
+    BEETS_WEB_SECRET_KEY), never a bare sha256: a low-entropy secret in a
+    request body cannot be confirmed offline from the job files (#351 N1)."""
+    install_key = hmac.new(str(app.secret_key or "").encode("utf-8"), b"job-request-fingerprint", hashlib.sha256).digest()
+    digest = hmac.new(install_key, digestmod=hashlib.sha256)
     for part in (request.method, request.path, request.query_string.decode("latin-1")):
         digest.update(part.encode("utf-8", "replace") + b"\0")
     for key, value in sorted(request.form.items(multi=True)):
