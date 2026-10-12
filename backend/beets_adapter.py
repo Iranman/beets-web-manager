@@ -496,7 +496,7 @@ class BeetsAdapter:
         # Stock Beets' QueryConverter splits the decoded URL on "/" and turns
         # "\\" back into os.sep, so a "/" inside a term must travel as "\\"
         # (%2F is decoded before the split and never matched a path query).
-        encoded = "/".join(urllib.parse.quote(t.replace("/", "\\"), safe="") for t in terms)
+        encoded = "/".join(urllib.parse.quote("\\".join(t.split("/")), safe="") for t in terms)
         return f"/{entity}/query/{encoded}"
 
     def get_items(self, query: Optional[Union[str, List[str]]] = None) -> List[Dict[str, Any]]:
