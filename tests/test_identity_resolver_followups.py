@@ -164,6 +164,41 @@ class ProviderOutageReportingTests(unittest.TestCase):
         self.assertIsNotNone(self._track_candidates(ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[])))
 
 
+class EvidenceFingerprintStatusTests(unittest.TestCase):
+    """QA D11: AcoustID not checked is "unavailable" in the evidence packet,
+    never "no_result"; a real empty answer stays "no_result"."""
+
+    def test_album_and_folder_packet(self):
+        import backend.ai_service as ai
+        fp = ai._ai_match_evidence_packet("fresh_import", acoustid_status="not_configured")["fingerprint"]
+        self.assertEqual((fp["status"], fp["unavailable_reason"]), ("unavailable", "not_configured"))
+        self.assertEqual(ai._ai_match_evidence_packet("fresh_import")["fingerprint"]["status"], "no_result")
+
+    def test_track_packet(self):
+        import backend.ai_service as ai
+
+        def packet(status):
+            return ai._track_ai_evidence_packet(
+                1, filename="a.mp3", current={}, search_title="t", search_artist="a", suggestions={},
+                selected_candidate=None, candidates=[], acoustid_candidates=[], discogs_candidates=[],
+                acoustid_status=status)
+        ev = packet("auth_failed")
+        self.assertEqual(ev["fingerprint"]["status"], "unavailable")
+        self.assertEqual(ev["fingerprint"]["acoustid_status"], "unavailable")
+        self.assertEqual(ev["validation"]["fingerprint_status"], "unavailable")
+        self.assertEqual(packet("")["fingerprint"]["status"], "no_result")
+
+    def test_suggest_routes_pass_the_status(self):
+        import inspect
+        import backend.ai_service as ai
+        import routes_library
+        for fn in (ai._ai_suggest_album_internal, ai._ai_suggest_folder_internal):
+            src = inspect.getsource(fn)
+            self.assertEqual(src.count("_ai_match_evidence_packet("), src.count("acoustid_status=acoustid_status,"),
+                             fn.__name__)
+        self.assertIn("acoustid_status=acoustid_status,", inspect.getsource(routes_library))
+
+
 class AcoustIDUnavailableReviewReasonTests(unittest.TestCase):
     """#303: review stays the outcome without fingerprint evidence, but the
     reason says how to resolve it."""

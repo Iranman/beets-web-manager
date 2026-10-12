@@ -222,7 +222,7 @@ class ApiImportRouteTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual((opts["copy"], opts["move"]), (True, False))
 
-    def test_fallback_defaults_to_skip_and_asis_only_on_request(self):
+    def test_fallback_is_always_skip_and_asis_goes_to_review(self):
         res, opts = self._post(False)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(opts["quiet_fallback"], "skip")
@@ -230,8 +230,16 @@ class ApiImportRouteTests(unittest.TestCase):
                          [{"path": "/downloads/A/Unmatched", "status": "not matched; left in place for review",
                            "reason": "not_matched"}])
         self.assertTrue(any("not matched; left in place for review" in line for line in self.logs))
-        _, opts = self._post(False, fallback="asis")
-        self.assertEqual(opts["quiet_fallback"], "asis")
+        # QA D3: an as-is import would put an album with no verified
+        # identity (blank artist/album) in the library; it is skipped instead
+        # and the unmatched folder is recorded for the Review Queue.
+        self.logs = []
+        res, opts = self._post(False, fallback="asis")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(opts["quiet_fallback"], "skip")
+        self.assertTrue(self.job_result["asis_refused"])
+        self.assertEqual(self.job_result["not_matched"][0]["status"], "not matched; left in place for review")
+        self.assertTrue(any("Import as-is is not allowed" in line for line in self.logs))
 
     def test_preserved_torrent_source_move_is_refused(self):
         res, opts = self._post(True, move=True)

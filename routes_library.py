@@ -1193,6 +1193,7 @@ def ai_suggest(iid):
             candidates=mb_candidates,
             acoustid_candidates=acoustid_cands,
             discogs_candidates=discogs_cands,
+            acoustid_status=acoustid_status,
         )
         suggestions["ai_available"] = ai_available
         suggestions["ai_unavailable_reason"] = ai_unavailable_reason

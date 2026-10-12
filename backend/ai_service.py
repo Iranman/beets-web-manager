@@ -122,7 +122,8 @@ def _ai_match_evidence_packet(use_case: str, *, folder_path: str = "",
                               candidates: Optional[List[Dict[str, Any]]] = None,
                               preflight: Optional[Dict[str, Any]] = None,
                               wanted_tracks: Optional[List[Dict[str, Any]]] = None,
-                              reason: str = "") -> Dict[str, Any]:
+                              reason: str = "",
+                              acoustid_status: str = "") -> Dict[str, Any]:
     """Compact, JSON-safe evidence for Review UI and decision history."""
     suggestion = suggestion or {}
     folder_evidence = folder_evidence or {}
@@ -154,7 +155,10 @@ def _ai_match_evidence_packet(use_case: str, *, folder_path: str = "",
         "top_candidates": top_candidates,
         "preflight": _compact_preflight(preflight),
         "fingerprint": {
-            "status": "matched" if preflight and int(preflight.get("acoustid_target_hits") or 0) else "no_result",
+            # QA D11: not checked (acoustid_status set) is "unavailable", never "no_result".
+            "status": ("matched" if preflight and int(preflight.get("acoustid_target_hits") or 0)
+                       else "unavailable" if acoustid_status else "no_result"),
+            "unavailable_reason": acoustid_status,
             "acoustid_mismatch": bool((preflight or {}).get("acoustid_mismatch")),
             "target_hits": int((preflight or {}).get("acoustid_target_hits") or 0),
             "top_release": _s((preflight or {}).get("acoustid_top_release") or ""),
@@ -311,14 +315,16 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
                               selected_candidate: Optional[Dict[str, Any]],
                               candidates: List[Dict[str, Any]],
                               acoustid_candidates: List[Dict[str, Any]],
-                              discogs_candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+                              discogs_candidates: List[Dict[str, Any]],
+                              acoustid_status: str = "") -> Dict[str, Any]:
     mb_trackid = _s(suggestions.get("mb_trackid", "")).strip().lower()
     try:
         selected_index = int((selected_candidate or {}).get("candidate_index", -1))
     except Exception:
         selected_index = -1
     top_acoustid = acoustid_candidates[0] if acoustid_candidates else {}
-    fingerprint_status = "matched" if acoustid_candidates else "no_result"
+    # QA D11: not checked (acoustid_status set) is "unavailable", never "no_result".
+    fingerprint_status = "matched" if acoustid_candidates else "unavailable" if acoustid_status else "no_result"
     return {
         "use_case": "track_retag",
         "created_at": int(time.time()),
@@ -352,7 +358,8 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
         },
         "fingerprint": {
             "status": fingerprint_status,
-            "acoustid_status": "candidate" if acoustid_candidates else "no_result",
+            "acoustid_status": "candidate" if acoustid_candidates else fingerprint_status,
+            "unavailable_reason": acoustid_status,
             "score": _audio_identity_score(top_acoustid) if top_acoustid else 0.0,
             "acoustid_id": _s(top_acoustid.get("acoustid_id") or "") if top_acoustid else "",
             "mb_trackid": _s(top_acoustid.get("mb_trackid") or "") if top_acoustid else "",
@@ -502,6 +509,7 @@ def _ai_suggest_album_internal(
                 + urllib.parse.urlencode({"query": album.albumartist, "type": "artist"}))
         evidence = _ai_match_evidence_packet(
             "light_confirm",
+            acoustid_status=acoustid_status,
             folder_path=album_dir,
             suggestion=sug,
             folder_evidence=album_ev,
@@ -711,6 +719,7 @@ def _ai_suggest_album_internal(
         sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
             "light_confirm",
+            acoustid_status=acoustid_status,
             folder_path=album_dir,
             suggestion=sug,
             folder_evidence=album_ev,
@@ -1131,6 +1140,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                     )
                 evidence = _ai_match_evidence_packet(
                     "fresh_import",
+                    acoustid_status=acoustid_status,
                     folder_path=folder_path,
                     suggestion=sug,
                     folder_evidence=ev,
@@ -1184,6 +1194,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         }
         evidence = _ai_match_evidence_packet(
             "fresh_import",
+            acoustid_status=acoustid_status,
             folder_path=folder_path,
             suggestion=sug,
             folder_evidence=ev,
@@ -1434,6 +1445,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
             "fresh_import",
+            acoustid_status=acoustid_status,
             folder_path=folder_path,
             suggestion=sug,
             folder_evidence=ev,
