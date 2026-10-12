@@ -441,7 +441,13 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """
     payload    = payload_in
     aldir      = payload.get("aldir", "").strip()
-    mb_albumid = payload.get("mb_albumid", "").strip()
+    mb_albumid = _s(payload.get("mb_albumid")).strip()
+    if not mb_albumid:
+        # #264 / #260 QA-2: a Release Group alone is accepted; the resolver
+        # then picks a Release inside that group only (fail closed).
+        rgid = _extract_mb_uuid(_s(payload.get("mb_releasegroupid")).strip())
+        if rgid:
+            mb_albumid = f"https://musicbrainz.org/release-group/{rgid}"
     manual_mbid_override = bool(
         payload.get("manual_mbid_override")
         or payload.get("force_mbid")
@@ -2548,7 +2554,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if input_looks_like_release_group:
             log_start = len(log)
             resolved_release = _resolve_album_release_for_import(
-                mb_albumid,
+                # #264: the URL form takes the fail-closed release-group branch
+                # directly; a bare UUID could be mistaken for a Release ID.
+                f"https://musicbrainz.org/release-group/{selected_releasegroupid}",
                 Path(folder_path).parent.name,
                 Path(folder_path).name,
                 "",

@@ -293,6 +293,9 @@ def _folder_import_track_count(source_folder: str, existing_album_id: int = 0) -
     return 0
 
 
+_RG_ALTERNATIVE_RELEASE_CAP = 25
+
+
 def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                                       year: str, track_count: int, log: list,
                                       source_folder: str = "",
@@ -403,7 +406,12 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
         ]
         if rank_track_count:
             others.sort(key=lambda c: abs(int(c.get("track_count") or 0) - rank_track_count))
-        # ponytail: one tracklist fetch per release; very large groups are slow (MB rate limit).
+        # #264: one tracklist fetch per release, so the loop is capped. The
+        # resolver has no cancel_event; the cap bounds the work instead.
+        if len(others) > _RG_ALTERNATIVE_RELEASE_CAP:
+            log.append(f"  Release group {rgid} has {len(others)} other releases; checking the "
+                       f"{_RG_ALTERNATIVE_RELEASE_CAP} closest by track count.")
+            others = others[:_RG_ALTERNATIVE_RELEASE_CAP]
         for cand in others:
             accepted = _source_accepts_release(
                 cand["mb_albumid"], "Release-group alternative release")
@@ -467,7 +475,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             return _accept_from_release_group(provided_rg, resolved, first_checked=True)
         elif resolved and _MB_UUID_RE.match(resolved):
             rg_resolved = _resolve_release_group_to_release(
-                resolved, log, year=year, track_count=track_count)
+                resolved, log, year=year, track_count=rank_track_count)
             if rg_resolved:
                 return _accept_from_release_group(resolved, rg_resolved)
             log.append(f"  WARN: {resolved} did not resolve to a release with tracks")
@@ -477,11 +485,19 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                    "release group; Manual Review is required.")
         return ""
 
+    if not source_folder:
+        # #261 F-6: a text search alone never sets identity. Without a folder
+        # there is no tracklist or fingerprint evidence to check a candidate
+        # against, so the top search hit would be a guess.
+        log.append("  REFUSED: no source folder to verify a MusicBrainz search result against; "
+                   "a text match alone never sets album identity. Manual Review is required.")
+        return ""
+
     log.append("  Searching MusicBrainz for a release ID…")
     album_only_pool_loaded = False
     cands = _mb_release_search(album, artist, limit=6, year=year,
                                track_count=rank_track_count, log=log)
-    if not cands and source_folder and artist:
+    if not cands and artist:
         log.append(
             "  No artist-scoped MusicBrainz candidates found; "
             "trying album title without artist…"
@@ -489,8 +505,6 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
         cands = _mb_release_search(album, "", limit=12, year=year,
                                    track_count=rank_track_count, log=log)
         album_only_pool_loaded = True
-    if not cands and not source_folder:
-        return ""
 
     if source_folder:
         scored_cands: List[tuple] = []
@@ -594,14 +608,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             "  No MusicBrainz search candidate matched the folder tracklist; "
             "manual Review is required."
         )
-        return ""
-
-    best = cands[0]
-    mbid = (best.get("mb_albumid") or "").strip().lower()
-    if mbid:
-        log.append(f"  MusicBrainz release selected: {best.get('artist','?')} – "
-                   f"{best.get('album','?')} {best.get('year','')} [{mbid}]")
-    return mbid
+    return ""
 
 
 def _app_managed_download_path(path: Path) -> bool:
