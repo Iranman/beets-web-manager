@@ -101,6 +101,14 @@ Intended direction:
 - Converge matching entry points on one shared result contract containing local metadata, candidate identities, release-group ID, optional release ID, recording IDs, AcoustID evidence, tracklist evidence, duration evidence, filename/tag evidence, AI availability/contribution, confidence, conflicts, warnings, explanation, and action eligibility.
 - Keep AI as an optional contributor, never the source of truth.
 
+Identity evidence floors (enforced today; tests in `tests/test_identity_evidence_floors.py` and `tests/test_identity_resolver_followups.py`):
+
+- A provider that did not answer (no key, rejected key, outage, rate limit, `fpcalc` missing) is reported as *not checked*, never as "no match". AcoustID callers that must tell the two apart use `_acoustid_lookup_cached_outcome` or `_acoustid_hits_or_none` (`None` = not checked, `[]` = answered with no result); suggestion responses carry `acoustid_status` (`not_configured` / `auth_failed` / `lookup_failed` / empty), `acoustid_unavailable` and `musicbrainz_unavailable`.
+- Merging an imported missing-track fill into an existing album needs an AcoustID confirmation of the requested recording for every file. A weak, ambiguous, unanswered or empty lookup, a MusicBrainz failure, or a file with no requested track sends the album to Review with its rows kept; nothing is deleted.
+- When the AcoustID top tier names both the requested recording and a different one, the result is review (`acoustid_ambiguous`), not a mismatch.
+- The import/reimport resolver (`library_service._resolve_album_release_for_import`) never sets album identity from a MusicBrainz text search alone: without a source folder to verify against it refuses, and a folder-backed search result must pass the folder preflight (`action_allowed`). A Release Group input is checked against at most `_RG_ALTERNATIVE_RELEASE_CAP` (25) of its Releases closest by track count, and a failed Release Group lookup fails closed.
+- `release_selected_by_operator` is passed only where the operator picked a Release that may move the album to another Release Group (manual match); paths that already verified the Release is in the album's own Release Group do not pass it.
+
 ## Mutation Lifecycle
 
 Existing mutation mechanisms include:

@@ -108,6 +108,11 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **Check**: the error and the provider row on the System page name the exact entry that would admit it, for example `add 192.168.1.20:32400 to BEETS_OUTBOUND_ALLOWLIST or set PLEX_URL to it`. The Web Manager log has a `blocked outbound request ...` line with the host and port (never credentials or query strings).
 * **Fix**: set the service's URL (`PLEX_URL`, `LIDARR_URL`, `SLSKD_URL`, `QBITTORRENT_URL`, `YTDLP_PO_PROVIDER_URL`, `AI_BASE_URL`) to the exact address the app should call, or add the named `host:port` to `BEETS_OUTBOUND_ALLOWLIST` in the Compose `.env`/`environment:` and recreate the container. The allowlist is operator-only and cannot be changed from the System page. Cloud-metadata, link-local, unspecified, multicast and reserved addresses are refused even when listed, and a catch-all CIDR such as `0.0.0.0/0` is ignored (logged at startup). See CONFIGURATION, *Operator-only settings*.
 
+### 15a. An import, missing-track fill or match went to Review with "AcoustID not configured" or "fingerprints were not checked"
+* **Cause**: Web Manager acts on album identity only with deterministic evidence. When AcoustID has no key, rejects the key, is unreachable or rate limited, or `fpcalc` is missing, the tracks are *not checked*, which is not the same as a match. A Release Group match backed only by titles and durations, and any missing-track fill that would be merged into an existing album, then goes to Review instead of being applied. A MusicBrainz text search without a folder to compare against never sets album identity either.
+* **Check**: the job log or candidate reason says `acoustid_unavailable`, `AcoustID not configured: set ACOUSTID_API_KEY`, or `AcoustID lookup failed (...); fingerprints were not checked`. Suggestion responses show `acoustid_status` (`not_configured`, `auth_failed` or `lookup_failed`) and `musicbrainz_unavailable`.
+* **Fix**: set `ACOUSTID_API_KEY` (see CONFIGURATION), make sure `fpcalc` is present, and re-check the item; or confirm the match yourself in Review. Until then, a missing-track fill stays as a separate album row in the same Release Group; nothing is deleted.
+
 ---
 
 ## Operational Diagnostics
