@@ -13,12 +13,15 @@ except ImportError:  # pragma: no cover
 os.environ['BEETS_WEB_AUTH_DISABLED'] = '1'
 import app as app_module
 from backend.beets_adapter import BeetsUnavailableError, BeetsError
+from backend.app_runtime import jobs as app_jobs
+from tests._job_threads import join_jobs
 
 
 class JobsPageEndpointsTestCase(unittest.TestCase):
     def setUp(self):
         self.app = app_module.app
         self.client = self.app.test_client()
+        self.addCleanup(join_jobs, app_jobs)  # the start endpoints run real jobs (#234)
 
     def test_jobs_list_endpoint_authenticated(self):
         res = self.client.get('/api/jobs', headers={'X-Beets-CSRF': '1'})

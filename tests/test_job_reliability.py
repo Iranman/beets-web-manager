@@ -14,6 +14,7 @@ from unittest import mock
 
 import job_engine
 from job_engine import DuplicateJobError, IdempotencyKeyReuseError, JobStore
+from tests._job_threads import join_jobs
 from tests.test_staging_mutation_hardening import _RouteEnv
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,8 +72,9 @@ class RequestScopeDuplicateTests(unittest.TestCase):
 
     def setUp(self):
         self.go = threading.Event()
-        self.addCleanup(self.go.set)
         self.store = JobStore()
+        self.addCleanup(self.store.close)  # runs after go.set: joins the released jobs
+        self.addCleanup(self.go.set)
 
     def _blocking(self, log):
         self.go.wait(5)
@@ -204,13 +206,18 @@ class RestartTruthfulnessTests(unittest.TestCase):
             store.close()
             rec = json.loads((Path(d) / f"{job.job_id}.json").read_text(encoding="utf-8"))
             self.assertEqual(rec["status"], "failed")
-            self.assertEqual(JobStore(d).get(job.job_id).status, "failed")
+            reloaded = JobStore(d)
+            self.addCleanup(reloaded.close)
+            self.assertEqual(reloaded.get(job.job_id).status, "failed")
 
 
 class DoneCallbackTests(unittest.TestCase):
     def test_called_once_on_finish_and_at_once_when_already_done(self):
         go, seen = threading.Event(), []
-        job = JobStore().start_python(lambda log: go.wait(5), label="x")
+        store = JobStore()
+        self.addCleanup(store.close)
+        self.addCleanup(go.set)
+        job = store.start_python(lambda log: go.wait(5), label="x")
         job.add_done_callback(lambda j: seen.append(("late", j.status)))
         job.add_done_callback(lambda j: 1 / 0)  # a failing callback harms nothing
         with self.assertLogs("app.job_engine", "ERROR"):
@@ -273,6 +280,8 @@ class JobRouteDuplicateStartTests(_RouteEnv):
         p = mock.patch.object(routes_cleanup, "_clean_remove_orphaned_items", fake)
         p.start()
         self.addCleanup(p.stop)
+        from backend.app_runtime import jobs
+        self.addCleanup(join_jobs, jobs)  # after go.set: joins the released jobs
         self.addCleanup(self.go.set)
 
     def _job(self, job_id):

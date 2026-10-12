@@ -19,11 +19,18 @@ def _wait(job, timeout=5.0):
         time.sleep(0.01)
 
 
+def _store(test):
+    """A store whose job threads are joined when ``test`` ends (#234)."""
+    store = JobStore()
+    test.addCleanup(store.close)
+    return store
+
+
 class FailedResultTests(unittest.TestCase):
     """BA-3: a job that returns {"ok": False} did not succeed."""
 
     def test_ok_false_result_is_failed(self):
-        job = JobStore().start_python(lambda log: {"ok": False, "error": "engine refused"}, label="x")
+        job = _store(self).start_python(lambda log: {"ok": False, "error": "engine refused"}, label="x")
         _wait(job)
         self.assertEqual((job.status, job.returncode), ("failed", 1))
         self.assertEqual(job.result, {"ok": False, "error": "engine refused"})
@@ -31,7 +38,7 @@ class FailedResultTests(unittest.TestCase):
 
     def test_other_results_still_succeed(self):
         for result in ({"ok": True}, {"n": 1}, None, [1], {"ok": None}):
-            job = JobStore().start_python(lambda log, r=result: r, label="x")
+            job = _store(self).start_python(lambda log, r=result: r, label="x")
             _wait(job)
             self.assertEqual(job.status, "success", result)
 
@@ -43,7 +50,7 @@ class FailedResultTests(unittest.TestCase):
             if cancel.is_set():  # it sees the request and stops (D4: only then is it cancelled)
                 return {"ok": False}
             return {"ok": True}
-        job = JobStore().start_python(body, label="x")
+        job = _store(self).start_python(body, label="x")
         job.kill()
         go.set()
         _wait(job)
@@ -59,8 +66,8 @@ class DuplicateStartTests(unittest.TestCase):
 
     def setUp(self):
         self.go = threading.Event()
+        self.store = _store(self)  # closed after go.set releases its jobs
         self.addCleanup(self.go.set)
-        self.store = JobStore()
 
     def _blocking(self, log):
         self.go.wait(5)
@@ -116,7 +123,7 @@ class ThreadStartFailureTests(unittest.TestCase):
     """#229: a job whose thread cannot start is failed, not running forever."""
 
     def test_start_failure_marks_job_failed(self):
-        store = JobStore()
+        store = _store(self)
         with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
             with self.assertRaises(RuntimeError):
                 store.start_python(lambda log: None, label="x")
@@ -198,7 +205,7 @@ class TransactionHookTests(_RouteEnv):
 
     def test_duplicate_maps_to_409(self):
         import app as app_module
-        job = JobStore().start_python(lambda log: None, label="x")
+        job = _store(self).start_python(lambda log: None, label="x")
         with app_module.app.test_request_context():
             resp = app_module.app.make_response(app_module.app.handle_user_exception(DuplicateJobError(job)))
         self.assertEqual(resp.status_code, 409)

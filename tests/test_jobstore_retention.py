@@ -15,8 +15,13 @@ def wait_done(job, timeout=2.0):
 
 
 class JobStoreRetentionTests(unittest.TestCase):
-    def test_python_job_exposes_structured_state_without_breaking_result(self):
+    def _store(self):
         jobs = JobStore()
+        self.addCleanup(jobs.close)  # joins the job threads (#234)
+        return jobs
+
+    def test_python_job_exposes_structured_state_without_breaking_result(self):
+        jobs = self._store()
 
         def run(log, cancel_event, update_state):
             update_state({
@@ -54,7 +59,7 @@ class JobStoreRetentionTests(unittest.TestCase):
         self.assertIn("duration_seconds", payload["state"])
 
     def test_legacy_python_job_without_structured_state_still_works(self):
-        jobs = JobStore()
+        jobs = self._store()
         job = jobs.start_python(lambda log: log.append("legacy complete"), label="legacy")
         wait_done(job)
 
@@ -64,7 +69,7 @@ class JobStoreRetentionTests(unittest.TestCase):
         self.assertNotIn("state", payload)
 
     def test_python_job_compact_payload_omits_large_result(self):
-        jobs = JobStore()
+        jobs = self._store()
 
         def run(log):
             log.append("done")
@@ -90,7 +95,7 @@ class JobStoreRetentionTests(unittest.TestCase):
         self.assertEqual(len(detail["result"]["issues"]), 50)
         self.assertEqual(detail["log"], ["done"])
     def test_prune_finished_preserves_recent_metadata_and_running_jobs(self):
-        jobs = JobStore()
+        jobs = self._store()
         release_running = threading.Event()
 
         old_plain = jobs.start_python(lambda log: log.append("old"), label="old plain")
@@ -130,7 +135,7 @@ class JobStoreRetentionTests(unittest.TestCase):
             release_running.set()
 
     def test_clear_finished_still_removes_all_finished_jobs(self):
-        jobs = JobStore()
+        jobs = self._store()
         done = jobs.start_python(lambda log: log.append("done"), label="done")
         running_gate = threading.Event()
         running = jobs.start_python(
