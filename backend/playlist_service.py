@@ -3254,15 +3254,34 @@ def _playlist_web_manager_names() -> List[str]:
     return names
 
 
+def _playlist_legacy_open_dir(folder: Path) -> Optional[int]:
+    """The legacy folder opened O_DIRECTORY|O_NOFOLLOW (#364 F1): its listing
+    and every file open go through this descriptor, so the folder cannot be
+    swapped for a symlink after the symlink check. OSError if it is one now;
+    None where the platform has no dir_fd support (the path is used then)."""
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+            and os.open in os.supports_dir_fd and os.scandir in os.supports_fd):
+        return None
+    return os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
 def _playlist_legacy_read_text(path: Path) -> str:
     """Text of a local playlist file, checked on the open descriptor (#351
     N3): opened O_NOFOLLOW|O_NONBLOCK first, then it must be a regular file
     no bigger than ``_PLAYLIST_LEGACY_MAX_BYTES`` -- no check-then-read gap
-    a symlink or FIFO swapped in between could slip through."""
+    a symlink or FIFO swapped in between could slip through. A file of the
+    legacy folder is opened relative to that folder's no-follow descriptor."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not nofollow and path.is_symlink():  # platforms without O_NOFOLLOW
         raise ValueError("playlist file is a symlink")
-    fd = os.open(str(path), os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    legacy = PLAYLIST_LEGACY_IMPORT_DIR
+    dir_fd = _playlist_legacy_open_dir(path.parent) if legacy is not None and path.parent == Path(legacy) else None
+    try:
+        fd = os.open(path.name if dir_fd is not None else str(path), flags, dir_fd=dir_fd)
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
     with os.fdopen(fd, "rb") as fh:
         st = os.fstat(fh.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_size > _PLAYLIST_LEGACY_MAX_BYTES:
@@ -3316,21 +3335,28 @@ def _playlist_legacy_files() -> List[Path]:
                 continue
             if not folder.is_dir():
                 continue
-            count = 0
-            for p in folder.iterdir():
-                if p.name.startswith(".") or p.is_symlink() or not p.is_file():
-                    continue
-                if p.suffix.lower() == ".m3u":
-                    if own and _PLAYLIST_EXPORT_STEM_RE.search(p.stem):
-                        continue
-                elif own or not p.name.endswith(".playlist.json"):
-                    continue
-                if count >= _PLAYLIST_LEGACY_MAX_FILES:
-                    _app_logger.warning("Playlist folder has more than %d playlist files; the rest are ignored",
-                                        _PLAYLIST_LEGACY_MAX_FILES)
-                    break
-                count += 1
-                found.append(p)
+            dir_fd = None if own else _playlist_legacy_open_dir(folder)
+            try:
+                count = 0
+                with os.scandir(folder if dir_fd is None else dir_fd) as entries:
+                    for entry in entries:
+                        if entry.name.startswith(".") or not entry.is_file(follow_symlinks=False):
+                            continue
+                        p = folder / entry.name
+                        if p.suffix.lower() == ".m3u":
+                            if own and _PLAYLIST_EXPORT_STEM_RE.search(p.stem):
+                                continue
+                        elif own or not p.name.endswith(".playlist.json"):
+                            continue
+                        if count >= _PLAYLIST_LEGACY_MAX_FILES:
+                            _app_logger.warning("Playlist folder has more than %d playlist files; the rest are ignored",
+                                                _PLAYLIST_LEGACY_MAX_FILES)
+                            break
+                        count += 1
+                        found.append(p)
+            finally:
+                if dir_fd is not None:
+                    os.close(dir_fd)
         except OSError as exc:
             _app_logger.warning("Playlist folder is unreadable: %s", type(exc).__name__)
     # .playlist.json first: it also holds the tracks not in the library.
