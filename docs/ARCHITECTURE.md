@@ -137,7 +137,7 @@ Every import is Beets' own importer run inside stock Beets by the `webmanager` p
 
 | Route | Composite | Beets equivalent |
 |---|---|---|
-| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback` = the request's `fallback` (`skip` default; `asis` only when the caller sends it), `--search-id` = the optional `search_id` |
+| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback: skip` always (a request with `fallback: asis` is run as `skip` and reports `asis_refused`, so an album with no verified identity is left in place for the Review Queue, never imported with blank or placeholder tags), `--search-id` = the optional `search_id` |
 | `POST /api/folders/import-with-id` | `plan_confirmed_import()` / `apply_confirmed_import()` | `beet import -q --search-id <mb_albumid>` with `quiet_fallback: skip` |
 | `POST /api/albums/reimport-disk` | same confirmed-import family | same; a folder inside the library is imported in place (no copy, no move) |
 
