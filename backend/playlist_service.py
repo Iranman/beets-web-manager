@@ -2638,7 +2638,17 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                     and not bool(plex.get("path_mapping_verified"))
                     and match_ratio < PLEX_SYNC_MIN_MATCH_RATIO
                 )
-                if mapping_failed:
+                if mapping_failed and match_details.get("timed_out"):
+                    # A slow Plex, not a path problem: don't send the user to path mapping.
+                    plex["issue_reason"] = "Plex did not answer in time"
+                    plex["error"] = (
+                        "Plex did not answer within its time limit; existing Plex playlist left unchanged. "
+                        "Retry when Plex is less busy, or raise PLEX_INDEX_TIMEOUT."
+                    )
+                    plex["status"] = "failed"
+                    if log is not None:
+                        log.append(f"  [plex] {plex['error']}")
+                elif mapping_failed:
                     plex["issue_reason"] = "path mapping not verified"
                     plex["action_needed"] = (
                         f"Check path mapping: {plex.get('path_mapping_used') or (str(MUSIC_ROOT) + ' -> (none)')}"

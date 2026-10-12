@@ -1325,7 +1325,7 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
         )
         log.append(
             f"  [plex] Playlist track count: {len(items)}; Plex indexed track count: "
-            f"{details['index_tracks']}"
+            f"{'unavailable (index not loaded)' if index_error else details['index_tracks']}"
         )
         log.append(
             f"  [plex] Matched {len(keys)}/{len(items)} "

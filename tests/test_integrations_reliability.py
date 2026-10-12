@@ -343,7 +343,7 @@ class PlexPlaylistReplaceTests(unittest.TestCase):
     ITEMS = [{"id": i, "artist": "A", "title": f"T{i}", "path": f"/music/a/{i}.flac"} for i in (1, 2, 3)]
     KEYS = ["11", "12", "13"]
 
-    def _sync(self, fake, manifest, keys=None):
+    def _sync(self, fake, manifest, keys=None, details=None):
         stored = {}
 
         def replace_manifest(name, m):
@@ -365,8 +365,9 @@ class PlexPlaylistReplaceTests(unittest.TestCase):
             "_plex_settings": mock.Mock(return_value=dict(_PLEX_SETTINGS)),
             "_plex_find_music_section": mock.Mock(return_value=("machine", "3", "Music")),
             "_plex_track_keys_for_items": mock.Mock(return_value=(
-                list(keys or self.KEYS), {"matched_track_ids": [], "pending_plex_count": 0,
-                                          "path_mapping_verified": True})),
+                list(self.KEYS if keys is None else keys),
+                details or {"matched_track_ids": [], "pending_plex_count": 0,
+                            "path_mapping_verified": True})),
             "_plex_request": fake.request,
             "PLEX_PLAYLIST_CHUNK_SIZE": 1,
         }
@@ -382,6 +383,20 @@ class PlexPlaylistReplaceTests(unittest.TestCase):
         self.assertEqual(plex["issue_reason"], "Plex did not answer in time")
         self.assertEqual([c for c in fake.calls if c[0] == "POST"], [("POST", "/playlists")])
         self.assertEqual(fake.playlists, {})
+
+    def test_index_timeout_is_not_reported_as_a_path_mapping_problem(self):  # #339 QA NB-A
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11"]}})
+        plex, _ = self._sync(fake, {"last_plex": {"rating_key": "100"}}, keys=[],
+                             details={"pending_plex_count": 3, "path_mapping_verified": False, "timed_out": 1})
+        self.assertEqual(plex["status"], "failed")
+        self.assertEqual(plex["issue_reason"], "Plex did not answer in time")
+        self.assertNotIn("path mapping", plex["error"].lower())
+        self.assertEqual(fake.keys("100"), ["11"])
+        self.assertEqual([c for c in fake.calls if c[0] != "GET"], [])
+        # Without a timeout the same evidence still points at path mapping.
+        plex, _ = self._sync(_FakePlex(), {}, keys=[],
+                             details={"pending_plex_count": 3, "path_mapping_verified": False})
+        self.assertEqual(plex["issue_reason"], "path mapping not verified")
 
     def test_failed_append_keeps_the_playlist_and_its_identity(self):  # IA-16
         fake = _FakePlex({"100": {"title": "Mix", "items": ["11"]}}, fail_put=http_error(500))
