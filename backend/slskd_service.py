@@ -1010,11 +1010,13 @@ def _slskd_wait_downloads(username: str, remote_files: list, log: list,
                     files = [root]
                 elif root.is_dir():
                     files = [
-                        f for f in root.rglob("*")
-                        if f.is_file() and f.suffix.lower() in AUDIO_EXT
+                        f for f in _slskd_bounded_walk(root, max(5.0, deadline - time.time()), cancel_event)
+                        if f.suffix.lower() in AUDIO_EXT
                     ]
                 else:
                     continue
+            except RuntimeError:
+                raise  # "cancelled"
             except Exception:
                 continue
             for f in files:
