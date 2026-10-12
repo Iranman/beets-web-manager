@@ -450,6 +450,38 @@ class FixMetadataRouteTests(_RouteEnvBase):
         self.assertNotIn("initiating_user", tx["metadata"])
 
 
+class MergeDuplicateAlbumRouteTests(_RouteEnvBase):
+    """D18: the route runs the album-row merge transaction (plan/approve/
+    apply/rollback) and records no wrapper row claiming rollback is
+    unavailable; the job result names the merge transaction."""
+
+    def test_route_uses_the_merge_family_and_no_wrapper_row(self):
+        import routes_cleanup
+        album = {"id": 1, "albumartist": "A", "album": "B", "year": 2000, "mb_albumid": "", "mb_releasegroupid": ""}
+        started = {}
+
+        def start_python(fn, label="", metadata=None):
+            started.update(fn=fn, metadata=metadata)
+            return mock.Mock(job_id="job1")
+        merge = mock.Mock(return_value={"ok": True, "moved": 2, "operation_id": "txn_1_mergeabc",
+                                        "retired_album_ids": [2]})
+        cwm = routes_cleanup.composite_workflows
+        with mock.patch.object(cwm, "get_album", side_effect=lambda i: {**album, "id": i}), \
+                mock.patch.object(cwm, "find_all_items_by_album_id", return_value=[]), \
+                mock.patch.object(routes_cleanup, "_library_duplicate_merge_safety",
+                                  return_value={"merge_safe": True, "merge_target_album_id": 1}), \
+                mock.patch.object(cwm, "merge_duplicate_albums", merge), \
+                mock.patch.object(routes_cleanup.jobs, "start_python", side_effect=start_python), \
+                mock.patch.object(routes_cleanup, "_invalidate_lib_cache"):
+            res = self.client.post("/api/clean/merge-duplicate-album",
+                                   json={"target_album_id": 1, "source_album_id": 2})
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertIs(started["metadata"]["transaction"], False)
+            out = started["fn"]([])
+        merge.assert_called_once_with(1, 2)
+        self.assertEqual(out["transaction_id"], "txn_1_mergeabc")
+
+
 class AlbumArtDeleteTests(_Engine):
     """D10: deleting the cover removes the file (kept in the engine's
     quarantine), clears artpath, reports what it removed, and rolls back."""
