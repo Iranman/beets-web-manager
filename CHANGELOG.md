@@ -9,6 +9,16 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - TrueNAS rollout script: the online library identity digest now hashes item paths relative to the library directory Beets reports in `/webmanager/status`. Before, an engine restart that moved from plugin 1.15.0 to 1.16.0, which serves Beets 2.14 item paths as absolute paths, failed with "library identity digest changed across the engine restart" even though the library had not changed. A real path change still changes the digest. This applies to the pre/post-deploy, engine-restart and offline stop/start comparisons.
+- Jobs that wait on a child job (imports, downloads, Clean All's artwork and genre steps, replacements): a cancel or timeout no longer abandons a child that may be in the middle of a Beets operation. The parent asks the child to stop and waits up to 5 minutes for its real outcome (#317). The parent's transaction is Cancelled only when the child stopped before reporting a library change; Failed (partially applied) when the child finished or reported a change first; Recovery Required when the child was still running. A timed-out child that then finishes is used as a success. Read-only children (scans) are still stopped at once.
+- A Running transaction of a mutation family this version does not know (a removed family, or one cut off before it recorded evidence) is moved to Recovery Required by the startup sweep instead of staying Running for good (#266).
+- The album move rollback log names the folders the tracks are back in as absolute paths, also for moves planned before 0.4.0 (#328 F9).
+- Staging moves re-check the source's identity right before the directory rename and before the file's old name is unlinked, so a source swapped in between is refused, not moved or deleted (#351 N4).
+- Jobs whose label contains "Artist" (or "repair", "maintenance") are no longer recorded as Artwork Update or AI Suggestion transactions (#325 F5).
+- The Music Format Preferences rejection message no longer says files were "handled according to settings" when they were left in place, and names why they were kept (#325 F3).
+
+### Added
+
+- `GET /api/transactions/<id>` returns `cancel: {allowed, mode, code, reason}`, from the same rule as `POST /api/transactions/<id>/cancel` (#356).
 
 ## v0.4.0 - 2026-10-12
 

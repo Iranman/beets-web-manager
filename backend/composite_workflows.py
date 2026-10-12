@@ -613,17 +613,31 @@ def _rename_noreplace(s_fd: int, s_name: str, d_fd: int, d_name: str, expected: 
     check (#230 S-3/N1). A file is hard-linked (EEXIST if taken) then its old
     name unlinked; where links are unavailable it is copied with O_EXCL. A
     directory is renamed over an empty one made here with exclusive mkdir, so
-    a planted entry makes the move fail instead of being replaced."""
+    a planted entry makes the move fail instead of being replaced.
+
+    Both branches re-check the source's identity right before acting on its
+    name (#351 N4); a source swapped in between is refused, not moved or
+    unlinked. ponytail: POSIX has no rename/unlink-by-inode, so a swap in the
+    microseconds between that check and the call remains (needs write access
+    inside staging; it can only move or unlink an entry inside staging)."""
+    def source_unchanged() -> bool:
+        try:
+            return _same_entry(expected, os.stat(s_name, dir_fd=s_fd, follow_symlinks=False))
+        except FileNotFoundError:
+            return False
+
     if stat.S_ISDIR(expected.st_mode):
         os.mkdir(d_name, dir_fd=d_fd)  # FileExistsError: something is there
         try:
+            if not source_unchanged():
+                raise ValueError("Source changed since validation; nothing was moved.")
             os.rename(s_name, d_name, src_dir_fd=s_fd, dst_dir_fd=d_fd)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             try:
                 os.rmdir(d_name, dir_fd=d_fd)  # only ever our own empty placeholder
             except OSError:
                 pass
-            if exc.errno == errno.EXDEV:
+            if getattr(exc, "errno", None) == errno.EXDEV:
                 raise ValueError("Refusing a cross-filesystem move of a directory; nothing was moved.") from exc
             raise
         return
@@ -635,7 +649,10 @@ def _rename_noreplace(s_fd: int, s_name: str, d_fd: int, d_name: str, expected: 
             return
         raise
     try:
-        if not _same_entry(expected, os.stat(d_name, dir_fd=d_fd, follow_symlinks=False)):
+        if not _same_entry(expected, os.stat(d_name, dir_fd=d_fd, follow_symlinks=False)) \
+                or not source_unchanged():
+            # The old name no longer holds the moved file: unlinking it would
+            # remove some other entry, so drop our link and leave both alone.
             raise ValueError("Source changed since validation; nothing was moved.")
     except BaseException:
         os.unlink(d_name, dir_fd=d_fd)
@@ -3476,6 +3493,15 @@ def album_relocation_unchanged(ad: BeetsAdapter, meta: Dict[str, Any]) -> bool:
             and all(os.path.isfile(p) for p in files))
 
 
+def _rollback_folders(live: Optional[Dict[str, Any]], before: Dict[str, Any]) -> List[str]:
+    """The folders the tracks are in after a rollback, as absolute paths
+    (#328 F9): read from live Beets (the adapter makes them absolute), not the
+    plan, which older records hold relative to the library directory."""
+    if live and live.get("items"):
+        return sorted({os.path.dirname(p) for p in live["items"].values() if p})
+    return list(before.get("folders") or [])
+
+
 def rollback_album_relocation(
     operation_id: str,
     adapter: Optional[BeetsAdapter] = None,
@@ -3566,7 +3592,7 @@ def rollback_album_relocation(
             metadata={"rollback_result": result, "rollback_request": {**request_meta, "outcome": "succeeded"}},
             append_logs=[f"Moved {result.get('restored_items', 0) - (result.get('adopted_items') or 0) - (result.get('repointed_items') or 0)} "
                   f"tracks of album {aid} back to "
-                  f"{', '.join(meta['before'].get('folders') or []) or '(unknown)'}"
+                  f"{', '.join(_rollback_folders(live, meta['before'])) or '(unknown)'}"
                   + ("; cover restored" if result.get("restored_art") else "")]
                  + ([f"{result['adopted_items']} track(s) were already back after an interrupted rollback "
                      "(size and mtime matched); their rows were updated without moving anything"]

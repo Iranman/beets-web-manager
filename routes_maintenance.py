@@ -19,7 +19,7 @@ from backend.transaction_engine import validated_settings
 from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
-from backend.transaction_service import _start_metadata_apply_transaction, _sync_transactions_from_jobs
+from backend.transaction_service import CANCELLABLE_STATUSES, _start_metadata_apply_transaction, _sync_transactions_from_jobs, transaction_cancel_eligibility
 from backend.cleanup_service import album_cleanup_apply_response, controlled_apply_error, controlled_rollback_error
 from backend.playlist_service import playlist_sync_status_payload
 from app import app  # noqa: E402  (route modules load after app.py defines app)
@@ -737,6 +737,7 @@ def api_transaction_detail(transaction_id):
             limit=_transaction_int_arg("limit", 100, 1, 1000),
         )
         tx.setdefault("rollback", {}).update(_rollback_fields(tx))
+        tx["cancel"] = transaction_cancel_eligibility(tx)  # #356
         return jsonify({"ok": True, "transaction": tx})
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
@@ -780,21 +781,20 @@ def api_transaction_cancel(transaction_id):
     # Compare-and-set (#187 F-6): only a not-yet-started transaction can be
     # cancelled, so a cancel racing an apply never overwrites its outcome.
     try:
-        for expected in ("Pending", "Preview", "Approved"):
+        for expected in CANCELLABLE_STATUSES:
             tx = transactions.transition(transaction_id, expected, "Cancelled")
             if tx is not None:
                 return jsonify({"ok": True, "transaction": tx})
         tx = transactions.get(transaction_id)
-        current = tx.get("status")
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
-    meta = tx.get("metadata") or {}
-    if (meta.get("mutation_family") == composite_workflows.MBSYNC_LIBRARY_FAMILY
-            and meta.get("engine_operation_id") and current in ("Running", "Recovery Required")):
-        return _cancel_engine_mbsync(transaction_id, str(meta["engine_operation_id"]))
+    # One rule with the detail payload's "cancel" field (#356).
+    eligibility = transaction_cancel_eligibility(tx)
+    if eligibility["mode"] == "engine":
+        return _cancel_engine_mbsync(transaction_id, eligibility["engine_operation_id"])
     return jsonify({"ok": False, "code": "not_cancellable",
-                    "error": f"Only a Pending, Preview or Approved transaction can be cancelled "
-                             f"(this one is {current})."}), 409
+                    "error": eligibility["reason"] if not eligibility["allowed"]
+                    else "The transaction changed while it was being cancelled; try again."}), 409
 
 
 def _cancel_engine_mbsync(transaction_id: str, engine_op: str):
