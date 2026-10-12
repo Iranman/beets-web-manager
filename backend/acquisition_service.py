@@ -114,7 +114,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     forced_albumartist = _artist_folder_name_without_mbid(data.get("albumartist") or artist).strip()
     raw_fallback_method = data.get("fallback_method")
     fallback_method = _normalise_download_method(raw_fallback_method, "") if raw_fallback_method else ""
-    source_fallback_methods = _slskd_fallback_methods(fallback_method)
+    source_fallback_methods = _slskd_fallback_methods()
     try_source_fallback = (
         (raw_fallback_method is not None and fallback_method in {"soundcloud", "spotiflac", "ytdlp"})
         or bool(data.get("try_ytdlp_fallback"))
@@ -1206,6 +1206,7 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
     earlier_passes = 0
     for monitored in ((True, False) if include_unmonitored else (True,)):
         page, pages, total = 1, 1, 0
+        prev_total: Optional[int] = None
         while page <= pages:
             if cancel is not None and cancel():
                 return [], LIDARR_WANTED_CANCELLED
@@ -1214,6 +1215,12 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
                 pages = -(-total // _LIDARR_WANTED_PAGE_SIZE)
                 if pages > _LIDARR_WANTED_MAX_PAGES:
                     raise ValueError("wanted/missing has too many pages")
+                # A short page is only legitimate when the list changed under
+                # us (totalRecords moved); otherwise rows would silently go missing.
+                expected = min(_LIDARR_WANTED_PAGE_SIZE, total - (page - 1) * _LIDARR_WANTED_PAGE_SIZE)
+                if len(records) < expected and prev_total in (None, total):
+                    raise ValueError("wanted/missing page is short of totalRecords")
+                prev_total = total
             except Exception as exc:
                 reason = _lidarr_wanted_error(exc)
                 _app_logger.warning("Lidarr wanted-list fetch failed: %s (%s)", reason, type(exc).__name__)
@@ -1461,7 +1468,6 @@ def _acq_download_payload(item: Dict[str, Any], method: str,
     if track_count:
         payload["track_count"] = track_count
     if method == "slskd" and try_source_fallback:
-        payload["fallback_method"] = "spotiflac"
         payload["try_ytdlp_fallback"] = True
         payload["try_source_fallback"] = True
     return payload

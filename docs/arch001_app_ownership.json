@@ -7159,9 +7159,9 @@
    "module": "backend/slskd_service.py",
    "lines": [
     1223,
-    1232
+    1235
    ],
-   "size": 10,
+   "size": 13,
    "body_lines": 9,
    "route": null,
    "mutation_capable": false,
@@ -7182,8 +7182,8 @@
    "name": "_strip_track_filename_id_suffix",
    "module": "backend/slskd_service.py",
    "lines": [
-    1235,
-    1240
+    1238,
+    1243
    ],
    "size": 6,
    "body_lines": 5,
@@ -26123,10 +26123,10 @@
    "module": "backend/acquisition_service.py",
    "lines": [
     1185,
-    1234
+    1241
    ],
-   "size": 50,
-   "body_lines": 33,
+   "size": 57,
+   "body_lines": 40,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -26146,8 +26146,8 @@
    "name": "_acq_fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1237,
-    1238
+    1244,
+    1245
    ],
    "size": 2,
    "body_lines": 1,
@@ -26168,8 +26168,8 @@
    "name": "_acq_item_mbid",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1241,
-    1245
+    1248,
+    1252
    ],
    "size": 5,
    "body_lines": 4,
@@ -26195,8 +26195,8 @@
    "name": "_acq_can_import_disk",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1248,
-    1254
+    1255,
+    1261
    ],
    "size": 7,
    "body_lines": 6,
@@ -26218,8 +26218,8 @@
    "name": "_acq_can_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1257,
-    1271
+    1264,
+    1278
    ],
    "size": 15,
    "body_lines": 14,
@@ -26241,8 +26241,8 @@
    "name": "_acq_action_flags",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1274,
-    1296
+    1281,
+    1303
    ],
    "size": 23,
    "body_lines": 22,
@@ -26265,8 +26265,8 @@
    "name": "_build_acquisition_queue_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1299,
-    1424
+    1306,
+    1431
    ],
    "size": 126,
    "body_lines": 123,
@@ -26304,8 +26304,8 @@
    "name": "_download_sources_status",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1427,
-    1439
+    1434,
+    1446
    ],
    "size": 13,
    "body_lines": 10,
@@ -26328,11 +26328,11 @@
    "name": "_acq_download_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1445,
-    1467
+    1452,
+    1473
    ],
-   "size": 23,
-   "body_lines": 21,
+   "size": 22,
+   "body_lines": 20,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -26350,8 +26350,8 @@
    "name": "_acq_start_download_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1470,
-    1475
+    1476,
+    1481
    ],
    "size": 6,
    "body_lines": 5,
@@ -26374,8 +26374,8 @@
    "name": "_acq_start_import_disk_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1478,
-    1490
+    1484,
+    1496
    ],
    "size": 13,
    "body_lines": 12,
@@ -26397,8 +26397,8 @@
    "name": "_acq_trim_batch_log",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1493,
-    1499
+    1499,
+    1505
    ],
    "size": 7,
    "body_lines": 6,
@@ -26417,8 +26417,8 @@
    "name": "_acq_download_all_record",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1502,
-    1524
+    1508,
+    1530
    ],
    "size": 23,
    "body_lines": 15,
@@ -26437,8 +26437,8 @@
    "name": "_save_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1527,
-    1534
+    1533,
+    1540
    ],
    "size": 8,
    "body_lines": 7,
@@ -26457,8 +26457,8 @@
    "name": "_load_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1537,
-    1544
+    1543,
+    1550
    ],
    "size": 8,
    "body_lines": 7,
@@ -26477,8 +26477,8 @@
    "name": "_qbit_status_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1547,
-    1561
+    1553,
+    1567
    ],
    "size": 15,
    "body_lines": 14,
@@ -26498,8 +26498,8 @@
    "name": "_qbit_login_cookie",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1564,
-    1596
+    1570,
+    1602
    ],
    "size": 33,
    "body_lines": 32,
@@ -26518,8 +26518,8 @@
    "name": "_qbit_request_json",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1599,
-    1607
+    1605,
+    1613
    ],
    "size": 9,
    "body_lines": 7,
@@ -26538,8 +26538,8 @@
    "name": "_qbit_post",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1610,
-    1617
+    1616,
+    1623
    ],
    "size": 8,
    "body_lines": 7,
@@ -26558,8 +26558,8 @@
    "name": "_qbit_path_alias_pairs",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1620,
-    1630
+    1626,
+    1636
    ],
    "size": 11,
    "body_lines": 10,
@@ -26578,8 +26578,8 @@
    "name": "_qbit_map_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1633,
-    1648
+    1639,
+    1654
    ],
    "size": 16,
    "body_lines": 8,
@@ -26601,8 +26601,8 @@
    "name": "_qbit_allowed_repair_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1651,
-    1658
+    1657,
+    1664
    ],
    "size": 8,
    "body_lines": 7,
@@ -26623,8 +26623,8 @@
    "name": "_qbit_candidate_target_paths",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1661,
-    1695
+    1667,
+    1701
    ],
    "size": 35,
    "body_lines": 33,
@@ -26646,8 +26646,8 @@
    "name": "_library_file_candidates_for_qbit",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1698,
-    1744
+    1704,
+    1750
    ],
    "size": 47,
    "body_lines": 46,
@@ -26669,8 +26669,8 @@
    "name": "_qbit_scene_text",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1753,
-    1757
+    1759,
+    1763
    ],
    "size": 5,
    "body_lines": 4,
@@ -26692,8 +26692,8 @@
    "name": "_qbit_torrent_scene_artist_slug",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1760,
-    1762
+    1766,
+    1768
    ],
    "size": 3,
    "body_lines": 2,
@@ -26714,8 +26714,8 @@
    "name": "_qbit_torrent_album_guess",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1765,
-    1775
+    1771,
+    1781
    ],
    "size": 11,
    "body_lines": 10,
@@ -26737,8 +26737,8 @@
    "name": "_qbit_track_guess_from_scene_file",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1778,
-    1800
+    1784,
+    1806
    ],
    "size": 23,
    "body_lines": 22,
@@ -26761,8 +26761,8 @@
    "name": "_library_file_candidates_for_qbit_metadata",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1803,
-    1892
+    1809,
+    1898
    ],
    "size": 90,
    "body_lines": 87,
@@ -26789,8 +26789,8 @@
    "name": "_qbit_hardlink_public_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1910,
-    1924
+    1916,
+    1930
    ],
    "size": 15,
    "body_lines": 6,
@@ -26809,8 +26809,8 @@
    "name": "_qbit_hardlink_missing_impl",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1927,
-    2163
+    1933,
+    2169
    ],
    "size": 237,
    "body_lines": 231,
@@ -26839,8 +26839,8 @@
    "name": "_audio_files_under",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2166,
-    2175
+    2172,
+    2181
    ],
    "size": 10,
    "body_lines": 9,
@@ -27088,10 +27088,10 @@
    "module": "backend/replacement_service.py",
    "lines": [
     291,
-    320
+    319
    ],
-   "size": 30,
-   "body_lines": 29,
+   "size": 29,
+   "body_lines": 28,
    "route": null,
    "mutation_capable": false,
    "domain": "REPLACEMENT",
@@ -27109,8 +27109,8 @@
    "name": "_music_format_find_verified_replacement",
    "module": "backend/replacement_service.py",
    "lines": [
-    323,
-    424
+    322,
+    423
    ],
    "size": 102,
    "body_lines": 101,
@@ -27135,8 +27135,8 @@
    "name": "_music_format_replacement_matching_contract",
    "module": "backend/replacement_service.py",
    "lines": [
-    427,
-    452
+    426,
+    451
    ],
    "size": 26,
    "body_lines": 11,
@@ -27155,8 +27155,8 @@
    "name": "_music_format_remove_original_after_replacement",
    "module": "backend/replacement_service.py",
    "lines": [
-    455,
-    492
+    454,
+    491
    ],
    "size": 38,
    "body_lines": 27,
@@ -27177,8 +27177,8 @@
    "name": "_music_format_replace_rows",
    "module": "backend/replacement_service.py",
    "lines": [
-    495,
-    634
+    494,
+    633
    ],
    "size": 140,
    "body_lines": 138,
@@ -27213,8 +27213,8 @@
    "name": "_replacement_destination_check",
    "module": "backend/replacement_service.py",
    "lines": [
-    637,
-    671
+    636,
+    670
    ],
    "size": 35,
    "body_lines": 23,

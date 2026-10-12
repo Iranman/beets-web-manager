@@ -1220,9 +1220,12 @@ def _download_method_list(value: str) -> List[str]:
     return methods
 
 
-def _slskd_fallback_methods(requested: str = "") -> List[str]:
+def _slskd_fallback_methods() -> List[str]:
+    """The direct-source chain is operator configuration (SLSKD_FALLBACK_METHODS)
+    only. A request may turn the fallback on, never add or reorder sources
+    (SpotiFLAC stays opt-in, ACQ-12)."""
     methods: List[str] = []
-    for method in [requested] + _download_method_list(_SLSKD_FALLBACK_METHODS):
+    for method in _download_method_list(_SLSKD_FALLBACK_METHODS):
         method = _normalise_download_method(method, "")
         if method in {"spotiflac", "ytdlp", "soundcloud"} and method not in methods:
             methods.append(method)

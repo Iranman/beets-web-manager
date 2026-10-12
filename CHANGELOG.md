@@ -9,7 +9,7 @@ The project uses Semantic Versioning.
 ### Upgrade Notes
 
 - `YTDLP_PO_PROVIDER_URL` is now blank by default, so the bgutil PO token provider is used only when you set it (`docker-compose.full.yml` still sets it for its sidecar).
-- SpotiFLAC is no longer in the default slskd fallback chain (now `ytdlp,soundcloud`). To keep using it, add `spotiflac` to `SLSKD_FALLBACK_METHODS` and install its CLI.
+- SpotiFLAC is no longer in the default slskd fallback chain (now `ytdlp,soundcloud`), and a download request (Find Music, Download All, track replacement) can no longer add it: the chain is exactly `SLSKD_FALLBACK_METHODS`. To keep using SpotiFLAC, list `spotiflac` there and install its CLI. Track replacement now uses a direct-source fallback only when its "try an alternate source" setting is on.
 
 ### Fixed
 
@@ -19,7 +19,7 @@ The project uses Semantic Versioning.
 - A configured PO token provider that is blocked by the outbound policy or unreachable no longer fails YouTube downloads. They continue without PO tokens, and a warning is logged.
 - SoundCloud missing-track downloads now try up to five search results in order. Results whose length is more than 10% off the MusicBrainz length are skipped, as are clips of 45 s or less (previews), and DRM-protected results. Identity verification after download is unchanged.
 - yt-dlp per-chunk `[download] x%` progress lines are no longer written to the job log (0% and 100% are kept), so a long download keeps the start of the job in the saved log.
-- The Lidarr wanted list is read in pages of 1000 until `totalRecords` is covered, de-duplicated by Lidarr album id, with a 60 s timeout per page and one retry after a timeout or 5xx. Large wanted lists no longer time out after 10 s per 100-album page. A failed page still means no list, never a partial one.
+- The Lidarr wanted list is read in pages of 1000 until `totalRecords` is covered, de-duplicated by Lidarr album id, with a 60 s timeout per page and one retry after a timeout or 5xx. Large wanted lists no longer time out after 10 s per 100-album page. A failed page, or a page shorter than `totalRecords` promises while `totalRecords` has not changed, still means no list, never a partial one.
 
 ### Changed
 

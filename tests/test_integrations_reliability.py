@@ -597,6 +597,24 @@ class LidarrWantedTests(_BoundaryCase):
         self.assertEqual(self._fetch([_wanted_page(full, total=1500)] + [socket.timeout("slow")] * 2),
                          ([], "Could not reach Lidarr"))
 
+    def test_short_page_with_unchanged_total_is_not_complete(self):  # QA F4
+        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        more = [dict(_WANTED, id=i) for i in range(1001, 2001)]
+        self.assertEqual(self._fetch([_wanted_page(full, total=2500), _wanted_page([], total=2500)]),
+                         ([], "Lidarr returned an unexpected response"))
+        # Final page short of what totalRecords promises is just as incomplete.
+        self.assertEqual(self._fetch([_wanted_page(full, total=2500), _wanted_page(more, total=2500),
+                                      _wanted_page([], total=2500)]),
+                         ([], "Lidarr returned an unexpected response"))
+        # A short first page contradicting its own totalRecords too.
+        self.assertEqual(self._fetch([_wanted_page([_WANTED], total=5)]),
+                         ([], "Lidarr returned an unexpected response"))
+
+    def test_short_page_is_accepted_when_total_records_moved(self):  # QA F4
+        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        rows, error = self._fetch([_wanted_page(full, total=1500), _wanted_page([], total=1000)])
+        self.assertEqual((len(rows), error), (1000, ""))
+
     def test_missing_total_records_is_malformed(self):  # ACQ-9: paging needs it
         self.assertEqual(self._fetch([_Resp({"records": [_WANTED]})]),
                          ([], "Lidarr returned an unexpected response"))

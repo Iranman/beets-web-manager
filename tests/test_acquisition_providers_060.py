@@ -14,16 +14,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-acq = rt = slskd = yts = OutboundPolicyError = None
+acq = rt = replacement = slskd = yts = OutboundPolicyError = None
 
 
 def setUpModule():
     # Deferred to run time: this module sorts before test_ai_batch_retry_race,
     # which must be the first to import app (at collection, in its temp env).
-    global acq, rt, slskd, yts, OutboundPolicyError
+    global acq, rt, replacement, slskd, yts, OutboundPolicyError
     import app  # noqa: F401  -- loads the module family in order
     import backend.acquisition_service as acq
     import backend.app_runtime as rt
+    import backend.replacement_service as replacement
     import backend.slskd_service as slskd
     import backend.ytdlp_service as yts
     from backend.security import OutboundPolicyError
@@ -158,24 +159,59 @@ class FallbackChainTests(_AcquisitionJobCase):  # ACQ-5, ACQ-12
                 mock.patch.object(acq, "_slskd_search_and_queue", side_effect=RuntimeError("slskd x timed out")), \
                 mock.patch.object(acq, "_direct_source_unavailable_reason",
                                   side_effect=lambda m: reasons[m]) as availability:
-            self._start(fallback_method="spotiflac")
+            with mock.patch.object(slskd, "_SLSKD_FALLBACK_METHODS", "spotiflac,ytdlp,soundcloud"):
+                self._start(try_source_fallback=True)
             _result, log, error = self._run_job()
         self.assertIn("[fallback] Skipped SpotiFLAC: SpotiFLAC CLI is not installed (SPOTIFLAC_CMD)", log)
         self.assertEqual(self.direct_calls, ["ytdlp", "soundcloud"])
         self.assertEqual(availability.call_count, 3)
         self.assertIn("YouTube: no audio; SoundCloud: no audio", error)
 
+    def _metadata(self, payload):
+        self.jobs.start_python.reset_mock()
+        with mock.patch.object(slskd, "SLSKD_API_KEY", "k"):
+            self._start(**payload)
+        return self.jobs.start_python.call_args.kwargs["metadata"]
+
     @unittest.skipIf("SLSKD_FALLBACK_METHODS" in os.environ, "operator override set")
     def test_default_chain_has_no_spotiflac(self):
         self.assertEqual(slskd._slskd_fallback_methods(), ["ytdlp", "soundcloud"])
-        self.assertEqual(slskd._slskd_fallback_methods(""), ["ytdlp", "soundcloud"])
-        with mock.patch.object(slskd, "SLSKD_API_KEY", "k"):
-            self._start(try_source_fallback=True)
-        self.assertEqual(self.jobs.start_python.call_args.kwargs["metadata"]["fallback_methods"],
+        self.assertEqual(self._metadata({"try_source_fallback": True})["fallback_methods"],
                          ["ytdlp", "soundcloud"])
 
-    def test_spotiflac_stays_opt_in_when_requested(self):
-        self.assertEqual(slskd._slskd_fallback_methods("spotiflac")[0], "spotiflac")
+    def test_requested_fallback_method_cannot_add_or_reorder_sources(self):  # QA F1
+        with mock.patch.object(slskd, "_SLSKD_FALLBACK_METHODS", "ytdlp,soundcloud"):
+            meta = self._metadata({"fallback_method": "spotiflac"})
+            self.assertTrue(meta["try_source_fallback"])  # it may still switch the fallback on
+            self.assertEqual(meta["fallback_methods"], ["ytdlp", "soundcloud"])
+            self.assertEqual(acq._download_sources_status()["fallback_chain"], meta["fallback_methods"])
+
+    def test_spotiflac_runs_only_when_configured(self):
+        with mock.patch.object(slskd, "_SLSKD_FALLBACK_METHODS", "spotiflac,ytdlp,soundcloud"):
+            self.assertEqual(self._metadata({"try_source_fallback": True})["fallback_methods"],
+                             ["spotiflac", "ytdlp", "soundcloud"])
+
+    def test_download_all_child_job_uses_the_configured_chain(self):  # QA F1
+        item = {"artist": "A", "album": "B", "mbid": "00000000-0000-0000-0000-000000000001"}
+        payload = acq._acq_download_payload(item, "slskd", True)
+        self.assertNotIn("fallback_method", payload)
+        with mock.patch.object(slskd, "_SLSKD_FALLBACK_METHODS", "ytdlp,soundcloud"):
+            meta = self._metadata(payload)
+            self.assertTrue(meta["try_source_fallback"])
+            self.assertEqual(meta["fallback_methods"], ["ytdlp", "soundcloud"])
+            self.assertEqual(acq._download_sources_status()["fallback_chain"], meta["fallback_methods"])
+
+    def test_replacement_honours_try_alternate_source(self):  # QA F1 + F2
+        row = {"artist": "A", "albumartist": "A", "album": "B", "title": "T", "track": 1}
+        with mock.patch.object(slskd, "_SLSKD_FALLBACK_METHODS", "ytdlp,soundcloud"):
+            for enabled in (True, False):
+                with self.subTest(try_alternate_source=enabled):
+                    prefs = {"replacement_fallback": {"try_alternate_source": enabled}}
+                    payload = replacement._music_format_replacement_payload(row, prefs, "slskd")
+                    self.assertNotIn("fallback_method", payload)
+                    meta = self._metadata(payload)
+                    self.assertIs(meta["try_source_fallback"], enabled)
+                    self.assertEqual(meta["fallback_methods"], ["ytdlp", "soundcloud"])
 
 
 class SourceAvailabilityTests(unittest.TestCase):  # ACQ-5
