@@ -14,7 +14,7 @@ The project uses Semantic Versioning.
 ### Tests
 
 - The stale opt-in Docker smoke test (`RUN_DOCKER_SMOKE`), which built the Web Manager image and ran Beets in it, now runs against stock `lscr.io/linuxserver/beets`: it loads every plugin in `config.yaml.example` with the bundled plugins in `/config/beetsplug`, imports a generated track and runs fetchart. It runs wherever Docker is available, including CI, so it is no longer always skipped (#355).
-- CI's `unit-tests` job runs the root-only PUID/PGID ownership tests as root and the `setup.ps1` (pwsh) test, and fails if any of them skips (#355).
+- CI's `unit-tests` job runs the root-only PUID/PGID ownership tests as root the `setup.ps1` (pwsh) test and the stock-Beets smoke test, and fails if any of them skips (#355).
 - The slskd containment tests patch only `backend.slskd_service`'s `time`, not the process-wide `time.time`/`time.sleep`, so threads left by other tests cannot consume their fake clock (#266).
 
 ## v0.4.0 - 2026-10-12
