@@ -89,10 +89,10 @@ class AdapterAbsolutePathTests(unittest.TestCase):
         """#351 N5: ".." is never collapsed lexically; the row loses its path."""
         ad, _ = self._adapter({
             "/item/": {"items": [{"id": 1, "path": "A/../../etc/passwd"}, {"id": 2, "path": "link/../x.flac"},
-                                 {"id": 3, "path": "A/..B/01.flac"}]},
+                                 {"id": 3, "path": "A/..B/01.flac"}, {"id": 4, "path": "/music/A/../../etc/passwd"}]},
             "/album/7": {"id": 7, "artpath": "../cover.jpg", "items": [{"id": 1, "path": ".."}]},
         })
-        self.assertEqual([r["path"] for r in ad.get_items()], [None, None, "/music/A/..B/01.flac"])
+        self.assertEqual([r["path"] for r in ad.get_items()], [None, None, "/music/A/..B/01.flac", None])
         album = ad.get_album(7)
         self.assertIsNone(album["artpath"])
         self.assertIsNone(album["items"][0]["path"])

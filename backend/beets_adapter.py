@@ -534,11 +534,13 @@ class BeetsAdapter:
                 return
             for key in ("path", "artpath"):
                 value = row.get(key)
-                if isinstance(value, str) and value and not posixpath.isabs(value):
-                    if ".." in value.split("/"):
-                        log.warning("Beets row %s has an unsafe relative %s; ignoring it", row.get("id"), key)
-                        row[key] = None
-                        continue
+                if not (isinstance(value, str) and value):
+                    continue
+                if ".." in value.split("/"):  # absolute too: Beets stores absolute paths normalized
+                    log.warning("Beets row %s has an unsafe %s; ignoring it", row.get("id"), key)
+                    row[key] = None
+                    continue
+                if not posixpath.isabs(value):
                     if not libdir:
                         libdir.append(self._library_directory())
                     if libdir[0]:
