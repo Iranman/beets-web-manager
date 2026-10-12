@@ -46,9 +46,6 @@ The project uses Semantic Versioning.
 - The stale opt-in Docker smoke test (`RUN_DOCKER_SMOKE`), which built the Web Manager image and ran Beets in it, now runs against stock `lscr.io/linuxserver/beets`: it loads every plugin in `config.yaml.example` with the bundled plugins in `/config/beetsplug`, imports a generated track and runs fetchart. It runs wherever Docker is available, including CI, so it is no longer always skipped (#355).
 - CI's `unit-tests` job runs the root-only PUID/PGID ownership tests as root, the `setup.ps1` (pwsh) test and the stock-Beets smoke test, and fails if any of them skips (#355).
 - The slskd containment tests patch only `backend.slskd_service`'s `time`, not the process-wide `time.time`/`time.sleep`, so threads left by other tests cannot consume their fake clock (#266).
-
-### Tests
-
 - No backend test leaves `job_engine` threads running after it ends (#234 item 2). Before, 22 tests left job threads or a `job-heartbeat` thread running into later tests. These threads are the suspected cause of the intermittent exit-139 crashes in CI. The tests now close their `JobStore` or join the shared store's jobs, and `tests/test_job_thread_guard.py` fails any test whose job threads are still alive 10 seconds after it ends. The suite runs the guard on every test. Production code is unchanged.
 
 ## v0.4.0 - 2026-10-12
