@@ -58,6 +58,12 @@ COPY backend/ ./backend/
 COPY beetsplug/ ./beetsplug/
 COPY config.yaml.example .env.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
+# The running build's identity, from the same build args as the OCI labels
+# above; backend/build_info.py reports it via /health/live and
+# /api/setup/status. json.dumps, not printf, so no value can break the JSON.
+RUN VERSION="${VERSION}" VCS_REF="${VCS_REF}" BUILD_DATE="${BUILD_DATE}" python -c \
+    'import json, os; print(json.dumps({"version": os.environ["VERSION"], "revision": os.environ["VCS_REF"], "created": os.environ["BUILD_DATE"]}))' \
+    > /app/BUILD_INFO.json
 
 RUN mkdir -p /web-manager-data /config /music /downloads \
     && chown -R beets:beets /app /web-manager-data /config /music /downloads

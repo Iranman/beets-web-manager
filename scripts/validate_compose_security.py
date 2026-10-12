@@ -191,7 +191,13 @@ def _check_third_party_images(text: str, label: str, errors: list[str]) -> None:
     if not services and re.search(r"(?m)^services:", text):
         errors.append(f"{label}: has a services: section but no service could be read from it")
     for name, block in services.items():
-        if name in _PROJECT_SERVICES or _has_build_block(block):
+        if _has_build_block(block):
+            continue
+        # #253 S-12: the project names are exempt only while they actually
+        # run a project image; `beets: image: evil/x:latest` is third-party.
+        # A `${VAR:-default}` reference is judged by its default (dev file).
+        image = re.sub(r"^\$\{\w+:?-(.*)\}$", r"\1", _image_line(block).strip("\"'"))
+        if name in _PROJECT_SERVICES and _image_repo(image) in _PROJECT_IMAGE_REPOS:
             continue
         _check_image_digest_semantics(f"{label}: {name}", _image_line(block), False, errors)
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import ast
 import json
 import re
-import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -37,9 +36,16 @@ CLASSES = [
 
 
 def production_files():
-    tracked = subprocess.check_output(
-        ["git", "ls-files", "backend/*.py", "beetsplug/*.py"], cwd=ROOT, text=True
-    ).split()
+    # Filesystem walk, not `git ls-files`: the audit must run where git is
+    # absent (slim test images) or the checkout is a worktree whose .git
+    # points outside the container. It audits every file on disk, which is a
+    # superset of the tracked set, so it can only find more hits, never fewer.
+    tracked = sorted(
+        p.relative_to(ROOT).as_posix()
+        for pattern in ("backend/**/*.py", "beetsplug/**/*.py")
+        for p in ROOT.glob(pattern)
+        if "__pycache__" not in p.parts
+    )
     # ARCH-001: every top-level route module is production code too.
     routes = sorted(p.name for p in ROOT.glob("routes_*.py"))
     files = list(dict.fromkeys(TOP_LEVEL + routes + tracked))
