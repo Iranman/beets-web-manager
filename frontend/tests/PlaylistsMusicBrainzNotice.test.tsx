@@ -25,6 +25,8 @@ vi.mock('../src/api/client', () => {
     resolvePlaylistTrack: pending(),
     runPlaylistPipelineAction: pending(),
     startPlaylistDownload: pending(),
+    syncPlaylists: pending(),
+    apiErrorBody: vi.fn(),
   };
 });
 

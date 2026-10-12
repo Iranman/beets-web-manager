@@ -221,7 +221,10 @@ export interface ReviewEvidence {
   selected_recording_candidate?: ReviewRecordingCandidate;
   missing_id_type?: string;
   fingerprint?: {
+    /** "unavailable" means not checked (see unavailable_reason); "no_result"
+     * is a real empty answer. */
     status?: string;
+    unavailable_reason?: string;
     acoustid_status?: string;
     score?: number;
     acoustid_id?: string;
@@ -421,6 +424,13 @@ export interface TransactionListResponse {
 export interface TransactionDetailResponse {
   ok: boolean;
   transaction: TransactionDetail;
+  /** Rollback results: items restored, of which `adopted` were already back
+   * after an interrupted earlier rollback (no move was needed). */
+  restored?: number | unknown[];
+  adopted?: number;
+  status?: string;
+  /** Cancel of a running library sync: engine_cancelling (202). */
+  code?: string;
 }
 
 export interface TransactionSettings {
@@ -517,6 +527,8 @@ export interface SetupStatusResponse {
   ok: boolean;
   status: 'ready' | 'warning' | string;
   version: string;
+  /** Git revision the image was built from; 'unknown' when not stamped. */
+  revision?: string;
   demo_mode: boolean;
   setup_complete: boolean;
   first_run?: {
@@ -953,6 +965,11 @@ export interface JobStartResponse extends ApiOkResponse {
   batch_job_id?: string;
   state?: AiBatchState;
   reconnected?: boolean;
+  /** Nothing new started: this job was already running (Clean All answers
+   * this itself; a 409 job_already_running/started is turned into it). */
+  already_running?: boolean;
+  replay?: boolean;
+  job_status?: string;
 }
 
 export interface AttachRecordingResponse extends ApiOkResponse {
@@ -1071,6 +1088,21 @@ export interface QbitStatusResponse extends ApiOkResponse {
   path_aliases?: string;
   repair_allowed_roots?: string[];
   torrent_source_roots?: string[];
+  /** Provider health record of the last qBittorrent calls; null before any. */
+  health?: ProviderHealth | null;
+}
+
+export interface ProviderHealth {
+  provider?: string;
+  calls?: number;
+  failures?: number;
+  /** confirmed, no_result, unavailable, rate_limited, authentication_error,
+   * transient_error, rejected, not_configured, ... */
+  last_outcome?: string | null;
+  last_status_code?: number | null;
+  last_message?: string | null;
+  last_success_at?: number | null;
+  last_failure_at?: number | null;
 }
 
 export interface QbitHardlinkRepairResult {
@@ -1759,18 +1791,54 @@ export interface PlaylistSyncStatusResponse extends ApiOkResponse {
   last_run?: number;
   last_error?: string;
   last_log?: string[];
-  last_result?: {
-    playlists_seen?: number;
-    playlists_updated?: number;
-    tracks_written?: number;
-    local_added?: number;
-    plex_added?: number;
-    skipped?: number;
-  } | null;
+  /** Job id of the most recent sync job (manual or automatic). */
+  last_job_id?: string;
+  /** Epoch seconds of the next automatic sync, when auto-sync runs. */
+  next_run_at?: number;
+  last_result?: PlaylistSyncResult | null;
+}
+
+export interface PlaylistSyncPendingTrack {
+  artist: string;
+  title: string;
+  reason: string;
+}
+
+export interface PlaylistSyncDetail {
+  name: string;
+  updated?: boolean;
+  pending?: PlaylistSyncPendingTrack[];
+  pending_count?: number;
+  plex_mode?: 'in_place' | 'created' | string;
+  plex_writes?: number;
+  plex_rating_key?: string;
+  plex_error?: string;
+  plex_note?: string;
+  external_added?: number;
+  error?: string;
+  error_type?: string;
+  skipped_reason?: 'pipeline_running' | string;
+}
+
+export interface PlaylistSyncResult {
+  playlists_seen?: number;
+  playlists_updated?: number;
+  playlists_failed?: number;
+  playlists_skipped_busy?: number;
+  /** Names of older playlist files imported read-only on this run. */
+  legacy_imported?: string[];
+  tracks_written?: number;
+  local_added?: number;
+  plex_added?: number;
+  plex_writes?: number;
+  pending?: number;
+  skipped?: number;
+  details?: PlaylistSyncDetail[];
 }
 
 export interface PlaylistSyncStartResponse extends ApiOkResponse {
   job_id: string;
+  already_running?: boolean;
 }
 
 // ── Lidarr Wanted ─────────────────────────────────────────────────────────────
@@ -2200,6 +2268,10 @@ export interface AiSuggestResponse extends ApiOkResponse {
   required_review?: boolean;
   /** True when MusicBrainz was unreachable; results are local/fingerprint only. */
   musicbrainz_unavailable?: boolean;
+  /** Set when AcoustID did not check fingerprints: not_configured,
+   * auth_failed or lookup_failed. Empty when it ran. */
+  acoustid_status?: string;
+  acoustid_unavailable?: boolean;
 }
 
 export interface ImportReviewSelectedMatch {

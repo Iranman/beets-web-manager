@@ -1293,6 +1293,7 @@ function MaintenanceRunnerBar({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [showTasks, setShowTasks] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportLoading, setReportLoading] = useState(false);
@@ -1338,8 +1339,12 @@ function MaintenanceRunnerBar({
   const runNow = async (options?: { forceFresh?: boolean }) => {
     setBusy(true);
     setError('');
+    setNotice('');
     try {
-      await startCleanAll(options);
+      const started = await startCleanAll(options);
+      if (started.already_running) {
+        setNotice('Clean All is already running, so no second run was started. Showing the run in progress.');
+      }
       setReport(null);
       await onStarted();
     } catch (err) {
@@ -1502,6 +1507,7 @@ function MaintenanceRunnerBar({
             </div>
           )}
         </div>
+        {notice ? <Alert role="status" severity="info" sx={{ mt: 2 }} onClose={() => setNotice('')}>{notice}</Alert> : null}
         {error ? <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert> : null}
       </section>
       <MaintenanceRunnerReportDialog

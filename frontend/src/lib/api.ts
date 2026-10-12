@@ -1,3 +1,5 @@
+import { beginIdempotentRequest, followedJobStart, idempotencyErrorMessage } from './jobStart';
+
 export type ApiErrorCategory = 'network' | 'engine_offline' | 'engine_auth' | 'auth' | 'timeout' | 'http_error';
 
 export class ApiError extends Error {
@@ -34,9 +36,15 @@ const CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
   const method = (opts.method ?? 'GET').toUpperCase();
   let headers = opts.headers;
+  let settle = () => {};
   if (!CSRF_EXEMPT_METHODS.has(method)) {
     const merged = new Headers(headers);
     if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
+    if (!merged.has('Idempotency-Key')) {
+      const action = beginIdempotentRequest(method, url, opts.body);
+      merged.set('Idempotency-Key', action.key);
+      settle = action.settle;
+    }
     headers = merged;
   }
 
@@ -50,13 +58,17 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(0, 'Could not reach Beets Web Manager.', 'network');
   }
+  settle();
 
   if (!res.ok) {
     let serverMessage = `HTTP ${res.status}`;
     let errorCode = '';
     let providerUnavailable = false;
     try {
-      const body = (await res.json()) as { error?: string; error_code?: string; unavailable?: boolean };
+      const body = (await res.json()) as { error?: string; error_code?: string; code?: string; unavailable?: boolean };
+      // Same job already running, or this key already started it: follow it.
+      const followed = followedJobStart(res.status, body);
+      if (followed) return followed as T;
       // A provider outage (e.g. MusicBrainz) is a 503 with unavailable:true and
       // fixed user-safe text; it is not a Beets engine outage.
       providerUnavailable = body?.unavailable === true;
@@ -66,6 +78,7 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
       if (typeof body?.error_code === 'string') {
         errorCode = body.error_code;
       }
+      serverMessage = idempotencyErrorMessage(body?.code ?? '') || serverMessage;
     } catch {
       // ignore JSON parse failure
     }
