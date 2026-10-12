@@ -25,7 +25,9 @@ from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsA
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
 import backend.item_replacement as _item_replacement
-from backend.acoustid_service import _acoustid_lookup_cached, _album_item_abs_path
+from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_hits_or_none,
+                                      _acoustid_lookup_cached_outcome, _album_item_abs_path,
+                                      acoustid_failure_status)
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
 from backend.matching_service import _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
@@ -229,8 +231,9 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
             raise
 
         def _hits(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-            path = _album_item_abs_path(_s(row.get("path") or ""))
-            return _acoustid_lookup_cached(path) if path and Path(path).is_file() else None
+            # None (UNAVAILABLE) when AcoustID was not asked or did not answer,
+            # never [] (NO_RESULT) (#297 N4).
+            return _acoustid_hits_or_none(_album_item_abs_path(_s(row.get("path") or "")))
 
         plan = _import_reconciliation.plan_reconciliation(
             existing_items, imported_items, target_by_slot,
@@ -438,7 +441,13 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """
     payload    = payload_in
     aldir      = payload.get("aldir", "").strip()
-    mb_albumid = payload.get("mb_albumid", "").strip()
+    mb_albumid = _s(payload.get("mb_albumid")).strip()
+    if not mb_albumid:
+        # #264 / #260 QA-2: a Release Group alone is accepted; the resolver
+        # then picks a Release inside that group only (fail closed).
+        rgid = _extract_mb_uuid(_s(payload.get("mb_releasegroupid")).strip())
+        if rgid:
+            mb_albumid = f"https://musicbrainz.org/release-group/{rgid}"
     manual_mbid_override = bool(
         payload.get("manual_mbid_override")
         or payload.get("force_mbid")
@@ -1216,10 +1225,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # (duplicate_action keep); merge them onto the existing album.
             if wanted_tracks:
                 fp_validation = _validate_wanted_album_items_with_acoustid(
-                    aid, mb_albumid, wanted_tracks, log)
-                if not fp_validation.get("ok", True):
-                    _needs_review("AcoustID rejected downloaded file(s) for the requested "
-                                  "missing MusicBrainz track(s).")
+                    aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist)
+                if not fp_validation.get("ok"):
+                    _needs_review(fp_validation.get("reason") or "AcoustID did not verify the downloaded "
+                                  "file(s) for the requested missing MusicBrainz track(s).")
             aid = _merge_imported_album_into_existing(
                 aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
                 replace_existing_item_ids=replace_existing_item_ids)
@@ -1320,14 +1329,31 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
 def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
                                                wanted_tracks: List[Dict[str, Any]],
-                                               log: list) -> Dict[str, Any]:
-    """Reject downloaded missing-track files when AcoustID proves they are wrong."""
+                                               log: list,
+                                               expected_artist: str = "") -> Dict[str, Any]:
+    """Gate merging downloaded missing-track files into an existing album.
+
+    Merging reassigns audio to the album, so it needs deterministic proof
+    (#244 F1, #297 N2): ``ok`` is True only when AcoustID confirms the
+    requested Recording ID for every downloaded file. A different song
+    (``mismatches``), an unconfirmed or ambiguous match (``unverified``),
+    a fingerprint with no AcoustID result (``no_result``) and a fingerprint
+    that was never checked (``not_checked``: no key, rejected key, outage,
+    fpcalc) all send the folder to review with ``reason``. Nothing here
+    ever deletes a download (#244 F2)."""
     wanted = _normalise_wanted_tracks(wanted_tracks)
     if not album_id or not mb_albumid or not wanted:
         return {"ok": True, "checked": 0, "mismatches": []}
+
+    def _refuse(reason: str) -> Dict[str, Any]:
+        log.append(f"  AcoustID missing-track validation: {reason}")
+        return {"ok": False, "checked": 0, "confirmed": 0, "unverified": [], "no_result": 0,
+                "not_checked": [], "mismatches": [], "reason": reason}
+
     mb = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb.get("ok"):
-        return {"ok": True, "checked": 0, "mismatches": [], "warning": mb.get("error", "")}
+        return _refuse("the MusicBrainz release could not be loaded, so the downloaded files were not "
+                       f"verified ({mb.get('error') or 'lookup failed'}).")
     mb_tracks = mb.get("tracks") or []
     wanted_pairs = {
         (int(t.get("disc") or 1), int(t.get("track") or 0))
@@ -1357,7 +1383,7 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         if t.get("mb_trackid")
     }
     if not target_tracks:
-        return {"ok": True, "checked": 0, "mismatches": []}
+        return _refuse("none of the requested tracks is on the selected MusicBrainz release.")
 
     try:
         raw_items = composite_workflows.find_all_items_by_album_id(int(album_id))
@@ -1370,13 +1396,13 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             )
         )
     except Exception as ex:
-        log.append(f"  AcoustID validation warning: {ex}")
-        return {"ok": True, "checked": 0, "mismatches": [], "warning": str(ex)}
+        return _refuse(f"the imported tracks could not be read from Beets ({ex}).")
 
     checked = 0
     no_result = 0
     confirmed = 0
     unverified: List[Dict[str, Any]] = []
+    not_checked: List[Dict[str, Any]] = []
     mismatches: List[Dict[str, Any]] = []
     for row in rows:
         item = {
@@ -1395,10 +1421,19 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             if float(best.get("score") or 0) >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
                 target = best.get("track") or {}
         if not target:
+            # A downloaded file that maps to no requested track is not proven
+            # to belong in this album.
+            unverified.append({"item_id": int(row["id"]), "title": item.get("title", ""),
+                               "reason": "does not match a requested track"})
             continue
 
         path = _album_item_abs_path(item.get("path", ""))
-        cands = _acoustid_lookup_cached(path) if path else []
+        lookup = _acoustid_lookup_cached_outcome(path) if path else None
+        failure = acoustid_failure_status(lookup) if lookup is not None else "lookup_failed"
+        if failure:
+            not_checked.append({"item_id": int(row["id"]), "title": item.get("title", ""), "status": failure})
+            continue
+        cands = list(lookup.data or [])
         if not cands:
             no_result += 1
             continue
@@ -1414,6 +1449,7 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         verdict = verify_audio_against_request(
             cands,
             expected_title=_s(target.get("title") or ""),
+            expected_artist=_s(target.get("artist") or expected_artist),
             expected_recording_id=target_trackid,
         ) if target_trackid else {"decision": "review", "recording_id": ""}
         if verdict.get("decision") == "accept":
@@ -1433,12 +1469,23 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             "candidate": top,
         })
 
-    if checked or no_result:
-        log.append(
-            "  AcoustID missing-track validation: "
-            f"{checked} checked, {confirmed} confirmed, {len(unverified)} unverified, "
-            f"{no_result} without fingerprint result, {len(mismatches)} mismatch(es)."
-        )
+    log.append(
+        "  AcoustID missing-track validation: "
+        f"{checked} checked, {confirmed} confirmed, {len(unverified)} unverified, "
+        f"{no_result} without an AcoustID result, {len(not_checked)} not checked, "
+        f"{len(mismatches)} mismatch(es)."
+    )
+    if not_checked:
+        log.append(f"  {ACOUSTID_FAILURE_MESSAGES[not_checked[0]['status']]}")
+    reason = ""
+    if mismatches:
+        reason = "AcoustID identified a different song than the requested missing MusicBrainz track(s)."
+    elif not_checked:
+        reason = ("The downloaded file(s) were not merged: "
+                  f"{ACOUSTID_FAILURE_MESSAGES[not_checked[0]['status']]}")
+    elif unverified or no_result or not confirmed:
+        reason = ("AcoustID did not confirm that the downloaded file(s) are the requested MusicBrainz "
+                  "recording(s), so they were not merged into the existing album.")
     for mismatch in mismatches[:5]:
         cand = mismatch.get("candidate") or {}
         target = mismatch.get("target") or {}
@@ -1449,12 +1496,14 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             f"{cand.get('title', '')} ({cand.get('album', '')})"
         )
     return {
-        "ok": not mismatches,
+        "ok": not reason,
         "checked": checked,
         "confirmed": confirmed,
         "unverified": unverified,
         "no_result": no_result,
+        "not_checked": not_checked,
         "mismatches": mismatches,
+        "reason": reason,
     }
 
 
@@ -2505,7 +2554,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if input_looks_like_release_group:
             log_start = len(log)
             resolved_release = _resolve_album_release_for_import(
-                mb_albumid,
+                # #264: the URL form takes the fail-closed release-group branch
+                # directly; a bare UUID could be mistaken for a Release ID.
+                f"https://musicbrainz.org/release-group/{selected_releasegroupid}",
                 Path(folder_path).parent.name,
                 Path(folder_path).name,
                 "",

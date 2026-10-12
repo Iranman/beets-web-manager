@@ -30,6 +30,13 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def _answer(hits):
+    """A real AcoustID answer for synthetic hits (the lookup seam is typed)."""
+    from backend.provider_boundary import ProviderOutcome, ProviderResult
+    hits = list(hits or [])
+    return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if hits else ProviderOutcome.NO_RESULT, data=hits)
+
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_attach_enforcement_"))
 # Deliberately atexit, not unittest.addModuleCleanup: addModuleCleanup stores
 # callbacks in a single process-wide list drained in full whenever ANY
@@ -236,8 +243,8 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
             return {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
-        self._patch(patch_app_family(APP, "_acoustid_lookup_cached",
-                                       side_effect=lambda path: self._acoustid_candidates))
+        self._patch(patch_app_family(APP, "_acoustid_lookup_cached_outcome",
+                                       side_effect=lambda path: _answer(self._acoustid_candidates)))
         self._patch(patch_app_family(APP, "_mb_recording_search", return_value=[]))
         self._patch(patch_app_family(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
@@ -587,8 +594,8 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
             return {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
-        self._patch(patch_app_family(APP, "_acoustid_lookup_cached",
-                                       side_effect=lambda path: self._acoustid_candidates))
+        self._patch(patch_app_family(APP, "_acoustid_lookup_cached_outcome",
+                                       side_effect=lambda path: _answer(self._acoustid_candidates)))
         self._patch(patch_app_family(APP, "_mb_recording_search", return_value=[]))
         self._patch(patch_app_family(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))

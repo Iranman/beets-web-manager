@@ -675,10 +675,17 @@ def verify_audio_against_request(
         if expected in {_hit_recording_id(r) for r in high}:
             return _out("review", AcoustIDStatus.AMBIGUOUS, high[0],
                         "Requested recording is not AcoustID's strongest match.")
-        if all(_agrees(r) for r in tier):
+        agreeing = [r for r in tier if _agrees(r)]
+        if agreeing and len(agreeing) == len(tier):
             return _out("review", AcoustIDStatus.CONFLICT, high[0],
                         "AcoustID identifies a different MusicBrainz recording of the same song.",
                         ["acoustid_recording_id_differs"])
+        if agreeing:
+            # #244 F2: a top tier that mixes the requested song with a
+            # different one is ambiguous, never grounds to reject the audio.
+            return _out("review", AcoustIDStatus.AMBIGUOUS, agreeing[0],
+                        "AcoustID matches the requested song and a different song at the same confidence.",
+                        ["acoustid_ambiguous"])
         return _out("reject", AcoustIDStatus.CONFLICT, high[0],
                     "AcoustID identified a different recording than the requested track.",
                     ["acoustid_metadata_conflict"])

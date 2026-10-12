@@ -116,7 +116,9 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
 ACOUSTID_FAILURE_MESSAGES = {
     "not_configured": "AcoustID not configured (set ACOUSTID_API_KEY); fingerprints were not checked.",
     "auth_failed": "AcoustID rejected the API key (check ACOUSTID_API_KEY); fingerprints were not checked.",
-    "lookup_failed": "AcoustID lookup failed (service unavailable or rate limited); fingerprints were not checked.",
+    # #297 N3: this status also covers a missing or timed-out fpcalc.
+    "lookup_failed": ("AcoustID lookup failed (service unavailable or rate limited, or fpcalc missing "
+                      "or timed out); fingerprints were not checked."),
 }
 
 

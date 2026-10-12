@@ -403,6 +403,13 @@ class TestVerifyAudioAgainstRequest(unittest.TestCase):
                       expected_title="Song", expected_artist="Band", expected_recording_id=REC)
         self.assertEqual(out["decision"], "reject")
 
+    def test_mixed_top_tier_without_expected_id_is_review_not_reject(self):
+        # #244 F2: one tied hit is the requested song, one a different song.
+        hits = [self._h(OTHER, 95), self._h("dddddddd-0000-0000-0000-00000000000d", 95, title="Other Song")]
+        out = self._v(hits, expected_title="Song", expected_artist="Band", expected_recording_id=REC)
+        self.assertEqual(out["decision"], "review")
+        self.assertEqual(out["status"], "ambiguous")
+
     def test_live_version_is_not_the_studio_request(self):
         out = self._v([self._h(OTHER, 95, title="Song (Live)")], expected_title="Song", expected_artist="Band")
         self.assertEqual(out["decision"], "reject")

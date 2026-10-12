@@ -205,6 +205,23 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: when the job has already queued a review item, the handler keeps that item's review status (for example, it carries a "review queued" flag on the exception) and does not mark it `auto_enqueue_failed`.
 - Priority: P3. Status: Open.
 
+## ARCH-026 Identity Evidence Follow-ups (#244, #261, #264, #303)
+
+- Affected area: `backend/composite_workflows.py` (owner library-transaction-engineer), `backend/acoustid_service.py`, `backend/import_service.py`, `backend/library_service.py`.
+- Open:
+  - #261 F-5: a Release-Group-only write to an album with no `mb_albumid` is checked only for being a UUID (`plan_album_metadata`); it can replace a different existing Release Group without the operator flag or a MusicBrainz check. The only caller is the operator-explicit add-mbids route. Fix in the engine: when the current Release Group differs and there is no Release, require `release_selected_by_operator`.
+  - #261: the metadata-update summary always says "operator-selected" on a Release Group change, even when `release_group_change.operator_selected` is false (the metadata field is correct).
+  - #261 N-7: no production caller passes `acoustid_lookup_fn` to `create_album_mb_track_repair_plan`, so with `acoustid_verify` on every blank slot goes to review.
+  - #264: the Release Group candidate loop is capped but not cancellable; the resolver receives no `cancel_event`.
+  - Without `ACOUSTID_API_KEY`, an imported missing-track fill cannot be merged and stays a second album row in the same Release Group until Review resolves it.
+- Accepted (by design, conservative):
+  - #244 F3: an embedded Recording ID contradicted by the fingerprint is a conflict and goes to review.
+  - #244 F4: one AcoustID result linked to several recordings does not confirm any of them.
+  - #244 F5: the AcoustID file cache key is versioned (`v2|`) but its payload is not; the only consumer is display, so a format change needs a key bump.
+  - #261 N-6: an operator Release that the resolver swaps into another Release Group is refused at the stamp step (fail-safe).
+  - #303: with no fingerprint evidence, `identity_proof` is INSUFFICIENT and the candidate goes to review; the reason now says how to resolve it.
+- Priority: P3. Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).

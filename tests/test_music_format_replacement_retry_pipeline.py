@@ -71,7 +71,7 @@ class ReplacementRetryPipelineTests(unittest.TestCase):
 
     def test_acoustid_resolved_orphan_track_uses_recording_identity(self):
         resolver_source = function_source("_music_format_resolve_replacement_identity")
-        self.assertIn('_acoustid_lookup_cached(str(path))', resolver_source)
+        self.assertIn('_acoustid_hits_or_none(str(path))', resolver_source)
         self.assertIn('recording_review.apply_replacement_identity(', resolver_source)
         service = (Path(__file__).resolve().parents[1] / "backend" / "recording_review.py").read_text(encoding="utf-8")
         self.assertIn('resolved["acoustid_mb_trackid"]', service)

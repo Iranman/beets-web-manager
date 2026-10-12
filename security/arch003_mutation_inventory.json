@@ -4271,12 +4271,12 @@
       "reviewed_in_pr": 102
     },
     {
-      "key": "routes_library.py:apply_album_duplicate_resolver._do:a0b87bb04efe",
+      "key": "routes_library.py:apply_album_duplicate_resolver._do:f9d9bb55aa25",
       "file": "routes_library.py",
       "function": "apply_album_duplicate_resolver._do",
       "line": 4249,
       "kind": "subprocess",
-      "call_text": "composite_workflows.update_album_metadata(int(aid), {\"mb_albumid\": stamp_mbid}, release_selected_by_operator=True)",
+      "call_text": "composite_workflows.update_album_metadata(int(aid), {\"mb_albumid\": stamp_mbid})",
       "classification": "CONTROLLED_MEDIA_MUTATION",
       "transaction_family": "album_metadata_repair_v1",
       "domain": "album_metadata",
