@@ -2703,6 +2703,7 @@ def plan_album_metadata(
             **kwargs,
         }
     payload = dict(payload)
+    initiating_user = _s(payload.pop("initiating_user", "")) or "operator"
     aid = int(payload.get("album_id") or 0)
     album_updates = dict(payload.get("updates") or {})
     per_item = {str(k): dict(v or {}) for k, v in (payload.get("item_updates") or {}).items()}
@@ -2758,6 +2759,7 @@ def plan_album_metadata(
     tx = st.create(
         operation_type="Metadata Update",
         status="Preview",
+        initiating_user=initiating_user,
         summary=summary,
         rollback_available=True,
         rollback_reason="Restores the album and track values captured before the update.",

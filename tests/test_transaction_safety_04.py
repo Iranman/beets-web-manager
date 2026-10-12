@@ -415,6 +415,41 @@ class TransactionSettingsRouteTests(_RouteEnvBase):
         self.assertEqual((ok.status_code, ok.get_json()["settings"]["automatic_approval_threshold"]), (200, 0.99))
 
 
+class FixMetadataRouteTests(_RouteEnvBase):
+    """D9: fix-metadata records no wrapper "Repair" row claiming rollback is
+    unavailable; the rollbackable Metadata Update row is the record, under
+    the requesting user, and the job result names it."""
+
+    def test_no_wrapper_row_and_the_real_row_is_named(self):
+        import routes_library
+        started = {}
+
+        def start_python(fn, label="", metadata=None):
+            started.update(fn=fn, metadata=metadata)
+            return mock.Mock(job_id="job1")
+        update = mock.Mock(return_value={"ok": True, "operation_id": "txn_1_abcdefgh"})
+        with mock.patch.object(routes_library.jobs, "start_python", side_effect=start_python), \
+                mock.patch.object(routes_library.composite_workflows, "update_album_metadata", update), \
+                mock.patch.object(routes_library, "_transaction_user_label", return_value="alice"), \
+                mock.patch.object(routes_library, "_invalidate_lib_cache"):
+            res = self.client.post("/api/albums/5/fix-metadata", json={"album": "Fixed"})
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertIs(started["metadata"]["transaction"], False)
+            out = started["fn"]([])
+        update.assert_called_once_with(5, {"album": "Fixed"}, initiating_user="alice")
+        self.assertEqual(out["transaction_ids"], ["txn_1_abcdefgh"])
+
+    def test_album_metadata_row_records_the_user(self):
+        album = {"id": 5, "album": "Old", "albumartist": "A"}
+        ad = mock.Mock(get_album=mock.Mock(return_value=album))
+        res = cw.plan_album_metadata({"album_id": 5, "updates": {"album": "New"}, "initiating_user": "alice"},
+                                     adapter=ad, store=self.store)
+        self.assertTrue(res["ok"], res)
+        tx = self.store.get(res["operation_id"])
+        self.assertEqual(tx["initiating_user"], "alice")
+        self.assertNotIn("initiating_user", tx["metadata"])
+
+
 class TransactionAttributionTests(_Engine):
     """D7: an apply or rollback records one row under the signed-in user;
     its item write no longer adds a second "Metadata Update" row as

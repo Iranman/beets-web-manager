@@ -1812,6 +1812,7 @@ def album_fix_metadata(aid):
     new_aa = (payload.get("albumartist") or "").strip()
     new_year = payload.get("year")
     new_mbid = (payload.get("mb_albumid") or "").strip()
+    user = _transaction_user_label()
 
     def _do(log, cancel_event=None):
         # SEC-002 / ARCH-003 Wave 24 final review: mb_albumid is deliberately
@@ -1849,6 +1850,7 @@ def album_fix_metadata(aid):
         # way this job ever completes when a requested change did not
         # actually happen.
         failures: List[str] = []
+        transaction_ids: List[str] = []
 
         if updates:
             try:
@@ -1860,9 +1862,12 @@ def album_fix_metadata(aid):
                 # albumartist/year now go through the same controlled
                 # boundary -- allowlisted fields, Plan/Apply/Verify, and a
                 # real rollback path.
-                res = composite_workflows.update_album_metadata(aid, updates)
+                res = composite_workflows.update_album_metadata(aid, updates, initiating_user=user)
+                if res.get("operation_id"):
+                    transaction_ids.append(res["operation_id"])
                 if res.get("ok"):
-                    log.append(f"  Engine album fields updated: {updates}")
+                    log.append(f"  Engine album fields updated: {updates} "
+                               f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
                 else:
                     log.append(f"  Engine album update failed: {res.get('error')}")
                     failures.append(f"album fields: {res.get('error')}")
@@ -1878,6 +1883,7 @@ def album_fix_metadata(aid):
                     "mb_albumid": new_mbid,
                 })
                 if plan_res.get("ok") and plan_res.get("operation_id"):
+                    transaction_ids.append(plan_res["operation_id"])
                     apply_res = composite_workflows.apply_album_mb_track_repair(plan_res["operation_id"])
                     if not apply_res.get("ok"):
                         log.append(f"  MB track repair failed: {apply_res.get('error')}")
@@ -1893,9 +1899,14 @@ def album_fix_metadata(aid):
 
         if failures:
             raise RuntimeError("; ".join(failures))
+        return {"ok": True, "transaction_ids": transaction_ids}
 
+    # D9: no wrapper transaction. It said "rollback unavailable" while the
+    # real, rollbackable Metadata Update / MB track repair transactions sat
+    # in separate rows; those rows are now the only record, under this user.
     label = f"Fix metadata: album_id={aid}"
-    job = jobs.start_python(_do, label=label)
+    job = jobs.start_python(_do, label=label, metadata={"type": "album-fix-metadata", "album_id": aid,
+                                                        "transaction": False})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
