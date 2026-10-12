@@ -2155,12 +2155,65 @@ def fetch_and_embed_album_art(
 def delete_album_art(
     album_id: int,
     adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Clear album artpath and art."""
+    """Remove the album's cover file as one audited, reversible transaction
+    (D10). It used to clear artpath only, report removed_count 0 and leave
+    the file on disk. Beets moves the file into its quarantine folder and
+    clears artpath; rollback (the album_art_replace family's) puts both
+    back. The operator's request is the approval."""
     ad = adapter or beets_adapter
+    st = _get_store(store)
     aid = int(album_id)
-    ad.modify(fields={"artpath": ""}, album_ids=[aid], write=False, move=False)
-    return {"ok": True, "album_id": aid}
+    album = ad.get_album(aid, expand=False)
+    if not album:
+        return {"ok": False, "code": "not_found", "error": "Album not found"}
+    old_artpath = _s(album.get("artpath"))
+    if not old_artpath:
+        return {"ok": True, "album_id": aid, "removed": [], "removed_count": 0,
+                "message": "The album has no cover file; nothing was changed."}
+    rgid = _s(album.get("mb_releasegroupid")).strip().lower()
+    tx = st.create(
+        operation_type="Artwork Update", status="Preview",
+        summary=f"Remove the cover of album {aid} ({_s(album.get('album'))})",
+        changes=[{"type": "album_art_remove", "album_id": aid, "old_artpath": old_artpath}],
+        rollback_available=True,
+        metadata={"mutation_family": ALBUM_ART_REPLACE_FAMILY, "remove": True, "album_id": aid,
+                  "expected_mb_releasegroupid": rgid, "before": {"artpath": old_artpath}},
+    )
+    op_id = tx["id"]
+    from backend.resource_locks import approve_preview, attempt_owner, claim_approved, claim_refusal, \
+        locks as resource_locks
+    if approve_preview(st, op_id, "operator artwork remove") is None:
+        return {"ok": False, "code": "not_preview", "operation_id": op_id,
+                "error": "The artwork change was cancelled before it ran."}
+    with resource_locks().hold([f"album:{aid}"], attempt_owner(op_id), timeout=10):
+        if claim_approved(st, op_id) is None:
+            return {"ok": False, "code": "not_approved", "error": claim_refusal(st, op_id)}
+        st.update(op_id, status="Running", metadata={"engine_request": {"operation_id": op_id}})
+        try:
+            res = ad.remove_album_art(aid, expected_mb_releasegroupid=rgid, idempotency_key=op_id)
+        except BeetsAdapterError as exc:
+            if _transport_error(exc):
+                st.update(op_id, status="Recovery Required",
+                          logs=["Beets did not answer; whether the cover was removed is unknown."])
+                raise
+            code = exc.error_code or ""
+            known = code in ("NO_ART", "OLD_ART_PATH_INVALID", "ALBUM_NOT_FOUND", "IDENTITY_CHANGED", "BEETS_NOT_FOUND")
+            st.update(op_id, status="Failed", logs=[f"Beets refused to remove the cover ({code or 'error'}); "
+                                                    + ("nothing was changed." if known else
+                                                       "Beets tried to put it back; check the album.")])
+            return {"ok": False, "code": code.lower() or "beets_error", "operation_id": op_id, "status": "Failed",
+                    "mutated": False if known else None,
+                    "error": ("Restart the beets container so it loads webmanager plugin 1.16.0; nothing was changed."
+                              if code == "BEETS_NOT_FOUND" else
+                              "Beets could not remove the cover; nothing was changed." if known else
+                              "Beets could not remove the cover; check the album's artwork.")}
+        out = finish_album_art_replace(op_id, res, adapter=ad, store=st)
+    engine = res.get("result") if isinstance(res.get("result"), dict) else res
+    removed = [_s(p) for p in engine.get("removed") or []]
+    return {**out, "removed": removed, "removed_count": len(removed),
+            "quarantined_art": [engine.get("art_id")] if removed else []}
 
 
 #: Operator-supplied album cover set through Beets (plugin 1.12.0,
@@ -2300,9 +2353,11 @@ def finish_album_art_replace(
     st.update(
         operation_id, status=status,
         metadata={**meta, "engine_result": engine, "after": {"artpath": artpath}, "verification_problems": problems},
-        logs=[f"Album {meta['album_id']} cover is now {artpath or '(embedded only)'}",
-              f"Embedded into {engine.get('embedded_items', 0)} of {engine.get('item_count', 0)} tracks",
-              f"Previous cover kept by Beets (engine id {engine.get('art_id')})"]
+        logs=([f"Album {meta['album_id']} cover file removed: {', '.join(engine.get('removed') or []) or '(none)'}"]
+              if meta.get("remove") else
+              [f"Album {meta['album_id']} cover is now {artpath or '(embedded only)'}",
+               f"Embedded into {engine.get('embedded_items', 0)} of {engine.get('item_count', 0)} tracks"])
+             + [f"Previous cover kept by Beets (engine id {engine.get('art_id')})"]
              + ([f"Verification mismatch: {', '.join(problems)}"] if problems else []),
     )
     return {"ok": not problems, "operation_id": operation_id, "status": status, "album_id": int(meta["album_id"]),

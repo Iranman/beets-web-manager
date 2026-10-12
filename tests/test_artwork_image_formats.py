@@ -20,7 +20,10 @@ from backend.artwork_service import AlbumArtRequestError
 
 def _encoded(fmt, size=(48, 48), mode="RGB"):
     buf = io.BytesIO()
-    Image.new(mode, size, (10, 120, 200) if mode == "RGB" else 1).save(buf, format=fmt)
+    img = Image.new(mode, size, (10, 120, 200) if mode == "RGB" else 1)
+    if mode == "RGB":  # noise: a real-sized cover (artwork_service.MIN_ALBUM_ART_BYTES)
+        img.paste(Image.effect_noise(size, 80).convert("RGB"))
+    img.save(buf, format=fmt)
     return buf.getvalue()
 
 

@@ -58,7 +58,7 @@ class _FakeResponse(io.BytesIO):
 
 def _png_bytes():
     buf = io.BytesIO()
-    Image.new("RGB", (64, 64), (200, 10, 10)).save(buf, format="PNG")
+    Image.effect_noise((64, 64), 80).convert("RGB").save(buf, format="PNG")  # over MIN_ALBUM_ART_BYTES
     return buf.getvalue()
 
 

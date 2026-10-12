@@ -813,6 +813,14 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/album-art", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
 
+    def remove_album_art(self, album_id: int, expected_mb_releasegroupid: str = "",
+                         idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        """Remove the album's cover file (plugin 1.16.0); the engine keeps it
+        and rollback_album_art() puts it back."""
+        payload = {"album_id": int(album_id), "expected_mb_releasegroupid": str(expected_mb_releasegroupid or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-art/remove", json_data=payload, headers=headers)
+
     def rollback_album_art(
         self,
         art_id: str,

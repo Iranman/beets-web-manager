@@ -450,6 +450,46 @@ class FixMetadataRouteTests(_RouteEnvBase):
         self.assertNotIn("initiating_user", tx["metadata"])
 
 
+class AlbumArtDeleteTests(_Engine):
+    """D10: deleting the cover removes the file (kept in the engine's
+    quarantine), clears artpath, reports what it removed, and rolls back."""
+
+    def test_delete_removes_the_file_and_rolls_back(self):
+        album = self.make_album(os.path.join(self.music, "A", "B"))
+        cover = os.fsdecode(self.lib.get_album(album.id).artpath)
+        with open(cover, "rb") as fh:
+            original = fh.read()
+        res = cw.delete_album_art(album.id, adapter=self.ad, store=self.store)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((res["removed"], res["removed_count"], res["status"]), ([cover], 1, "Completed"))
+        self.assertFalse(os.path.exists(cover))
+        self.assertFalse(self.lib.get_album(album.id).artpath)
+        tx = self.store.get(res["operation_id"])
+        self.assertEqual(tx["metadata"]["mutation_family"], cw.ALBUM_ART_REPLACE_FAMILY)
+        rb = cw.rollback_album_art_replace(res["operation_id"], adapter=self.ad, store=self.store)
+        self.assertEqual(rb["status"], "Rolled Back", rb)
+        with open(cover, "rb") as fh:
+            self.assertEqual(fh.read(), original)
+        self.assertEqual(os.fsdecode(self.lib.get_album(album.id).artpath), cover)
+
+    def test_no_cover_changes_nothing_and_records_nothing(self):
+        album = self.make_album(os.path.join(self.music, "A", "C"), art=False)
+        res = cw.delete_album_art(album.id, adapter=self.ad, store=self.store)
+        self.assertEqual((res["ok"], res["removed_count"]), (True, 0))
+        self.assertEqual(self.store.list(limit=5)[0], [])
+
+    def test_upload_floor_matches_the_usable_floor(self):
+        import io
+        from PIL import Image
+        import backend.artwork_service as art
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "PNG")  # a valid image the art scan would call unusable
+        self.assertLess(len(buf.getvalue()), art.MIN_ALBUM_ART_BYTES)
+        with self.assertRaises(art.AlbumArtRequestError) as ctx:
+            art._validate_album_art_bytes(buf.getvalue())
+        self.assertIn("too small", ctx.exception.message)
+
+
 class TransactionAttributionTests(_Engine):
     """D7: an apply or rollback records one row under the signed-in user;
     its item write no longer adds a second "Metadata Update" row as

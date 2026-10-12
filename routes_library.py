@@ -1722,6 +1722,8 @@ def album_delete_art(aid):
         "removed": result.get("removed") or [],
         "removed_count": int(result.get("removed_count") or 0),
         "quarantined_art": result.get("quarantined_art") or [],
+        "operation_id": result.get("operation_id"),
+        **({"message": result["message"]} if result.get("message") else {}),
     })
 
 
