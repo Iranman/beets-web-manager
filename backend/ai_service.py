@@ -27,7 +27,7 @@ from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_m
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
 from backend.app_runtime import jobs
 from backend.musicbrainz_service import _artist_folder_key, _discogs_release_fallback_candidate, _mb_release_search_by_folder_tracks
-from backend.serializers import _compact_mb_candidate, _resolve_import_review_source_path
+from backend.serializers import _compact_mb_candidate, _resolve_import_review_source_path, _resolve_import_scan_root
 from backend.pending_review_store import _import_review_folder_signature, _pending_review_has_path, _pending_review_path_key, _pending_review_path_set
 from backend.plex_service import _trigger_plex_refresh
 
@@ -1827,7 +1827,9 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None) -> Lis
     folders are not followed. A folder the per-folder import checks refuse
     (an approved root itself, e.g. loose files directly in Downloads) is
     logged and left in place, never imported."""
-    base = Path(root)
+    base, err = _resolve_import_scan_root(root)  # callers check too; stored state is untrusted
+    if err or base is None:
+        raise RuntimeError(f"Import source folder refused: {err}")
     if not base.is_dir():
         raise RuntimeError(f"Import source folder not found: {root}")
     found = set()

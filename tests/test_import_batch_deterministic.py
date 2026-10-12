@@ -25,7 +25,7 @@ def setUpModule():
     # Import the app family at run time, not collection time (see
     # test_acoustid_status_propagation): app_runtime reads the environment
     # when it is first imported.
-    global APP, ai, isvc, cw, patch_app_family
+    global APP, ai, ser, cw, patch_app_family
     tmp = Path(tempfile.mkdtemp(prefix="bwm_det_import_env_"))
     os.environ.setdefault("BEETSDIR", str(tmp / "config"))
     os.environ.setdefault("LIB_PATH", str(tmp / "config" / "musiclibrary.blb"))
@@ -37,7 +37,7 @@ def setUpModule():
     sys.path.insert(0, str(ROOT))
     import app as APP  # noqa: N811
     import backend.ai_service as ai
-    import backend.import_service as isvc
+    import backend.serializers as ser
     import backend.composite_workflows as cw
     try:
         from _app_family import patch_app_family
@@ -99,6 +99,21 @@ class FolderDiscoveryTests(_Roots):
         self.audio("Album/CD2/01.flac")
         self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl / "Album")), [str(self.dl / "Album")])
 
+    def test_symlinked_album_folder_is_not_followed(self):
+        (self.outside / "01.flac").write_bytes(b"x")
+        self.audio("Album/01.flac")
+        try:
+            (self.dl / "Linked").symlink_to(self.outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl)), [str(self.dl / "Album")])
+
+    def test_walk_rechecks_the_root(self):
+        self.audio("Album/01.flac")
+        for bad in (str(self.music), str(self.outside)):
+            with self.subTest(root=bad), self.assertRaisesRegex(RuntimeError, "refused"):
+                ai._ai_batch_find_audio_dirs(bad)
+
     def test_missing_root_fails_clearly(self):
         with self.assertRaisesRegex(RuntimeError, "not found"):
             ai._ai_batch_find_audio_dirs(str(self.dl / "gone"))
@@ -114,25 +129,25 @@ class ScanRootTests(_Roots):
     """F3/F4: the scan-root rule."""
 
     def test_downloads_root_itself_is_allowed(self):
-        path, err = isvc._resolve_import_scan_root(str(self.dl))
+        path, err = ser._resolve_import_scan_root(str(self.dl))
         self.assertIsNone(err)
         self.assertEqual(path, self.dl)
 
     def test_subfolders_are_allowed(self):
-        path, err = isvc._resolve_import_scan_root(str(self.dl / "Album"))
+        path, err = ser._resolve_import_scan_root(str(self.dl / "Album"))
         self.assertIsNone(err)
         self.assertEqual(path, self.dl / "Album")
-        path, err = isvc._resolve_import_scan_root(str(self.music / "Artist"))
+        path, err = ser._resolve_import_scan_root(str(self.music / "Artist"))
         self.assertIsNone(err)
 
     def test_music_root_itself_is_refused(self):
-        self.assertIsNotNone(isvc._resolve_import_scan_root(str(self.music))[1])
+        self.assertIsNotNone(ser._resolve_import_scan_root(str(self.music))[1])
 
     def test_unsafe_paths_are_refused(self):
         for raw in (str(self.outside), str(self.dl / ".." / "outside"), str(self.dl) + "\x00x",
                     "downloads", "", str(self.tmp)):
             with self.subTest(raw=raw):
-                path, err = isvc._resolve_import_scan_root(raw)
+                path, err = ser._resolve_import_scan_root(raw)
                 self.assertIsNone(path)
                 self.assertTrue(err)
 
@@ -142,7 +157,7 @@ class ScanRootTests(_Roots):
             link.symlink_to(self.outside, target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest("cannot create symlinks here")
-        self.assertIsNotNone(isvc._resolve_import_scan_root(str(link))[1])
+        self.assertIsNotNone(ser._resolve_import_scan_root(str(link))[1])
 
 
 class BatchRouteTests(_Roots):

@@ -3306,11 +3306,38 @@
    ]
   },
   {
+   "name": "_resolve_import_scan_root",
+   "module": "backend/serializers.py",
+   "lines": [
+    175,
+    200
+   ],
+   "size": 26,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT",
+   "desired_owner": "backend/import_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_find_audio_dirs",
+    "_start_ai_batch_job",
+    "start_ai_batch_import"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_import_review_cleanup_roots",
+    "_import_review_path_text_error",
+    "_resolve_import_review_source_path",
+    "_s"
+   ]
+  },
+  {
    "name": "_normalize_review_origin_type",
    "module": "backend/serializers.py",
    "lines": [
-    209,
-    234
+    237,
+    262
    ],
    "size": 26,
    "body_lines": 25,
@@ -3335,8 +3362,8 @@
    "name": "_path_origin_hint",
    "module": "backend/serializers.py",
    "lines": [
-    237,
-    274
+    265,
+    302
    ],
    "size": 38,
    "body_lines": 37,
@@ -3359,8 +3386,8 @@
    "name": "_review_origin_payload",
    "module": "backend/serializers.py",
    "lines": [
-    277,
-    337
+    305,
+    365
    ],
    "size": 61,
    "body_lines": 57,
@@ -3385,8 +3412,8 @@
    "name": "_compact_mb_candidate",
    "module": "backend/serializers.py",
    "lines": [
-    340,
-    371
+    368,
+    399
    ],
    "size": 32,
    "body_lines": 31,
@@ -3405,8 +3432,8 @@
    "name": "_leaked_db_paths_summary",
    "module": "backend/serializers.py",
    "lines": [
-    374,
-    392
+    402,
+    420
    ],
    "size": 19,
    "body_lines": 16,
@@ -3426,8 +3453,8 @@
    "name": "json_route_result",
    "module": "backend/serializers.py",
    "lines": [
-    395,
-    401
+    423,
+    429
    ],
    "size": 7,
    "body_lines": 2,
@@ -3454,8 +3481,8 @@
    "name": "_config_error_response",
    "module": "backend/serializers.py",
    "lines": [
-    432,
-    434
+    460,
+    462
    ],
    "size": 3,
    "body_lines": 2,
@@ -24165,10 +24192,10 @@
    "module": "backend/ai_service.py",
    "lines": [
     1823,
-    1850
+    1852
    ],
-   "size": 28,
-   "body_lines": 21,
+   "size": 30,
+   "body_lines": 23,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -24179,15 +24206,16 @@
    ],
    "caller_count": 1,
    "dependencies": [
-    "_resolve_import_review_source_path"
+    "_resolve_import_review_source_path",
+    "_resolve_import_scan_root"
    ]
   },
   {
    "name": "_ai_batch_already_in_library",
    "module": "backend/ai_service.py",
    "lines": [
-    1853,
-    1860
+    1855,
+    1862
    ],
    "size": 8,
    "body_lines": 7,
@@ -24206,8 +24234,8 @@
    "name": "_ai_batch_folder_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1863,
-    1880
+    1865,
+    1882
    ],
    "size": 18,
    "body_lines": 17,
@@ -24228,8 +24256,8 @@
    "name": "_ai_batch_queue_pending_review",
    "module": "backend/ai_service.py",
    "lines": [
-    1883,
-    1895
+    1885,
+    1897
    ],
    "size": 13,
    "body_lines": 12,
@@ -24252,8 +24280,8 @@
    "name": "_ai_batch_build_evidence",
    "module": "backend/ai_service.py",
    "lines": [
-    1898,
-    1920
+    1900,
+    1922
    ],
    "size": 23,
    "body_lines": 22,
@@ -24276,8 +24304,8 @@
    "name": "_ai_batch_run_suggestions",
    "module": "backend/ai_service.py",
    "lines": [
-    1923,
-    2055
+    1925,
+    2057
    ],
    "size": 133,
    "body_lines": 132,
@@ -24303,8 +24331,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2058,
-    2070
+    2060,
+    2072
    ],
    "size": 13,
    "body_lines": 12,
@@ -24327,8 +24355,8 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2073,
-    2274
+    2075,
+    2276
    ],
    "size": 202,
    "body_lines": 201,
@@ -24361,8 +24389,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2277,
-    2406
+    2279,
+    2408
    ],
    "size": 130,
    "body_lines": 129,
@@ -24399,8 +24427,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2419,
-    2437
+    2421,
+    2439
    ],
    "size": 19,
    "body_lines": 16,
@@ -24419,8 +24447,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2440,
-    2462
+    2442,
+    2464
    ],
    "size": 23,
    "body_lines": 19,
@@ -24445,8 +24473,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2465,
-    2592
+    2467,
+    2594
    ],
    "size": 128,
    "body_lines": 122,
@@ -24477,8 +24505,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2595,
-    2629
+    2597,
+    2631
    ],
    "size": 35,
    "body_lines": 25,
@@ -25372,32 +25400,6 @@
    "caller_count": 2,
    "dependencies": [
     "_path_is_under",
-    "_s"
-   ]
-  },
-  {
-   "name": "_resolve_import_scan_root",
-   "module": "backend/import_service.py",
-   "lines": [
-    3131,
-    3145
-   ],
-   "size": 15,
-   "body_lines": 9,
-   "route": null,
-   "mutation_capable": false,
-   "domain": "IMPORT",
-   "desired_owner": "backend/import_service.py",
-   "migration_status": "EXTRACTED",
-   "callers": [
-    "_start_ai_batch_job",
-    "start_ai_batch_import"
-   ],
-   "caller_count": 2,
-   "dependencies": [
-    "_import_review_cleanup_roots",
-    "_import_review_path_text_error",
-    "_resolve_import_review_source_path",
     "_s"
    ]
   },

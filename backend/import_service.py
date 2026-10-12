@@ -34,7 +34,7 @@ from backend.matching_service import _album_mb_completeness, _album_track_score,
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
-from backend.serializers import _import_review_cleanup_roots, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
+from backend.serializers import _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
 from backend.plex_service import _trigger_plex_refresh
 
@@ -3128,18 +3128,6 @@ def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]
     return resolved, None
 
 
-def _resolve_import_scan_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
-    """The folder a batch import scans (F3/F4). The same checks as an Import
-    Review source folder (no symlinks, no encoded tricks, under an approved
-    root), except that a download root itself is allowed, so "import
-    everything in Downloads" works. The music library root stays refused: the
-    batch moves files. Existence is not checked here; the scan does that."""
-    error = _import_review_path_text_error(raw, allow_relative=False)
-    if error:
-        return None, error
-    candidate = Path(_s(raw).strip())
-    # allow_music=False: these roots are already contained (never "/" and
-    # never overlapping the library) and resolved.
-    if candidate in _import_review_cleanup_roots(allow_music=False):
-        return candidate, None
-    return _resolve_import_review_source_path(raw, allow_music=True, expected_type="dir", require_exists=False)
+# The batch import's scan-root rule (F3/F4) is _resolve_import_scan_root in
+# backend/serializers.py, next to the Import Review validator it extends, so
+# the batch walk in ai_service can re-check it too.
