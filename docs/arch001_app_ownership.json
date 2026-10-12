@@ -3937,14 +3937,34 @@
    ]
   },
   {
-   "name": "_plex_request",
+   "name": "_plex_response_socket",
    "module": "backend/plex_service.py",
    "lines": [
     429,
-    478
+    432
    ],
-   "size": 50,
-   "body_lines": 44,
+   "size": 4,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_plex_request"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_plex_request",
+   "module": "backend/plex_service.py",
+   "lines": [
+    435,
+    494
+   ],
+   "size": 60,
+   "body_lines": 53,
    "route": null,
    "mutation_capable": false,
    "domain": "PLEX",
@@ -3968,6 +3988,7 @@
    "caller_count": 13,
    "dependencies": [
     "_plex_client_headers",
+    "_plex_response_socket",
     "_plex_settings"
    ]
   },
@@ -3975,8 +3996,8 @@
    "name": "_plex_machine_identifier",
    "module": "backend/plex_service.py",
    "lines": [
-    481,
-    486
+    497,
+    502
    ],
    "size": 6,
    "body_lines": 5,
@@ -3999,8 +4020,8 @@
    "name": "_plex_find_music_section",
    "module": "backend/plex_service.py",
    "lines": [
-    489,
-    518
+    505,
+    534
    ],
    "size": 30,
    "body_lines": 28,
@@ -4026,8 +4047,8 @@
    "name": "_plex_section_locations",
    "module": "backend/plex_service.py",
    "lines": [
-    521,
-    559
+    537,
+    575
    ],
    "size": 39,
    "body_lines": 38,
@@ -4051,8 +4072,8 @@
    "name": "_trigger_plex_refresh",
    "module": "backend/plex_service.py",
    "lines": [
-    565,
-    590
+    581,
+    606
    ],
    "size": 26,
    "body_lines": 24,
@@ -4094,8 +4115,8 @@
    "name": "_plex_is_final_library_path",
    "module": "backend/plex_service.py",
    "lines": [
-    593,
-    615
+    609,
+    631
    ],
    "size": 23,
    "body_lines": 22,
@@ -4122,8 +4143,8 @@
    "name": "_plex_beets_path_candidates",
    "module": "backend/plex_service.py",
    "lines": [
-    618,
-    656
+    634,
+    672
    ],
    "size": 39,
    "body_lines": 37,
@@ -4149,8 +4170,8 @@
    "name": "_plex_path_keys_for_beets_item",
    "module": "backend/plex_service.py",
    "lines": [
-    659,
-    664
+    675,
+    680
    ],
    "size": 6,
    "body_lines": 4,
@@ -4172,8 +4193,8 @@
    "name": "_plex_path_keys_for_plex_file",
    "module": "backend/plex_service.py",
    "lines": [
-    667,
-    679
+    683,
+    695
    ],
    "size": 13,
    "body_lines": 11,
@@ -4197,8 +4218,8 @@
    "name": "_plex_track_part_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    682,
-    689
+    698,
+    705
    ],
    "size": 8,
    "body_lines": 7,
@@ -4222,8 +4243,8 @@
    "name": "_plex_duration_seconds",
    "module": "backend/plex_service.py",
    "lines": [
-    692,
-    701
+    708,
+    717
    ],
    "size": 10,
    "body_lines": 9,
@@ -4243,8 +4264,8 @@
    "name": "_plex_track_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    704,
-    712
+    720,
+    728
    ],
    "size": 9,
    "body_lines": 8,
@@ -4266,8 +4287,8 @@
    "name": "_plex_item_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    715,
-    716
+    731,
+    732
    ],
    "size": 2,
    "body_lines": 1,
@@ -4289,8 +4310,8 @@
    "name": "_plex_duration_values",
    "module": "backend/plex_service.py",
    "lines": [
-    719,
-    721
+    735,
+    737
    ],
    "size": 3,
    "body_lines": 2,
@@ -4312,8 +4333,8 @@
    "name": "_plex_track_mbids",
    "module": "backend/plex_service.py",
    "lines": [
-    724,
-    729
+    740,
+    745
    ],
    "size": 6,
    "body_lines": 5,
@@ -4334,8 +4355,8 @@
    "name": "_plex_item_lookup_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    732,
-    751
+    748,
+    767
    ],
    "size": 20,
    "body_lines": 19,
@@ -4359,8 +4380,8 @@
    "name": "_plex_track_lookup_rows",
    "module": "backend/plex_service.py",
    "lines": [
-    754,
-    776
+    770,
+    792
    ],
    "size": 23,
    "body_lines": 22,
@@ -4386,8 +4407,8 @@
    "name": "_plex_find_track",
    "module": "backend/plex_service.py",
    "lines": [
-    779,
-    792
+    795,
+    808
    ],
    "size": 14,
    "body_lines": 11,
@@ -4409,8 +4430,8 @@
    "name": "_plex_section_track_index",
    "module": "backend/plex_service.py",
    "lines": [
-    795,
-    966
+    811,
+    982
    ],
    "size": 172,
    "body_lines": 170,
@@ -4447,8 +4468,8 @@
    "name": "_plex_section_track_lookup",
    "module": "backend/plex_service.py",
    "lines": [
-    969,
-    971
+    985,
+    987
    ],
    "size": 3,
    "body_lines": 1,
@@ -4467,8 +4488,8 @@
    "name": "_plex_unique_index_value",
    "module": "backend/plex_service.py",
    "lines": [
-    974,
-    978
+    990,
+    994
    ],
    "size": 5,
    "body_lines": 4,
@@ -4487,8 +4508,8 @@
    "name": "_plex_pending_match_reason",
    "module": "backend/plex_service.py",
    "lines": [
-    981,
-    1008
+    997,
+    1024
    ],
    "size": 28,
    "body_lines": 24,
@@ -4512,8 +4533,8 @@
    "name": "_plex_pending_match_row",
    "module": "backend/plex_service.py",
    "lines": [
-    1011,
-    1027
+    1027,
+    1043
    ],
    "size": 17,
    "body_lines": 13,
@@ -4536,8 +4557,8 @@
    "name": "_plex_track_keys_for_items",
    "module": "backend/plex_service.py",
    "lines": [
-    1030,
-    1338
+    1046,
+    1354
    ],
    "size": 309,
    "body_lines": 306,
@@ -4579,8 +4600,8 @@
    "name": "_playlist_path_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    1341,
-    1378
+    1357,
+    1394
    ],
    "size": 38,
    "body_lines": 37,
@@ -4605,8 +4626,8 @@
    "name": "_plex_track_file",
    "module": "backend/plex_service.py",
    "lines": [
-    1381,
-    1383
+    1397,
+    1399
    ],
    "size": 3,
    "body_lines": 2,
@@ -4627,8 +4648,8 @@
    "name": "_plex_failure",
    "module": "backend/plex_service.py",
    "lines": [
-    1386,
-    1410
+    1402,
+    1426
    ],
    "size": 25,
    "body_lines": 21,
@@ -4653,8 +4674,8 @@
    "name": "_plex_configured",
    "module": "backend/plex_service.py",
    "lines": [
-    1413,
-    1416
+    1429,
+    1432
    ],
    "size": 4,
    "body_lines": 2,
@@ -4677,8 +4698,8 @@
    "name": "_plex_display_url",
    "module": "backend/plex_service.py",
    "lines": [
-    1419,
-    1421
+    1435,
+    1437
    ],
    "size": 3,
    "body_lines": 1,
@@ -4697,8 +4718,8 @@
    "name": "_plex_status_payload",
    "module": "backend/plex_service.py",
    "lines": [
-    1424,
-    1464
+    1440,
+    1480
    ],
    "size": 41,
    "body_lines": 40,
@@ -4726,8 +4747,8 @@
    "name": "_playlist_status_id",
    "module": "backend/plex_service.py",
    "lines": [
-    1466,
-    1469
+    1482,
+    1485
    ],
    "size": 4,
    "body_lines": 3,
