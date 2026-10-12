@@ -6,12 +6,13 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 import base64, copy, difflib, hashlib, json, os, re, shutil, socket, sqlite3, subprocess, threading, time, unicodedata, uuid
 import urllib.error
+from collections import Counter, defaultdict, deque
 import backend.job_contract as job_contract
 from backend.matching import evaluate_release_group_candidate
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
-from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PLAYLIST_AUTO_SYNC_ENABLED, PLAYLIST_AUTO_SYNC_INTERVAL, PLAYLIST_DOWNLOAD_BATCH_SIZE, PLAYLIST_DOWNLOAD_METHODS, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_EXPORTS_DIR, PLAYLIST_JOB_STATE_DIR, PLAYLIST_MANIFESTS_DIR, PLAYLIST_MEMBERSHIP_DIR, PLAYLIST_MIN_DOWNLOAD_SECONDS, PLAYLIST_PIPELINE_STATES, PLAYLIST_STATE_ROOT, PLEX_API_TIMEOUT, PLEX_PLAYLIST_CHUNK_SIZE, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_UNMATCHED_REPLACE, PLEX_SYNC_MIN_MATCH_RATIO, _MB_UUID_RE, _s, _up, _ur, _ytdlp_ready
+from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PLAYLIST_AUTO_SYNC_ENABLED, PLAYLIST_AUTO_SYNC_INTERVAL, PLAYLIST_LEGACY_IMPORT_DIR, PLAYLIST_DOWNLOAD_BATCH_SIZE, PLAYLIST_DOWNLOAD_METHODS, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_EXPORTS_DIR, PLAYLIST_JOB_STATE_DIR, PLAYLIST_MANIFESTS_DIR, PLAYLIST_MEMBERSHIP_DIR, PLAYLIST_MIN_DOWNLOAD_SECONDS, PLAYLIST_PIPELINE_STATES, PLAYLIST_STATE_ROOT, PLEX_API_TIMEOUT, PLEX_PLAYLIST_CHUNK_SIZE, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_UNMATCHED_REPLACE, PLEX_SYNC_MIN_MATCH_RATIO, _MB_UUID_RE, _s, _up, _ur, _ytdlp_ready
 from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _spotiflac_missing_tracks_download, _ytdlp_js_runtime_options, _ytdlp_missing_tracks_download, _ytdlp_remote_components, _ytdlp_source_extractor_args
 from backend.app_runtime import _norm, _path_is_under, _redact_security_text, _safe_path_component
 from backend.audio_preferences import load_music_format_preferences as _load_music_format_preferences, validate_audio_file as _validate_audio_file_preferences, handle_rejected_download as _handle_rejected_audio_download
@@ -21,9 +22,10 @@ import backend.composite_workflows as composite_workflows
 from backend.title_normalize import dash_suffix_group, split_ws_led, trailing_bracket_group
 from backend.library_cache import library_cache
 from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
-from backend.slskd_service import SLSKD_API_KEY, _DASH_SEP_CORE_RE, _download_method_list, _find_slskd_downloaded_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
+from backend.slskd_service import SLSKD_API_KEY, _DASH_SEP_CORE_RE, _download_method_list, _find_slskd_downloaded_files, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
 from backend.matching_service import _MB_VARIOUS_ARTISTS_ID, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _invalidate_lib_cache, _playlist_artist_credit_info
 from backend.app_runtime import jobs
+from job_engine import DuplicateJobError
 from backend.app_runtime import WEB_MANAGER_DATA_DIR
 from backend.serializers import _json_from_flask_response
 from backend.plex_service import _plex_configured, _plex_failure, _plex_timeout_error, _playlist_path_keys, _playlist_resolve_item_path, _playlist_status_id, _plex_find_music_section, _plex_is_final_library_path, _plex_machine_identifier, _plex_request, _plex_settings, _plex_status_payload, _plex_track_file, _plex_track_keys_for_items, _trigger_plex_refresh
@@ -1694,6 +1696,122 @@ def _plex_create_audio_playlist(machine_id: str, title: str, keys: List[str],
     return added, playlist_key
 
 
+def _plex_playlist_entries(rating_key: str) -> List[Dict[str, Any]]:
+    """The Plex playlist's entries in Plex order: ``[{"item_id", "key", "track"}]``.
+
+    ``item_id`` is Plex's playlistItemID (one per entry, so duplicates of a
+    track are told apart); ``key`` is the track's ratingKey. An entry
+    without either is malformed and refuses the in-place sync: editing a
+    playlist we cannot read exactly could remove the wrong entry."""
+    d = _plex_request(f"/playlists/{rating_key}/items", timeout=20)
+    metadata = (d.get("MediaContainer") or {}).get("Metadata") if isinstance(d, dict) else None
+    rows: List[Dict[str, Any]] = []
+    for track in metadata or []:
+        track = track if isinstance(track, dict) else {}
+        key = _s(track.get("ratingKey") or "").strip().strip("/").split("/")[-1]
+        item_id = _s(track.get("playlistItemID") or "").strip()
+        if not key or not item_id:
+            raise RuntimeError("Plex returned a playlist entry without ratingKey/playlistItemID")
+        rows.append({"item_id": item_id, "key": key, "track": track})
+    return rows
+
+
+def _plex_sync_playlist_in_place(machine_id: str,
+                                 rating_key: str,
+                                 desired_keys: List[str],
+                                 *,
+                                 removable=None,
+                                 log=None) -> Dict[str, Any]:
+    """Make an existing Plex playlist hold ``desired_keys`` (order and
+    duplicates kept) without deleting/recreating it, so its ratingKey
+    survives (user decision: "Web Manager list, synced in place").
+
+    1. Remove only entries beyond the wanted count of their track for which
+       ``removable(track)`` is true (the track was removed in Web Manager).
+       Other extra entries (added in Plex, unknown to Beets) are kept.
+    2. Append the missing entries.
+    3. Move entries into the desired order; kept extras go after them.
+
+    Each step works from what Plex reports, so a run that fails halfway is
+    finished by the next one. An unchanged playlist costs one GET and zero
+    writes.
+    """
+    removable = removable or (lambda _track: False)
+    want = Counter(desired_keys)
+    current = _plex_playlist_entries(rating_key)
+    result = {"removed": 0, "added": 0, "moved": 0, "writes": 0}
+
+    seen: Counter = Counter()
+    for row in current:
+        seen[row["key"]] += 1
+        if seen[row["key"]] > want[row["key"]] and removable(row["track"]):
+            _plex_request(f"/playlists/{rating_key}/items/{row['item_id']}",
+                          method="DELETE", timeout=PLEX_API_TIMEOUT)
+            result["removed"] += 1
+            result["writes"] += 1
+    if result["removed"]:
+        current = _plex_playlist_entries(rating_key)
+
+    have = Counter(row["key"] for row in current)
+    used: Counter = Counter()
+    missing: List[str] = []
+    for key in desired_keys:
+        used[key] += 1
+        if used[key] > have[key]:
+            missing.append(key)
+    for index in range(0, len(missing), PLEX_PLAYLIST_CHUNK_SIZE):
+        chunk = missing[index:index + PLEX_PLAYLIST_CHUNK_SIZE]
+        _plex_request(f"/playlists/{rating_key}/items",
+                      {"uri": _plex_playlist_uri(machine_id, chunk)},
+                      method="PUT", timeout=PLEX_API_TIMEOUT)
+        result["added"] += len(chunk)
+        result["writes"] += 1
+    if missing:
+        current = _plex_playlist_entries(rating_key)
+
+    pool: Dict[str, deque] = defaultdict(deque)
+    for row in current:
+        pool[row["key"]].append(row["item_id"])
+    order: List[str] = []
+    for key in desired_keys:
+        if pool[key]:
+            order.append(pool[key].popleft())
+    placed = set(order)
+    order += [row["item_id"] for row in current if row["item_id"] not in placed]
+    ids = [row["item_id"] for row in current]
+    for position, item_id in enumerate(order):
+        if ids[position] == item_id:
+            continue
+        # Plex moves an entry to the top when no "after" entry is given.
+        params = {"after": order[position - 1]} if position else None
+        _plex_request(f"/playlists/{rating_key}/items/{item_id}/move", params,
+                      method="PUT", timeout=PLEX_API_TIMEOUT)
+        ids.remove(item_id)
+        ids.insert(position, item_id)
+        result["moved"] += 1
+        result["writes"] += 1
+    if log is not None:
+        if result["writes"]:
+            log.append(
+                f"  [plex] Updated playlist in place (ratingKey {rating_key}): "
+                f"+{result['added']} added, -{result['removed']} removed, {result['moved']} moved"
+            )
+        else:
+            log.append(f"  [plex] Playlist already up to date (ratingKey {rating_key}); no Plex writes")
+    return result
+
+
+def _plex_track_removed_in_web_manager(track: Dict[str, Any], manifest: Dict[str, Any]) -> bool:
+    """True when this Plex entry's track has a Web Manager tombstone."""
+    title = _s((track or {}).get("title") or "").strip()
+    if not title or not isinstance(manifest, dict):
+        return False
+    for artist in {_s(track.get("originalTitle") or "").strip(), _s(track.get("grandparentTitle") or "").strip()}:
+        if _playlist_track_is_tombstoned({"artist": artist, "title": title}, manifest):
+            return True
+    return False
+
+
 def _plex_delete_playlist_by_rating_key(rating_key: str, log=None, *, raise_errors: bool = False) -> int:
     """Delete exactly one Plex playlist by its own stable ratingKey -- the
     unambiguous, preferred deletion authority (SEC-002 Wave 10 second final
@@ -1949,14 +2067,16 @@ def _playlist_atomic_json_replace(path: Path,
                 time.sleep(0.025 * (attempt + 1))
         if not path.exists():
             raise RuntimeError(f"final file was not created: {path}")
-    except Exception as exc:
+    except BaseException as exc:
+        # Every failure path removes the temp file, including a refused
+        # replace (an ACL'd dataset) and an interrupt; a leftover is logged.
         try:
-            if tmp.exists():
-                tmp.unlink()
-        except Exception:
-            pass
-        if log is not None:
-            log.append(f"  [playlist] {label} save failed for {path.name}: {exc}")
+            tmp.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            _app_logger.warning("Playlist temp file %s could not be removed: %s",
+                                tmp.name, type(unlink_exc).__name__)
+        if log is not None and isinstance(exc, Exception):
+            log.append(f"  [playlist] {label} save failed for {path.name}: {type(exc).__name__}")
         raise
 
 
@@ -2208,6 +2328,11 @@ def _playlist_write_manifest(name: str,
             "last_pipeline": dict(previous.get("last_pipeline") or {}),
             "last_plex": dict(previous.get("last_plex") or {}),
         }
+        compared = ("playlist_id", "name", "source", "content", "desired_tracks",
+                    "matched_count", "missing_count")
+        if previous and all(previous.get(k) == manifest[k] for k in compared):
+            # Unchanged: no rewrite (an idle sync stays write-free).
+            return previous
         path = _playlist_manifest_path(clean_name, manifest)
         _playlist_atomic_json_replace(
             path,
@@ -2251,18 +2376,22 @@ def _playlist_store_track_state(name: str,
         manifest = _playlist_read_manifest(clean_name, playlist_id=playlist_id)
         states = dict(manifest.get("track_states") or {})
         key = _playlist_status_id(track)
-        row = dict(states.get(key) or _playlist_track_manifest_payload(track))
+        previous_row = states.get(key) if isinstance(states.get(key), dict) else None
+        row = dict(previous_row or _playlist_track_manifest_payload(track))
         normalized_status = _s(status).strip().lower()
         if normalized_status not in PLAYLIST_PIPELINE_STATES:
             normalized_status = "failed"
         row.update({
             "id": key,
             "status": normalized_status,
-            "updated_at": time.time(),
         })
         for field, value in updates.items():
             if value not in (None, "") or field in {"message", "failure_reason", "staged_path"}:
                 row[field] = value
+        if previous_row is not None and {k: v for k, v in previous_row.items() if k != "updated_at"} ==                 {k: v for k, v in row.items() if k != "updated_at"}:
+            # Unchanged: a repeated sync must not rewrite the manifest per track.
+            return previous_row
+        row["updated_at"] = time.time()
         states[key] = row
         manifest["track_states"] = states
         _playlist_replace_manifest(clean_name, manifest)
@@ -2503,24 +2632,40 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                     if log is not None:
                         log.append(f"  [plex] {plex['error']}")
                 elif keys:
-                    playlist_keys = list(dict.fromkeys(str(key) for key in keys if str(key)))
+                    # Order and duplicates are kept (a track listed twice
+                    # stays twice in Plex).
+                    playlist_keys = [str(key) for key in keys if str(key)]
                     replace_target: Dict[str, Any] = {}
                     if replace_plex:
                         replace_target = _plex_replace_target(name, pid, manifest, log=log)
-                    # IA-03: create first; the old playlist is deleted only
-                    # once the new one exists in full.
-                    added, new_rating_key = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
-                    plex["created"] = True
-                    plex["tracks_added"] = added
-                    plex["rating_key"] = new_rating_key
-                    old_rating_key = _s(replace_target.get("rating_key") or "").strip()
-                    old_delete_failed = False
-                    if old_rating_key and old_rating_key != _s(new_rating_key).strip():
-                        try:
-                            plex["replaced"] = _plex_delete_playlist_by_rating_key(
-                                old_rating_key, log=log, raise_errors=True)
-                        except Exception:
-                            old_delete_failed = True
+                    target_key = _s(replace_target.get("rating_key") or "").strip()
+                    existing_playlist = _plex_playlist_by_rating_key(target_key) if target_key else None
+                    if existing_playlist is not None:
+                        # The existing Plex playlist is updated in place, never
+                        # deleted and recreated: its ratingKey (and anything
+                        # pointing at it in Plex) survives every sync.
+                        plex["mode"] = "in_place"
+                        plex["rating_key"] = target_key  # kept even if a step below fails
+                        tombstones = _playlist_read_manifest(name, playlist_id=pid) or manifest or {}
+                        in_place = _plex_sync_playlist_in_place(
+                            machine_id, target_key, playlist_keys,
+                            removable=lambda track: _plex_track_removed_in_web_manager(track, tombstones),
+                            log=log)
+                        plex["created"] = True  # "the Plex playlist holds this sync" (UI contract)
+                        plex["rating_key"] = target_key
+                        plex["tracks_added"] = in_place["added"]
+                        plex["tracks_removed"] = in_place["removed"]
+                        plex["tracks_moved"] = in_place["moved"]
+                        plex["plex_writes"] = in_place["writes"]
+                    else:
+                        if target_key and log is not None:
+                            log.append(f"  [plex] Stored Plex playlist {target_key} no longer exists; creating a new one")
+                        plex["mode"] = "created"
+                        added, new_rating_key = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
+                        plex["created"] = True
+                        plex["tracks_added"] = added
+                        plex["rating_key"] = new_rating_key
+                        plex["plex_writes"] = 1 + max(0, (len(playlist_keys) - 1) // PLEX_PLAYLIST_CHUNK_SIZE)
                     plex["matched_track_ids"] = list(match_details.get("matched_track_ids") or [])
                     plex["complete"] = pending_count == 0 and len(keys) == len(items)
                     plex["status"] = "success" if plex["complete"] else "partial_success"
@@ -2532,14 +2677,6 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         plex["action_needed"] = (
                             "Another playlist shares this name with no stored Plex ratingKey; "
                             "sync it once more to safely establish separate Plex identity"
-                        )
-                    if old_delete_failed:
-                        plex["complete"] = False
-                        plex["status"] = "partial_success"
-                        plex["issue_reason"] = "previous Plex playlist could not be removed"
-                        plex["action_needed"] = (
-                            "The new Plex playlist was created, but the previous copy is still in Plex; "
-                            "delete the older duplicate in Plex"
                         )
                     plex["summary_message"] = (
                         f"Plex playlist updated with {len(keys)} of {len(items)} track(s); "
@@ -2618,7 +2755,12 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
             if failure["reason"] == provider_boundary.OUTBOUND_NOT_ALLOWLISTED:
                 plex["issue_reason"] = "Plex is blocked by the outbound network policy"
                 plex["action_needed"] = failure["hint"] or plex["action_needed"]
-            if not plex.get("created") and _plex_timeout_error(exc):
+            if plex.get("mode") == "in_place":
+                # The playlist kept its identity; the steps that ran are
+                # read back and finished by the next sync.
+                plex["issue_reason"] = "Plex playlist update did not finish"
+                plex["action_needed"] = "Sync again; it continues from what Plex now holds"
+            elif not plex.get("created") and _plex_timeout_error(exc):
                 # IA-02: a create that timed out is never re-sent; Plex may
                 # or may not have applied it.
                 plex["issue_reason"] = "Plex did not answer in time"
@@ -2723,6 +2865,8 @@ _PLAYLIST_SYNC_STATE: Dict[str, Any] = {
     "last_result": None,
     "last_log": [],
     "last_error": "",
+    "last_job_id": "",
+    "next_run_at": 0,
 }
 
 
@@ -3008,159 +3152,334 @@ def _playlist_append_external_additions(primary: List[Dict[str, Any]],
     return out
 
 
-def _playlist_sync_all(log: list, names: Optional[List[str]] = None) -> Dict[str, Any]:
+_PLAYLIST_LEGACY_LEDGER = "legacy_imports.json"
+_PLAYLIST_LEGACY_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _playlist_web_manager_names() -> List[str]:
+    """Display names of every playlist Web Manager manages (its index)."""
+    try:
+        index_data = _playlist_load_index()
+    except PlaylistStateError:
+        return []
+    names: List[str] = []
+    for entry in index_data.values():
+        name = _s((entry or {}).get("name") or (entry or {}).get("clean_name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _playlist_legacy_tracks(path: Path) -> Tuple[str, List[Dict[str, Any]]]:
+    """(name, tracks) from an old ``<MUSIC_ROOT>/playlists`` file. Read only."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.name.endswith(".playlist.json"):
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            return "", []
+        name = _s(data.get("name") or path.name[: -len(".playlist.json")]).strip()
+        tracks = data.get("desired_tracks") or data.get("tracks") or []
+        return name, [t for t in tracks if isinstance(t, dict)] if isinstance(tracks, list) else []
+    rows = composite_workflows.parse_m3u_text(text)
+    for row in rows:
+        if not row.get("title"):
+            row["title"] = Path(_s(row.get("path")).replace("\\", "/")).stem
+    return path.stem, rows
+
+
+def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
+    """Import the playlists older versions kept in ``PLAYLIST_LEGACY_IMPORT_DIR``
+    (default ``<MUSIC_ROOT>/playlists``) once, read-only.
+
+    A file is imported only when Web Manager has no list with that name, and
+    each name is recorded in ``legacy_imports.json`` so it is never imported
+    again (even after the Web Manager list is deleted). The legacy folder is
+    never written to; ``*.tmp`` leftovers there are ignored.
+    """
+    legacy_dir = PLAYLIST_LEGACY_IMPORT_DIR
+    if legacy_dir is None:
+        return []
+    try:
+        if not legacy_dir.is_dir():
+            return []
+        files = sorted(
+            (p for p in legacy_dir.iterdir()
+             if (p.name.endswith(".playlist.json") or p.suffix.lower() == ".m3u")
+             and not p.is_symlink() and p.is_file()),
+            # .playlist.json first: it also holds the tracks not in the library.
+            key=lambda p: (not p.name.endswith(".playlist.json"), p.name.casefold()),
+        )
+    except OSError as exc:
+        _app_logger.warning("Legacy playlist folder is unreadable: %s", type(exc).__name__)
+        return []
+    if not files:
+        return []
+    ledger_path = PLAYLIST_STATE_ROOT / _PLAYLIST_LEGACY_LEDGER
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+    except Exception:
+        _app_logger.warning("Legacy playlist import ledger is unreadable; skipping legacy import")
+        return []
+    ledger = ledger if isinstance(ledger, dict) else {}
+    existing = {_norm(n) for n in _playlist_web_manager_names()}
+    imported: List[str] = []
+    changed = False
+    for path in files:
+        try:
+            if path.stat().st_size > _PLAYLIST_LEGACY_MAX_BYTES:
+                continue
+            name, tracks = _playlist_legacy_tracks(path)
+        except Exception as exc:
+            _app_logger.warning("Legacy playlist %s could not be read: %s", path.name, type(exc).__name__)
+            continue
+        name = _clean_playlist_name(name)
+        key = _norm(name)
+        if not name or not key or key in ledger:
+            continue
+        if key in existing:
+            ledger[key] = {"name": name, "source": path.name, "skipped": "web_manager_list_exists",
+                           "at": time.time()}
+            changed = True
+            continue
+        tracks = _playlist_clean_track_list(tracks)
+        if not tracks:
+            continue
+        try:
+            _playlist_write_manifest(name, tracks, source="legacy_import", content=path.name, log=log)
+        except Exception as exc:
+            _app_logger.warning("Legacy playlist %s import failed: %s", path.name, type(exc).__name__)
+            log.append(f"  [playlist-sync] Could not import legacy playlist {name!r}")
+            continue
+        ledger[key] = {"name": name, "source": path.name, "tracks": len(tracks), "at": time.time()}
+        existing.add(key)
+        imported.append(name)
+        changed = True
+        log.append(f"  [playlist-sync] Imported legacy playlist {name!r} ({len(tracks)} track(s)) from {path.name}")
+    if changed:
+        _playlist_atomic_json_replace(ledger_path, ledger, save_key="legacy-imports")
+    return imported
+
+
+def _plex_playlist_for(name: str, manifest: Dict[str, Any],
+                       plex_playlists: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The Plex playlist this Web Manager list syncs with: its stored
+    ratingKey, else the single Plex playlist with this title. Returns
+    (playlist, problem)."""
+    def _key(pl):
+        return _s(pl.get("ratingKey") or pl.get("key") or "").strip().strip("/").split("/")[-1]
+
+    stored = _s(((manifest or {}).get("last_plex") or {}).get("rating_key") or "").strip()
+    if stored:
+        found = next((pl for pl in plex_playlists if _key(pl) == stored), None)
+        return found, "" if found else "stored Plex playlist no longer exists"
+    same_title = [pl for pl in plex_playlists if _norm(pl.get("title", "")) == _norm(name)]
+    if len(same_title) > 1:
+        return None, "ambiguous_plex_playlist"
+    return (same_title[0] if same_title else None), ""
+
+
+def _playlist_sync_one(name: str, index: Dict[str, Any], plex_playlists: List[Dict[str, Any]],
+                       log: List[str]) -> Optional[Dict[str, Any]]:
+    """Sync one Web Manager list with its M3U and its Plex playlist.
+
+    The saved manifest is the master copy. Tracks found only in the M3U or
+    the Plex playlist are merged in (appended); nothing leaves the list
+    unless it was removed in Web Manager (a tombstone). Plex is then
+    updated in place. Returns None when the list has nothing playable.
+    """
+    manifest = _playlist_read_manifest(name)
+    pid = _s(manifest.get("playlist_id") or "").strip() or None
+    desired, desired_source = _playlist_desired_tracks_for_name(name)
+    matched_items, missing_tracks = _playlist_match_reference_tracks(desired, index)
+    local_items, local_skipped = _playlist_m3u_items(name, index)
+    plex_pl, plex_problem = _plex_playlist_for(name, manifest, plex_playlists)
+    plex_items, plex_skipped = _plex_playlist_items(plex_pl, index) if plex_pl else ([], 0)
+
+    # An M3U/Plex entry is an addition only when it is not already one of
+    # the saved tracks (compared as library items, not as text).
+    matched_ids = {_playlist_item_identity(item) for item in matched_items}
+    additions = [
+        item for item in _merge_playlist_items(local_items, plex_items)
+        if _playlist_item_identity(item) not in matched_ids
+        and _playlist_apply_tombstones(name, [item], manifest)
+    ]
+    playable_items = matched_items + additions
+    if not playable_items:
+        return None
+    desired_out = _playlist_merge_desired_tracks(desired, additions)
+
+    local_ids = [_playlist_item_identity(item) for item in local_items]
+    plex_ids = [_playlist_item_identity(item) for item in plex_items]
+    playable_ids = [_playlist_item_identity(item) for item in playable_items]
+    changed = bool(additions) or local_ids != playable_ids or plex_ids != playable_ids or plex_pl is None
+    pending = [
+        {"artist": _s(t.get("artist")), "title": _s(t.get("title")), "reason": "not in the Beets library"}
+        for t in missing_tracks
+    ]
+    detail: Dict[str, Any] = {
+        "name": name,
+        "local_tracks": len(local_items),
+        "plex_tracks": len(plex_items),
+        "merged_tracks": len(playable_items),
+        "local_added": len([k for k in playable_ids if k not in local_ids]),
+        "plex_added": 0,
+        "plex_synced": False,
+        "plex_error": "",
+        "plex_mode": "",
+        "plex_writes": 0,
+        "plex_rating_key": _s(((manifest or {}).get("last_plex") or {}).get("rating_key") or ""),
+        "skipped": local_skipped + plex_skipped,
+        "updated": False,
+        "desired_tracks": len(desired_out),
+        "desired_source": desired_source,
+        "external_added": len(additions),
+        "available_tracks": len(playable_items),
+        "missing_tracks": len(missing_tracks),
+        "pending": pending[:50],
+        "pending_count": len(pending),
+    }
+    if plex_problem:
+        detail["plex_note"] = plex_problem
+    if not changed:
+        detail["plex_synced"] = True
+        return detail
+    log.append(
+        f"  [playlist-sync] {name}: {len(matched_items)} saved + {len(additions)} added in M3U/Plex "
+        f"-> {len(playable_items)} playable, {len(missing_tracks)} pending"
+    )
+    output = _create_playlist_outputs(
+        name,
+        playable_items,
+        log=log,
+        replace_plex=True,
+        require_full_plex=False,
+        desired_tracks=desired_out,
+        missing_tracks=missing_tracks,
+        playlist_id=pid,
+    )
+    plex_result = output.get("plex") or {}
+    plex_synced = bool(plex_result.get("created") and not plex_result.get("error"))
+    detail.update({
+        "updated": True,
+        "plex_synced": plex_synced,
+        "plex_mode": _s(plex_result.get("mode") or ""),
+        "plex_writes": int(plex_result.get("plex_writes") or 0),
+        "plex_added": int(plex_result.get("tracks_added") or 0) if plex_synced else 0,
+        "plex_rating_key": _s(plex_result.get("rating_key") or detail["plex_rating_key"]),
+        "plex_tracks_matched": int(plex_result.get("tracks_matched") or 0),
+        "plex_tracks_unmatched": int(plex_result.get("tracks_unmatched") or 0),
+        "plex_error": _s(plex_result.get("error") or ""),
+    })
+    if plex_synced:
+        detail["plex_tracks"] = int(plex_result.get("verified_count") or detail["plex_tracks"] or 0)
+    for row in plex_result.get("pending_tracks") or []:
+        if isinstance(row, dict):
+            detail["pending_count"] += 1
+            if len(detail["pending"]) < 50:
+                detail["pending"].append({
+                    "artist": _s(row.get("artist")), "title": _s(row.get("title")),
+                    "reason": _s(row.get("reason") or "not visible in Plex yet"),
+                })
+    return detail
+
+
+def _playlist_sync_all(log: list, names: Optional[List[str]] = None,
+                       cancel_event=None) -> Dict[str, Any]:
     status = _plex_status_payload(force=False)
     if not status.get("configured") or not status.get("connected"):
         raise RuntimeError(status.get("error") or "Plex is not connected")
 
+    _playlist_ensure_state_dirs()
+    imported = _playlist_import_legacy_lists(log)
     wanted_names = {_norm(n) for n in (names or []) if _s(n).strip()}
     index = _playlist_library_index()
-    local_names = []
-    _playlist_ensure_state_dirs()
-    try:
-        res = composite_workflows.list_playlist_m3u()
-        if isinstance(res, dict) and res.get("ok") and isinstance(res.get("playlists"), list):
-            for pl in res.get("playlists") or []:
-                n = _s(pl.get("name") or pl.get("key") or "").strip()
-                if n and n not in local_names:
-                    local_names.append(n)
-    except Exception:
-        pass
-    plex_by_norm: Dict[str, Dict[str, Any]] = {}
-    for pl in _plex_audio_playlists():
-        plex_by_norm.setdefault(_norm(pl.get("title", "")), pl)
+    plex_playlists = _plex_audio_playlists()
 
-    display_by_norm: Dict[str, str] = {}
-    for name in local_names:
-        display_by_norm.setdefault(_norm(name), name)
-    for key, pl in plex_by_norm.items():
-        display_by_norm.setdefault(key, _s(pl.get("title") or "").strip())
-
-    summary = {
+    summary: Dict[str, Any] = {
         "playlists_seen": 0,
         "playlists_updated": 0,
+        "playlists_failed": 0,
+        "playlists_skipped_busy": 0,
+        "legacy_imported": imported,
         "tracks_written": 0,
         "local_added": 0,
         "plex_added": 0,
+        "plex_writes": 0,
+        "pending": 0,
         "skipped": 0,
         "details": [],
     }
-    for norm_name, display_name in sorted(display_by_norm.items(), key=lambda kv: kv[1].casefold()):
-        if wanted_names and norm_name not in wanted_names:
+    for name in sorted(_playlist_web_manager_names(), key=str.casefold):
+        if wanted_names and _norm(name) not in wanted_names:
             continue
-        local_items, local_skipped = _playlist_m3u_items(display_name, index)
-        plex_items, plex_skipped = ([], 0)
-        plex = plex_by_norm.get(norm_name)
-        if plex:
-            plex_items, plex_skipped = _plex_playlist_items(plex, index)
-        external_items = _merge_playlist_items(local_items, plex_items)
-        external_items = _playlist_apply_tombstones(display_name, external_items)
-        desired_tracks, desired_source = _playlist_desired_tracks_for_name(
-            display_name, min_tracks=len(local_items))
-        original_desired_keys = {
-            _playlist_manifest_identity(track)
-            for track in _playlist_clean_track_list(desired_tracks)
-        }
-        desired_tracks = _playlist_merge_desired_tracks(desired_tracks, external_items)
-        desired_tracks = _playlist_apply_tombstones(display_name, desired_tracks)
-        desired_keys = {
-            _playlist_manifest_identity(track)
-            for track in _playlist_clean_track_list(desired_tracks)
-        }
-        desired_changed = desired_keys != original_desired_keys
-        matched_items, missing_tracks = _playlist_match_reference_tracks(desired_tracks, index)
-        playable_items = _playlist_append_external_additions(matched_items, external_items)
-        if not playable_items:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        # Never overlap a pipeline job (download/import/Plex sync) on this list.
+        runtime_lock = _playlist_pipeline_runtime_lock(name)
+        if _playlist_running_pipeline_job_id(name) or not runtime_lock.acquire(blocking=False):
+            summary["playlists_skipped_busy"] += 1
+            summary["details"].append({"name": name, "updated": False, "skipped_reason": "pipeline_running"})
+            log.append(f"  [playlist-sync] {name}: a pipeline job is running; skipped")
             continue
-
-        local_ids = [_playlist_item_identity(item) for item in local_items]
-        plex_ids = [_playlist_item_identity(item) for item in plex_items]
-        playable_ids = [_playlist_item_identity(item) for item in playable_items]
-        local_added = len([key for key in playable_ids if key not in local_ids])
-        plex_added = len([key for key in playable_ids if key not in plex_ids])
-        changed = desired_changed or local_ids != playable_ids or plex_ids != playable_ids
-
+        try:
+            detail = _playlist_sync_one(name, index, plex_playlists, log)
+        except Exception as exc:
+            # One list failing never stops the others; the reason is logged
+            # and shown in the sync status.
+            _app_logger.warning("Playlist sync failed for %r: %s", name, type(exc).__name__)
+            summary["playlists_failed"] += 1
+            summary["details"].append({"name": name, "updated": False, "error": "sync_failed",
+                                       "error_type": type(exc).__name__})
+            log.append(f"  [playlist-sync] {name}: sync failed ({type(exc).__name__})")
+            continue
+        finally:
+            runtime_lock.release()
+        if detail is None:
+            continue
         summary["playlists_seen"] += 1
-        summary["skipped"] += local_skipped + plex_skipped
-        detail = {
-            "name": display_name,
-            "local_tracks": len(local_items),
-            "plex_tracks": len(plex_items),
-            "merged_tracks": len(playable_items),
-            "local_added": local_added,
-            "plex_added": plex_added,
-            "plex_synced": False,
-            "plex_error": "",
-            "skipped": local_skipped + plex_skipped,
-            "updated": False,
-            "desired_tracks": len(desired_tracks),
-            "desired_source": desired_source,
-            "available_tracks": len(playable_items),
-            "missing_tracks": len(missing_tracks),
-        }
-        if changed:
-            log.append(
-                f"  [playlist-sync] {display_name}: "
-                f"{len(local_items)} local + {len(plex_items)} Plex + "
-                f"{len(matched_items)} manifest match(es) -> {len(playable_items)} playable"
-            )
-            output = _create_playlist_outputs(
-                display_name,
-                playable_items,
-                log=log,
-                replace_plex=True,
-                require_full_plex=False,
-                desired_tracks=desired_tracks,
-                missing_tracks=missing_tracks,
-            )
-            plex_result = output.get("plex") or {}
-            plex_synced = bool(plex_result.get("created") and not plex_result.get("error"))
+        summary["skipped"] += int(detail.get("skipped") or 0)
+        summary["pending"] += int(detail.get("pending_count") or 0)
+        summary["plex_writes"] += int(detail.get("plex_writes") or 0)
+        if detail.get("updated"):
             summary["playlists_updated"] += 1
-            summary["tracks_written"] += len(playable_items)
-            summary["local_added"] += local_added
-            summary["plex_added"] += plex_added if plex_synced else 0
-            detail["updated"] = True
-            detail["plex_synced"] = plex_synced
-            detail["plex_added"] = plex_added if plex_synced else 0
-            if plex_synced:
-                detail["plex_tracks"] = int(
-                    plex_result.get("verified_count")
-                    or plex_result.get("existing_playlist_count")
-                    or plex_result.get("tracks_added")
-                    or detail.get("plex_tracks")
-                    or 0
-                )
-                detail["plex_verified_count"] = int(plex_result.get("verified_count") or 0)
-                detail["plex_unique_rating_keys"] = int(plex_result.get("unique_rating_keys") or 0)
-            detail["plex_tracks_matched"] = int(plex_result.get("tracks_matched") or 0)
-            detail["plex_tracks_unmatched"] = int(plex_result.get("tracks_unmatched") or 0)
-            detail["plex_error"] = _s(plex_result.get("error") or "")
+            summary["tracks_written"] += int(detail.get("merged_tracks") or 0)
+            summary["local_added"] += int(detail.get("local_added") or 0)
+            summary["plex_added"] += int(detail.get("plex_added") or 0)
         summary["details"].append(detail)
     log.append(
-        f"Playlist two-way sync complete: {summary['playlists_updated']} updated, "
-        f"{summary['local_added']} added to M3U, {summary['plex_added']} added to Plex"
+        f"Playlist sync complete: {summary['playlists_updated']} updated, "
+        f"{summary['plex_writes']} Plex write(s), {summary['pending']} pending, "
+        f"{summary['playlists_failed']} failed"
     )
     return summary
 
 
-def _playlist_sync_all_locked(log: list, names: Optional[List[str]] = None) -> Dict[str, Any]:
+def _playlist_sync_all_locked(log: list, names: Optional[List[str]] = None,
+                              cancel_event=None) -> Dict[str, Any]:
     if not _PLAYLIST_SYNC_LOCK.acquire(blocking=False):
         log.append("Playlist sync already running; skipped this run")
         return {"skipped": True, "reason": "already_running"}
     _PLAYLIST_SYNC_STATE.update({"running": True, "last_error": ""})
     try:
-        result = _playlist_sync_all(log, names=names)
+        result = _playlist_sync_all(log, names=names, cancel_event=cancel_event)
         _PLAYLIST_SYNC_STATE.update({
             "last_run": time.time(),
             "last_result": result,
             "last_log": list(log)[-200:],
         })
+        if result.get("playlists_failed"):
+            _PLAYLIST_SYNC_STATE["last_error"] = (
+                f"{result['playlists_failed']} playlist(s) failed to sync; see the job log"
+            )
         return result
     except Exception as ex:
+        _app_logger.warning("Playlist sync failed: %s", type(ex).__name__)
+        text = _s(ex)
+        message = text if text == "cancelled" or text.startswith("Plex") else _plex_failure(ex)["error"]
         _PLAYLIST_SYNC_STATE.update({
             "last_run": time.time(),
-            "last_error": str(ex),
-            "last_log": list(log)[-200:] + [f"Fatal: {ex}"],
+            "last_error": message,
+            "last_log": list(log)[-200:] + [f"Fatal: {message}"],
         })
         raise
     finally:
@@ -6095,6 +6414,8 @@ def _playlist_slskd_download_track(artist: str, title: str,
         raise RuntimeError("SLSKD API key is not configured")
     wanted = [{"title": title}]
     inner_log: List[str] = raw_log if raw_log is not None else []
+    username, queued = "", []
+    afiles: List[Any] = []
     try:
         username, queued, expected, _remote_dir = _slskd_search_and_queue(
             artist, title, "", inner_log, track_count=0, wanted_tracks=wanted,
@@ -6109,12 +6430,20 @@ def _playlist_slskd_download_track(artist: str, title: str,
             username, queued, expected or aldir, inner_log,
             artist=artist, album=title, track_count=max(1, len(queued)),
             transfer_hints=transfer_hints, wanted_tracks=wanted, cancel_event=cancel_event)
+        if not afiles:
+            raise RuntimeError("SLSKD completed but no queued playlist file was found")
+    except BaseException:
+        # #280: a failed or cancelled track must not leave its transfer
+        # queued in slskd (it could land in downloads later). Same contained
+        # cleanup album acquisition uses (#277).
+        if username and queued:
+            _slskd_cancel_queued_downloads(username, queued, inner_log)
+            _slskd_cleanup_failed_candidate_files(username, queued, inner_log)
+        raise
     finally:
         if raw_log is None:
             for line in inner_log:
                 log(line)
-    if not afiles:
-        raise RuntimeError("SLSKD completed but no queued playlist file was found")
     log(f"  [slskd] Copying {len(afiles)} downloaded file(s) into playlist import staging")
     return _playlist_copy_source_files(afiles, dl_dir, artist, title, log)
 
@@ -8404,22 +8733,75 @@ def _playlist_start_download_action(name: str,
     return {**result, "action": action}
 
 
-def _playlist_auto_sync_worker():
-    time.sleep(min(30, PLAYLIST_AUTO_SYNC_INTERVAL))
+_PLAYLIST_SYNC_DEDUPE_KEY = "playlist-sync"
+
+
+def start_playlist_sync_job(names: Optional[List[str]] = None, *, trigger: str = "manual"):
+    """Start the playlist sync as a tracked job_engine job.
+
+    Manual and automatic syncs share one ``dedupe_key``, so they never
+    overlap: a second start raises ``DuplicateJobError`` (HTTP 409 on the
+    route). The job is cancellable between playlists.
+    """
+    wanted = [n for n in (names or []) if _s(n).strip()]
+
+    def _do(log, cancel_event=None):
+        log.append(f"Starting playlist sync ({trigger})")
+        result = _playlist_sync_all_locked(log, names=wanted or None, cancel_event=cancel_event)
+        log.append(json.dumps({k: v for k, v in result.items() if k != "details"}, sort_keys=True))
+        return result
+
+    job = jobs.start_python(
+        _do,
+        label="Playlist sync" + (" (automatic)" if trigger == "auto" else ""),
+        metadata={"type": "playlist-sync", "trigger": trigger, "dedupe_key": _PLAYLIST_SYNC_DEDUPE_KEY},
+    )
+    _PLAYLIST_SYNC_STATE["last_job_id"] = job.job_id
+    return job
+
+
+def _playlist_auto_sync_tick() -> str:
+    """One scheduler tick: start the sync job unless auto-sync is off, Plex
+    is not configured, or a sync is already running. Returns what happened."""
+    if not PLAYLIST_AUTO_SYNC_ENABLED:
+        return "disabled"
+    if not _plex_configured(_plex_settings()):
+        return "plex_not_configured"
+    try:
+        start_playlist_sync_job(trigger="auto")
+    except DuplicateJobError:
+        return "already_running"
+    except Exception as exc:
+        _app_logger.warning("Automatic playlist sync could not start: %s", type(exc).__name__)
+        _PLAYLIST_SYNC_STATE["last_error"] = "Automatic playlist sync could not start; see the server log"
+        return "error"
+    return "started"
+
+
+def _playlist_auto_sync_scheduler(stop: threading.Event) -> None:
+    """Wake every PLAYLIST_AUTO_SYNC_INTERVAL seconds and start a tracked
+    sync job. This loop does no sync work itself (ADR 0005: the work is a
+    job_engine job, visible, cancellable and logged)."""
+    wait = min(30, PLAYLIST_AUTO_SYNC_INTERVAL)
     while True:
+        _PLAYLIST_SYNC_STATE["next_run_at"] = time.time() + wait
+        if stop.wait(wait):
+            return
         try:
-            if PLAYLIST_AUTO_SYNC_ENABLED and _plex_settings().get("token"):
-                log: List[str] = ["Starting automatic playlist two-way sync"]
-                _playlist_sync_all_locked(log)
-        except Exception:
-            pass
-        time.sleep(PLAYLIST_AUTO_SYNC_INTERVAL)
+            _playlist_auto_sync_tick()
+        except Exception as exc:  # never let the scheduler die silently
+            _app_logger.warning("Playlist auto-sync scheduler tick failed: %s", type(exc).__name__)
+        wait = PLAYLIST_AUTO_SYNC_INTERVAL
+
+
+_PLAYLIST_AUTO_SYNC_STOP = threading.Event()
 
 
 def _start_playlist_auto_sync_worker():
     if not PLAYLIST_AUTO_SYNC_ENABLED:
         return
-    threading.Thread(target=_playlist_auto_sync_worker, daemon=True).start()
+    threading.Thread(target=_playlist_auto_sync_scheduler, args=(_PLAYLIST_AUTO_SYNC_STOP,),
+                     name="playlist-auto-sync-scheduler", daemon=True).start()
 
 
 def _playlist_index_warm_worker():

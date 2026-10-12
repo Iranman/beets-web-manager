@@ -3929,13 +3929,52 @@ def _get_playlist_m3u_path(playlist_key: str, display_name: str = "") -> Path:
     return _get_playlist_dir() / f"{_sanitize_playlist_key(playlist_key)}.m3u"
 
 
+def parse_m3u_text(text: str) -> List[Dict[str, Any]]:
+    """M3U lines as ``[{"path", "artist", "title"}]`` in file order, keeping
+    duplicates. ``artist``/``title`` come from the preceding ``#EXTINF``
+    label ("Artist - Title") when there is one."""
+    items: List[Dict[str, Any]] = []
+    artist = title = ""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if line.upper().startswith("#EXTINF:"):
+                label = line.split(",", 1)[1].strip() if "," in line else ""
+                artist, _, title = label.partition(" - ") if " - " in label else ("", "", label)
+                artist, title = artist.strip(), title.strip()
+            continue
+        items.append({"path": line, "artist": artist, "title": title})
+        artist = title = ""
+    return items
+
+
 def read_playlist_m3u(playlist_key: str, fallback_name: str = "") -> Dict[str, Any]:
     p = _get_playlist_m3u_path(playlist_key, fallback_name)
     if not p.exists():
-        return {"ok": False, "exists": False, "tracks": []}
-    lines = p.read_text(encoding="utf-8").splitlines()
-    tracks = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
-    return {"ok": True, "exists": True, "playlist_key": playlist_key, "tracks": tracks, "count": len(tracks)}
+        return {"ok": False, "exists": False, "items": [], "tracks": []}
+    items = parse_m3u_text(p.read_text(encoding="utf-8"))
+    # ``items`` is the contract playlist_service reads; ``tracks`` (paths
+    # only) is kept for older callers.
+    return {"ok": True, "exists": True, "playlist_key": playlist_key, "items": items,
+            "tracks": [it["path"] for it in items], "count": len(items)}
+
+
+def _write_text_atomic(p: Path, text: str) -> None:
+    """Write ``text`` to ``p`` through a same-directory temp file that is
+    removed on every failure path, including a refused replace."""
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def export_playlist_m3u(playlist_key: str, display_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3948,8 +3987,15 @@ def export_playlist_m3u(playlist_key: str, display_name: str, items: List[Dict[s
         length = int(it.get("length") or 0)
         lines.append(f"#EXTINF:{length},{artist} - {title}\n")
         lines.append(f"{path}\n")
-    p.write_text("".join(lines), encoding="utf-8")
-    return {"ok": True, "playlist_key": playlist_key, "path": str(p), "count": len(items)}
+    text = "".join(lines)
+    try:
+        unchanged = p.read_text(encoding="utf-8") == text
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        _write_text_atomic(p, text)
+    return {"ok": True, "playlist_key": playlist_key, "path": str(p), "count": len(items),
+            "unchanged": unchanged}
 
 
 def delete_playlist_m3u(playlist_key: str, fallback_name: str = "") -> Dict[str, Any]:

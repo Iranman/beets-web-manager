@@ -324,6 +324,27 @@ def _wanted_tracks_remaining_after_satisfied(
     return [t for t in wanted_tracks if _wanted_track_key(t) not in satisfied_keys]
 
 
+def _slskd_pause(seconds: float, cancel_event: Optional[Any] = None) -> None:
+    """Sleep between slskd polls; a job cancel ends the wait at once (#280)."""
+    if cancel_event is None:
+        time.sleep(seconds)
+    elif cancel_event.wait(seconds):
+        raise RuntimeError("cancelled")
+
+
+def _slskd_bounded_walk(root: Path, deadline: float, cancel_event: Optional[Any] = None):
+    """Yield the paths of files under ``root`` (symlinked folders are not
+    followed), stopping once ``deadline`` (epoch seconds) passes; a job
+    cancel raises "cancelled". Checked once per folder (#263)."""
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        if time.time() >= deadline:
+            return
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
 def _slskd_search_and_queue(artist: str, album: str, year: str,
                              log: list, track_count: int = 0,
                              wanted_tracks: Optional[List[Dict[str, Any]]] = None,
@@ -403,7 +424,7 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
     missing_rows_logged = False
     poll_error: Optional[BaseException] = None
     for _ in range(45):
-        time.sleep(1)
+        _slskd_pause(1, cancel_event)
         try:
             st = _slskd_req("GET", f"searches/{search_id}?includeResponses=true")
             if not isinstance(st, dict):
@@ -451,7 +472,7 @@ def _slskd_search_and_queue(artist: str, album: str, year: str,
             fetch_error = exc
         if responses or _inline_responses:
             break
-        time.sleep(1)
+        _slskd_pause(1, cancel_event)
     if not responses and _inline_responses:
         log.append(f"  [slskd] Using {len(_inline_responses)} cached inline responses")
         responses = _inline_responses
@@ -754,20 +775,24 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             log.append(f"  [slskd] WARN: transfer-path lookup failed: {ex}")
         return hints
 
-    def _scan_exact(roots: List[Path]) -> tuple:
+    def _scan_exact(roots: List[Path], deadline: float) -> tuple:
         for root in roots:
             try:
                 if root.is_file() and root.suffix.lower() in audio_exts and root.name.lower() in queued_names:
                     return str(root.parent), [root]
                 if root.is_dir():
+                    # #263: one pass over a large torrent tree must not
+                    # outlive the wait's deadline or ignore a cancel.
                     matches = [
-                        f for f in root.rglob("*")
-                        if f.is_file()
-                        and f.suffix.lower() in audio_exts
+                        f for f in _slskd_bounded_walk(root, deadline, cancel_event)
+                        if f.suffix.lower() in audio_exts
                         and f.name.lower() in queued_names
+                        and f.is_file()
                     ]
                 else:
                     continue
+            except RuntimeError:
+                raise  # "cancelled"
             except Exception as ex:
                 log.append(f"  [slskd] WARN: queued-file search failed under {root}: {ex}")
                 continue
@@ -924,7 +949,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
             for candidate in (hp, hp.parent):
                 if _slskd_within_roots(candidate, static_roots):
                     _root_add(hint_roots, candidate)
-        folder, files = _scan_exact(hint_roots)
+        folder, files = _scan_exact(hint_roots, deadline)
         if files:
             return folder, files
         if not logged_wait:

@@ -279,6 +279,14 @@ PLAYLIST_AUTO_SYNC_ENABLED = os.environ.get("PLAYLIST_AUTO_SYNC", "1").strip().l
 PLAYLIST_AUTO_SYNC_INTERVAL = max(60, int(os.environ.get("PLAYLIST_AUTO_SYNC_INTERVAL", "300") or "300"))
 
 
+# Where versions before 0.4.0 kept playlists (<MUSIC_ROOT>/playlists). Each
+# list there is imported once, read-only, when Web Manager has none with that
+# name. "off" disables the import; any other value must be absolute.
+_PLAYLIST_LEGACY_RAW = os.environ.get("PLAYLIST_LEGACY_IMPORT_DIR", "").strip()
+PLAYLIST_LEGACY_IMPORT_DIR = None if _PLAYLIST_LEGACY_RAW.lower() in {"off", "0", "false", "no", "none"} else Path(
+    _config_layers.container_path("PLAYLIST_LEGACY_IMPORT_DIR", str(_MUSIC_ROOT_SETTING / "playlists")))
+
+
 PLAYLIST_MIN_DOWNLOAD_SECONDS = max(0, int(os.environ.get("PLAYLIST_MIN_DOWNLOAD_SECONDS", "45") or "45"))
 
 

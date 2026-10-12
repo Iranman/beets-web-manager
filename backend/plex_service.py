@@ -6,7 +6,7 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 from backend import config_layers
 from backend.security import OutboundPolicyError
-import json, math, os, re, socket, threading, time, unicodedata, uuid
+import json, math, os, re, socket, time, unicodedata, uuid
 import urllib.error, urllib.parse, urllib.request
 from collections import Counter
 from pathlib import Path
@@ -428,7 +428,10 @@ def _plex_client_headers() -> Dict[str, str]:
 
 def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
                   *, method: str = "GET", timeout: Optional[int] = None,
-                  attempts: int = 2) -> Dict[str, Any]:
+                  attempts: int = 2, deadline: Optional[float] = None) -> Dict[str, Any]:
+    """``deadline`` (a time.time() value) bounds the whole call, body read
+    included, without a helper thread (#339): each socket wait is capped at
+    the time left and the body is read in chunks, checked between chunks."""
     settings = _plex_settings()
     if not settings["url"]:
         raise RuntimeError("Plex URL is not configured")
@@ -442,12 +445,31 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     headers.update(_plex_client_headers())
     req = urllib.request.Request(url, headers=headers, method=method)
     timeout = int(timeout or PLEX_API_TIMEOUT)
+
+    def remaining() -> float:
+        left = deadline - time.time()
+        if left <= 0:
+            raise TimeoutError("Plex request exceeded its time limit")
+        return left
+
+    if deadline is not None:
+        timeout = max(0.1, min(timeout, remaining()))
     # IA-02 / BA-5: the boundary owns retries -- at most ``attempts`` for a
     # GET, and never a re-send of a POST/PUT/DELETE, which Plex may already
     # have applied before the timeout (a duplicate playlist or append).
     with provider_boundary.opened("plex", req, timeout=timeout,
                                   max_attempts=max(1, int(attempts or 1))) as r:
-        raw = r.read()
+        if deadline is None:
+            raw = r.read()
+        else:
+            chunks = []
+            while True:
+                remaining()
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks)
     if not raw:
         return {}
     try:
@@ -824,7 +846,9 @@ def _plex_section_track_index(section_key, log=None, force: bool = False) -> Dic
         index_timeout = PLEX_INDEX_TIMEOUT
     while True:
         loops += 1
-        d = _plex_request_with_wall_timeout(
+        # #339: one total deadline for the whole index, enforced on the
+        # socket reads themselves -- no abandoned helper thread on timeout.
+        d = _plex_request(
             f"/library/sections/{section_key}/all",
             {
                 "type": 10,
@@ -832,7 +856,8 @@ def _plex_section_track_index(section_key, log=None, force: bool = False) -> Dic
                 "X-Plex-Container-Size": size,
             },
             timeout=PLEX_API_TIMEOUT,
-            wall_timeout=index_timeout,
+            attempts=1,
+            deadline=started + max(1, index_timeout),
         )
         mc = d.get("MediaContainer", {})
         tracks = mc.get("Metadata", []) or []
@@ -942,29 +967,6 @@ def _plex_section_track_index(section_key, log=None, force: bool = False) -> Dic
 def _plex_section_track_lookup(section_key, log=None) -> Dict[tuple, str]:
     """Compatibility wrapper: return the cached Plex lookup map."""
     return _plex_section_track_index(section_key, log=log).get("lookup", {})
-
-
-def _plex_request_with_wall_timeout(path: str,
-                                    params: Optional[Dict[str, Any]] = None,
-                                    *,
-                                    timeout: int,
-                                    wall_timeout: int) -> Dict[str, Any]:
-    box: Dict[str, Any] = {}
-
-    def _worker() -> None:
-        try:
-            box["result"] = _plex_request(path, params, timeout=timeout, attempts=1)
-        except Exception as exc:
-            box["error"] = exc
-
-    thread = threading.Thread(target=_worker, name="plex-request-timeout", daemon=True)
-    thread.start()
-    thread.join(max(1, int(wall_timeout or timeout)))
-    if thread.is_alive():
-        raise TimeoutError(f"Plex request timed out after {wall_timeout}s")
-    if box.get("error"):
-        raise box["error"]
-    return box.get("result") or {}
 
 
 def _plex_unique_index_value(mapping: Dict[Any, set], key: Any) -> str:

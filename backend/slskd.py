@@ -1,5 +1,7 @@
+import os
 import re
 import shutil
+import stat
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -294,6 +296,40 @@ def _renamed_copies(directory: Path, name: str, queued_at: float) -> List[Path]:
     return out
 
 
+def _unlink_proven_under(root: Path, path: Path, remote) -> bool:
+    """Delete ``path`` (lexically under ``root``) relative to directory file
+    descriptors: every folder below ``root`` is opened O_NOFOLLOW and the
+    file itself is checked with lstat, so a folder or file swapped for a
+    symlink after the containment check cannot redirect the delete (#263,
+    #281). The transfer proof (regular file, queued size, mtime) is checked
+    again on the entry actually deleted. Returns False, deleting nothing,
+    when the platform lacks dir_fd support."""
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return False
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        return False
+    if not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd):
+        return False
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        size = getattr(remote, "size", 0)
+        queued_at = getattr(remote, "queued_at", 0.0)
+        if not stat.S_ISREG(st.st_mode) or size <= 0 or st.st_size != size or st.st_mtime < queued_at:
+            return False
+        os.unlink(parts[-1], dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
 def cleanup_failed_candidate_files(downloads_root: Path, username: str,
                                    remote_files: Sequence,
                                    audio_exts: Iterable[str],
@@ -327,32 +363,40 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
         except ValueError:
             return path.name
 
-    targets: List[Path] = []
+    targets: Dict[Path, Any] = {}
     left: List[Path] = []
     for remote in remote_files or []:
         rp = _remote_path(remote)
         if not rp.name or rp.suffix.lower() not in audio_ext_set:
             continue
-        dirs = dict.fromkeys((root / rp.parent.name, peer_root / rp.parent, peer_root / rp.parent.name))
-        for d in dirs:
+        candidates = [root / rp.parent.name, peer_root / rp.parent]
+        # #281: the flattened peer path <peer>/<remote folder name> is only a
+        # fallback layout. When the full peer path exists, slskd used that
+        # layout, and the flattened folder can be another album of this peer.
+        if not (peer_root / rp.parent).is_dir():
+            candidates.append(peer_root / rp.parent.name)
+        for d in dict.fromkeys(candidates):
             if not within_roots(d, allowed):
                 continue
             exact = d / rp.name
             if exact.is_file():
-                (targets if _proven_from_transfer(exact, remote) else left).append(exact)
+                if _proven_from_transfer(exact, remote):
+                    targets.setdefault(exact, remote)
+                else:
+                    left.append(exact)
             for copy in _renamed_copies(d, rp.name, getattr(remote, "queued_at", 0.0)):
                 if _proven_from_transfer(copy, remote):
-                    targets.append(copy)
+                    targets.setdefault(copy, remote)
 
     removed = 0
     touched_dirs: set[Path] = set()
-    for path in dict.fromkeys(targets):
+    for path, remote in targets.items():
         try:
-            if not within_roots(path, allowed) or not path.is_file():
+            if not within_roots(path, allowed):
                 continue
-            path.unlink(missing_ok=True)
-            removed += 1
-            touched_dirs.add(path.parent)
+            if _unlink_proven_under(root, path, remote):
+                removed += 1
+                touched_dirs.add(path.parent)
         except Exception:
             pass
     for path in dict.fromkeys(p for p in left if p not in targets):
