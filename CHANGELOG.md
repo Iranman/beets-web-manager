@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Import Review: opening or browsing a review item no longer changes any files or starts an import. Before, showing an item could quarantine or permanently delete up to 4 of its rejected files, and could queue an import for a high-confidence match, without a click. Now **Remove N rejected files…** opens a confirmation that lists the files and says whether they will be quarantined or permanently deleted, and imports start only from the Import button and its confirmation. The bulk **Revalidate** button and backend auto-import jobs are unchanged.
+- Import Review keyboard shortcuts (`[`, `]`, `i`) no longer fire while another Import tab is open or while Ctrl, Alt, Shift or Meta is held. The candidate Left/Right arrow keys now work only while focus is inside the candidate carousel, not anywhere on the page.
+
 ## v0.5.0 - 2026-10-12
 
 ### Upgrade Notes

@@ -16,6 +16,7 @@ import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { apiGet } from '../../lib/api';
 import {
@@ -23,7 +24,6 @@ import {
   albumMbsubmit,
   apiErrorBody,
   attachRecording,
-  autoEnqueueImport,
   cleanupReviewFiles,
   cleanupStaleReview,
   confirmAttachRecording,
@@ -36,7 +36,6 @@ import {
   matchAlbum,
   decideImportReviewRemote,
   previewImportTarget,
-  reconcileAutoEnqueueImport,
   revalidateImportReview,
   reconcileImportJob,
   reimportDisk,
@@ -121,6 +120,7 @@ type ConfirmIntent =
   | { kind: 'apply'; item: ReviewItem; mbid: string }
   | { kind: 'dismiss'; item: ReviewItem }
   | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
+  | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; destructive: boolean }
   | { kind: 'attach_recording_confirm'; item: ReviewItem; mbid: string; candidate: ReviewRecordingCandidate };
 
 type BgJobStatus =
@@ -235,7 +235,6 @@ const matchTones: Record<MatchBucket, string> = {
   needs_id: 'border-cyan-200 bg-cyan-50 text-cyan-800',
 };
 const AUTO_IMPORT_CONFIDENCE_THRESHOLD = 0.60;
-const AUTO_QUARANTINE_REJECTED_MAX_FILES = 5;
 
 function persistSubmittedItemIds(ids: Set<string>) {
   try {
@@ -250,20 +249,14 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: number | undefined;
-  const timeout = new Promise<T>((_, reject) => {
-    timer = window.setTimeout(() => reject(new Error(label)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== undefined) window.clearTimeout(timer);
-  });
-}
-
 function isEditableTarget(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
   const tag = element?.tagName?.toLowerCase() ?? '';
   return tag === 'input' || tag === 'textarea' || tag === 'select' || Boolean(element?.isContentEditable);
+}
+
+function hasModifierKey(e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): boolean {
+  return e.altKey || e.ctrlKey || e.metaKey || e.shiftKey;
 }
 
 function reviewQueueSnapshot(items: ReviewItem[], counts: ReviewCounts): string {
@@ -1984,16 +1977,12 @@ function CandidateCarousel({
     setTrackError('');
   }, [initialIndex]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase() ?? '';
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-      if (e.key === 'ArrowLeft') { e.preventDefault(); goTo(currentIndex - 1); }
-      if (e.key === 'ArrowRight') { e.preventDefault(); goTo(currentIndex + 1); }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [currentIndex, goTo]);
+  // REV-16: arrow keys act only while focus is inside this carousel, never window-wide.
+  const handleCarouselKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (isEditableTarget(e.target) || hasModifierKey(e)) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); goTo(currentIndex - 1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); goTo(currentIndex + 1); }
+  };
 
   useEffect(() => {
     const mbid = current?.mb_albumid;
@@ -2058,7 +2047,14 @@ function CandidateCarousel({
     : 'blocked';
 
   return (
-    <div ref={containerRef} className="mt-3 rounded border border-graphite-200 bg-white">
+    <div
+      ref={containerRef}
+      role="group"
+      aria-label="Candidate matches (Left/Right arrow keys switch matches)"
+      tabIndex={-1}
+      onKeyDown={handleCarouselKeyDown}
+      className="mt-3 rounded border border-graphite-200 bg-white"
+    >
       <div className="flex items-center gap-2 border-b border-graphite-200 px-3 py-1.5">
         <button
           aria-label="Previous match"
@@ -2628,7 +2624,6 @@ export function ReviewCard({
     ? ''
     : selectedMatch?.preflight_reason || '';
   const cleanupFiles = selectedCleanupSourceFiles(selectedMatch, targetPreviewState?.preview);
-  const cleanupPurgeReady = hasDestructiveCleanupMismatch(selectedMatch, targetPreviewState?.preview);
   const cleanupReady = cleanupFiles.length > 0;
   const openSubmissionPage = () => {
     const params = new URLSearchParams();
@@ -2892,7 +2887,7 @@ export function ReviewCard({
                       onClick={onCleanupFiles}
                       disabled={busy}
                     >
-                      {cleanupPurgeReady ? 'Purge' : 'Quarantine'} {cleanupFiles.length} rejected file{cleanupFiles.length === 1 ? '' : 's'}
+                      Remove {cleanupFiles.length} rejected file{cleanupFiles.length === 1 ? '' : 's'}…
                     </Button>
                   </div>
                 ) : null}
@@ -2996,6 +2991,7 @@ function ConfirmDialog({
   const deletingLibraryFolder = intent?.kind === 'delete_folder' && isMusicLibraryPath(item?.path);
   const wrongSourceNote = intent?.kind === 'delete_folder' ? wrongSourceEvidenceNote(item) : '';
   const isAttachConfirm = intent?.kind === 'attach_recording_confirm';
+  const cleanupDestructive = intent?.kind === 'cleanup_files' && intent.destructive;
   const [reason, setReason] = useState('');
   useEffect(() => { setReason(''); }, [intent]);
   const reasonTrimmed = reason.trim();
@@ -3004,6 +3000,8 @@ function ConfirmDialog({
     ? 'Remove Review Item'
     : intent?.kind === 'delete_folder'
       ? deletingLibraryFolder ? 'Delete Library Folder' : 'Delete Source Folder'
+      : intent?.kind === 'cleanup_files'
+        ? cleanupDestructive ? 'Permanently Delete Rejected Files' : 'Quarantine Rejected Files'
       : isAttachConfirm
         ? 'Confirm Recording ID (Review Required)'
         : 'Start Tagging Job';
@@ -3013,6 +3011,10 @@ function ConfirmDialog({
       ? deletingLibraryFolder
         ? 'This permanently deletes this folder from the music library, removes matching Beets DB rows, and removes it from Pending Review. Use this only when the tracks are confirmed wrong.'
         : 'This permanently deletes the source folder from disk and removes it from Pending Review. Use this only when the tracks are confirmed wrong.'
+      : intent?.kind === 'cleanup_files'
+        ? cleanupDestructive
+          ? 'These files will be permanently deleted from disk. This cannot be undone. Other files in the folder stay in review.'
+          : 'These files will be moved to the import-review quarantine folder, not deleted. Other files in the folder stay in review.'
       : isAttachConfirm
         ? 'The backend flagged this candidate as needing human review before it can be attached. Confirming only attaches this Recording ID -- it does not authorize any other action.'
         : 'This starts a backend Beets job that can write tags and move files according to the configured path template.';
@@ -3052,6 +3054,13 @@ function ConfirmDialog({
                   ) : null}
                 </div>
               ) : null}
+              {intent?.kind === 'cleanup_files' ? (
+                <ul aria-label="Files to remove" className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-xs text-zinc-600">
+                  {intent.files.map((file) => (
+                    <li key={file} className="truncate" title={file}>{file}</li>
+                  ))}
+                </ul>
+              ) : null}
               {intent?.kind === 'attach_recording_confirm' ? (
                 <div className="mt-2 space-y-2 text-xs text-zinc-600">
                   <div className="truncate font-mono">{intent.candidate.mb_trackid}</div>
@@ -3084,12 +3093,16 @@ function ConfirmDialog({
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="text" onClick={onClose}>Cancel</Button>
             <Button
-              color={intent?.kind === 'delete_folder' ? 'error' : 'primary'}
+              color={intent?.kind === 'delete_folder' || cleanupDestructive ? 'error' : 'primary'}
               variant="contained"
               disabled={isAttachConfirm && !reasonTrimmed}
               onClick={() => onConfirm(reasonTrimmed)}
             >
-              {intent?.kind === 'delete_folder' ? deleteFolderActionLabel(item) : 'Confirm'}
+              {intent?.kind === 'delete_folder'
+                ? deleteFolderActionLabel(item)
+                : intent?.kind === 'cleanup_files'
+                  ? `${cleanupDestructive ? 'Delete' : 'Quarantine'} ${intent.files.length} file${intent.files.length === 1 ? '' : 's'}`
+                  : 'Confirm'}
             </Button>
           </div>
         </DialogPanel>
@@ -3241,8 +3254,6 @@ export function ImportReviewPage({
   const [queueUpdatesAvailable, setQueueUpdatesAvailable] = useState(false);
   const targetPreviewKeysRef = useRef<Record<string, string>>({});
   const queueSnapshotRef = useRef('');
-  const autoEnqueueKeysRef = useRef<Set<string>>(new Set());
-  const autoCleanupKeysRef = useRef<Set<string>>(new Set());
   const reviewItemStateKeysRef = useRef<Record<string, string>>({});
   const [confirmIntent, setConfirmIntent] = useState<ConfirmIntent | null>(null);
   const [loading, setLoading] = useState(true);
@@ -3733,145 +3744,8 @@ export function ImportReviewPage({
     }
   }, [loadQueue]);
 
-  // Backend-owned auto-enqueue: the browser only submits the current verified selection.
-  useEffect(() => {
-    if (!active) return;
-    if (!activeItem) return;
-    const item = activeItem;
-    const itemStateKey = reviewItemStateKey(item);
-    const statusKey = (item.status_key || item.status || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-    if (['auto_enqueue_failed', 'format_policy_rejected', 'import_failed', 'failed'].includes(statusKey)) return;
-    if (item.type !== 'pending_ai' || existingAlbumId(item)) return;
-    if (submittedItemIdsRef.current.has(item.id)) return;
-    if (runningJobItemIdsRef.current.has(item.id)) return;
-    const sm = selectedMatches[item.id];
-    if (!sm || sm.source === 'manual' || !sm.auto_fix_eligible || !sm.is_importable) return;
-    const previewState = currentTargetPreviewState(item, sm, targetPreviews);
-    if (!previewState || previewState.status !== 'ready' || !previewState.preview) return;
-    const preview = previewState.preview;
-    if (!preview.safe || (preview.real_conflict_count ?? 0) > 0) return;
-    const blockReason = applyBlockReason(item, mbids[item.id] || sm.release_group_id, sm, previewState);
-    if (blockReason) return;
-    const selectedSourceFiles = selectedImportSourceFiles(sm, preview);
-    const previewCount = preview.tracks_to_import_count ?? selectedSourceFiles.length;
-    if (selectedSourceFiles.length < 1 || previewCount < 1) return;
-    if (selectedSourceFiles.length !== previewCount) {
-      setAction(item.id, {
-        status: 'error',
-        message: `Import selection changed for ${itemTitle(item)}. Refresh target preview before queueing.`,
-      });
-      return;
-    }
-    const representativeId = sm.representative_release_id && sm.representative_release_id !== sm.release_group_id
-      ? sm.representative_release_id
-      : (mbids[item.id] || sm.representative_release_id);
-    const enqueueKey = [
-      item.id,
-      itemStateKey,
-      previewState.key,
-      sm.release_group_id,
-      representativeId,
-      ...selectedSourceFiles.slice().sort(),
-    ].join('::');
-    if (autoEnqueueKeysRef.current.has(enqueueKey)) return;
-    autoEnqueueKeysRef.current.add(enqueueKey);
-
-    const unfilteredSelectedFiles = selectedImportSourceFiles(sm);
-    const keepReviewAfterSuccess = Boolean(
-      (sm.is_partial_import && unmatchedExtraTrackCount(sm) > 0)
-      || selectedSourceFiles.length < unfilteredSelectedFiles.length,
-    );
-    const albumLabel = itemTitle(item);
-    const label = `Import queued: ${albumLabel} - ${selectedSourceFiles.length} track${selectedSourceFiles.length === 1 ? '' : 's'}`;
-    const payload = {
-      path: item.path || '',
-      review_item_id: item.id,
-      mb_albumid: representativeId,
-      mb_releasegroupid: sm.release_group_id,
-      confidence_score: sm.confidence_score,
-      selected_source_files: selectedSourceFiles,
-      track_mapping: sm.track_mapping,
-      ai_suggestion: suggestionWithOrigin(item, suggestions[item.id]?.suggestion as AiSuggestion | undefined),
-      selected_match: {
-        release_group_id: sm.release_group_id,
-        representative_release_id: representativeId,
-        artist: sm.artist || item.artist || '',
-        album: sm.album || item.album || albumLabel,
-        year: sm.year || item.year || '',
-        confidence_score: sm.confidence_score,
-        preflight_status: sm.preflight_status,
-        source: sm.source,
-      },
-      trigger_plex: false,
-    };
-    const setSameItemAction = (state: ActionState) => {
-      if (reviewItemStateKeysRef.current[item.id] === itemStateKey) setAction(item.id, state);
-    };
-    const attachQueuedJob = (jobId: string, message = `Job ${jobId} queued.`) => {
-      setBackgroundJobs((prev) => ({
-        ...prev,
-        [item.id]: { jobId, status: 'running', label, message, item },
-      }));
-      removeLocalItem(item);
-      void pollJobBackground(jobId, item, label, keepReviewAfterSuccess);
-    };
-    setSameItemAction({
-      status: 'running',
-      message: `Submitting import for ${albumLabel}: ${selectedSourceFiles.length} verified track${selectedSourceFiles.length === 1 ? '' : 's'}...`,
-    });
-
-    void withTimeout(autoEnqueueImport(payload), 15000, 'enqueue acknowledgement timed out')
-      .then((started) => {
-        if (started.handled) {
-          autoEnqueueKeysRef.current.delete(enqueueKey);
-          setSameItemAction({
-            status: 'warning',
-            message: started.note || started.eligibility?.blocking_reasons?.join('; ') || 'Audio was rejected by Music Format Preferences.',
-          });
-          if (started.pending_review_exists === false) removeLocalItem(item);
-          void loadQueue();
-          return;
-        }
-        if (!started.queued || !started.job_id) {
-          const reasons = started.eligibility?.blocking_reasons?.join('; ') || 'Backend eligibility rejected auto-import.';
-          autoEnqueueKeysRef.current.delete(enqueueKey);
-          setSameItemAction({ status: 'error', message: reasons });
-          return;
-        }
-        attachQueuedJob(started.job_id, `Queued ${selectedSourceFiles.length} track${selectedSourceFiles.length === 1 ? '' : 's'} for ${albumLabel}.`);
-      })
-      .catch((err) => {
-        setSameItemAction({ status: 'running', message: `Checking queued import for ${albumLabel}...` });
-        void reconcileAutoEnqueueImport(payload)
-          .then((result) => {
-            if (result.queued && result.job_id) {
-              attachQueuedJob(result.job_id, `Reconnected to queued import for ${albumLabel}.`);
-              return;
-            }
-            if (result.handled) {
-              autoEnqueueKeysRef.current.delete(enqueueKey);
-              setSameItemAction({
-                status: 'warning',
-                message: result.note || result.eligibility?.blocking_reasons?.join('; ') || 'Audio was rejected by Music Format Preferences.',
-              });
-              if (result.pending_review_exists === false) removeLocalItem(item);
-              void loadQueue();
-              return;
-            }
-            autoEnqueueKeysRef.current.delete(enqueueKey);
-            setSameItemAction({
-              status: 'error',
-              message: result.retryable
-                ? `Import was not queued for ${albumLabel}. Retry enqueue.`
-                : (result.eligibility?.blocking_reasons?.join('; ') || (err instanceof Error ? err.message : String(err))),
-            });
-          })
-          .catch((reconcileErr) => {
-            autoEnqueueKeysRef.current.delete(enqueueKey);
-            setSameItemAction({ status: 'error', message: reconcileErr instanceof Error ? reconcileErr.message : String(reconcileErr) });
-          });
-      });
-  }, [active, activeItem, mbids, pollJobBackground, removeLocalItem, selectedMatches, setAction, suggestions, targetPreviews]);
+  // REV-02: no import is ever started by viewing or selecting an item. Imports run only
+  // from the explicit Import button (startApply -> confirm dialog -> runApply).
   // Keep ref in sync so callbacks can read current backgroundJobs without stale closures.
   useEffect(() => { backgroundJobsRef.current = backgroundJobs; }, [backgroundJobs]);
 
@@ -4275,7 +4149,7 @@ export function ImportReviewPage({
     }
   }, [removeLocalItem, setAction]);
 
-  const runCleanupFiles = useCallback(async (item: ReviewItem) => {
+  const requestCleanupFiles = useCallback((item: ReviewItem) => {
     if (!item.path) {
       setAction(item.id, { status: 'error', message: 'No source folder path is available for this review item.' });
       return;
@@ -4283,12 +4157,17 @@ export function ImportReviewPage({
     const sm = selectedMatches[item.id];
     const preview = currentTargetPreviewState(item, sm, targetPreviews)?.preview;
     const files = selectedCleanupSourceFiles(sm, preview);
-    const destructive = hasDestructiveCleanupMismatch(sm, preview);
-    const cleanupAction = destructive ? 'delete_rejected' : 'quarantine_rejected';
     if (files.length < 1) {
       setAction(item.id, { status: 'error', message: 'No rejected or extra source files are selected for cleanup.' });
       return;
     }
+    setConfirmIntent({ kind: 'cleanup_files', item, files, destructive: hasDestructiveCleanupMismatch(sm, preview) });
+  }, [selectedMatches, setAction, targetPreviews]);
+
+  // Sends exactly the files and action the user confirmed in the dialog.
+  const runCleanupFiles = useCallback(async (item: ReviewItem, files: string[], destructive: boolean) => {
+    if (!item.path) return;
+    const cleanupAction = destructive ? 'delete_rejected' : 'quarantine_rejected';
     setAction(item.id, { status: 'running', message: `${destructive ? 'Purging' : 'Quarantining'} ${files.length} rejected file${files.length === 1 ? '' : 's'}...` });
     try {
       const result = await cleanupReviewFiles({
@@ -4315,64 +4194,9 @@ export function ImportReviewPage({
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
-  }, [loadQueue, removeLocalItem, selectedMatches, setAction, targetPreviews]);
+  }, [loadQueue, removeLocalItem, setAction]);
 
-  useEffect(() => {
-    if (!active || !activeItem?.path) return;
-    const item = activeItem;
-    const itemPath = item.path || '';
-    if (!itemPath) return;
-    if (actions[item.id]?.status === 'running') return;
-    if (backgroundJobs[item.id]?.status === 'running' || backgroundJobs[item.id]?.status === 'still_running') return;
-    const selectedMatch = selectedMatches[item.id];
-    if (!selectedMatch) return;
-    const previewState = currentTargetPreviewState(item, selectedMatch, targetPreviews);
-    const preview = previewState?.status === 'ready' ? previewState.preview : undefined;
-    const files = selectedCleanupSourceFiles(selectedMatch, preview);
-    const destructive = hasDestructiveCleanupMismatch(selectedMatch, preview);
-    const cleanupAction = destructive ? 'delete_rejected' : 'quarantine_rejected';
-    if (files.length < 1 || files.length >= AUTO_QUARANTINE_REJECTED_MAX_FILES) return;
-    const key = [
-      item.id,
-      itemPath,
-      targetPreviewKey(item, selectedMatch),
-      cleanupAction,
-      [...files].sort().join('|'),
-    ].join('::');
-    if (autoCleanupKeysRef.current.has(key)) return;
-    autoCleanupKeysRef.current.add(key);
-    setAction(item.id, {
-      status: 'running',
-      message: `${destructive ? 'Auto-purging' : 'Auto-quarantining'} ${files.length} rejected file${files.length === 1 ? '' : 's'}...`,
-    });
-    void cleanupReviewFiles({
-      path: itemPath,
-      review_item_id: item.id,
-      files,
-      action: cleanupAction,
-      allow_delete: destructive,
-    })
-      .then((result) => {
-        const handled = (result.quarantined_count ?? 0) + (result.deleted_count ?? 0);
-        setAction(item.id, {
-          status: 'success',
-          message: destructive
-            ? `Auto-purged ${result.deleted_count ?? 0} rejected file${result.deleted_count === 1 ? '' : 's'}; ${result.remaining_audio_count ?? 0} audio file${result.remaining_audio_count === 1 ? '' : 's'} remain.`
-            : `Auto-quarantined ${result.quarantined_count ?? 0} rejected file${result.quarantined_count === 1 ? '' : 's'}; ${result.remaining_audio_count ?? 0} audio file${result.remaining_audio_count === 1 ? '' : 's'} remain.`,
-        });
-        if (result.pending_review_removed || result.remaining_audio_count === 0) {
-          removeLocalItem(item);
-        } else if (handled > 0) {
-          void loadQueue(true);
-        }
-      })
-      .catch((err) => {
-        autoCleanupKeysRef.current.delete(key);
-        const message = err instanceof Error ? err.message : String(err);
-        const aiWarning = optionalAiWarning(message);
-        setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
-      });
-  }, [active, activeItem, actions, backgroundJobs, loadQueue, removeLocalItem, selectedMatches, setAction, targetPreviews]);
+  // REV-01: rejected-file cleanup never runs on view; only requestCleanupFiles -> confirm.
 
   const runDeleteFolder = useCallback(async (item: ReviewItem) => {
     if (!item.path) {
@@ -4401,10 +4225,11 @@ export function ImportReviewPage({
     if (!intent) return;
     if (intent.kind === 'apply') void runApply(intent.item, intent.mbid);
     else if (intent.kind === 'dismiss') void runDismiss(intent.item);
+    else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files, intent.destructive);
     else if (intent.kind === 'attach_recording_confirm') {
       void runConfirmedAttach(intent.item, intent.mbid, intent.candidate, reason || '');
     } else void runDeleteFolder(intent.item);
-  }, [confirmIntent, runApply, runConfirmedAttach, runDeleteFolder, runDismiss]);
+  }, [confirmIntent, runApply, runCleanupFiles, runConfirmedAttach, runDeleteFolder, runDismiss]);
 
   const selectFilter = useCallback((nextFilter: QueueFilter) => {
     setFilter(nextFilter);
@@ -4605,15 +4430,17 @@ export function ImportReviewPage({
   }, [activeItem, mbids, setAction]);
 
   useEffect(() => {
+    // REV-15: the panel stays mounted while another Import tab is shown, so gate on `active`.
+    if (!active) return;
     const handler = (e: KeyboardEvent) => {
-      if (confirmIntent || isEditableTarget(e.target)) return;
+      if (confirmIntent || isEditableTarget(e.target) || hasModifierKey(e)) return;
       if (e.key === '[') { e.preventDefault(); handlePrev(); }
       if (e.key === ']') { e.preventDefault(); handleNext(); }
       if (e.key.toLowerCase() === 'i') { e.preventDefault(); handleFocusManualEntry(); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [confirmIntent, handleFocusManualEntry, handlePrev, handleNext]);
+  }, [active, confirmIntent, handleFocusManualEntry, handlePrev, handleNext]);
 
   return (
     <section className="flex flex-col gap-5">
@@ -4840,7 +4667,7 @@ export function ImportReviewPage({
               onApply={() => startApply(activeItem)}
               onDismiss={() => requestDismiss(activeItem)}
               onDeleteFolder={() => void requestDeleteFolder(activeItem)}
-              onCleanupFiles={() => void runCleanupFiles(activeItem)}
+              onCleanupFiles={() => requestCleanupFiles(activeItem)}
               importJobActive={
                 backgroundJobs[activeItem.id]?.status === 'running' ||
                 backgroundJobs[activeItem.id]?.status === 'still_running'
