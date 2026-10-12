@@ -4150,7 +4150,19 @@ def _sanitize_playlist_key(playlist_key: str) -> str:
 
 
 def _get_playlist_m3u_path(playlist_key: str, display_name: str = "") -> Path:
-    return _get_playlist_dir() / f"{_sanitize_playlist_key(playlist_key)}.m3u"
+    # The key is already reduced to [A-Za-z0-9_-]; the normalised containment
+    # check states the invariant where every M3U read/write/delete gets its path.
+    base = os.path.normpath(str(_get_playlist_dir()))
+    target = os.path.normpath(os.path.join(base, f"{_sanitize_playlist_key(playlist_key)}.m3u"))
+    if not target.startswith(base + os.sep):
+        raise ValueError("Refusing a playlist M3U path outside the playlist folder")
+    return Path(target)
+
+
+def _m3u_field(value: Any) -> str:
+    """One M3U line's worth of text: a CR/LF from a tag or file name would
+    start a new entry, which the two-way sync reads back as a track."""
+    return re.sub(r"[\r\n]+", " ", _s(value))
 
 
 def parse_m3u_text(text: str) -> List[Dict[str, Any]]:
@@ -4205,9 +4217,9 @@ def export_playlist_m3u(playlist_key: str, display_name: str, items: List[Dict[s
     p = _get_playlist_m3u_path(playlist_key, display_name)
     lines = ["#EXTM3U\n"]
     for it in items:
-        path = _decode_path(it.get("path") or "")
-        title = it.get("title") or "Unknown"
-        artist = it.get("artist") or "Unknown"
+        path = _m3u_field(_decode_path(it.get("path") or ""))
+        title = _m3u_field(it.get("title") or "Unknown")
+        artist = _m3u_field(it.get("artist") or "Unknown")
         length = int(it.get("length") or 0)
         lines.append(f"#EXTINF:{length},{artist} - {title}\n")
         lines.append(f"{path}\n")

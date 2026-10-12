@@ -11,7 +11,8 @@ from backend.config_manager import ConfigConflictError, ConfigError, ConfigValid
 from backend.ai_service import _run_ai_matching_regressions
 from backend.app_runtime import _app_logger, _env_int, _plugin_install_log, _s
 from backend.auth_service import _auth_failure_rate_limit_response, _constant_time_equal, _csrf_request_allowed, _json_security_error, _request_authorized, _security_auth_disabled, _security_auth_username, _verify_password
-from backend.config_service import _plugin_status_payload, _redact_config_content, _restore_redacted_config_secrets
+from backend.config_service import (CONFIG_REDACTION_FAILED_MESSAGE, ConfigRedactionError, _plugin_status_payload,
+                                    _redact_config_content, _restore_redacted_config_secrets)
 from backend.playlist_service import _music_format_preferences
 from backend.setup_service import _first_run_setup_required
 from app import app  # noqa: E402  (route modules load after app.py defines app)
@@ -139,8 +140,8 @@ def get_config():
         return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_read_failed")}), getattr(exc, "status_code", 502)
     try:
         content = _redact_config_content(str(result.get("content") or ""))
-    except ConfigError as exc:  # #324 F2: fail closed, no content
-        return jsonify({"ok": False, "error": str(exc), "code": exc.error_code}), exc.status_code
+    except ConfigRedactionError:  # #324 F2: fail closed, no content; fixed text
+        return jsonify({"ok": False, "error": CONFIG_REDACTION_FAILED_MESSAGE, "code": "config_redaction_failed"}), 409
     return jsonify({
         "ok": True,
         "content": content,
