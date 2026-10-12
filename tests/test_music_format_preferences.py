@@ -217,7 +217,7 @@ class RejectedDownloadPreservedSourceTests(unittest.TestCase):
         result, _ = self._handle(seeded, "quarantine")
         message = _music_format_policy_rejection_error(1, [result], {"rejected_download_handling": "quarantine"})
         self.assertIn("Import stopped", message)
-        self.assertIn("1 left in place", message)
+        self.assertIn("1 rejected file(s) left in place (file is a preserved torrent source", message)
         self.assertNotIn("manual cleanup", message)
 
     def test_qa_marker_in_file_name_does_not_unpreserve_torrent_source(self):
