@@ -6,6 +6,50 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- Restart the Beets container so it loads webmanager plugin 1.16.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, item audio/file downloads stay broken on Beets 2.14.
+- Playlists: the Web Manager list is now the master copy. Sync updates Plex playlists in place, so each one keeps its ratingKey. A track is removed from Plex or the `.m3u` only after you remove it in Web Manager; tracks added in Plex or the `.m3u` are merged in. Playlists that exist only in Plex are no longer adopted.
+- On first load, playlists in `<MUSIC_ROOT>/playlists` (`.m3u` and `.playlist.json`) and hand-placed `.m3u` files in the Web Manager playlist folder are imported once, read-only, when no Web Manager list has that name. Web Manager never writes to `<MUSIC_ROOT>/playlists`.
+- `PLAYLIST_AUTO_SYNC` now runs as a tracked job, one sync at a time. `PLEX_INDEX_TIMEOUT` is now the total time for the whole Plex index fetch.
+- "Import as-is" no longer imports folders Beets cannot match. They stay in place and go to the Review Queue (`asis_refused`). Albums with a blank artist or album are refused.
+- Without `ACOUSTID_API_KEY`, a missing-track fill is no longer merged on text or duration evidence; it waits in Review.
+- Out-of-range transaction settings return 400 instead of being clamped. The cover upload floor is 1000 bytes. The quarantine root must be inside the configured root.
+- `SPOTIFLAC_SERVICES` accepts only known service names or `ext:<id>`; other values are refused on save and before every run.
+- A Beets config path outside `BEETSDIR` is never read or verified.
+- Config editor revisions are keyed per process, so an edit opened before a restart gets a revision conflict when saved after it. Reload the editor and save again.
+- `BEETS_WEB_MANAGER_VERSION` is no longer used to report the running version; the image's `/app/BUILD_INFO.json` is. With a `:latest` or pinned `image:` the rollout script no longer writes the variable and warns if a stale one is set. A compose `image:` that interpolates the variable is deprecated.
+
+### Fixed
+
+- Item audio streaming and download (`/api/items/<id>/audio`, `/file`) no longer fail with 500 on Beets 2.14, and artwork placement after import finds the album folder again (#302). The plugin binds the library directory for every Beets web request, and the adapter turns relative item and cover paths into absolute ones.
+- Path lookups against stock Beets work (`/` is sent as the query path separator). The stale-row cleanup before a re-import removes only rows whose files are provably missing.
+- Clean All can no longer run twice at once; racing starts return the running job (D1). Cancelled runs are recorded as cancelled (D15). Imports of the same source folder are deduplicated (D2).
+- Job starts are protected against retried requests: a request fingerprint and an optional `Idempotency-Key` header return 409 `job_already_running` / `job_already_started` instead of starting a second job. Jobs interrupted by a restart become Recovery Required. Job logs and results are redacted before they are stored (#272, #229, #266).
+- Transaction logs are appended, not replaced, so recovery and audit history is kept. Interrupted cleanups become Recovery Required after a restart instead of staying Running. One-shot mutations that could not start are Cancelled with "nothing was changed". Partially Rolled Back operations can be retried (#298, #328, #317, #318, #308, #245).
+- Staging moves never overwrite an existing target; cross-filesystem moves fsync and verify the copy before removing the source; cleanup refuses to cross mounts (#230).
+- The torrent-source protection applies to every modify, and album artpath is validated (#335, #327, #336). Clean All's Release Group merge no longer loops on blocked empty folders.
+- Cover delete is truthful and reversible (`/album-art/remove`).
+- Identity: a missing-track merge needs AcoustID proof and fails closed to Review; a mixed AcoustID top tier goes to Review; the resolver never sets identity from text alone; Release Group input is checked against its Releases and fails closed (#244, #261, #264, #303).
+- Provider outages are reported as "not checked", never "no match": AcoustID during matching, ai-suggest and playlist placement, and MusicBrainz during ai-suggest (#252, #297, D11).
+- Playlists: a sync with no changes makes no Plex writes; duplicates and order are kept; unmatched tracks show as pending with a reason; a sync whose Plex step fails is reported as failed; creating a playlist with no matched tracks returns `no_tracks` instead of 502; albums imported outside Web Manager are seen within about 15 seconds; hand-placed `.m3u` files are listed.
+- Plex: the index fetch respects `PLEX_INDEX_TIMEOUT` as a total (#339), and a URL blocked by the outbound policy is reported as such.
+- slskd: a cancelled playlist track cancels and cleans its transfer (#280); partial-file cleanup is contained (#281); download-folder scans are bounded (#263); a 401 names `SLSKD_API_KEY`.
+- Lidarr's wanted list says why it failed. A refused qBittorrent login shows in provider health and no longer echoes qBittorrent's response (#252).
+- Setup no longer labels a saved key as "Docker environment overrides saved key" (D12). Duplicate-resolver and MusicBrainz-completeness errors return fixed reasons instead of exception text.
+- `/health/live` and `/api/setup/status` report the running `version` and `revision`.
+
+### Security
+
+- `SPOTIFLAC_SERVICES` can no longer inject command-line flags (#340). SpotiFLAC output is confined to the download folder and symlinks a run creates there are removed (#274).
+- The config editor redacts secrets in every YAML form and refuses to show the file if it cannot (`config_redaction_failed`). Revisions are HMAC-keyed. Saves, reverts and plugin edits are serialized (#324).
+- Config editor backups are private (0600) and never follow symlinks (#183). Plugin provisioning refuses a symlinked `beetsplug` folder and plugin preview diffs mask secrets (#239).
+- Rollout script: Ctrl-C seals the backup and restores state, a backup directory is never reused, the token is read in isolated Python, and the running version and revision are verified after deploy (#253).
+
+### Changed
+
+- Dependencies: eslint 10.12.0, jsdom 30.1.2, react-router 8.4.0, @tanstack/react-query 5.104.1, postcss 8.5.29.
+- CI pulls stock Beets authenticated from GHCR with retries (#234), runs Python tests with faulthandler, and runs the frontend Vitest suite. The ARCH-002 caller audit no longer needs git; `Dockerfile.test` is the supported full-suite environment.
 ## v0.3.0 - 2026-10-11
 
 ### Upgrade Notes
