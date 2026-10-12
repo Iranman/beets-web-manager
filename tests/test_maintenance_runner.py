@@ -123,7 +123,7 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("_maintenance_resume_summary(report)", self.app_source)
         self.assertIn("persist_checkpoint('running')", self.runner_source)
         self.assertIn("persist_checkpoint(\"complete\")", self.runner_source)
-        self.assertIn("persist_checkpoint(\"failed\", failed_message)", self.runner_source)
+        self.assertIn("persist_checkpoint(\"cancelled\" if cancelled else \"failed\", failed_message)", self.runner_source)
         self.assertIn('"result_task_ids": sorted(str(key) for key in results.keys())', self.runner_source)
         self.assertIn('"results": results', self.app_source)
         self.assertIn('_maintenance_save_last_report({task_id: result}, log)', self.runner_source)
@@ -137,8 +137,8 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("resume_payload = _maintenance_resume_summary", self.runner_source)
         self.assertIn('if task_id in {"library_health", "missing_files", "artist_alias"} and task_id in results:', self.app_source)
         self.assertIn('explicit_next_task = _s(last_run.get("next_task")).strip()', self.app_source)
-        self.assertIn('persist_checkpoint("partial", failed_message)', self.runner_source)
-        self.assertIn('return finish_partial(failed_message)', self.runner_source)
+        self.assertIn('persist_checkpoint(status, failed_message)', self.runner_source)
+        self.assertIn('return finish_partial(failed_message, \"cancelled\" if cancelled else \"partial\")', self.runner_source)
         self.assertIn('"maintenance_status": "partial"', self.runner_source)
         for task_id in ["library_health", "missing_files", "artist_alias"]:
             marker = f'if skip_completed_task("{task_id}"):'

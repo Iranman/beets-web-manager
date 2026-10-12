@@ -262,8 +262,11 @@ def _start_metadata_apply_transaction(transaction_id: str):
     tx = transactions.get(transaction_id)
     if tx.get("operation_type") != "Metadata Update":
         raise ValueError("Only metadata update transactions can be applied by this endpoint.")
-    if tx.get("status") != "Approved":
+    status = tx.get("status")
+    if status in ("Preview", "Pending"):
         raise ValueError("Approve the transaction before applying it.")
+    if status != "Approved":  # D15: a replay is told what happened, not to approve
+        raise ValueError(f"This transaction cannot be applied again (status is {status}); nothing was changed.")
     metadata = tx.get("metadata") or {}
     item_id = int(metadata.get("item_id") or 0)
     if not item_id:

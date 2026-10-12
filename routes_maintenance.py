@@ -245,7 +245,7 @@ def start_maintenance_runner():
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("cancelled")
 
-        def finish_partial(failed_message: str) -> Dict[str, Any]:
+        def finish_partial(failed_message: str, status: str = "partial") -> Dict[str, Any]:
             clean_counts = _maintenance_clean_all_counts(tasks, results)
             progress_percent = round(
                 (sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"}) / total) * 100
@@ -274,9 +274,9 @@ def start_maintenance_runner():
                         "clean_all_counts": clean_counts,
                     },
                 })
-            persist_checkpoint("partial", failed_message)
+            persist_checkpoint(status, failed_message)  # D15: "cancelled" when the operator cancelled
             log.append(f"Clean All partially completed: {failed_message}")
-            return {"ok": False, "partial": True, "status": "partial", "error": failed_message, "tasks": tasks, "results": results}
+            return {"ok": False, "partial": True, "status": status, "error": failed_message, "tasks": tasks, "results": results}
 
         root_repair_error = ""
         log.append("Clean All started.")
@@ -594,6 +594,7 @@ def start_maintenance_runner():
             return {"ok": True, "tasks": tasks, "results": results}
         except Exception as exc:
             failed_message = _s(exc) or "maintenance failed"
+            cancelled = failed_message.strip().lower() == "cancelled" or bool(cancel_event and cancel_event.is_set())
             completed_before_failure = sum(1 for task in tasks if task["status"] in {"complete", "skipped"})
             running_task = next((task for task in tasks if task["status"] == "running"), None)
             # Clean All resume reattachment: a running_task carrying a saved
@@ -608,7 +609,7 @@ def start_maintenance_runner():
             if running_task and not (running_task.get("id") == "artist_folder_merge" and running_task.get("operation_id")):
                 set_task(running_task["id"], "failed", failed_message)
             if completed_before_failure > 0:
-                return finish_partial(failed_message)
+                return finish_partial(failed_message, "cancelled" if cancelled else "partial")
             if update_state:
                 update_state({
                     "category": "Cleanup",
@@ -627,18 +628,22 @@ def start_maintenance_runner():
                         (sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"}) / total) * 100
                     ),
                 })
-            persist_checkpoint("failed", failed_message)
+            persist_checkpoint("cancelled" if cancelled else "failed", failed_message)
             log.append(f"Clean All failed: {failed_message}")
             raise
     job = jobs.start_python(
-        job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner"),
+        # D1: never a second Clean All. A duplicate in this process fails at
+        # once, and one in another process does not wait to run after it.
+        # A lock left by a dead process is reclaimed by acquire() once stale.
+        job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner",
+                             fail_fast_in_process=True, wait_seconds=0),
         label="Clean All",
         metadata={"type": "maintenance-runner", "workflow": "clean-all", "category": "Cleanup", "resumed": resume_requested,
                   **job_contract.contract_metadata("maintenance-runner")},
     )
     resume_payload = _maintenance_resume_summary({
         "last_run": {
-            "status": "failed",
+            "status": resume_snapshot.get("previous_status") or "failed",  # D15: e.g. cancelled
             "tasks": resume_snapshot.get("tasks") or [],
             "results": resume_snapshot.get("results") or {},
         }

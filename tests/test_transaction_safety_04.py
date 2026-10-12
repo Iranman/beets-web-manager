@@ -372,6 +372,17 @@ class ItemMetadataWriteFailedRollbackTests(_RouteEnvBase):
         # The generic apply route would skip apply_album_metadata's re-validation.
         self.assertNotIn(cw.ALBUM_METADATA_FAMILY, routes_maintenance._ENGINE_FAMILIES)
 
+    def test_apply_replay_names_the_status(self):
+        """D15: replaying apply on a Completed edit does not ask to approve it."""
+        import backend.transaction_service as ts
+        op = self.store.create(operation_type="Metadata Update", status="Completed",
+                               metadata={"item_id": 3, "pending_fields": {"title": "New"}})["id"]
+        with mock.patch.object(ts, "transactions", self.store):
+            with self.assertRaises(ValueError) as ctx:
+                ts._start_metadata_apply_transaction(op)
+        self.assertIn("status is Completed", str(ctx.exception))
+        self.assertNotIn("Approve", str(ctx.exception))
+
     def test_job_that_never_started_is_not_rollbackable(self):
         import backend.transaction_service as ts
         op = self.store.create(operation_type="Metadata Update", status="Approved",

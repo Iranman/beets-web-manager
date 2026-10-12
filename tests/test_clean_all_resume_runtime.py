@@ -351,6 +351,38 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self.assertEqual(_last_run(self.checkpoint)["status"], "complete")
         self.assertIn("artist_folder_merge", self.call_order)
 
+    def test_a_second_clean_all_never_runs_while_one_holds_the_lock(self):
+        """D1: a duplicate start fails at once instead of queueing a full
+        second mutating run behind the first."""
+        import backend.job_contract as job_contract
+        health = self._patch(patch_app_family(app_module, "_library_health_payload",
+                                              return_value=_task_results()["library_health"]))
+        started = time.time()
+        with job_contract.held("maintenance-runner"):
+            parent, _data = self._post_clean_all(force_fresh=True)
+        self.assertLess(time.time() - started, 30)
+        self.assertEqual(parent.returncode, 1, parent.log)
+        self.assertIn("already running", "\n".join(parent.log))
+        self.assertEqual(health.call_count, 0)
+
+    def test_cancelled_run_is_recorded_and_reported_as_cancelled(self):
+        """D15: the checkpoint and the resume summary say cancelled, not failed."""
+        self._patch(patch_app_family(app_module, "_library_health_payload", return_value=_task_results()["library_health"]))
+
+        def cancel_now(*_a, **_k):
+            self.store.started[-1]._cancel.set()
+            return _task_results()["missing_files"]
+        self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", side_effect=cancel_now))
+        self._post_clean_all(force_fresh=True)
+        self.assertEqual(_last_run(self.checkpoint)["status"], "cancelled")
+
+        self._patch(patch_app_family(app_module, "_maintenance_root_folder_repair", return_value=_task_results()["root_folder_repair"]))
+        self._patch(patch_app_family(app_module, "_artist_id_alias_groups", return_value=[]))
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan", side_effect=self._artist_scan_success))
+        _parent, data = self._post_clean_all()
+        self.assertTrue(data["resumed"], data)
+        self.assertEqual(data["resume"]["previous_status"], "cancelled", data)
+
     def _artist_scan_success(self, *args, **kwargs):
         self.call_order.append("artist_folder_merge")
         return {"candidates": [], "skipped": []}
