@@ -130,6 +130,9 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ### 16b. slskd says "HTTP 401" / "slskd rejected the API key"
 * Set `SLSKD_API_KEY` (or `SLSKD_API_KEY_FILE`) to a key slskd accepts. A cancelled or failed playlist track cancels its queued slskd transfer and removes only the partial files proven to belong to it.
 
+### 16c. "qBittorrent rejected the login"
+* Check `QBITTORRENT_USERNAME` / `QBITTORRENT_PASSWORD` (or their `_FILE` variants). The refusal is recorded as `authentication_error` for `qbittorrent` in `GET /api/providers/health` and in the qBittorrent status `health` field.
+
 ### Check Container Health
 ```bash
 docker compose ps beets-web-manager

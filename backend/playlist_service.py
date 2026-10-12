@@ -21,7 +21,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 from backend.title_normalize import dash_suffix_group, split_ws_led, trailing_bracket_group
 from backend.library_cache import library_cache
-from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
+from backend.acoustid_service import _acoustid_hits_or_none, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
 from backend.slskd_service import SLSKD_API_KEY, _DASH_SEP_CORE_RE, _download_method_list, _find_slskd_downloaded_files, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
 from backend.matching_service import _MB_VARIOUS_ARTISTS_ID, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _invalidate_lib_cache, _playlist_artist_credit_info
 from backend.app_runtime import jobs
@@ -5592,7 +5592,12 @@ def _playlist_canonical_placement_evidence(
     of a bare bool, per ARCH-002 Part 19.
     """
     probe = dict(local_track_probe or {})
-    probe["acoustid_hits"] = list(acoustid_hits or probe.get("acoustid_hits") or [])
+    # #297 N4: None means AcoustID gave no real answer (UNAVAILABLE); only a
+    # list -- possibly empty -- is an answer (NO_RESULT when empty).
+    if acoustid_hits is not None:
+        probe["acoustid_hits"] = list(acoustid_hits)
+    elif probe.get("acoustid_hits") is None:
+        probe["acoustid_hits"] = None
     candidate = {
         "release_group_id": _s(mb_releasegroupid).strip().lower(),
         "tracks": [target_track] if target_track else [],
@@ -6073,8 +6078,7 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
             acoustid_hits = None
             try:
                 audio_path_probe = _playlist_resolve_item_path(path_text)
-                if audio_path_probe.exists():
-                    acoustid_hits = _acoustid_lookup_cached(str(audio_path_probe))
+                acoustid_hits = _acoustid_hits_or_none(str(audio_path_probe))
             except Exception as ex:
                 _playlist_log(log, f"  [playlist-place] AcoustID lookup skipped: {ex}")
             canonical = _playlist_canonical_placement_evidence(
@@ -6151,11 +6155,14 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
 
     recording_candidates: List[Dict[str, Any]] = []
     seen_recording_ids: set = set()
+    acoustid_answered = False  # #297 N4: outage != "fingerprint found nothing"
 
     try:
         audio_path = _playlist_resolve_item_path(path_text)
-        if audio_path.exists():
-            for cand in _acoustid_lookup_cached(str(audio_path)):
+        fp_hits = _acoustid_hits_or_none(str(audio_path))
+        acoustid_answered = fp_hits is not None
+        if fp_hits:
+            for cand in fp_hits:
                 mbid = _s(cand.get("mb_trackid") or "").strip().lower()
                 if not _MB_UUID_RE.match(mbid) or mbid in seen_recording_ids:
                     continue
@@ -6355,7 +6362,8 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
             if _s(rc.get("_source") or rc.get("source") or "").lower() == "acoustid"
         ]
         canonical = _playlist_canonical_placement_evidence(
-            item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits_for_probe,
+            item_probe, best_track, mb_releasegroupid,
+            acoustid_hits=acoustid_hits_for_probe if acoustid_answered else None,
         )
         if not canonical.can_auto_accept():
             _playlist_log(
