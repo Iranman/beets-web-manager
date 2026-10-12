@@ -1136,7 +1136,7 @@ class AlbumFolderCleanupRouteAndUiTests(unittest.TestCase):
         self.assertIn('"album-folder-cleanup-apply-issue"', APP_SOURCE)
         self.assertIn("_ALBUM_FOLDER_CLEANUP_LOCK", APP_SOURCE)
         self.assertIn("album-folder-cleanup-trash", APP_SOURCE)
-        self.assertIn("issues = [issue for issue in plan.get(\"issues\", []) if issue.get(\"safe\")]", APP_SOURCE)
+        self.assertIn("if issue.get(\"safe\") and issue.get(\"id\") not in attempted]", APP_SOURCE)  # #298 N6
 
     def test_jobs_page_uses_compact_album_cleanup_actions(self):
         self.assertIn("function JobStatusBar", JOBS_SOURCE)

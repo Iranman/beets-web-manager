@@ -63,18 +63,25 @@ class TransactionEngineTests(unittest.TestCase):
             self.assertEqual(csv_type, "text/csv")
             self.assertIn("311", csv_payload)
 
-    def test_settings_are_configurable_and_clamped(self):
+    def test_settings_are_configurable_and_out_of_range_is_refused(self):
+        """D8: out-of-range or mistyped values are refused, never clamped,
+        and nothing from a refused request is saved."""
+        from backend.transaction_engine import SettingsError
         with tempfile.TemporaryDirectory() as tmp:
             store = TransactionStore(tmp)
-            settings = store.save_settings({
-                "dry_run_by_default": True,
-                "automatic_approval_threshold": 5,
-                "backup_retention_days": -1,
-            })
-            self.assertTrue(settings["dry_run_by_default"])
-            self.assertEqual(settings["automatic_approval_threshold"], 1.0)
-            self.assertEqual(settings["backup_retention_days"], 0)
+            settings = store.save_settings({"dry_run_by_default": True, "automatic_approval_threshold": 0.95,
+                                            "backup_retention_days": 7})
+            self.assertEqual((settings["dry_run_by_default"], settings["automatic_approval_threshold"],
+                              settings["backup_retention_days"]), (True, 0.95, 7))
             self.assertTrue((Path(tmp) / "settings.json").exists())
+            for bad in ({"automatic_approval_threshold": 5}, {"automatic_approval_threshold": 0.0},
+                        {"automatic_approval_threshold": 0.5}, {"automatic_approval_threshold": "0.99"},
+                        {"backup_retention_days": -1}, {"backup_retention_days": 1.5},
+                        {"maximum_undo_history": True}, {"enabled": "false"},
+                        {"dry_run_by_default": False, "backup_retention_days": 0}):
+                with self.subTest(bad), self.assertRaises(SettingsError):
+                    store.save_settings(bad)
+            self.assertEqual(store.settings(), settings)
 
 
 if __name__ == "__main__":

@@ -459,12 +459,16 @@ class ConfigSnapshotRaceTests(_TempConfigMixin, unittest.TestCase):
             os.symlink(self.outside, path)
             return result
 
+        # #324 F4: the locked re-read sees the swap and refuses (fail closed)
+        # instead of overwriting; nothing outside is read, backed up or written.
         with mock.patch.object(bp, "_plan_config_yaml_plugins", plan_then_swap):
-            backup = bp.apply_recommended_plugins(path, ["fetchart"])["backup"]
-        self.assertEqual((self.config_dir / backup).read_text(encoding="utf-8"), _BASE_CONFIG)
-        self.assertNotIn("OUTSIDECONTENT", path.read_text(encoding="utf-8"))
-        self.assertFalse(path.is_symlink())
+            with self.assertRaises(bp.BeetsConfigEditError):
+                bp.apply_recommended_plugins(path, ["fetchart"])
+        for f in self.config_dir.iterdir():
+            if f.is_file() and not f.is_symlink():
+                self.assertNotIn("OUTSIDECONTENT", f.read_text(encoding="utf-8"), f.name)
         self.assertEqual(self.outside.read_text(encoding="utf-8"), "victim: OUTSIDECONTENT\n")
+        self.assertEqual(sorted(p.name for p in self.outside.parent.iterdir()), ["victim.yaml"])
 
     def test_symlinked_config_is_refused_by_every_editor(self):
         from backend.beets_plugins import (

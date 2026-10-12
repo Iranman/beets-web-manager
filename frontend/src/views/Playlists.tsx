@@ -25,6 +25,8 @@ import {
   resolvePlaylistTrack,
   runPlaylistPipelineAction,
   startPlaylistDownload,
+  syncPlaylists,
+  apiErrorBody,
 } from '../api/client';
 import type {
   PlaylistCreateResponse,
@@ -41,7 +43,8 @@ import type {
   PlaylistTrackSuggestion,
 } from '../api/types';
 import { LogViewer } from '../components/LogViewer';
-import { MusicBrainzUnavailableNotice } from '../components/MusicBrainzUnavailableNotice';
+import { MusicBrainzUnavailableNotice, fingerprintNotCheckedLabel } from '../components/MusicBrainzUnavailableNotice';
+import { PlaylistSyncSummary, playlistSyncStatusLabel } from '../features/playlists/PlaylistSyncSummary';
 
 type Notice = {
   severity: 'info' | 'success' | 'warning' | 'error';
@@ -314,9 +317,12 @@ function identityEvidenceLabel(track: PlaylistTrack): string {
   if (fingerprint === 'matched') parts.push('Fingerprint: Matched');
   else if (fingerprint === 'no_result') parts.push('Fingerprint: No result');
   else if (fingerprint === 'failed') parts.push('Fingerprint: Failed');
+  else if (fingerprintNotCheckedLabel(fingerprint)) parts.push(`Fingerprint: ${fingerprintNotCheckedLabel(fingerprint)}`);
 
   if (typeof track.acoustid_score === 'number' && track.acoustid_score > 0) {
     parts.push(`AcoustID: ${track.acoustid_score.toFixed(2)}`);
+  } else if (fingerprintNotCheckedLabel(track.acoustid_status)) {
+    if (!fingerprintNotCheckedLabel(fingerprint)) parts.push(`AcoustID: ${fingerprintNotCheckedLabel(track.acoustid_status)}`);
   } else if (track.acoustid_status) {
     parts.push(`AcoustID: ${statusLabel(track.acoustid_status)}`);
   }
@@ -431,19 +437,6 @@ function allTracksFromResult(result: PlaylistParseResponse | null): PlaylistTrac
   if (!result) return [];
   if (result.tracks?.length) return result.tracks;
   return [...matchedAsTracks(result.matched ?? []), ...(result.missing ?? [])];
-}
-
-function playlistSyncStatusLabel(status: PlaylistSyncStatusResponse | null): string {
-  if (!status) return '';
-  const mode = status.enabled ? `Auto every ${Math.round((status.interval || 0) / 60)} min` : 'Auto off';
-  const result = status.last_result;
-  const last = status.last_run
-    ? new Date(status.last_run * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : 'never';
-  const detail = result
-    ? ` · ${result.playlists_updated ?? 0} updated · +${result.local_added ?? 0} M3U · +${result.plex_added ?? 0} Plex`
-    : '';
-  return `${mode} · Last ${last}${detail}`;
 }
 
 function playlistCoverageNote(playlist: PlaylistEntry): string {
@@ -641,7 +634,7 @@ function summarizeSavedPlaylist(playlist: PlaylistEntry): SavedPlaylistSummary {
   const plexMatched = countValue(lastPlex.tracks_matched ?? playlist.plex_tracks_matched ?? playlist.plex_tracks);
   const plexEligible = countValue(lastPlex.tracks_requested ?? playlist.available ?? plexMatched);
   const plexPending = countValue(lastPlex.pending_plex_count ?? playlist.plex_pending_count ?? lastPlex.tracks_unmatched ?? playlist.plex_tracks_unmatched);
-  const plexFailed = plexStatus === 'failed' || lastPlexStatus === 'failed';
+  const plexFailed = plexStatus === 'failed' || lastPlexStatus === 'failed' || normalizedPlaylistStatus(playlist.sync_status) === 'failed';
   const plexKnown = hasPlexState
     || plexMatched > 0
     || plexPending > 0
@@ -703,6 +696,9 @@ function summarizeSavedPlaylist(playlist: PlaylistEntry): SavedPlaylistSummary {
     statusTone = 'danger';
   } else if (activeFailures > 0) {
     statusBadge = 'Has Failures';
+    statusTone = 'danger';
+  } else if (plexFailed) {
+    statusBadge = 'Plex Sync Failed';
     statusTone = 'danger';
   } else if (plexNeedsSync) {
     statusBadge = 'Needs Plex Sync';
@@ -1154,6 +1150,8 @@ export default function Playlists() {
   const [playlistError, setPlaylistError] = useState('');
   const [playlistSyncStatus, setPlaylistSyncStatus] = useState<PlaylistSyncStatusResponse | null>(null);
   const [playlistSyncNotice, setPlaylistSyncNotice] = useState<Notice | null>(null);
+  const [playlistSyncJobId, setPlaylistSyncJobId] = useState('');
+  const [startingPlaylistSync, setStartingPlaylistSync] = useState(false);
   const [loadingPlaylistDetails, setLoadingPlaylistDetails] = useState('');
   const [loadingPlaylistRows, setLoadingPlaylistRows] = useState<TrackGroupId | ''>('');
   const [trackPageHasMore, setTrackPageHasMore] = useState<Partial<Record<TrackGroupId, boolean>>>({});
@@ -1310,6 +1308,51 @@ export default function Playlists() {
     }, PLAYLIST_SYNC_STATUS_POLL_MS);
     return () => window.clearInterval(timer);
   }, [loadPlaylistSyncStatus]);
+
+  // Follow the sync job this page started (or joined) until it ends.
+  useEffect(() => {
+    if (!playlistSyncJobId) return undefined;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const job = await getJob(playlistSyncJobId);
+        if (cancelled || job.status === 'running') return;
+        setPlaylistSyncJobId('');
+        void loadPlaylistSyncStatus();
+        void loadPlaylists();
+        setPlaylistSyncNotice(job.status === 'success'
+          ? { severity: 'success', message: 'Playlist sync finished. Any pending tracks are listed below.' }
+          : {
+              severity: 'error',
+              message: `Playlist sync ${job.status === 'cancelled' || job.status === 'killed' ? 'was cancelled' : 'failed'}${typeof job.result?.error === 'string' ? `: ${job.result.error}` : ''}. Lists that did not sync are marked below; open Jobs for the log.`,
+            });
+      } catch {
+        // Transient poll failure: try again on the next tick.
+      }
+    };
+    const timer = window.setInterval(() => { void check(); }, 3_000);
+    void check();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [playlistSyncJobId, loadPlaylistSyncStatus, loadPlaylists]);
+
+  const handleSyncAllPlaylists = async () => {
+    setStartingPlaylistSync(true);
+    setPlaylistSyncNotice(null);
+    try {
+      const started = await syncPlaylists();
+      setPlaylistSyncJobId(started.job_id);
+      setPlaylistSyncNotice({
+        severity: 'info',
+        message: started.already_running
+          ? 'A playlist sync was already running, so no second one was started. Following that run.'
+          : 'Playlist sync started.',
+      });
+    } catch (err) {
+      setPlaylistSyncNotice({ severity: 'error', message: `Playlist sync did not start: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setStartingPlaylistSync(false);
+    }
+  };
 
   useEffect(() => {
     if (downloadJobId || !lastDownloadJobId || downloadState || downloadError) return undefined;
@@ -1517,7 +1560,13 @@ export default function Playlists() {
       setNotice({ severity: playlistStatusSeverity(result), message: playlistStatusMessage(result) });
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      const noTracks = apiErrorBody(err)?.error_code === 'no_tracks';
+      setNotice({
+        severity: 'error',
+        message: noTracks
+          ? 'Nothing was saved: this playlist has no tracks. Add or paste at least one track, then save again.'
+          : err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setSaving(false);
     }
@@ -3084,6 +3133,13 @@ export default function Playlists() {
             >
               Refresh Saved Playlists
             </Button>
+            <Button
+              variant="contained"
+              onClick={() => { void handleSyncAllPlaylists(); }}
+              disabled={startingPlaylistSync || Boolean(playlistSyncJobId) || Boolean(playlistSyncStatus?.running)}
+            >
+              {playlistSyncJobId || playlistSyncStatus?.running ? 'Syncing to Plex...' : 'Sync All to Plex'}
+            </Button>
           </div>
         </div>
 
@@ -3098,6 +3154,7 @@ export default function Playlists() {
         {playlistSyncStatus?.last_error ? (
           <Alert severity="error" sx={{ mb: 2 }}>{playlistSyncStatus.last_error}</Alert>
         ) : null}
+        <PlaylistSyncSummary status={playlistSyncStatus} />
 
         {loadingPlaylists && <LinearProgress sx={{ borderRadius: 1 }} />}
         {playlistError && <Alert severity="error">{playlistError}</Alert>}

@@ -43,6 +43,14 @@ def register_webmanager_blueprint(plugin: Any) -> bool:
         # Attach auth guard to blueprint
         webmanager_bp.before_request(require_webmanager_auth)
 
+        # Beets 2.14 expands relative DB paths through a ContextVar only the
+        # thread that built Library() has; Werkzeug serves each request on a
+        # new thread. Bind it app-wide (after stock web's own before_request
+        # sets g.lib) so stock routes -- /item/<id>/file, item and album
+        # paths, path: queries, /album/<id>/art -- see absolute paths too.
+        from .operations import bind_music_dir
+        beets_web_app.before_request(lambda: bind_music_dir(getattr(flask.g, "lib", None)))
+
         # Register blueprint on Beets web app
         beets_web_app.register_blueprint(webmanager_bp)
         _REGISTERED = True

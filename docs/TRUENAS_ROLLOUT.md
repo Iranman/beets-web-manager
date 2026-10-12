@@ -31,6 +31,23 @@ and the script never edits that line or the stack `.env`. It accepts three layou
 | `...:<VERSION>` (pinned by you) | pulls and verifies that tag. A tag pinned to any other version is refused (`compose_image_mismatch`); change the line yourself. |
 | `...:${BEETS_WEB_MANAGER_VERSION...}` (older stacks) | exports the variable for its own Compose calls and, after a verified deploy, rewrites that one line of the stack `.env` (see step 9). |
 
+`BEETS_WEB_MANAGER_VERSION` is read **only** by the third layout. With `:latest`
+or a pinned tag, a `BEETS_WEB_MANAGER_VERSION=` line left in the stack `.env`
+by an older layout selects nothing and does not describe what runs; it just
+keeps naming whatever release it was last set to. The script reports it as
+`UNUSED VERSION VARIABLE` (dry run and deploy) and never edits it. Delete
+the line yourself. The running version is the image's`
+org.opencontainers.image.version` label, which the rollout verifies, and the
+version that `/health/live` reports.
+
+After the recreate, the rollout checks the running build itself: `/health/live`
+must report `VERSION` (reason `running_version_mismatch` otherwise) and, when the
+app reports a build revision (images that carry `/app/BUILD_INFO.json`, written
+from the same build arguments as the OCI labels), the image's revision label`
+(`running_revision_mismatch`). The `` layout still
+works but is deprecated, and the run warns about it: it is the only layout in which
+the script writes a version into `.env`. Switch the image line to `:latest`.
+
 ## Expected host layout (verify, don't trust)
 
 ```text
@@ -101,7 +118,9 @@ the first half passes:
    `VERSION`/`EXPECTED_REVISION`, recording its image ID.
 2. **Backup:** timestamped directory under
    `$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS/`. Directories
-   are mode 700 and files mode 600. See "Backup contents" below.
+   are mode 700 and files mode 600. The directory must not exist yet: a
+   second run in the same second is refused ("refusing to reuse it") instead
+   of writing into another run's backup. See "Backup contents" below.
 3. **Stop** only `beets-web-manager`, confirm it stopped, then copy its
    state files and the Beets config into the backup (they are quiescent now).
 4. **Archive the stale DB** (only after confirming, via `lsof`/`fuser`, that
@@ -276,7 +295,9 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
    the previous image (step 2's checksum-guarded token handling still
    runs). No live file is replaced from a backup that may hold partial
    copies; a copy cut off mid-write is never kept under its final name
-   (it is written as `<name>.part` and deleted if the copy fails). A
+   (it is written as `<name>.part` and deleted if the copy fails, or if
+   the run is interrupted with Ctrl-C/SIGTERM, which ends it with exit
+   130/143 after the same cleanup as a failure). A
    file changed after that is still refused.
 1. Stops only `beets-web-manager` and restores the prior Compose file.
 2. Restores or removes the persistent token according to the token

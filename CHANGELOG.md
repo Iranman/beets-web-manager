@@ -6,6 +6,58 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.4.0 - 2026-10-12
+
+### Upgrade Notes
+
+- Restart the Beets container so it loads webmanager plugin 1.16.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, item audio/file downloads stay broken on Beets 2.14.
+- Playlists: the Web Manager list is now the master copy. Sync updates Plex playlists in place, so each one keeps its ratingKey. A track is removed from Plex or the `.m3u` only after you remove it in Web Manager; tracks added in Plex or the `.m3u` are merged in. Playlists that exist only in Plex are no longer adopted.
+- On first load, playlists in `<MUSIC_ROOT>/playlists` (`.m3u` and `.playlist.json`) and hand-placed `.m3u` files in the Web Manager playlist folder are imported once, read-only, when no Web Manager list has that name. Web Manager never writes to `<MUSIC_ROOT>/playlists`.
+- `PLAYLIST_AUTO_SYNC` now runs as a tracked job, one sync at a time. `PLEX_INDEX_TIMEOUT` is now the total time for the whole Plex index fetch. Every other Plex call now treats its time limit (usually `PLEX_API_TIMEOUT`) as a total for reading the response, not a limit per network read, so a very slow Plex can fail a call it used to finish slowly. Raise the timeout if that happens.
+- "Import as-is" no longer imports folders Beets cannot match. They stay in place and go to the Review Queue (`asis_refused`). Albums with a blank artist or album are refused.
+- Without `ACOUSTID_API_KEY`, a missing-track fill is no longer merged on text or duration evidence; it waits in Review.
+- Out-of-range transaction settings return 400 instead of being clamped. The cover upload floor is 1000 bytes. The quarantine root must be inside the configured root.
+- `SPOTIFLAC_SERVICES` accepts only known service names or `ext:<id>`; other values are refused on save and before every run.
+- A Beets config path outside `BEETSDIR` is never read or verified.
+- Config editor revisions are keyed per process, so an edit opened before a restart gets a revision conflict when saved after it. Reload the editor and save again.
+- `BEETS_WEB_MANAGER_VERSION` is no longer used to report the running version; the image's `/app/BUILD_INFO.json` is. With a `:latest` or pinned `image:` the rollout script no longer writes the variable and warns if a stale one is set. A compose `image:` that interpolates the variable is deprecated.
+- Fingerprint results cached as "no match" by earlier versions are ignored and re-checked against AcoustID the next time each file is looked up. The old cache files under `/config/.cache/metadata/acoustid` are left in place; delete them to reclaim space.
+
+### Fixed
+
+- AcoustID lookups run again in the Web Manager image (QA 0.4.0 B2). Its fpcalc 1.5.1 exits with an error on every file while still printing a valid fingerprint, and Web Manager discarded that fingerprint and cached the file as "no match". Fingerprints are now judged by fpcalc's output, not its exit code. A file that really cannot be fingerprinted is reported as not checked and is never cached as "no match".
+- Item audio streaming and download (`/api/items/<id>/audio`, `/file`) no longer fail with 500 on Beets 2.14, and artwork placement after import finds the album folder again (#302). The plugin binds the library directory for every Beets web request, and the adapter turns relative item and cover paths into absolute ones.
+- Path lookups against stock Beets work (`/` is sent as the query path separator). The stale-row cleanup before a re-import removes only rows whose files are provably missing.
+- Clean All can no longer run twice at once; racing starts return the running job (D1). Cancelled runs are recorded as cancelled (D15). Imports of the same source folder are deduplicated (D2).
+- After a restart interrupts Clean All, resuming it works at once instead of failing with "already running" for about two minutes. The restart releases only the interrupted job's workflow lock; a lock held by a live process still blocks. A start refused because Clean All runs in another process returns 409 `workflow_busy` and no longer records a Failed job and transaction.
+- Every transaction records who started it. Composite workflows such as removing an album cover, and jobs an operator started, record the signed-in user; scheduled and unattended actions record `system` instead of `operator`.
+- Job starts are protected against retried requests: a request fingerprint and an optional `Idempotency-Key` header return 409 `job_already_running` / `job_already_started` instead of starting a second job. Jobs interrupted by a restart become Recovery Required. Job logs and results are redacted before they are stored (#272, #229, #266).
+- Transaction logs are appended, not replaced, so recovery and audit history is kept. Interrupted cleanups become Recovery Required after a restart instead of staying Running. One-shot mutations that could not start are Cancelled with "nothing was changed". Partially Rolled Back operations can be retried (#298, #328, #317, #318, #308, #245).
+- Staging moves never overwrite an existing target; cross-filesystem moves fsync and verify the copy before removing the source; cleanup refuses to cross mounts (#230).
+- The torrent-source protection applies to every modify, and album artpath is validated (#335, #327, #336). Clean All's Release Group merge no longer loops on blocked empty folders.
+- Cover delete is truthful and reversible (`/album-art/remove`).
+- Identity: a missing-track merge needs AcoustID proof and fails closed to Review; a mixed AcoustID top tier goes to Review; the resolver never sets identity from text alone; Release Group input is checked against its Releases and fails closed (#244, #261, #264, #303).
+- Provider outages are reported as "not checked", never "no match": AcoustID during matching, ai-suggest and playlist placement, and MusicBrainz during ai-suggest (#252, #297, D11).
+- Playlists: a sync with no changes makes no Plex writes; duplicates and order are kept; unmatched tracks show as pending with a reason; a sync whose Plex step fails is reported as failed; creating a playlist with no matched tracks returns `no_tracks` instead of 502; albums imported outside Web Manager are seen within about 15 seconds; hand-placed `.m3u` files are listed.
+- Plex: the index fetch respects `PLEX_INDEX_TIMEOUT` as a total (#339), even when Plex sends the response slowly a few bytes at a time. A Plex time-out is reported as a time-out, not as a path-mapping problem. A URL blocked by the outbound policy is reported as such. The per-track title searches that follow share one `PLEX_API_TIMEOUT` total; tracks not searched in time stay pending with that reason. A track removed in Web Manager now leaves the Plex playlist even when Plex shows a different title for the same file, and a Plex-side track that only reads alike is kept. Imported `.m3u` entries take the library's artist and title and show correct counts.
+- slskd: a cancelled playlist track cancels and cleans its transfer (#280); partial-file cleanup is contained (#281); download-folder scans are bounded (#263); a 401 names `SLSKD_API_KEY`.
+- Lidarr's wanted list says why it failed. A refused qBittorrent login shows in provider health and no longer echoes qBittorrent's response (#252).
+- Setup no longer labels a saved key as "Docker environment overrides saved key" (D12). Duplicate-resolver and MusicBrainz-completeness errors return fixed reasons instead of exception text.
+- `/health/live` and `/api/setup/status` report the running `version` and `revision`.
+
+### Security
+
+- `SPOTIFLAC_SERVICES` can no longer inject command-line flags (#340). SpotiFLAC output is confined to the download folder and symlinks a run creates there are removed (#274).
+- The config editor redacts secrets in every YAML form and refuses to show the file if it cannot (`config_redaction_failed`). Revisions are HMAC-keyed. Saves, reverts and plugin edits are serialized (#324).
+- Config editor backups are private (0600) and never follow symlinks (#183). Plugin provisioning refuses a symlinked `beetsplug` folder and plugin preview diffs mask secrets (#239).
+- Rollout script: Ctrl-C seals the backup and restores state, a backup directory is never reused, the token is read in isolated Python, and the running version and revision are verified after deploy (#253).
+- 0.4.0 security review: the transaction-settings and config-redaction errors return fixed text instead of exception text, playlist M3U and state-file paths pass a normalized containment check, and a line break in a track's tag or file name can no longer add an entry to an exported M3U.
+
+### Changed
+
+- Dependencies: eslint 10.12.0, jsdom 30.1.2, react-router 8.4.0, @tanstack/react-query 5.104.1, postcss 8.5.29.
+- Web UI follows the 0.4.0 API: job starts send an `Idempotency-Key` and follow an already-running job instead of erroring; interrupted jobs show "Recovery required"; imports point as-is refusals to the Review Queue; Playlists gets Sync All to Plex with failed, busy and pending (with reasons) results; AcoustID/MusicBrainz outages show "not checked", never "no match"; Library Changes offers Retry Rollback, shows restored/adopted counts, cancels orphaned library syncs and reports rejected settings; System shows the build revision; Torrent Repair shows qBittorrent login failures.
+- CI pulls stock Beets authenticated from GHCR with retries (#234), runs Python tests with faulthandler, and runs the frontend Vitest suite. The ARCH-002 caller audit no longer needs git; `Dockerfile.test` is the supported full-suite environment.
 ## v0.3.0 - 2026-10-11
 
 ### Upgrade Notes

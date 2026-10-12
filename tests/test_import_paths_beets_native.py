@@ -130,10 +130,24 @@ class ReimportSourceTests(unittest.TestCase):
 
     def test_move_and_search_id_and_fallback(self):
         ad = mock.MagicMock()
-        cw.reimport_source("/downloads/A", {"move": True, "search_id": REL, "quiet_fallback": "asis"}, adapter=ad)
+        cw.reimport_source("/downloads/A", {"move": True, "search_id": REL}, adapter=ad)
         kw = ad.run_import.call_args.kwargs
         self.assertEqual((kw["copy"], kw["move"]), (False, True))
-        self.assertEqual((kw["search_ids"], kw["quiet_fallback"]), ([REL], "asis"))
+        self.assertEqual((kw["search_ids"], kw["quiet_fallback"]), ([REL], "skip"))
+
+    def test_asis_fallback_is_refused_before_beets_runs(self):
+        ad = mock.MagicMock()
+        res = cw.reimport_source("/downloads/A", {"quiet_fallback": "asis"}, adapter=ad)
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "asis_refused", False))
+        ad.run_import.assert_not_called()
+
+    def test_albums_imported_counts_only_this_request(self):
+        # The library grew by 5 (a concurrent import), but this request added one album.
+        ad = mock.MagicMock()
+        ad.get_stats.side_effect = [{"albums": 10}, {"albums": 15}]
+        ad.run_import.return_value = {"imported_album_ids": [42], "skipped_paths": []}
+        res = cw.reimport_source("/downloads/A", {}, adapter=ad)
+        self.assertEqual((res["albums_imported"], res["imported_album_ids"]), (1, [42]))
 
     def test_bad_fallback_and_refusal(self):
         ad = mock.MagicMock()
@@ -198,7 +212,7 @@ class ApiImportRouteTests(unittest.TestCase):
         self.addCleanup(skips.stop)
 
     def _post(self, preserved, **payload):
-        def run_now(fn, label=""):
+        def run_now(fn, label="", metadata=None):
             self.job_result = fn(self.logs)
             return types.SimpleNamespace(job_id="j1")
         captured = {}
@@ -222,7 +236,7 @@ class ApiImportRouteTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual((opts["copy"], opts["move"]), (True, False))
 
-    def test_fallback_defaults_to_skip_and_asis_only_on_request(self):
+    def test_fallback_is_always_skip_and_asis_goes_to_review(self):
         res, opts = self._post(False)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(opts["quiet_fallback"], "skip")
@@ -230,8 +244,16 @@ class ApiImportRouteTests(unittest.TestCase):
                          [{"path": "/downloads/A/Unmatched", "status": "not matched; left in place for review",
                            "reason": "not_matched"}])
         self.assertTrue(any("not matched; left in place for review" in line for line in self.logs))
-        _, opts = self._post(False, fallback="asis")
-        self.assertEqual(opts["quiet_fallback"], "asis")
+        # QA D3: an as-is import would put an album with no verified
+        # identity (blank artist/album) in the library; it is skipped instead
+        # and the unmatched folder is recorded for the Review Queue.
+        self.logs = []
+        res, opts = self._post(False, fallback="asis")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(opts["quiet_fallback"], "skip")
+        self.assertTrue(self.job_result["asis_refused"])
+        self.assertEqual(self.job_result["not_matched"][0]["status"], "not matched; left in place for review")
+        self.assertTrue(any("Import as-is is not allowed" in line for line in self.logs))
 
     def test_preserved_torrent_source_move_is_refused(self):
         res, opts = self._post(True, move=True)

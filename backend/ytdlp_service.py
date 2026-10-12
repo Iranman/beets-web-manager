@@ -7,7 +7,7 @@ import backend.provider_boundary as provider_boundary
 import copy, importlib, json, os, re, shlex, shutil, subprocess, sys, time
 import logging
 import urllib.error
-from backend.security import OutboundPolicyError, validate_outbound_url
+from backend.security import OutboundPolicyError, parse_spotiflac_services, validate_outbound_url
 from backend.ytdlp_guard import ytdlp_guarded_options
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -663,7 +663,8 @@ def _spotiflac_input_sources() -> List[str]:
 
 
 def _spotiflac_services() -> List[str]:
-    return _spotiflac_list_from_env(_SPOTIFLAC_SERVICES) or [
+    """Validated --service values; raises ValueError for an unknown entry (#340)."""
+    return list(parse_spotiflac_services(_SPOTIFLAC_SERVICES)) or [
         "tidal", "qobuz", "deezer", "amazon", "soundcloud"
     ]
 
@@ -779,10 +780,14 @@ def _ytdlp_find_first_url(source: str, queries: List[str], log: list) -> str:
 
 
 def _spotiflac_download_url(url: str, dest_dir: str, log: list, label: str = "") -> int:
+    try:
+        services = _spotiflac_services()
+    except ValueError as ex:
+        raise RuntimeError(str(ex)) from None
     os.makedirs(dest_dir, exist_ok=True)
     before = _audio_files_in_dir(dest_dir)
+    links_before = _symlinks_in_dir(dest_dir)
     cmd = _spotiflac_command(log) + [url, dest_dir]
-    services = _spotiflac_services()
     if services:
         cmd += ["--service"] + services
     cmd += [
@@ -811,8 +816,34 @@ def _spotiflac_download_url(url: str, dest_dir: str, log: list, label: str = "")
             log.append(f"  [spotiflac] {text[:240]}")
     if proc.returncode != 0:
         raise RuntimeError(f"SpotiFLAC failed with exit code {proc.returncode}")
-    after = _audio_files_in_dir(dest_dir)
-    return max(0, len(after - before))
+    _remove_new_symlinks(dest_dir, links_before, log)
+    root = os.path.realpath(dest_dir)
+    after = {
+        name for name in _audio_files_in_dir(dest_dir) - before
+        if not os.path.islink(name) and os.path.commonpath([root, os.path.realpath(name)]) == root
+    }
+    return len(after)
+
+
+def _symlinks_in_dir(dest_dir: str) -> set:
+    found = set()
+    for top, dirs, files in os.walk(dest_dir):  # followlinks=False: never leaves dest_dir
+        found.update(os.path.join(top, n) for n in dirs + files if os.path.islink(os.path.join(top, n)))
+    return found
+
+
+def _remove_new_symlinks(dest_dir: str, before: set, log: list) -> None:
+    """#274: SpotiFLAC builds names from remote metadata. SpotiFLAC 5.x strips
+    path separators and confines its own output, but that is the tool's
+    behaviour, not ours: a symlink the run created inside dest_dir is removed
+    (the link, never its target), so neither the file count nor a later
+    import can follow it out of the download folder."""
+    for link in sorted(_symlinks_in_dir(dest_dir) - before):
+        log.append(f"  [spotiflac] Removed a symlink from the download folder: {os.path.basename(link)}")
+        try:
+            os.unlink(link)
+        except OSError:
+            pass
 
 
 def _spotiflac_missing_tracks_download(artist: str, album: str, year: str,
@@ -1524,8 +1555,15 @@ def _spotiflac_status() -> Dict[str, Any]:
         "package": _SPOTIFLAC_PIP_PACKAGE,
         "version": _package_version("SpotiFLAC") or _package_version("spotiflac"),
         "input_sources": _spotiflac_input_sources(),
-        "services": _spotiflac_services(),
+        **_spotiflac_services_status(),
     }
+
+
+def _spotiflac_services_status() -> Dict[str, Any]:
+    try:
+        return {"services": _spotiflac_services()}
+    except ValueError as ex:
+        return {"services": [], "services_error": str(ex)}
 
 
 def _ytdlp_po_provider_status() -> Dict[str, Any]:

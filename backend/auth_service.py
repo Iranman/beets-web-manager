@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, WEB_MANAGER_DATA_DIR, _env_int, _s
 from backend.app_runtime import _redact_security_text
+from backend.transaction_engine import SYSTEM_ACTOR, set_actor_resolver
 from flask import g, has_request_context, jsonify, request
 
 # ── ARCH-001 extracted code ──
@@ -698,10 +699,22 @@ def _client_ip_is_lan() -> bool:
 
 
 def _transaction_user_label() -> str:
+    """Who to record on a transaction: the signed-in session user, else a
+    verified Basic-auth user, else the configured username (D7). Outside a
+    request (a scheduled or unattended action) it is the system actor."""
+    if not has_request_context():
+        return SYSTEM_ACTOR
     try:
-        auth = request.authorization
-        if auth and auth.username:
-            return str(auth.username)
+        from flask import session
+        if _session_authorized():
+            return str(session.get("user"))
+        if _basic_authorized(request.headers.get("Authorization", "")):
+            return str(request.authorization.username)
     except RuntimeError:
         pass
     return os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "operator"
+
+
+# Every transaction created while serving a request (a composite plan, an art
+# delete, ...) records this request's verified user, not a default (NB-3).
+set_actor_resolver(_transaction_user_label)

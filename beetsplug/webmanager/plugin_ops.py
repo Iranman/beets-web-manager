@@ -306,6 +306,30 @@ def _catch_lookup_errors():
         beets_log.removeHandler(handler)
 
 
+def _failed_target_change(lib, kind, tid, before) -> Optional[Dict[str, Any]]:
+    """The stored change a target that raised still left behind, or None."""
+    if before is None:
+        return None
+    try:
+        if kind == "album":
+            after = _album_state(lib, tid) or ({}, {})
+        else:
+            item = lib.get_item(tid)
+            after = ({}, {tid: _field_values(item)} if item is not None else {})
+        album_fields = _diff(before[0], after[0])
+        items = [{"item_id": iid, "title": _short(after[1].get(iid, {}).get("title") or old.get("title")),
+                  "fields": fields}
+                 for iid, old in before[1].items() if (fields := _diff(old, after[1].get(iid, {})))]
+    except Exception:
+        return None
+    if not (album_fields or items):
+        return None
+    state = after[0] or before[0] or (after[1].get(tid) or {})
+    return {"kind": kind, "id": tid, "failed": True,
+            "artist": _short(state.get("albumartist") or state.get("artist")),
+            "album": _short(state.get("album")), "album_fields": album_fields, "items": items}
+
+
 def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[str, Any]:
     """Run Beets' own mbsync over the whole library, one album or singleton
     at a time: exactly the targets `beet mbsync` with no query visits
@@ -365,6 +389,7 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
             res["cancelled"] = True
             break
         probe = _FoundProbe(lib)
+        before = None
         with lock:
             try:
                 if kind == "album":
@@ -394,6 +419,15 @@ def run_mbsync_library(lib, write: bool, cancel, lock, progress=None) -> Dict[st
                 res["failed_count"] += 1
                 if len(res["failed"]) < MAX_LIBRARY_FAILURES:
                     res["failed"].append({"kind": kind, "id": tid, "error": f"{type(ex).__name__}: {str(ex)[:200]}"})
+                # #326 F3: Beets commits what it stored before the error, so
+                # record that diff too; this log is the only record.
+                partial = _failed_target_change(lib, kind, tid, before)
+                if partial:
+                    res["changed_items"] += len(partial["items"])
+                    if len(res["changes"]) < MAX_LIBRARY_CHANGES:
+                        res["changes"].append(partial)
+                    else:
+                        res["changes_truncated"] = True
                 consecutive += 1
                 if consecutive >= MAX_CONSECUTIVE_FAILURES:
                     res["aborted"] = True

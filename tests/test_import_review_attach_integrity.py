@@ -38,6 +38,7 @@ from tests.test_import_review_attach_enforcement import (
     _ENV_OVERRIDES,
     _fake_item,
     _acoustid_candidate,
+    _answer,
     _wait_job,
     RECORDING_ID,
     RELEASE_ID,
@@ -248,7 +249,7 @@ class _AttachIntegrityTestCase(unittest.TestCase):
             return result if result is not None else {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=get_item))
-        self._patch(patch_app_family(APP, "_acoustid_lookup_cached", side_effect=acoustid_lookup))
+        self._patch(patch_app_family(APP, "_acoustid_lookup_cached_outcome", side_effect=lambda p: _answer(acoustid_lookup(p))))
         self._patch(patch_app_family(APP, "_mb_recording_search", side_effect=mb_search))
         self._patch(patch_app_family(APP, "_fetch_mb_recording_details", side_effect=fetch_details))
         self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
@@ -753,7 +754,7 @@ class SecuritySanitizationTests(_AttachIntegrityTestCase):
         def raising_lookup(path):
             raise RuntimeError("boom Authorization: Bearer recon-exc-secret Cookie: session=recon-cookie-secret")
 
-        with patch_app_family(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
+        with patch_app_family(APP, "_acoustid_lookup_cached_outcome", side_effect=raising_lookup), \
              mock.patch.object(APP.app.logger, "error") as mock_log:
             resp = self._post_safe(iid)
 
@@ -830,7 +831,7 @@ class SecuritySanitizationTests(_AttachIntegrityTestCase):
         def raising_lookup(path):
             raise RuntimeError(f"boom https://svcuser:{long_password}@internal.example/api")
 
-        with patch_app_family(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
+        with patch_app_family(APP, "_acoustid_lookup_cached_outcome", side_effect=raising_lookup), \
              mock.patch.object(APP.app.logger, "error") as mock_log:
             resp = self._post_safe(iid)
 

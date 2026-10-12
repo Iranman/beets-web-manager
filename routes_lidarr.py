@@ -5,6 +5,7 @@ module while reusing the existing acquisition helpers and outbound URL policy.
 """
 import backend.provider_boundary as provider_boundary
 import json
+import re
 import urllib.error
 import urllib.parse
 from typing import Any, Dict, List, Tuple
@@ -134,6 +135,25 @@ def _find_artist(artists: List[Dict[str, Any]], name: str) -> Dict[str, Any] | N
     return contains[0] if contains else None
 
 
+_WANTED_FIXED_ERRORS = frozenset({
+    "Could not reach Lidarr",
+    "Lidarr returned an unexpected response",
+    "Lidarr rejected the API key",
+    "Lidarr is rate limiting requests",
+})
+
+
+def _wanted_error_text(error: str) -> str:
+    """Map an _acq_fetch_lidarr_wanted() reason to a fixed, safe text."""
+    if error in _WANTED_FIXED_ERRORS:
+        return error
+    if re.fullmatch(r"Lidarr refused the request \(HTTP \d{3}\)", error):
+        return error
+    if error.startswith("Lidarr is blocked by the outbound network policy."):
+        return "Lidarr is blocked by the outbound network policy."
+    return "Could not reach Lidarr"
+
+
 @app.get("/api/wanted/lidarr")
 def wanted_lidarr():
     # Check configuration ourselves, via this file's own type-safe
@@ -148,7 +168,9 @@ def wanted_lidarr():
     rows, error = _acq_fetch_lidarr_wanted()
     if error:
         app.logger.warning("Lidarr wanted-list fetch failed: %s", error)
-        return jsonify({"ok": False, "error": "Could not reach Lidarr", "missing": [], "total": 0}), 502
+        # Show the reason only when it is one of _lidarr_wanted_error's fixed
+        # texts (QA D13); anything else is never echoed (CodeQL #407).
+        return jsonify({"ok": False, "error": _wanted_error_text(error), "missing": [], "total": 0}), 502
     return jsonify({"ok": True, "missing": rows, "total": len(rows)})
 
 

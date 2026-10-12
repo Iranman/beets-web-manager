@@ -88,6 +88,7 @@ IMAGE_LAYOUT=""
 # was pulled and verified for it before the recreate.
 DEPLOY_REF=""
 DEPLOY_IMAGE_ID=""
+DEPLOY_REVISION=""
 # Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>)
 # to pin the exact org.opencontainers.image.revision label. Strongly recommended
 # for pinned production rollouts. When unset, revision-label check is skipped
@@ -302,6 +303,23 @@ restart_engine_if_stopped() {
 }
 trap on_error ERR
 
+# #253 S-13: Ctrl-C / SIGTERM gets the same cleanup as a failure, so a backup
+# cut off mid-copy never keeps a <dst>.part, and exits 130/143. Bash runs
+# this after the interrupted foreground command returns. curl_auth's own
+# INT/TERM traps only ever run inside its $(...) subshell, so they do not
+# replace this one.
+on_signal() {
+  trap - INT TERM
+  printf '[%s] Interrupted by signal (exit %s).\n' "$(date -u +%H:%M:%S)" "$1" >&2
+  seal_failed_backup
+  restore_pre_pull_latest_tag
+  restart_engine_if_stopped
+  report_failure "$1"
+  exit "$1"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
 # curl_auth <curl args...>: curl with the Web Manager token sent from a
 # private header file (mktemp creates it 0600), never on curl's command
 # line, where any local user can read it in the process list. The file is
@@ -324,7 +342,7 @@ curl_auth() {
   done
   [[ -n "$ACTIVE_AUTH_TOKEN_PATH" ]] || { curl "$@"; return; }
   local tok
-  tok="$(python3 -c '
+  tok="$(python3 -I -c '
 import os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -704,6 +722,22 @@ verify_compose_image() {
   fi
   DEPLOY_REF="$resolved_image"
   log "Compose service '${SERVICE}' resolves to ${resolved_image} (layout: ${IMAGE_LAYOUT})"
+  [[ "$IMAGE_LAYOUT" != "variable" ]] || warn "DEPRECATED LAYOUT: the image line reads BEETS_WEB_MANAGER_VERSION, so this run must rewrite that .env line to stay durable. Switch the image line to ${LATEST_IMAGE} (the shipped layout); then nothing in .env names a version."
+  warn_unused_version_variable
+}
+
+# A stack .env can keep BEETS_WEB_MANAGER_VERSION from an older layout after
+# the Compose file stopped reading it (e.g. the shipped literal :latest). It
+# then names some old release and looks like the running version while
+# meaning nothing. Report it; never edit the operator's .env for it.
+warn_unused_version_variable() {
+  local env_file line
+  env_file="$(dirname "$COMPOSE_FILE")/.env"
+  [[ -f "$env_file" ]] || return 0
+  ! grep -Eq '^[^#]*BEETS_WEB_MANAGER_VERSION' "$COMPOSE_FILE" || return 0
+  line="$(grep '^BEETS_WEB_MANAGER_VERSION=' "$env_file" | tail -n 1 || true)"
+  [[ -n "$line" && "${line#BEETS_WEB_MANAGER_VERSION=}" != "$VERSION" ]] || return 0
+  warn "UNUSED VERSION VARIABLE: ${env_file} sets ${line}, but ${COMPOSE_FILE} never reads BEETS_WEB_MANAGER_VERSION (layout: ${IMAGE_LAYOUT}). It does not select or describe the running image -- the image's org.opencontainers.image.version label does. Left unchanged; delete that line to avoid confusion."
 }
 
 # ---------------------------------------------------------------------------
@@ -1423,6 +1457,8 @@ verify_backup_manifest() {
 backup_copy() {
   local dst="${*: -1}"
   BACKUP_PART="${dst}.part"
+  # #253 G1: a leftover .part directory would make `cp -R` nest into it.
+  rm -rf -- "$BACKUP_PART"
   cp "${@:1:$#-1}" "$BACKUP_PART"
   mv -T -- "$BACKUP_PART" "$dst"
   BACKUP_PART=""
@@ -1628,7 +1664,7 @@ restore_env_version_line() {
     [[ -z "$prev_line" ]] || warn "backup .env had BEETS_WEB_MANAGER_VERSION but ${env_file} no longer exists -- not recreating it"
     return 0
   fi
-  if [[ -z "$prev_line" ]] && ! compose_image_line_uses_version_variable; then
+  if ! compose_image_line_uses_version_variable; then
     # The Compose file does not use the variable (literal :latest or a
     # pinned tag): the .env is not part of the image choice; leave it alone.
     return 0
@@ -1760,6 +1796,7 @@ verify_image_labels_if_present() {
     warn "EXPECTED_REVISION not set -- skipping the exact revision-label pin (relying on the version label '${version}' alone). Set EXPECTED_REVISION=<release commit sha> once it's known for a fully pinned deployment."
   fi
   DEPLOY_IMAGE_ID="$img_id"
+  DEPLOY_REVISION="$revision"
   log "Image labels verified: ${DEPLOY_REF} version=${version} revision=${revision:-<none>} id=${img_id}"
 }
 
@@ -1778,7 +1815,14 @@ pull_and_verify_image() {
 # ---------------------------------------------------------------------------
 create_backup_dir() {
   STAGE="backup-creation"
-  ( umask 077; mkdir -p "$BACKUP_DIR" )
+  # #253 S-14: never reuse a backup folder (same-second rerun); plain mkdir
+  # fails if it already exists. The failure report must not offer that
+  # other run's folder as this run's rollback, so BACKUP_DIR is cleared.
+  if ! ( umask 077; mkdir -p -- "$(dirname "$BACKUP_DIR")" && mkdir -- "$BACKUP_DIR" ) 2>/dev/null; then
+    local taken="$BACKUP_DIR"
+    BACKUP_DIR=""
+    die "backup directory ${taken} already exists or cannot be created -- refusing to reuse it; wait a second and re-run"
+  fi
   chmod 700 "$BACKUP_DIR"
   # Checksum manifest from the start; if the run fails before the backup is
   # complete, seal_failed_backup checksums what it holds so far.
@@ -2042,7 +2086,41 @@ verify_post_deploy() {
 
   verify_endpoints "post-deploy"
 
+  assert_running_build_identity
+
   assert_no_new_setup_blocking_reasons
+}
+
+# The running app must report the release this run verified on the image:
+# /health/live's version (from the image's BUILD_INFO.json, written from the
+# same build args as the OCI labels) must be VERSION, and its revision, when
+# the app reports one, must be the image's revision label. A deploy-time
+# variable such as BEETS_WEB_MANAGER_VERSION is never consulted.
+assert_running_build_identity() {
+  local body live_version live_revision i
+  for i in 1 2 3 4 5; do
+    body="$(curl -sS --max-time 10 "${ENDPOINT_BASE_URL}/health/live" 2>/dev/null || true)"
+    live_version="$(printf '%s' "$body" | _py -c 'import json,sys
+try: print(json.load(sys.stdin).get("version",""))
+except Exception: print("")' || true)"
+    [[ "$live_version" == "$VERSION" ]] && break
+    sleep 2
+  done
+  if [[ "$live_version" != "$VERSION" ]]; then
+    REASON_CODE="running_version_mismatch"
+    die "/health/live reports version '${live_version}', expected '${VERSION}' (the verified image label)"
+  fi
+  live_revision="$(printf '%s' "$body" | _py -c 'import json,sys
+try: print(json.load(sys.stdin).get("revision",""))
+except Exception: print("")' || true)"
+  if [[ -z "$live_revision" || "$live_revision" == "unknown" || -z "$DEPLOY_REVISION" ]]; then
+    log "/health/live reports version ${live_version} (no build revision reported -- image predates BUILD_INFO.json)"
+  elif [[ "$live_revision" != "$DEPLOY_REVISION" ]]; then
+    REASON_CODE="running_revision_mismatch"
+    die "/health/live reports revision '${live_revision}', expected the image revision label '${DEPLOY_REVISION}'"
+  else
+    log "/health/live reports version ${live_version}, revision ${live_revision} (matches the image labels)"
+  fi
 }
 
 # Durably persist the deployed VERSION into .env's own BEETS_WEB_MANAGER_VERSION
@@ -2061,6 +2139,12 @@ persist_deployed_version() {
   STAGE="persist-version"
   if [[ "$IMAGE_LAYOUT" == "latest" ]]; then
     log "Compose uses ${LATEST_IMAGE}: nothing is written to .env or the Compose file. A later 'docker compose pull' moves to whatever :latest is then."
+    return 0
+  fi
+  if [[ "$IMAGE_LAYOUT" != "variable" ]]; then
+    # Pinned literal tag: the Compose file alone selects the image, so a
+    # BEETS_WEB_MANAGER_VERSION line would be unused and only mislead.
+    log "Compose pins ${DEPLOY_REF}: nothing is written to .env or the Compose file."
     return 0
   fi
   local env_file

@@ -80,7 +80,7 @@ class AlbumFixMetadataIdentityFieldSplitTests(unittest.TestCase):
         /albums/<id>) bypass instead of the controlled
         album_metadata_repair_v1 family the rest of this route already
         uses for mb_albumid."""
-        self.assertIn("composite_workflows.update_album_metadata(aid, updates)", self.src)
+        self.assertIn("composite_workflows.update_album_metadata(aid, updates, initiating_user=user)", self.src)
         self.assertNotIn("composite_workflows.update_album_fields(aid, updates)", self.src)
 
     def test_mb_albumid_is_still_synced_via_the_dedicated_transaction(self):

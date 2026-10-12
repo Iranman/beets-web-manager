@@ -45,6 +45,14 @@ const INTEGRATION_TESTS: Record<IntegrationKey, () => Promise<SetupIntegrationTe
 
 type IntegrationStatus = SetupStatusResponse['integrations'][string];
 
+/** "Version 0.4.0 (abc1234)": the revision is shortened to 7 characters and
+ * left out when the image was not stamped with one. */
+export function versionLabel(version: string, revision?: string | null): string {
+  const rev = (revision ?? '').trim();
+  const short = rev && rev !== 'unknown' ? (/^[0-9a-f]{8,}$/i.test(rev) ? rev.slice(0, 7) : rev) : '';
+  return `Version ${version}${short ? ` (${short})` : ''}`;
+}
+
 function integrationBadge(
   integration: IntegrationStatus,
   test: SetupIntegrationTestResponse | undefined,
@@ -952,7 +960,7 @@ export default function System() {
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">System</h1>
           <div className="mt-1 text-sm text-zinc-500">
-            {status?.version ? `Version ${status.version}` : 'Environment, readiness, and Beets configuration'}
+            {status?.version ? versionLabel(status.version, status.revision) : 'Environment, readiness, and Beets configuration'}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">

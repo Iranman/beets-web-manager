@@ -65,7 +65,7 @@ Both containers share these filesystem mounts:
 
 - **Library State**: `/config/musiclibrary.blb` is the authoritative Beets library, owned exclusively by the stock Beets container.
 - **Web Manager Durable State**: `/web-manager-data` (`WEB_MANAGER_DATA_DIR`, mounted to `./web-manager` by default) holds `app_settings.json`, `.setup_complete`, `.auth_token`, and session encryption keys.
-- **Job State**: Lives in `JobStore` in memory; structured progress and logs are exposed via `/api/jobs/*`.
+- **Job State**: `JobStore` (`job_engine.py`), durable under `<WEB_MANAGER_DATA_DIR>/jobs/<job_id>.json` when the data dir is set explicitly (every shipped Compose file) or `BEETS_WEB_DURABLE_JOBS=1`; structured progress and logs are exposed via `/api/jobs/*`.
 - **Audit & Transaction State**: Stored in `backend.transaction_engine.TransactionStore` under `/web-manager-data/transactions` (`BEETS_TRANSACTION_DIR`).
 - **Import Review State**: Staged under `/downloads` and tracked in `/web-manager-data/unmatched_drafts`.
 
@@ -78,6 +78,14 @@ Existing lifecycle:
 3. `/api/jobs/*` serializes job status, logs, metadata, and compact results.
 4. Some workflows add their own checkpoint files and resume logic, especially playlist and AI-batch/import flows.
 5. There is no generic remote "run this Beets command" job abstraction — a narrow, operation-specific `BeetsAdapter` call (e.g. `mbsubmit`, `modify`) runs synchronously inside a `PythonJob`, and a job is never reported `cancelled` once stock Beets has already completed the underlying operation.
+6. **Duplicate starts.** Every mutating request (POST/PUT/PATCH/DELETE) gets a start scope (`routes_jobs.py` → `job_engine.enter_start_scope`). The first job it starts records the request fingerprint (method, path, query, body, upload bytes) and the optional `Idempotency-Key` header (8–128 of `A-Za-z0-9._:-`). Responses, all with nothing started:
+   - identical request while that job runs (mutating jobs only): `409 {"code": "job_already_running", "job_id", "status": "running", "replay": false}`;
+   - same `Idempotency-Key` again, any status, also after a restart while the record is kept: `409 {"code": "job_already_started" | "job_already_running", "job_id", "status", "replay": true}`;
+   - same key with a different request: `422 {"code": "idempotency_key_reused", "job_id"}`; a malformed key: `400 {"code": "invalid_idempotency_key"}`.
+   A client that retries a start (lost response, timeout) sends the same key and follows `job_id` on a 409. A start that must be single whatever its body names a workflow or resource key, `metadata["dedupe_key"]` (`workflow:maintenance-runner`, `workflow:maintenance-duplicates`, `import-source:<path>`): `start_python` checks for a running job with that key and registers the new one under one `JobStore` lock, so racing starts cannot both pass a separate "is one running?" check (D1). The job contract (`backend/job_contract.py`), the import slot and transaction CAS guards still apply on top. Jobs started outside a request (schedules, other jobs) are not scoped.
+7. **Restarts.** A job persisted as running when the process stopped is never re-run: read-only jobs become `failed`, others `recovery_required`; the row carries `interrupted: true` and `recovery` (`interrupted_at`, `last_heartbeat_at`, `checkpoint`). Resume is the workflow's own, from its checkpoint (Clean All, playlist download, AI batch).
+8. **Recurring work and watchers.** `JobStore.every(name, interval_seconds, tick, initial_delay=0)` runs `tick()` on a store-owned schedule until `JobStore.close()`; the tick starts tracked jobs with `start_python` and may return the job, in which case later ticks are skipped until it finishes. `PythonJob.add_done_callback(fn)` runs `fn(job)` once the job is terminal. Neither needs an ad hoc thread.
+9. **Persisted records are redacted** (`job_engine.redact_for_persistence`): `log_tail` and `result` on disk never carry `key=value` secrets, bearer tokens, sensitive dict keys or URL userinfo, whatever the producer logged (#272).
 
 Intended direction:
 
@@ -101,6 +109,14 @@ Intended direction:
 - Converge matching entry points on one shared result contract containing local metadata, candidate identities, release-group ID, optional release ID, recording IDs, AcoustID evidence, tracklist evidence, duration evidence, filename/tag evidence, AI availability/contribution, confidence, conflicts, warnings, explanation, and action eligibility.
 - Keep AI as an optional contributor, never the source of truth.
 
+Identity evidence floors (enforced today; tests in `tests/test_identity_evidence_floors.py` and `tests/test_identity_resolver_followups.py`):
+
+- A provider that did not answer (no key, rejected key, outage, rate limit, `fpcalc` missing) is reported as *not checked*, never as "no match". AcoustID callers that must tell the two apart use `_acoustid_lookup_cached_outcome` or `_acoustid_hits_or_none` (`None` = not checked, `[]` = answered with no result); suggestion responses carry `acoustid_status` (`not_configured` / `auth_failed` / `lookup_failed` / empty), `acoustid_unavailable` and `musicbrainz_unavailable`.
+- Merging an imported missing-track fill into an existing album needs an AcoustID confirmation of the requested recording for every file. A weak, ambiguous, unanswered or empty lookup, a MusicBrainz failure, or a file with no requested track sends the album to Review with its rows kept; nothing is deleted.
+- When the AcoustID top tier names both the requested recording and a different one, the result is review (`acoustid_ambiguous`), not a mismatch.
+- The import/reimport resolver (`library_service._resolve_album_release_for_import`) never sets album identity from a MusicBrainz text search alone: without a source folder to verify against it refuses, and a folder-backed search result must pass the folder preflight (`action_allowed`). A Release Group input is checked against at most `_RG_ALTERNATIVE_RELEASE_CAP` (25) of its Releases closest by track count, and a failed Release Group lookup fails closed.
+- `release_selected_by_operator` is passed only where the operator picked a Release that may move the album to another Release Group (manual match); paths that already verified the Release is in the album's own Release Group do not pass it.
+
 ## Mutation Lifecycle
 
 Existing mutation mechanisms include:
@@ -110,6 +126,13 @@ Existing mutation mechanisms include:
 - A file-backed `TransactionStore` in `backend/transaction_engine.py` (plan/apply/verify/recover) with statuses, changes, metadata diffs, rollback fields, and job attachment. This bookkeeping is pure Web-Manager-local orchestration; it does not itself talk to Beets.
 - Rollback eligibility is server-owned (#228): `GET /api/transactions` and `GET /api/transactions/<id>` add `rollback.allowed` (bool), `rollback.allowed_code` (`allowed`, `not_applied`, `already_rolled_back`, `not_supported`, `unavailable`, `unsupported_operation`, `not_completed`) and `rollback.allowed_reason` (empty when allowed), computed by `routes_maintenance.rollback_eligibility` from the same gate `POST /api/transactions/<id>/rollback` applies. `rollback.available` and `rollback.reason` stay the stored values. An engine rollback that ran but failed verification (status Recovery Required) answers with `mutated: true`.
 - Several workflow-specific preview/dry-run routes, including import target preview, cleanup scans, folder placeholder preview, and transaction endpoints.
+- Transaction audit and recovery rules (0.4.0):
+  - A step's log lines are appended (`TransactionStore.update(..., append_logs=[...])`); `logs=` replaces the whole log and is used only by job wrappers that pass the job's full log. No later step, refusal or recovery erases the record of what an apply did.
+  - Rollback eligibility checks each family's own evidence key (quarantine, merge, record, art id, relocation `after`, album-metadata `before_state`); a rollback-only family is eligible only when Completed, Failed or Partially Rolled Back. A Partially Rolled Back folder cleanup or local metadata rollback can be retried: each restore is idempotent.
+  - A one-shot plan -> approve -> apply that raises before its claim (a busy or stale lock) ends Cancelled, never Approved with nobody to apply it (`resource_locks.cancel_unclaimed_on_error`).
+  - The startup sweep (`backend/transaction_recovery.py`, Waitress runs one process) resolves Running transactions last written before the process started: registry and manifest families from Beets' durable records; a claimed composite apply, a folder cleanup or an import-review cleanup to Recovery Required; a library sync with a recorded Beets operation id to Recovery Required with a cancel action; a job wrapper follows its job (`recovery_required` maps to Recovery Required). A transaction the sweep completes or fails says so in its own log. A Running wrapper with no evidence is left as is.
+  - Staging files (downloads, quarantine) move fd-relative from their staging root and never replace an entry that appears at the target after the check: a file is hard-linked then its old name unlinked, a directory is renamed over an empty placeholder made with exclusive `mkdir`; across filesystems a file is copied, fsynced and its source unlinked only when its identity, size and mtime are unchanged. A staging delete refuses a folder that holds another mount.
+  - Failure injection between stages (after preview, mid-apply, after a file step but before its result is recorded, a process crash mid-apply, and during rollback) is covered for the folder cleanup engine in `tests/test_failure_injection_matrix.py`, and for album moves in `tests/test_album_relocation_transaction.py`.
 
 Intended direction (the target shape for every production mutation path):
 
@@ -129,7 +152,7 @@ Every import is Beets' own importer run inside stock Beets by the `webmanager` p
 
 | Route | Composite | Beets equivalent |
 |---|---|---|
-| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback` = the request's `fallback` (`skip` default; `asis` only when the caller sends it), `--search-id` = the optional `search_id` |
+| `POST /api/import` | `reimport_source()` | `beet import -q` with `autotag: yes`, `quiet_fallback: skip` always (a request with `fallback: asis` is run as `skip` and reports `asis_refused`, so an album with no verified identity is left in place for the Review Queue, never imported with blank or placeholder tags), `--search-id` = the optional `search_id` |
 | `POST /api/folders/import-with-id` | `plan_confirmed_import()` / `apply_confirmed_import()` | `beet import -q --search-id <mb_albumid>` with `quiet_fallback: skip` |
 | `POST /api/albums/reimport-disk` | same confirmed-import family | same; a folder inside the library is imported in place (no copy, no move) |
 

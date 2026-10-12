@@ -253,6 +253,34 @@ class ResourceLocks:
     def held(self) -> List[Dict[str, Any]]:
         return sorted(self._read_all().values(), key=lambda r: _order(r["key"]))
 
+    def blocker(self, keys: Iterable[str], owner: str = "") -> Optional[Dict[str, Any]]:
+        """The live lock another owner holds that conflicts with ``keys``, or
+        None. A read-only probe: nothing is acquired or reclaimed."""
+        wanted = [validate_key(k) for k in keys]
+        with self._registry():
+            now = time.time()
+            for other_key, rec in self._read_all().items():
+                if (rec.get("owner") != owner and any(conflicts(k, other_key) for k in wanted)
+                        and not self.is_stale(rec, now)):
+                    return rec
+        return None
+
+    def release_interrupted(self, owner: str) -> List[str]:
+        """Release every lock ``owner`` left behind when its job was
+        interrupted (job_engine marked it recovery_required after a restart),
+        without waiting for the heartbeat ttl. A holder process still alive
+        on this host keeps its locks: only a dead owner's locks go."""
+        released = []
+        with self._registry():
+            for key, rec in self._read_all().items():
+                if rec.get("owner") != owner:
+                    continue
+                if rec.get("host") == HOST and _pid_alive(int(rec.get("pid") or 0), rec.get("pid_start")):
+                    continue
+                self._file(key).unlink(missing_ok=True)
+                released.append(key)
+        return released
+
     def reclaim_stale(self) -> List[str]:
         reclaimed = []
         with self._registry():
@@ -325,6 +353,21 @@ def approve_preview(store, operation_id: str, approved_by: str) -> Optional[Dict
         if tx.get("status") != "Approved":
             return None
     return tx
+
+
+@contextmanager
+def cancel_unclaimed_on_error(store, operation_id: str):
+    """For a one-shot plan -> approve -> apply call: if the apply raises
+    before it claimed the transaction (a busy or stale lock, Beets down),
+    Approved -> Cancelled, so it is never left Approved with nobody to apply
+    it (#328 N1). Nothing ran before the claim; once claimed the CAS loses."""
+    try:
+        yield
+    except BaseException:
+        store.transition(operation_id, "Approved", "Cancelled", append_logs=[
+            "Not run: the apply stopped before it started (the album was busy or Beets was unavailable); "
+            "nothing was changed. Start the operation again."])
+        raise
 
 
 _override: Optional[ResourceLocks] = None

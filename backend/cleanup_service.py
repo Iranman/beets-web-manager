@@ -482,7 +482,7 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
 def controlled_apply_error(ex: BaseException, operation_id: str, *,
                            refused: str = "The engine refused the operation.",
                            busy: str = "Another operation is using these library items; nothing was changed. "
-                                       "Try again shortly.",
+                                       "Try again shortly (a lock left by an interrupted attempt expires within about 2 minutes).",
                            failed: str = "The operation failed.") -> Tuple[Dict[str, Any], int]:
     """Map an exception raised by a transaction apply (or rollback) executor
     to a controlled (JSON body, HTTP status) -- shared by every engine family
@@ -541,7 +541,7 @@ def controlled_rollback_error(ex: BaseException, operation_id: str, *,
         if lock_before_write:
             return {"ok": False, "mutated": False, "code": "resource_busy",
                     "error": "Another operation is using these library items; nothing was changed. "
-                             "Try again shortly."}, 409
+                             "Try again shortly (a lock left by an interrupted attempt expires within about 2 minutes)."}, 409
         return {"ok": False, "code": "resource_busy",
                 "error": "Another operation is using these library items. Reload the transaction "
                          "to check its state before retrying."}, 409
@@ -2213,12 +2213,15 @@ def _album_folder_cleanup_plan(root: Optional[Path] = None,
         for rec in records:
             if rec.get("is_empty") and int(rec.get("db_item_count") or 0) == 0:
                 issue = _album_cleanup_build_issue(artist_dir, [rec], ["empty_folder"])
-                if issue:
+                if issue and not _album_cleanup_issue_identity_blockers({**issue, "safety": "Safe"}):
+                    # Only "Safe" when the apply's identity gate will pass too (#298 N6);
+                    # otherwise it keeps its computed review status.
                     issue["proposed_action"] = "Remove empty album folder"
                     issue["safety"] = "Safe"
                     issue["safe"] = True
                     issue["risk_level"] = "Safe"
                     issue["risk_reason"] = "Safe cleanup: empty folder with no DB-tracked items."
+                if issue:
                     key = tuple(sorted(issue["current_folders"]))
                     if key not in seen_issue_keys:
                         seen_issue_keys.add(key)
@@ -2940,6 +2943,7 @@ def _album_folder_cleanup_apply_safe(root: Optional[Path], log: List[str],
     last_plan_summary: Dict[str, Any] = {}
     total_applied = 0
     batch_num = 0
+    attempted: set = set()  # #298 N6: an issue is tried once per run
 
     while True:
         if cancel_event and cancel_event.is_set():
@@ -2951,7 +2955,10 @@ def _album_folder_cleanup_apply_safe(root: Optional[Path], log: List[str],
             if err_s and err_s not in seen_scan_errors:
                 seen_scan_errors.add(err_s)
                 errors.append(err_s)
-        issues = [issue for issue in plan.get("issues", []) if issue.get("safe")]
+        # An issue the apply blocked (or failed) is planned "safe" again by the
+        # re-scan; without this the run spun to the batch cap re-proposing it.
+        issues = [issue for issue in plan.get("issues", [])
+                  if issue.get("safe") and issue.get("id") not in attempted]
         if not issues:
             break
         batch_num += 1
@@ -2983,6 +2990,7 @@ def _album_folder_cleanup_apply_safe(root: Optional[Path], log: List[str],
                     "scanned_count": total_applied,
                     "current_result": _s(issue.get("proposed_action")),
                 })
+            attempted.add(issue.get("id"))
             applied_issue = _album_cleanup_apply_issue(
                 issue, scan_root, trash_root, log, summary, operations,
                 verbose_files=verbose_files,

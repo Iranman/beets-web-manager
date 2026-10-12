@@ -53,6 +53,24 @@ const pageSize = 50;
 // Mirrors the backend's cancellable states (POST /api/transactions/<id>/cancel
 // returns 409 not_cancellable otherwise); the server stays the authority.
 const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
+// A library sync Beets is still running (or a restart orphaned) is cancelled
+// through its engine operation (#348). The server exposes no eligibility
+// field for this yet, so this mirrors routes_maintenance.api_transaction_cancel.
+function canCancel(tx: TransactionDetail) {
+  if (CANCELLABLE_STATUSES.has(tx.status)) return true;
+  const meta = tx.metadata || {};
+  return meta.mutation_family === 'mbsync_library_v1' && Boolean(meta.engine_operation_id)
+    && (tx.status === 'Running' || tx.status === 'Recovery Required');
+}
+
+export function rollbackSuccessMessage(r: { job_id?: string; restored?: unknown; adopted?: unknown }) {
+  if (r.job_id) return `Rollback job started: ${r.job_id}`;
+  const restored = typeof r.restored === 'number' ? r.restored : Array.isArray(r.restored) ? r.restored.length : null;
+  const adopted = typeof r.adopted === 'number' ? r.adopted : 0;
+  if (restored === null) return 'Rollback finished.';
+  return `Rollback finished: ${restored} item${restored === 1 ? '' : 's'} restored`
+    + (adopted > 0 ? ` (${adopted} were already back after an interrupted rollback, so they were not moved again).` : '.');
+}
 // Rollback eligibility is server-owned (#228): the UI reads rollback.allowed
 // and never re-derives it. A response without the field (older backend) keeps
 // the action disabled.
@@ -92,7 +110,16 @@ function actionErrorMessage(verb: 'Cancel' | 'Apply' | 'Rollback', ex: unknown) 
   const raw = ex instanceof Error ? ex.message : String(ex);
   const reason = /[.!?]$/.test(raw) ? raw : `${raw}.`;
   const status = (ex as { httpStatus?: number } | null)?.httpStatus;
-  const body = apiErrorBody(ex) as { code?: string; mutated?: boolean; partial_mutation?: boolean } | undefined;
+  const body = apiErrorBody(ex) as { code?: string; mutated?: boolean; partial_mutation?: boolean; status?: string } | undefined;
+  if (verb === 'Rollback' && (body?.code === 'partial' || body?.status === 'Partially Rolled Back')) {
+    return `Rollback finished only part-way: ${reason} Some changes were restored and the rest were not. Use Retry Rollback to restore the rest (items already restored are skipped), or check the log below.`;
+  }
+  if (verb === 'Cancel' && body?.code === 'engine_not_running') {
+    return `Cancel not needed: ${reason} Reload to see the sync's final status.`;
+  }
+  if (verb === 'Cancel' && body?.code === 'engine_unavailable') {
+    return `Cancel not sent: ${reason} The sync may still be running. Check that Beets is up, then try Cancel again.`;
+  }
   // Apply and Rollback both write the library; Cancel only changes status.
   if (verb !== 'Cancel' && (body?.mutated === true || body?.partial_mutation === true || body?.code === 'partial_mutation'
     || status === undefined || status === 0 || status >= 500)) {
@@ -306,10 +333,15 @@ export default function LibraryChanges() {
 
   const updateSettings = async (patch: Partial<TransactionSettings>) => {
     if (!settings) return;
-    const next = { ...settings, ...patch };
-    setSettings(next);
-    const response = await saveTransactionSettings(patch);
-    setSettings(response.settings);
+    const previous = settings;
+    setSettings({ ...settings, ...patch });
+    try {
+      const response = await saveTransactionSettings(patch);
+      setSettings(response.settings);
+    } catch (ex) {
+      setSettings(previous);
+      setError(`Setting not saved: ${ex instanceof Error ? ex.message : String(ex)} The previous value is kept.`);
+    }
   };
 
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -343,7 +375,7 @@ export default function LibraryChanges() {
   const runAction = async (
     verb: 'Cancel' | 'Apply' | 'Rollback',
     request: (id: string) => Promise<{ transaction?: TransactionDetail; job_id?: string }>,
-    success: (response: { job_id?: string }) => string,
+    success: (response: { job_id?: string; restored?: unknown; adopted?: unknown; code?: string }) => string,
   ) => {
     if (!detail) return;
     setError('');
@@ -363,12 +395,14 @@ export default function LibraryChanges() {
     // loadRows clears the error banner, so surface the refusal after it.
     if (failure) setError(failure);
   };
-  const doCancel = () => runAction('Cancel', cancelTransaction, () => 'Transaction cancelled.');
+  const doCancel = () => runAction('Cancel', cancelTransaction, (r) => (r.code === 'engine_cancelling'
+    ? 'Cancel sent to Beets. It stops after the album it is on; albums already synced keep their changes.'
+    : 'Transaction cancelled.'));
   const doApply = () => runAction('Apply', applyTransaction, (r) => (r.job_id ? `Apply job started: ${r.job_id}` : 'Transaction applied.'));
 
   const doRollback = () => {
     if (!window.confirm('Rollback this transaction? Review the rollback availability before continuing.')) return;
-    void runAction('Rollback', rollbackTransaction, (r) => (r.job_id ? `Rollback job started: ${r.job_id}` : 'Rollback finished.'));
+    void runAction('Rollback', rollbackTransaction, rollbackSuccessMessage);
   };
 
   return (
@@ -474,8 +508,8 @@ export default function LibraryChanges() {
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
-                  <Button size="small" color="warning" variant="outlined" disabled={!CANCELLABLE_STATUSES.has(detail.status)} onClick={() => void doCancel()}>Cancel</Button>
-                  <Button size="small" color="error" variant="outlined" disabled={detail.rollback?.allowed !== true} aria-describedby={detail.rollback?.allowed === true ? undefined : 'rollback-blocked-reason'} onClick={doRollback}>Rollback</Button>
+                  <Button size="small" color="warning" variant="outlined" disabled={!canCancel(detail)} onClick={() => void doCancel()}>Cancel</Button>
+                  <Button size="small" color="error" variant="outlined" disabled={detail.rollback?.allowed !== true} aria-describedby={detail.rollback?.allowed === true ? undefined : 'rollback-blocked-reason'} onClick={doRollback}>{detail.status === 'Partially Rolled Back' ? 'Retry Rollback' : 'Rollback'}</Button>
                 </div>
               </div>
 

@@ -88,7 +88,7 @@ class CleanAllWorkflowStaticTests(unittest.TestCase):
     def test_clean_all_button_resumes_incomplete_checkpoint(self):
         self.assertIn('def _maintenance_resume_from_report', APP_SOURCE)
         self.assertIn('def _maintenance_resume_summary', APP_SOURCE)
-        self.assertIn('persist_checkpoint("failed", failed_message)', APP_SOURCE)
+        self.assertIn('persist_checkpoint("cancelled" if cancelled else "failed", failed_message)', APP_SOURCE)
         self.assertIn('skip_completed_task("artist_folder_merge")', APP_SOURCE)
         self.assertIn('skip_completed_task("release_group_merge")', APP_SOURCE)
         self.assertIn('skip_completed_task("duplicates")', APP_SOURCE)
@@ -100,9 +100,9 @@ class CleanAllWorkflowStaticTests(unittest.TestCase):
         self.assertIn("raw === 'partial'", JOBS_SOURCE)
 
     def test_clean_all_partial_failure_preserves_completed_work(self):
-        self.assertIn('def finish_partial(failed_message: str)', APP_SOURCE)
-        self.assertIn('persist_checkpoint("partial", failed_message)', APP_SOURCE)
-        self.assertIn('return finish_partial(failed_message)', APP_SOURCE)
+        self.assertIn('def finish_partial(failed_message: str, status: str = "partial")', APP_SOURCE)
+        self.assertIn('persist_checkpoint(status, failed_message)', APP_SOURCE)
+        self.assertIn('return finish_partial(failed_message, \"cancelled\" if cancelled else \"partial\")', APP_SOURCE)
         self.assertIn('"maintenance_status": "partial"', APP_SOURCE)
         self.assertIn('"partial": True', APP_SOURCE)
         self.assertIn("status === 'Partial'", JOBS_SOURCE)

@@ -1456,6 +1456,8 @@ def _qbit_status_payload() -> Dict[str, Any]:
         "path_aliases": QBIT_PATH_ALIASES,
         "repair_allowed_roots": [str(p) for p in QBIT_REPAIR_ALLOWED_ROOTS],
         "torrent_source_roots": [str(p) for p in TORRENT_SOURCE_ROOTS],
+        # Last classified outcome, incl. a refused login (#252 NF-3); redacted.
+        "health": provider_boundary.provider_health().get("qbittorrent"),
     }
 
 
@@ -1483,7 +1485,14 @@ def _qbit_login_cookie() -> str:
         body = resp.read().decode("utf-8", errors="replace").strip()
         cookie = resp.headers.get("Set-Cookie", "")
         if body != "Ok." and not (status == 204 and cookie):
-            raise RuntimeError(f"qBittorrent login failed: {body or 'empty response'}")
+            # #252 NF-3: a ProviderError inside the block is recorded in
+            # provider health as an auth failure; the text is fixed, never
+            # qBittorrent's body.
+            raise provider_boundary.ProviderError(
+                provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR,
+                "qBittorrent rejected the login; check QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD",
+                status_code=status, provider="qbittorrent",
+            )
     return cookie.split(";", 1)[0].strip()
 
 

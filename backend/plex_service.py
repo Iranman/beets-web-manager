@@ -6,7 +6,7 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 from backend import config_layers
 from backend.security import OutboundPolicyError
-import json, math, os, re, socket, threading, time, unicodedata, uuid
+import json, math, os, re, socket, time, unicodedata, uuid
 import urllib.error, urllib.parse, urllib.request
 from collections import Counter
 from pathlib import Path
@@ -426,9 +426,19 @@ def _plex_client_headers() -> Dict[str, str]:
     }
 
 
+def _plex_response_socket(response: Any) -> Any:
+    """The socket under an http.client response (``fp.raw._sock``), or None."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    return sock if isinstance(sock, socket.socket) else None
+
+
 def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
                   *, method: str = "GET", timeout: Optional[int] = None,
-                  attempts: int = 2) -> Dict[str, Any]:
+                  attempts: int = 2, deadline: Optional[float] = None) -> Dict[str, Any]:
+    """``deadline`` (a time.time() value) bounds the whole call, body read
+    included, without a helper thread (#339): each socket wait is capped at
+    the time left and the body is read as it arrives, checked between reads.
+    Without `deadline` the body read gets `timeout` in total."""
     settings = _plex_settings()
     if not settings["url"]:
         raise RuntimeError("Plex URL is not configured")
@@ -442,12 +452,40 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     headers.update(_plex_client_headers())
     req = urllib.request.Request(url, headers=headers, method=method)
     timeout = int(timeout or PLEX_API_TIMEOUT)
+
+    def remaining() -> float:
+        left = deadline - time.time()
+        if left <= 0:
+            raise TimeoutError("Plex request exceeded its time limit")
+        return left
+
+    if deadline is not None:
+        timeout = max(0.1, min(timeout, remaining()))
     # IA-02 / BA-5: the boundary owns retries -- at most ``attempts`` for a
     # GET, and never a re-send of a POST/PUT/DELETE, which Plex may already
     # have applied before the timeout (a duplicate playlist or append).
     with provider_boundary.opened("plex", req, timeout=timeout,
                                   max_attempts=max(1, int(attempts or 1))) as r:
-        raw = r.read()
+        if deadline is None:
+            # Without a caller deadline the body still gets at most
+            # ``timeout`` in total, not ``timeout`` per received byte.
+            deadline = time.time() + timeout
+        # read1 returns the bytes that have arrived (Content-Length or
+        # chunked); read(n) would block until n bytes or EOF, so a trickling
+        # body could outlive the deadline (#339 QA). Each recv also waits at
+        # most the time left.
+        read = getattr(r, "read1", None) or r.read
+        sock = _plex_response_socket(r)
+        chunks = []
+        while True:
+            left = remaining()
+            if sock is not None and sock.fileno() != -1:  # closed once the body is complete
+                sock.settimeout(max(0.01, left))
+            chunk = read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
     if not raw:
         return {}
     try:
@@ -754,13 +792,15 @@ def _plex_track_lookup_rows(track: Dict[str, Any]) -> List[Tuple[Tuple[Any, ...]
     return rows
 
 
-def _plex_find_track(section_key, artist, title):
-    """Return ratingKey of first Plex track matching artist+title, or None."""
+def _plex_find_track(section_key, artist, title, deadline: Optional[float] = None):
+    """Return ratingKey of first Plex track matching artist+title, or None.
+    ``deadline`` (a time.time() value) bounds the whole request."""
     d = _plex_request(
         f"/library/sections/{section_key}/all",
         {"type": 10, "track.title": title},
         timeout=PLEX_API_TIMEOUT,
         attempts=1,
+        deadline=deadline,
     )
     for t in d.get("MediaContainer", {}).get("Metadata", []):
         if _norm(t.get("grandparentTitle","")) == _norm(artist) or not artist:
@@ -824,7 +864,9 @@ def _plex_section_track_index(section_key, log=None, force: bool = False) -> Dic
         index_timeout = PLEX_INDEX_TIMEOUT
     while True:
         loops += 1
-        d = _plex_request_with_wall_timeout(
+        # #339: one total deadline for the whole index, enforced on the
+        # socket reads themselves -- no abandoned helper thread on timeout.
+        d = _plex_request(
             f"/library/sections/{section_key}/all",
             {
                 "type": 10,
@@ -832,7 +874,8 @@ def _plex_section_track_index(section_key, log=None, force: bool = False) -> Dic
                 "X-Plex-Container-Size": size,
             },
             timeout=PLEX_API_TIMEOUT,
-            wall_timeout=index_timeout,
+            attempts=1,
+            deadline=started + max(1, index_timeout),
         )
         mc = d.get("MediaContainer", {})
         tracks = mc.get("Metadata", []) or []
@@ -944,29 +987,6 @@ def _plex_section_track_lookup(section_key, log=None) -> Dict[tuple, str]:
     return _plex_section_track_index(section_key, log=log).get("lookup", {})
 
 
-def _plex_request_with_wall_timeout(path: str,
-                                    params: Optional[Dict[str, Any]] = None,
-                                    *,
-                                    timeout: int,
-                                    wall_timeout: int) -> Dict[str, Any]:
-    box: Dict[str, Any] = {}
-
-    def _worker() -> None:
-        try:
-            box["result"] = _plex_request(path, params, timeout=timeout, attempts=1)
-        except Exception as exc:
-            box["error"] = exc
-
-    thread = threading.Thread(target=_worker, name="plex-request-timeout", daemon=True)
-    thread.start()
-    thread.join(max(1, int(wall_timeout or timeout)))
-    if thread.is_alive():
-        raise TimeoutError(f"Plex request timed out after {wall_timeout}s")
-    if box.get("error"):
-        raise box["error"]
-    return box.get("result") or {}
-
-
 def _plex_unique_index_value(mapping: Dict[Any, set], key: Any) -> str:
     values = mapping.get(key) or set()
     if len(values) == 1:
@@ -1040,6 +1060,11 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
     index_info: Dict[str, Any] = {}
     fallback_searches = 0
     max_fallback = PLEX_SYNC_MAX_FALLBACK_SEARCHES
+    # NB-2: per-track title searches together get one request timeout's
+    # worth of time, so a slow Plex cannot stretch them to minutes.
+    search_budget = PLEX_API_TIMEOUT
+    search_deadline = 0.0  # starts at the first title search
+    search_budget_spent = False
     while True:
         attempt += 1
         lookup: Dict[tuple, str] = {}
@@ -1064,7 +1089,8 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
             index_error = str(exc)
             if log is not None:
                 log.append(
-                    f"  [plex] Path index unavailable; bounded title search only: {exc}"
+                    f"  [plex] Path index unavailable; falling back to title search "
+                    f"(at most {max_fallback} searches, {search_budget}s total): {exc}"
                 )
         for idx, it in enumerate(items):
             if idx in keys_by_index:
@@ -1147,17 +1173,27 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
                 if key:
                     methods_by_index[idx] = "text"
             if not key and fallback_searches < max_fallback:
-                fallback_searches += 1
-                try:
-                    key = _plex_find_track(section_key, it.get("artist", ""), it.get("title", ""))
-                    if key:
-                        methods_by_index[idx] = "bounded_search"
-                except Exception as exc:
-                    if _plex_timeout_error(exc):
-                        index_status = "timeout"
-                        max_fallback = fallback_searches
-                    if log is not None and fallback_searches == 1:
-                        log.append(f"  [plex] Bounded title search failed: {exc}")
+                search_deadline = search_deadline or (time.time() + search_budget)
+                if time.time() >= search_deadline:
+                    # NB-2: all title searches share one total time budget.
+                    max_fallback = fallback_searches
+                    search_budget_spent = True
+                else:
+                    fallback_searches += 1
+                    try:
+                        key = _plex_find_track(section_key, it.get("artist", ""), it.get("title", ""),
+                                               deadline=search_deadline)
+                        if key:
+                            methods_by_index[idx] = "bounded_search"
+                    except Exception as exc:
+                        if _plex_timeout_error(exc):
+                            index_status = "timeout"
+                            max_fallback = fallback_searches
+                            search_budget_spent = time.time() >= search_deadline
+                        if log is not None and fallback_searches == 1:
+                            log.append(f"  [plex] Title search failed: {exc}")
+            if not key and search_budget_spent:
+                pending_reason_by_index.setdefault(idx, "Plex title search time limit reached; retry later")
             if key:
                 keys_by_index[idx] = str(key)
         if len(keys_by_index) >= len(final_items) or time.time() >= deadline:
@@ -1289,7 +1325,7 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
         )
         log.append(
             f"  [plex] Playlist track count: {len(items)}; Plex indexed track count: "
-            f"{details['index_tracks']}"
+            f"{'unavailable (index not loaded)' if index_error else details['index_tracks']}"
         )
         log.append(
             f"  [plex] Matched {len(keys)}/{len(items)} "
@@ -1304,7 +1340,9 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
         if missing_indexes:
             log.append(
                 f"  [plex] Missing in Plex: {len(missing_indexes)}; "
-                f"fallback searches used {fallback_searches}/{max_fallback}"
+                f"fallback searches used {fallback_searches}/{PLEX_SYNC_MAX_FALLBACK_SEARCHES}"
+                + (f"; title searches stopped at the {search_budget}s time limit"
+                   if search_budget_spent else "")
             )
             for row in missing_examples[:5]:
                 log.append(
@@ -1374,6 +1412,15 @@ def _plex_failure(exc: BaseException, url: Optional[str] = None) -> Dict[str, st
         return {"reason": "http_error", "error": f"Plex returned HTTP {int(exc.code)}.", "hint": ""}
     if _plex_timeout_error(exc):
         return {"reason": "timeout", "error": "Plex did not answer in time.", "hint": ""}
+    if isinstance(exc, OutboundPolicyError) and any(
+            word in _s(exc) for word in ("prohibited", "metadata", "internal", "not allowed", "refused")):
+        # A refusal no allowlist entry can fix (loopback, metadata, scheme,
+        # cross-origin redirect): a policy block, not a network fault (QA D14).
+        # DNS failures and oversize responses stay "unreachable".
+        return {"reason": provider_boundary.OUTBOUND_NOT_ALLOWLISTED,
+                "error": "Plex is blocked by the outbound network policy. "
+                         "Use the Plex server's private network address in PLEX_URL.",
+                "hint": ""}
     if isinstance(exc, (urllib.error.URLError, ConnectionError, socket.gaierror, OutboundPolicyError)):
         return {"reason": "unreachable", "error": "Could not reach Plex.", "hint": ""}
     return {"reason": "plex_error", "error": "The Plex operation failed; see the server log.", "hint": ""}

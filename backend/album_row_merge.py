@@ -254,7 +254,7 @@ def apply_album_row_merge(operation_id: str, *, adapter: Optional[BeetsAdapter] 
                 meta["release_group_id"], meta["release_id"], idempotency_key=operation_id,
                 **({"partial": True} if meta.get("partial") else {}))
         except Exception:
-            st.update(operation_id, status="Failed", logs=["Engine album-row-merge refused or failed; the engine "
+            st.update(operation_id, status="Failed", append_logs=["Engine album-row-merge refused or failed; the engine "
                                                            "restored anything it changed."])
             raise
         return finish_album_row_merge(operation_id, res, adapter=ad, store=st)
@@ -292,7 +292,7 @@ def finish_album_row_merge(operation_id: str, engine: Dict[str, Any], *, adapter
     status = "Completed" if not problems else "Recovery Required"
     st.update(operation_id, status=status,
               metadata={"engine_result": engine, "verification_problems": problems, "albums_after": albums_after},
-              logs=[f"Merged {len(meta['items'])} item(s) into album {target}; retired {engine.get('retired_album_ids')}"]
+              append_logs=[f"Merged {len(meta['items'])} item(s) into album {target}; retired {engine.get('retired_album_ids')}"]
               + [f"Verification problem: {p}" for p in problems])
     return {"ok": not problems, "operation_id": operation_id, "status": status, "target_album_id": target,
             "retired_album_ids": engine.get("retired_album_ids") or [], "merge_id": engine.get("merge_id"),
@@ -331,7 +331,7 @@ def rollback_album_row_merge(operation_id: str, *, adapter: Optional[BeetsAdapte
         status = "Rolled Back" if not problems else "Recovery Required"
         if st.transition(operation_id, tx.get("status"), status,
                          metadata={"rollback_result": res, "rollback_problems": problems},
-                         logs=[f"Restored album rows {meta['source_album_ids']} and item ownership"]
+                         append_logs=[f"Restored album rows {meta['source_album_ids']} and item ownership"]
                          + [f"Rollback problem: {p}" for p in problems]) is None:
             return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status, "rollback_problems": problems}

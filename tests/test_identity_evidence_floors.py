@@ -101,14 +101,17 @@ class AlbumTrackFingerprintCheckTests(unittest.TestCase):
 class WantedAlbumValidationTests(unittest.TestCase):
     """MI-7: release membership and weak hits are not confirmation."""
 
-    def _validate(self, cands):
-        mb = {"ok": True, "tracks": [{"disc": 1, "track": 1, "mb_trackid": REC_A, "title": "Crossfire"}]}
-        rows = [{"id": 7, "title": "Crossfire", "path": "/music/a.flac", "disc": 1, "track": 1,
-                 "mb_trackid": REC_A, "length": 200}]
+    def _validate(self, cands, *, outcome=None, mb=None, rows=None):
+        from backend.provider_boundary import ProviderOutcome, ProviderResult
+        mb = mb or {"ok": True, "tracks": [{"disc": 1, "track": 1, "mb_trackid": REC_A, "title": "Crossfire"}]}
+        rows = rows if rows is not None else [{"id": 7, "title": "Crossfire", "path": "/music/a.flac", "disc": 1,
+                                               "track": 1, "mb_trackid": REC_A, "length": 200}]
+        outcome = outcome or (ProviderOutcome.CONFIRMED if cands else ProviderOutcome.NO_RESULT)
+        answer = ProviderResult("acoustid", outcome, data=cands)
         with mock.patch.object(imp, "_fetch_mb_release_tracklist", return_value=mb), \
                 mock.patch.object(imp.composite_workflows, "find_all_items_by_album_id", return_value=rows), \
                 mock.patch.object(imp, "_album_item_abs_path", side_effect=lambda p: p), \
-                mock.patch.object(imp, "_acoustid_lookup_cached", return_value=cands):
+                mock.patch.object(imp, "_acoustid_lookup_cached_outcome", return_value=answer):
             return imp._validate_wanted_album_items_with_acoustid(
                 1, RELEASE, [{"disc": 1, "track": 1, "mb_trackid": REC_A, "title": "Crossfire"}], [])
 
@@ -117,16 +120,59 @@ class WantedAlbumValidationTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertEqual(len(res["mismatches"]), 1)
 
-    def test_weak_target_hit_is_unverified_not_confirmed(self):
+    def test_weak_target_hit_is_unverified_and_goes_to_review(self):
+        # #244 F1: unverified is not merged; it goes to review (never deleted).
         res = self._validate([hit(REC_A, 30, title="Crossfire")])
-        self.assertTrue(res["ok"], "weak evidence never deletes the download")
+        self.assertFalse(res["ok"])
         self.assertEqual(res["confirmed"], 0)
         self.assertEqual(len(res["unverified"]), 1)
+        self.assertEqual(res["mismatches"], [])
+        self.assertIn("did not confirm", res["reason"])
 
     def test_confirmed_target_passes(self):
         res = self._validate([hit(REC_A, 95, title="Crossfire")])
         self.assertTrue(res["ok"])
         self.assertEqual(res["confirmed"], 1)
+        self.assertEqual(res["reason"], "")
+
+    def test_not_checked_is_not_no_result_and_blocks_the_merge(self):
+        # #297 N2: no key / rejected key / outage is "not checked", fail closed.
+        from backend.provider_boundary import ProviderOutcome
+        for outcome, status in ((ProviderOutcome.NOT_CONFIGURED, "not_configured"),
+                                (ProviderOutcome.AUTHENTICATION_ERROR, "auth_failed"),
+                                (ProviderOutcome.UNAVAILABLE, "lookup_failed")):
+            with self.subTest(status=status):
+                res = self._validate([], outcome=outcome)
+                self.assertFalse(res["ok"])
+                self.assertEqual(res["no_result"], 0)
+                self.assertEqual([r["status"] for r in res["not_checked"]], [status])
+                self.assertIn("not checked", res["reason"])
+
+    def test_no_acoustid_result_blocks_the_merge(self):
+        res = self._validate([])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["no_result"], 1)
+
+    def test_musicbrainz_failure_fails_closed(self):
+        res = self._validate([hit(REC_A, 95, title="Crossfire")], mb={"ok": False, "error": "503"})
+        self.assertFalse(res["ok"])
+        self.assertIn("could not be loaded", res["reason"])
+
+    def test_file_matching_no_requested_track_is_unverified(self):
+        rows = [{"id": 8, "title": "Bonus Jam", "path": "/music/b.flac", "disc": 1, "track": 9,
+                 "mb_trackid": "", "length": 30}]
+        res = self._validate([hit(REC_A, 95, title="Crossfire")], rows=rows)
+        self.assertFalse(res["ok"])
+        self.assertEqual(len(res["unverified"]), 1)
+
+    def test_mixed_top_tier_is_review_not_mismatch(self):
+        # #244 F2: expected recording absent, one tied hit is the same song and
+        # one is a different song -> ambiguous, never a reject.
+        res = self._validate([hit(REC_B, 95, title="Crossfire"),
+                              hit(REC_C, 95, title="Space and Time", acoustid_id="aid-2")])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["mismatches"], [])
+        self.assertEqual(len(res["unverified"]), 1)
 
 
 class FreshImportEmbeddedConflictTests(unittest.TestCase):
@@ -139,6 +185,14 @@ class FreshImportEmbeddedConflictTests(unittest.TestCase):
         res = align_tracks_global(local, target, trust_model="fresh_reviewed_import")
         self.assertIn("fingerprint_recording_id_conflict", res.conflicts)
         self.assertFalse([a for a in res.assignments if a.status == "matched"])
+
+    def test_acoustid_conflict_is_recorded_once(self):
+        # #244 F7.
+        from backend.matching.track_alignment import _edge_for
+        local = {"title": "Crossfire", "track": 1, "acoustid_hits": [{"recording_id": REC_B, "score": 95}]}
+        target = {"title": "Crossfire", "track": 1, "recording_id": REC_A}
+        edge = _edge_for(0, 0, local, target, trust_model="fresh_reviewed_import")
+        self.assertEqual(edge.conflicts.count("acoustid_conflict"), 1)
 
     def test_embedded_id_contradicting_target_is_a_conflict(self):
         local = [{"title": "Crossfire", "track": 1, "recording_id": REC_B}]

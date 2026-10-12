@@ -71,13 +71,13 @@ from backend.transaction_service import (  # noqa: E402
     _install_transaction_job_hooks,
 )
 from backend.maintenance_service import (  # noqa: E402
-    _FULL_SCAN_INTERVAL, _auto_scan_loop,
+    _FULL_SCAN_INTERVAL, start_auto_scan_schedule,
 )
 
 
 threading.Thread(target=_install_ytdlp, daemon=True).start()
 
-threading.Thread(target=_install_optional_plugins, daemon=True).start()
+_install_optional_plugins()  # a no-op placeholder: no thread needed
 
 from flask import Flask, Response, abort, jsonify, request, send_file
 from backend.beets_adapter import beets_adapter
@@ -427,7 +427,7 @@ except Exception as _ai_migration_ex:
 
 
 if _legacy_local_scan_enabled():
-    threading.Thread(target=_auto_scan_loop, daemon=True).start()
+    start_auto_scan_schedule()  # jobs.every: stopped by jobs.close()
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────

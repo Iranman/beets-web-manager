@@ -47,7 +47,8 @@ def _families() -> Dict[str, Dict[str, Any]]:
             "kind": "registry", "finish": composite_workflows.finish_album_art_replace},
         composite_workflows.ALBUM_RELOCATION_FAMILY: {
             "kind": "registry", "finish": composite_workflows.finish_album_relocation,
-            "unchanged": composite_workflows.album_relocation_unchanged},
+            "unchanged": composite_workflows.album_relocation_unchanged,
+            "advice": composite_workflows.RELOCATION_UNKNOWN_ADVICE},
         duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: {
             "kind": "registry", "finish": duplicate_cleanup.finish_reviewed_cleanup},
         album_row_merge.ALBUM_ROW_MERGE_FAMILY: {
@@ -85,12 +86,20 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
         return {"operation_id": op, "action": "skipped"}
     if "engine_request" not in meta:
         # Running was never followed by an engine request: nothing was sent.
-        st.update(op, status="Failed", logs=["Recovered after restart: the engine was never called."])
+        st.update(op, status="Failed", append_logs=["Recovered after restart: the engine was never called."])
         return {"operation_id": op, "action": "failed_never_sent"}
 
     def mark(status: str, note: str) -> Dict[str, Any]:
-        st.update(op, status=status, logs=[f"Recovered after restart: {note}"])
+        if status == "Recovery Required" and fam.get("advice"):
+            note = f"{note}. {fam['advice']}"  # #328 F2
+        st.update(op, status=status, append_logs=[f"Recovered after restart: {note}"])
         return {"operation_id": op, "action": status, "note": note}
+
+    def finish(result: Dict[str, Any]) -> Dict[str, Any]:
+        # #328 F9: the transaction's own log says the sweep completed it.
+        st.update(op, append_logs=["Recovered after restart: the engine finished this operation; recording its result."])
+        out = fam["finish"](op, {"result": result}, adapter=ad, store=st)
+        return {"operation_id": op, "action": "finished", "status": out.get("status")}
 
     if fam["kind"] == "manifest":
         try:
@@ -104,8 +113,7 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
             return mark("Failed", "the engine has no record of this operation; nothing was changed")
         status = record.get("status")
         if status == "applied":
-            out = fam["finish"](op, {"result": record.get("result") or {}}, adapter=ad, store=st)
-            return {"operation_id": op, "action": "finished", "status": out.get("status")}
+            return finish(record.get("result") or {})
         if status == "compensated":
             return mark("Failed", "the engine restored the library after a failure")
         if status == "applying":
@@ -125,18 +133,34 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
     if reg.get("status") == "running":
         return {"operation_id": op, "action": "still_running"}
     if reg.get("status") == "succeeded":
-        out = fam["finish"](op, {"result": reg.get("result") or {}}, adapter=ad, store=st)
-        return {"operation_id": op, "action": "finished", "status": out.get("status")}
+        return finish(reg.get("result") or {})
     return mark("Failed", f"the engine reports {reg.get('status')!r} ({reg.get('error_code') or 'no code'})")
 
 
 def _interrupted_apply(st: TransactionStore, op: str) -> Dict[str, Any]:
     """A claimed composite apply (``_claim_apply``) records no engine evidence,
     so a restart that left it Running cannot tell whether Beets wrote it."""
-    tx = st.transition(op, "Running", "Recovery Required", logs=[
+    tx = st.transition(op, "Running", "Recovery Required", append_logs=[
         "Recovered after restart: the apply was interrupted; check the library; this transaction "
         "cannot be rolled back or re-applied — re-plan if needed."])
     return {"operation_id": op, "action": "Recovery Required" if tx else "skipped"}
+
+
+def _orphaned(st: TransactionStore, tx: Dict[str, Any]) -> Dict[str, Any]:
+    """A Running transaction that recorded an engine operation id but has no
+    registry family (a library sync) and that a previous process left behind
+    (#326 F2, #344 b): never left Running nor called Failed; the log says why."""
+    from backend.composite_workflows import MBSYNC_LIBRARY_FAMILY
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") == MBSYNC_LIBRARY_FAMILY:
+        note = (f"Recovered after restart: Beets may still be syncing; see Beets operation "
+                f"{meta['engine_operation_id']} (cancel it from this transaction). Albums it synced keep "
+                "their changes; the change log above stops where Web Manager last heard from Beets.")
+    else:
+        note = ("Recovered after restart: the process stopped while this transaction was running, so "
+                "whether it changed the library cannot be proven; check the library before retrying.")
+    out = st.transition(tx["id"], "Running", "Recovery Required", append_logs=[note])
+    return {"operation_id": tx["id"], "action": "Recovery Required" if out else "skipped", "note": note}
 
 
 def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
@@ -151,9 +175,19 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
     for tx in rows:
         meta = tx.get("metadata") or {}
         if (meta.get("mutation_family") not in families and before is not None
-                and (meta.get("engine_result") or {}).get("mutation_started")
                 and (tx.get("updated_at") or 0) < before):
-            results.append(_interrupted_apply(st, tx["id"]))
+            # Only with evidence (QA #306 N1): a claimed composite apply, or a
+            # library sync whose Beets operation id was recorded. A job's
+            # wrapper follows its job (job_engine marks it recovery_required;
+            # update_from_job maps that to Recovery Required, #344 a/b).
+            if meta.get("engine_operation_id") and meta.get("mutation_family"):
+                results.append(_orphaned(st, tx))
+            elif ((meta.get("engine_result") or {}).get("mutation_started") or meta.get("mutation_started")
+                  or meta.get("filesystem_mutated") or meta.get("mutation_family") == "folder_cleanup_v1"):
+                # Folder cleanup (Clean All) and import-review cleanup are claimed
+                # Running and record each step as it lands; a crash between steps
+                # left them Running for good (failure-injection matrix).
+                results.append(_interrupted_apply(st, tx["id"]))
         elif meta.get("mutation_family") in families:
             try:
                 results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st))
@@ -177,7 +211,7 @@ def _interrupted_relocation_rollbacks(st: TransactionStore, before: float) -> Li
             req = meta.get("rollback_request")
             if (meta.get("mutation_family") == ALBUM_RELOCATION_FAMILY and req and not req.get("outcome")
                     and (tx.get("updated_at") or 0) < before
-                    and st.transition(tx["id"], status, "Recovery Required", logs=[
+                    and st.transition(tx["id"], status, "Recovery Required", append_logs=[
                         "Recovered after restart: a rollback was interrupted; some tracks may already be back. "
                         "Retry the rollback (Beets resumes from the recorded paths) or check the album's files."])):
                 out.append({"operation_id": tx["id"], "action": "Recovery Required", "note": "rollback interrupted"})

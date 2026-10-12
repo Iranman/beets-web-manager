@@ -53,7 +53,8 @@ class RollbackStatusGateTests(unittest.TestCase):
             restore.assert_not_called()
 
     def test_every_non_completed_status_is_refused_without_a_write(self):
-        for status in sorted(STATUSES - {"Completed"}):
+        # Partially Rolled Back retries the rest (#298 N4): see the test below.
+        for status in sorted(STATUSES - {"Completed", "Partially Rolled Back"}):
             for op_type, operation in (("metadata_restore", "Metadata Update"),
                                        ("recording_id_restore", "MusicBrainz Match")):
                 with self.subTest(status=status, op=op_type):
@@ -68,6 +69,15 @@ class RollbackStatusGateTests(unittest.TestCase):
                 self.assertEqual(res.status_code, 200, res.get_json())
                 self.restores[OPS[op_type]].assert_called_once()
                 self.assertEqual(self.store.get(tid)["status"], "Rolled Back")
+
+    def test_partially_rolled_back_retries_the_rest(self):
+        """#298 N4: each restore sets the captured value, so a retry is a no-op
+        for what is already back and finishes the rest."""
+        tid = self._tx("Partially Rolled Back")
+        res = self.client.post(f"/api/transactions/{tid}/rollback")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.restores["_run_item_metadata_restore"].assert_called_once()
+        self.assertEqual(self.store.get(tid)["status"], "Rolled Back")
 
     def test_second_rollback_of_the_same_transaction_is_refused(self):
         tid = self._tx("Completed")

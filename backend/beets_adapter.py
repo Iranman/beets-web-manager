@@ -9,6 +9,7 @@ import base64
 import hashlib
 import http.client
 import os
+import posixpath
 from pathlib import Path
 import json
 import logging
@@ -31,6 +32,7 @@ except ImportError:
 log = logging.getLogger("beets.adapter")
 
 DEFAULT_BEETS_WEB_URL = "http://beets:8337"
+_IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")  # the plugin's own rule (#308)
 
 # #208: a BEETS_WEB_URL with userinfo (user:pass@) never worked -- urllib
 # sends no Basic header and parses "u:pw@host" as the host -- and the
@@ -270,6 +272,7 @@ class BeetsAdapter:
             or "/config/.webmanager_api_key"
         )
         self.timeout = timeout
+        self._libdir = ""
 
         # Bounded cache for get_items_page() -- see the note on
         # _ITEMS_PAGE_CACHE_TTL_SECONDS above get_items_page() for why this
@@ -340,6 +343,11 @@ class BeetsAdapter:
         req_headers = {"Accept": "application/json"}
         if headers:
             req_headers.update(headers)
+        key = req_headers.get("Idempotency-Key")
+        if key and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+            # The plugin accepts only short plain keys (#308); a caller-supplied
+            # key is mapped deterministically, so its retries still collapse.
+            req_headers["Idempotency-Key"] = "k-" + hashlib.sha256(key.encode("utf-8")).hexdigest()
 
         body = None
         if json_data is not None:
@@ -487,22 +495,63 @@ class BeetsAdapter:
         if not terms:
             return f"/{entity}/"
 
-        encoded = "/".join(urllib.parse.quote(t, safe="") for t in terms)
+        # Stock Beets' QueryConverter splits the decoded URL on "/" and turns
+        # "\\" back into os.sep, so a "/" inside a term must travel as "\\"
+        # (%2F is decoded before the split and never matched a path query).
+        encoded = "/".join(urllib.parse.quote("\\".join(t.split("/")), safe="") for t in terms)
         return f"/{entity}/query/{encoded}"
+
+    def _library_directory(self) -> str:
+        """Beets' library directory from /webmanager/status (plugin >= 1.6.0),
+        cached once known; "" while it cannot be read."""
+        # ponytail: cached for the process; a changed Beets `directory` needs a Web Manager restart.
+        if not getattr(self, "_libdir", ""):
+            try:
+                status = self.get_plugin_status()
+                self._libdir = str(status.get("library_directory") or "") if isinstance(status, dict) else ""
+            except BeetsAdapterError:
+                return ""
+        return self._libdir
+
+    def _rows(self, rows: List[Any]) -> List[Any]:
+        """Normalise Beets rows for every consumer: legacy ``genre``, and
+        absolute ``path``/``artpath``. Beets 2.14 stores paths relative to
+        its library directory and stock web routes served them relative
+        until the webmanager plugin bound that directory app-wide (D4, #302);
+        a relative path is joined to the directory Beets reports."""
+        libdir: List[str] = []  # looked up at most once per call
+
+        def fix(row: Any) -> None:
+            _with_legacy_genre(row)
+            if not isinstance(row, dict):
+                return
+            for key in ("path", "artpath"):
+                value = row.get(key)
+                if isinstance(value, str) and value and not posixpath.isabs(value):
+                    if not libdir:
+                        libdir.append(self._library_directory())
+                    if libdir[0]:
+                        row[key] = posixpath.normpath(posixpath.join(libdir[0], value))
+            for nested in row["items"] if isinstance(row.get("items"), list) else []:
+                fix(nested)
+
+        for row in rows:
+            fix(row)
+        return rows
 
     def get_items(self, query: Optional[Union[str, List[str]]] = None) -> List[Dict[str, Any]]:
         """Fetch items matching query (or all items) from GET /item/ or /item/query/<queries>."""
         path = self._build_query_path("item", query)
         res = self._request("GET", path)
         if isinstance(res, dict):
-            return [_with_legacy_genre(r) for r in res.get("items") or res.get("results") or []]
+            return self._rows(list(res.get("items") or res.get("results") or []))
         return []
 
     def get_item(self, item_id: int) -> Optional[Dict[str, Any]]:
         """Fetch single item by ID from GET /item/<id>."""
         try:
             res = self._request("GET", f"/item/{int(item_id)}")
-            return _with_legacy_genre(res) if isinstance(res, dict) else None
+            return self._rows([res])[0] if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
 
@@ -511,7 +560,7 @@ class BeetsAdapter:
         path = self._build_query_path("album", query)
         res = self._request("GET", path)
         if isinstance(res, dict):
-            return [_with_legacy_genre(r) for r in res.get("albums") or res.get("results") or []]
+            return self._rows(list(res.get("albums") or res.get("results") or []))
         return []
 
     def get_album(self, album_id: int, expand: bool = True) -> Optional[Dict[str, Any]]:
@@ -519,7 +568,7 @@ class BeetsAdapter:
         params = {"expand": ""} if expand else None
         try:
             res = self._request("GET", f"/album/{int(album_id)}", params=params)
-            return _with_legacy_genre(res) if isinstance(res, dict) else None
+            return self._rows([res])[0] if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
 
@@ -712,9 +761,10 @@ class BeetsAdapter:
         album_ids: Optional[List[int]] = None,
         query: Optional[str] = None,
         write: bool = True,
-        move: bool = True,
+        move: bool = False,
     ) -> Dict[str, Any]:
-        """Modify metadata fields on items or albums."""
+        """Modify metadata fields on items or albums. Files move only when
+        ``move`` is asked for explicitly (#335)."""
         payload = {
             "fields": fields,
             "item_ids": item_ids or [],
@@ -805,6 +855,14 @@ class BeetsAdapter:
         # Embedding rewrites every track of the album.
         return self._request("POST", "/webmanager/album-art", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
+
+    def remove_album_art(self, album_id: int, expected_mb_releasegroupid: str = "",
+                         idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        """Remove the album's cover file (plugin 1.16.0); the engine keeps it
+        and rollback_album_art() puts it back."""
+        payload = {"album_id": int(album_id), "expected_mb_releasegroupid": str(expected_mb_releasegroupid or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-art/remove", json_data=payload, headers=headers)
 
     def rollback_album_art(
         self,
@@ -1169,8 +1227,19 @@ class BeetsAdapter:
 
     def find_item_by_path(self, path: str) -> Optional[Dict[str, Any]]:
         """Compatibility helper finding a single item by path."""
-        items = self.get_items(f"path:{path}")
-        return items[0] if items else None
+        # One term (no shell-style split on spaces or quotes). Beets' path:
+        # also matches everything under a directory, so keep the exact file.
+        want = os.path.normpath(str(path))
+        items = self.get_items([f"path:{path}"])
+        if len(items) == 1 and "path" not in items[0]:  # web.include_paths off: Beets' own match
+            return items[0]
+        for item in items:
+            got = item.get("path")
+            if isinstance(got, bytes):
+                got = got.decode("utf-8", "surrogateescape")
+            if got and os.path.normpath(str(got)) == want:
+                return item
+        return None
 
     def find_items_by_query(self, query: str) -> List[Dict[str, Any]]:
         """Compatibility helper finding items matching query."""

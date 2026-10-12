@@ -204,6 +204,26 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         self.assertEqual(self.lib.get_album(bad.id).album, "Old Title")
         self.assertEqual(seen, [0, 1])  # reported before each album, after the one before it
 
+    def test_a_target_that_raises_part_way_still_records_what_beets_stored(self):
+        """#326 F3: Beets commits what it stored before the error; the change
+        log, the only record, must carry that diff."""
+        album = self._add_album("rel-a")
+        first = album.items()[0]
+
+        def half_sync(plugin, lib, query, move, pretend, write):
+            item = lib.get_item(first.id)
+            item.title = "stored before the error"
+            item.store()
+            raise RuntimeError("boom after one track")
+
+        with mock.patch.object(MBSyncPlugin, "albums", half_sync):
+            r = plugin_ops.run_mbsync_library(self.lib, False, threading.Event(), threading.RLock())
+        self.assertEqual((r["failed_count"], r["changed_items"]), (1, 1))
+        change = r["changes"][0]
+        self.assertEqual((change["id"], change["failed"]), (album.id, True))
+        self.assertEqual(change["items"][0]["item_id"], first.id)
+        self.assertEqual(change["items"][0]["fields"]["title"], ["old 1", "stored before the error"])
+
     def test_tag_write_failures_are_reported_not_silent_and_files_never_move(self):
         beets_config["import"]["write"] = True
         beets_config["import"]["move"] = True  # ignored: MBSync All never moves files

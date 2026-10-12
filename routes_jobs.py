@@ -1,10 +1,13 @@
 """Job management routes — registered on app after app.py initializes."""
+import hashlib
+import os
+import re
 import time
 
-from flask import jsonify, request
+from flask import g, jsonify, request
 
 import backend.provider_boundary as provider_boundary
-from job_engine import DuplicateJobError
+from job_engine import DuplicateJobError, IdempotencyKeyReuseError, enter_start_scope, exit_start_scope
 
 # Imported after app.py has already defined app and jobs (circular-but-OK pattern)
 from app import app, jobs, _ai_batch_find_state, _ai_batch_reconcile_state, _AI_BATCH_TERMINAL_STATUSES  # noqa: E402
@@ -40,12 +43,70 @@ def _present_job_row(job, *, include_log=False, include_result=True):
     return row
 
 
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:\-]{8,128}$")
+
+
+def _request_fingerprint() -> str:
+    """What makes two requests the same operation: method, path, query and
+    body (JSON/raw bytes, form fields, uploaded file names)."""
+    digest = hashlib.sha256()
+    for part in (request.method, request.path, request.query_string.decode("latin-1")):
+        digest.update(part.encode("utf-8", "replace") + b"\0")
+    for key, value in sorted(request.form.items(multi=True)):
+        digest.update(f"form:{key}={value}\0".encode("utf-8", "replace"))
+    for key, storage in sorted(request.files.items(multi=True), key=lambda kv: kv[0]):
+        digest.update(f"file:{key}={storage.filename}\0".encode("utf-8", "replace"))
+        try:  # the upload's bytes, without disturbing the view's read position
+            position = storage.stream.tell()
+            storage.stream.seek(0)
+            for chunk in iter(lambda: storage.stream.read(1 << 16), b""):
+                digest.update(chunk)
+            storage.stream.seek(position)
+        except (OSError, ValueError, AttributeError):
+            digest.update(os.urandom(16))  # unknown contents: never call two uploads the same
+    digest.update(request.get_data(cache=True))
+    return digest.hexdigest()
+
+
+@app.before_request
+def _open_job_start_scope():
+    """Duplicate-start protection for every route that starts a job (see
+    job_engine's module docstring): the first job a mutating request starts
+    is tied to the request's fingerprint and optional Idempotency-Key."""
+    if request.method not in _MUTATING_METHODS:
+        return None
+    key = (request.headers.get("Idempotency-Key") or "").strip()
+    if key and not _IDEMPOTENCY_KEY_RE.match(key):
+        return jsonify({"ok": False, "code": "invalid_idempotency_key",
+                        "error": "Idempotency-Key must be 8-128 characters of A-Z, a-z, 0-9, '.', '_', ':' or '-'."}), 400
+    g._job_start_scope = enter_start_scope(_request_fingerprint, key)
+    return None
+
+
+@app.teardown_request
+def _close_job_start_scope(_exc=None):
+    token = g.pop("_job_start_scope", None)
+    if token is not None:
+        exit_start_scope(token)
+
+
 @app.errorhandler(DuplicateJobError)
 def _duplicate_job(exc):
-    """Any route that starts a job: an identical mutating job is already
-    running (BA-6). Nothing was started; the running job's id is returned."""
-    return jsonify({"ok": False, "code": "job_already_running", "error": str(exc),
-                    "job_id": exc.job.job_id}), 409
+    """Any route that starts a job: nothing was started. Either an identical
+    mutating job is still running (BA-6), or -- ``job_already_started`` --
+    this request's Idempotency-Key already started ``job_id``. A client that
+    retried a start follows ``job_id`` either way."""
+    job = exc.job
+    code = "job_already_started" if exc.replay and job.status != "running" else "job_already_running"
+    return jsonify({"ok": False, "code": code, "error": str(exc), "job_id": job.job_id,
+                    "status": job.status, "replay": bool(exc.replay)}), 409
+
+
+@app.errorhandler(IdempotencyKeyReuseError)
+def _idempotency_key_reused(exc):
+    return jsonify({"ok": False, "code": "idempotency_key_reused", "error": str(exc),
+                    "job_id": exc.job.job_id}), 422
 
 
 @app.get("/api/jobs")

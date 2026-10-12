@@ -232,10 +232,10 @@ def _edge_for(local_index: int, target_index: int, local: Dict[str, Any], target
             if acoustid_status == AcoustIDStatus.CONFIRMED:
                 conflicts.append("fingerprint_recording_id_conflict")
 
+    # A CONFLICT already carries "acoustid_conflict" from
+    # _acoustid_status_for_target (#244 F7: it used to be added twice).
     if acoustid_status == AcoustIDStatus.CONFIRMED:
         hard_positive = True
-    elif acoustid_status == AcoustIDStatus.CONFLICT:
-        conflicts.append("acoustid_conflict")
     elif acoustid_status == AcoustIDStatus.AMBIGUOUS:
         warnings.append("acoustid_ambiguous")
 

@@ -5,12 +5,14 @@ beside the existing JobStore without changing the job architecture.
 """
 from __future__ import annotations
 
+import contextvars
 import csv
 import errno
 import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -20,10 +22,46 @@ import time
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 
 LOG = logging.getLogger("beets_web.transaction_engine")
+
+#: Who a transaction records when no operator started it (a scheduled or
+#: unattended job). An operator-started one records the verified user (D7).
+SYSTEM_ACTOR = "system"
+_actor: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar("transaction_actor", default=None)
+_actor_resolver: Optional[Callable[[], Optional[str]]] = None
+
+
+def set_actor_resolver(resolver: Optional[Callable[[], Optional[str]]]) -> None:
+    """Register how to name the verified user of the current request
+    (auth_service does this); None outside a request."""
+    global _actor_resolver
+    _actor_resolver = resolver
+
+
+@contextmanager
+def acting_as(user: Optional[str]):
+    """Record ``user`` on every transaction created in this context (a job
+    thread started by an operator's request)."""
+    token = _actor.set(user or None)
+    try:
+        yield
+    finally:
+        _actor.reset(token)
+
+
+def current_actor() -> str:
+    """The user a transaction created now is attributed to: the job's
+    starter, else the current request's verified user, else SYSTEM_ACTOR."""
+    actor = _actor.get()
+    if not actor and _actor_resolver is not None:
+        try:
+            actor = _actor_resolver()
+        except Exception:
+            actor = None
+    return str(actor or SYSTEM_ACTOR)
 
 
 STATUSES = {
@@ -79,6 +117,43 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "maximum_undo_history": 250,
     "dry_run_by_default": False,
 }
+
+# D8: accepted ranges; anything else is refused, never clamped. The approval
+# threshold has a floor, so a typo such as 0 cannot approve every match.
+SETTINGS_INT_RANGES = {"backup_retention_days": (1, 3650), "maximum_undo_history": (1, 100000)}
+SETTINGS_FLOAT_RANGES = {"automatic_approval_threshold": (0.9, 1.0)}
+
+
+class SettingsError(ValueError):
+    """A transaction setting is out of range or of the wrong type."""
+
+
+def validated_settings(updates: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """(the known settings in ``updates``, converted; "") or ({}, why the
+    first bad value is refused). The text is built from DEFAULT_SETTINGS
+    names and the fixed ranges only, so a route can show it as is (D8)."""
+    out: Dict[str, Any] = {}
+    for key, default in DEFAULT_SETTINGS.items():
+        if key not in updates:
+            continue
+        value = updates[key]
+        if isinstance(default, bool):
+            if not isinstance(value, bool):
+                return {}, f"{key} must be true or false."
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            return {}, f"{key} must be a number."
+        elif isinstance(default, int):
+            low, high = SETTINGS_INT_RANGES[key]
+            if not (math.isfinite(value) and value == int(value) and low <= value <= high):
+                return {}, f"{key} must be a whole number from {low} to {high}."
+            value = int(value)
+        else:
+            low, high = SETTINGS_FLOAT_RANGES[key]
+            if not low <= float(value) <= high:
+                return {}, f"{key} must be from {low} to {high}."
+            value = float(value)
+        out[key] = value
+    return out, ""
 
 _TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-zA-Z_]{8,64}$")
 
@@ -362,7 +437,7 @@ class TransactionStore:
         self,
         *,
         operation_type: str,
-        initiating_user: str = "operator",
+        initiating_user: Optional[str] = None,
         originating_job: Optional[str] = None,
         status: str = "Pending",
         dry_run: bool = False,
@@ -380,7 +455,7 @@ class TransactionStore:
             "id": _new_id(),
             "created_at": now,
             "updated_at": now,
-            "initiating_user": initiating_user or "operator",
+            "initiating_user": initiating_user or current_actor(),
             "originating_job": originating_job,
             "operation_type": _operation_type(operation_type),
             "status": _status(status),
@@ -431,20 +506,15 @@ class TransactionStore:
         return settings
 
     def save_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate every value, then save. An out-of-range or mistyped value
+        raises SettingsError and nothing is saved (D8: values used to be
+        clamped silently, and "false" was stored as True)."""
+        values, problem = validated_settings(updates)
+        if problem:
+            raise SettingsError(problem)
         with self._lock:
             settings = self.settings()
-            for key, default in DEFAULT_SETTINGS.items():
-                if key not in updates:
-                    continue
-                value = updates[key]
-                if isinstance(default, bool):
-                    settings[key] = bool(value)
-                elif isinstance(default, int):
-                    settings[key] = max(0, int(value))
-                elif isinstance(default, float):
-                    settings[key] = max(0.0, min(1.0, float(value)))
-                else:
-                    settings[key] = value
+            settings.update(values)
             self._ensure()
             path = self._settings_path()
             tmp = path.with_suffix(".json.tmp")
@@ -496,7 +566,11 @@ class TransactionStore:
         operation: str = "",
         query: str = "",
         job: str = "",
+        rollback_fields: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
+        """``rollback_fields(full_tx)`` is merged into each returned row's
+        ``rollback`` from the record already read here (#245 F3: no second
+        read per row)."""
         self._ensure()
         status_lc = status.strip().lower()
         operation_lc = operation.strip().lower()
@@ -527,11 +601,15 @@ class TransactionStore:
                     }, ensure_ascii=False, default=str).lower()
                     if query_lc not in haystack:
                         continue
-                rows.append(row)
+                rows.append((row, tx))
         total = len(rows)
         offset = max(0, int(offset or 0))
         limit = max(1, min(500, int(limit or 50)))
-        return rows[offset:offset + limit], total
+        page = rows[offset:offset + limit]
+        if rollback_fields is not None:
+            for row, tx in page:
+                row.setdefault("rollback", {}).update(rollback_fields(tx))
+        return [row for row, _tx in page], total
 
     def update(self, transaction_id: str, **updates: Any) -> Dict[str, Any]:
         with self._lock:
@@ -549,6 +627,11 @@ class TransactionStore:
                     tx.setdefault("metadata", {}).update(value)
                 elif key == "rollback" and isinstance(value, dict):
                     tx.setdefault("rollback", {}).update(value)
+                elif key == "append_logs":
+                    # ``logs=`` replaces the whole log (job wrappers pass the
+                    # job's full log); a step's own lines append, so recovery
+                    # and apply history is never overwritten.
+                    tx["logs"] = (list(tx.get("logs") or []) + [str(m) for m in value])[-500:]
                 else:
                     tx[key] = value
             return self._write(tx)
@@ -586,6 +669,9 @@ class TransactionStore:
             next_status = "Preview" if dry_run else "Completed"
         elif status in {"cancelled", "killed"}:
             next_status = "Cancelled"
+        elif status == "recovery_required":
+            # The process stopped mid-job: completion cannot be proven (#344 a).
+            next_status = "Recovery Required"
         else:
             next_status = "Failed"
 
@@ -607,8 +693,13 @@ class TransactionStore:
             # Job state only advances a transaction that is already Running
             # (claimed before its job started). It never claims an Approved
             # one, nor rewrites Cancelled or another final status (#217).
-            if self._read(transaction_id).get("status") != "Running":
+            current = self._read(transaction_id)
+            if current.get("status") != "Running":
                 updates.pop("status")
+            elif next_status == "Recovery Required":  # the audit says why, once
+                updates["logs"] = (updates.get("logs") or list(current.get("logs") or [])) + [
+                    "Recovered after restart: the job was interrupted, so whether it changed the library "
+                    "cannot be proven; check the library before retrying."]
             return self.update(transaction_id, **updates)
 
     def rollback(self, transaction_id: str) -> Dict[str, Any]:
@@ -716,7 +807,7 @@ class TransactionStore:
         expected_states: Optional[Dict[str, Any]] = None,
         reversibility: str = "RECOVERABLE",
         payload: Optional[Dict[str, Any]] = None,
-        created_by: str = "operator",
+        created_by: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Create a plan transaction with strict root containment and symlink checks."""
         resolved_target = Path(target_path).resolve()
@@ -2022,8 +2113,12 @@ def _folder_step(adapter: Any, key: str, op: str, **paths: str) -> Optional[str]
             res = adapter.folder_op(op, key, **paths)
         except Exception as exc:
             code = getattr(exc, "error_code", "") or type(exc).__name__
-            if not getattr(exc, "status_code", None):  # no HTTP reply (connection error/timeout)
-                last = f"{FOLDER_OP_UNCONFIRMED} ({code})"  # no reply: Beets may have done it
+            http = int(getattr(exc, "status_code", 0) or 0)
+            # No HTTP reply (connection error/timeout), or a 5xx the plugin did
+            # not answer itself (a proxy, a crashed handler; #298 L2): Beets may
+            # have done the step.
+            if not http or (http >= 500 and code == "BEETS_UPSTREAM_ERROR"):
+                last = f"{FOLDER_OP_UNCONFIRMED} ({code})"
                 continue
             if last is not None:
                 return f"{last} then {code}"
@@ -2098,6 +2193,8 @@ def execute_folder_cleanup_apply(
             step_code = step_error.split(" ", 1)[0] if step_error else None
             if step_code is not None and step_code not in FOLDER_STEP_MESSAGES:
                 step_code = "FOLDER_OP_FAILED"  # only allowlisted codes leave the engine
+            if step_code:
+                msg = f"{msg}: {step_code}"  # #298 L1: the code, never Beets' reply text
             store.append_log(operation_id, f"Apply failed: {msg}")
             store.update(operation_id, status="Failed", rollback={
                 "available": mutated,
@@ -2147,7 +2244,7 @@ def execute_folder_cleanup_apply(
                     moved_records.append({"source": str(sp), "target": str(tp), "kind": "file", "unconfirmed": True})
                     _record(f"move {sp} -> {tp} not confirmed; recorded for rollback")
                 if err:
-                    return _fail(f"Move failed {sp} -> {tp}: {err}", "folder_cleanup_move_failed", err)
+                    return _fail(f"Move failed {sp} -> {tp}", "folder_cleanup_move_failed", err)
                 moved_records.append({"source": str(sp), "target": str(tp), "kind": "file"})
                 _record(f"moved {sp} -> {tp}")
 
@@ -2173,7 +2270,7 @@ def execute_folder_cleanup_apply(
                     moved_records.append({"source": str(sp), "target": str(tp), "kind": "dir", "unconfirmed": True})
                     _record(f"folder rename {sp} -> {tp} not confirmed; recorded for rollback")
                 if err:
-                    return _fail(f"Folder rename failed {sp} -> {tp}: {err}", "folder_cleanup_rename_failed", err)
+                    return _fail(f"Folder rename failed {sp} -> {tp}", "folder_cleanup_rename_failed", err)
                 moved_records.append({"source": str(sp), "target": str(tp), "kind": "dir"})
                 _record(f"renamed folder {sp} -> {tp}")
 
@@ -2208,7 +2305,7 @@ def execute_folder_cleanup_apply(
                     removed_dirs.append(str(dp))
                     _record(f"removal of {dp} not confirmed; recorded for rollback")
                 if err:
-                    return _fail(f"Directory removal failed {dp}: {err}", "folder_cleanup_remove_failed", err)
+                    return _fail(f"Directory removal failed {dp}", "folder_cleanup_remove_failed", err)
                 removed_dirs.append(str(dp))
                 _record(f"removed empty folder {dp}")
 
@@ -2244,7 +2341,8 @@ def _unconfirmed_steps(operation_id: str, meta: Dict[str, Any]) -> List[Dict[str
 
 #: Statuses a folder cleanup rollback starts from; each also needs the apply
 #: record (``engine_result``). Running is a caller's own claim (#224 CAS).
-_FOLDER_ROLLBACK_FROM = frozenset({"Completed", "Failed", "Running"})
+#: Partially Rolled Back retries the rest: every step skips what is back (#298 N4).
+_FOLDER_ROLLBACK_FROM = frozenset({"Completed", "Failed", "Partially Rolled Back", "Running"})
 
 
 def rollback_folder_cleanup(
@@ -2314,7 +2412,8 @@ def rollback_folder_cleanup(
             # view below is trusted only once Beets has a final outcome for it.
             # Replaying its key reads that outcome, or runs the step now, which
             # makes any late copy of the request a replay that changes nothing.
-            for step in _unconfirmed_steps(operation_id, meta):
+            pending = _unconfirmed_steps(operation_id, meta)
+            for step in pending:
                 paths = {k: v for k, v in step.items() if k not in ("key", "op")}
                 err = _folder_step(ad, step["key"], step["op"], **paths)
                 if err == FOLDER_OP_BUSY:
@@ -2323,6 +2422,11 @@ def rollback_folder_cleanup(
                     return _defer(f"Beets has not finished step {step['key']}.",
                                   "Beets has not finished an earlier step of this cleanup (it may be waiting "
                                   "for an import to end); nothing was rolled back. Try again later.")
+            if pending:
+                # Settled. A retry (Partially Rolled Back) never replays an apply
+                # key again: one pruned from Beets' registry would run afresh
+                # and undo what this rollback restored (#298 N4).
+                store.update(operation_id, metadata={"unconfirmed_steps": []})
 
             dirs_restored = dirs_failed = files_restored = files_failed = 0
             try:

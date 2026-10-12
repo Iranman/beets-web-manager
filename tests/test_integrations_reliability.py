@@ -248,53 +248,102 @@ class PlexPathMapTests(unittest.TestCase):
         self.assertEqual(self._map(["/a", "/plexmusic"], configured="/plexmusic"), "/plexmusic")
 
 
-# -- Plex playlist replace: IA-03, IA-16 ----------------------------------------------
+# -- Plex playlist sync in place: IA-03, IA-16, ratingKey stability ---------------
 
 class _FakePlex:
-    def __init__(self, playlists=None, fail_post=None, fail_put=None, fail_delete=None):
-        self.playlists = dict(playlists or {})  # ratingKey -> {"title", "items"}
+    """Plex playlists at entry level: every entry has its own playlistItemID,
+    so duplicates are told apart, and supports the add/remove/move calls."""
+
+    def __init__(self, playlists=None, fail_post=None, fail_put=None, fail_delete=None,
+                 fail_move=None):
+        self.playlists = {}  # ratingKey -> {"title", "items": [[item_id, track_key], ...]}
+        self.next_item = 9000
+        for key, row in (playlists or {}).items():
+            self.playlists[key] = {"title": row["title"], "items": [self._entry(k) for k in row["items"]]}
         self.fail_post, self.fail_put, self.fail_delete = fail_post, fail_put, fail_delete
+        self.fail_move = fail_move
         self.calls = []
         self.next_key = 500
 
-    def request(self, path, params=None, *, method="GET", timeout=None, attempts=2):
+    def _entry(self, track_key):
+        self.next_item += 1
+        return [str(self.next_item), str(track_key)]
+
+    def keys(self, rating_key):
+        return [k for _i, k in self.playlists[rating_key]["items"]]
+
+    def writes(self):
+        return [c for c in self.calls if c[0] != "GET"]
+
+    @staticmethod
+    def _uri_keys(params):
+        return params["uri"].rsplit("/", 1)[1].split(",")
+
+    def request(self, path, params=None, *, method="GET", timeout=None, attempts=2, deadline=None):
         self.calls.append((method, path))
         params = params or {}
+        parts = path.strip("/").split("/")
         if method == "GET" and path == "/playlists":
             return {"MediaContainer": {"Metadata": [
-                {"ratingKey": k, "key": f"/playlists/{k}/items", "title": v["title"], "smart": "0"}
+                {"ratingKey": k, "key": f"/playlists/{k}/items", "title": v["title"], "smart": "0",
+                 "playlistType": "audio"}
                 for k, v in self.playlists.items()]}}
         if method == "GET" and path.endswith("/items"):
-            key = path.split("/")[2]
-            return {"MediaContainer": {"Metadata": [{"ratingKey": i} for i in self.playlists[key]["items"]]}}
+            key = parts[1]
+            if key not in self.playlists:
+                raise http_error(404)
+            return {"MediaContainer": {"Metadata": [
+                {"ratingKey": k, "playlistItemID": i, "title": f"T{k}", "grandparentTitle": "A"}
+                for i, k in self.playlists[key]["items"]]}}
+        if method == "GET" and len(parts) == 2 and parts[0] == "playlists":
+            if parts[1] not in self.playlists:
+                raise http_error(404)
+            v = self.playlists[parts[1]]
+            return {"MediaContainer": {"Metadata": [
+                {"ratingKey": parts[1], "title": v["title"], "smart": "0", "playlistType": "audio"}]}}
         if method == "POST" and path == "/playlists":
             if self.fail_post:
                 raise self.fail_post
             self.next_key += 1
             key = str(self.next_key)
-            self.playlists[key] = {"title": params["title"], "items": params["uri"].rsplit("/", 1)[1].split(",")}
+            self.playlists[key] = {"title": params["title"], "items": [self._entry(k) for k in self._uri_keys(params)]}
             return {"MediaContainer": {"Metadata": [{"ratingKey": key}]}}
-        if method == "PUT":
+        if method == "PUT" and path.endswith("/move"):
+            if self.fail_move:
+                raise self.fail_move
+            items = self.playlists[parts[1]]["items"]
+            entry = next(e for e in items if e[0] == parts[3])
+            items.remove(entry)
+            after = params.get("after")
+            pos = 0 if after is None else next(n for n, e in enumerate(items) if e[0] == str(after)) + 1
+            items.insert(pos, entry)
+            return {}
+        if method == "PUT" and path.endswith("/items"):
             if self.fail_put:
                 raise self.fail_put
-            key = path.split("/")[2]
-            self.playlists[key]["items"] += params["uri"].rsplit("/", 1)[1].split(",")
+            self.playlists[parts[1]]["items"] += [self._entry(k) for k in self._uri_keys(params)]
+            return {}
+        if method == "DELETE" and len(parts) == 4:  # one entry
+            if self.fail_delete:
+                raise self.fail_delete
+            items = self.playlists[parts[1]]["items"]
+            items[:] = [e for e in items if e[0] != parts[3]]
             return {}
         if method == "DELETE":
             if self.fail_delete:
                 raise self.fail_delete
-            key = path.split("/")[2]
-            if key not in self.playlists:
+            if parts[1] not in self.playlists:
                 raise http_error(404)
-            del self.playlists[key]
+            del self.playlists[parts[1]]
             return {}
         raise AssertionError(f"unexpected Plex call {method} {path}")
 
 
 class PlexPlaylistReplaceTests(unittest.TestCase):
     ITEMS = [{"id": i, "artist": "A", "title": f"T{i}", "path": f"/music/a/{i}.flac"} for i in (1, 2, 3)]
+    KEYS = ["11", "12", "13"]
 
-    def _sync(self, fake, manifest):
+    def _sync(self, fake, manifest, keys=None, details=None):
         stored = {}
 
         def replace_manifest(name, m):
@@ -316,8 +365,9 @@ class PlexPlaylistReplaceTests(unittest.TestCase):
             "_plex_settings": mock.Mock(return_value=dict(_PLEX_SETTINGS)),
             "_plex_find_music_section": mock.Mock(return_value=("machine", "3", "Music")),
             "_plex_track_keys_for_items": mock.Mock(return_value=(
-                ["11", "12", "13"], {"matched_track_ids": [], "pending_plex_count": 0,
-                                     "path_mapping_verified": True})),
+                list(self.KEYS if keys is None else keys),
+                details or {"matched_track_ids": [], "pending_plex_count": 0,
+                            "path_mapping_verified": True})),
             "_plex_request": fake.request,
             "PLEX_PLAYLIST_CHUNK_SIZE": 1,
         }
@@ -326,44 +376,63 @@ class PlexPlaylistReplaceTests(unittest.TestCase):
             result = ps._create_playlist_outputs("Mix", self.ITEMS, log=[])
         return result["plex"], stored.get("last_plex") or {}
 
-    def test_failed_create_keeps_the_old_playlist_and_its_identity(self):  # IA-03
-        fake = _FakePlex({"100": {"title": "Mix", "items": ["1"]}}, fail_post=socket.timeout("slow"))
-        plex, last = self._sync(fake, {"last_plex": {"rating_key": "100"}})
+    def test_failed_create_reports_timeout_and_keeps_nothing_partial(self):  # IA-03
+        fake = _FakePlex(fail_post=socket.timeout("slow"))
+        plex, last = self._sync(fake, {})
         self.assertEqual(plex["status"], "failed")
-        self.assertIn("100", fake.playlists)
-        self.assertNotIn(("DELETE", "/playlists/100"), fake.calls)
-        self.assertEqual(last.get("rating_key"), "100")
         self.assertEqual(plex["issue_reason"], "Plex did not answer in time")
         self.assertEqual([c for c in fake.calls if c[0] == "POST"], [("POST", "/playlists")])
+        self.assertEqual(fake.playlists, {})
 
-    def test_failed_chunk_append_removes_the_partial_copy(self):  # IA-16
-        fake = _FakePlex({"100": {"title": "Mix", "items": ["1"]}}, fail_put=http_error(500))
+    def test_index_timeout_is_not_reported_as_a_path_mapping_problem(self):  # #339 QA NB-A
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11"]}})
+        plex, _ = self._sync(fake, {"last_plex": {"rating_key": "100"}}, keys=[],
+                             details={"pending_plex_count": 3, "path_mapping_verified": False, "timed_out": 1})
+        self.assertEqual(plex["status"], "failed")
+        self.assertEqual(plex["issue_reason"], "Plex did not answer in time")
+        self.assertNotIn("path mapping", plex["error"].lower())
+        self.assertEqual(fake.keys("100"), ["11"])
+        self.assertEqual([c for c in fake.calls if c[0] != "GET"], [])
+        # Without a timeout the same evidence still points at path mapping.
+        plex, _ = self._sync(_FakePlex(), {}, keys=[],
+                             details={"pending_plex_count": 3, "path_mapping_verified": False})
+        self.assertEqual(plex["issue_reason"], "path mapping not verified")
+
+    def test_failed_append_keeps_the_playlist_and_its_identity(self):  # IA-16
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11"]}}, fail_put=http_error(500))
         plex, last = self._sync(fake, {"last_plex": {"rating_key": "100"}})
         self.assertEqual(plex["status"], "failed")
-        self.assertEqual(list(fake.playlists), ["100"])  # partial new one deleted, old one intact
+        self.assertEqual(list(fake.playlists), ["100"])
+        self.assertEqual(fake.keys("100"), ["11"])
         self.assertEqual(last.get("rating_key"), "100")
+        self.assertEqual(plex["issue_reason"], "Plex playlist update did not finish")
+        self.assertNotIn("POST", [c[0] for c in fake.calls])
 
-    def test_success_replaces_the_old_playlist_after_creating_the_new_one(self):
-        fake = _FakePlex({"100": {"title": "Mix", "items": ["1"]}})
+    def test_success_updates_the_existing_playlist_in_place(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11"]}})
         plex, last = self._sync(fake, {"last_plex": {"rating_key": "100"}})
         self.assertEqual(plex["status"], "success")
-        self.assertEqual(plex["replaced"], 1)
-        self.assertNotIn("100", fake.playlists)
-        self.assertLess(fake.calls.index(("POST", "/playlists")), fake.calls.index(("DELETE", "/playlists/100")))
-        self.assertEqual(last["rating_key"], plex["rating_key"])
-        self.assertEqual(fake.playlists[plex["rating_key"]]["items"], ["11", "12", "13"])
+        self.assertEqual(plex["mode"], "in_place")
+        self.assertEqual(plex["rating_key"], "100")
+        self.assertEqual(last["rating_key"], "100")
+        self.assertEqual(fake.keys("100"), self.KEYS)
+        self.assertNotIn("POST", [c[0] for c in fake.calls])
+        self.assertNotIn(("DELETE", "/playlists/100"), fake.calls)
 
-    def test_title_fallback_replaces_the_single_same_title_playlist(self):
-        fake = _FakePlex({"100": {"title": "Mix", "items": ["1"]}})
+    def test_title_fallback_updates_the_single_same_title_playlist(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11"]}})
         plex, _ = self._sync(fake, {})
-        self.assertEqual(plex["replaced"], 1)
-        self.assertEqual(list(fake.playlists), [plex["rating_key"]])
+        self.assertEqual(plex["rating_key"], "100")
+        self.assertEqual(list(fake.playlists), ["100"])
+        self.assertEqual(fake.keys("100"), self.KEYS)
 
-    def test_old_playlist_delete_failure_is_reported(self):
-        fake = _FakePlex({"100": {"title": "Mix", "items": ["1"]}}, fail_delete=http_error(500))
-        plex, _ = self._sync(fake, {"last_plex": {"rating_key": "100"}})
-        self.assertEqual(plex["status"], "partial_success")
-        self.assertEqual(plex["issue_reason"], "previous Plex playlist could not be removed")
+    def test_a_missing_stored_playlist_is_created_once(self):
+        fake = _FakePlex()
+        plex, last = self._sync(fake, {"last_plex": {"rating_key": "100"}})
+        self.assertEqual(plex["status"], "success")
+        self.assertEqual(plex["mode"], "created")
+        self.assertEqual(last["rating_key"], plex["rating_key"])
+        self.assertEqual(fake.keys(plex["rating_key"]), self.KEYS)
 
 
 # -- Spotify: IA-19 -------------------------------------------------------------------

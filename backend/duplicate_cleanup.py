@@ -305,7 +305,7 @@ def apply_reviewed_cleanup(
                 idempotency_key=operation_id,
             )
         except Exception:
-            st.update(operation_id, status="Failed", logs=["Engine quarantine-remove failed; nothing was removed."])
+            st.update(operation_id, status="Failed", append_logs=["Engine quarantine-remove failed; nothing was removed."])
             raise
         return finish_reviewed_cleanup(operation_id, res, adapter=ad, store=st, abs_path=to_abs)
 
@@ -367,7 +367,7 @@ def finish_reviewed_cleanup(
         status=status,
         metadata={**meta, "engine_result": engine, "verified": verified, "verification_problems": problems,
                   "items_before": items_before, "items_after": items_after},
-        logs=[f"Quarantined item {r.get('item_id')}: {r.get('quarantine_path')}" for r in engine.get("removed") or []]
+        append_logs=[f"Quarantined item {r.get('item_id')}: {r.get('quarantine_path')}" for r in engine.get("removed") or []]
         + ([f"Verification problem: {x}" for x in problems] if problems else []),
     )
     return {"ok": not problems, "operation_id": operation_id, "status": status,
@@ -413,7 +413,7 @@ def rollback_reviewed_cleanup(
     status = "Rolled Back" if not problems else "Recovery Required"
     if st.transition(operation_id, tx.get("status"), status,
                      metadata={**meta, "rollback_result": result, "rollback_problems": problems},
-                     logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
+                     append_logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
                            for r in result.get("restored") or []] + [f"Rollback problem: {x}" for x in problems]) is None:
         return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status,

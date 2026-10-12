@@ -120,6 +120,7 @@ import type {
   ReconciliationReviewsResponse,
 } from './types';
 import type { LibraryTrack } from '../types/api';
+import { beginIdempotentRequest, followedJobStart, idempotencyErrorMessage } from '../lib/jobStart';
 
 type ApiErrorBody = {
   ok?: boolean;
@@ -151,12 +152,19 @@ export function apiErrorBody(err: unknown): ApiErrorBody | undefined {
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase();
   let headers = init?.headers;
+  let settle = () => {};
   if (!_CSRF_EXEMPT_METHODS.has(method)) {
     // Every mutating request must carry X-Beets-CSRF, regardless of which
     // call site built the RequestInit — centralized here so a call site
     // forgetting the header (or a future one) can't silently skip it.
     const merged = new Headers(headers);
     if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
+    // Job starts are deduplicated by this key (#344); harmless elsewhere.
+    if (!merged.has('Idempotency-Key')) {
+      const action = beginIdempotentRequest(method, path, init?.body);
+      merged.set('Idempotency-Key', action.key);
+      settle = action.settle;
+    }
     headers = merged;
   }
 
@@ -174,7 +182,12 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw netErr;
   }
 
+  settle();
   const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
+
+  // Same job already running, or this key already started it: follow it.
+  const followed = followedJobStart(response.status, body);
+  if (followed) return followed as T;
 
   if (!response.ok) {
     let errorCode = body?.error_code || body?.code || '';
@@ -187,7 +200,7 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode && body?.unavailable !== true);
     let isEngineAuthError = errorCode === 'ENGINE_AUTH_FAILED';
     let isAuthError = (response.status === 401 || response.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && !isEngineAuthError;
-    let message = body?.error || `HTTP ${response.status}`;
+    let message = idempotencyErrorMessage(errorCode) || body?.error || `HTTP ${response.status}`;
 
     if (isAuthError) {
       message = 'Your session expired. Sign in again.';

@@ -46,6 +46,22 @@ npm audit --audit-level=high
 
 For a targeted Python test: `python -m unittest tests.test_name`.
 
+### Supported environment for the full backend suite
+
+The suite is supported on what CI runs: Python 3.13 with `requirements-dev.txt` installed (it adds the pinned `beets` fixture package), on Linux. No git binary is needed. Some tests drive the Bash rollout script and use POSIX permissions, so on Windows run them in the test image instead of the host Python:
+
+```bash
+docker build -f Dockerfile.test -t bwm-test .
+docker run --rm -m 1500m -v "$PWD:/src" bwm-test                  # full suite
+docker run --rm -m 1500m -v "$PWD:/src" bwm-test \
+  env BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000 \
+  python -m unittest tests.test_name                               # one module
+```
+
+On Git Bash, prefix the `docker run` lines with `MSYS_NO_PATHCONV=1`. `Dockerfile.test` is test-only (never published). Rebuild it after `requirements*.txt` changes. CI's `compose-verification` job builds it on every PR.
+
+`tests.test_stock_beets_acceptance.StockBeetsDockerAcceptanceTests` boots the real `lscr.io/linuxserver/beets:latest` container, so it needs a Docker CLI and daemon. Inside the test image it reports `skipped 'Docker CLI not available on host'`. To run it, use host Python with Docker available (`python -m unittest tests.test_stock_beets_acceptance`); CI runs it in the `stock-beets-acceptance` job. The other skips that are expected in the image are opt-in or need privileges the image deliberately lacks: Docker smoke tests gated on `RUN_DOCKER_SMOKE=1` or a Docker CLI, and tests that need root (`chown needs root`). The `-v` output prints every skip reason. Any error, and any other skip, is a real failure, in particular `app.py could not be imported`, a missing `bash`/`sqlite3`/`ffmpeg`/`curl`, or a missing plugin dependency. Report it; don't work around it.
+
 ## Frontend Runtime Shape
 
 The frontend is a React/Next.js static export under `frontend/`. Local development can use the Next dev server, but production is served from the generated `frontend/dist/` artifacts by the Flask deployment. A working local dev-server build is not proof that the deployed app changed — verify against `frontend/dist/` or a real container for anything deployment-relevant.

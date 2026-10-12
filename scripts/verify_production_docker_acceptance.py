@@ -303,8 +303,13 @@ def build_images() -> None:
     _ok(f"Built {IMAGE_TAG} successfully (VCS_REF={head_sha})")
 
     print(f"==> Step 2: Ensuring stock Beets image {STOCK_BEETS_IMAGE} is present...")
-    pull_res = run(["docker", "pull", STOCK_BEETS_IMAGE])
-    if pull_res.returncode != 0:
+    # CI pre-pulls it once per job with an authenticated pull
+    # (scripts/ci_pull_stock_beets.sh, #234) and sets STOCK_BEETS_PREPULLED=1;
+    # a second anonymous pull here would only re-hit the registry rate limit.
+    prepulled = os.environ.get("STOCK_BEETS_PREPULLED") == "1" and \
+        run(["docker", "image", "inspect", STOCK_BEETS_IMAGE]).returncode == 0
+    pull_res = None if prepulled else run(["docker", "pull", STOCK_BEETS_IMAGE])
+    if pull_res is not None and pull_res.returncode != 0:
         print(f"FATAL: Failed to pull {STOCK_BEETS_IMAGE}:\n{pull_res.stderr}")
         sys.exit(2)
     digest_res = run(["docker", "inspect", "--format", "{{index .RepoDigests 0}}", STOCK_BEETS_IMAGE])

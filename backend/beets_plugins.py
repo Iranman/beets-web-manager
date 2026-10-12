@@ -42,7 +42,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
-from backend.config_layers import SECRET_CONFIG_KEYS
+from backend.config_layers import SECRET_CONFIG_KEYS, is_secret_config_key, mask_config_secret_values
 
 log = logging.getLogger("beets.plugins.manifest")
 
@@ -438,16 +438,24 @@ def ensure_plugin_sys_path(config_dir: Optional[Path | str] = None) -> None:
 # Bundled Plugin Provisioning
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _replace_plugin_file(dest: Path, content: bytes, root: Path) -> None:
+def _replace_plugin_file(dest: Path, content: bytes, root: Path | str) -> None:
     """Atomically (temp file + os.replace) install ``content`` at ``dest``.
 
     A symlinked destination is replaced, never written through, and a
     destination whose directory resolves outside ``root`` is refused.
+    ``root`` should be the beetsplug real path resolved ONCE by the caller
+    (SEC-237-4): containment is checked against that fixed path before the
+    temp file is created and again just before the rename, so a directory
+    swapped for a symlink in between is refused rather than followed.
     """
     real_root = os.path.realpath(root)
-    real_parent = os.path.realpath(dest.parent)
-    if os.path.commonpath([real_root, real_parent]) != real_root:
-        raise RuntimeError(f"Refusing to provision {dest.name}: its directory resolves outside beetsplug")
+
+    def _check_contained() -> None:
+        real_parent = os.path.realpath(dest.parent)
+        if os.path.commonpath([real_root, real_parent]) != real_root:
+            raise RuntimeError(f"Refusing to provision {dest.name}: its directory resolves outside beetsplug")
+
+    _check_contained()
     if not dest.is_symlink() and dest.is_file() and dest.read_bytes() == content:
         return
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=str(dest.parent))
@@ -455,6 +463,9 @@ def _replace_plugin_file(dest: Path, content: bytes, root: Path) -> None:
         with os.fdopen(fd, "wb") as fh:
             fh.write(content)
         os.chmod(tmp_name, 0o644)
+        _check_contained()
+        if os.path.commonpath([real_root, os.path.realpath(tmp_name)]) != real_root:
+            raise RuntimeError(f"Refusing to provision {dest.name}: its directory resolves outside beetsplug")
         os.replace(tmp_name, dest)
     except BaseException:
         try:
@@ -477,6 +488,12 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
     if target_beetsplug_dir.is_symlink():
         raise RuntimeError("Refusing to provision plugins: beetsplug is a symbolic link")
     target_beetsplug_dir.mkdir(parents=True, exist_ok=True)
+    # SEC-237-4: resolve the root once; every file is checked against it.
+    if target_beetsplug_dir.is_symlink():
+        raise RuntimeError("Refusing to provision plugins: beetsplug is a symbolic link")
+    real_beetsplug = os.path.realpath(target_beetsplug_dir)
+    if os.path.dirname(real_beetsplug) != os.path.realpath(cfg_dir):
+        raise RuntimeError("Refusing to provision plugins: beetsplug resolves outside the config directory")
 
     # Ensure .webmanager_api_key file is always provisioned in config directory
     provision_api_key_file(cfg_dir)
@@ -502,7 +519,7 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
 
             # Replace, never write through, a symlinked or planted target (F5b).
             try:
-                _replace_plugin_file(target_file, content, target_beetsplug_dir)
+                _replace_plugin_file(target_file, content, real_beetsplug)
             except Exception as exc:
                 raise RuntimeError(f"Failed to copy bundled plugin {entry.name}: {exc}") from exc
             provisioned.append(entry.name)
@@ -517,7 +534,7 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
                     rel_p = sub_entry.relative_to(entry)
                     dest_file = target_sub / rel_p
                     dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    _replace_plugin_file(dest_file, sub_entry.read_bytes(), target_beetsplug_dir)
+                    _replace_plugin_file(dest_file, sub_entry.read_bytes(), real_beetsplug)
             provisioned.append(entry.name)
 
     # Ensure .webmanager_api_key file is provisioned in config directory
@@ -979,19 +996,28 @@ def _write_config_text(
     Fails closed: if the backup cannot be made, config.yaml is not touched.
     Returns the backup's file name only (never a host/container path).
     """
+    from backend.config_manager import CONFIG_WRITE_LOCK
     backup_path: Optional[Path] = None
-    if backup_prefix:
-        if original is None:
-            raise BeetsConfigEditError("internal error: backup requested without the original snapshot")
-        try:
-            backup_path = _create_backup(path, backup_prefix, original)
-        except Exception as exc:
-            raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
+    with CONFIG_WRITE_LOCK:  # #324 F4: same lock as the config editor's save/revert
+        if original is not None:
+            try:
+                current = _read_config_snapshot(path)
+            except Exception as exc:
+                raise BeetsConfigEditError(f"Could not re-read {path.name}: {type(exc).__name__}") from exc
+            if current != original:
+                raise BeetsConfigEditError(f"{path.name} changed while it was being edited; try again")
+        if backup_prefix:
+            if original is None:
+                raise BeetsConfigEditError("internal error: backup requested without the original snapshot")
+            try:
+                backup_path = _create_backup(path, backup_prefix, original)
+            except Exception as exc:
+                raise BeetsConfigEditError(f"Could not back up {path.name}: {type(exc).__name__}") from exc
 
-    try:
-        _atomic_write_text(path, text)
-    except Exception as exc:
-        raise BeetsConfigEditError(f"Failed to write updated config.yaml: {type(exc).__name__}") from exc
+        try:
+            _atomic_write_text(path, text)
+        except Exception as exc:
+            raise BeetsConfigEditError(f"Failed to write updated config.yaml: {type(exc).__name__}") from exc
     return backup_path.name if backup_path else None
 
 
@@ -1156,19 +1182,8 @@ def _timestamped_backup_prefix(path: Path) -> str:
 # _mask_config_diff(). No regex: config text is untrusted input and an
 # earlier regex here was polynomial (py/polynomial-redos); every step below
 # is a single O(len(line)) scan.
-_SECRET_KEY_WORDS = ("password", "passwd", "passphrase", "secret", "token", "bearer", "credential")
 _SECRET_MASK = "********"
-
-
-def _is_secret_key(key: str) -> bool:
-    k = key.strip().strip("\"'").strip().lower()
-    if not k:
-        return False
-    return (
-        k in SECRET_CONFIG_KEYS
-        or k.endswith(("key", "pass", "pwd")) or k.startswith("auth")
-        or any(word in k for word in _SECRET_KEY_WORDS)
-    )
+_is_secret_key = is_secret_config_key
 
 
 def _mask_url_userinfo(body: str) -> str:
@@ -1285,6 +1300,13 @@ def preview_recommended_plugins(config_path: Path | str) -> Dict[str, Any]:
             n=0,
         )
     )
+    # SEC-237-6: the line masker cannot see a secret read through an anchor
+    # alias, a URL query secret, or a folded continuation; mask every secret
+    # value YAML finds in the file, and show no diff if that cannot be proven.
+    try:
+        diff = mask_config_secret_values(text, diff, _SECRET_MASK)
+    except ValueError:
+        diff = "(diff hidden: config.yaml secrets could not be masked)\n"
     return {
         "recommended": list(RECOMMENDED_CONFIG_PLUGINS),
         "configured": [p for p in RECOMMENDED_CONFIG_PLUGINS if p in configured],

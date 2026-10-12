@@ -1553,12 +1553,14 @@ def start_import():
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
     path     = str(validated_path)
-    # Beets quiet_fallback: skip by default, so an album Beets cannot match is
-    # left in place for review; asis (import with existing tags, no release
-    # group) only when the caller asks for it.
+    # Beets quiet_fallback is always skip: an album Beets cannot match to a
+    # MusicBrainz release is left in place and listed in the Review Queue.
+    # "asis" (import with existing tags, no Release Group) is accepted for
+    # compatibility but never imports unverified identity (QA D3).
     fallback = _s(payload.get("fallback") or "skip").strip().lower()
     if fallback not in ("asis", "skip"):
         return jsonify({"ok": False, "error": "fallback must be 'asis' or 'skip'"}), 400
+    asis_refused, fallback = fallback == "asis", "skip"
     write    = payload.get("write", True)
     move     = payload.get("move", False)
     noincremental = payload.get("reimport", False)   # "reimport" key kept for JS compat
@@ -1590,6 +1592,9 @@ def start_import():
     def _do(log, cancel_event=None):
         _validate_import_source_audio(path, log, reject_downloads=True,
                                       preserve_source=preserve_torrent_source)
+        if asis_refused:
+            log.append("[import] Import as-is is not allowed: albums without a verified MusicBrainz "
+                       "identity are left in place for the Review Queue.")
         # Beets' own importer (beet import -q): a preserved torrent source is
         # always copied; anything else is copied unless move was requested.
         beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source or not move,
@@ -1617,10 +1622,13 @@ def start_import():
                 _record_import_skips(path, not_matched)
             except RuntimeError as ex:
                 log.append(f"[import] WARN {ex} They are not in the Review Queue; see the list above.")
-        return {"albums_imported": res.get("albums_imported"), "quiet_fallback": fallback,
+        return {"albums_imported": res.get("albums_imported"), "quiet_fallback": fallback, "asis_refused": asis_refused,
                 "not_matched": not_matched, "not_matched_known": res.get("not_matched_known", True)}
 
-    job = jobs.start_python(_do, label=label)
+    # D2: one import per source folder at a time. albums_imported is the
+    # library album-count delta, so a second concurrent import of the same
+    # folder would count the first one's albums as its own.
+    job = jobs.start_python(_do, label=label, metadata={"dedupe_key": f"import-source:{path}"})
     return jsonify({"ok": True, "job_id": job.job_id})
 
 

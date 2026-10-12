@@ -140,7 +140,17 @@ export function formatJobStatus(status: JobStatus | string, needsAttention = fal
   if (status === 'failed') return 'Failed';
   if (status === 'cancelled' || status === 'killed') return 'Cancelled';
   if (status === 'running') return 'Running';
+  if (status === 'recovery_required') return 'Recovery required';
   return labelize(String(status || 'Unknown'));
+}
+
+/** What an interrupted job means for the user, or '' for any other job. */
+export function interruptedJobText(job: Pick<Job, 'status' | 'interrupted'>): string {
+  if (job.status === 'recovery_required') {
+    return 'A restart stopped this job part-way. It was not re-run, so the library may be partly changed. Check Library Changes for its transaction (Recovery Required) before running it again.';
+  }
+  if (job.interrupted) return 'A restart stopped this job part-way. It changed nothing and was not re-run; start it again if you still need it.';
+  return '';
 }
 
 export function friendlyJobTitle(job: Job) {
@@ -310,6 +320,17 @@ function stateFeedItems(job: Job): JobFeedItem[] {
 
 function finalStatusItem(job: Job, rawLines: string[]): JobFeedItem | null {
   if (job.status === 'running') return null;
+  if (job.status === 'recovery_required') {
+    return {
+      id: `final-${job.job_id}`,
+      phase: 'Needs attention',
+      status: 'warning',
+      title: `${friendlyDoneSubject(job)} was interrupted and needs recovery.`,
+      detail: interruptedJobText(job),
+      time: job.finished_at,
+      paths: [],
+    };
+  }
   if (job.status === 'success') {
     return {
       id: `final-${job.job_id}`,
@@ -318,6 +339,7 @@ function finalStatusItem(job: Job, rawLines: string[]): JobFeedItem | null {
       title: jobNeedsAttention(job, rawLines)
         ? `${friendlyDoneSubject(job)} finished, but some items need attention.`
         : `${friendlyDoneSubject(job)} completed successfully.`,
+      detail: reviewQueueText(job) || undefined,
       time: job.finished_at,
       paths: [],
     };
@@ -330,7 +352,7 @@ function finalStatusItem(job: Job, rawLines: string[]): JobFeedItem | null {
       title: job.status === 'failed'
         ? `${friendlyDoneSubject(job)} failed.`
         : `${friendlyDoneSubject(job)} was cancelled.`,
-      detail: friendlyFailureReason(job, rawLines),
+      detail: interruptedJobText(job) || friendlyFailureReason(job, rawLines),
       time: job.finished_at,
       paths: [],
     };
@@ -500,6 +522,7 @@ function resultTitleForJob(job: Job, attention: boolean) {
   if (job.status === 'success') return `${friendlyDoneSubject(job)} completed.`;
   if (job.status === 'failed') return `${friendlyDoneSubject(job)} failed.`;
   if (job.status === 'killed' || job.status === 'cancelled') return `${friendlyDoneSubject(job)} was cancelled.`;
+  if (job.status === 'recovery_required') return `${friendlyDoneSubject(job)} was interrupted and needs recovery.`;
   return '';
 }
 
@@ -532,9 +555,22 @@ function friendlyFailureReason(job: Job, rawLines: string[]) {
 
 function jobNeedsAttention(job: Job, rawLines: string[]) {
   if (job.status === 'failed') return false;
+  if (reviewQueueText(job)) return true;
   const counts = collectJobCounts(rawLines, job.result);
   const attentionKeys = ['tracks not found in Plex', 'missing tracks', 'failed tracks', 'items needing review'];
   return attentionKeys.some((key) => (counts.get(key) ?? 0) > 0) || rawLines.some((line) => /needs attention|Plex sync issue|missing in Plex|review required/i.test(line));
+}
+
+/** Folders an import declined to take as-is (D3) or could not match wait in
+ * the Review Queue; say so rather than reporting a plain success. */
+export function reviewQueueText(job: Pick<Job, 'result'>): string {
+  const refused = numberValue(job.result?.asis_refused) ?? 0;
+  const unmatched = numberValue(job.result?.not_matched) ?? 0;
+  if (refused + unmatched <= 0) return '';
+  const parts: string[] = [];
+  if (refused > 0) parts.push(`${numberFmt.format(refused)} not imported as-is`);
+  if (unmatched > 0) parts.push(`${numberFmt.format(unmatched)} with no confident match`);
+  return `${parts.join(', ')}. Nothing was imported for these; open Import > Review Queue to choose a match.`;
 }
 
 function friendlyDoneSubject(job: Job) {
@@ -551,6 +587,7 @@ function statusTone(job: Job, attention: boolean): JobFeedStatus {
   if (job.status === 'failed') return 'error';
   if (job.status === 'cancelled' || job.status === 'killed') return 'cancelled';
   if (job.status === 'running') return 'running';
+  if (job.status === 'recovery_required') return 'warning';
   return 'info';
 }
 

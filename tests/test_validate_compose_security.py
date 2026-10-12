@@ -57,6 +57,13 @@ class ThirdPartyImageTests(unittest.TestCase):
             "x.yml", errors)
         self.assertEqual(errors, [])
 
+    def test_project_service_name_running_a_foreign_image_is_third_party(self):
+        # #253 S-12: the service name alone does not exempt an image.
+        for name in ("beets", "beets-web-manager"):
+            errors = []
+            vcs._check_third_party_images(f"services:\n  {name}:\n    image: evil.example/x:latest\n", "x.yml", errors)
+            self.assertIn(f"x.yml: {name} image is not digest-pinned: evil.example/x:latest", errors)
+
     def test_service_after_a_column_0_comment_is_checked(self):
         errors = []
         vcs._check_third_party_images(

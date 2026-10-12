@@ -65,14 +65,15 @@ class ApplyCasMatrixTests(_Env):
         self.assertEqual((again["ok"], again.get("idempotent"), again["mutated"]), (True, True, True))
         self.assertEqual(len(local.calls), 1)
 
-    def test_rollback_from_partially_rolled_back_is_refused(self):
+    def test_rollback_from_partially_rolled_back_retries_the_rest(self):
+        """#298 N4 (was: refused). A retry restores only what is not back yet;
+        here nothing is left, so it finishes Rolled Back without a Beets call."""
         local = patch_local_folder_ops(self, self.music)
         op, _src = self.plan_rename()
         self.store.update(op, status="Partially Rolled Back",
                           metadata={"engine_result": {"moved_records": [], "removed_dirs": []}})
         res = te.rollback_folder_cleanup(self.store, op)
-        self.assertEqual((res["ok"], res["code"]), (False, "rollback_not_eligible"))
-        self.assertEqual(self.store.get(op)["status"], "Partially Rolled Back")
+        self.assertEqual((res["ok"], res["status"]), (True, "Rolled Back"))
         self.assertEqual(local.calls, [])
 
 

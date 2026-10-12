@@ -1,6 +1,7 @@
 import LinearProgress from '@mui/material/LinearProgress';
 import { NavLink } from 'react-router';
 import type { Job } from '../types/api';
+import { formatJobStatus, interruptedJobText } from '../lib/jobFeed';
 
 interface Props {
   job: Job | null;
@@ -68,7 +69,7 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
           <div className="flex flex-wrap items-baseline gap-2">
             <span className="truncate text-sm font-medium text-zinc-100">{label}</span>
             <span className={`text-[0.67rem] font-semibold uppercase tracking-wide ${textStyle}`}>
-              {job.status}
+              {formatJobStatus(job.status)}
             </span>
             {!isRunning ? (
               <NavLink
@@ -79,6 +80,10 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
               </NavLink>
             ) : null}
           </div>
+
+          {interruptedJobText(job) ? (
+            <div className="mt-1.5 text-xs text-orange-200">{interruptedJobText(job)}</div>
+          ) : null}
 
           {lastLines.length > 0 ? (
             <div className="mt-1.5 space-y-1 border-l border-graphite-700 pl-2">

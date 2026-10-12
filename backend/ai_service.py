@@ -20,7 +20,7 @@ from backend.audio_preferences import mark_needs_replacement as _mark_music_form
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
-from backend.acoustid_service import _acoustid_lookup_cached, _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
 from backend.artwork_service import _fetch_artwork_after_retag
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_match_score
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
@@ -122,7 +122,8 @@ def _ai_match_evidence_packet(use_case: str, *, folder_path: str = "",
                               candidates: Optional[List[Dict[str, Any]]] = None,
                               preflight: Optional[Dict[str, Any]] = None,
                               wanted_tracks: Optional[List[Dict[str, Any]]] = None,
-                              reason: str = "") -> Dict[str, Any]:
+                              reason: str = "",
+                              acoustid_status: str = "") -> Dict[str, Any]:
     """Compact, JSON-safe evidence for Review UI and decision history."""
     suggestion = suggestion or {}
     folder_evidence = folder_evidence or {}
@@ -154,7 +155,10 @@ def _ai_match_evidence_packet(use_case: str, *, folder_path: str = "",
         "top_candidates": top_candidates,
         "preflight": _compact_preflight(preflight),
         "fingerprint": {
-            "status": "matched" if preflight and int(preflight.get("acoustid_target_hits") or 0) else "no_result",
+            # QA D11: not checked (acoustid_status set) is "unavailable", never "no_result".
+            "status": ("matched" if preflight and int(preflight.get("acoustid_target_hits") or 0)
+                       else "unavailable" if acoustid_status else "no_result"),
+            "unavailable_reason": acoustid_status,
             "acoustid_mismatch": bool((preflight or {}).get("acoustid_mismatch")),
             "target_hits": int((preflight or {}).get("acoustid_target_hits") or 0),
             "top_release": _s((preflight or {}).get("acoustid_top_release") or ""),
@@ -311,14 +315,16 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
                               selected_candidate: Optional[Dict[str, Any]],
                               candidates: List[Dict[str, Any]],
                               acoustid_candidates: List[Dict[str, Any]],
-                              discogs_candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+                              discogs_candidates: List[Dict[str, Any]],
+                              acoustid_status: str = "") -> Dict[str, Any]:
     mb_trackid = _s(suggestions.get("mb_trackid", "")).strip().lower()
     try:
         selected_index = int((selected_candidate or {}).get("candidate_index", -1))
     except Exception:
         selected_index = -1
     top_acoustid = acoustid_candidates[0] if acoustid_candidates else {}
-    fingerprint_status = "matched" if acoustid_candidates else "no_result"
+    # QA D11: not checked (acoustid_status set) is "unavailable", never "no_result".
+    fingerprint_status = "matched" if acoustid_candidates else "unavailable" if acoustid_status else "no_result"
     return {
         "use_case": "track_retag",
         "created_at": int(time.time()),
@@ -352,7 +358,8 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
         },
         "fingerprint": {
             "status": fingerprint_status,
-            "acoustid_status": "candidate" if acoustid_candidates else "no_result",
+            "acoustid_status": "candidate" if acoustid_candidates else fingerprint_status,
+            "unavailable_reason": acoustid_status,
             "score": _audio_identity_score(top_acoustid) if top_acoustid else 0.0,
             "acoustid_id": _s(top_acoustid.get("acoustid_id") or "") if top_acoustid else "",
             "mb_trackid": _s(top_acoustid.get("mb_trackid") or "") if top_acoustid else "",
@@ -451,13 +458,27 @@ def _ai_suggest_album_internal(
     except Exception:
         acoustid_release_hits = {}
     acoustid_cands: List[Dict[str, Any]] = []
+    # #297 N4 / #252 NF-2: "not checked" (no key, rejected key, outage) is
+    # reported as acoustid_status, never as "no fingerprint candidates".
+    acoustid_status = ""
     for path in track_paths:
-        acoustid_cands = _acoustid_lookup_cached(path)
-        if acoustid_cands:
+        lookup = _acoustid_lookup_cached_outcome(path)
+        acoustid_status = acoustid_failure_status(lookup)
+        acoustid_cands = list(lookup.data or [])
+        if acoustid_cands or acoustid_status:
             break
 
-    mb_candidates = _mb_release_search(album.album or "", album.albumartist or "", limit=8,
-                                       year=album_year, track_count=track_count)
+    # #252 NF-1: a MusicBrainz outage keeps the AcoustID evidence already
+    # gathered and is reported, as the folder and track routes do.
+    mb_unavailable = False
+    try:
+        mb_candidates = _mb_release_search(album.album or "", album.albumartist or "", limit=8,
+                                           year=album_year, track_count=track_count)
+    except provider_boundary.ProviderError:
+        mb_unavailable, mb_candidates = True, []
+    provider_flags = {"musicbrainz_unavailable": mb_unavailable,
+                      "acoustid_status": acoustid_status,
+                      "acoustid_unavailable": bool(acoustid_status)}
     for c in mb_candidates:
         c["acoustid_release_hits"] = acoustid_release_hits.get(c.get("mb_albumid", ""), 0)
         c["_match_score"] = _score_mb_release_candidate(album_ev, c)
@@ -472,6 +493,9 @@ def _ai_suggest_album_internal(
             "country": "",
             "confidence": "low",
             "reason": (
+                "MusicBrainz could not be reached, so no release candidates were looked up. "
+                "Try again later; the AcoustID evidence below is kept."
+                if mb_unavailable else
                 "No MusicBrainz release candidates were found for this album. "
                 "Manual review or adding the release to MusicBrainz is required."
             ),
@@ -485,13 +509,15 @@ def _ai_suggest_album_internal(
                 + urllib.parse.urlencode({"query": album.albumartist, "type": "artist"}))
         evidence = _ai_match_evidence_packet(
             "light_confirm",
+            acoustid_status=acoustid_status,
             folder_path=album_dir,
             suggestion=sug,
             folder_evidence=album_ev,
             candidates=[],
         )
         sug["review_evidence"] = evidence
-        log.append(f"  No MB candidates found for {album.albumartist or '?'} — {album.album or '?'}")
+        log.append(f"  No MB candidates {'(MusicBrainz unavailable) ' if mb_unavailable else ''}found for "
+                   f"{album.albumartist or '?'} — {album.album or '?'}")
         return {
             "ok": True,
             "suggestion": sug,
@@ -499,6 +525,7 @@ def _ai_suggest_album_internal(
             "acoustid_candidates": acoustid_cands,
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
+            **provider_flags,
         }
 
     acoustid_section = ""
@@ -692,6 +719,7 @@ def _ai_suggest_album_internal(
         sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
             "light_confirm",
+            acoustid_status=acoustid_status,
             folder_path=album_dir,
             suggestion=sug,
             folder_evidence=album_ev,
@@ -707,6 +735,7 @@ def _ai_suggest_album_internal(
             "acoustid_candidates": acoustid_cands,
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
+            **provider_flags,
         }
     except Exception as exc:
         _app_logger.warning("AI album suggestion failed: %s", type(exc).__name__)
@@ -1111,6 +1140,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                     )
                 evidence = _ai_match_evidence_packet(
                     "fresh_import",
+                    acoustid_status=acoustid_status,
                     folder_path=folder_path,
                     suggestion=sug,
                     folder_evidence=ev,
@@ -1164,6 +1194,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         }
         evidence = _ai_match_evidence_packet(
             "fresh_import",
+            acoustid_status=acoustid_status,
             folder_path=folder_path,
             suggestion=sug,
             folder_evidence=ev,
@@ -1414,6 +1445,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
             "fresh_import",
+            acoustid_status=acoustid_status,
             folder_path=folder_path,
             suggestion=sug,
             folder_evidence=ev,

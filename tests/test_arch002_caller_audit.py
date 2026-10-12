@@ -31,6 +31,20 @@ class CallerAuditTests(unittest.TestCase):
             code = audit.main([])
         self.assertEqual(code, 0, err.getvalue())
 
+    def test_production_files_cover_nested_packages_without_git(self):
+        # The audit must not depend on the git binary, and must still reach
+        # nested packages the way `git ls-files backend/*.py` did.
+        from unittest import mock
+        with mock.patch("subprocess.run", side_effect=AssertionError("git must not be invoked")), \
+                mock.patch("subprocess.check_output", side_effect=AssertionError("git must not be invoked")):
+            files = set(audit.production_files())
+        expected = {p.relative_to(ROOT).as_posix() for g in ("backend/**/*.py", "beetsplug/**/*.py")
+                    for p in ROOT.glob(g) if "__pycache__" not in p.parts}
+        self.assertTrue(expected)
+        self.assertLessEqual(expected, files)
+        self.assertIn("beetsplug/webmanager/__init__.py", files)
+        self.assertTrue(any(f.startswith("backend/matching/") for f in files))
+
     def test_needs_migration_is_zero(self):
         hits = audit.hit_map()
         units = audit.load_classification(hits)

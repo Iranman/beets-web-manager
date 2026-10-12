@@ -99,7 +99,7 @@ class LibraryPayloadExtractionTests(unittest.TestCase):
 
 class AutoScanLoopRebuildsInsteadOfJustInvalidatingTests(unittest.TestCase):
     def setUp(self):
-        self.fn = _function_source(APP_SOURCE, "def _auto_scan_loop():", "\n\nif _legacy_local_scan_enabled()")
+        self.fn = _function_source(APP_SOURCE, "def _auto_scan_tick():", "\n\ndef start_auto_scan_schedule")
 
     def test_quick_tick_calls_refresh_not_bare_invalidate(self):
         self.assertIn("_refresh_library_cache()", self.fn)
@@ -112,9 +112,12 @@ class AutoScanLoopRebuildsInsteadOfJustInvalidatingTests(unittest.TestCase):
         self.assertIn("_refresh_library_cache()", tick_block)
 
     def test_loop_is_opt_in_before_starting_background_daemon_thread(self):
-        startup = _function_source(APP_SOURCE, "if _legacy_local_scan_enabled():", "\n\n# ── Import")
-        self.assertIn("threading.Thread(target=_auto_scan_loop, daemon=True).start()", startup)
-        self.assertNotIn("threading.Thread(target=_auto_scan_loop, daemon=True).start()", self.fn)
+        # The tick runs on the job store's scheduler (jobs.every), started
+        # only when opted in -- never an ad hoc thread.
+        startup = _function_source(APP_SOURCE, "if _legacy_local_scan_enabled():", "\n\n")
+        self.assertIn("start_auto_scan_schedule()", startup)
+        self.assertNotIn("threading.Thread", startup)
+        self.assertNotIn("threading.Thread", self.fn)
 
 
 
