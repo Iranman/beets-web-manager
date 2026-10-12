@@ -11,13 +11,15 @@ Provides:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
 import posixpath
-import shutil
+import secrets
 import stat
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -52,9 +54,38 @@ class ConfigValidationError(ConfigError):
         super().__init__(message, error_code="CONFIG_INVALID_YAML", status_code=400)
 
 
+# #324 F5: the revision is an HMAC under a per-process random key, not a bare
+# sha256 of the plaintext, so a revision returned to the browser cannot be
+# used offline to confirm a guess of a low-entropy secret in config.yaml.
+# A restart changes every revision: an editor left open across a restart
+# gets a 409 and reloads.
+_REVISION_KEY = secrets.token_bytes(32)
+
+# #324 F4: one lock for every Web Manager config.yaml writer (the editor's
+# save/revert here and beets_plugins._write_config_text).
+CONFIG_WRITE_LOCK = threading.RLock()
+
+
 def compute_revision(content: str) -> str:
-    """Compute deterministic SHA-256 revision hash for configuration content."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    """Revision token for configuration content (HMAC-SHA256, hex)."""
+    return hmac.new(_REVISION_KEY, content.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def revision_matches(expected: str, content: str) -> bool:
+    return hmac.compare_digest(str(expected or "").strip().lower(), compute_revision(content))
+
+
+def _write_backups(cfg: Path, text: str) -> None:
+    """Back up ``text`` (the snapshot the revision check ran on) to
+    ``config.yaml.bak`` and a timestamped copy, both created 0600 via O_EXCL
+    and never written through a symlink (#183 S-4). A failure is logged;
+    the save goes ahead, as before."""
+    from backend import config_layers
+    try:
+        config_layers.replace_private_file(get_config_backup_path(cfg), text)
+        config_layers.create_private_file(cfg.with_name(f"{cfg.name}.bak.{int(time.time())}"), text, unique=True)
+    except Exception as exc:
+        log.warning("Failed to create config backup for %s: %s", cfg.name, type(exc).__name__)
 
 
 DEFAULT_CONFIG_DIR = "/config"
@@ -224,39 +255,33 @@ def save_config(
     if not valid:
         raise ConfigValidationError(err_msg)
 
-    current_data = get_config(cfg)
-    current_rev = current_data["revision"]
+    # #324 F4: the revision check, backup and replace run under one lock, so a
+    # concurrent Web Manager writer (another save, a revert, a plugin
+    # provisioning edit) cannot change the file between check and replace.
+    # The app is one process (waitress, threaded), so a process lock covers
+    # every Web Manager writer; Beets itself does not write config.yaml.
+    with CONFIG_WRITE_LOCK:
+        current_data = get_config(cfg)
+        if expected_revision and expected_revision.strip():
+            if not revision_matches(expected_revision, current_data["content"]):
+                raise ConfigConflictError()
 
-    if expected_revision and expected_revision.strip():
-        if expected_revision.strip().lower() != current_rev.lower():
-            raise ConfigConflictError()
+        if merge_stored is not None:
+            content = merge_stored(current_data["content"])
+            # The merged text holds real secrets; YAML errors quote the bad line,
+            # so this error carries no parser detail.
+            if not validate_config_yaml(content)[0]:
+                raise ConfigValidationError("Invalid YAML after restoring redacted secrets")
 
-    if merge_stored is not None:
-        content = merge_stored(current_data["content"])
-        # The merged text holds real secrets; YAML errors quote the bad line,
-        # so this error carries no parser detail.
-        if not validate_config_yaml(content)[0]:
-            raise ConfigValidationError("Invalid YAML after restoring redacted secrets")
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        if cfg.exists() and cfg.is_file():
+            _write_backups(cfg, current_data["content"])
 
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    bak = get_config_backup_path(cfg)
-
-    # Create backup if original exists
-    if cfg.exists() and cfg.is_file():
         try:
-            shutil.copy2(str(cfg), str(bak))
-            # Also create timestamped backup
-            ts = int(time.time())
-            ts_bak = cfg.with_name(f"{cfg.name}.bak.{ts}")
-            shutil.copy2(str(cfg), str(ts_bak))
+            _replace_config_file(cfg, content)
         except Exception as exc:
-            log.warning("Failed to create config backup for %s: %s", cfg, exc)
-
-    try:
-        _replace_config_file(cfg, content)
-    except Exception as exc:
-        log.error("Failed to write configuration file %s: %s", cfg, exc)
-        raise ConfigError("Failed to write configuration file.") from exc
+            log.error("Failed to write configuration file %s: %s", cfg, exc)
+            raise ConfigError("Failed to write configuration file.") from exc
 
     new_rev = compute_revision(content)
     return {
@@ -277,26 +302,27 @@ def revert_config(
     if not bak.exists() or not bak.is_file():
         raise ConfigError("No configuration backup found to revert to.", error_code="CONFIG_NO_BACKUP", status_code=404)
 
-    current_data = get_config(cfg)
-    if expected_revision and expected_revision.strip():
-        if expected_revision.strip().lower() != current_data["revision"].lower():
-            raise ConfigConflictError()
+    with CONFIG_WRITE_LOCK:
+        current_data = get_config(cfg)
+        if expected_revision and expected_revision.strip():
+            if not revision_matches(expected_revision, current_data["content"]):
+                raise ConfigConflictError()
 
-    try:
-        backup_content = bak.read_text(encoding="utf-8")
-    except Exception as exc:
-        log.error("Failed to read backup configuration %s: %s", bak, exc)
-        raise ConfigError("Failed to read backup configuration.") from exc
+        try:
+            backup_content = bak.read_text(encoding="utf-8")
+        except Exception as exc:
+            log.error("Failed to read backup configuration %s: %s", bak, exc)
+            raise ConfigError("Failed to read backup configuration.") from exc
 
-    valid, err_msg = validate_config_yaml(backup_content)
-    if not valid:
-        raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}")
+        valid, err_msg = validate_config_yaml(backup_content)
+        if not valid:
+            raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}")
 
-    try:
-        _replace_config_file(cfg, backup_content)
-    except Exception as exc:
-        log.error("Failed to revert configuration %s: %s", cfg, exc)
-        raise ConfigError("Failed to revert configuration.") from exc
+        try:
+            _replace_config_file(cfg, backup_content)
+        except Exception as exc:
+            log.error("Failed to revert configuration %s: %s", cfg, exc)
+            raise ConfigError("Failed to revert configuration.") from exc
 
     new_rev = compute_revision(backup_content)
     return {

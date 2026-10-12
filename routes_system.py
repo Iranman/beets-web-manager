@@ -137,10 +137,13 @@ def get_config():
         return _config_error_response(exc)
     except ConfigError as exc:
         return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_read_failed")}), getattr(exc, "status_code", 502)
-    text = str(result.get("content") or "")
+    try:
+        content = _redact_config_content(str(result.get("content") or ""))
+    except ConfigError as exc:  # #324 F2: fail closed, no content
+        return jsonify({"ok": False, "error": str(exc), "code": exc.error_code}), exc.status_code
     return jsonify({
         "ok": True,
-        "content": _redact_config_content(text),
+        "content": content,
         "redacted": True,
         "revision": result.get("revision"),
         "has_backup": bool(result.get("has_backup")),

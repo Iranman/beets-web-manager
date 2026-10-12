@@ -222,7 +222,7 @@ def _config_secret_segments(text: str) -> List[Tuple[Any, str, str, str, str]]:
         while stack and stack[-1][0] >= col:
             stack.pop()
         key = key_part.strip(" \t").strip("'\"")
-        if key.lower() not in _CONFIG_SECRET_KEYS:
+        if not config_layers.is_secret_config_key(key):
             if _is_empty_config_value(value):
                 stack.append([col, key, False])
             segs.append((None, line, "", "", ""))
@@ -263,7 +263,22 @@ def _redact_config_content(text: str) -> str:
             out.append(head + value + ending + cont)
         else:
             out.append(f'{head} "{_REDACTED_SECRET}"{ending}')
-    return "".join(out)
+    # #324 F2: the line scan cannot see flow mappings, anchors read through an
+    # alias, explicit "? key" entries or JSON; mask every secret value YAML
+    # finds. Fails closed (ConfigRedactionError, no content) when that
+    # cannot be proven.
+    try:
+        return config_layers.mask_config_secret_values(text, "".join(out), _REDACTED_SECRET)
+    except ValueError:
+        raise ConfigRedactionError() from None
+
+
+class ConfigRedactionError(ConfigError):
+    def __init__(self):
+        super().__init__(
+            "config.yaml holds a secret in a form the editor cannot hide; edit the file directly.",
+            error_code="config_redaction_failed", status_code=409,
+        )
 
 
 def _config_path_label(path: Tuple[Any, ...]) -> str:
@@ -294,8 +309,17 @@ def _restore_redacted_config_secrets(submitted: str, stored: str) -> str:
         if seg[0] is not None:
             counts[seg[0]] = counts.get(seg[0], 0) + 1
     out = []
+    stored_plain = {seg[1] for seg in _config_secret_segments(stored) if seg[0] is None}
     for path, head, value, ending, cont in segs:
         if path is None:
+            # A placeholder outside a secret-key line (flow mapping, anchor,
+            # JSON, #324 F2) cannot be mapped back: refuse, never write it.
+            if _REDACTED_SECRET in head and head not in stored_plain:
+                raise ConfigSecretMergeError(
+                    f"Refusing to save {_REDACTED_SECRET}: it stands for a secret the editor cannot restore on this "
+                    "line. Type the real value there, or edit config.yaml directly.",
+                    error_code="config_redacted_placeholder",
+                )
             out.append(head)
             continue
         if cont or value.strip(" \t") not in _REDACTED_VALUE_FORMS:

@@ -904,8 +904,9 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "SPOTIFLAC_SERVICES": {
         "section": "Playlists & Download Providers",
-        "default": "spotify,deezer,tidal,qobuz",
-        "description": "Streaming services supported by spotiflac acquisition provider",
+        "default": "tidal,qobuz,deezer,amazon,soundcloud",
+        "description": "SpotiFLAC --service list in priority order: tidal, qobuz, deezer, amazon, soundcloud, apple, "
+                       "youtube, youtube-music, gdstudio, pandora, or ext:<extension id>",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -1673,6 +1674,10 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
                 # #208: refused at save, not only after the next restart;
                 # the constant message never echoes the value.
                 raise ValueError(BEETS_WEB_URL_USERINFO_MESSAGE)
+        if key == "SPOTIFLAC_SERVICES":
+            # #340: these become spotiflac argv; refuse options and unknown names.
+            from backend.security import parse_spotiflac_services
+            parse_spotiflac_services(value)
         if key == "PLEX_URL" and value.strip():
             # The token is a setting of its own (PLEX_TOKEN, sent as a header);
             # a URL carrying credentials or a ?X-Plex-Token= query would be
@@ -2151,7 +2156,13 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
 
     loaded_plugins = list(dict.fromkeys(str(p) for p in (plugin_status.get("loaded_plugins") or []) if str(p).strip()))
 
+    # SEC-237-3: never read, or put on sys.path, a config path that
+    # get_config_path() refuses (outside BEETSDIR, symlinked out, relative).
+    checked_path, path_refused = _checked_beets_config_path()
+    config_path_usable = not path_refused and Path(config_path) == checked_path
     try:
+        if not config_path_usable:
+            raise RuntimeError("Beets config path refused; plugin verification skipped")
         from backend.beets_plugins import verify_all_plugins
         plugins_report = verify_all_plugins(
             config_path.parent, config_file=config_path, loaded_plugins=loaded_plugins
@@ -2175,7 +2186,7 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
 
     config_text = ""
     try:
-        if config_path.exists():
+        if config_path_usable and config_path.exists():
             config_text = config_path.read_text(encoding="utf-8")
     except Exception:
         pass
@@ -3094,6 +3105,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
     }
 
     try:
+        if config_path_error:  # SEC-237-3: never verify a refused path
+            raise RuntimeError("Beets config path refused; plugin verification skipped")
         from backend.beets_plugins import verify_all_plugins
         plugins_report = verify_all_plugins(
             beets_config_path.parent,
@@ -3559,7 +3572,7 @@ def setup_test_acoustid():
     payload = request.get_json(silent=True) or {}
     from helpers_mb import ACOUSTID_NOT_CONFIGURED_MESSAGE, acoustid_api_key
     api_key = str(payload.get("api_key") or "").strip() or acoustid_api_key()
-    diagnostics = _beets_plugin_diagnostics(Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")))
+    diagnostics = _beets_plugin_diagnostics(_checked_beets_config_path()[0])
     capabilities = diagnostics.get("capabilities") if isinstance(diagnostics.get("capabilities"), dict) else {}
     acoustid_cap = capabilities.get("acoustid_lookup") if isinstance(capabilities.get("acoustid_lookup"), dict) else {}
     result: Dict[str, Any] = {
@@ -4024,7 +4037,7 @@ def setup_mark_complete():
         if _SETUP_COMPLETE_MARKER.exists():
             return jsonify({"ok": False, "error": "Setup already completed"}), 409
 
-        beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+        beets_config_path, config_path_error = _checked_beets_config_path()
         diagnostics = _beets_plugin_diagnostics(beets_config_path)
         is_test_env = app.config.get("TESTING") or stub_mode or os.environ.get("BEETS_SKIP_ENGINE_CHECK", "").strip().lower() in ("1", "true", "yes", "on")
         if not diagnostics.get("remote_reachable") and not is_test_env:
@@ -4037,6 +4050,8 @@ def setup_mark_complete():
         if not is_test_env:
             try:
                 from backend.beets_plugins import verify_all_plugins
+                if config_path_error:  # SEC-237-3
+                    return jsonify({"ok": False, "error": config_path_error}), 409
                 plugins_check = verify_all_plugins(beets_config_path.parent)
                 if not plugins_check.get("all_required_healthy", True):
                     unhealthy = [

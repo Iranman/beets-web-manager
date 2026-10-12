@@ -360,6 +360,7 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_save_acq_download_all_last": ("APP_STATE", "app_state_v1", "acquisition-last-download-history-state"),
     "_save_rgid_resolutions": ("APP_STATE", "app_state_v1", "rgid-resolutions-decision-state"),
     "_spotiflac_download_url": ("STAGING_ONLY", "staging_v1", "spotiflac-download-staging-dir"),
+    "_remove_new_symlinks": ("STAGING_ONLY", "staging_v1", "spotiflac-staging-symlink-confinement"),
     "create_unmatched_draft": ("STAGING_ONLY", "staging_v1", "unmatched-draft-submission-state"),
     "render_index": ("READ_ONLY_FALSE_POSITIVE", "none", "in-memory-template-string-replace"),
     "_prune_empty_review_dirs": ("NON_MEDIA_FILESYSTEM", "infra_v1", "prune-empty-review-staging-dirs"),

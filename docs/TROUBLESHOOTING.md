@@ -55,6 +55,9 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **Cause**: The editor reads `BEETS_CONFIG` (default `/config/config.yaml`). In v0.1.49 and earlier it read the host-side `BEETS_CONFIG_PATH`. After any Settings save, that sent it to an empty file inside the container, and edits were never written to Beets' real config.
 * **Fix**: Upgrade. If you saved edits from the Config page on v0.1.49 or earlier, they are not in `/config/config.yaml`; apply them again. The editor now refuses to read or write anything other than a file directly inside the Beets config directory.
 * **Saving refused with `config_secret_ambiguous` or `config_redacted_placeholder`**: secret values show as `[REDACTED]`; leave that text unchanged to keep the stored secret, replace the whole `[REDACTED]` (quotes included) to set a new one, or use `""` to clear it. `config_secret_ambiguous` means the stored `config.yaml` has that secret key twice in the same section, or not at all at that place (for example you moved or copied the line). Type the real value on that line, or reload the page and redo the edit.
+* **`[REDACTED]` inside a flow mapping, an anchor, a URL or a JSON line, and saving is refused**: the editor can restore a stored secret only on its own `key: value` line. Replace that `[REDACTED]` with the real value, or edit `config.yaml` directly.
+* **The Config page shows no content with `config_redaction_failed`**: a secret is written in a form the editor cannot hide (for example escaped characters in a JSON string). Edit `config.yaml` directly, or write the secret as a plain `key: value` line.
+* **Saving says the config was changed by another writer after Web Manager restarted**: revisions change on restart. Reload the page and save again.
 
 ---
 
