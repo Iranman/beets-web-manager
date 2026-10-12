@@ -2971,8 +2971,17 @@ def update_item_metadata(
     write_tags: bool = True,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    within_transaction: bool = False,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Write one item's fields. ``within_transaction``: the caller's own
+    transaction (an apply or a rollback) already audits this write, so no
+    second "Metadata Update" row is recorded under a generic user (D7)."""
+    if within_transaction:
+        if updates:
+            _engine_ok(_modify(adapter or beets_adapter, updates, item_ids=[int(item_id)],
+                               write=write_tags, move=force_write_tags))
+        return {"ok": True, "item_fields_changed": len(updates or {})}
     payload = {
         "item_id": int(item_id),
         "updates": updates,

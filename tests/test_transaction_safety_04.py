@@ -397,9 +397,30 @@ class ItemMetadataWriteFailedRollbackTests(_RouteEnvBase):
         self.assertFalse(rollback_eligibility(self.store.get(op))["allowed"])
 
 
-if __name__ == "__main__":
-    import unittest
-    unittest.main()
+class TransactionAttributionTests(_Engine):
+    """D7: an apply or rollback records one row under the signed-in user;
+    its item write no longer adds a second "Metadata Update" row as
+    "operator"."""
+
+    def test_write_inside_a_transaction_records_no_second_row(self):
+        album = self.make_album(os.path.join(self.music, "A", "B"))
+        iid = album.items()[0].id
+        res = cw.update_item_metadata(iid, {"title": "Inner"}, within_transaction=True,
+                                      adapter=self.ad, store=self.store)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.lib.get_item(iid).title, "Inner")
+        self.assertEqual(self.store.list(limit=10)[0], [])
+        cw.update_item_metadata(iid, {"title": "Standalone"}, adapter=self.ad, store=self.store)
+        self.assertEqual(len(self.store.list(limit=10)[0]), 1)  # a standalone edit is still audited
+
+    def test_label_is_the_session_user(self):
+        from flask import session
+        from backend import auth_service
+        with app.app.test_request_context("/"):
+            session["authenticated"], session["user"] = True, "alice"
+            self.assertEqual(auth_service._transaction_user_label(), "alice")
+        with app.app.test_request_context("/", headers={"Authorization": "Basic Ym9iOndyb25n"}):  # bob:wrong
+            self.assertNotEqual(auth_service._transaction_user_label(), "bob")  # unverified name never recorded
 
 
 class CleanAllBlankIdentityVerificationTests(_Engine):
@@ -453,3 +474,7 @@ class RootFolderRepairLeadingSpaceTests(unittest.TestCase):
         album = SimpleNamespace(items=lambda: [SimpleNamespace(path=b" (0000)/01.flac")])
         self.assertEqual(art._album_path_repair_summary(album)["first_track_path"],
                          str(art.MUSIC_ROOT / " (0000)" / "01.flac"))
+
+
+if __name__ == "__main__":
+    unittest.main()

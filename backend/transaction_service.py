@@ -285,7 +285,7 @@ def _start_metadata_apply_transaction(transaction_id: str):
             # #318: from here Beets may store the edit even if the tag write
             # fails (WRITE_FAILED), so a Failed apply keeps its rollback.
             transactions.update(transaction_id, metadata={"engine_result": {"mutation_started": True}})
-            result = composite_workflows.update_item_metadata(item_id, fields)
+            result = composite_workflows.update_item_metadata(item_id, fields, within_transaction=True)
             _require_attach_stage_success(result, "metadata update")
             _invalidate_lib_cache()
             transactions.update(transaction_id, status="Completed", logs=list(log)[-500:], counts={"items": 1, "changes": len(changed_fields)})

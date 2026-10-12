@@ -1062,7 +1062,8 @@ def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[s
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=False)
+        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=False,
+                                                         within_transaction=True)
         _require_attach_stage_success(result, "rollback metadata restore")
         _invalidate_lib_cache()
         log.append(f"  [rollback] Restored metadata for item {item_id}.")
@@ -1111,7 +1112,8 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True)
+        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True,
+                                                         within_transaction=True)
         _require_attach_stage_success(result, "rollback recording identity restore")
         album_id = 0
         try:
