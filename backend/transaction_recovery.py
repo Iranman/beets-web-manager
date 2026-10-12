@@ -182,7 +182,11 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
             # update_from_job maps that to Recovery Required, #344 a/b).
             if meta.get("engine_operation_id") and meta.get("mutation_family"):
                 results.append(_orphaned(st, tx))
-            elif (meta.get("engine_result") or {}).get("mutation_started"):
+            elif ((meta.get("engine_result") or {}).get("mutation_started") or meta.get("mutation_started")
+                  or meta.get("filesystem_mutated") or meta.get("mutation_family") == "folder_cleanup_v1"):
+                # Folder cleanup (Clean All) and import-review cleanup are claimed
+                # Running and record each step as it lands; a crash between steps
+                # left them Running for good (failure-injection matrix).
                 results.append(_interrupted_apply(st, tx["id"]))
         elif meta.get("mutation_family") in families:
             try:
