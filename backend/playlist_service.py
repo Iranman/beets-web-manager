@@ -2035,16 +2035,22 @@ def _playlist_atomic_json_replace(path: Path,
         safe_key = str(threading.get_ident())
     tmp = parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
     resolved_tmp = tmp.resolve(strict=False)
-    tmp_safe = False
+    tmp_root = None
     for root in allowed_roots:
         try:
             resolved_tmp.relative_to(root)
-            tmp_safe = True
+            tmp_root = root
             break
         except ValueError:
             pass
-    if not tmp_safe:
+    if tmp_root is None:
         raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp}")
+    # Every later use of tmp (open, replace, the cleanup unlink) goes through
+    # this normalised, prefix-checked form of the same contained path.
+    tmp_text = os.path.normpath(str(resolved_tmp))
+    if not tmp_text.startswith(os.path.normpath(str(tmp_root)).rstrip(os.sep) + os.sep):
+        raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp.name}")
+    tmp = Path(tmp_text)
 
     try:
         with tmp.open("w", encoding="utf-8") as handle:

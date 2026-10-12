@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -88,6 +89,34 @@ SETTINGS_FLOAT_RANGES = {"automatic_approval_threshold": (0.9, 1.0)}
 
 class SettingsError(ValueError):
     """A transaction setting is out of range or of the wrong type."""
+
+
+def validated_settings(updates: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """(the known settings in ``updates``, converted; "") or ({}, why the
+    first bad value is refused). The text is built from DEFAULT_SETTINGS
+    names and the fixed ranges only, so a route can show it as is (D8)."""
+    out: Dict[str, Any] = {}
+    for key, default in DEFAULT_SETTINGS.items():
+        if key not in updates:
+            continue
+        value = updates[key]
+        if isinstance(default, bool):
+            if not isinstance(value, bool):
+                return {}, f"{key} must be true or false."
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            return {}, f"{key} must be a number."
+        elif isinstance(default, int):
+            low, high = SETTINGS_INT_RANGES[key]
+            if not (math.isfinite(value) and value == int(value) and low <= value <= high):
+                return {}, f"{key} must be a whole number from {low} to {high}."
+            value = int(value)
+        else:
+            low, high = SETTINGS_FLOAT_RANGES[key]
+            if not low <= float(value) <= high:
+                return {}, f"{key} must be from {low} to {high}."
+            value = float(value)
+        out[key] = value
+    return out, ""
 
 _TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-zA-Z_]{8,64}$")
 
@@ -443,28 +472,12 @@ class TransactionStore:
         """Validate every value, then save. An out-of-range or mistyped value
         raises SettingsError and nothing is saved (D8: values used to be
         clamped silently, and "false" was stored as True)."""
+        values, problem = validated_settings(updates)
+        if problem:
+            raise SettingsError(problem)
         with self._lock:
             settings = self.settings()
-            for key, default in DEFAULT_SETTINGS.items():
-                if key not in updates:
-                    continue
-                value = updates[key]
-                if isinstance(default, bool):
-                    if not isinstance(value, bool):
-                        raise SettingsError(f"{key} must be true or false.")
-                elif isinstance(value, bool) or not isinstance(value, (int, float)):
-                    raise SettingsError(f"{key} must be a number.")
-                elif isinstance(default, int):
-                    low, high = SETTINGS_INT_RANGES[key]
-                    if value != int(value) or not low <= value <= high:
-                        raise SettingsError(f"{key} must be a whole number from {low} to {high}.")
-                    value = int(value)
-                else:
-                    low, high = SETTINGS_FLOAT_RANGES[key]
-                    if not low <= float(value) <= high:
-                        raise SettingsError(f"{key} must be from {low} to {high}.")
-                    value = float(value)
-                settings[key] = value
+            settings.update(values)
             self._ensure()
             path = self._settings_path()
             tmp = path.with_suffix(".json.tmp")

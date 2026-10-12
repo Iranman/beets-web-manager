@@ -273,12 +273,12 @@ def _redact_config_content(text: str) -> str:
         raise ConfigRedactionError() from None
 
 
+CONFIG_REDACTION_FAILED_MESSAGE = "config.yaml holds a secret in a form the editor cannot hide; edit the file directly."
+
+
 class ConfigRedactionError(ConfigError):
     def __init__(self):
-        super().__init__(
-            "config.yaml holds a secret in a form the editor cannot hide; edit the file directly.",
-            error_code="config_redaction_failed", status_code=409,
-        )
+        super().__init__(CONFIG_REDACTION_FAILED_MESSAGE, error_code="config_redaction_failed", status_code=409)
 
 
 def _config_path_label(path: Tuple[Any, ...]) -> str:

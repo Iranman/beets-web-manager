@@ -45,6 +45,7 @@ The project uses Semantic Versioning.
 - The config editor redacts secrets in every YAML form and refuses to show the file if it cannot (`config_redaction_failed`). Revisions are HMAC-keyed. Saves, reverts and plugin edits are serialized (#324).
 - Config editor backups are private (0600) and never follow symlinks (#183). Plugin provisioning refuses a symlinked `beetsplug` folder and plugin preview diffs mask secrets (#239).
 - Rollout script: Ctrl-C seals the backup and restores state, a backup directory is never reused, the token is read in isolated Python, and the running version and revision are verified after deploy (#253).
+- 0.4.0 security review: the transaction-settings and config-redaction errors return fixed text instead of exception text, playlist M3U and state-file paths pass a normalized containment check, and a line break in a track's tag or file name can no longer add an entry to an exported M3U.
 
 ### Changed
 
