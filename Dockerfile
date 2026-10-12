@@ -10,6 +10,12 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
+# ---- Deno (yt-dlp JS challenge runtime) -------------------------------------
+# yt-dlp's YouTube signature/n challenges run in a JS runtime: yt-dlp-ejs
+# (installed with yt-dlp) supplies the solver scripts, Deno >= 2.3 runs them.
+# Digest-pinned like the other bases (SEC-9); Dependabot tracks this FROM.
+FROM denoland/deno:bin-2.9.7@sha256:bc5aa4466e21b6d3021226a85ba2e1911f7c386254d97b9d797903ab74edace2 AS deno
+
 # ---- Runtime stage ----------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS runtime
 
@@ -37,6 +43,16 @@ RUN apt-get update && apt-get upgrade -y --no-install-recommends \
     ffmpeg \
     libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# Deno for yt-dlp (see the deno stage). Its cache goes to /tmp: the hardened
+# Compose runs read_only with /tmp as tmpfs and a read-only HOME. No update
+# checks or prompts; YTDLP_REMOTE_COMPONENTS stays empty, so no solver code
+# is fetched at runtime.
+COPY --from=deno /deno /usr/local/bin/deno
+ENV DENO_DIR=/tmp/deno \
+    DENO_NO_UPDATE_CHECK=1 \
+    DENO_NO_PROMPT=1
+RUN deno --version
 
 # Baked-in default identity. The entrypoint remaps this to the runtime
 # PUID/PGID (default unchanged, 1000/1000) before dropping privileges --

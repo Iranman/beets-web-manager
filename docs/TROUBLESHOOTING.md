@@ -157,6 +157,11 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ### 16c. "qBittorrent rejected the login"
 * Check `QBITTORRENT_USERNAME` / `QBITTORRENT_PASSWORD` (or their `_FILE` variants). The refusal is recorded as `authentication_error` for `qbittorrent` in `GET /api/providers/health` and in the qBittorrent status `health` field.
 
+### 16d. YouTube downloads fail with "need a supported JavaScript runtime ... Deno/Node/QuickJS was not found"
+* **Cause**: yt-dlp solves YouTube's signature challenges in a JavaScript runtime. Since 0.6.0 the Web Manager image ships Deno at `/usr/local/bin/deno` (cache in `DENO_DIR=/tmp/deno`), so this means `YTDLP_JS_RUNTIMES` was set to a runtime that is not present, or a custom image dropped Deno.
+* **Check**: `docker exec beets-web-manager deno --version`.
+* **Fix**: unset `YTDLP_JS_RUNTIMES` (default `deno,node,quickjs`) or point it at a working executable (`deno:/usr/local/bin/deno`), and recreate the container. The challenge solver scripts come from the bundled `yt-dlp-ejs` package; leave `YTDLP_REMOTE_COMPONENTS` empty so nothing is downloaded at runtime.
+
 ### Check Container Health
 ```bash
 docker compose ps beets-web-manager
