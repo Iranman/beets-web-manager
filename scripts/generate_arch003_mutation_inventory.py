@@ -493,14 +493,15 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             if func == "apply_folder_cleanup":
                 return "CONTROLLED_MEDIA_MUTATION", "folder_cleanup_v1", "reviewed-composite-workflows-folder-cleanup"
             if func in ("delete_file", "move_file", "_remove_resolved", "_move_resolved",
-                        "_staging_dir_fd", "_copy_file_across_fs"):
+                        "_staging_dir_fd", "_copy_file_across_fs", "_rename_noreplace", "_refuse_other_mounts"):
                 # Wave 0 (LT-13): both refuse MUSIC_ROOT, symlinks and any path
                 # outside the staging/download roots before touching anything.
                 # _remove_resolved/_move_resolved are the shared sinks they call,
                 # only ever with a target already validated by
                 # _validated_staging_target. Since #206 F1 they work fd-relative
                 # from the staging root (_staging_dir_fd opens each component
-                # O_NOFOLLOW; _copy_file_across_fs is the EXDEV file fallback).
+                # O_NOFOLLOW; _copy_file_across_fs is the EXDEV file fallback;
+                # _rename_noreplace never replaces a target planted after the check, #230).
                 return "STAGING_ONLY", "", "staging-root-contained-delete-move"
             if func == "write_staging_tags":
                 return "STAGING_ONLY", "", "reviewed-dup1-staging-tag-hint"

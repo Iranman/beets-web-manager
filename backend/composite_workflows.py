@@ -429,17 +429,18 @@ def _validated_staging_target(path: Union[str, Path], what: str) -> Path:
     protected data, or a symlink. Returns the resolved path to operate on,
     with its lstat identity captured for the destructive helpers (#182)."""
     raw = Path(path)
+    name = raw.name or "(root)"  # #230 N3: no absolute paths in errors and job logs
     if not _is_safe_staging_path(raw):
-        raise ValueError(f"Refusing to {what} outside staging roots: {path}")
+        raise ValueError(f"Refusing to {what} outside staging roots: {name}")
     resolved = _ValidatedPath(raw.resolve())
     try:
         resolved.identity = os.lstat(str(resolved))
     except FileNotFoundError:
         pass
     if _is_staging_root(resolved):
-        raise ValueError(f"Refusing to {what} a staging root itself: {path}")
+        raise ValueError(f"Refusing to {what} a staging root itself: {name}")
     if _is_protected_data_path(resolved) or _has_symlink_component(resolved):
-        raise ValueError(f"Refusing to {what} a protected path: {path}")
+        raise ValueError(f"Refusing to {what} a protected path: {name}")
     return resolved
 
 
@@ -479,8 +480,11 @@ def _staging_dir_fd(root: Path, parts: Tuple[str, ...], created: Optional[List[T
             except FileNotFoundError:
                 if created is None:
                     raise
-                os.mkdir(name, dir_fd=fds[-1])
-                created.append((fds[-1], name))
+                try:
+                    os.mkdir(name, dir_fd=fds[-1])
+                    created.append((fds[-1], name))
+                except FileExistsError:  # #230 N2: a concurrent move made it first
+                    pass
                 fd = os.open(name, flags, dir_fd=fds[-1])
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
@@ -510,8 +514,17 @@ def _check_leaf(parent_fd: int, name: str, resolved: Path) -> os.stat_result:
     except FileNotFoundError:
         now = None
     if expected is None or now is None or not _same_entry(expected, now):
-        raise ValueError(f"Path changed since validation: {resolved}")
+        raise ValueError(f"Path changed since validation: {resolved.name}")
     return now
+
+
+def _refuse_other_mounts(parent_fd: int, name: str, dev: int) -> None:
+    """#230 S-2: rmtree(dir_fd=) would descend into a mount placed inside a
+    staging folder; refuse the delete when any directory below is on
+    another device (nothing is removed)."""
+    for _root, _dirs, _files, rootfd in os.fwalk(name, dir_fd=parent_fd, follow_symlinks=False):
+        if os.fstat(rootfd).st_dev != dev:
+            raise ValueError("Refusing to delete a folder that contains another mounted filesystem.")
 
 
 def _remove_resolved(resolved: Path) -> None:
@@ -523,6 +536,7 @@ def _remove_resolved(resolved: Path) -> None:
     with _staging_dir_fd(root, parts[:-1]) as parent_fd:
         now = _check_leaf(parent_fd, parts[-1], resolved)
         if stat.S_ISDIR(now.st_mode):
+            _refuse_other_mounts(parent_fd, parts[-1], now.st_dev)
             shutil.rmtree(parts[-1], dir_fd=parent_fd)
         else:
             os.unlink(parts[-1], dir_fd=parent_fd)
@@ -550,10 +564,14 @@ def _copy_file_across_fs(src_fd: int, src_name: str, dst_fd: int, dst_name: str,
             os.fchmod(dfd, stat.S_IMODE(st.st_mode))
             os.utime(dfd, ns=(st.st_atime_ns, st.st_mtime_ns))
             os.fsync(dfd)
+            copied = os.fstat(dfd).st_size
             os.close(dfd)
             dfd = -1
+            os.fsync(dst_fd)  # the new name is durable before the source goes
             now = os.stat(src_name, dir_fd=src_fd, follow_symlinks=False)
-            if not _same_entry(st, now):
+            # #230 S-1: a source still being written changes size or mtime.
+            if (not _same_entry(st, now) or (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+                    or copied != st.st_size):
                 raise ValueError("Source changed during the copy; nothing was moved.")
         except BaseException:
             if dfd >= 0:
@@ -575,7 +593,7 @@ def _move_resolved(src: Path, dst: Path) -> None:
     _require_dir_fd_support()
     if getattr(dst, "identity", None) is not None or _has_symlink_component(dst.parent) \
             or os.path.lexists(str(dst)):
-        raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
+        raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst.name}")
     s_root, s_parts = _staging_parts(src)
     d_root, d_parts = _staging_parts(dst)
     with _staging_dir_fd(s_root, s_parts[:-1]) as s_fd:
@@ -586,13 +604,43 @@ def _move_resolved(src: Path, dst: Path) -> None:
             except FileNotFoundError:
                 pass
             else:
-                raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst}")
+                raise ValueError(f"Refusing to move onto an existing or symlinked target: {dst.name}")
+            _rename_noreplace(s_fd, s_parts[-1], d_fd, d_parts[-1], expected)
+
+
+def _rename_noreplace(s_fd: int, s_name: str, d_fd: int, d_name: str, expected: os.stat_result) -> None:
+    """Move without ever replacing an entry planted at the target after the
+    check (#230 S-3/N1). A file is hard-linked (EEXIST if taken) then its old
+    name unlinked; where links are unavailable it is copied with O_EXCL. A
+    directory is renamed over an empty one made here with exclusive mkdir, so
+    a planted entry makes the move fail instead of being replaced."""
+    if stat.S_ISDIR(expected.st_mode):
+        os.mkdir(d_name, dir_fd=d_fd)  # FileExistsError: something is there
+        try:
+            os.rename(s_name, d_name, src_dir_fd=s_fd, dst_dir_fd=d_fd)
+        except OSError as exc:
             try:
-                os.rename(s_parts[-1], d_parts[-1], src_dir_fd=s_fd, dst_dir_fd=d_fd)
-            except OSError as exc:
-                if exc.errno != errno.EXDEV:
-                    raise
-                _copy_file_across_fs(s_fd, s_parts[-1], d_fd, d_parts[-1], expected)
+                os.rmdir(d_name, dir_fd=d_fd)  # only ever our own empty placeholder
+            except OSError:
+                pass
+            if exc.errno == errno.EXDEV:
+                raise ValueError("Refusing a cross-filesystem move of a directory; nothing was moved.") from exc
+            raise
+        return
+    try:
+        os.link(s_name, d_name, src_dir_fd=s_fd, dst_dir_fd=d_fd, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno in (errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK):
+            _copy_file_across_fs(s_fd, s_name, d_fd, d_name, expected)
+            return
+        raise
+    try:
+        if not _same_entry(expected, os.stat(d_name, dir_fd=d_fd, follow_symlinks=False)):
+            raise ValueError("Source changed since validation; nothing was moved.")
+    except BaseException:
+        os.unlink(d_name, dir_fd=d_fd)
+        raise
+    os.unlink(s_name, dir_fd=s_fd)
 
 
 def delete_staging_file(path: str) -> Dict[str, Any]:
