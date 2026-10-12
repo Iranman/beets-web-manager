@@ -14,6 +14,7 @@ import backend.untracked_recovery_service as untracked_recovery
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
 import backend.job_contract as job_contract
+from backend.transaction_engine import SettingsError
 from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
@@ -663,9 +664,13 @@ def api_transaction_settings():
 
 @app.post("/api/transactions/settings")
 def api_transaction_settings_save():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Send the settings as a JSON object."}), 400
     try:
         settings = transactions.save_settings(payload)
+    except SettingsError as ex:  # D8: our own fixed text, never clamped
+        return jsonify({"ok": False, "error": str(ex), "code": "invalid_setting"}), 400
     except Exception as ex:
         _app_logger.warning("Could not save transaction settings: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save transaction settings."}), 400

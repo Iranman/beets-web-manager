@@ -80,6 +80,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "dry_run_by_default": False,
 }
 
+# D8: accepted ranges; anything else is refused, never clamped. The approval
+# threshold has a floor, so a typo such as 0 cannot approve every match.
+SETTINGS_INT_RANGES = {"backup_retention_days": (1, 3650), "maximum_undo_history": (1, 100000)}
+SETTINGS_FLOAT_RANGES = {"automatic_approval_threshold": (0.9, 1.0)}
+
+
+class SettingsError(ValueError):
+    """A transaction setting is out of range or of the wrong type."""
+
 _TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-zA-Z_]{8,64}$")
 
 # SEC-002 Wave 16 final review: the control agent serves requests via
@@ -431,6 +440,9 @@ class TransactionStore:
         return settings
 
     def save_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate every value, then save. An out-of-range or mistyped value
+        raises SettingsError and nothing is saved (D8: values used to be
+        clamped silently, and "false" was stored as True)."""
         with self._lock:
             settings = self.settings()
             for key, default in DEFAULT_SETTINGS.items():
@@ -438,13 +450,21 @@ class TransactionStore:
                     continue
                 value = updates[key]
                 if isinstance(default, bool):
-                    settings[key] = bool(value)
+                    if not isinstance(value, bool):
+                        raise SettingsError(f"{key} must be true or false.")
+                elif isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise SettingsError(f"{key} must be a number.")
                 elif isinstance(default, int):
-                    settings[key] = max(0, int(value))
-                elif isinstance(default, float):
-                    settings[key] = max(0.0, min(1.0, float(value)))
+                    low, high = SETTINGS_INT_RANGES[key]
+                    if value != int(value) or not low <= value <= high:
+                        raise SettingsError(f"{key} must be a whole number from {low} to {high}.")
+                    value = int(value)
                 else:
-                    settings[key] = value
+                    low, high = SETTINGS_FLOAT_RANGES[key]
+                    if not low <= float(value) <= high:
+                        raise SettingsError(f"{key} must be from {low} to {high}.")
+                    value = float(value)
+                settings[key] = value
             self._ensure()
             path = self._settings_path()
             tmp = path.with_suffix(".json.tmp")

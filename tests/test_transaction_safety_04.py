@@ -397,6 +397,24 @@ class ItemMetadataWriteFailedRollbackTests(_RouteEnvBase):
         self.assertFalse(rollback_eligibility(self.store.get(op))["allowed"])
 
 
+class TransactionSettingsRouteTests(_RouteEnvBase):
+    """D8: the route answers 400 with the reason; nothing is clamped or saved."""
+
+    def test_out_of_range_is_a_400(self):
+        before = self.client.get("/api/transactions/settings").get_json()["settings"]
+        for body in ({"automatic_approval_threshold": 0.0}, {"automatic_approval_threshold": 1.5},
+                     {"backup_retention_days": -3}, [1]):
+            res = self.client.post("/api/transactions/settings", json=body)
+            self.assertEqual(res.status_code, 400, body)
+            self.assertFalse(res.get_json()["ok"])
+        self.assertIn("automatic_approval_threshold must be from 0.9 to 1.0",
+                      self.client.post("/api/transactions/settings",
+                                       json={"automatic_approval_threshold": 0}).get_json()["error"])
+        self.assertEqual(self.client.get("/api/transactions/settings").get_json()["settings"], before)
+        ok = self.client.post("/api/transactions/settings", json={"automatic_approval_threshold": 0.99})
+        self.assertEqual((ok.status_code, ok.get_json()["settings"]["automatic_approval_threshold"]), (200, 0.99))
+
+
 class TransactionAttributionTests(_Engine):
     """D7: an apply or rollback records one row under the signed-in user;
     its item write no longer adds a second "Metadata Update" row as
