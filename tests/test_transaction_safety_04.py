@@ -659,6 +659,18 @@ class MbsyncLostOutcomeTests(unittest.TestCase):
                 self.assertEqual((result["processed"], result["outcome_unknown"]), (4, True))
                 self.assertTrue(any("Outcome partly unknown" in line and "4 of 10" in line for line in log), log)
 
+class MusicRootAliasTests(unittest.TestCase):
+    """#261 N-1: the library-root guards honour config_layers' documented
+    MUSIC_ROOT aliases, not only the raw variable."""
+
+    def test_alias_music_root_is_the_guarded_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            env = {k: v for k, v in os.environ.items() if k != "MUSIC_ROOT"}
+            env["MUSIC_LIBRARY_PATH"] = td
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertTrue(cw._is_within_music_root(os.path.join(td, "A", "01.flac")))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -329,7 +329,7 @@ def _is_protected_data_path(resolved: Path) -> bool:
 def _is_within_music_root(path: Union[str, Path]) -> bool:
     """True if path resolves inside MUSIC_ROOT -- the only tree these
     artist/album folder-inventory helpers are meant to walk or list."""
-    music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
+    music_root = _music_root()  # #261 N-1: honour the documented aliases
     try:
         p = Path(path).resolve()
     except Exception:
@@ -388,7 +388,7 @@ def _is_safe_staging_path(path: Union[str, Path]) -> bool:
     if _has_symlink_component(path):
         return False
     p = Path(contained).resolve()
-    music_root = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve()
+    music_root = _music_root()  # #261 N-1: honour the documented aliases
     # Must NOT be the music root, inside it, or an ancestor of it (#182)
     try:
         if p == music_root or music_root in p.parents or p in music_root.parents:
