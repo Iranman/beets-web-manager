@@ -85,6 +85,46 @@ class AdapterAbsolutePathTests(unittest.TestCase):
         self.assertEqual([r["path"] for r in ad.get_items()], ["a.flac", "b.flac"])
         self.assertEqual(calls.count("/webmanager/status"), 1)
 
+    def test_dotdot_relative_paths_fail_closed(self):
+        """#351 N5: ".." is never collapsed lexically; the row loses its path."""
+        ad, _ = self._adapter({
+            "/item/": {"items": [{"id": 1, "path": "A/../../etc/passwd"}, {"id": 2, "path": "link/../x.flac"},
+                                 {"id": 3, "path": "A/..B/01.flac"}]},
+            "/album/7": {"id": 7, "artpath": "../cover.jpg", "items": [{"id": 1, "path": ".."}]},
+        })
+        self.assertEqual([r["path"] for r in ad.get_items()], [None, None, "/music/A/..B/01.flac"])
+        album = ad.get_album(7)
+        self.assertIsNone(album["artpath"])
+        self.assertIsNone(album["items"][0]["path"])
+
+    def test_relative_library_directory_is_never_joined(self):
+        """#351 N5: a library_directory that is not absolute counts as unknown."""
+        for bad in ("music", "./music", ""):
+            ad, calls = self._adapter({"/item/": {"items": [{"id": 1, "path": "a.flac"}]}}, libdir=bad)
+            self.assertEqual(ad.get_items()[0]["path"], "a.flac")
+            self.assertEqual(ad.get_items()[0]["path"], "a.flac")
+            self.assertEqual(calls.count("/webmanager/status"), 2)  # not cached
+
+
+class FindItemByPathBackslashTests(unittest.TestCase):
+    """#351 N6: Beets turns "\\" in a query term into os.sep, so a path with a
+    backslash is queried as another path and Beets' match cannot be trusted."""
+
+    def _adapter(self, rows):
+        ad = BeetsAdapter(base_url="http://beets:8337", api_key="k")
+        ad._request = lambda method, path, **_: {"results": [dict(r) for r in rows]}
+        return ad
+
+    def test_include_paths_off_match_is_not_trusted_for_a_backslash_path(self):
+        ad = self._adapter([{"id": 9}])  # Beets matched /music/A/B/01.flac
+        self.assertIsNone(ad.find_item_by_path("/music/A/B\\01.flac"))
+        self.assertEqual(ad.find_item_by_path("/music/A/B/01.flac")["id"], 9)
+
+    def test_include_paths_on_rejects_the_other_file(self):
+        ad = self._adapter([{"id": 9, "path": "/music/A/B/01.flac"}])
+        self.assertIsNone(ad.find_item_by_path("/music/A/B\\01.flac"))
+        self.assertEqual(ad.find_item_by_path("/music/A/B/01.flac")["id"], 9)
+
 
 class ArtworkPlacementRelativePathTests(unittest.TestCase):
     """#302: artwork placement found no album folder for a relative item path."""
