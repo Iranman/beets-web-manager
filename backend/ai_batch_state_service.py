@@ -12,10 +12,10 @@ from backend.app_runtime import WEB_MANAGER_DATA_DIR, _s
 # ── ARCH-001 extracted code ──
 
 
-_MUSIC_FORMAT_POLICY_HANDLED_MESSAGE = (
-    "Downloaded audio does not match Music Format Preferences. "
-    "Rejected files were handled according to settings."
-)
+# The rejection message's fixed prefix; the counts that follow say what was
+# done with each file (#325 F3). Messages saved before 0.4.1 continue with
+# "Rejected files were handled according to settings." and still match.
+_MUSIC_FORMAT_POLICY_HANDLED_MESSAGE = "Downloaded audio does not match Music Format Preferences."
 
 
 _MUSIC_FORMAT_POLICY_REVIEW_NOTE = (

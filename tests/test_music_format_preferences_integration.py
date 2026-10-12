@@ -65,7 +65,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertIn('_handle_rejected_audio_download(row["path"], prefs, log=log,', APP_SOURCE)
         self.assertIn('_MUSIC_FORMAT_POLICY_HANDLED_MESSAGE', APP_SOURCE)
         self.assertIn('_music_format_policy_rejection_error', APP_SOURCE)
-        self.assertIn('Downloaded audio does not match Music Format Preferences. ', APP_SOURCE)
+        self.assertIn('Downloaded audio does not match Music Format Preferences.', APP_SOURCE)
         self.assertIn('Import stopped; choose another source or update Music Format Preferences before retrying.', APP_SOURCE)
         self.assertIn('handled_results.append(_handle_rejected_audio_download', APP_SOURCE)
         self.assertIn('_is_music_format_policy_handled_error', APP_SOURCE)

@@ -3,13 +3,35 @@
 
 from __future__ import annotations
 
-import re, time
-from typing import Any, Iterable, List, Optional, Tuple
+import contextvars, re, time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _s
 from backend.auth_service import _yt_bot_check_message
 from backend.app_runtime import jobs
+from job_engine import is_read_only_job
 
 # ── ARCH-001 extracted code ──
+
+#: How long a parent waits, after asking a mutating child job to stop, for the
+#: child's real outcome (#317). A Beets operation the child is waiting on does
+#: not stop at once.
+# ponytail: fixed window; per-caller values if a child type needs longer.
+CHILD_SETTLE_SECONDS = 300
+
+#: Set by the transaction job wrapper (transaction_service) for the job running
+#: on this thread: ``note_job_progress`` reports into that job's audit.
+_job_progress: "contextvars.ContextVar[Optional[Callable[..., None]]]" = contextvars.ContextVar(
+    "job_progress", default=None)
+
+
+def note_job_progress(**flags: Any) -> None:
+    """Tell the current job's transaction audit what happened (#317):
+    ``mutation_started=True`` (the library may have changed) or
+    ``outcome_unknown=True`` (a child operation was still running when this
+    job stopped waiting for it). No-op outside a transaction-wrapped job."""
+    sink = _job_progress.get()
+    if sink is not None:
+        sink(**flags)
 
 
 def _call_job_fn(fn, log, cancel=None, update_state=None):
@@ -95,13 +117,86 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             return False
         return True
 
+    def _mirror(child: Any) -> List[Any]:
+        nonlocal seen
+        new_lines = child.log[seen:]
+        for line in new_lines:
+            if _should_mirror_child_line(line):
+                log.append(f"  [{prefix}] {line}")
+        mirrored_lines.extend(new_lines)
+        seen += len(new_lines)
+        return new_lines
+
+    def _settle(child: Any) -> Optional[Any]:
+        """Ask the child to stop. A mutating child may be in the middle of a
+        Beets operation that keeps running (#317), so wait for its real
+        outcome: the terminal child, or None when it is still running after
+        CHILD_SETTLE_SECONDS (or its record vanished): outcome unknown."""
+        if child.status != "running":
+            return child
+        child.kill()
+        log.append(f"  [{prefix}] Asked job {job_id} to stop; waiting up to {CHILD_SETTLE_SECONDS}s "
+                   "for its Beets operation to finish or stop.")
+        end = time.time() + CHILD_SETTLE_SECONDS
+        while True:
+            current = jobs.get(job_id)
+            if current is None:
+                return None
+            _mirror(current)
+            if current.status != "running":
+                return current
+            if time.time() >= end:
+                return None
+            time.sleep(2)
+
+    def _changed_library(done: Any) -> bool:
+        state = getattr(done, "state", None) or {}
+        result = getattr(done, "result", None)
+        return (done.status == "success" or bool(state.get("mutation_started"))
+                or (isinstance(result, dict) and bool(result.get("mutation_started"))))
+
+    def _note_unknown() -> None:
+        note_job_progress(outcome_unknown=True, mutation_started=True)
+        log.append(f"  [{prefix}] Job {job_id} is still running; whether it changed the library is unknown. "
+                   "Check it in Jobs.")
+
+    def _cancel(child: Optional[Any]) -> RuntimeError:
+        if child is None or is_read_only_job(getattr(child, "metadata", None)):
+            if child is not None:
+                child.kill()
+            return RuntimeError("cancelled")
+        done = _settle(child)
+        if done is None:
+            _note_unknown()
+        elif _changed_library(done):
+            note_job_progress(mutation_started=True)
+            log.append(f"  [{prefix}] Job {job_id} ended {done.status} after the cancel request; "
+                       "it may have changed the library before it stopped.")
+        else:
+            log.append(f"  [{prefix}] Job {job_id} stopped ({done.status}) before reporting a library change.")
+        return RuntimeError("cancelled")
+
+    def _give_up(child: Any, reason: str) -> Any:
+        """Timeout or stall: a read-only child is simply stopped; a mutating
+        one's real outcome is waited for and reported (#317)."""
+        if is_read_only_job(getattr(child, "metadata", None)):
+            child.kill()
+            raise RuntimeError(reason)
+        done = _settle(child)
+        if done is None:
+            _note_unknown()
+            raise RuntimeError(f"{reason}; job {job_id} is still running, so its outcome is unknown")
+        if done.status == "success":
+            log.append(f"  [{prefix}] Job {job_id} finished its work after all ({reason}); continuing with its result.")
+            return getattr(done, "result", None)
+        if _changed_library(done):
+            note_job_progress(mutation_started=True)
+        raise RuntimeError(reason)
+
     while True:
         now = time.time()
         if cancel_event is not None and cancel_event.is_set():
-            child = jobs.get(job_id)
-            if child:
-                child.kill()
-            raise RuntimeError("cancelled")
+            raise _cancel(jobs.get(job_id))
         child = jobs.get(job_id)
         if not child:
             if _mirrored_log_indicates_success():
@@ -110,12 +205,7 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
                 )
                 return {"job_id": job_id, "status": "success", "result_inferred_from_log": True}
             raise RuntimeError(f"child job not found: {job_id}")
-        new_lines = child.log[seen:]
-        for line in new_lines:
-            if _should_mirror_child_line(line):
-                log.append(f"  [{prefix}] {line}")
-        mirrored_lines.extend(new_lines)
-        seen += len(new_lines)
+        new_lines = _mirror(child)
         child_state = dict(getattr(child, "state", {}) or {})
         state_key = (
             child.status,
@@ -151,11 +241,9 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
                     )
                     timeout_notice_logged = True
             else:
-                child.kill()
-                raise RuntimeError(f"{prefix} job timed out")
+                return _give_up(child, f"{prefix} job timed out")
         if idle_timeout and (now - last_activity) >= idle_timeout:
-            child.kill()
-            raise RuntimeError(f"{prefix} job stalled with no progress for {idle_timeout}s")
+            return _give_up(child, f"{prefix} job stalled with no progress for {idle_timeout}s")
         time.sleep(2)
 
 

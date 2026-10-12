@@ -163,6 +163,18 @@ def _orphaned(st: TransactionStore, tx: Dict[str, Any]) -> Dict[str, Any]:
     return {"operation_id": tx["id"], "action": "Recovery Required" if out else "skipped", "note": note}
 
 
+def _unknown_family(st: TransactionStore, tx: Dict[str, Any]) -> Dict[str, Any]:
+    """#266 item 3 (ARCH-023): a Running transaction of a mutation family this
+    version cannot resolve (removed, or never claimed with evidence) that a
+    previous process left behind. It is never replayed; Recovery Required
+    lets the operator see it and clear it after checking the library."""
+    note = (f"Recovered after restart: this {tx['metadata']['mutation_family']!r} transaction was left Running by "
+            "an earlier process, and this version cannot tell from engine evidence whether it changed the "
+            "library. Nothing was replayed; check the library and re-plan if needed.")
+    out = st.transition(tx["id"], "Running", "Recovery Required", append_logs=[note])
+    return {"operation_id": tx["id"], "action": "Recovery Required" if out else "skipped", "note": note}
+
+
 def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
           before: Optional[float] = None) -> List[Dict[str, Any]]:
     """``before``: claimed composite applies last written before this time
@@ -188,6 +200,8 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
                 # Running and record each step as it lands; a crash between steps
                 # left them Running for good (failure-injection matrix).
                 results.append(_interrupted_apply(st, tx["id"]))
+            elif meta.get("mutation_family"):
+                results.append(_unknown_family(st, tx))
         elif meta.get("mutation_family") in families:
             try:
                 results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st))

@@ -3046,11 +3046,31 @@
    "dependencies": []
   },
   {
+   "name": "note_job_progress",
+   "module": "backend/job_service.py",
+   "lines": [
+    27,
+    34
+   ],
+   "size": 8,
+   "body_lines": 3,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "JOBS",
+   "desired_owner": "backend/job_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_wait_for_child_job"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_call_job_fn",
    "module": "backend/job_service.py",
    "lines": [
-    15,
-    22
+    37,
+    44
    ],
    "size": 8,
    "body_lines": 7,
@@ -3069,11 +3089,11 @@
    "name": "_wait_for_child_job",
    "module": "backend/job_service.py",
    "lines": [
-    25,
-    159
+    47,
+    247
    ],
-   "size": 135,
-   "body_lines": 131,
+   "size": 201,
+   "body_lines": 197,
    "route": null,
    "mutation_capable": false,
    "domain": "JOBS",
@@ -3091,15 +3111,16 @@
    "caller_count": 7,
    "dependencies": [
     "_s",
-    "_yt_bot_check_message"
+    "_yt_bot_check_message",
+    "note_job_progress"
    ]
   },
   {
    "name": "_running_job_of_type",
    "module": "backend/job_service.py",
    "lines": [
-    162,
-    170
+    250,
+    258
    ],
    "size": 9,
    "body_lines": 8,
@@ -3122,8 +3143,8 @@
    "name": "_root_folder_repair_running_job",
    "module": "backend/job_service.py",
    "lines": [
-    173,
-    180
+    261,
+    268
    ],
    "size": 8,
    "body_lines": 7,
@@ -23268,10 +23289,10 @@
    "module": "backend/ai_service.py",
    "lines": [
     41,
-    70
+    73
    ],
-   "size": 30,
-   "body_lines": 27,
+   "size": 33,
+   "body_lines": 30,
    "route": null,
    "mutation_capable": false,
    "domain": "REPLACEMENT",
@@ -23290,8 +23311,8 @@
    "name": "_validate_import_source_audio",
    "module": "backend/ai_service.py",
    "lines": [
-    73,
-    115
+    76,
+    118
    ],
    "size": 43,
    "body_lines": 38,
@@ -23318,8 +23339,8 @@
    "name": "_ai_match_evidence_packet",
    "module": "backend/ai_service.py",
    "lines": [
-    118,
-    167
+    121,
+    170
    ],
    "size": 50,
    "body_lines": 40,
@@ -23349,8 +23370,8 @@
    "name": "_ai_conf_at_least",
    "module": "backend/ai_service.py",
    "lines": [
-    170,
-    172
+    173,
+    175
    ],
    "size": 3,
    "body_lines": 1,
@@ -23372,8 +23393,8 @@
    "name": "_ai_auto_import_allowed",
    "module": "backend/ai_service.py",
    "lines": [
-    175,
-    190
+    178,
+    193
    ],
    "size": 16,
    "body_lines": 12,
@@ -23397,8 +23418,8 @@
    "name": "_track_ai_parse_duration_seconds",
    "module": "backend/ai_service.py",
    "lines": [
-    193,
-    214
+    196,
+    217
    ],
    "size": 22,
    "body_lines": 21,
@@ -23420,8 +23441,8 @@
    "name": "_track_ai_duration_seconds",
    "module": "backend/ai_service.py",
    "lines": [
-    217,
-    222
+    220,
+    225
    ],
    "size": 6,
    "body_lines": 5,
@@ -23440,8 +23461,8 @@
    "name": "_track_ai_candidate_duration_seconds",
    "module": "backend/ai_service.py",
    "lines": [
-    225,
-    232
+    228,
+    235
    ],
    "size": 8,
    "body_lines": 7,
@@ -23460,8 +23481,8 @@
    "name": "_track_ai_match_status",
    "module": "backend/ai_service.py",
    "lines": [
-    235,
-    240
+    238,
+    243
    ],
    "size": 6,
    "body_lines": 5,
@@ -23478,8 +23499,8 @@
    "name": "_compact_track_ai_candidate",
    "module": "backend/ai_service.py",
    "lines": [
-    243,
-    307
+    246,
+    310
    ],
    "size": 65,
    "body_lines": 64,
@@ -23503,8 +23524,8 @@
    "name": "_track_ai_evidence_packet",
    "module": "backend/ai_service.py",
    "lines": [
-    310,
-    374
+    313,
+    377
    ],
    "size": 65,
    "body_lines": 55,
@@ -23527,8 +23548,8 @@
    "name": "_classify_openai_error",
    "module": "backend/ai_service.py",
    "lines": [
-    377,
-    398
+    380,
+    401
    ],
    "size": 22,
    "body_lines": 14,
@@ -23549,8 +23570,8 @@
    "name": "_ai_suggest_album_internal",
    "module": "backend/ai_service.py",
    "lines": [
-    401,
-    742
+    404,
+    745
    ],
    "size": 342,
    "body_lines": 328,
@@ -23584,8 +23605,8 @@
    "name": "_record_ai_match",
    "module": "backend/ai_service.py",
    "lines": [
-    753,
-    777
+    756,
+    780
    ],
    "size": 25,
    "body_lines": 23,
@@ -23605,8 +23626,8 @@
    "name": "_score_mb_release_candidate",
    "module": "backend/ai_service.py",
    "lines": [
-    783,
-    871
+    786,
+    874
    ],
    "size": 89,
    "body_lines": 81,
@@ -23629,8 +23650,8 @@
    "name": "_ai_preflight_note",
    "module": "backend/ai_service.py",
    "lines": [
-    874,
-    901
+    877,
+    904
    ],
    "size": 28,
    "body_lines": 27,
@@ -23651,8 +23672,8 @@
    "name": "_run_ai_release_preflight",
    "module": "backend/ai_service.py",
    "lines": [
-    904,
-    941
+    907,
+    944
    ],
    "size": 38,
    "body_lines": 36,
@@ -23677,8 +23698,8 @@
    "name": "_apply_ai_preflight_to_suggestion",
    "module": "backend/ai_service.py",
    "lines": [
-    944,
-    973
+    947,
+    976
    ],
    "size": 30,
    "body_lines": 28,
@@ -23702,8 +23723,8 @@
    "name": "_ai_suggest_folder_internal",
    "module": "backend/ai_service.py",
    "lines": [
-    976,
-    1470
+    979,
+    1473
    ],
    "size": 495,
    "body_lines": 485,
@@ -23744,8 +23765,8 @@
    "name": "_run_ai_matching_regressions",
    "module": "backend/ai_service.py",
    "lines": [
-    1473,
-    1578
+    1476,
+    1581
    ],
    "size": 106,
    "body_lines": 104,
@@ -23774,8 +23795,8 @@
    "name": "_ai_batch_reserve_worker",
    "module": "backend/ai_service.py",
    "lines": [
-    1608,
-    1622
+    1611,
+    1625
    ],
    "size": 15,
    "body_lines": 5,
@@ -23794,8 +23815,8 @@
    "name": "_ai_batch_promote_worker",
    "module": "backend/ai_service.py",
    "lines": [
-    1625,
-    1636
+    1628,
+    1639
    ],
    "size": 12,
    "body_lines": 5,
@@ -23814,8 +23835,8 @@
    "name": "_ai_batch_release_worker",
    "module": "backend/ai_service.py",
    "lines": [
-    1639,
-    1648
+    1642,
+    1651
    ],
    "size": 10,
    "body_lines": 3,
@@ -23835,8 +23856,8 @@
    "name": "_ai_batch_active_worker_job_id",
    "module": "backend/ai_service.py",
    "lines": [
-    1651,
-    1658
+    1654,
+    1661
    ],
    "size": 8,
    "body_lines": 4,
@@ -23857,8 +23878,8 @@
    "name": "_ai_batch_release_worker_any",
    "module": "backend/ai_service.py",
    "lines": [
-    1661,
-    1675
+    1664,
+    1678
    ],
    "size": 15,
    "body_lines": 3,
@@ -23879,8 +23900,8 @@
    "name": "_ai_batch_validate_worker_handoff",
    "module": "backend/ai_service.py",
    "lines": [
-    1693,
-    1723
+    1696,
+    1726
    ],
    "size": 31,
    "body_lines": 11,
@@ -23901,8 +23922,8 @@
    "name": "_ai_batch_folder_id",
    "module": "backend/ai_service.py",
    "lines": [
-    1729,
-    1731
+    1732,
+    1734
    ],
    "size": 3,
    "body_lines": 2,
@@ -23925,8 +23946,8 @@
    "name": "_ai_batch_state_file",
    "module": "backend/ai_service.py",
    "lines": [
-    1734,
-    1736
+    1737,
+    1739
    ],
    "size": 3,
    "body_lines": 2,
@@ -23945,8 +23966,8 @@
    "name": "_ai_batch_json_safe",
    "module": "backend/ai_service.py",
    "lines": [
-    1739,
-    1748
+    1742,
+    1751
    ],
    "size": 10,
    "body_lines": 9,
@@ -23965,8 +23986,8 @@
    "name": "_ai_batch_persist_job_association",
    "module": "backend/ai_service.py",
    "lines": [
-    1751,
-    1756
+    1754,
+    1759
    ],
    "size": 6,
    "body_lines": 5,
@@ -23989,8 +24010,8 @@
    "name": "_ai_batch_load_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1759,
-    1764
+    1762,
+    1767
    ],
    "size": 6,
    "body_lines": 5,
@@ -24014,8 +24035,8 @@
    "name": "_ai_batch_latest_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1767,
-    1769
+    1770,
+    1772
    ],
    "size": 3,
    "body_lines": 2,
@@ -24041,8 +24062,8 @@
    "name": "_ai_batch_find_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1772,
-    1776
+    1775,
+    1779
    ],
    "size": 5,
    "body_lines": 4,
@@ -24071,8 +24092,8 @@
    "name": "_ai_batch_control",
    "module": "backend/ai_service.py",
    "lines": [
-    1779,
-    1785
+    1782,
+    1788
    ],
    "size": 7,
    "body_lines": 6,
@@ -24094,8 +24115,8 @@
    "name": "_ai_batch_initial_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1788,
-    1816
+    1791,
+    1819
    ],
    "size": 29,
    "body_lines": 28,
@@ -24116,8 +24137,8 @@
    "name": "_ai_batch_find_audio_dirs",
    "module": "backend/ai_service.py",
    "lines": [
-    1819,
-    1837
+    1822,
+    1840
    ],
    "size": 19,
    "body_lines": 18,
@@ -24136,8 +24157,8 @@
    "name": "_ai_batch_already_in_library",
    "module": "backend/ai_service.py",
    "lines": [
-    1840,
-    1847
+    1843,
+    1850
    ],
    "size": 8,
    "body_lines": 7,
@@ -24156,8 +24177,8 @@
    "name": "_ai_batch_folder_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1850,
-    1867
+    1853,
+    1870
    ],
    "size": 18,
    "body_lines": 17,
@@ -24178,8 +24199,8 @@
    "name": "_ai_batch_queue_pending_review",
    "module": "backend/ai_service.py",
    "lines": [
-    1870,
-    1882
+    1873,
+    1885
    ],
    "size": 13,
    "body_lines": 12,
@@ -24202,8 +24223,8 @@
    "name": "_ai_batch_build_evidence",
    "module": "backend/ai_service.py",
    "lines": [
-    1885,
-    1907
+    1888,
+    1910
    ],
    "size": 23,
    "body_lines": 22,
@@ -24226,8 +24247,8 @@
    "name": "_ai_batch_run_suggestions",
    "module": "backend/ai_service.py",
    "lines": [
-    1910,
-    2042
+    1913,
+    2045
    ],
    "size": 133,
    "body_lines": 132,
@@ -24253,8 +24274,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2045,
-    2057
+    2048,
+    2060
    ],
    "size": 13,
    "body_lines": 12,
@@ -24277,8 +24298,8 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2060,
-    2261
+    2063,
+    2264
    ],
    "size": 202,
    "body_lines": 201,
@@ -24311,8 +24332,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2264,
-    2391
+    2267,
+    2394
    ],
    "size": 128,
    "body_lines": 127,
@@ -24348,8 +24369,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2394,
-    2520
+    2397,
+    2523
    ],
    "size": 127,
    "body_lines": 121,
@@ -24379,8 +24400,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2523,
-    2557
+    2526,
+    2560
    ],
    "size": 35,
    "body_lines": 25,
@@ -29045,11 +29066,31 @@
    ]
   },
   {
+   "name": "_word",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    31,
+    33
+   ],
+   "size": 3,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_transaction_operation_from_job"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_transaction_operation_from_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    30,
-    69
+    36,
+    75
    ],
    "size": 40,
    "body_lines": 39,
@@ -29062,14 +29103,16 @@
     "_transaction_create_for_job"
    ],
    "caller_count": 1,
-   "dependencies": []
+   "dependencies": [
+    "_word"
+   ]
   },
   {
    "name": "_transaction_create_for_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    72,
-    111
+    78,
+    117
    ],
    "size": 40,
    "body_lines": 39,
@@ -29090,11 +29133,11 @@
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    114,
-    207
+    120,
+    233
    ],
-   "size": 94,
-   "body_lines": 93,
+   "size": 114,
+   "body_lines": 113,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -29108,11 +29151,32 @@
    ]
   },
   {
+   "name": "transaction_cancel_eligibility",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    240,
+    257
+   ],
+   "size": 18,
+   "body_lines": 12,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "TRANSACTIONS",
+   "desired_owner": "backend/transaction_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "api_transaction_cancel",
+    "api_transaction_detail"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    210,
-    219
+    260,
+    269
    ],
    "size": 10,
    "body_lines": 9,
@@ -29133,8 +29197,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    224,
-    235
+    274,
+    285
    ],
    "size": 12,
    "body_lines": 11,
@@ -29155,8 +29219,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    238,
-    268
+    288,
+    318
    ],
    "size": 31,
    "body_lines": 30,
@@ -29178,8 +29242,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    271,
-    325
+    321,
+    375
    ],
    "size": 55,
    "body_lines": 54,
@@ -34388,10 +34452,10 @@
    "module": "routes_maintenance.py",
    "lines": [
     725,
-    742
+    743
    ],
-   "size": 18,
-   "body_lines": 11,
+   "size": 19,
+   "body_lines": 12,
    "route": {
     "method": "GET",
     "path": "/api/transactions/<transaction_id>"
@@ -34405,15 +34469,16 @@
    "dependencies": [
     "_rollback_fields",
     "_sync_transactions_from_jobs",
-    "_transaction_int_arg"
+    "_transaction_int_arg",
+    "transaction_cancel_eligibility"
    ]
   },
   {
    "name": "api_transaction_approve",
    "module": "routes_maintenance.py",
    "lines": [
-    746,
-    775
+    747,
+    776
    ],
    "size": 30,
    "body_lines": 21,
@@ -34433,11 +34498,11 @@
    "name": "api_transaction_cancel",
    "module": "routes_maintenance.py",
    "lines": [
-    779,
+    780,
     797
    ],
-   "size": 19,
-   "body_lines": 16,
+   "size": 18,
+   "body_lines": 15,
    "route": {
     "method": "POST",
     "path": "/api/transactions/<transaction_id>/cancel"
@@ -34449,7 +34514,8 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_cancel_engine_mbsync"
+    "_cancel_engine_mbsync",
+    "transaction_cancel_eligibility"
    ]
   },
   {
