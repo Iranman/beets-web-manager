@@ -74,5 +74,7 @@ class WebManagerPlugin(BeetsPlugin):
         self.register_listener("write", break_hard_link)
         self.register_listener("after_write", note_library_write)
         # Never place an as-is import under a blank artist/album (D3).
-        from .operations import on_import_task_created
+        from .operations import on_album_imported, on_import_task_created
         self.register_listener("import_task_created", on_import_task_created)
+        # Which albums this request imported (not a library-wide count).
+        self.register_listener("album_imported", on_album_imported)

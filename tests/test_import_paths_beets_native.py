@@ -130,10 +130,24 @@ class ReimportSourceTests(unittest.TestCase):
 
     def test_move_and_search_id_and_fallback(self):
         ad = mock.MagicMock()
-        cw.reimport_source("/downloads/A", {"move": True, "search_id": REL, "quiet_fallback": "asis"}, adapter=ad)
+        cw.reimport_source("/downloads/A", {"move": True, "search_id": REL}, adapter=ad)
         kw = ad.run_import.call_args.kwargs
         self.assertEqual((kw["copy"], kw["move"]), (False, True))
-        self.assertEqual((kw["search_ids"], kw["quiet_fallback"]), ([REL], "asis"))
+        self.assertEqual((kw["search_ids"], kw["quiet_fallback"]), ([REL], "skip"))
+
+    def test_asis_fallback_is_refused_before_beets_runs(self):
+        ad = mock.MagicMock()
+        res = cw.reimport_source("/downloads/A", {"quiet_fallback": "asis"}, adapter=ad)
+        self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, "asis_refused", False))
+        ad.run_import.assert_not_called()
+
+    def test_albums_imported_counts_only_this_request(self):
+        # The library grew by 5 (a concurrent import), but this request added one album.
+        ad = mock.MagicMock()
+        ad.get_stats.side_effect = [{"albums": 10}, {"albums": 15}]
+        ad.run_import.return_value = {"imported_album_ids": [42], "skipped_paths": []}
+        res = cw.reimport_source("/downloads/A", {}, adapter=ad)
+        self.assertEqual((res["albums_imported"], res["imported_album_ids"]), (1, [42]))
 
     def test_bad_fallback_and_refusal(self):
         ad = mock.MagicMock()

@@ -2792,6 +2792,24 @@ def plan_album_metadata(
         if not verdict["ok"]:
             return verdict
         album_updates["mb_releasegroupid"] = verdict["release_group_id"]
+    elif ("mb_releasegroupid" in album_updates
+          and _uuid_or_blank(album_updates["mb_releasegroupid"]) != _uuid_or_blank(album.get("mb_releasegroupid"))
+          and not payload.get("release_selected_by_operator")):
+        # #261 F-5: a Release Group change with no Release on the album needs
+        # the operator's selection or a MusicBrainz-verified Release in that
+        # Release Group (``verified_release_id``, not written). Text alone
+        # never qualifies.
+        evidence = _uuid_or_blank(payload.get("verified_release_id"))
+        if not evidence:
+            return {"ok": False, "code": "release_group_change_unverified",
+                    "error": "Changing the Release Group of an album with no Release needs an operator selection "
+                             "or a MusicBrainz-verified Release in that Release Group; nothing was planned."}
+        verdict = _verified_album_identity(album, evidence, _s(album_updates["mb_releasegroupid"]),
+                                           allow_establish=True, rg_explicit=True)
+        if not verdict["ok"]:
+            return verdict
+        album_updates["mb_releasegroupid"] = verdict["release_group_id"]
+    payload.pop("verified_release_id", None)
     refusal = _identity_write_error(album_updates)
     if refusal:
         return refusal
@@ -2802,9 +2820,9 @@ def plan_album_metadata(
     new_rg = _uuid_or_blank(album_updates.get("mb_releasegroupid"))
     summary = f"Metadata update for album {aid}"
     if old_rg and new_rg and old_rg != new_rg:
-        payload["release_group_change"] = {"from": old_rg, "to": new_rg,
-                                           "operator_selected": bool(payload.get("release_selected_by_operator"))}
-        summary += f" (Release Group {old_rg} -> {new_rg}, operator-selected)"
+        selected = bool(payload.get("release_selected_by_operator"))
+        payload["release_group_change"] = {"from": old_rg, "to": new_rg, "operator_selected": selected}
+        summary += f" (Release Group {old_rg} -> {new_rg}, {'operator-selected' if selected else 'explicit'})"
     before: Dict[str, Any] = {"album": {"id": aid, "fields": _restorable(album, album_updates)}, "items": []}
     for iid, fields in per_item.items():
         item = ad.get_item(int(iid))
@@ -4002,6 +4020,9 @@ def reimport_source(
     opts = beets_options or {}
     move = bool(opts.get("move")) and not opts.get("copy")
     fallback = _s(opts.get("quiet_fallback") or "skip").strip().lower()
+    if fallback == "asis":  # defense in depth for QA D3; /api/import already forces skip (#342)
+        return {"ok": False, "code": "asis_refused", "mutated": False,
+                "error": "Importing unmatched albums as-is is refused; they stay in place for the Review Queue."}
     if fallback not in _QUIET_FALLBACKS:
         return {"ok": False, "code": "invalid_fallback", "mutated": False,
                 "error": "quiet_fallback must be 'skip' or 'asis'."}
@@ -4014,8 +4035,12 @@ def reimport_source(
                             quiet_fallback=fallback, timeout=timeout)
     except BeetsAdapterError as ex:
         return _import_refused(ex)
-    after = _album_count(ad)
-    added = after - before if before is not None and after is not None else None
+    ids = res.get("imported_album_ids") if isinstance(res, dict) else None
+    if isinstance(ids, list):  # plugin 1.16.0: this request's albums only (#344 c)
+        added = len(ids)
+    else:  # older plugin: a library-wide delta, inflated by concurrent imports
+        after = _album_count(ad)
+        added = after - before if before is not None and after is not None else None
     reported = res.get("skipped_paths") if isinstance(res, dict) else None
     if isinstance(reported, list):
         not_matched, known = [_s(x) for x in reported if _s(x)], True
@@ -4030,6 +4055,7 @@ def reimport_source(
     skipped = [{"path": p, "reason": reasons.get(p) or "not_matched"} for p in not_matched]
     return {"ok": True, "copy": not move, "move": move, "quiet_fallback": fallback,
             "albums_imported": added, "not_matched": not_matched, "skipped": skipped,
+            "imported_album_ids": ids if isinstance(ids, list) else None,
             "not_matched_known": known, "result": res}
 
 
@@ -4865,7 +4891,22 @@ def mbsync_library(
         st.update(transaction_id, metadata={"mutation_family": MBSYNC_LIBRARY_FAMILY, "engine_operation_id": op_id,
                                             "write": write, "move": move})
 
-    cancel_sent, errors, logged = False, 0, 0
+    cancel_sent, errors, logged, last = False, 0, 0, {}
+
+    def lost(code: str, error: str) -> Dict[str, Any]:
+        # #326 F2/F3: keep what Beets last reported; the rest is unknown.
+        counts = {k: int(last.get(k) or 0) for k in _MBSYNC_LIBRARY_COUNTS}
+        note = (f"Outcome partly unknown: Beets last reported {counts['processed']} of {counts['targets']} "
+                f"synced, {counts['changed_albums'] + counts['changed_singletons']} changed.")
+        log.append(note)
+        if st:
+            st.update(transaction_id, changes=_mbsync_change_rows(last.get("changes") or []),
+                      counts={"albums": counts["changed_albums"], "items": counts["changed_items"]},
+                      metadata={"engine_result": {**counts, "outcome_unknown": True, "lost": code}},
+                      logs=[note])
+        return {"ok": False, "code": code, "operation_id": op_id, "mutated": None, "summary": counts,
+                "outcome_partly_unknown": True, "error": f"{error} {note}"}
+
     while True:
         if not cancel_sent and cancel_requested(cancel_event):
             cancel_sent = True
@@ -4878,17 +4919,17 @@ def mbsync_library(
             op = ad.get_operation(op_id) or {}
             errors = 0
         except BeetsAdapterNotFoundError:
-            return {"ok": False, "code": "operation_lost", "operation_id": op_id, "mutated": None,
-                    "error": "Beets no longer knows this sync (was Beets restarted?). It stopped there; albums "
-                             "synced before that keep their changes."}
+            return lost("operation_lost", "Beets no longer knows this sync (was Beets restarted?). It stopped "
+                                          "there; albums synced before that keep their changes.")
         except BeetsAdapterError as ex:
             errors += 1
             if errors >= max_poll_errors:
-                return {"ok": False, "code": "engine_unreachable", "operation_id": op_id, "mutated": None,
-                        "error": f"Lost contact with Beets ({ex.error_code}); the sync may still be running there."}
+                return lost("engine_unreachable",
+                            f"Lost contact with Beets ({ex.error_code}); the sync may still be running there.")
             sleep(poll_seconds)
             continue
         status, result = op.get("status"), op.get("result") or {}
+        last = result or last
         processed = int(result.get("processed") or 0)
         if processed >= logged + 25 or (status != "running" and processed > logged):
             logged = processed

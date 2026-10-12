@@ -602,6 +602,17 @@ def _refuse_blank_identity(session, task) -> bool:
     return True
 
 
+#: Album ids this request's import added (set only while run_import holds
+#: mutation_lock, so concurrent imports elsewhere never count, #344 c).
+_IMPORTED_ALBUM_IDS: Optional[List[int]] = None
+
+
+def on_album_imported(lib, album):
+    """``album_imported`` listener: record the album for the running request."""
+    if _IMPORTED_ALBUM_IDS is not None:
+        _IMPORTED_ALBUM_IDS.append(int(album.id))
+
+
 def on_import_task_created(session, task):
     """``import_task_created`` listener (D3): without autotag, Beets places an
     album by its own tags, so one with no artist or album name is skipped
@@ -673,6 +684,14 @@ def run_import():
     # happens to an album without a strong match (skip by default).
     autotag = bool(data.get("autotag", False))
     quiet_fallback = str(data.get("quiet_fallback") or "skip").lower()
+    if quiet_fallback == "asis":
+        # An unmatched album imported with whatever tags it has gets no
+        # verified identity (QA D3, music-identity). Refused, not gated: no
+        # operator setting can supply the evidence the match lacked.
+        return jsonify({
+            "error": "quiet_fallback 'asis' is refused: an album Beets cannot match is left in place for review",
+            "error_code": "ASIS_REFUSED",
+        }), 400
     if quiet_fallback not in _QUIET_FALLBACKS:
         return jsonify({
             "error": "quiet_fallback must be 'skip' or 'asis'",
@@ -858,7 +877,12 @@ def run_import():
                 session = _import_session_class(autotag, tasks)(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
-                session.run()
+                global _IMPORTED_ALBUM_IDS
+                _IMPORTED_ALBUM_IDS = imported_ids = []
+                try:
+                    session.run()
+                finally:
+                    _IMPORTED_ALBUM_IDS = None
 
                 skipped: List[str] = []
                 skipped_reasons: List[Dict[str, str]] = []
@@ -886,6 +910,7 @@ def run_import():
                     "duplicate_action": duplicate_action,
                     "skipped_paths": skipped,
                     "skipped": skipped_reasons,
+                    "imported_album_ids": sorted(set(imported_ids)),
                 }
                 if op_id_arg:
                     update_operation(op_id_arg, "succeeded", result=result)

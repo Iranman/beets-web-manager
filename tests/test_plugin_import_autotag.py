@@ -3,7 +3,7 @@ importer (beet import -q [--search-id]) and reports the folders Beets skipped.
 
 These run the real Beets importer offline. With no metadata-source plugin
 loaded Beets finds no candidates, so autotag + quiet_fallback=skip skips the
-album (left in place) and quiet_fallback=asis imports it with its tags.
+album (left in place); quiet_fallback=asis is refused (plugin 1.16.0).
 """
 import os
 import shutil
@@ -121,20 +121,21 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "no_strong_match"}])
         self.assertEqual(len(self.lib.albums()), 0)
 
-    def test_autotag_asis_imports_when_asked(self):
+    def test_autotag_asis_is_refused(self):
+        """An unmatched album never enters the library without a release
+        group (#261 F-5 / D3): quiet_fallback=asis is refused before Beets runs."""
         src = os.path.join(self.downloads, "Some Artist - Asis")
         _album(src, "Some Artist", "Asis")
         res = self._import(paths=[src], autotag=True, quiet_fallback="asis", copy=True, move=False)
-        self.assertEqual(res.get_json()["skipped_paths"], [])
-        self.assertEqual(res.get_json()["skipped"], [])
-        self.assertEqual([a.album for a in self.lib.albums()], ["Asis"])
-        self.assertTrue(os.path.isdir(src))
+        self.assertEqual((res.status_code, res.get_json()["error_code"]), (400, "ASIS_REFUSED"))
+        self.assertEqual(len(self.lib.albums()), 0)
+        self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
 
     def test_untagged_album_is_never_placed_under_a_blank_identity(self):
         """D3: an as-is import of a folder with no artist/album tags would land
         at "/music/ (0000)/ -  - 01 - ...". It is skipped, nothing is added
         or moved, and the reason is reported."""
-        for name, body in (("Plain", {}), ("Fallback", {"autotag": True, "quiet_fallback": "asis"})):
+        for name, body in (("Plain", {}),):
             with self.subTest(name):
                 src = os.path.join(self.downloads, name)
                 _album(src, "", "")
@@ -150,8 +151,9 @@ class PluginImportAutotagTests(unittest.TestCase):
         blank-identity target where it is and reports it."""
         src = os.path.join(self.downloads, "Some Artist - Kept")
         _album(src, "Some Artist", "Kept")
-        self._import(paths=[src], copy=True, move=False)
+        res = self._import(paths=[src], copy=True, move=False)
         album = self.lib.albums()[0]
+        self.assertEqual(res.get_json()["imported_album_ids"], [album.id])  # #344 c
         paths = sorted(i.path for i in album.items())
         auth = {"Authorization": f"Bearer {TOKEN}"}
         for body in ({"album_ids": [album.id], "fields": {"album": ""}},

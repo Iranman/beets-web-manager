@@ -601,5 +601,64 @@ class RootFolderRepairLeadingSpaceTests(unittest.TestCase):
                          str(art.MUSIC_ROOT / " (0000)" / "01.flac"))
 
 
+from tests.test_mutation_identity_safety import RG_B, REL_A2, REL_B, _IdentityEnv  # noqa: E402
+from tests.test_mbsync_all_via_beets import ScriptedAdapter  # noqa: E402
+from backend.beets_adapter import BeetsAdapterConnectionError, BeetsAdapterNotFoundError  # noqa: E402
+
+
+class ReleaseGroupOnlyChangeTests(_IdentityEnv):
+    """#261 F-5: an album with no Release changes Release Group only with the
+    operator's selection or a MusicBrainz-verified Release in that group."""
+
+    def plan(self, updates, **kw):
+        self.ad = self.adapter(rel="")
+        return cw.plan_album_metadata({"album_id": 1, "updates": updates, **kw}, adapter=self.ad, store=self.store)
+
+    def test_text_alone_is_refused_and_nothing_is_planned(self):
+        res = self.plan({"mb_releasegroupid": RG_B})
+        self.assertEqual(res.get("code"), "release_group_change_unverified", res)
+        self.assertEqual(self.store.list()[1], 0)
+
+    def test_verified_release_in_that_group_qualifies(self):
+        res = self.plan({"mb_releasegroupid": RG_B}, verified_release_id=REL_B)
+        self.assertTrue(res["ok"], res)
+        tx = self.store.get(res["operation_id"])
+        self.assertNotIn("verified_release_id", tx["metadata"])
+        self.assertIn("explicit)", tx["summary"])
+        # A Release from another group is not evidence for this one.
+        self.assertFalse(self.plan({"mb_releasegroupid": RG_B}, verified_release_id=REL_A2).get("ok"))
+
+    def test_operator_selection_qualifies_and_is_labelled(self):
+        res = self.plan({"mb_releasegroupid": RG_B}, release_selected_by_operator=True)
+        self.assertTrue(res["ok"], res)
+        self.assertIn("operator-selected)", self.store.get(res["operation_id"])["summary"])
+
+
+class MbsyncLostOutcomeTests(unittest.TestCase):
+    """#326 F2/F3: losing Beets mid-run keeps the last counts it reported."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = te.TransactionStore(self._tmp.name)
+        self.tx = self.store.create(operation_type="MusicBrainz Match", status="Running")["id"]
+
+    def test_lost_or_unreachable_keeps_last_counts(self):
+        running = {"status": "running", "result": {"targets": 10, "processed": 4, "changed_albums": 2,
+                                                   "changed_items": 1}}
+        for err, code in ((BeetsAdapterNotFoundError("gone"), "operation_lost"),
+                          (BeetsAdapterConnectionError("down"), "engine_unreachable")):
+            with self.subTest(code):
+                log = []
+                res = cw.mbsync_library(log, None, transaction_id=self.tx, adapter=ScriptedAdapter([running, err]),
+                                        store=self.store, sleep=lambda s: None, max_poll_errors=1)
+                self.assertEqual((res["ok"], res["code"], res["mutated"]), (False, code, None))
+                self.assertTrue(res["outcome_partly_unknown"])
+                result = self.store.get(self.tx)["metadata"]["engine_result"]
+                self.assertEqual((result["processed"], result["outcome_unknown"]), (4, True))
+                self.assertTrue(any("Outcome partly unknown" in line and "4 of 10" in line for line in log), log)
+
+
 if __name__ == "__main__":
     unittest.main()
