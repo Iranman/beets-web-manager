@@ -1,8 +1,10 @@
 """Operation implementations for the WebManager Beets integration plugin."""
 
+import math
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
 import logging
@@ -50,6 +52,7 @@ DURABLE_RETENTION_SECONDS = 7 * 86400
 REGISTRY_FILENAME = "webmanager_operations.json"
 _FINAL = ("succeeded", "failed")
 _durable_file: Optional[str] = None
+_IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")
 
 webmanager_bp = Blueprint("webmanager", __name__, url_prefix="/webmanager")
 
@@ -64,6 +67,11 @@ def _bind_library_music_dir():
     library's directory for this request's thread. Also loads the durable
     registry on the first request after a restart, so a tag write (a Web
     Manager edit, mbsync) keeps relocation records current (#332)."""
+    key = request.headers.get("Idempotency-Key")
+    if key is not None and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+        # Keys are saved to disk (#308): a bounded, plain-text key only.
+        return jsonify({"error": "Idempotency-Key must be 1-200 characters of A-Z a-z 0-9 . _ : -",
+                        "error_code": "INVALID_IDEMPOTENCY_KEY"}), 400
     lib = getattr(g, "lib", None)
     bind_music_dir(lib)
     if lib is not None:
@@ -98,25 +106,27 @@ def _prune_operations_locked():
     """Prune expired completed/failed operations from registry (must hold _operations_lock)."""
     now = time.time()
     to_delete = []
-    completed = []
+    # Durable outcomes have their own cap, so a burst of ordinary operations
+    # can never evict a folder-op or relocation record (#308).
+    completed: Dict[bool, List[Tuple[float, str]]] = {True: [], False: []}
 
     for op_id, op in _operations.items():
         if op.get("status") in _FINAL:
-            keep = DURABLE_RETENTION_SECONDS if op.get("type") in _DURABLE_TYPES else DEFAULT_RETENTION_SECONDS
+            durable = op.get("type") in _DURABLE_TYPES
+            keep = DURABLE_RETENTION_SECONDS if durable else DEFAULT_RETENTION_SECONDS
             if now - op.get("updated_at", now) > keep:
                 to_delete.append(op_id)
             else:
-                completed.append((op.get("updated_at", 0), op_id))
+                completed[durable].append((op.get("updated_at", 0), op_id))
 
     for op_id in to_delete:
         del _operations[op_id]
 
-    # Enforce hard upper bound on completed operations
-    if len(completed) > MAX_COMPLETED_OPERATIONS:
-        completed.sort(key=lambda x: x[0])  # oldest first
-        overflow = len(completed) - MAX_COMPLETED_OPERATIONS
-        for _, op_id in completed[:overflow]:
-            if op_id in _operations and _operations[op_id].get("status") != "running":
+    # Enforce hard upper bound on completed operations, per kind
+    for group in completed.values():
+        if len(group) > MAX_COMPLETED_OPERATIONS:
+            group.sort(key=lambda x: x[0])  # oldest first
+            for _, op_id in group[:len(group) - MAX_COMPLETED_OPERATIONS]:
                 del _operations[op_id]
 
 
@@ -125,15 +135,26 @@ def _save_durable_locked() -> None:
     if not _durable_file:
         return
     entries = [op for op in _operations.values() if op.get("type") in _DURABLE_TYPES and op.get("status") in _FINAL]
-    tmp = _durable_file + ".tmp"
+    tmp = None
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # A fresh O_EXCL temp file (mode 0600) never follows a planted
+        # symlink; os.replace keeps that mode on the registry (#308).
+        fd, tmp = tempfile.mkstemp(prefix=REGISTRY_FILENAME + ".", suffix=".tmp",
+                                   dir=os.path.dirname(_durable_file))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(entries, fh)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, _durable_file)
-    except OSError as exc:
+        tmp = None
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("webmanager: could not save the operation registry: %s", exc)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def bind_durable_registry(lib) -> None:
@@ -152,17 +173,20 @@ def bind_durable_registry(lib) -> None:
                 saved = json.load(fh)
         except FileNotFoundError:
             return
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             log.warning("webmanager: ignoring an unreadable operation registry: %s", exc)
             return
         for op in saved if isinstance(saved, list) else []:
             if not (isinstance(op, dict) and isinstance(op.get("operation_id"), str)
+                    and _IDEMPOTENCY_KEY_RE.fullmatch(op["operation_id"])
                     and op.get("type") in _DURABLE_TYPES and op.get("status") in _FINAL):
                 continue
             try:
                 created, updated = float(op.get("created_at") or 0), float(op.get("updated_at") or 0)
             except (TypeError, ValueError):
                 continue
+            if not (math.isfinite(created) and math.isfinite(updated)):
+                continue  # inf/nan would never be pruned (#308)
             _operations.setdefault(op["operation_id"], {
                 "operation_id": op["operation_id"], "type": op["type"], "_fingerprint": op.get("_fingerprint"),
                 "status": op["status"], "created_at": created, "updated_at": updated,

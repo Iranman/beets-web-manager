@@ -31,6 +31,7 @@ except ImportError:
 log = logging.getLogger("beets.adapter")
 
 DEFAULT_BEETS_WEB_URL = "http://beets:8337"
+_IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")  # the plugin's own rule (#308)
 
 # #208: a BEETS_WEB_URL with userinfo (user:pass@) never worked -- urllib
 # sends no Basic header and parses "u:pw@host" as the host -- and the
@@ -340,6 +341,11 @@ class BeetsAdapter:
         req_headers = {"Accept": "application/json"}
         if headers:
             req_headers.update(headers)
+        key = req_headers.get("Idempotency-Key")
+        if key and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+            # The plugin accepts only short plain keys (#308); a caller-supplied
+            # key is mapped deterministically, so its retries still collapse.
+            req_headers["Idempotency-Key"] = "k-" + hashlib.sha256(key.encode("utf-8")).hexdigest()
 
         body = None
         if json_data is not None:

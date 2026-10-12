@@ -67,6 +67,38 @@ class PluginFolderOpTests(unittest.TestCase):
     def p(self, *parts):
         return os.path.join(self.music, *parts)
 
+    def test_library_db_and_registry_inside_the_music_dir_are_never_touched(self):
+        """#308 item 7: with the Beets config inside the library directory,
+        folder steps never move, rename or remove the DB, the operation
+        registry, its temp files, or a folder holding them."""
+        cfg = self.p("Cfg", ".beets")
+        os.makedirs(cfg)
+        lib = Library(os.path.join(cfg, "library.blb"), directory=self.music)
+        self.addCleanup(lambda: lib._connection().close())
+        beets_web_app.config["lib"] = lib
+        registry = os.path.join(cfg, ops_mod.REGISTRY_FILENAME)
+        tmp = registry + ".abc.tmp"
+        for path in (registry, tmp):
+            with open(path, "w") as fh:
+                fh.write("[]")
+        cases = [
+            {"op": "rename_dir", "source": cfg, "target": self.p("Cfg", "moved")},
+            {"op": "rename_dir", "source": self.p("Cfg"), "target": self.p("Cfg2")},
+            {"op": "move_file", "source": os.path.join(cfg, "library.blb"), "target": self.p("x.blb")},
+            {"op": "move_file", "source": registry, "target": self.p("r.json")},
+            {"op": "move_file", "source": tmp, "target": self.p("t.json")},
+            {"op": "move_file", "source": self.p("x.txt"), "target": os.path.join(cfg, "library.blb-journal")},
+        ]
+        with open(self.p("x.txt"), "w") as fh:
+            fh.write("x")
+        for body in cases:
+            r = self.post(body)
+            self.assertEqual((r.status_code, r.get_json()["error_code"]), (409, "PATH_PROTECTED"), body)
+        os.makedirs(self.p("Cfg", "empty"))
+        self.assertEqual(self.post({"op": "remove_empty_dir", "path": self.p("Cfg", "empty")}).status_code, 200)
+        self.assertTrue(os.path.isfile(registry) and os.path.isfile(tmp))
+        self.assertTrue(os.path.isfile(os.path.join(cfg, "library.blb")))
+
     def test_requires_auth_and_is_advertised(self):
         self.assertEqual(self.post({"op": "create_dir", "path": self.p("X")}, auth=False).status_code, 401)
         self.assertIn("folder_op", ops_mod.get_capabilities())

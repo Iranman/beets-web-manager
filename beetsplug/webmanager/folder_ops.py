@@ -79,6 +79,22 @@ def contained_path(raw: Any, root: str) -> str:
     return path
 
 
+def _refuse_protected(lib, path: str) -> None:
+    """Never move, rename or remove the library DB (or its journal), the
+    operation registry (or its temp files), or a folder holding them, when
+    the Beets config lives inside the library directory (#308)."""
+    db = os.fsdecode(getattr(lib, "path", None) or "")
+    if not db or db == ":memory:":
+        return
+    db = os.path.abspath(db)
+    folder = os.path.dirname(db)
+    if (folder + os.sep).startswith(path + os.sep) or (
+            os.path.dirname(path) == folder
+            and os.path.basename(path).startswith((os.path.basename(db), ops.REGISTRY_FILENAME))):
+        raise _Refused("the path holds the Beets library database or Web Manager's operation registry",
+                       "PATH_PROTECTED")
+
+
 def _refuse_tracked(lib, path: str) -> None:
     if any(True for _ in lib.items(PathQuery("path", os.fsencode(path)))):
         raise _Refused("the path holds library items; move them through Beets instead", "PATH_IS_TRACKED")
@@ -99,6 +115,8 @@ def _step(lib, root: str, data: dict) -> dict:
         want_dir = op == "rename_dir"
         if not (os.path.isdir(source) if want_dir else os.path.isfile(source)):
             raise _Refused("source is missing or of the wrong type", "SOURCE_MISSING")
+        _refuse_protected(lib, source)
+        _refuse_protected(lib, target)
         _refuse_tracked(lib, source)
         _refuse_tracked(lib, target)  # never re-create a path Beets still references
         _refuse_target(target)
@@ -112,6 +130,7 @@ def _step(lib, root: str, data: dict) -> dict:
         path = contained_path(data.get("path"), root)
         if not os.path.isdir(path):
             raise _Refused("folder is missing", "SOURCE_MISSING")
+        _refuse_protected(lib, path)
         if os.listdir(path):  # a clearer error only; os.rmdir is the real check
             raise _Refused("folder is not empty", "NOT_EMPTY")
         try:
@@ -125,6 +144,7 @@ def _step(lib, root: str, data: dict) -> dict:
         path = contained_path(data.get("path"), root)
         if os.path.isdir(path):
             return {"op": op, "path": path, "existed": True}
+        _refuse_protected(lib, path)
         if os.path.lexists(path):
             raise _Refused("a file is in the way", "TARGET_EXISTS")
         util.mkdirall(os.path.join(path, "_"))  # creates path and any missing parents
