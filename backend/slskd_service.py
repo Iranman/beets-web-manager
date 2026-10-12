@@ -335,15 +335,15 @@ def _slskd_pause(seconds: float, cancel_event: Optional[Any] = None) -> None:
 def _slskd_bounded_walk(root: Path, budget: float, cancel_event: Optional[Any] = None):
     """Yield the paths of files under ``root`` (symlinked folders are not
     followed), stopping once ``budget`` seconds have passed; a job cancel
-    raises "cancelled". Checked once per folder (#263)."""
+    raises "cancelled". Checked on every entry (#263)."""
     stop_at = time.monotonic() + max(1.0, budget)
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for path in Path(root).rglob("*"):
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("cancelled")
         if time.monotonic() >= stop_at:
             return
-        for name in filenames:
-            yield Path(dirpath) / name
+        if path.is_file():
+            yield path
 
 
 def _slskd_search_and_queue(artist: str, album: str, year: str,

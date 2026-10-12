@@ -85,8 +85,13 @@ class BoundedWalkTests(unittest.TestCase):  # #263
     def test_walk_stops_at_its_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._tree(tmp)
-            ticks = iter([0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 10.0, 10.0])
-            with mock.patch.object(slskd.time, "monotonic", side_effect=lambda: next(ticks)):
+            calls = []
+
+            def monotonic():
+                calls.append(1)
+                return 0.0 if len(calls) <= 3 else 10.0
+
+            with mock.patch.object(slskd.time, "monotonic", side_effect=monotonic):
                 found = list(slskd._slskd_bounded_walk(root, 5.0))
             self.assertLess(len(found), 5)
 
