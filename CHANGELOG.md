@@ -9,6 +9,9 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - TrueNAS rollout script: the online library identity digest now hashes item paths relative to the library directory Beets reports in `/webmanager/status`. Before, an engine restart that moved from plugin 1.15.0 to 1.16.0, which serves Beets 2.14 item paths as absolute paths, failed with "library identity digest changed across the engine restart" even though the library had not changed. A real path change still changes the digest. This applies to the pre/post-deploy, engine-restart and offline stop/start comparisons.
+- Playlist sync (#363): a track a playlist deliberately repeats is no longer re-sent to Plex on every sync. Plex keeps one entry per track and drops a repeat it already holds, so the sync logged "+1 added" and counted a Plex write that changed nothing. A repeat is now satisfied by the one Plex entry, an unchanged playlist makes 0 Plex writes, and the "added" count (log and `tracks_added`) is what Plex holds after the write. The repeat stays in the Web Manager list and its `.m3u`.
+- Legacy playlist import (#351 N3): each `MUSIC_ROOT/playlists` file is opened first (no symlink follow, non-blocking) and then checked on the open file (regular file, at most 5 MB), so a file swapped for a symlink or FIFO after listing is not read. A symlinked `playlists` folder is skipped, and at most 500 files per folder are imported.
+- Playlist suggestions (#356): `GET /api/playlists/<name>/suggestions` and `POST /api/playlists/<name>/apply-safe-suggestions` return a response-level `acoustid_status` (`not_attempted`: suggestions for missing tracks have no audio to fingerprint) beside `musicbrainz_unavailable`.
 
 ## v0.4.0 - 2026-10-12
 

@@ -255,7 +255,8 @@ class _FakePlex:
     so duplicates are told apart, and supports the add/remove/move calls."""
 
     def __init__(self, playlists=None, fail_post=None, fail_put=None, fail_delete=None,
-                 fail_move=None):
+                 fail_move=None, collapse=False):
+        self.collapse = collapse  # real Plex: an added track already in the playlist is dropped (#363)
         self.playlists = {}  # ratingKey -> {"title", "items": [[item_id, track_key], ...]}
         self.next_item = 9000
         for key, row in (playlists or {}).items():
@@ -271,6 +272,12 @@ class _FakePlex:
 
     def keys(self, rating_key):
         return [k for _i, k in self.playlists[rating_key]["items"]]
+
+    def _add(self, rating_key, track_keys):
+        items = self.playlists[rating_key]["items"]
+        for k in track_keys:
+            if not (self.collapse and str(k) in {e[1] for e in items}):
+                items.append(self._entry(k))
 
     def writes(self):
         return [c for c in self.calls if c[0] != "GET"]
@@ -306,7 +313,8 @@ class _FakePlex:
                 raise self.fail_post
             self.next_key += 1
             key = str(self.next_key)
-            self.playlists[key] = {"title": params["title"], "items": [self._entry(k) for k in self._uri_keys(params)]}
+            self.playlists[key] = {"title": params["title"], "items": []}
+            self._add(key, self._uri_keys(params))
             return {"MediaContainer": {"Metadata": [{"ratingKey": key}]}}
         if method == "PUT" and path.endswith("/move"):
             if self.fail_move:
@@ -321,7 +329,7 @@ class _FakePlex:
         if method == "PUT" and path.endswith("/items"):
             if self.fail_put:
                 raise self.fail_put
-            self.playlists[parts[1]]["items"] += [self._entry(k) for k in self._uri_keys(params)]
+            self._add(parts[1], self._uri_keys(params))
             return {}
         if method == "DELETE" and len(parts) == 4:  # one entry
             if self.fail_delete:
@@ -750,6 +758,7 @@ class MusicBrainzOutageRouteTests(_RouteCase):
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
         self.assertTrue(body["musicbrainz_unavailable"])
+        self.assertEqual(body["acoustid_status"], "not_attempted")  # #356 item 3
         self.assertEqual([r["best"]["source"] for r in body["rows"]], ["beets-title", "beets-title"])
         # the outage is detected once; later tracks do not ask MusicBrainz again
         self.assertEqual(urllib.request.urlopen.call_count, pb.POLICIES["musicbrainz"].max_attempts)

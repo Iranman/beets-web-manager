@@ -607,6 +607,9 @@ def playlist_suggestions(name):
         "safe_count": safe_count,
         "rows": rows,
         "musicbrainz_unavailable": bool(mb_state.get("musicbrainz_unavailable")),
+        # #356: suggestions for missing tracks are text-only; there is no audio
+        # to fingerprint, so AcoustID is never consulted here.
+        "acoustid_status": "not_attempted",
     })
 
 
@@ -645,6 +648,9 @@ def playlist_apply_safe_suggestions(name):
         "suggested": suggestion_rows,
         "safe_count": len(replacements),
         "musicbrainz_unavailable": bool(mb_state.get("musicbrainz_unavailable")),
+        # #356: suggestions for missing tracks are text-only; there is no audio
+        # to fingerprint, so AcoustID is never consulted here.
+        "acoustid_status": "not_attempted",
     })
 
 
