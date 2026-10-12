@@ -12,6 +12,7 @@ import os
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -69,6 +70,14 @@ class _Spy:
             return real_unlink(self, missing_ok=missing_ok)
 
         self.patches = (mock.patch.object(Path, "rglob", rglob), mock.patch.object(Path, "unlink", unlink))
+
+
+def _module_time(**fakes):
+    """Patch only backend.slskd_service's `time` name (#266): patching
+    `slskd.time.time` replaced the process-wide `time.time`, so leftover
+    threads from earlier tests consumed _Clock ticks."""
+    real = {"time": time.time, "sleep": time.sleep, "monotonic": time.monotonic}
+    return mock.patch.object(slskd, "time", types.SimpleNamespace(**{**real, **fakes}))
 
 
 def _apply(patches):
@@ -222,8 +231,7 @@ class DownloadedFileSearchContainmentTests(unittest.TestCase):
         started = _apply((
             *tree.patches(), *spy.patches,
             mock.patch.object(slskd, "_slskd_req", return_value=[]),
-            mock.patch.object(slskd.time, "sleep", side_effect=sleep),
-            mock.patch.object(slskd.time, "time", side_effect=_Clock(ticks)),
+            _module_time(sleep=sleep, time=_Clock(ticks)),
         ))
         try:
             log = []
@@ -292,7 +300,7 @@ class DownloadedFileSearchContainmentTests(unittest.TestCase):
             started = _apply((
                 *tree.patches(),
                 mock.patch.object(slskd, "_slskd_req", return_value=[]),
-                mock.patch.object(slskd.time, "sleep", side_effect=AssertionError("slept despite cancel_event")),
+                _module_time(sleep=mock.Mock(side_effect=AssertionError("slept despite cancel_event"))),
             ))
             try:
                 with self.assertRaisesRegex(RuntimeError, "^cancelled$"):
@@ -337,7 +345,7 @@ class SearchAndQueueContainmentTests(unittest.TestCase):
 
         log = []
         started = _apply((*tree.patches(), mock.patch.object(slskd, "_slskd_req", side_effect=req),
-                          mock.patch.object(slskd.time, "sleep")))
+                          _module_time(sleep=mock.Mock())))
         try:
             try:
                 result = slskd._slskd_search_and_queue("Artist", "Album", "", log)

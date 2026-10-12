@@ -105,122 +105,88 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertIn("installed_but_disabled", SETUP)
 
 
-@unittest.skipUnless(os.environ.get("RUN_DOCKER_SMOKE") == "1", "set RUN_DOCKER_SMOKE=1 to build and run the Docker fresh-install smoke test")
-class BeetsFreshInstallDockerSmokeTests(unittest.TestCase):
-    def test_fresh_image_loads_default_plugins(self):
-        if not shutil.which("docker"):
-            self.skipTest("docker executable not available")
-        image = os.environ.get("DOCKER_SMOKE_IMAGE", "beets-web-manager-review-fix")
-        subprocess.run(["docker", "build", "--no-cache", "-t", image, "."], cwd=ROOT, check=True, text=True)
-        with tempfile.TemporaryDirectory(dir=os.environ.get("TMP", None)) as config_dir, \
-             tempfile.TemporaryDirectory(dir=os.environ.get("TMP", None)) as music_dir, \
-             tempfile.TemporaryDirectory(dir=os.environ.get("TMP", None)) as downloads_dir:
-            shell = """
-set -eu
-cp /app/config.yaml.example /config/config.yaml
-cat >> /config/config.yaml <<'YAML'
+class BeetsFreshInstallStockDockerSmokeTests(unittest.TestCase):
+    """#355: a fresh install's config (setup.sh copies config.yaml.example to
+    beets/config.yaml) loads every listed plugin in the stock
+    lscr.io/linuxserver/beets image, with the bundled plugins provisioned
+    into /config/beetsplug, and a network-free import + fetchart run works.
+    Runs wherever Docker is available (CI's unit-tests and security jobs
+    pre-pull the image); stock-beets-acceptance covers the HTTP protocol."""
+
+    SMOKE_OVERLAY = """\
 paths:
   default: Smoke/$title
   singleton: Smoke/$title
   comp: Smoke/$title
 import:
   write: no
-  copy: yes
+  copy: no
   move: no
-  quiet_fallback: asis
 fetchart:
   auto: no
   sources: filesystem
-embedart:
+chroma:
   auto: no
-lyrics:
+embedart:
   auto: no
 lastgenre:
   auto: no
 scrub:
   auto: no
-YAML
-test "$(id -u)" != "0"
-beet -c /config/config.yaml version
-beet -c /config/config.yaml config
-# Direct, unambiguous proof fetchart resolves from the installed Beets
-# distribution (not shadowed by the bundled/mounted beetsplug directories)
-# and its runtime dependencies import -- this is the exact failure mode a
-# `beetsplug/__init__.py` package initializer previously caused: it made
-# /app/beetsplug a regular package, which shadows the real beetsplug
-# namespace package in site-packages instead of merging with it.
-python -c "
-import beetsplug.fetchart, beetsplug.discpath
-print('fetchart module:', beetsplug.fetchart.__file__)
-print('discpath module:', beetsplug.discpath.__file__)
-assert 'site-packages' in beetsplug.fetchart.__file__, 'fetchart did not resolve from the installed Beets distribution'
-assert '/app/beetsplug' in beetsplug.discpath.__file__, 'bundled discpath plugin was not found'
-"
-python -c "import requests, PIL; print('fetchart dependencies importable')"
-# Exact command /api/setup/status now runs as its plugin-loader probe
-# (routes_setup.py's _BEET_LOADER_PROBE_ARGS) -- `beet plugins` does not
-# exist in Beets 2.12.0, so this is the supported, real replacement. Assert
-# its exit code explicitly (not just via the overall `set -eu` script exit)
-# so a regression here fails with an unambiguous marker.
-if beet -c /config/config.yaml -vv version; then
-  echo "SETUP_DIAGNOSTIC_LOADER_PROBE_OK"
-else
-  echo "SETUP_DIAGNOSTIC_LOADER_PROBE_FAILED"
-  exit 1
-fi
-python -c "import discogs_client; print('discogs client importable')"
-beet -c /config/config.yaml help >/tmp/beet-help.txt
+replaygain:
+  auto: no
+"""
+
+    SHELL = """
+set -eu
+beet -vv version 2>&1
 fpcalc -version
 mkdir -p /tmp/import-smoke
 ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=1 -ac 2 -ar 44100 /tmp/import-smoke/smoke.wav
 ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=blue:s=16x16 -frames:v 1 /tmp/import-smoke/cover.jpg
-beet -c /config/config.yaml import -q --quiet-fallback asis /tmp/import-smoke
-# Real, network-free fetchart run against the just-imported album -- proves
-# the plugin actually loads and executes, not just that the loader probe
-# above tolerates it. sources: filesystem finds the cover.jpg placed
-# beside the smoke track, so no network access is needed or attempted.
-if beet -c /config/config.yaml fetchart -q; then
-  echo "FETCHART_RUN_OK"
-else
-  echo "FETCHART_RUN_FAILED"
-  exit 1
-fi
+beet -c /config/smoke.yaml import -q -A /tmp/import-smoke 2>&1
+beet -c /config/smoke.yaml fetchart 2>&1
+beet -c /config/smoke.yaml ls -a -f 'ART=$artpath' 2>&1
 """
+
+    @unittest.skipIf(not shutil.which("docker"), "Docker CLI not available on host")
+    def test_stock_image_loads_default_config_plugins(self):
+        try:  # same dual import as _app_ast_cache above
+            from test_stock_beets_acceptance import STOCK_BEETS_IMAGE, _docker_with_retry
+        except ImportError:  # pragma: no cover
+            from tests.test_stock_beets_acceptance import STOCK_BEETS_IMAGE, _docker_with_retry
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            self.skipTest("Docker daemon not running or responsive")
+        if subprocess.run(["docker", "image", "inspect", STOCK_BEETS_IMAGE], capture_output=True).returncode != 0:
+            err = _docker_with_retry(["docker", "pull", STOCK_BEETS_IMAGE])
+            if err is not None:
+                self.fail(f"docker pull {STOCK_BEETS_IMAGE} failed:\n{err}")
+        with tempfile.TemporaryDirectory() as config_dir, tempfile.TemporaryDirectory() as music_dir:
+            plugdir = Path(config_dir, "beetsplug")
+            shutil.copytree(ROOT / "beetsplug" / "webmanager", plugdir / "webmanager")
+            shutil.copy2(ROOT / "beetsplug" / "discpath.py", plugdir / "discpath.py")
+            Path(config_dir, "config.yaml").write_text(CONFIG, encoding="utf-8")
+            Path(config_dir, "smoke.yaml").write_text(self.SMOKE_OVERLAY, encoding="utf-8")
+            Path(config_dir, ".webmanager_api_key").write_text("0" * 64 + "\n", encoding="utf-8")
+            # Run as the invoking user so the temp dirs stay removable.
+            user = ["--user", f"{os.getuid()}:{os.getgid()}"] if hasattr(os, "getuid") else []
             proc = subprocess.run([
-                "docker", "run", "--rm",
-                "--read-only",
-                "--security-opt", "no-new-privileges:true",
-                "--cap-drop", "ALL",
-                "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
-                "--tmpfs", "/run:rw,nosuid,nodev,size=64m",
+                "docker", "run", "--rm", *user,
+                "-e", "BEETSDIR=/config", "-e", "HOME=/tmp",
                 "-v", f"{config_dir}:/config",
-                "-v", f"{music_dir}:/data/media/music",
-                "-v", f"{downloads_dir}:/data/torrents",
+                "-v", f"{music_dir}:/music",
                 "--entrypoint", "sh",
-                image,
-                "-lc", shell,
-            ], cwd=ROOT, capture_output=True, text=True, timeout=300)
+                STOCK_BEETS_IMAGE, "-c", self.SHELL,
+            ], capture_output=True, text=True, timeout=300)
         output = (proc.stdout or "") + "\n" + (proc.stderr or "")
         self.assertEqual(proc.returncode, 0, output)
-        for bad in ("error loading plugin", "ModuleNotFoundError", "replaygain initialization failed", "No module named", "mp3gain", "plexsync"):
-            self.assertNotIn(bad.lower(), output.lower())
-        for expected in ("lastgenre", "listenbrainz", "musicbrainz", "discpath", "replaygain", "ffmpeg", "discogs client importable"):
-            self.assertIn(expected, output.lower())
-        # Proves the exact command setup diagnostics now runs (`beet -c
-        # ... -vv version`) exits zero against a real fresh-install image
-        # with the default plugin set loaded -- and never uses the
-        # unsupported `beet plugins` command.
-        self.assertIn("SETUP_DIAGNOSTIC_LOADER_PROBE_OK", output)
-        self.assertNotIn("SETUP_DIAGNOSTIC_LOADER_PROBE_FAILED", output)
-        self.assertNotIn("beet -c /config/config.yaml plugins", output)
-        # Direct FetchArt packaging/execution assertions (Issue: FetchArt
-        # plugin load error in production) -- not merely inferred from the
-        # general loader probe above.
-        self.assertIn("fetchart module: /usr/local/lib/python3", output)
-        self.assertIn("discpath module: /app/beetsplug/discpath.py", output)
-        self.assertIn("fetchart dependencies importable", output)
-        self.assertIn("FETCHART_RUN_OK", output)
-        self.assertNotIn("FETCHART_RUN_FAILED", output)
+        for bad in ("error loading plugin", "modulenotfounderror", "no module named", "traceback"):
+            self.assertNotIn(bad, output.lower(), output)
+        plugins_line = next((ln for ln in output.splitlines() if ln.startswith("plugins:")), "plugins:")
+        loaded = {p.strip() for p in plugins_line.split(":", 1)[1].split(",")}
+        self.assertLessEqual(set(CONFIG.splitlines()[0].split(":", 1)[1].split()), loaded, output)
+        # fetchart ran and stored the cover found beside the track (art_filename: albumart).
+        self.assertIn("ART=/tmp/import-smoke/albumart.jpg", output)
 
 
 if __name__ == "__main__":
