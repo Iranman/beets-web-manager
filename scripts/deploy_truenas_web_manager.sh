@@ -88,6 +88,7 @@ IMAGE_LAYOUT=""
 # was pulled and verified for it before the recreate.
 DEPLOY_REF=""
 DEPLOY_IMAGE_ID=""
+DEPLOY_REVISION=""
 # Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>)
 # to pin the exact org.opencontainers.image.revision label. Strongly recommended
 # for pinned production rollouts. When unset, revision-label check is skipped
@@ -721,6 +722,7 @@ verify_compose_image() {
   fi
   DEPLOY_REF="$resolved_image"
   log "Compose service '${SERVICE}' resolves to ${resolved_image} (layout: ${IMAGE_LAYOUT})"
+  [[ "$IMAGE_LAYOUT" != "variable" ]] || warn "DEPRECATED LAYOUT: the image line reads BEETS_WEB_MANAGER_VERSION, so this run must rewrite that .env line to stay durable. Switch the image line to ${LATEST_IMAGE} (the shipped layout); then nothing in .env names a version."
   warn_unused_version_variable
 }
 
@@ -1794,6 +1796,7 @@ verify_image_labels_if_present() {
     warn "EXPECTED_REVISION not set -- skipping the exact revision-label pin (relying on the version label '${version}' alone). Set EXPECTED_REVISION=<release commit sha> once it's known for a fully pinned deployment."
   fi
   DEPLOY_IMAGE_ID="$img_id"
+  DEPLOY_REVISION="$revision"
   log "Image labels verified: ${DEPLOY_REF} version=${version} revision=${revision:-<none>} id=${img_id}"
 }
 
@@ -2083,7 +2086,41 @@ verify_post_deploy() {
 
   verify_endpoints "post-deploy"
 
+  assert_running_build_identity
+
   assert_no_new_setup_blocking_reasons
+}
+
+# The running app must report the release this run verified on the image:
+# /health/live's version (from the image's BUILD_INFO.json, written from the
+# same build args as the OCI labels) must be VERSION, and its revision, when
+# the app reports one, must be the image's revision label. A deploy-time
+# variable such as BEETS_WEB_MANAGER_VERSION is never consulted.
+assert_running_build_identity() {
+  local body live_version live_revision i
+  for i in 1 2 3 4 5; do
+    body="$(curl -sS --max-time 10 "${ENDPOINT_BASE_URL}/health/live" 2>/dev/null || true)"
+    live_version="$(printf '%s' "$body" | _py -c 'import json,sys
+try: print(json.load(sys.stdin).get("version",""))
+except Exception: print("")' || true)"
+    [[ "$live_version" == "$VERSION" ]] && break
+    sleep 2
+  done
+  if [[ "$live_version" != "$VERSION" ]]; then
+    REASON_CODE="running_version_mismatch"
+    die "/health/live reports version '${live_version}', expected '${VERSION}' (the verified image label)"
+  fi
+  live_revision="$(printf '%s' "$body" | _py -c 'import json,sys
+try: print(json.load(sys.stdin).get("revision",""))
+except Exception: print("")' || true)"
+  if [[ -z "$live_revision" || "$live_revision" == "unknown" || -z "$DEPLOY_REVISION" ]]; then
+    log "/health/live reports version ${live_version} (no build revision reported -- image predates BUILD_INFO.json)"
+  elif [[ "$live_revision" != "$DEPLOY_REVISION" ]]; then
+    REASON_CODE="running_revision_mismatch"
+    die "/health/live reports revision '${live_revision}', expected the image revision label '${DEPLOY_REVISION}'"
+  else
+    log "/health/live reports version ${live_version}, revision ${live_revision} (matches the image labels)"
+  fi
 }
 
 # Durably persist the deployed VERSION into .env's own BEETS_WEB_MANAGER_VERSION

@@ -1024,6 +1024,7 @@ class EndToEndFixture(unittest.TestCase):
             "blocking_reason_codes_by_image": overrides.pop("curl_blocking_reason_codes_by_image", {}),
             "setup_status_http_by_image": overrides.pop("curl_setup_status_http_by_image", {}),
             "auth_required": overrides.pop("curl_auth_required", False),
+            "live_build_by_image": overrides.pop("curl_live_build_by_image", {}),
         }
         curl_state_path = os.path.join(self.tmp, "curl_state.json")
         with open(curl_state_path, "w", encoding="utf-8") as f:
@@ -1259,6 +1260,27 @@ class FullDeployTests(EndToEndFixture):
         res = self.run_script()
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("BEETS_WEB_MANAGER_VERSION not persisted", res.stderr)
+
+    # The running app's build identity (BUILD_INFO.json via /health/live) is
+    # checked against the verified image labels, not against any env var.
+    def _deploy_with_live(self, live):
+        Path(self.webmgr_dir, ".auth_token").write_text("tok", encoding="utf-8")
+        return self.run_script(env=self.env(curl_live_build_by_image={self.GOOD_IMAGE: live}))
+
+    def test_running_build_matching_the_image_labels_passes(self):
+        res = self._deploy_with_live({"version": "0.1.3", "revision": self.GOOD_REVISION})
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"revision {self.GOOD_REVISION} (matches the image labels)", res.stderr)
+
+    def test_running_revision_other_than_the_image_label_fails(self):
+        res = self._deploy_with_live({"version": "0.1.3", "revision": "f" * 40})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           running_revision_mismatch", res.stderr)
+
+    def test_running_version_other_than_version_fails(self):
+        res = self._deploy_with_live({"version": "0.1.49"})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           running_version_mismatch", res.stderr)
 
     def test_pinned_layout_never_writes_the_unused_version_variable(self):
         # The pinned image line alone selects the image: an old

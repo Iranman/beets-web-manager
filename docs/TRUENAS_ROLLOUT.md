@@ -40,6 +40,14 @@ the line yourself. The running version is the image's`
 org.opencontainers.image.version` label, which the rollout verifies, and the
 version that `/health/live` reports.
 
+After the recreate, the rollout checks the running build itself: `/health/live`
+must report `VERSION` (reason `running_version_mismatch` otherwise) and, when the
+app reports a build revision (images that carry `/app/BUILD_INFO.json`, written
+from the same build arguments as the OCI labels), the image's revision label`
+(`running_revision_mismatch`). The `` layout still
+works but is deprecated, and the run warns about it: it is the only layout in which
+the script writes a version into `.env`. Switch the image line to `:latest`.
+
 ## Expected host layout (verify, don't trust)
 
 ```text

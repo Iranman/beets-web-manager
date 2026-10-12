@@ -84,8 +84,12 @@ def main():
         if path.startswith("/api/health"):
             body = json.dumps({"status": "ok"})
         elif path.startswith("/health/live"):
-            _ref, version = _running_webmgr()
-            body = json.dumps({"status": "alive", "version": version})
+            ref, version = _running_webmgr()
+            # "live_build_by_image": {image_ref: {"version", "revision"}}
+            # simulates what the image's BUILD_INFO.json makes the app report.
+            live = {"status": "alive", "version": version}
+            live.update((state.get("live_build_by_image") or {}).get(ref, {}))
+            body = json.dumps(live)
         elif path.startswith("/api/setup/status"):
             ref, _version = _running_webmgr()
             reasons = (state.get("blocking_reasons_by_image") or {}).get(ref, [])

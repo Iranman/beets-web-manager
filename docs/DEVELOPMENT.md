@@ -60,7 +60,7 @@ docker run --rm -m 1500m -v "$PWD:/src" bwm-test \
 
 On Git Bash, prefix the `docker run` lines with `MSYS_NO_PATHCONV=1`. `Dockerfile.test` is test-only (never published). Rebuild it after `requirements*.txt` changes. CI's `compose-verification` job builds it on every PR.
 
-`tests.test_stock_beets_acceptance.StockBeetsDockerAcceptanceTests` boots the real `lscr.io/linuxserver/beets:latest` container, so it needs a Docker CLI and daemon. Inside the test image it reports `skipped 'Docker CLI not available on host'`. That skip is visible in the unittest summary and is the only expected one. To run it, use host Python with Docker available (`python -m unittest tests.test_stock_beets_acceptance`); CI runs it in the `stock-beets-acceptance` job. Any other error or skip in the image is a real failure. Report it; don't work around it.
+`tests.test_stock_beets_acceptance.StockBeetsDockerAcceptanceTests` boots the real `lscr.io/linuxserver/beets:latest` container, so it needs a Docker CLI and daemon. Inside the test image it reports `skipped 'Docker CLI not available on host'`. To run it, use host Python with Docker available (`python -m unittest tests.test_stock_beets_acceptance`); CI runs it in the `stock-beets-acceptance` job. The other skips that are expected in the image are opt-in or need privileges the image deliberately lacks: Docker smoke tests gated on `RUN_DOCKER_SMOKE=1` or a Docker CLI, and tests that need root (`chown needs root`). The `-v` output prints every skip reason. Any error, and any other skip, is a real failure, in particular `app.py could not be imported`, a missing `bash`/`sqlite3`/`ffmpeg`/`curl`, or a missing plugin dependency. Report it; don't work around it.
 
 ## Frontend Runtime Shape
 

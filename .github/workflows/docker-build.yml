@@ -79,6 +79,21 @@ jobs:
       - run: docker compose -f examples/docker-compose.external-beets.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
+      - name: BUILD_INFO.json matches the image's OCI labels
+        # The app reports its version/revision from /app/BUILD_INFO.json;
+        # it must say exactly what org.opencontainers.image.* says.
+        run: |
+          docker run --rm --entrypoint cat beets-web-manager:ci /app/BUILD_INFO.json > "$RUNNER_TEMP/build_info.json"
+          docker image inspect --format '{{json .Config.Labels}}' beets-web-manager:ci > "$RUNNER_TEMP/labels.json"
+          python - "$RUNNER_TEMP/build_info.json" "$RUNNER_TEMP/labels.json" <<'PY'
+          import json, sys
+          info = json.load(open(sys.argv[1])); labels = json.load(open(sys.argv[2]))
+          for key in ("version", "revision", "created"):
+              want = labels.get(f"org.opencontainers.image.{key}", "")
+              assert info.get(key) == want, f"BUILD_INFO {key}={info.get(key)!r} != label {want!r}"
+          assert info["revision"], "empty revision"
+          print("BUILD_INFO.json matches labels:", info)
+          PY
       - name: Supported local test image (Dockerfile.test) builds and needs no git
         # docs/DEVELOPMENT.md documents this image for running the full suite
         # locally. It has no git binary, so this proves the suite's git-free
