@@ -19,9 +19,11 @@ The project uses Semantic Versioning.
 - A Beets config path outside `BEETSDIR` is never read or verified.
 - Config editor revisions are keyed per process, so an edit opened before a restart gets a revision conflict when saved after it. Reload the editor and save again.
 - `BEETS_WEB_MANAGER_VERSION` is no longer used to report the running version; the image's `/app/BUILD_INFO.json` is. With a `:latest` or pinned `image:` the rollout script no longer writes the variable and warns if a stale one is set. A compose `image:` that interpolates the variable is deprecated.
+- Fingerprint results cached as "no match" by earlier versions are ignored and re-checked against AcoustID the next time each file is looked up. The old cache files under `/config/.cache/metadata/acoustid` are left in place; delete them to reclaim space.
 
 ### Fixed
 
+- AcoustID lookups run again in the Web Manager image (QA 0.4.0 B2). Its fpcalc 1.5.1 exits with an error on every file while still printing a valid fingerprint, and Web Manager discarded that fingerprint and cached the file as "no match". Fingerprints are now judged by fpcalc's output, not its exit code. A file that really cannot be fingerprinted is reported as not checked and is never cached as "no match".
 - Item audio streaming and download (`/api/items/<id>/audio`, `/file`) no longer fail with 500 on Beets 2.14, and artwork placement after import finds the album folder again (#302). The plugin binds the library directory for every Beets web request, and the adapter turns relative item and cover paths into absolute ones.
 - Path lookups against stock Beets work (`/` is sent as the query path separator). The stale-row cleanup before a re-import removes only rows whose files are provably missing.
 - Clean All can no longer run twice at once; racing starts return the running job (D1). Cancelled runs are recorded as cancelled (D15). Imports of the same source folder are deduplicated (D2).
