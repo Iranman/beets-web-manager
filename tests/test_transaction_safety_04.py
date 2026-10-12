@@ -671,6 +671,69 @@ class MusicRootAliasTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 self.assertTrue(cw._is_within_music_root(os.path.join(td, "A", "01.flac")))
 
+class RestartAndOrphanTests(_RouteEnvBase):
+    """#344 a/b and #326 F2/F6: a restart or lost contact never turns an
+    unprovable outcome into Failed, and an orphaned sync can be cancelled."""
+
+    def _running(self, **meta):
+        return self.store.create(operation_type="MusicBrainz Match", status="Running", metadata=meta)["id"]
+
+    def test_job_recovery_required_is_not_mapped_to_failed(self):
+        from types import SimpleNamespace
+        tx = self._running()
+        self.store.update_from_job(tx, SimpleNamespace(status="recovery_required", job_id="j1", metadata={},
+                                                       result=None, log=[]))
+        self.assertEqual(self.store.get(tx)["status"], "Recovery Required")
+        self.assertIn("cannot be proven", " ".join(self.store.get(tx)["logs"]))
+
+    def test_job_that_lost_contact_is_recovery_required(self):
+        import time
+        import backend.transaction_service as ts
+        from job_engine import JobStore
+        store_jobs = JobStore(self.data / "jobs")
+        for p in (mock.patch.object(ts, "jobs", store_jobs), mock.patch.object(ts, "transactions", self.store)):
+            p.start()
+            self.addCleanup(p.stop)
+        ts._install_transaction_job_hooks()
+        self.addCleanup(store_jobs.close)
+        job = store_jobs.start_python(lambda log, cancel=None: {"ok": False, "outcome_partly_unknown": True},
+                                      label="MBSync", metadata={"transaction": {"operation_type": "MusicBrainz Match"}})
+        tx_id = job.metadata["transaction_id"]
+        deadline = time.time() + 5
+        while time.time() < deadline and self.store.get(tx_id)["status"] == "Running":
+            time.sleep(0.01)
+        self.assertEqual(self.store.get(tx_id)["status"], "Recovery Required")
+
+    def test_restart_marks_an_orphaned_library_sync(self):
+        import time
+        from backend import transaction_recovery
+        plain = self._running()  # no evidence: its job's own recovery decides (QA #306 N1)
+        sync = self._running(mutation_family=cw.MBSYNC_LIBRARY_FAMILY, engine_operation_id="op-9")
+        res = transaction_recovery.sweep(adapter=mock.Mock(), store=self.store, before=time.time() + 1)
+        self.assertEqual({r["operation_id"]: r["action"] for r in res}, {sync: "Recovery Required"})
+        self.assertEqual(self.store.get(plain)["status"], "Running")
+        self.assertIn("Beets may still be syncing; see Beets operation op-9", " ".join(self.store.get(sync)["logs"]))
+        # A transaction this process is still running is left alone.
+        live = self._running()
+        transaction_recovery.sweep(adapter=mock.Mock(), store=self.store, before=time.time() - 60)
+        self.assertEqual(self.store.get(live)["status"], "Running")
+
+    def test_orphaned_sync_is_cancelled_by_its_engine_operation_id(self):
+        tx = self._running(mutation_family=cw.MBSYNC_LIBRARY_FAMILY, engine_operation_id="op-9")
+        self.store.update(tx, status="Recovery Required")
+        ad = mock.Mock()
+        with mock.patch.object(cw, "beets_adapter", ad):
+            resp = self.client.post(f"/api/transactions/{tx}/cancel")
+        self.assertEqual((resp.status_code, resp.get_json()["code"]), (202, "engine_cancelling"))
+        ad.cancel_mbsync_library.assert_called_once_with("op-9")
+        ad.cancel_mbsync_library.side_effect = BeetsAdapterError("x", status_code=409, error_code="NOT_RUNNING")
+        with mock.patch.object(cw, "beets_adapter", ad):
+            resp = self.client.post(f"/api/transactions/{tx}/cancel")
+        self.assertEqual((resp.status_code, resp.get_json()["code"]), (409, "engine_not_running"))
+        # Any other Running transaction is still not cancellable here.
+        other = self._running()
+        self.assertEqual(self.client.post(f"/api/transactions/{other}/cancel").status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()

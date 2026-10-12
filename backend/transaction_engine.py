@@ -606,6 +606,9 @@ class TransactionStore:
             next_status = "Preview" if dry_run else "Completed"
         elif status in {"cancelled", "killed"}:
             next_status = "Cancelled"
+        elif status == "recovery_required":
+            # The process stopped mid-job: completion cannot be proven (#344 a).
+            next_status = "Recovery Required"
         else:
             next_status = "Failed"
 
@@ -627,8 +630,13 @@ class TransactionStore:
             # Job state only advances a transaction that is already Running
             # (claimed before its job started). It never claims an Approved
             # one, nor rewrites Cancelled or another final status (#217).
-            if self._read(transaction_id).get("status") != "Running":
+            current = self._read(transaction_id)
+            if current.get("status") != "Running":
                 updates.pop("status")
+            elif next_status == "Recovery Required":  # the audit says why, once
+                updates["logs"] = (updates.get("logs") or list(current.get("logs") or [])) + [
+                    "Recovered after restart: the job was interrupted, so whether it changed the library "
+                    "cannot be proven; check the library before retrying."]
             return self.update(transaction_id, **updates)
 
     def rollback(self, transaction_id: str) -> Dict[str, Any]:

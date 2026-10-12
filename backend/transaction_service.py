@@ -179,6 +179,8 @@ def _install_transaction_job_hooks() -> None:
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
                 if reports_failure(result):
                     next_status = "Failed"  # BA-3: the same rule as job_engine
+                if isinstance(result, dict) and result.get("outcome_partly_unknown"):
+                    next_status = "Recovery Required"  # lost contact mid-run: not provably Failed (#326 F2)
                 finish(cancelled(result) if cancel_honoured(cancel) else next_status)
                 return result
         else:

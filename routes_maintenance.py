@@ -770,12 +770,34 @@ def api_transaction_cancel(transaction_id):
             tx = transactions.transition(transaction_id, expected, "Cancelled")
             if tx is not None:
                 return jsonify({"ok": True, "transaction": tx})
-        current = transactions.get(transaction_id).get("status")
+        tx = transactions.get(transaction_id)
+        current = tx.get("status")
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    meta = tx.get("metadata") or {}
+    if (meta.get("mutation_family") == composite_workflows.MBSYNC_LIBRARY_FAMILY
+            and meta.get("engine_operation_id") and current in ("Running", "Recovery Required")):
+        return _cancel_engine_mbsync(transaction_id, str(meta["engine_operation_id"]))
     return jsonify({"ok": False, "code": "not_cancellable",
                     "error": f"Only a Pending, Preview or Approved transaction can be cancelled "
                              f"(this one is {current})."}), 409
+
+
+def _cancel_engine_mbsync(transaction_id: str, engine_op: str):
+    """#326 F6: stop a library sync Beets is still running, also one a
+    restart orphaned, by the operation id its transaction recorded. Beets
+    stops after the album it is on; synced albums keep their changes."""
+    try:
+        composite_workflows.beets_adapter.cancel_mbsync_library(engine_op)
+    except BeetsError as ex:
+        if ex.error_code == "NOT_RUNNING":
+            return jsonify({"ok": False, "code": "engine_not_running",
+                            "error": "Beets is no longer running this sync; nothing to cancel."}), 409
+        return jsonify({"ok": False, "code": "engine_unavailable",
+                        "error": f"Beets did not take the cancel ({ex.error_code})."}), 503
+    transactions.append_log(transaction_id, f"Cancel sent to Beets operation {engine_op}: it stops after "
+                                            "the album it is on; albums already synced keep their changes.")
+    return jsonify({"ok": True, "code": "engine_cancelling", "engine_operation_id": engine_op}), 202
 
 
 def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None):

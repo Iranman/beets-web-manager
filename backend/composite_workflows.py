@@ -4957,8 +4957,10 @@ def mbsync_library(
         if counts["failed_count"]:
             parts.append(f"{counts['failed_count']} albums or singles could not be synced (see the log)")
         if counts["write_failed_count"]:
+            # #326 F4: a re-run sees no database difference and never retries the write.
             parts.append(f"{counts['write_failed_count']} tracks' tags could not be written (their Beets "
-                         "database fields did change)")
+                         "database fields did change; a re-run will not retry them: fix the files' "
+                         "permissions, then run `beet write` in the Beets container)")
         out.update(code="MBSYNC_PARTIAL",
                    error=f"{'; '.join(parts)}. {counts['processed']} of {counts['targets']} were synced.")
     if st:

@@ -139,6 +139,23 @@ def _interrupted_apply(st: TransactionStore, op: str) -> Dict[str, Any]:
     return {"operation_id": op, "action": "Recovery Required" if tx else "skipped"}
 
 
+def _orphaned(st: TransactionStore, tx: Dict[str, Any]) -> Dict[str, Any]:
+    """A Running transaction that recorded an engine operation id but has no
+    registry family (a library sync) and that a previous process left behind
+    (#326 F2, #344 b): never left Running nor called Failed; the log says why."""
+    from backend.composite_workflows import MBSYNC_LIBRARY_FAMILY
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") == MBSYNC_LIBRARY_FAMILY:
+        note = (f"Recovered after restart: Beets may still be syncing; see Beets operation "
+                f"{meta['engine_operation_id']} (cancel it from this transaction). Albums it synced keep "
+                "their changes; the change log above stops where Web Manager last heard from Beets.")
+    else:
+        note = ("Recovered after restart: the process stopped while this transaction was running, so "
+                "whether it changed the library cannot be proven; check the library before retrying.")
+    out = st.transition(tx["id"], "Running", "Recovery Required", logs=[note])
+    return {"operation_id": tx["id"], "action": "Recovery Required" if out else "skipped", "note": note}
+
+
 def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
           before: Optional[float] = None) -> List[Dict[str, Any]]:
     """``before``: claimed composite applies last written before this time
@@ -151,9 +168,15 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
     for tx in rows:
         meta = tx.get("metadata") or {}
         if (meta.get("mutation_family") not in families and before is not None
-                and (meta.get("engine_result") or {}).get("mutation_started")
                 and (tx.get("updated_at") or 0) < before):
-            results.append(_interrupted_apply(st, tx["id"]))
+            # Only with evidence (QA #306 N1): a claimed composite apply, or a
+            # library sync whose Beets operation id was recorded. A job's
+            # wrapper follows its job (job_engine marks it recovery_required;
+            # update_from_job maps that to Recovery Required, #344 a/b).
+            if meta.get("engine_operation_id") and meta.get("mutation_family"):
+                results.append(_orphaned(st, tx))
+            elif (meta.get("engine_result") or {}).get("mutation_started"):
+                results.append(_interrupted_apply(st, tx["id"]))
         elif meta.get("mutation_family") in families:
             try:
                 results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st))
