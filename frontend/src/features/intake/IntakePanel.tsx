@@ -377,6 +377,10 @@ function JobLog({
   };
 
   const recoverBatch = async (retryFailed = false) => {
+    const prompt = retryFailed
+      ? 'Retry eligible failures? This starts imports again for failed folders that are eligible for retry. Imports can write tags and move files into the library.'
+      : 'Recover this batch? This resumes imports for unfinished folders. Imports can write tags and move files into the library; completed folders are not redone.';
+    if (!window.confirm(prompt)) return;
     setRecovering(true);
     setActionError('');
     try {
@@ -764,6 +768,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
   );
 
   const retryFailedImports = async () => {
+    if (!window.confirm('Retry failed imports? This starts an import job for every album that failed in the last Import All run. Imports can write tags and move files into the library.')) return;
     setRetryingFailed(true);
     setRetryNotice('');
     setRetryError('');

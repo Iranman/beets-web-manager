@@ -14,8 +14,9 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
-- Import Review: opening or browsing a review item no longer changes any files or starts an import. Before, showing an item could quarantine or permanently delete up to 4 of its rejected files, and could queue an import for a high-confidence match, without a click. Now **Remove N rejected files…** opens a confirmation that lists the files and says whether they will be quarantined or permanently deleted, and imports start only from the Import button and its confirmation. The bulk **Revalidate** button and backend auto-import jobs are unchanged.
-- Import Review keyboard shortcuts (`[`, `]`, `i`) no longer fire while another Import tab is open or while Ctrl, Alt, Shift or Meta is held. The candidate Left/Right arrow keys now work only while focus is inside the candidate carousel, not anywhere on the page.
+- Import Review: opening or browsing a review item no longer changes any files or starts an import. Before, showing an item could quarantine or permanently delete up to 4 of its rejected files, and could queue an import for a high-confidence match, without a click. Now **Remove N rejected files…** opens a confirmation that lists the files and says whether they will be quarantined or permanently deleted, and imports start only from the Import button and its confirmation. Backend auto-import jobs are unchanged.
+- Import page: every button that starts imports or changes stored data now asks first. **Revalidate** is renamed **Revalidate & Import…** and its confirmation gives the number of items and says eligible items may be imported. **Retry failed imports**, **Retry eligible failures** and **Recover batch** confirm that imports will start. **Clean Stale…** and History's **Clear** confirm that only review or history metadata changes. Cancel sends nothing.
+- Import Review keyboard shortcuts (`[`, `]`, `i`) no longer fire while another Import tab is open or while Ctrl, Alt or Meta is held. Shift and AltGr are allowed, so the shortcuts work on layouts that need them to type `[` or `]` (for example German). The candidate Left/Right arrow keys now work only while focus is inside the candidate carousel, not anywhere on the page.
 
 ## v0.5.0 - 2026-10-12
 

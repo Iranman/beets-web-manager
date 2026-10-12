@@ -149,7 +149,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('"skip_import_lock": skip_import_lock', body)
     def test_frontend_never_enqueues_an_import_on_view(self):
         # 0.5.1 hotfix (REV-02): viewing/selecting an item must never start an import.
-        # Backend auto-enqueue stays available to backend jobs and the explicit Revalidate button.
+        # Backend auto-enqueue stays available to backend jobs and the confirmed Revalidate & Import action.
         page = (_REVIEW_FEATURE / "ImportReviewPage.tsx").read_text(encoding="utf-8")
         self.assertNotIn('autoEnqueueImport', page)
         self.assertNotIn('reconcileAutoEnqueueImport', page)
@@ -243,7 +243,10 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('review_item_ids: ids, auto_enqueue: true', REVIEW_PAGE)
         self.assertIn('setSelectedMatches((current)', REVIEW_PAGE)
         self.assertIn('next[row.review_item_id] = row.selected_match as unknown as SelectedMatch', REVIEW_PAGE)
-        self.assertIn("{revalidateBusy ? 'Revalidating…' : 'Revalidate'}", REVIEW_PAGE)
+        self.assertIn("{revalidateBusy ? 'Revalidating…' : 'Revalidate & Import…'}", REVIEW_PAGE)
+        # 0.5.1: the button only opens a confirmation; auto_enqueue runs after Confirm.
+        self.assertIn("setConfirmIntent({ kind: 'revalidate', ids });", REVIEW_PAGE)
+        self.assertIn("else if (intent.kind === 'revalidate') void handleRevalidateQueue(intent.ids);", REVIEW_PAGE)
 
     def test_auto_enqueue_does_not_reuse_stale_persisted_job_id(self):
         body = section(APP, 'def _import_review_start_auto_import', '@app.post("/api/import-review/auto-enqueue")')

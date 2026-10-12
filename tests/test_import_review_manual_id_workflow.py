@@ -204,8 +204,8 @@ class ImportReviewManualIdFrontendTests(unittest.TestCase):
         start = IMPORT_REVIEW_SOURCE.rindex("const handler = (e: KeyboardEvent) => {", 0, shortcut_pos)
         end = IMPORT_REVIEW_SOURCE.index("window.addEventListener('keydown', handler);", shortcut_pos)
         keyboard = IMPORT_REVIEW_SOURCE[start:end]
-        # REV-15: shortcuts ignore modified keys and are not bound while the panel is inactive.
-        self.assertIn("if (confirmIntent || isEditableTarget(e.target) || hasModifierKey(e)) return;", keyboard)
+        # REV-15: shortcuts ignore Ctrl/Meta/Alt chords (not Shift/AltGr) and are not bound while inactive.
+        self.assertIn("if (confirmIntent || isEditableTarget(e.target) || isCommandChord(e)) return;", keyboard)
         self.assertIn("if (!active) return;", IMPORT_REVIEW_SOURCE[start - 200:start])
         self.assertIn("if (e.key.toLowerCase() === 'i')", keyboard)
         self.assertIn("handleFocusManualEntry()", keyboard)
