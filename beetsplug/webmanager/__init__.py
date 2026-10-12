@@ -73,3 +73,6 @@ class WebManagerPlugin(BeetsPlugin):
         from .relocation_ops import break_hard_link, note_library_write
         self.register_listener("write", break_hard_link)
         self.register_listener("after_write", note_library_write)
+        # Never place an as-is import under a blank artist/album (D3).
+        from .operations import on_import_task_created
+        self.register_listener("import_task_created", on_import_task_created)

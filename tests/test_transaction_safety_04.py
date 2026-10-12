@@ -399,3 +399,27 @@ class ItemMetadataWriteFailedRollbackTests(_RouteEnvBase):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+class CleanAllBlankIdentityVerificationTests(_Engine):
+    """D3: an album Beets would file under "/music/ (0000)" (blank artist and
+    album) is reported by Clean All's final verification, which only scanned
+    artist/album folder names before."""
+
+    def test_blank_identity_album_is_counted_as_a_placeholder(self):
+        import backend.maintenance_service as ms
+        self.make_album(os.path.join(self.music, "ok"))
+        blank = self.make_album(os.path.join(self.music, " (0000)"), art=False)
+        blank.album, blank.albumartist = "", ""
+        blank.store(inherit=False)
+        log = []
+        with mock.patch("backend.beets_adapter.beets_adapter", self.ad), \
+                mock.patch.object(ms, "_library_health_payload", return_value={}), \
+                mock.patch.object(ms, "_stamp_artist_folder_scan", return_value={}), \
+                mock.patch.object(ms, "_scan_folder_name_placeholders", return_value=[]), \
+                mock.patch.object(ms, "_maintenance_duplicate_recording_mbid_groups", return_value=0), \
+                mock.patch.object(ms, "_maintenance_save_last_report"):
+            res = ms._maintenance_final_verification(log)
+        self.assertEqual(res["final_summary"]["placeholder_identity_folders_remaining"], 1)
+        self.assertEqual([p["album_id"] for p in res["placeholder_folders"]], [blank.id])
+        self.assertIn("[verification] Placeholder identity folders remaining: 1", log)

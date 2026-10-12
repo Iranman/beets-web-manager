@@ -962,6 +962,22 @@ def _maintenance_duplicate_recording_mbid_groups() -> int:
         return 0
 
 
+# Same rule as the webmanager plugin's blank_identity (D3).
+_PLACEHOLDER_IDENTITY = re.compile(r"^(\[?unknown( artist| album)?\]?|\[?untitled\]?)?$", re.I)
+
+
+def _maintenance_blank_identity_albums() -> List[Dict[str, Any]]:
+    """Albums Beets would file under an empty/placeholder artist or album
+    name (e.g. "/music/ (0000)"), which the folder-name scan cannot see."""
+    from backend.beets_adapter import beets_adapter
+    out = []
+    for a in beets_adapter.list_all_albums():
+        if any(_PLACEHOLDER_IDENTITY.match(str(a.get(k) or "").strip()) for k in ("album", "albumartist")):
+            out.append({"album_id": a.get("id"), "album": a.get("album") or "",
+                        "albumartist": a.get("albumartist") or "", "reason": "blank_identity"})
+    return out
+
+
 def _maintenance_final_verification(log: List[str], cancel_event: Optional[Any] = None,
                                     progress: Optional[Any] = None) -> Dict[str, Any]:
     if cancel_event and cancel_event.is_set():
@@ -972,6 +988,7 @@ def _maintenance_final_verification(log: List[str], cancel_event: Optional[Any] 
     artist_scan = _stamp_artist_folder_scan(MUSIC_ROOT)
     placeholder_meta: Dict[str, Any] = {}
     placeholders = _scan_folder_name_placeholders(cancel_event=cancel_event, scan_meta=placeholder_meta)
+    placeholders = placeholders + _maintenance_blank_identity_albums()
     artwork_leftovers = _maintenance_artwork_collision_leftovers(MUSIC_ROOT)
     duplicate_recording_groups = _maintenance_duplicate_recording_mbid_groups()
 

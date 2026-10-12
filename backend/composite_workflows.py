@@ -3075,6 +3075,8 @@ _RELOCATION_REFUSALS = {
     "SYMLINK_REJECTED": "An old location runs through a symlink; nothing was changed.",
     "EXTENSION_CHANGED": "A track's file type changed since it was moved; nothing was changed.",
     "PATH_INVALID": "The recorded old locations are not usable; nothing was changed.",
+    "BLANK_IDENTITY": "The album has no artist or album name to place it under; fix its tags first. "
+                      "Nothing was moved.",
     "UNDONE": "Beets could not finish and put every file back; nothing was changed.",
     "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.15.0; nothing was changed.",
     "INVALID_REQUEST": "Beets refused the request as malformed; nothing was changed.",

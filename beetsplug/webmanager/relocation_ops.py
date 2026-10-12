@@ -150,6 +150,8 @@ def _check_relocate(lib, data: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     album = lib.get_album(int(data.get("album_id") or 0))
     if not album:
         raise _no("album not found", "ALBUM_NOT_FOUND")
+    if ops.album_identity_blank(album):  # D3: never "/music/ (0000)/ -  - 01 - ..."
+        raise _no("the album has no artist or album name to place it under", "BLANK_IDENTITY")
     before = _state(lib, album)
     expected = {str(k): _abs(lib, v) for k, v in (data.get("expected_paths") or {}).items()}
     if not expected or expected != before["items"]:

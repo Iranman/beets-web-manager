@@ -475,6 +475,17 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         self.assertEqual(self.snapshot(self.album.id), before)
         self.assertFalse(cw.rollback_album_relocation(op, adapter=self.ad, store=self.store)["ok"])
 
+    def test_blank_identity_album_is_never_relocated(self):
+        """D3: Beets would place it at "/music/ (0000)/..."; refused, nothing moves."""
+        album = self.lib.get_album(self.album.id)
+        album.albumartist = ""
+        album.store(inherit=False)
+        before = self.snapshot(self.album.id)
+        res = cw.relocate_album(self.album.id, mode="rename", adapter=self.ad, store=self.store)
+        self.assertEqual((res["ok"], res["code"], res["status"]), (False, "blank_identity", "Failed"), res)
+        self.assertIn("no artist or album name", res["error"])
+        self.assertEqual(self.snapshot(self.album.id), before)
+
     def test_preview_is_not_applied(self):
         plan = cw.plan_album_relocation(album_id=self.album.id, adapter=self.ad, store=self.store)
         res = cw.apply_album_relocation(plan["operation_id"], adapter=self.ad, store=self.store)

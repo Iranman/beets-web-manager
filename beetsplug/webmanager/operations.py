@@ -538,6 +538,79 @@ _QUIET_FALLBACKS = ("skip", "asis")
 _MB_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
+#: An artist or album value that names nothing: placing it would build a
+#: path such as "/music/ (0000)/ -  - 01 - Track.mp3" (D3).
+_PLACEHOLDER_IDENTITY = re.compile(r"^(\[?unknown( artist| album)?\]?|\[?untitled\]?)?$", re.I)
+
+
+def blank_identity(value: Any) -> bool:
+    return bool(_PLACEHOLDER_IDENTITY.match(str(value or "").strip()))
+
+
+def album_identity_blank(album) -> bool:
+    """D3: moving ``album`` would place it under a blank artist/album."""
+    return blank_identity(album.get("album")) or blank_identity(album.get("albumartist"))
+
+
+def item_identity_blank(item) -> bool:
+    if not item.get("album_id"):
+        return blank_identity(item.get("artist"))
+    return blank_identity(item.get("album")) or (
+        blank_identity(item.get("albumartist")) and blank_identity(item.get("artist")))
+
+
+def _task_identity_blank(task) -> bool:
+    """True when an as-is import of ``task`` would place files under an
+    empty or placeholder artist/album."""
+    items = list(getattr(task, "items", None) or [])
+    if not items and getattr(task, "item", None) is not None:
+        items = [task.item]
+    if not items:
+        return False
+    if not getattr(task, "is_album", False):  # singleton: Non-Album/$artist/$title
+        return any(blank_identity(it.get("artist")) for it in items)
+    return any(blank_identity(it.get("album"))
+               or (blank_identity(it.get("albumartist")) and blank_identity(it.get("artist")))
+               for it in items)  # not yet in the library, so no album_id to go by
+
+
+def _skip_action():
+    try:
+        from beets.importer import Action
+        return Action.SKIP
+    except ImportError:  # older beets
+        from beets.importer import action
+        return action.SKIP
+
+
+def _asis_action():
+    try:
+        from beets.importer import Action
+        return Action.ASIS
+    except ImportError:  # older beets
+        from beets.importer import action
+        return action.ASIS
+
+
+def _refuse_blank_identity(session, task) -> bool:
+    if not _task_identity_blank(task):
+        return False
+    task.webmanager_blank_identity = True
+    recorded = getattr(session, "webmanager_tasks", None)
+    if recorded is not None and task not in recorded:
+        recorded.append(task)
+    return True
+
+
+def on_import_task_created(session, task):
+    """``import_task_created`` listener (D3): without autotag, Beets places an
+    album by its own tags, so one with no artist or album name is skipped
+    before anything is added or moved. Only Web Manager imports are checked."""
+    if getattr(session, "webmanager_require_identity", False) and _refuse_blank_identity(session, task):
+        task.set_choice(_skip_action())
+    return None
+
+
 def _import_session_class(autotag: bool, tasks: List[Any]):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
@@ -555,13 +628,22 @@ def _import_session_class(autotag: bool, tasks: List[Any]):
             from beets.ui.commands import TerminalImportSession as base
 
     class _RecordingSession(base):
+        webmanager_tasks = tasks
+        webmanager_require_identity = not autotag
+
         def choose_match(self, task):
             tasks.append(task)
-            return super().choose_match(task)
+            return self._identity_checked(task, super().choose_match(task))
 
         def choose_item(self, task):
             tasks.append(task)
-            return super().choose_item(task)
+            return self._identity_checked(task, super().choose_item(task))
+
+        def _identity_checked(self, task, choice):
+            # D3: the as-is fallback keeps the file tags; none may be blank.
+            if choice == _asis_action() and _refuse_blank_identity(self, task):
+                return _skip_action()
+            return choice
 
         def get_duplicate_action(self, task, found_duplicates):
             task.webmanager_duplicate = True
@@ -782,7 +864,9 @@ def run_import():
                 skipped_reasons: List[Dict[str, str]] = []
                 for task in tasks:
                     if getattr(task, "skip", False):
-                        if getattr(task, "webmanager_duplicate", False):
+                        if getattr(task, "webmanager_blank_identity", False):
+                            reason = "blank_identity"  # D3: no artist/album name to place it under
+                        elif getattr(task, "webmanager_duplicate", False):
                             reason = "duplicate"
                         elif not getattr(task, "candidates", None):
                             reason = "no_candidates"  # nothing found, or the source was unreachable
@@ -950,6 +1034,22 @@ def run_modify():
                     "error_code": "UNSUPPORTED_FIELDS",
                     "fields": unsupported,
                 }), 400
+
+            if move:
+                # D3: a move never places files under a blank artist/album.
+                def _after(obj, fields):
+                    keys = ("album", "albumartist", "artist", "album_id")
+                    return {k: fields[k] if k in fields else obj.get(k) for k in keys}
+                blank = [f"item {it.id}" for it in items_to_modify
+                         if item_fields and item_identity_blank(_after(it, item_fields))]
+                blank += [f"album {alb.id}" for alb in albums_to_modify
+                          if album_fields and album_identity_blank(_after(alb, album_fields))]
+                if blank:
+                    return jsonify({
+                        "error": "Refusing to move files under an empty or placeholder artist/album name",
+                        "error_code": "BLANK_IDENTITY",
+                        "targets": blank,
+                    }), 409
 
             write_failed: List[int] = []
 
@@ -1154,12 +1254,17 @@ def run_move():
     moved_albums = 0
     missing_item_ids: List[int] = []
     missing_album_ids: List[int] = []
+    blank_item_ids: List[int] = []
+    blank_album_ids: List[int] = []
     try:
         with mutation_lock:
             for iid in item_ids:
                 item = lib.get_item(iid)
                 if not item:
                     missing_item_ids.append(iid)
+                    continue
+                if item_identity_blank(item):  # D3: left where it is
+                    blank_item_ids.append(iid)
                     continue
                 item.move()
                 moved_items += 1
@@ -1168,6 +1273,9 @@ def run_move():
                 album = lib.get_album(aid)
                 if not album:
                     missing_album_ids.append(aid)
+                    continue
+                if album_identity_blank(album):
+                    blank_album_ids.append(aid)
                     continue
                 album.move()
                 moved_albums += 1
@@ -1178,6 +1286,8 @@ def run_move():
             "moved_albums": moved_albums,
             "missing_item_ids": missing_item_ids,
             "missing_album_ids": missing_album_ids,
+            "blank_identity_item_ids": blank_item_ids,
+            "blank_identity_album_ids": blank_album_ids,
         }
         update_operation(op_id, "succeeded", result=result)
         return jsonify({"operation_id": op_id, **result})
