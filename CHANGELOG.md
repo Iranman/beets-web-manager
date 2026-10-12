@@ -21,6 +21,10 @@ The project uses Semantic Versioning.
 - yt-dlp per-chunk `[download] x%` progress lines are no longer written to the job log (0% and 100% are kept), so a long download keeps the start of the job in the saved log.
 - The Lidarr wanted list is read in pages of 1000 until `totalRecords` is covered, de-duplicated by Lidarr album id, with a 60 s timeout per page and one retry after a timeout or 5xx. Large wanted lists no longer time out after 10 s per 100-album page. A failed page still means no list, never a partial one.
 
+### Changed
+
+- The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.
+
 ## v0.5.0 - 2026-10-12
 
 ### Upgrade Notes
