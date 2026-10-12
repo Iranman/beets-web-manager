@@ -604,7 +604,7 @@ class ApplyRefusalAndRecoveryTests(_Engine):
         with mock.patch.object(self.ad, "relocate_album",
                                side_effect=BeetsAdapterNotFoundError("x", error_code="BEETS_NOT_FOUND")):
             res = cw.apply_album_relocation(op, adapter=self.ad, store=self.store)
-        self.assertIn("1.15.0", res["error"])
+        self.assertIn("1.16.0", res["error"])
         self.assertEqual(self.store.get(op)["status"], "Failed")
 
 

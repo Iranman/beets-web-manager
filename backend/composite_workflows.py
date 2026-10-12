@@ -3227,7 +3227,7 @@ _RELOCATION_REFUSALS = {
     "BLANK_IDENTITY": "The album has no artist or album name to place it under; fix its tags first. "
                       "Nothing was moved.",
     "UNDONE": "Beets could not finish and put every file back; nothing was changed.",
-    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.15.0; nothing was changed.",
+    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.16.0; nothing was changed.",
     "INVALID_REQUEST": "Beets refused the request as malformed; nothing was changed.",
     "SOURCE_CHANGED": "A torrent original is gone or changed since the album was linked into the library "
                       "(the torrent client or another tool changed it); nothing was changed.",
@@ -3342,10 +3342,10 @@ def apply_album_relocation(
         if not capable:
             st.update(op_id, status="Failed", append_logs=[
                 "Not moved: the album is in a preserved torrent source and Beets has no webmanager plugin "
-                "1.15.0 (capability album_relocation_link) to link it; nothing was changed."])
+                "1.15.0 or later (capability album_relocation_link) to link it; nothing was changed."])
             return {"ok": False, "code": "plugin_outdated", "mutated": False, "operation_id": op_id,
                     "status": "Failed",
-                    "error": "Restart the beets container so it loads webmanager plugin 1.15.0, which links "
+                    "error": "Restart the beets container so it loads webmanager plugin 1.16.0, which links "
                              "a seeding torrent's files instead of moving them; nothing was changed."}
     from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"], attempt_owner(op_id), timeout=10):
