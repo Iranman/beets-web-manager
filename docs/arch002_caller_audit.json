@@ -481,10 +481,6 @@
       "DISPLAY_ONLY",
       "Maps the canonical verify_audio_against_request verdict onto the file-level result schema."
     ],
-    "backend/track_align.py::align_tracks": [
-      "COMPATIBILITY_WRAPPER",
-      "Delegates to canonical align_tracks_global(trust_model=fresh_reviewed_import); 0.96 only labels matched vs fuzzy for display. Unused similarity_fn documented."
-    ],
     "backend/transaction_engine.py::<module>": [
       "DISPLAY_ONLY",
       "Comment/constant definitions."

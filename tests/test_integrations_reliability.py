@@ -661,8 +661,23 @@ class MusicBrainzOutageRouteTests(_RouteCase):
         lib.get_item.return_value = mock.Mock(title="Song", artist="Artist", albumartist="")
         lib.get_album.return_value = mock.Mock(album="Album", albumartist="Artist", mb_albumid="")
         with mock.patch.object(routes_library, "lib", lib):
-            self.assertUnavailable(self.client.get("/api/items/1/mb-candidates"))
             self.assertUnavailable(self.client.get("/api/albums/1/mb-candidates"))
+
+    def test_item_mb_candidates_reports_the_outage(self):
+        """#356 item 2: the track candidate search reports the outage like the
+        other candidate endpoints (#252 NF-4), never as "no candidates"."""
+        import routes_library
+        lib = mock.Mock()
+        lib.get_item.return_value = mock.Mock(title="Song", artist="Artist", albumartist="")
+        with mock.patch.object(routes_library, "lib", lib):
+            res = self.client.get("/api/items/1/mb-candidates")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json(), {"ok": True, "candidates": [], "musicbrainz_unavailable": True,
+                                              "query": {"title": "Song", "artist": "Artist"}})
+            with mock.patch.object(routes_library, "_mb_recording_search", return_value=[{"mb_trackid": REL}]):
+                body = self.client.get("/api/items/1/mb-candidates").get_json()
+        self.assertFalse(body["musicbrainz_unavailable"])
+        self.assertEqual(body["candidates"], [{"mb_trackid": REL}])
 
     def test_folder_ai_suggest_keeps_the_specific_reason(self):
         import backend.ai_service as ai_service

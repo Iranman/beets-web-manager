@@ -1221,8 +1221,14 @@ def item_mb_candidates(iid):
     raw_title  = item.title or ""
     raw_artist = item.artist or item.albumartist or ""
     title, artist = _clean_for_mb(raw_title, raw_artist)
-    candidates = _mb_recording_search(title, artist)
-    return jsonify({"ok": True, "candidates": candidates, "query": {"title": title, "artist": artist}})
+    # #356: an outage is reported, never shown as "no candidates" (#252 NF-4).
+    # AcoustID is not consulted here, so there is no acoustid_status.
+    try:
+        candidates, unavailable = _mb_recording_search(title, artist), False
+    except provider_boundary.ProviderError:
+        candidates, unavailable = [], True
+    return jsonify({"ok": True, "candidates": candidates, "musicbrainz_unavailable": unavailable,
+                    "query": {"title": title, "artist": artist}})
 
 
 @app.get("/api/albums/<int:aid>/mb-candidates")

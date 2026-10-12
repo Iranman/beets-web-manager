@@ -85,14 +85,13 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         # longer rewrites mb_trackid/track/disc/title via raw local SQL at
         # all -- it delegates to the album_mb_track_repair_v1 composite
         # workflow (backend/composite_workflows.py), which owns the actual
-        # mutation and its AcoustID cross-check. What must still hold here, at
-        # the app.py call site, is that this function always requests
-        # that cross-check -- it is not optional for this caller, since
-        # the pre-migration behavior always ran it unconditionally.
+        # mutation. That family runs mbsync, which never assigns Recording
+        # IDs from fuzzy alignment (MI-18), so no AcoustID cross-check is
+        # requested (#261 N-7).
         start = self.app_source.index("def _match_tracks_from_mb_shared(")
         end = self.app_source.index("\ndef ", start + 10)
         relabel_source = self.app_source[start:end]
-        self.assertIn('"acoustid_verify": True', relabel_source)
+        self.assertNotIn("acoustid_verify", relabel_source)
         self.assertIn("composite_workflows.plan_album_mb_track_repair(payload)", relabel_source)
         self.assertIn("composite_workflows.apply_album_mb_track_repair(op_id", relabel_source)
 

@@ -215,9 +215,6 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 
 - Affected area: `backend/composite_workflows.py` (owner library-transaction-engineer), `backend/acoustid_service.py`, `backend/import_service.py`, `backend/library_service.py`.
 - Open:
-  - #261 F-5: a Release-Group-only write to an album with no `mb_albumid` is checked only for being a UUID (`plan_album_metadata`); it can replace a different existing Release Group without the operator flag or a MusicBrainz check. The only caller is the operator-explicit add-mbids route. Fix in the engine: when the current Release Group differs and there is no Release, require `release_selected_by_operator`.
-  - #261: the metadata-update summary always says "operator-selected" on a Release Group change, even when `release_group_change.operator_selected` is false (the metadata field is correct).
-  - #261 N-7: no production caller passes `acoustid_lookup_fn` to `create_album_mb_track_repair_plan`, so with `acoustid_verify` on every blank slot goes to review.
   - #264: the Release Group candidate loop is capped but not cancellable; the resolver receives no `cancel_event`.
   - Without `ACOUSTID_API_KEY`, an imported missing-track fill cannot be merged and stays a second album row in the same Release Group until Review resolves it.
 - Accepted (by design, conservative):
@@ -230,11 +227,10 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 
 ## ARCH-027 Transaction Safety Follow-ups (0.4.0)
 
-- Affected area: `backend/library_service.py`, `backend/beets_adapter.py`, `backend/track_align.py`, `backend/transaction_engine.py`.
+- Affected area: `backend/library_service.py`, `backend/beets_adapter.py`, `backend/transaction_engine.py`.
 - Evidence:
   - App-managed download folders are recognised by name (` - yt|ytdlp|soundcloud|spotiflac missing <13-digit ms>` under `DOWNLOADS_ALLOWED_ROOTS`, #325). A folder that a user names that way is treated as app-managed. A marker file written at creation would be proof (owner integrations-automation-engineer).
   - Stock Beets' web `QueryConverter` splits path queries on `/` and maps `\` to the path separator, so `BeetsAdapter.find_item_by_path` sends `/` as `\` (#345). A path that itself contains a backslash cannot be queried exactly; `find_item_by_path` also re-checks the exact path because Beets' `path:` query matches directory prefixes.
-  - `acoustid_lookup_fn` / `track_align.resolve_unmatched_via_acoustid` has no production caller since #249; no mutation path consumes it (owner music-identity-engineer: remove or wire it).
   - `TransactionSettings.automatic_approval_threshold` is stored and validated but nothing reads it.
 - Priority: P3. Status: Open.
 
