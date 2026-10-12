@@ -38,6 +38,8 @@ The project uses Semantic Versioning.
 ### Added
 
 - `GET /api/transactions/<id>` returns `cancel: {allowed, mode, code, reason}`, from the same rule as `POST /api/transactions/<id>/cancel` (#356).
+- Library Changes uses the server's `cancel` field: Cancel is enabled only when the server allows it ("Cancel Sync" for a library sync Beets is running), and the server's reason is shown when it is not. The web UI no longer guesses eligibility from the status and mutation family (#356).
+- Playlists: the playlist sync status links its last sync job, and `/jobs?job=<id>` opens that job on the Jobs page. Playlist suggestions pass `acoustid_status` to the outage notice; `not_attempted` shows no AcoustID warning (#356).
 
 ### Tests
 

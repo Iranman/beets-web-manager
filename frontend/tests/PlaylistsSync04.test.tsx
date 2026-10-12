@@ -48,4 +48,20 @@ describe('Playlists sync all (#343)', () => {
     await waitFor(() => expect(getJob).toHaveBeenCalledWith('sync-1'));
     expect(await screen.findByText(/Playlist sync failed: 1 playlist\(s\) failed to sync/)).toBeTruthy();
   });
+
+  it('links the last sync job to the Jobs page (#356)', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [] } as never);
+    vi.mocked(getPlaylistSyncStatus).mockResolvedValue({ ...idle, last_run: 1, last_job_id: 'sync 7' });
+    render(<MemoryRouter><Playlists /></MemoryRouter>);
+    const link = await screen.findByRole('link', { name: 'View last sync job' });
+    expect(link.getAttribute('href')).toBe('/jobs?job=sync%207');
+  });
+
+  it('shows no job link when the status has no last_job_id', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [] } as never);
+    vi.mocked(getPlaylistSyncStatus).mockResolvedValue(idle);
+    render(<MemoryRouter><Playlists /></MemoryRouter>);
+    expect(await screen.findByText(/Auto off/)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'View last sync job' })).toBeNull();
+  });
 });

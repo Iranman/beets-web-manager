@@ -59,4 +59,36 @@ describe('Playlists MusicBrainz outage notice (#252 NF-4, QA-3/QA-4)', () => {
     await view();
     await waitFor(() => expect(screen.queryByText(MUSICBRAINZ_UNAVAILABLE_TEXT)).toBeNull());
   });
+
+  it('passes acoustid_status to the notice; not_attempted adds no AcoustID warning (#356)', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [{ name: 'P1', tracks: 1, missing: 1, has_m3u: true }] } as never);
+    vi.mocked(getPlaylistDetails).mockResolvedValue({
+      ok: true, name: 'P1', m3u: '/playlists/P1.m3u', total: 1, matched: [], missing: [missingTrack], tracks_loaded: true,
+    } as never);
+    vi.mocked(getPlaylistSuggestions).mockResolvedValue({
+      ok: true, name: 'P1', total_missing: 1, safe_count: 0, rows: [], musicbrainz_unavailable: true, acoustid_status: 'not_attempted',
+    });
+    render(<MemoryRouter><Playlists /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'View Tracks' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Fixes' }));
+    await screen.findByText(MUSICBRAINZ_UNAVAILABLE_TEXT);
+    expect(screen.queryByText(/fingerprints were not checked/)).toBeNull();
+  });
+
+  it('shows the AcoustID warning when the suggestions report a failing acoustid_status', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [{ name: 'P1', tracks: 1, missing: 1, has_m3u: true }] } as never);
+    vi.mocked(getPlaylistDetails).mockResolvedValue({
+      ok: true, name: 'P1', m3u: '/playlists/P1.m3u', total: 1, matched: [], missing: [missingTrack], tracks_loaded: true,
+    } as never);
+    vi.mocked(getPlaylistSuggestions).mockResolvedValue({
+      ok: true, name: 'P1', total_missing: 1, safe_count: 0, rows: [], musicbrainz_unavailable: false, acoustid_status: 'auth_failed',
+    });
+    render(<MemoryRouter><Playlists /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'View Tracks' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Fixes' }));
+    expect(await screen.findByText(/AcoustID rejected the API key/)).toBeTruthy();
+    expect(screen.queryByText(MUSICBRAINZ_UNAVAILABLE_TEXT)).toBeNull();
+  });
 });
