@@ -113,6 +113,13 @@ EOF
             # Precondition for the regression: the app made its tree private.
             MSYS_NO_PATHCONV=1 docker run --rm -v "$2:/d" alpine stat -c '%a %u:%g' /d | grep -qx '700 1000:1000' \
                 || { echo "::error::$1: data dir not 0700 1000:1000 after first boot" >&2; exit 1; }
+            # The bundled Deno must run as the app user under read_only with
+            # /tmp tmpfs, and yt-dlp's runtime probe must pick it up.
+            docker exec -u 1000:1000 "$cid" python3 -c \
+                'from backend.ytdlp_service import _ytdlp_js_runtime_status as s; r = s(); print(r); assert r["available"] and r["runtimes"][0]["runtime"] == "deno", r' \
+                || { echo "::error::$1: bundled Deno not usable by yt-dlp" >&2; exit 1; }
+            docker exec -u 1000:1000 "$cid" deno eval 'console.log(6 * 7)' | grep -qx 42 \
+                || { echo "::error::$1: bundled Deno cannot run JS" >&2; exit 1; }
         fi
     done
     assert_graceful "$1: stop" "$cid" compose stop -t "$STOP_TIMEOUT" beets-web-manager
