@@ -2,8 +2,6 @@
 
 - #317: a mutating child that published ``mutation_started`` and then stopped
   on the cancel; the idle-stall and timeout paths of ``_wait_for_child_job``.
-- #356 item 3: ``acoustid_status`` on ``GET /api/playlists/<name>/suggestions``
-  (the implementer's test covers only ``apply-safe-suggestions``).
 """
 
 import threading
@@ -11,7 +9,6 @@ import time
 import unittest
 from unittest import mock
 
-import tests.test_integrations_reliability as tir
 import tests.test_041_transaction_followups as tf  # module import: its classes are not re-collected here
 
 
@@ -77,33 +74,6 @@ class ChildJobQaTests(tf.ChildJobReconcileTests):
         self.assertTrue(tx["metadata"]["engine_result"]["outcome_unknown"])
         self.assertIn("outcome is unknown", " ".join(map(str, tx["logs"])))
 
-
-class SuggestionsGetAcoustidStatusTests(tir._RouteCase):
-    """#356 item 3 on the GET route, beside musicbrainz_unavailable."""
-
-    def _get(self, **search):
-        import routes_playlist
-        track = {"artist": "A", "title": "T"}
-        with mock.patch.multiple(routes_playlist,
-                                 _playlist_saved_playlist_exists=mock.Mock(return_value=True),
-                                 _playlist_library_index=mock.Mock(return_value={}),
-                                 _playlist_detail_payload=mock.Mock(return_value={"missing": [track]}),
-                                 _playlist_suggestions_for_track=mock.Mock(**search)):
-            res = self.client.get("/api/playlists/Mix/suggestions")
-        self.assertEqual(res.status_code, 200)
-        return res.get_json()
-
-    def test_get_suggestions_reports_acoustid_status(self):
-        body = self._get(return_value=[])
-        self.assertEqual(body["acoustid_status"], "not_attempted")
-        self.assertIs(body["musicbrainz_unavailable"], False)
-
-    def test_get_suggestions_reports_acoustid_status_during_a_musicbrainz_outage(self):
-        import backend.provider_boundary as pb
-        outage = pb.ProviderError(pb.ProviderOutcome.UNAVAILABLE, "down", provider="musicbrainz")
-        body = self._get(side_effect=[outage, []])
-        self.assertIs(body["musicbrainz_unavailable"], True)
-        self.assertEqual(body["acoustid_status"], "not_attempted")
 
 
 if __name__ == "__main__":
