@@ -46,8 +46,10 @@ from tests.test_import_review_attach_enforcement import (
 )
 try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
+    from _job_threads import join_jobs  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+    from tests._job_threads import join_jobs  # noqa: E402
 
 
 def setUpModule():
@@ -258,6 +260,14 @@ class _AttachIntegrityTestCase(unittest.TestCase):
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
         self._patch(patch_app_family(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(patch_app_family(APP, "_trigger_plex_refresh", return_value=None))
+
+    def tearDown(self):
+        # #234: release any gated job and join it before the patches stop
+        # (cleanups run after tearDown), so no job thread outlives the test.
+        for gate in (*self.gates.values(), *self.engine_gates.values()):
+            gate.set()
+        from backend.app_runtime import jobs
+        join_jobs(jobs)
 
     @staticmethod
     def _iid_from_track_repair_payload(payload):

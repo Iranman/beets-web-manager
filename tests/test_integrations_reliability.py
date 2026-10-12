@@ -255,7 +255,8 @@ class _FakePlex:
     so duplicates are told apart, and supports the add/remove/move calls."""
 
     def __init__(self, playlists=None, fail_post=None, fail_put=None, fail_delete=None,
-                 fail_move=None):
+                 fail_move=None, collapse=False):
+        self.collapse = collapse  # real Plex: an added track already in the playlist is dropped (#363)
         self.playlists = {}  # ratingKey -> {"title", "items": [[item_id, track_key], ...]}
         self.next_item = 9000
         for key, row in (playlists or {}).items():
@@ -271,6 +272,12 @@ class _FakePlex:
 
     def keys(self, rating_key):
         return [k for _i, k in self.playlists[rating_key]["items"]]
+
+    def _add(self, rating_key, track_keys):
+        items = self.playlists[rating_key]["items"]
+        for k in track_keys:
+            if not (self.collapse and str(k) in {e[1] for e in items}):
+                items.append(self._entry(k))
 
     def writes(self):
         return [c for c in self.calls if c[0] != "GET"]
@@ -306,7 +313,8 @@ class _FakePlex:
                 raise self.fail_post
             self.next_key += 1
             key = str(self.next_key)
-            self.playlists[key] = {"title": params["title"], "items": [self._entry(k) for k in self._uri_keys(params)]}
+            self.playlists[key] = {"title": params["title"], "items": []}
+            self._add(key, self._uri_keys(params))
             return {"MediaContainer": {"Metadata": [{"ratingKey": key}]}}
         if method == "PUT" and path.endswith("/move"):
             if self.fail_move:
@@ -321,7 +329,7 @@ class _FakePlex:
         if method == "PUT" and path.endswith("/items"):
             if self.fail_put:
                 raise self.fail_put
-            self.playlists[parts[1]]["items"] += [self._entry(k) for k in self._uri_keys(params)]
+            self._add(parts[1], self._uri_keys(params))
             return {}
         if method == "DELETE" and len(parts) == 4:  # one entry
             if self.fail_delete:
@@ -653,8 +661,23 @@ class MusicBrainzOutageRouteTests(_RouteCase):
         lib.get_item.return_value = mock.Mock(title="Song", artist="Artist", albumartist="")
         lib.get_album.return_value = mock.Mock(album="Album", albumartist="Artist", mb_albumid="")
         with mock.patch.object(routes_library, "lib", lib):
-            self.assertUnavailable(self.client.get("/api/items/1/mb-candidates"))
             self.assertUnavailable(self.client.get("/api/albums/1/mb-candidates"))
+
+    def test_item_mb_candidates_reports_the_outage(self):
+        """#356 item 2: the track candidate search reports the outage like the
+        other candidate endpoints (#252 NF-4), never as "no candidates"."""
+        import routes_library
+        lib = mock.Mock()
+        lib.get_item.return_value = mock.Mock(title="Song", artist="Artist", albumartist="")
+        with mock.patch.object(routes_library, "lib", lib):
+            res = self.client.get("/api/items/1/mb-candidates")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json(), {"ok": True, "candidates": [], "musicbrainz_unavailable": True,
+                                              "query": {"title": "Song", "artist": "Artist"}})
+            with mock.patch.object(routes_library, "_mb_recording_search", return_value=[{"mb_trackid": REL}]):
+                body = self.client.get("/api/items/1/mb-candidates").get_json()
+        self.assertFalse(body["musicbrainz_unavailable"])
+        self.assertEqual(body["candidates"], [{"mb_trackid": REL}])
 
     def test_folder_ai_suggest_keeps_the_specific_reason(self):
         import backend.ai_service as ai_service
@@ -750,6 +773,7 @@ class MusicBrainzOutageRouteTests(_RouteCase):
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
         self.assertTrue(body["musicbrainz_unavailable"])
+        self.assertEqual(body["acoustid_status"], "not_attempted")  # #356 item 3
         self.assertEqual([r["best"]["source"] for r in body["rows"]], ["beets-title", "beets-title"])
         # the outage is detected once; later tracks do not ask MusicBrainz again
         self.assertEqual(urllib.request.urlopen.call_count, pb.POLICIES["musicbrainz"].max_attempts)
@@ -825,6 +849,35 @@ class DownloadRootTests(unittest.TestCase):
         # static roots only (behaviour: test_slskd_peer_path_containment).
         self.assertIn("if raw and _slskd_within_roots(raw, download_roots):", source)
         self.assertIn("if _slskd_within_roots(candidate, static_roots):", source)
+
+
+class SuggestionsGetAcoustidStatusTests(_RouteCase):
+    """#356 item 3 on the GET route, beside musicbrainz_unavailable (0.4.1 QA)."""
+
+    def _get(self, **search):
+        import routes_playlist
+        track = {"artist": "A", "title": "T"}
+        with mock.patch.multiple(routes_playlist,
+                                 _playlist_saved_playlist_exists=mock.Mock(return_value=True),
+                                 _playlist_library_index=mock.Mock(return_value={}),
+                                 _playlist_detail_payload=mock.Mock(return_value={"missing": [track]}),
+                                 _playlist_suggestions_for_track=mock.Mock(**search)):
+            res = self.client.get("/api/playlists/Mix/suggestions")
+        self.assertEqual(res.status_code, 200)
+        return res.get_json()
+
+    def test_get_suggestions_reports_acoustid_status(self):
+        body = self._get(return_value=[])
+        self.assertEqual(body["acoustid_status"], "not_attempted")
+        self.assertIs(body["musicbrainz_unavailable"], False)
+
+    def test_get_suggestions_reports_acoustid_status_during_a_musicbrainz_outage(self):
+        import backend.provider_boundary as pb
+        outage = pb.ProviderError(pb.ProviderOutcome.UNAVAILABLE, "down", provider="musicbrainz")
+        body = self._get(side_effect=[outage, []])
+        self.assertIs(body["musicbrainz_unavailable"], True)
+        self.assertEqual(body["acoustid_status"], "not_attempted")
+
 
 
 if __name__ == "__main__":

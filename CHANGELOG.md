@@ -4,11 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.5.0 - 2026-10-12
+
+### Upgrade Notes
+
+- Legacy playlist import no longer reads a `MUSIC_ROOT/playlists` folder that is a symlink, a file larger than 5 MB, or more than 500 files in one folder. If your `playlists` folder is a symlink, replace it with a real folder (or move the files into Web Manager) before upgrading. Web Manager's own playlist folder is not affected.
+- After the upgrade, the first startup moves transactions that were left Running by an earlier crash or restart, and that no recovery step covers, to Recovery Required. They then show up in Library Changes for you to review; nothing in the library is changed.
+- Cancelling a job that is waiting on a child job (imports, downloads, Clean All artwork/genre steps) can now take up to 5 minutes, so the job reports the child's real outcome instead of abandoning it.
+
+### Security
+
+- Outbound-request log lines and provider HTTP errors no longer include the URL path, which can carry a webhook token or URL signature. They show the scheme, host, port and a short hash of the path (#350).
+- A URL password that contains a raw `/` (`http://user:pa/ss@host`) is now hidden in the config editor, the plugin preview diff, outbound-request logs and stored job records. Before, only the part before the `/` was hidden (#239 F-3).
+- Stored job logs and results now also hide a token-only URL login (`https://TOKEN@host`) and the whole of a password that contains `@` (#351 N2). Result fields named `fingerprint` or `client` are no longer blanked when a job is stored; a `client=` query parameter is still hidden.
+- The request fingerprint stored with each job is now an HMAC keyed with this install's secret key (`BEETS_WEB_SECRET_KEY` or `.flask_secret_key` in the data folder), not a plain SHA-256. The job files alone, without that key, can no longer be used to check guesses of a secret sent in a request. An uploaded file is hashed before the job store is locked, so a large upload no longer delays other job starts (#351 N1).
+- Two settings saves at the same moment no longer fail with a 500. Each save writes its own uniquely named, 0600 temporary file instead of a shared `.env.tmp` (#183).
+- `GET/POST /api/setup/env` returns the settings file name (`.env`), not its path inside the container (#183).
+- The Discogs token is read from Beets `config.yaml` only when `BEETS_CONFIG` is inside the Beets config folder (`BEETSDIR`), the same rule as every other reader of that file (#183, #239).
+- A `config.yaml` that Web Manager creates on a fresh install is now mode 0600 instead of 0644, because it holds Beets' secrets once they are set. Beets runs as the same `PUID`, so it can still read the file. Only the newest 10 timestamped config editor backups (`config.yaml.bak.<time>`) are kept (#324 N-2). Saving a CRLF `config.yaml` in the editor keeps its CRLF line endings (#324 N-3).
 
 ### Fixed
 
 - TrueNAS rollout script: the online library identity digest now hashes item paths relative to the library directory Beets reports in `/webmanager/status`. Before, an engine restart that moved from plugin 1.15.0 to 1.16.0, which serves Beets 2.14 item paths as absolute paths, failed with "library identity digest changed across the engine restart" even though the library had not changed. A real path change still changes the digest. This applies to the pre/post-deploy, engine-restart and offline stop/start comparisons.
+- Beets adapter (#351 N5): a relative item or art path from Beets that contains a `..` segment is no longer collapsed into a path under the library directory. Beets only stores paths inside its library directory as relative, so such a row is treated as corrupt and its `path`/`artpath` becomes empty. An absolute path with a `..` segment is treated the same way. A `library_directory` that is not absolute is ignored instead of being joined to relative paths. Normal Beets 2.14 relative paths still become absolute.
+- Beets adapter (#351 N6): stock Beets turns every `\` in a query term into `/`, and no URL encoding survives that, so a file name that contains a backslash cannot be queried exactly. Looking up a library item by such a path no longer accepts the item Beets matched when `web.include_paths` is off, because that item can be a different file. With `include_paths` on, the exact path comparison already rejected it. Other queries that contain a backslash still match `/`; this is a stock Beets limit.
+- Playlist sync (#363): a track a playlist deliberately repeats is no longer re-sent to Plex on every sync. Plex keeps one entry per track and drops a repeat it already holds, so the sync logged "+1 added" and counted a Plex write that changed nothing. A repeat is now satisfied by the one Plex entry, an unchanged playlist makes 0 Plex writes, and the "added" count (log and `tracks_added`) is what Plex holds after the write. The repeat stays in the Web Manager list and its `.m3u`.
+- Legacy playlist import (#351 N3): each `MUSIC_ROOT/playlists` file is opened first (no symlink follow, non-blocking) and then checked on the open file (regular file, at most 5 MB), so a file swapped for a symlink or FIFO after listing is not read. A symlinked `playlists` folder is skipped, and at most 500 files per folder are imported. The folder is opened once without following symlinks, and both its listing and each file open go through that handle, so swapping the folder for a symlink after the check does not redirect the import (#364 F1).
+- Playlist suggestions (#356): `GET /api/playlists/<name>/suggestions` and `POST /api/playlists/<name>/apply-safe-suggestions` return a response-level `acoustid_status` (`not_attempted`: suggestions for missing tracks have no audio to fingerprint) beside `musicbrainz_unavailable`.
+- `GET /api/items/<id>/mb-candidates` now reports a MusicBrainz outage as `200` with `ok: true`, `candidates: []` and `musicbrainz_unavailable: true`, like the other candidate endpoints, so the UI can show the outage notice. Before, it returned a `503` (#356). A successful search sets `musicbrainz_unavailable: false`. The album route is unchanged.
+- The MusicBrainz track sync no longer sends an `acoustid_verify` flag that nothing read. The unused `backend/track_align.py` was removed: since #249 nothing called its AcoustID promotion, and `mbsync` never assigns Recording IDs from alignment (#261 N-7). #261 F-5 and the "explicit"/"operator-selected" summary were fixed in v0.4.0; their technical-debt entries are closed.
+- Jobs that wait on a child job (imports, downloads, Clean All's artwork and genre steps, replacements): a cancel or timeout no longer abandons a child that may be in the middle of a Beets operation. The parent asks the child to stop and waits up to 5 minutes for its real outcome (#317). The parent's transaction is Cancelled only when the child stopped before reporting a library change; Failed (partially applied) when the child finished or reported a change first; Recovery Required when the child was still running. A timed-out child that then finishes is used as a success. Read-only children (scans) are still stopped at once.
+- A Running transaction of a mutation family this version does not know (a removed family, or one cut off before it recorded evidence) is moved to Recovery Required by the startup sweep instead of staying Running for good (#266).
+- The album move rollback log names the folders the tracks are back in as absolute paths, also for moves planned before 0.4.0 (#328 F9).
+- Staging moves re-check the source's identity right before the directory rename and before the file's old name is unlinked, so a source swapped in between is refused, not moved or deleted (#351 N4).
+- Jobs whose label contains "Artist" (or "repair", "maintenance") are no longer recorded as Artwork Update or AI Suggestion transactions (#325 F5).
+- The Music Format Preferences rejection message no longer says files were "handled according to settings" when they were left in place, and names why they were kept (#325 F3).
+- Troubleshooting §12 no longer says a failed tag write (`WRITE_FAILED`) cannot be rolled back; since v0.4.0 the Failed item or album edit can be rolled back once the files are writable (#318).
+
+### Added
+
+- `GET /api/transactions/<id>` returns `cancel: {allowed, mode, code, reason}`, from the same rule as `POST /api/transactions/<id>/cancel` (#356).
+- Library Changes uses the server's `cancel` field: Cancel is enabled only when the server allows it ("Cancel Sync" for a library sync Beets is running), and the server's reason is shown when it is not. The web UI no longer guesses eligibility from the status and mutation family (#356).
+- Playlists: the playlist sync status links its last sync job, and `/jobs?job=<id>` opens that job on the Jobs page. Playlist suggestions pass `acoustid_status` to the outage notice; `not_attempted` shows no AcoustID warning (#356).
+
+### Tests
+
+- The stale opt-in Docker smoke test (`RUN_DOCKER_SMOKE`), which built the Web Manager image and ran Beets in it, now runs against stock `lscr.io/linuxserver/beets`: it loads every plugin in `config.yaml.example` with the bundled plugins in `/config/beetsplug`, imports a generated track and runs fetchart. It runs wherever Docker is available, including CI, so it is no longer always skipped (#355).
+- CI's `unit-tests` job runs the root-only PUID/PGID ownership tests as root, the `setup.ps1` (pwsh) test and the stock-Beets smoke test, and fails if any of them skips (#355).
+- The slskd containment tests patch only `backend.slskd_service`'s `time`, not the process-wide `time.time`/`time.sleep`, so threads left by other tests cannot consume their fake clock (#266).
+- No backend test leaves `job_engine` threads running after it ends (#234 item 2). Before, 22 tests left job threads or a `job-heartbeat` thread running into later tests. These threads are the suspected cause of the intermittent exit-139 crashes in CI. The tests now close their `JobStore` or join the shared store's jobs, and `tests/test_job_thread_guard.py` fails any test whose job threads are still alive 10 seconds after it ends. The suite runs the guard on every test. Production code is unchanged.
 
 ## v0.4.0 - 2026-10-12
 

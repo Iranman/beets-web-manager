@@ -42,7 +42,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
-from backend.config_layers import SECRET_CONFIG_KEYS, is_secret_config_key, mask_config_secret_values
+from backend.config_layers import SECRET_CONFIG_KEYS, is_secret_config_key, mask_config_secret_values, url_userinfo_spans
 
 log = logging.getLogger("beets.plugins.manifest")
 
@@ -1027,14 +1027,14 @@ def _atomic_write_text(path: Path, text: str) -> None:
     A unique temp file in the same directory (mkstemp, created 0600) avoids
     clobbering/symlink games on a fixed name; the existing file's mode is
     restored so a 0600 config.yaml never becomes world-readable. A new file
-    gets 0644.
+    gets 0600: config.yaml holds Beets' secrets once they are set (#324 N-2).
     """
     try:
         st = os.lstat(path)
         # Never copy a symlink target's mode (the link itself is replaced).
         mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
     except FileNotFoundError:
-        mode = 0o644
+        mode = 0o600
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1189,26 +1189,17 @@ _is_secret_key = is_secret_config_key
 def _mask_url_userinfo(body: str) -> str:
     """``scheme://user:pass@host`` -> ``scheme://user:********@host`` (linear).
 
-    The userinfo ends at the LAST ``@`` before the next ``/``, so a password
-    holding a raw ``@`` or space is masked whole (F2r).
+    The userinfo ends at the LAST ``@`` before the next quote or line end
+    (config_layers.url_userinfo_spans), so a password holding a raw ``@`` or
+    space (F2r) or ``/`` (#239 F-3) is masked whole.
     """
     out: List[str] = []
     pos = 0
-    while True:
-        start = body.find("://", pos)
-        if start < 0:
-            break
-        auth_start = start + 3
-        slash = body.find("/", auth_start)
-        end = len(body) if slash < 0 else slash
-        at = body.rfind("@", auth_start, end)
-        colon = body.find(":", auth_start, at) if at >= 0 else -1
+    for start, end in url_userinfo_spans(body, spaces_end_url=False):
+        colon = body.find(":", start, end)
         if colon >= 0:
             out.append(body[pos:colon + 1] + _SECRET_MASK)
-            pos = at
-            continue
-        out.append(body[pos:auth_start])
-        pos = auth_start
+            pos = end
     out.append(body[pos:])
     return "".join(out)
 

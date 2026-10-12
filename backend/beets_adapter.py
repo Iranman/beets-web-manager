@@ -511,6 +511,8 @@ class BeetsAdapter:
                 self._libdir = str(status.get("library_directory") or "") if isinstance(status, dict) else ""
             except BeetsAdapterError:
                 return ""
+            if not posixpath.isabs(self._libdir):  # #351 N5: never join to a relative/odd directory
+                self._libdir = ""
         return self._libdir
 
     def _rows(self, rows: List[Any]) -> List[Any]:
@@ -518,7 +520,12 @@ class BeetsAdapter:
         absolute ``path``/``artpath``. Beets 2.14 stores paths relative to
         its library directory and stock web routes served them relative
         until the webmanager plugin bound that directory app-wide (D4, #302);
-        a relative path is joined to the directory Beets reports."""
+        a relative path is joined to the directory Beets reports.
+
+        #351 N5: Beets only stores paths under its directory as relative, so
+        a ".." segment means a corrupt or hostile DB. Collapsing it lexically
+        could name another file than the OS reaches through a symlinked
+        folder, so the value becomes None and no consumer acts on it."""
         libdir: List[str] = []  # looked up at most once per call
 
         def fix(row: Any) -> None:
@@ -527,7 +534,13 @@ class BeetsAdapter:
                 return
             for key in ("path", "artpath"):
                 value = row.get(key)
-                if isinstance(value, str) and value and not posixpath.isabs(value):
+                if not (isinstance(value, str) and value):
+                    continue
+                if ".." in value.split("/"):  # absolute too: Beets stores absolute paths normalized
+                    log.warning("Beets row %s has an unsafe %s; ignoring it", row.get("id"), key)
+                    row[key] = None
+                    continue
+                if not posixpath.isabs(value):
                     if not libdir:
                         libdir.append(self._library_directory())
                     if libdir[0]:
@@ -1229,9 +1242,12 @@ class BeetsAdapter:
         """Compatibility helper finding a single item by path."""
         # One term (no shell-style split on spaces or quotes). Beets' path:
         # also matches everything under a directory, so keep the exact file.
+        # #351 N6: stock Beets' QueryConverter turns every "\" in a term into
+        # os.sep, and no URL encoding survives that, so "a\b.flac" is queried
+        # as "a/b.flac". Beets' own match is then trusted only without "\".
         want = os.path.normpath(str(path))
         items = self.get_items([f"path:{path}"])
-        if len(items) == 1 and "path" not in items[0]:  # web.include_paths off: Beets' own match
+        if len(items) == 1 and "path" not in items[0] and "\\" not in str(path):  # web.include_paths off
             return items[0]
         for item in items:
             got = item.get("path")

@@ -20,6 +20,11 @@ vi.mock('../src/api/client', async (importActual) => ({
 const mockApprove = vi.mocked(approveTransaction);
 const PHRASE = 'DELETE ALBUM FILES';
 
+// Stands in for the server's cancel eligibility (#356); the UI must not derive it.
+const serverCancel = (status: string): TransactionDetail['cancel'] => (['Pending', 'Preview', 'Approved'].includes(status)
+  ? { allowed: true, mode: 'transaction', code: 'not_started', reason: 'Not started yet.' }
+  : { allowed: false, mode: null, code: 'not_cancellable', reason: `This transaction is ${status}.` });
+
 function tx(metadata: Record<string, unknown>, status = 'Preview'): TransactionDetail {
   return {
     id: 'tx-1',
@@ -32,6 +37,7 @@ function tx(metadata: Record<string, unknown>, status = 'Preview'): TransactionD
     confidence: {},
     counts: {},
     rollback: { available: false },
+    cancel: serverCancel(status),
     metadata,
     changes: [],
     changes_total: 0,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, EDITABLE_FIELDS, _s
 from backend.library_service import _require_attach_stage_success
@@ -12,7 +13,7 @@ from backend.beets_adapter import lib
 import backend.composite_workflows as composite_workflows
 from backend.matching_service import _invalidate_lib_cache
 from backend.app_runtime import jobs, transactions
-from backend.job_service import _call_job_fn
+from backend.job_service import _call_job_fn, _job_progress
 from job_engine import DuplicateJobError, cancel_honoured, cancel_requested, reports_failure
 from backend.import_review_service import _metadata_transaction_pending_fields
 
@@ -27,6 +28,11 @@ _TRANSACTION_LABEL_BLOCKLIST = (
 )
 
 
+def _word(text: str, word: str) -> bool:
+    """``word`` as a whole word: "Artist" is not "art", "repair" is not "ai" (#325 F5)."""
+    return re.search(rf"(?<![a-z]){word}(?![a-z])", text) is not None
+
+
 def _transaction_operation_from_job(label: str, metadata: Dict[str, Any]) -> Optional[str]:
     text = f"{metadata.get('type', '')} {label}".strip().lower()
     if not text or any(blocked in text for blocked in _TRANSACTION_LABEL_BLOCKLIST):
@@ -36,7 +42,7 @@ def _transaction_operation_from_job(label: str, metadata: Dict[str, Any]) -> Opt
             return "Playlist Import"
     if "music-format" in text or "replace" in text or "replacement" in text:
         return "Replace"
-    if "fetchart" in text or "art" in text or "artwork" in text:
+    if "fetchart" in text or "artwork" in text or _word(text, "art"):
         return "Artwork Update"
     if "dedup" in text or "duplicate" in text:
         return "Duplicate Removal"
@@ -52,7 +58,7 @@ def _transaction_operation_from_job(label: str, metadata: Dict[str, Any]) -> Opt
         return "MusicBrainz Match"
     if "acoustid" in text or "fingerprint" in text:
         return "AcoustID Match"
-    if "ai" in text or "suggest" in text:
+    if _word(text, "ai") or "suggest" in text:
         return "AI Suggestion"
     if "move" in text:
         return "Move"
@@ -160,6 +166,23 @@ def _install_transaction_job_hooks() -> None:
                         return update_state(updates, **kwargs)
                     return None
 
+                def note(mutation_started=False, outcome_unknown=False):
+                    # job_service.note_job_progress: a child job's Beets
+                    # operation changed the library or outlived the wait (#317).
+                    progress["mutated"] = progress["mutated"] or bool(mutation_started)
+                    progress["unknown"] = progress.get("unknown") or bool(outcome_unknown)
+
+                def settle(status, result=None):
+                    if progress.get("unknown"):
+                        transactions.update(tx_id, metadata={"engine_result": {"mutation_started": True,
+                                                                               "outcome_unknown": True}})
+                        transactions.append_log(tx_id, "A child job was still running a library operation when this "
+                                                       f"job stopped waiting for it: recorded as Recovery Required, "
+                                                       f"not {status}. Check the child job before retrying.")
+                        progress["partial"] = True
+                        return "Recovery Required"
+                    return cancelled(result) if status == "Cancelled" else status
+
                 def cancelled(result=None):
                     if not (progress["mutated"] or (isinstance(result, dict) and result.get("mutation_started"))):
                         return "Cancelled"
@@ -178,18 +201,21 @@ def _install_transaction_job_hooks() -> None:
                                                        f"its work: recorded as {status}.")
 
                 transactions.update(tx_id, status="Running")
+                token = _job_progress.set(note)
                 try:
                     result = _call_job_fn(fn, log, cancel, tracked_state)
                 except Exception as ex:
-                    finish(cancelled() if cancel_honoured(cancel, ex) else "Failed")
+                    finish(settle("Cancelled" if cancel_honoured(cancel, ex) else "Failed"))
                     transactions.append_log(tx_id, f"ERROR: {ex}")
                     raise
+                finally:
+                    _job_progress.reset(token)
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
                 if reports_failure(result):
                     next_status = "Failed"  # BA-3: the same rule as job_engine
                 if isinstance(result, dict) and result.get("outcome_partly_unknown"):
                     next_status = "Recovery Required"  # lost contact mid-run: not provably Failed (#326 F2)
-                finish(cancelled(result) if cancel_honoured(cancel) else next_status)
+                finish(settle("Cancelled" if cancel_honoured(cancel) else next_status, result))
                 return result
         else:
             wrapped = fn
@@ -205,6 +231,30 @@ def _install_transaction_job_hooks() -> None:
 
     jobs.start_python = start_python_with_transaction
     jobs._transaction_hooks_installed = True
+
+
+#: Statuses POST /api/transactions/<id>/cancel cancels outright (compare-and-set).
+CANCELLABLE_STATUSES = ("Pending", "Preview", "Approved")
+
+
+def transaction_cancel_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether the cancel route will act on ``tx`` (#356): the route and the
+    detail payload's ``cancel`` field both use this, so they cannot drift.
+    ``allowed``; ``mode`` "transaction" (not started: cancelled, nothing
+    changes), "engine" (a library sync Beets is running: the cancel is sent to
+    its operation) or None; ``code``; ``reason`` (operator text)."""
+    status = tx.get("status")
+    meta = tx.get("metadata") or {}
+    if status in CANCELLABLE_STATUSES:
+        return {"allowed": True, "mode": "transaction", "code": "not_started",
+                "reason": "Not started yet: cancelling it changes nothing."}
+    if (meta.get("mutation_family") == composite_workflows.MBSYNC_LIBRARY_FAMILY
+            and meta.get("engine_operation_id") and status in ("Running", "Recovery Required")):
+        return {"allowed": True, "mode": "engine", "code": "engine_operation",
+                "engine_operation_id": str(meta["engine_operation_id"]),
+                "reason": "Beets stops this sync after the album it is on; albums already synced keep their changes."}
+    return {"allowed": False, "mode": None, "code": "not_cancellable",
+            "reason": f"Only a Pending, Preview or Approved transaction can be cancelled (this one is {status})."}
 
 
 def _sync_transactions_from_jobs() -> None:

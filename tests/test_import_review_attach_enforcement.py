@@ -25,8 +25,10 @@ from pathlib import Path
 from types import SimpleNamespace
 try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
+    from _job_threads import join_jobs  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+    from tests._job_threads import join_jobs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -254,6 +256,12 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
         self._patch(patch_app_family(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(patch_app_family(APP, "_trigger_plex_refresh", return_value=None))
+
+    def tearDown(self):
+        # #234: join the attach jobs before the patches stop (cleanups run
+        # after tearDown), so no job thread outlives the test.
+        from backend.app_runtime import jobs
+        join_jobs(jobs)
 
     def _patch(self, patcher):
         obj = patcher.start()
@@ -605,6 +613,12 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self._patch(mock.patch.object(APP.composite_workflows, "relocate_album", side_effect=fake_relocate_album))
         self._patch(patch_app_family(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(patch_app_family(APP, "_trigger_plex_refresh", return_value=None))
+
+    def tearDown(self):
+        # #234: join the attach jobs before the patches stop (cleanups run
+        # after tearDown), so no job thread outlives the test.
+        from backend.app_runtime import jobs
+        join_jobs(jobs)
 
     def _patch(self, patcher):
         obj = patcher.start()

@@ -1334,8 +1334,8 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
         )
         if duplicate_key_count:
             log.append(
-                f"  [plex] Preserved {duplicate_key_count} duplicate playlist "
-                "entries for repeated tracks"
+                f"  [plex] {duplicate_key_count} repeated track(s) in the list; "
+                "Plex keeps one entry per track"
             )
         if missing_indexes:
             log.append(

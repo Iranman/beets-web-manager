@@ -17,8 +17,10 @@ from unittest import mock
 import app as app_module
 try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
+    from _job_threads import join_jobs  # noqa: E402
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
+    from tests._job_threads import join_jobs  # noqa: E402
 
 
 def _fake_folder_inventory(root):
@@ -69,6 +71,7 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.client = app_module.app.test_client()
 
     def tearDown(self):
+        join_jobs(app_module.jobs)  # #234: the scan job ends before its root is deleted
         self.tmp.cleanup()
 
     def _post(self, path, payload):

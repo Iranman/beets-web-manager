@@ -629,5 +629,191 @@ class QaAuditDefectTests(tir._RouteCase):
         self.assertEqual(res.get_json()["error_code"], "no_tracks")
 
 
+class CollapsedRepeatTests(unittest.TestCase):
+    """#363: Plex keeps one entry per track. A deliberate repeat that Plex
+    collapsed is satisfied: an unchanged list makes 0 Plex writes, and the
+    counters/log report what Plex holds after the write."""
+
+    def _run(self, plex, desired):
+        log = []
+        with mock.patch.multiple(ps, _plex_request=plex.request, PLEX_PLAYLIST_CHUNK_SIZE=2):
+            result = ps._plex_sync_playlist_in_place("machine", "100", desired, log=log)
+        return result, log
+
+    def test_collapsed_repeat_is_a_no_op(self):
+        # Production shape (Tamborito): the list repeats a track, Plex holds it once.
+        fake = _FakePlex({"100": {"title": "Mix", "items": _keys(1, 2, 3)}}, collapse=True)
+        result, log = self._run(fake, _keys(1, 2, 1, 3))
+        self.assertEqual(result, {"removed": 0, "added": 0, "moved": 0, "writes": 0})
+        self.assertEqual(fake.writes(), [])
+        self.assertTrue(any("no Plex writes" in line for line in log))
+        self.assertFalse(any("added" in line for line in log))
+
+    def test_new_track_listed_twice_is_sent_once(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": _keys(1)}}, collapse=True)
+        result, log = self._run(fake, _keys(1, 2, 2))
+        appends = [c for c in fake.calls if c[0] == "PUT" and c[1].endswith("/items")]
+        self.assertEqual(len(appends), 1)
+        self.assertEqual(fake.keys("100"), _keys(1, 2))
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(self._run(fake, _keys(1, 2, 2))[0]["writes"], 0)
+
+    def test_added_count_is_read_back_from_plex(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": _keys(1)}})
+
+        def request(path, params=None, *, method="GET", **kw):
+            if method == "PUT" and path.endswith("/items"):
+                fake.calls.append((method, path))
+                return {}  # Plex accepts the append but keeps nothing
+            return fake.request(path, params, method=method, **kw)
+
+        result, log = self._run(mock.Mock(request=request), _keys(1, 2))
+        self.assertEqual((result["added"], result["writes"]), (0, 1))
+        self.assertTrue(any("+0 added" in line for line in log))
+
+    def test_repeats_plex_already_holds_are_kept(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": _keys(1, 2, 1)}})
+        result, _ = self._run(fake, _keys(1, 2, 1))
+        self.assertEqual(result["writes"], 0)
+        self.assertEqual(fake.keys("100"), _keys(1, 2, 1))
+
+
+class CollapsedRepeatOutputsTests(unittest.TestCase):
+    """#363 through _create_playlist_outputs: the manifest keeps the repeat."""
+    ITEMS = [{"id": i, "artist": "A", "title": f"T{i}", "path": f"/music/a/{i}.flac"} for i in (1, 2, 1, 3)]
+    KEYS = ["11", "12", "11", "13"]
+
+    def _sync(self, fake, manifest):
+        return tir.PlexPlaylistReplaceTests._sync(self, fake, manifest)
+
+    def test_unchanged_list_with_collapsed_repeat_makes_no_writes(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11", "12", "13"]}}, collapse=True)
+        plex, last = self._sync(fake, {"last_plex": {"rating_key": "100"}})
+        self.assertEqual(plex["mode"], "in_place")
+        self.assertEqual((plex["plex_writes"], plex["tracks_added"]), (0, 0))
+        self.assertEqual(fake.writes(), [])
+        self.assertEqual(plex["verified_count"], 3)
+
+    def test_create_counts_what_plex_holds(self):
+        fake = _FakePlex(collapse=True)
+        plex, last = self._sync(fake, {})
+        self.assertEqual(plex["mode"], "created")
+        self.assertEqual(plex["tracks_added"], 3)  # 4 sent, Plex collapsed the repeat
+        writes = len(fake.writes())
+        plex2, _ = self._sync(fake, {"last_plex": last})
+        self.assertEqual((plex2["plex_writes"], plex2["tracks_added"]), (0, 0))
+        self.assertEqual(len(fake.writes()), writes)
+
+
+class LegacyFileSafetyTests(unittest.TestCase):
+    """#351 N3: the file is opened first and checked on the descriptor; a
+    symlinked legacy folder is refused; the number of files is capped."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.legacy = self.base / "playlists"
+        self.legacy.mkdir()
+        self.own = self.base / "own"
+        self.own.mkdir()
+        self.secret = self.base / "secret.m3u"
+        self.secret.write_text("#EXTM3U\n#EXTINF:1,S - Secret\n/etc/secret.flac\n", encoding="utf-8")
+        patcher = mock.patch.object(cw, "_get_playlist_dir", return_value=self.own)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _symlink(self, link, target, **kw):
+        try:
+            os.symlink(target, link, **kw)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+
+    def _files(self, folder=None):
+        with mock.patch.object(ps, "PLAYLIST_LEGACY_IMPORT_DIR", folder or self.legacy):
+            return [p.name for p in ps._playlist_legacy_files()]
+
+    def test_symlinked_legacy_folder_is_refused(self):
+        real = self.base / "real"
+        real.mkdir()
+        (real / "Mix.m3u").write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
+        link = self.base / "linked"
+        self._symlink(link, real, target_is_directory=True)
+        self.assertEqual(self._files(link), [])
+        self.assertEqual(self._files(real), ["Mix.m3u"])
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "needs O_NOFOLLOW")
+    def test_file_swapped_for_a_symlink_after_listing_is_not_read(self):
+        f = self.legacy / "Mix.m3u"
+        f.write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
+        self.assertEqual(self._files(), ["Mix.m3u"])
+        f.unlink()
+        self._symlink(f, self.secret)  # the swap between listing and reading
+        with self.assertRaises(OSError):
+            ps._playlist_legacy_tracks(f)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
+    def test_fifo_is_refused_without_blocking(self):
+        fifo = self.legacy / "Pipe.m3u"
+        os.mkfifo(fifo)
+        with self.assertRaises(ValueError):
+            ps._playlist_legacy_tracks(fifo)
+
+    def test_oversized_file_is_refused_on_the_descriptor(self):
+        f = self.legacy / "Big.m3u"
+        f.write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
+        with mock.patch.object(ps, "_PLAYLIST_LEGACY_MAX_BYTES", 8):
+            with self.assertRaises(ValueError):
+                ps._playlist_legacy_tracks(f)
+        self.assertEqual(ps._playlist_legacy_tracks(f)[0], "Big")
+
+    def _swap_folder_for_symlink(self):
+        """The legacy folder replaced by a symlink to a folder holding the secret."""
+        real = self.base / "elsewhere"
+        real.mkdir()
+        (real / "Mix.m3u").write_bytes(self.secret.read_bytes())
+        os.rename(self.legacy, self.base / "old")
+        self._symlink(self.legacy, real, target_is_directory=True)
+
+    @unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "needs dir_fd support")
+    def test_folder_swapped_after_the_symlink_check_is_not_listed(self):
+        # #364 F1: the swap lands between the is_symlink() check and the listing.
+        self._swap_folder_for_symlink()
+        real_is_symlink = Path.is_symlink
+        with mock.patch.object(Path, "is_symlink",
+                               lambda p: False if p == self.legacy else real_is_symlink(p)):
+            self.assertEqual(self._files(), [])
+
+    @unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "needs dir_fd support")
+    def test_folder_swapped_after_listing_is_not_read(self):
+        # #364 F1: the swap lands between the listing and the file open.
+        (self.legacy / "Mix.m3u").write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
+        self.assertEqual(self._files(), ["Mix.m3u"])
+        self._swap_folder_for_symlink()
+        with mock.patch.object(ps, "PLAYLIST_LEGACY_IMPORT_DIR", self.legacy):
+            with self.assertRaises(OSError):
+                ps._playlist_legacy_tracks(self.legacy / "Mix.m3u")
+
+    def test_number_of_files_is_capped(self):
+        for i in range(5):
+            (self.legacy / f"L{i}.m3u").write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
+        with mock.patch.object(ps, "_PLAYLIST_LEGACY_MAX_FILES", 3):
+            self.assertEqual(len(self._files()), 3)
+
+
+class SuggestionsAcoustidStatusTests(tir._RouteCase):
+    """#356 item 3: a response-level acoustid_status beside musicbrainz_unavailable."""
+
+    def test_apply_safe_suggestions_reports_acoustid_status(self):
+        import routes_playlist
+        with mock.patch.multiple(routes_playlist,
+                                 _playlist_saved_playlist_exists=mock.Mock(return_value=True),
+                                 _playlist_library_index=mock.Mock(return_value={}),
+                                 _playlist_detail_payload=mock.Mock(return_value={"missing": []})):
+            body = self.client.post("/api/playlists/Mix/apply-safe-suggestions", json={}).get_json()
+        self.assertEqual(body["acoustid_status"], "not_attempted")
+        self.assertIs(body["musicbrainz_unavailable"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

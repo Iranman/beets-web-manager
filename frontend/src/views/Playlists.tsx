@@ -7,6 +7,7 @@ import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router';
 import {
   applySafePlaylistSuggestions,
   cleanupPlaylistQuality,
@@ -1167,7 +1168,7 @@ export default function Playlists() {
 
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [musicbrainzUnavailable, setMusicbrainzUnavailable] = useState(false);
+  const [providerStatus, setProviderStatus] = useState<{ musicbrainz_unavailable?: boolean; acoustid_status?: string } | null>(null);
   const [confirmDownload, setConfirmDownload] = useState(false);
   const [downloadJobId, setDownloadJobId] = useState(() => localStorage.getItem(PLAYLIST_JOB_STORAGE_KEY) ?? '');
   const [lastDownloadJobId, setLastDownloadJobId] = useState(() => localStorage.getItem(PLAYLIST_LAST_JOB_STORAGE_KEY) ?? '');
@@ -1530,7 +1531,7 @@ export default function Playlists() {
     setParseError('');
     setNotice(null);
     setSuggestionRows([]);
-    setMusicbrainzUnavailable(false);
+    setProviderStatus(null);
     setDownloadState(null);
     setDownloadError('');
     setDownloadJobId('');
@@ -1605,7 +1606,7 @@ export default function Playlists() {
     setNotice(null);
     clearDownloadPanel();
     setSuggestionRows([]);
-    setMusicbrainzUnavailable(false);
+    setProviderStatus(null);
     try {
       const result = await getPlaylistDetails(playlist.name, { mode: 'summary' });
       setName(result.name || playlist.name);
@@ -1883,11 +1884,11 @@ export default function Playlists() {
     if (!savedPlaylistName) return;
     setLoadingSuggestions(true);
     setNotice(null);
-    setMusicbrainzUnavailable(false);
+    setProviderStatus(null);
     try {
       const result = await getPlaylistSuggestions(savedPlaylistName);
       setSuggestionRows(result.rows ?? []);
-      setMusicbrainzUnavailable(result.musicbrainz_unavailable === true);
+      setProviderStatus(result);
       setNotice({
         severity: 'info',
         message: `${result.safe_count.toLocaleString()} safe suggestion(s) found for ${result.total_missing.toLocaleString()} missing track(s).`,
@@ -1903,11 +1904,11 @@ export default function Playlists() {
     if (!savedPlaylistName) return;
     setApplyingSuggestions(true);
     setNotice(null);
-    setMusicbrainzUnavailable(false);
+    setProviderStatus(null);
     try {
       const result = await applySafePlaylistSuggestions(savedPlaylistName);
       setParseResult(result);
-      setMusicbrainzUnavailable(result.musicbrainz_unavailable === true);
+      setProviderStatus(result);
       setSuggestionRows([]);
       setResolveDraft(null);
       setNotice({
@@ -2680,7 +2681,7 @@ export default function Playlists() {
           </div>
 
           {notice ? <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.message}</Alert> : null}
-          <MusicBrainzUnavailableNotice show={musicbrainzUnavailable} />
+          <MusicBrainzUnavailableNotice show={providerStatus?.musicbrainz_unavailable === true} acoustidStatus={providerStatus?.acoustid_status} />
 
           <div className="flex flex-wrap gap-1.5">
             {trackGroups.map((group) => (
@@ -3144,7 +3145,17 @@ export default function Playlists() {
         </div>
 
         {playlistSyncStatus ? (
-          <div className="mb-3 text-xs text-zinc-500">{playlistSyncStatusLabel(playlistSyncStatus)}</div>
+          <div className="mb-3 text-xs text-zinc-500">
+            {playlistSyncStatusLabel(playlistSyncStatus)}
+            {playlistSyncStatus.last_job_id ? (
+              <>
+                {' · '}
+                <Link className="text-zinc-300 underline hover:text-white" to={`/jobs?job=${encodeURIComponent(playlistSyncStatus.last_job_id)}`}>
+                  View last sync job
+                </Link>
+              </>
+            ) : null}
+          </div>
         ) : null}
         {playlistSyncNotice ? (
           <Alert severity={playlistSyncNotice.severity} onClose={() => setPlaylistSyncNotice(null)} sx={{ mb: 2 }}>

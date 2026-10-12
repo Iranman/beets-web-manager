@@ -17,7 +17,6 @@ import backend.acoustid_service as acs
 import backend.import_service as imp
 from backend.matching import AcoustIDStatus, align_tracks_global
 from backend.matching.evidence import _release_id
-from backend.track_align import resolve_unmatched_via_acoustid
 from helpers_mb import _acoustid_parse_candidates
 
 REC_A = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -307,21 +306,21 @@ class HitScoreScaleTests(unittest.TestCase):
         self.assertEqual(acs._audio_identity_score({"score": 0.95}), 0.95)
 
 
-class ResolveUnmatchedTests(unittest.TestCase):
-    """Fresh-import AcoustID promotion uses the canonical ambiguity window."""
+class DeadAcoustidPromotionRemovedTests(unittest.TestCase):
+    """#261 N-7: the fresh-import AcoustID promotion had no production caller
+    after #249 and mbsync never assigns Recording IDs from alignment (MI-18),
+    so neither the helper nor a no-op ``acoustid_verify`` request survives."""
 
-    def test_tied_hit_does_not_promote(self):
-        comparison = [{"status": "missing", "mb_trackid": REC_A, "sim_score": 0.0},
-                      {"status": "extra", "file_path": "/x.flac", "local_title": "x"}]
-        resolve_unmatched_via_acoustid(comparison, lambda _p: [hit(REC_A, 95), hit(REC_B, 94)])
-        self.assertEqual(comparison[0]["status"], "missing")
+    def test_track_align_is_gone(self):
+        import importlib.util
+        self.assertIsNone(importlib.util.find_spec("backend.track_align"))
 
-    def test_confirmed_hit_promotes(self):
-        comparison = [{"status": "missing", "mb_trackid": REC_A, "sim_score": 0.0},
-                      {"status": "extra", "file_path": "/x.flac", "local_title": "x"}]
-        resolve_unmatched_via_acoustid(comparison, lambda _p: [hit(REC_A, 95)])
-        self.assertEqual(comparison[0]["status"], "acoustid_verified")
-
+    def test_mbsync_request_does_not_claim_an_acoustid_check(self):
+        import backend.matching_service as ms
+        with mock.patch.object(ms.composite_workflows, "plan_album_mb_track_repair",
+                               return_value={"ok": False, "code": "repair_no_release", "error": "x"}) as plan:
+            ms._match_tracks_from_mb_shared("", 1, [])
+        self.assertNotIn("acoustid_verify", plan.call_args.args[0])
 
 if __name__ == "__main__":
     unittest.main()

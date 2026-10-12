@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import base64, copy, difflib, hashlib, json, os, re, shutil, socket, sqlite3, subprocess, threading, time, unicodedata, uuid
+import base64, copy, difflib, hashlib, json, os, re, shutil, socket, sqlite3, stat, subprocess, threading, time, unicodedata, uuid
 import urllib.error
 from collections import Counter, defaultdict, deque
 import backend.job_contract as job_contract
@@ -1722,14 +1722,16 @@ def _plex_sync_playlist_in_place(machine_id: str,
                                  *,
                                  removable=None,
                                  log=None) -> Dict[str, Any]:
-    """Make an existing Plex playlist hold ``desired_keys`` (order and
-    duplicates kept) without deleting/recreating it, so its ratingKey
-    survives (user decision: "Web Manager list, synced in place").
+    """Make an existing Plex playlist hold ``desired_keys`` (in order)
+    without deleting/recreating it, so its ratingKey survives (user
+    decision: "Web Manager list, synced in place").
 
     1. Remove only entries beyond the wanted count of their track for which
        ``removable(track)`` is true (the track was removed in Web Manager).
        Other extra entries (added in Plex, unknown to Beets) are kept.
-    2. Append the missing entries.
+    2. Append the tracks Plex does not hold. A repeated track is satisfied
+       by one entry, because Plex collapses repeats (#363); repeats Plex
+       already holds are kept.
     3. Move entries into the desired order; kept extras go after them.
 
     Each step works from what Plex reports, so a run that fails halfway is
@@ -1752,22 +1754,28 @@ def _plex_sync_playlist_in_place(machine_id: str,
     if result["removed"]:
         current = _plex_playlist_entries(rating_key)
 
-    have = Counter(row["key"] for row in current)
-    used: Counter = Counter()
+    # #363: Plex keeps one entry per track -- adding a track that is already
+    # in the playlist is accepted and silently dropped. So a deliberate
+    # repeat is satisfied once its track is present; only tracks Plex does
+    # not hold at all are sent, each once. Re-sending a repeat would be a
+    # Plex write on every sync that changes nothing.
+    have = {row["key"] for row in current}
     missing: List[str] = []
     for key in desired_keys:
-        used[key] += 1
-        if used[key] > have[key]:
+        if key not in have:
+            have.add(key)
             missing.append(key)
     for index in range(0, len(missing), PLEX_PLAYLIST_CHUNK_SIZE):
         chunk = missing[index:index + PLEX_PLAYLIST_CHUNK_SIZE]
         _plex_request(f"/playlists/{rating_key}/items",
                       {"uri": _plex_playlist_uri(machine_id, chunk)},
                       method="PUT", timeout=PLEX_API_TIMEOUT)
-        result["added"] += len(chunk)
         result["writes"] += 1
     if missing:
+        before = len(current)
         current = _plex_playlist_entries(rating_key)
+        # Counted from what Plex reports after the write, not what was sent.
+        result["added"] = max(0, len(current) - before)
 
     pool: Dict[str, deque] = defaultdict(deque)
     for row in current:
@@ -2671,8 +2679,8 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                     if log is not None:
                         log.append(f"  [plex] {plex['error']}")
                 elif keys:
-                    # Order and duplicates are kept (a track listed twice
-                    # stays twice in Plex).
+                    # Order is kept. A track listed twice stays twice in
+                    # the manifest/M3U; Plex keeps one entry per track (#363).
                     playlist_keys = [str(key) for key in keys if str(key)]
                     replace_target: Dict[str, Any] = {}
                     if replace_plex:
@@ -2728,6 +2736,10 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         verified_keys, found_rkey, is_ambig, is_stale = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
                         if found_rkey:
                             plex["rating_key"] = found_rkey
+                        if plex["mode"] == "created" and not (is_stale or is_ambig):
+                            # #363: what Plex holds after the create (it
+                            # collapses repeats), not what was sent.
+                            plex["tracks_added"] = len(verified_keys)
                         verified_unique = {str(key) for key in verified_keys}
                         expected_unique = {str(key) for key in playlist_keys}
                         plex["verified_count"] = len(verified_unique)
@@ -3225,6 +3237,7 @@ def _playlist_append_external_additions(primary: List[Dict[str, Any]],
 
 _PLAYLIST_LEGACY_LEDGER = "legacy_imports.json"
 _PLAYLIST_LEGACY_MAX_BYTES = 5 * 1024 * 1024
+_PLAYLIST_LEGACY_MAX_FILES = 500  # per folder (#351 N3)
 
 
 def _playlist_web_manager_names() -> List[str]:
@@ -3241,9 +3254,47 @@ def _playlist_web_manager_names() -> List[str]:
     return names
 
 
+def _playlist_legacy_open_dir(folder: Path) -> Optional[int]:
+    """The legacy folder opened O_DIRECTORY|O_NOFOLLOW (#364 F1): its listing
+    and every file open go through this descriptor, so the folder cannot be
+    swapped for a symlink after the symlink check. OSError if it is one now;
+    None where the platform has no dir_fd support (the path is used then)."""
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+            and os.open in os.supports_dir_fd and os.scandir in os.supports_fd):
+        return None
+    return os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def _playlist_legacy_read_text(path: Path) -> str:
+    """Text of a local playlist file, checked on the open descriptor (#351
+    N3): opened O_NOFOLLOW|O_NONBLOCK first, then it must be a regular file
+    no bigger than ``_PLAYLIST_LEGACY_MAX_BYTES`` -- no check-then-read gap
+    a symlink or FIFO swapped in between could slip through. A file of the
+    legacy folder is opened relative to that folder's no-follow descriptor."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and path.is_symlink():  # platforms without O_NOFOLLOW
+        raise ValueError("playlist file is a symlink")
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    legacy = PLAYLIST_LEGACY_IMPORT_DIR
+    dir_fd = _playlist_legacy_open_dir(path.parent) if legacy is not None and path.parent == Path(legacy) else None
+    try:
+        fd = os.open(path.name if dir_fd is not None else str(path), flags, dir_fd=dir_fd)
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _PLAYLIST_LEGACY_MAX_BYTES:
+            raise ValueError("playlist file is not a regular file within the size limit")
+        data = fh.read(_PLAYLIST_LEGACY_MAX_BYTES + 1)
+    if len(data) > _PLAYLIST_LEGACY_MAX_BYTES:  # grew after the fstat
+        raise ValueError("playlist file is over the size limit")
+    return data.decode("utf-8", errors="replace")
+
+
 def _playlist_legacy_tracks(path: Path) -> Tuple[str, List[Dict[str, Any]]]:
     """(name, tracks) from an old ``<MUSIC_ROOT>/playlists`` file. Read only."""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = _playlist_legacy_read_text(path)
     if path.name.endswith(".playlist.json"):
         data = json.loads(text)
         if not isinstance(data, dict):
@@ -3277,17 +3328,35 @@ def _playlist_legacy_files() -> List[Path]:
     found: List[Path] = []
     for folder, own in folders:
         try:
+            if not own and folder.is_symlink():
+                # #351 N3: a symlinked MUSIC_ROOT/playlists could point the
+                # import anywhere; it is refused, not followed.
+                _app_logger.warning("Legacy playlist folder is a symlink; skipping it")
+                continue
             if not folder.is_dir():
                 continue
-            for p in folder.iterdir():
-                if p.name.startswith(".") or p.is_symlink() or not p.is_file():
-                    continue
-                if p.suffix.lower() == ".m3u":
-                    if own and _PLAYLIST_EXPORT_STEM_RE.search(p.stem):
-                        continue
-                elif own or not p.name.endswith(".playlist.json"):
-                    continue
-                found.append(p)
+            dir_fd = None if own else _playlist_legacy_open_dir(folder)
+            try:
+                count = 0
+                with os.scandir(folder if dir_fd is None else dir_fd) as entries:
+                    for entry in entries:
+                        if entry.name.startswith(".") or not entry.is_file(follow_symlinks=False):
+                            continue
+                        p = folder / entry.name
+                        if p.suffix.lower() == ".m3u":
+                            if own and _PLAYLIST_EXPORT_STEM_RE.search(p.stem):
+                                continue
+                        elif own or not p.name.endswith(".playlist.json"):
+                            continue
+                        if count >= _PLAYLIST_LEGACY_MAX_FILES:
+                            _app_logger.warning("Playlist folder has more than %d playlist files; the rest are ignored",
+                                                _PLAYLIST_LEGACY_MAX_FILES)
+                            break
+                        count += 1
+                        found.append(p)
+            finally:
+                if dir_fd is not None:
+                    os.close(dir_fd)
         except OSError as exc:
             _app_logger.warning("Playlist folder is unreadable: %s", type(exc).__name__)
     # .playlist.json first: it also holds the tracks not in the library.
@@ -3299,8 +3368,6 @@ def _playlist_local_file_tracks(name: str) -> List[Dict[str, Any]]:
     wanted = _norm(_clean_playlist_name(name))
     for path in _playlist_legacy_files():
         try:
-            if path.stat().st_size > _PLAYLIST_LEGACY_MAX_BYTES:
-                continue
             file_name, tracks = _playlist_legacy_tracks(path)
         except Exception:
             continue
@@ -3343,8 +3410,6 @@ def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
     index: Optional[Dict[str, Any]] = None  # built only when a file is imported
     for path in files:
         try:
-            if path.stat().st_size > _PLAYLIST_LEGACY_MAX_BYTES:
-                continue
             name, tracks = _playlist_legacy_tracks(path)
         except Exception as exc:
             _app_logger.warning("Legacy playlist %s could not be read: %s", path.name, type(exc).__name__)

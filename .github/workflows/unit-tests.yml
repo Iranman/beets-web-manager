@@ -56,3 +56,18 @@ jobs:
         # -X faulthandler: the rare exit-139 segfault (#234) must leave a
         # Python traceback of every thread instead of a bare "core dumped".
         run: python -X faulthandler -m unittest discover -s tests -p "test_*.py"
+      - name: Root-, pwsh- and Docker-gated tests run instead of skipping (#355)
+        # The runner user is not root, so the PUID/PGID chown tests skip in
+        # the step above; run just those as root. pwsh ships on the runner;
+        # fail if its setup.ps1 test or the stock-Beets fresh-install smoke
+        # (Docker, image pulled above) ever skips here.
+        run: |
+          set -o pipefail
+          python -X faulthandler -m unittest -v \
+            tests.test_fresh_install_token_generation.SetupPs1TokenGenerationTests \
+            tests.test_beets_fresh_install_plugins.BeetsFreshInstallStockDockerSmokeTests 2>&1 | tee gated.log
+          sudo -E env "PATH=$PATH" python -X faulthandler -m unittest -v \
+            tests.test_api_key_provisioning.ApiKeyProvisioningTests.test_applies_puid_pgid_ownership_when_configured \
+            tests.test_backup_restore_scripts.BackupRestoreRoundTripTests.test_restored_files_keep_the_owner_of_what_they_replace \
+            2>&1 | tee -a gated.log
+          if grep -Eq ' \.\.\. skipped|skipped=' gated.log; then echo "::error::a gated test skipped"; exit 1; fi
