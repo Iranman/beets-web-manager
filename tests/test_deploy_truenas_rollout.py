@@ -1048,6 +1048,12 @@ class EndToEndFixture(unittest.TestCase):
             capture_output=True, text=True, timeout=90,
         )
 
+    def use_version_variable_layout(self):
+        Path(self.compose_file).write_text(
+            Path(self.compose_file).read_text(encoding="utf-8").replace(
+                "beets-web-manager:0.1.3", "beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}"),
+            encoding="utf-8")
+
 
 class DryRunTests(EndToEndFixture):
     def test_dry_run_happy_path_succeeds_and_touches_nothing_in_stack_dir(self):
@@ -1219,6 +1225,7 @@ class FullDeployTests(EndToEndFixture):
         token = os.path.join(self.webmgr_dir, ".auth_token")
         Path(token).write_text("tok", encoding="utf-8")
         env_file = os.path.join(self.stack_dir, ".env")
+        self.use_version_variable_layout()
         Path(env_file).write_text("SOME_OTHER_VAR=1\nBEETS_WEB_MANAGER_VERSION=0.1.1\nANOTHER_VAR=2\n", encoding="utf-8")
         res = self.run_script()
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -1233,6 +1240,7 @@ class FullDeployTests(EndToEndFixture):
         token = os.path.join(self.webmgr_dir, ".auth_token")
         Path(token).write_text("tok", encoding="utf-8")
         env_file = os.path.join(self.stack_dir, ".env")
+        self.use_version_variable_layout()
         Path(env_file).write_text("SOME_OTHER_VAR=1\n", encoding="utf-8")
         res = self.run_script()
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -1246,10 +1254,22 @@ class FullDeployTests(EndToEndFixture):
         token = os.path.join(self.webmgr_dir, ".auth_token")
         Path(token).write_text("tok", encoding="utf-8")
         env_file = os.path.join(self.stack_dir, ".env")
+        self.use_version_variable_layout()
         self.assertFalse(os.path.exists(env_file))
         res = self.run_script()
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("BEETS_WEB_MANAGER_VERSION not persisted", res.stderr)
+
+    def test_pinned_layout_never_writes_the_unused_version_variable(self):
+        # The pinned image line alone selects the image: an old
+        # BEETS_WEB_MANAGER_VERSION line is reported, and .env is not edited.
+        Path(self.webmgr_dir, ".auth_token").write_text("tok", encoding="utf-8")
+        env_file = os.path.join(self.stack_dir, ".env")
+        Path(env_file).write_text("BEETS_WEB_MANAGER_VERSION=0.1.1\n", encoding="utf-8")
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("UNUSED VERSION VARIABLE", res.stderr)
+        self.assertEqual(Path(env_file).read_text(encoding="utf-8"), "BEETS_WEB_MANAGER_VERSION=0.1.1\n")
 
     def test_deploy_archives_stale_db_with_missing_wal_shm(self):
         token = os.path.join(self.webmgr_dir, ".auth_token")
@@ -1807,6 +1827,47 @@ class BackupManifestTests(VersionedStackFixture):
         self.assertFalse(Path(self.backup_dir(), "beets-config", "config.yaml").exists())
         self.assertEqual(Path(self.engine_dir, "config.yaml").read_text(encoding="utf-8"), config)
 
+    def test_sigterm_mid_copy_seals_the_backup_and_exits_143(self):
+        # #253 S-13: a deploy killed during a backup copy must not leave a
+        # <dst>.part that makes --rollback refuse the backup.
+        Path(self.engine_dir, "config.yaml").write_text("directory: /music\n", encoding="utf-8")
+        shim = Path(self.fakebin, "cp")
+        shim.write_text('#!/usr/bin/env bash\nlast="${@: -1}"\n'
+                        'case "$last" in *_backups*/beets-config/config.yaml*) '
+                        'head -c 5 "${@: -2:1}" > "$last"; kill -TERM "$PPID"; exit 0;; esac\n'
+                        'exec /bin/cp "$@"\n', encoding="utf-8", newline="\n")
+        os.chmod(shim, 0o755)
+        try:
+            res = self.run_script(env=self.env())
+        finally:
+            shim.unlink()
+        self.assertEqual(res.returncode, 143, res.stderr)
+        self.assertIn("Interrupted by signal", res.stderr)
+        self.assertIn("the backup is incomplete", res.stderr)
+        self.assertEqual(list(Path(self.backup_dir()).rglob("*.part")), [])
+        rb = self.run_script("--rollback", self.backup_dir())
+        self.assertEqual(rb.returncode, 0, rb.stderr)
+        self.assertNotIn("backup_manifest", rb.stdout + rb.stderr)
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+
+    def test_an_existing_backup_folder_is_never_reused(self):
+        # #253 S-14: a same-second rerun must not write into another run's backup.
+        stamp = "20260101-000000"
+        Path(self.fakebin, "date").write_text(
+            '#!/usr/bin/env bash\n'
+            f'case "$*" in *%Y%m%d-%H%M%S*) echo {stamp};; *) exec /bin/date "$@";; esac\n',
+            encoding="utf-8", newline="\n")
+        os.chmod(Path(self.fakebin, "date"), 0o755)
+        taken = Path(self.stack_dir, "_backups", f"web-manager-rollout-{stamp}")
+        taken.mkdir(parents=True)
+        Path(taken, "marker").write_text("other run", encoding="utf-8")
+        res = self.run_script(env=self.env())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("refusing to reuse it", res.stderr)
+        self.assertIn("no backup was created yet", res.stderr)
+        self.assertEqual(sorted(p.name for p in taken.iterdir()), ["marker"])
+        self.assertEqual(self.webmgr_container()["Image"], "sha256:oldimageid")
+
     def test_partial_beetsplug_copy_is_not_restored(self):
         if os.geteuid() == 0:
             self.skipTest("root can read a mode-0 file")
@@ -2006,6 +2067,24 @@ class LatestTagDeployTests(LatestTagStackFixture):
         res = self.run_script("--dry-run")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("layout: pinned", res.stderr)
+
+    # --- A stale, unused BEETS_WEB_MANAGER_VERSION is reported, not edited --
+
+    def test_stale_unused_version_variable_is_reported_and_left_alone(self):
+        Path(self.stack_env).write_text("OTHER_SETTING=keep-me\nBEETS_WEB_MANAGER_VERSION=0.1.49\n", encoding="utf-8")
+        env_before = Path(self.stack_env).read_bytes()
+        for args in (("--dry-run",), ()):
+            res = self.run_script(*args)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("UNUSED VERSION VARIABLE", res.stderr)
+            self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.49", res.stderr)
+            self.assertNotIn("keep-me", res.stdout + res.stderr, "other .env values are never printed")
+            self.assertEqual(Path(self.stack_env).read_bytes(), env_before)
+
+    def test_no_version_variable_warning_without_the_line(self):
+        res = self.run_script("--dry-run")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("UNUSED VERSION VARIABLE", res.stderr)
 
     # --- NB1: `up --pull never` needs Docker Compose v2.22+ ---------------
 

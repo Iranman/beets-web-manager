@@ -10,6 +10,9 @@ permissions:
 jobs:
   python-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -43,4 +46,13 @@ jobs:
         # check.
         run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
       - run: python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py
-      - run: python -m unittest discover -s tests -p "test_*.py"
+      - name: Pull lscr.io/linuxserver/beets:latest (authenticated, #234)
+        # tests.test_stock_beets_acceptance boots it; its own pull falls back
+        # to this image when the anonymous registry pull is rate-limited.
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_pull_stock_beets.sh
+      - name: Unit tests
+        # -X faulthandler: the rare exit-139 segfault (#234) must leave a
+        # Python traceback of every thread instead of a bare "core dumped".
+        run: python -X faulthandler -m unittest discover -s tests -p "test_*.py"

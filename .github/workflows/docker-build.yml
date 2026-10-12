@@ -79,6 +79,14 @@ jobs:
       - run: docker compose -f examples/docker-compose.external-beets.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
+      - name: Supported local test image (Dockerfile.test) builds and needs no git
+        # docs/DEVELOPMENT.md documents this image for running the full suite
+        # locally. It has no git binary, so this proves the suite's git-free
+        # audit path runs truthfully there instead of erroring.
+        run: |
+          docker build -f Dockerfile.test -t bwm-test:ci .
+          docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/src:ro" --entrypoint sh bwm-test:ci -c \
+            '! command -v git && python -m unittest tests.test_arch002_caller_audit'
       - name: Hardened config survives repeated boots (#282)
         run: bash docker/acceptance/hardened_restart.sh beets-web-manager:ci "$RUNNER_TEMP/bwm-sec-bind"
       - name: Installation smoke test
@@ -121,6 +129,9 @@ jobs:
   stock-beets-acceptance:
     name: stock-beets-acceptance
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -128,13 +139,13 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements.txt
       - run: pip install beets==${{ env.BEETS_TEST_FIXTURE_VERSION }}
-      - name: Record the pulled lscr.io/linuxserver/beets:latest image digest
+      - name: Pull lscr.io/linuxserver/beets:latest (authenticated) and record its digest
         # Section 19 provenance requirement: the compatibility lane below
         # floats on `:latest`, so record exactly which digest this run
-        # actually tested against.
-        run: |
-          docker pull lscr.io/linuxserver/beets:latest
-          docker inspect --format '{{index .RepoDigests 0}}' lscr.io/linuxserver/beets:latest
+        # actually tested against. Authenticated pull: see the script (#234).
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_pull_stock_beets.sh
       - name: Real Docker acceptance against unmodified lscr.io/linuxserver/beets:latest
         # Never builds or publishes a derived engine image -- pulls and
         # runs the real upstream image as-is, then exercises the
@@ -144,6 +155,9 @@ jobs:
   production-docker-acceptance:
     name: production-docker-acceptance
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - name: Checkout at exact PR head
         uses: actions/checkout@v7
@@ -153,6 +167,10 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
+      - name: Pull lscr.io/linuxserver/beets:latest (authenticated, #234)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_pull_stock_beets.sh
       - name: Run production Docker acceptance
         run: python scripts/verify_production_docker_acceptance.py
 

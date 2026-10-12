@@ -10,6 +10,9 @@ permissions:
 jobs:
   security:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -45,10 +48,16 @@ jobs:
         # than a workflow `env:` assignment.
         run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
 
+      - name: Pull lscr.io/linuxserver/beets:latest (authenticated, #234)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_pull_stock_beets.sh
+
       - name: Python syntax and security regression tests
+        # -X faulthandler: see unit-tests.yml (exit-139 segfault, #234).
         run: |
           python3 -m py_compile app.py tests/test_security_hardening.py scripts/security_secret_scan.py
-          python3 -m unittest discover -s tests -p "test_*.py"
+          python3 -X faulthandler -m unittest discover -s tests -p "test_*.py"
 
       - name: Frontend dependency audit
         working-directory: frontend
