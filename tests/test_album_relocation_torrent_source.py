@@ -497,6 +497,33 @@ class TorrentSourceRelocationTests(_Engine):
         self.assertTrue(os.path.samefile(os.fsdecode(item.path), original))
         self.assertTrue(op)
 
+    def test_failed_write_then_symlink_never_records_the_symlink_target(self):
+        """#336: a write that fails after its `write` event leaves no stale
+        pre-write identity that a later write through a symlink could use."""
+        import beetsplug.webmanager.operations as ops_mod
+        from beetsplug.webmanager import relocation_ops as ro
+        from mediafile import MediaFile, UnreadableFileError
+        op, item, _original = self.linked_item()
+        lib_path = os.fsdecode(item.path)
+        with mock.patch.object(MediaFile, "save", side_effect=UnreadableFileError(lib_path, "disk full")):
+            item.title = "Edited"
+            self.assertFalse(item.try_write())
+        recorded = ops_mod._operations[op]["result"]["evidence"]["library"][str(item.id)]
+        target = os.path.join(self.td, "elsewhere.flac")
+        self._write_flac(target)
+        os.unlink(lib_path)
+        try:
+            os.symlink(target, lib_path)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable here (Linux CI runs this)")
+        ro.break_hard_link(item=item)  # the write event at the now-symlinked path
+        ro.note_library_write(item=item)  # its after_write
+        self.assertNotIn(os.path.normpath(lib_path), ro._pre_write)
+        self.assertEqual(ops_mod._operations[op]["result"]["evidence"]["library"][str(item.id)], recorded)
+        # A pre-write identity handed in directly still never records a symlink.
+        ro._refresh_library_evidence(item, os.path.normpath(lib_path), recorded)
+        self.assertEqual(ops_mod._operations[op]["result"]["evidence"]["library"][str(item.id)], recorded)
+
     def test_unevaluable_rule_keeps_the_original(self):
         with mock.patch.object(ls, "_preserve_torrent_source_file", side_effect=OSError("boom")):
             self.assertTrue(cw._preserved_torrent_file(os.path.join(self.music, "x", "t.flac")))

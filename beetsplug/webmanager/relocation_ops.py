@@ -640,6 +640,10 @@ def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
     identity before the write, for ``note_library_write``."""
     p = os.fsdecode(path if path is not None else item.path)
     key = os.path.normpath(p)
+    # A write that failed after its ``write`` event never fired ``after_write``:
+    # drop that stale identity first, so it can never vouch for whatever is
+    # at this path now (#336).
+    _pre_write.pop(key, None)
     try:
         st = os.lstat(p)
     except OSError:
@@ -708,7 +712,13 @@ def _refresh_library_evidence(item, p: str, pre: Any) -> None:
     iid = str(getattr(item, "id", None) or "")
     if not ops._durable_file or not iid or pre is None:
         return
-    ev = _evidence(p)
+    try:
+        st = os.lstat(p)  # never follow a symlink planted at the library path (#336)
+    except OSError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return
+    ev = _ev_of(st)
     changed = False
     with ops._operations_lock:
         # ponytail: linear scan of at most MAX_COMPLETED_OPERATIONS records per write; index by path if it shows up
