@@ -22,10 +22,17 @@ The project uses Semantic Versioning.
 - Staging moves re-check the source's identity right before the directory rename and before the file's old name is unlinked, so a source swapped in between is refused, not moved or deleted (#351 N4).
 - Jobs whose label contains "Artist" (or "repair", "maintenance") are no longer recorded as Artwork Update or AI Suggestion transactions (#325 F5).
 - The Music Format Preferences rejection message no longer says files were "handled according to settings" when they were left in place, and names why they were kept (#325 F3).
+- Troubleshooting §12 no longer says a failed tag write (`WRITE_FAILED`) cannot be rolled back; since v0.4.0 the Failed item or album edit can be rolled back once the files are writable (#318).
 
 ### Added
 
 - `GET /api/transactions/<id>` returns `cancel: {allowed, mode, code, reason}`, from the same rule as `POST /api/transactions/<id>/cancel` (#356).
+
+### Tests
+
+- The stale opt-in Docker smoke test (`RUN_DOCKER_SMOKE`), which built the Web Manager image and ran Beets in it, now runs against stock `lscr.io/linuxserver/beets`: it loads every plugin in `config.yaml.example` with the bundled plugins in `/config/beetsplug`, imports a generated track and runs fetchart. It runs wherever Docker is available, including CI, so it is no longer always skipped (#355).
+- CI's `unit-tests` job runs the root-only PUID/PGID ownership tests as root, the `setup.ps1` (pwsh) test and the stock-Beets smoke test, and fails if any of them skips (#355).
+- The slskd containment tests patch only `backend.slskd_service`'s `time`, not the process-wide `time.time`/`time.sleep`, so threads left by other tests cannot consume their fake clock (#266).
 
 ## v0.4.0 - 2026-10-12
 
