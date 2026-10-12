@@ -57,25 +57,58 @@ describe('Library Changes 0.4 transaction contract (#348)', () => {
     expect(await screen.findByText(/3 items restored \(1 were already back/)).toBeTruthy();
   });
 
-  it('allows cancelling an orphaned library sync and reports the engine cancel', async () => {
+  it('enables Cancel Sync when the server reports engine mode, and reports the engine cancel (#356)', async () => {
     serve(tx('Recovery Required', {
       rollback: { available: false, allowed: false, allowed_reason: 'No.' },
-      metadata: { mutation_family: 'mbsync_library_v1', engine_operation_id: 'op-1' },
+      cancel: { allowed: true, mode: 'engine', code: 'engine_operation', engine_operation_id: 'op-1', reason: 'Beets is running this sync.' },
     }));
     vi.mocked(cancelTransaction).mockResolvedValue({ ok: true, code: 'engine_cancelling' } as never);
     render(<LibraryChanges />);
-    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    const cancel = await screen.findByRole('button', { name: 'Cancel Sync' });
     expect((cancel as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(cancel);
     expect(await screen.findByText(/Cancel sent to Beets/)).toBeTruthy();
   });
 
-  it('keeps Cancel disabled for a running transaction of another family', async () => {
-    serve(tx('Running', { metadata: { mutation_family: 'album_relocation_v1' } }));
+  it('follows cancel.allowed rather than inferring from status or family (#356)', async () => {
+    // A Running record of another family: the old client mirror disabled this.
+    serve(tx('Running', {
+      metadata: { mutation_family: 'album_relocation_v1' },
+      cancel: { allowed: true, mode: 'transaction', code: 'not_started', reason: 'Not started yet.' },
+    }));
+    vi.mocked(cancelTransaction).mockResolvedValue({ ok: true } as never);
     render(<LibraryChanges />);
-    expect(((await screen.findByRole('button', { name: 'Cancel' })) as HTMLButtonElement).disabled).toBe(true);
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    expect((cancel as HTMLButtonElement).disabled).toBe(false);
+    expect(cancel.getAttribute('aria-describedby')).toBeNull();
+    fireEvent.click(cancel);
+    expect(await screen.findByText('Transaction cancelled.')).toBeTruthy();
   });
 
+  it('disables Cancel and shows the server reason as is when not allowed (#356)', async () => {
+    const reason = 'Only a Pending, Preview or Approved transaction can be cancelled (this one is Completed).';
+    serve(tx('Completed', { cancel: { allowed: false, mode: null, code: 'not_cancellable', reason } }));
+    render(<LibraryChanges />);
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    expect((cancel as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById(cancel.getAttribute('aria-describedby') || '')?.textContent).toBe(reason);
+  });
+
+  it('keeps Cancel disabled with an explanation when the server omits cancel (older backend)', async () => {
+    serve(tx('Pending'));
+    render(<LibraryChanges />);
+    expect(((await screen.findByRole('button', { name: 'Cancel' })) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/did not report whether this transaction can be cancelled/)).toBeTruthy();
+  });
+
+  it('reports a 409 not_cancellable refusal with the server reason (#356)', async () => {
+    serve(tx('Pending', { cancel: { allowed: true, mode: 'transaction', code: 'not_started', reason: 'Not started yet.' } }));
+    vi.mocked(cancelTransaction).mockRejectedValue(
+      apiError('Only a Pending, Preview or Approved transaction can be cancelled (this one is Running).', 409, { ok: false, code: 'not_cancellable' }));
+    render(<LibraryChanges />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText(/Cancel refused: Only a Pending.*this one is Running\)\. Nothing was changed/)).toBeTruthy();
+  });
   it('reverts a rejected setting and shows the server message', async () => {
     serve(tx('Completed'));
     vi.mocked(getTransactionSettings).mockResolvedValue({ ok: true, settings: {

@@ -405,7 +405,20 @@ export interface TransactionChange {
   errors?: string[];
 }
 
+/** Server-owned cancel eligibility (#356). `mode: "transaction"` cancels the
+ * record (200); `mode: "engine"` asks Beets to stop the sync (202). `reason`
+ * is operator-facing text; branch on `allowed`/`mode`, not on `reason`. */
+export interface TransactionCancel {
+  allowed: boolean;
+  mode: 'transaction' | 'engine' | null;
+  code: string;
+  reason: string;
+  engine_operation_id?: string;
+}
+
 export interface TransactionDetail extends TransactionSummary {
+  /** Only the detail GET has it; older servers omit it. */
+  cancel?: TransactionCancel;
   changes: TransactionChange[];
   changes_total: number;
   changes_offset?: number;
@@ -1587,12 +1600,15 @@ export interface PlaylistSuggestionsResponse extends ApiOkResponse {
   safe_count: number;
   rows: PlaylistSuggestionRow[];
   musicbrainz_unavailable?: boolean;
+  /** "not_attempted": suggestions are for missing tracks, so no audio exists to fingerprint. */
+  acoustid_status?: string;
 }
 
 export interface PlaylistApplySuggestionsResponse extends PlaylistResolveTrackResponse {
   suggested?: Array<{ track: PlaylistTrack; best?: PlaylistTrackSuggestion | null }>;
   safe_count?: number;
   musicbrainz_unavailable?: boolean;
+  acoustid_status?: string;
 }
 
 export interface PlaylistPlexResult {

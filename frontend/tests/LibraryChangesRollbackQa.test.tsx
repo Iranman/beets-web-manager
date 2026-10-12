@@ -17,9 +17,14 @@ vi.mock('../src/api/client', async (importActual) => ({
   transactionExportUrl: vi.fn(() => '#'),
 }));
 
+// Stands in for the server's cancel eligibility (#356); the UI must not derive it.
+const serverCancel = (status: string): TransactionDetail['cancel'] => (['Pending', 'Preview', 'Approved'].includes(status)
+  ? { allowed: true, mode: 'transaction', code: 'not_started', reason: 'Not started yet.' }
+  : { allowed: false, mode: null, code: 'not_cancellable', reason: `This transaction is ${status}.` });
+
 const base = (status: string, rollback: TransactionDetail['rollback']): TransactionDetail => ({
   id: 'tx-1', created_at: 0, updated_at: 0, operation_type: 'Metadata Update', status, dry_run: false,
-  summary: 'Fix tags', confidence: {}, counts: {}, rollback, metadata: {}, changes: [], changes_total: 0,
+  summary: 'Fix tags', confidence: {}, counts: {}, rollback, cancel: serverCancel(status), metadata: {}, changes: [], changes_total: 0,
 });
 
 // The server's approve/cancel/apply/rollback(job) responses embed the stored

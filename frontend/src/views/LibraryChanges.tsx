@@ -50,17 +50,14 @@ const OPERATION_OPTIONS = [
 
 const pageSize = 50;
 
-// Mirrors the backend's cancellable states (POST /api/transactions/<id>/cancel
-// returns 409 not_cancellable otherwise); the server stays the authority.
-const CANCELLABLE_STATUSES = new Set(['Pending', 'Preview', 'Approved']);
-// A library sync Beets is still running (or a restart orphaned) is cancelled
-// through its engine operation (#348). The server exposes no eligibility
-// field for this yet, so this mirrors routes_maintenance.api_transaction_cancel.
-function canCancel(tx: TransactionDetail) {
-  if (CANCELLABLE_STATUSES.has(tx.status)) return true;
-  const meta = tx.metadata || {};
-  return meta.mutation_family === 'mbsync_library_v1' && Boolean(meta.engine_operation_id)
-    && (tx.status === 'Running' || tx.status === 'Recovery Required');
+// Cancel eligibility is server-owned (#356): the UI reads cancel.allowed and
+// never re-derives it. A response without the field (older backend) keeps
+// Cancel disabled.
+function cancelBlockedReason(tx: TransactionDetail) {
+  if (typeof tx.cancel?.allowed !== 'boolean') {
+    return 'Cancel unavailable: the server did not report whether this transaction can be cancelled, so Cancel is disabled. Reload the page; if this persists, update Web Manager so the web UI and server versions match.';
+  }
+  return tx.cancel.reason || 'Cancel unavailable: the server does not allow cancelling this transaction.';
 }
 
 export function rollbackSuccessMessage(r: { job_id?: string; restored?: unknown; adopted?: unknown }) {
@@ -508,9 +505,12 @@ export default function LibraryChanges() {
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
-                  <Button size="small" color="warning" variant="outlined" disabled={!canCancel(detail)} onClick={() => void doCancel()}>Cancel</Button>
+                  <Button size="small" color="warning" variant="outlined" disabled={detail.cancel?.allowed !== true} aria-describedby={detail.cancel?.allowed === true ? undefined : 'cancel-blocked-reason'} onClick={() => void doCancel()}>{detail.cancel?.mode === 'engine' ? 'Cancel Sync' : 'Cancel'}</Button>
                   <Button size="small" color="error" variant="outlined" disabled={detail.rollback?.allowed !== true} aria-describedby={detail.rollback?.allowed === true ? undefined : 'rollback-blocked-reason'} onClick={doRollback}>{detail.status === 'Partially Rolled Back' ? 'Retry Rollback' : 'Rollback'}</Button>
                 </div>
+                {detail.cancel?.allowed !== true && (
+                  <p id="cancel-blocked-reason" className="mt-2 text-xs text-zinc-400">{cancelBlockedReason(detail)}</p>
+                )}
               </div>
 
               {settings && (

@@ -11,6 +11,7 @@ import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useSearchParams } from 'react-router';
 import {
   applyAlbumFolderCleanupIssue,
   applySafeAlbumFolderCleanup,
@@ -2706,6 +2707,19 @@ export default function Jobs() {
   }, [selectedJobId]);
 
   useInterval(refreshSelectedJob, autoRefresh && selectedJobDialogOpen && selectedJobId ? (selectedJobMeta?.status === 'running' ? 2000 : 10000) : null);
+
+  // Deep link from other pages: /jobs?job=<id> (older links use ?q=<id>)
+  // opens that job once the list has loaded.
+  const [searchParams] = useSearchParams();
+  const linkedJobId = searchParams.get('job') || searchParams.get('q') || '';
+  const linkedJobHandled = useRef('');
+  useEffect(() => {
+    if (!linkedJobId || loading || error || linkedJobHandled.current === linkedJobId) return;
+    linkedJobHandled.current = linkedJobId;
+    const job = jobs.find((j) => j.job_id === linkedJobId);
+    if (job) void handleSelectJob(job);
+    else setNotice(`Job ${linkedJobId} is not in the job list. It may have been cleared; check the list below.`);
+  }, [linkedJobId, loading, error, jobs, handleSelectJob]);
 
   useEffect(() => {
     if (!selectedJobId) return;
