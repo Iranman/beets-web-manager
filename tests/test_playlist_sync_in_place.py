@@ -767,6 +767,33 @@ class LegacyFileSafetyTests(unittest.TestCase):
                 ps._playlist_legacy_tracks(f)
         self.assertEqual(ps._playlist_legacy_tracks(f)[0], "Big")
 
+    def _swap_folder_for_symlink(self):
+        """The legacy folder replaced by a symlink to a folder holding the secret."""
+        real = self.base / "elsewhere"
+        real.mkdir()
+        (real / "Mix.m3u").write_bytes(self.secret.read_bytes())
+        os.rename(self.legacy, self.base / "old")
+        self._symlink(self.legacy, real, target_is_directory=True)
+
+    @unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "needs dir_fd support")
+    def test_folder_swapped_after_the_symlink_check_is_not_listed(self):
+        # #364 F1: the swap lands between the is_symlink() check and the listing.
+        self._swap_folder_for_symlink()
+        real_is_symlink = Path.is_symlink
+        with mock.patch.object(Path, "is_symlink",
+                               lambda p: False if p == self.legacy else real_is_symlink(p)):
+            self.assertEqual(self._files(), [])
+
+    @unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "needs dir_fd support")
+    def test_folder_swapped_after_listing_is_not_read(self):
+        # #364 F1: the swap lands between the listing and the file open.
+        (self.legacy / "Mix.m3u").write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
+        self.assertEqual(self._files(), ["Mix.m3u"])
+        self._swap_folder_for_symlink()
+        with mock.patch.object(ps, "PLAYLIST_LEGACY_IMPORT_DIR", self.legacy):
+            with self.assertRaises(OSError):
+                ps._playlist_legacy_tracks(self.legacy / "Mix.m3u")
+
     def test_number_of_files_is_capped(self):
         for i in range(5):
             (self.legacy / f"L{i}.m3u").write_text("#EXTM3U\n/music/1.flac\n", encoding="utf-8")
