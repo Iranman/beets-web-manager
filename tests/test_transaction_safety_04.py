@@ -301,6 +301,90 @@ class MoveAllFolderCleanupFailureTests(_MoveAllFixture):
         self.assertTrue(any("[warn]" in line for line in log))
 
 
+class AlbumMetadataWriteFailedRollbackTests(_Engine):
+    """#318: Beets stores an album edit but cannot write the tags
+    (WRITE_FAILED). The Failed transaction is offered for rollback, and
+    rollback restores the stored values."""
+
+    def test_write_failed_album_edit_rolls_back(self):
+        from beets.library import Item
+        from beets.library.exceptions import WriteError
+        album = self.make_album(os.path.join(self.music, "A", "B"))
+        old = self.lib.get_album(album.id).album
+        denied = WriteError(self.music, PermissionError(13, "Permission denied"))
+        with mock.patch.object(Item, "write", side_effect=denied):
+            res = cw.update_album_metadata(album.id, {"album": "Edited"}, adapter=self.ad, store=self.store)
+        self.assertFalse(res["ok"], res)
+        tx = self.store.list(limit=5)[0][0]
+        tx = self.store.get(tx["id"])
+        self.assertEqual((tx["status"], tx["metadata"]["mutation_family"]), ("Failed", cw.ALBUM_METADATA_FAMILY))
+        self.assertEqual(self.lib.get_album(album.id).album, "Edited")  # Beets kept the DB edit
+        self.assertTrue(rollback_eligibility(tx)["allowed"], rollback_eligibility(tx))
+        import routes_maintenance
+        rb = routes_maintenance._ROLLBACK_ONLY_FAMILIES[cw.ALBUM_METADATA_FAMILY](tx["id"], adapter=self.ad,
+                                                                                    store=self.store)
+        self.assertEqual(rb["status"], "Rolled Back", rb)
+        self.assertEqual(self.lib.get_album(album.id).album, old)
+
+
+class ItemMetadataWriteFailedRollbackTests(_RouteEnvBase):
+    """#318: a Failed item edit keeps its metadata_restore rollback."""
+
+    def _apply(self, update_side_effect):
+        import backend.transaction_service as ts
+        op = self.store.create(operation_type="Metadata Update", status="Approved",
+                               metadata={"item_id": 3, "pending_fields": {"title": "New"}})["id"]
+        self.store.update(op, rollback={"available": True, "operations": [
+            {"type": "metadata_restore", "item_id": 3, "fields": {"title": "Old"}}]})
+        started = {}
+
+        def start_python(fn, label="", metadata=None):
+            started["fn"] = fn
+            return mock.Mock(job_id="job1")
+        for p in (mock.patch.object(ts, "transactions", self.store),
+                  mock.patch.object(ts.jobs, "start_python", side_effect=start_python),
+                  mock.patch.object(ts, "_invalidate_lib_cache"),
+                  mock.patch.object(ts.composite_workflows, "update_item_metadata",
+                                    side_effect=update_side_effect)):
+            p.start()
+            self.addCleanup(p.stop)
+        ts._start_metadata_apply_transaction(op)
+        return op, started["fn"]
+
+    def test_failed_apply_is_rollbackable(self):
+        op, fn = self._apply(BeetsAdapterError("write failed", status_code=500, error_code="WRITE_FAILED"))
+        with self.assertRaises(BeetsAdapterError):
+            fn([])
+        tx = self.store.get(op)
+        self.assertEqual(tx["status"], "Failed")
+        self.assertTrue(rollback_eligibility(tx)["allowed"], rollback_eligibility(tx))
+
+    def test_route_dispatches_album_metadata_rollback(self):
+        import routes_maintenance
+        op = self.store.create(operation_type="Metadata Update", status="Failed",
+                               metadata={"mutation_family": cw.ALBUM_METADATA_FAMILY,
+                                         "engine_result": {"mutation_started": True}})["id"]
+        fake = mock.Mock(return_value={"ok": True, "operation_id": op, "status": "Rolled Back"})
+        with mock.patch.dict(routes_maintenance._ROLLBACK_ONLY_FAMILIES, {cw.ALBUM_METADATA_FAMILY: fake}):
+            resp = self.client.post(f"/api/transactions/{op}/rollback")
+            self.assertEqual(resp.status_code, 200, resp.get_json())
+            fake.assert_called_once_with(op)
+        # The generic apply route would skip apply_album_metadata's re-validation.
+        self.assertNotIn(cw.ALBUM_METADATA_FAMILY, routes_maintenance._ENGINE_FAMILIES)
+
+    def test_job_that_never_started_is_not_rollbackable(self):
+        import backend.transaction_service as ts
+        op = self.store.create(operation_type="Metadata Update", status="Approved",
+                               metadata={"item_id": 3, "pending_fields": {"title": "New"}})["id"]
+        self.store.update(op, rollback={"available": True, "operations": [
+            {"type": "metadata_restore", "item_id": 3, "fields": {"title": "Old"}}]})
+        with mock.patch.object(ts, "transactions", self.store), \
+             mock.patch.object(ts.jobs, "start_python", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                ts._start_metadata_apply_transaction(op)
+        self.assertFalse(rollback_eligibility(self.store.get(op))["allowed"])
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

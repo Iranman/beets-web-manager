@@ -819,6 +819,13 @@ _ENGINE_FAMILIES = {
                                                   composite_workflows.rollback_album_relocation),
 }
 
+#: Families applied only by their own workflow (the generic apply route
+#: would skip its re-validation), whose rollback this route still offers
+#: (#318). Eligibility follows the engine-family rule.
+_ROLLBACK_ONLY_FAMILIES = {
+    composite_workflows.ALBUM_METADATA_FAMILY: composite_workflows.rollback_album_metadata,
+}
+
 #: Families whose rollback executor acquires its resource locks before any
 #: engine call or store write, so a ResourceLockConflictError from it proves
 #: nothing changed (#227). The item replacement, track quarantine and reviewed
@@ -873,7 +880,7 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
         if status not in ("Completed", "Failed", "Partially Rolled Back"):  # #298 N4: retry the rest
             return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
-    if meta.get("mutation_family") in _ENGINE_FAMILIES:
+    if meta.get("mutation_family") in _ENGINE_FAMILIES or meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES:
         if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
             return refused("not_supported", "Album cleanup has no rollback.")
         if not meta.get("engine_result"):
@@ -1041,8 +1048,9 @@ def api_transaction_rollback(transaction_id):
         return _item_file_replacement_response(composite_workflows.rollback_folder_cleanup, transaction_id,
                                                rollback_family=family)
     engine_family = _ENGINE_FAMILIES.get(family)
-    if engine_family:
-        return _item_file_replacement_response(engine_family[1], transaction_id, rollback_family=family)
+    rollback_fn = engine_family[1] if engine_family else _ROLLBACK_ONLY_FAMILIES.get(family)
+    if rollback_fn:
+        return _item_file_replacement_response(rollback_fn, transaction_id, rollback_family=family)
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:
