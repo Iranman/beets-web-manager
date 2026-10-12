@@ -9,6 +9,8 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - TrueNAS rollout script: the online library identity digest now hashes item paths relative to the library directory Beets reports in `/webmanager/status`. Before, an engine restart that moved from plugin 1.15.0 to 1.16.0, which serves Beets 2.14 item paths as absolute paths, failed with "library identity digest changed across the engine restart" even though the library had not changed. A real path change still changes the digest. This applies to the pre/post-deploy, engine-restart and offline stop/start comparisons.
+- `GET /api/items/<id>/mb-candidates` now reports a MusicBrainz outage as `200` with `ok: true`, `candidates: []` and `musicbrainz_unavailable: true`, like the other candidate endpoints, so the UI can show the outage notice. Before, it returned a `503` (#356). A successful search sets `musicbrainz_unavailable: false`. The album route is unchanged.
+- The MusicBrainz track sync no longer sends an `acoustid_verify` flag that nothing read. The unused `backend/track_align.py` was removed: since #249 nothing called its AcoustID promotion, and `mbsync` never assigns Recording IDs from alignment (#261 N-7). #261 F-5 and the "explicit"/"operator-selected" summary were fixed in v0.4.0; their technical-debt entries are closed.
 
 ## v0.4.0 - 2026-10-12
 

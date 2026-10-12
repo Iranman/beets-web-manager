@@ -894,21 +894,14 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
 
     ARCH-003 Wave 33 continuation: migrated from raw local
     UPDATE items/UPDATE albums SQL onto album_mb_track_repair_v1 (through
-    composite_workflows), using the target_tracks/acoustid_verify/zero_unmatched/
-    allow_establish_release_group/stamp_release_metadata options built
-    this same wave specifically to close this migration, and the family's
-    alignment procedure (backend/mb_alignment.greedy_album_track_alignment),
-    ported verbatim from this function's own former matching loop so the
-    engine and this call site can never again risk disagreeing on which
-    specific track a file gets permanently relabeled as.
+    composite_workflows). The family now runs Beets ``mbsync``, which never
+    assigns Recording IDs from text or position (MI-18), so no AcoustID
+    cross-check is requested (#261 N-7).
 
-    acoustid_verify/allow_establish_release_group/stamp_release_metadata
-    are always requested here (not opt-in like they are for other
-    callers of the family): this function's own pre-migration behavior
-    always ran the AcoustID cross-check unconditionally, always stamped
-    mb_releasegroupid whenever the release had one (with no conflict
-    check at all -- the engine's repair_identity_mismatch guard is a
-    strict, real improvement over that), and always stamped year/country.
+    allow_establish_release_group/stamp_release_metadata are always
+    requested here: this function always stamped mb_releasegroupid
+    whenever the release had one (the engine's repair_identity_mismatch
+    guard now checks it) and always stamped year/country.
 
     Return-value contract preserved for this function's 6 real callers,
     3 of which check `matched < 0` and raise/abort on it: -1 means the
@@ -924,7 +917,6 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
     payload: Dict[str, Any] = {
         "album_id": int(album_db_id or 0),
         "mb_albumid": mb_albumid,
-        "acoustid_verify": True,
         "allow_establish_release_group": True,
         "stamp_release_metadata": True,
     }
