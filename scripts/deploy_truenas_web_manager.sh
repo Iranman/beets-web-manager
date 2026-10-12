@@ -482,30 +482,44 @@ PYEOF
 # (id, album row, Recording/Release/Release Group IDs, disc, track, path)
 # and every album's identity, so any unexpected mutation changes it. The
 # plugin API key is read inside the container and never printed.
+# Item paths are hashed library-relative: Beets 2.14 stores them relative
+# to its `directory:` and /item/ serves them relative or absolute depending
+# on the webmanager plugin version (absolute from 1.16.0), so an absolute
+# path under the library directory the plugin reports is reduced to that
+# same relative form. A real path change still changes the digest.
 SEMANTIC_SNAPSHOT_PY='
-import hashlib, json, urllib.request
+import hashlib, json, posixpath, urllib.request
 BASE = "http://127.0.0.1:8337"
 def get(path, headers=None):
     req = urllib.request.Request(BASE + path, headers=headers or {})
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read().decode("utf-8"))
-stats = get("/stats")
-items = get("/item/").get("items") or []
-albums = get("/album/").get("albums") or []
-digest = hashlib.sha256()
-for it in sorted(items, key=lambda r: r.get("id") or 0):
-    digest.update(json.dumps([it.get(k) for k in ("id", "album_id", "mb_trackid", "mb_albumid",
-                                                    "mb_releasegroupid", "disc", "track", "path")]).encode())
-digest.update(b"|albums|")
-for al in sorted(albums, key=lambda r: r.get("id") or 0):
-    digest.update(json.dumps([al.get(k) for k in ("id", "mb_albumid", "mb_releasegroupid",
-                                                    "albumartist", "album")]).encode())
 status = {}
 try:
     key = open("/config/.webmanager_api_key", encoding="utf-8").read().strip()
     status = get("/webmanager/status", {"Authorization": "Bearer " + key})
 except Exception:
     status = {}
+libdir = status.get("library_directory") if isinstance(status, dict) else None
+libdir = posixpath.normpath(libdir) if isinstance(libdir, str) and posixpath.isabs(libdir) else ""
+def rel(path):
+    if isinstance(path, str) and libdir and posixpath.isabs(path):
+        relpath = posixpath.relpath(posixpath.normpath(path), libdir)
+        if relpath != ".." and not relpath.startswith("../"):
+            return relpath
+    return path
+stats = get("/stats")
+items = get("/item/").get("items") or []
+albums = get("/album/").get("albums") or []
+digest = hashlib.sha256()
+for it in sorted(items, key=lambda r: r.get("id") or 0):
+    row = [it.get(k) for k in ("id", "album_id", "mb_trackid", "mb_albumid",
+                               "mb_releasegroupid", "disc", "track")]
+    digest.update(json.dumps(row + [rel(it.get("path"))]).encode())
+digest.update(b"|albums|")
+for al in sorted(albums, key=lambda r: r.get("id") or 0):
+    digest.update(json.dumps([al.get(k) for k in ("id", "mb_albumid", "mb_releasegroupid",
+                                                    "albumartist", "album")]).encode())
 print(json.dumps({"items": stats.get("items"), "albums": stats.get("albums"),
                   "listed_items": len(items), "listed_albums": len(albums),
                   "digest": digest.hexdigest(),

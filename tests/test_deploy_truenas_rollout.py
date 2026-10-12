@@ -3060,3 +3060,56 @@ class DbIntegrityWordingTests(unittest.TestCase):
         self.assertIn("settle_copy_and_hash", body)
         self.assertNotIn("wal_checkpoint", body)  # never on the authoritative file
         self.assertIn('_compose start "$ENGINE_SERVICE"', body)
+
+
+class SemanticSnapshotPathNormalizationTests(unittest.TestCase):
+    """The identity digest (pre/post deploy, engine restart, offline stop/start
+    all use SEMANTIC_SNAPSHOT_PY) must not depend on whether /item/ presents
+    paths absolute or library-relative -- plugin 1.16.0 serves them absolute
+    on Beets 2.14 -- but must still change when a path really changes."""
+
+    SNIPPET = re.search(r"^SEMANTIC_SNAPSHOT_PY='\n(.*?)\n'$", SCRIPT_SOURCE, re.S | re.M).group(1)
+
+    def _digest(self, paths, libdir="/music"):
+        from contextlib import redirect_stdout
+        from io import BytesIO, StringIO
+        from unittest import mock
+
+        items = [{"id": i, "album_id": 1, "mb_trackid": f"t{i}", "mb_albumid": "a",
+                  "mb_releasegroupid": "rg", "disc": 1, "track": i, "path": p}
+                 for i, p in enumerate(paths, 1)]
+        routes = {"/stats": {"items": len(items), "albums": 1}, "/item/": {"items": items},
+                  "/album/": {"albums": [{"id": 1, "album": "WHAM"}]},
+                  "/webmanager/status": {"plugin_version": "1.16.0", "library_directory": libdir}}
+
+        def urlopen(req, timeout=None):
+            return BytesIO(json.dumps(routes[req.full_url.split(":8337", 1)[1]]).encode())
+
+        out = StringIO()
+        with mock.patch("urllib.request.urlopen", urlopen), redirect_stdout(out):
+            exec(self.SNIPPET, {"open": lambda *a, **k: StringIO("key")})
+        return json.loads(out.getvalue())["digest"]
+
+    def test_absolute_and_relative_presentation_digest_equal(self):
+        rel = ["DRAM/WHAM (2022)/01 a.m4a", "DRAM/WHAM (2022)/02 b.m4a"]
+        self.assertEqual(self._digest(rel), self._digest(["/music/" + p for p in rel]))
+        self.assertEqual(self._digest(rel), self._digest(["/music/" + p for p in rel], libdir="/music/"))
+
+    def test_real_path_change_changes_digest(self):
+        base = self._digest(["DRAM/WHAM (2022)/01 a.m4a"])
+        self.assertNotEqual(base, self._digest(["DRAM/WHAM (2023)/01 a.m4a"]))
+        self.assertNotEqual(base, self._digest(["/music/DRAM/WHAM (2023)/01 a.m4a"]))
+        # The same tail under another root is a different file, not a presentation change.
+        self.assertNotEqual(base, self._digest(["/other/DRAM/WHAM (2022)/01 a.m4a"]))
+        self.assertNotEqual(base, self._digest(["/music2/DRAM/WHAM (2022)/01 a.m4a"]))
+
+    def test_relative_paths_hash_as_before(self):
+        # Library-relative paths hash exactly as the previous script did, so
+        # the digest format did not silently change for existing installs.
+        import hashlib
+        rel = "DRAM/WHAM (2022)/01 a.m4a"
+        legacy = hashlib.sha256()
+        legacy.update(json.dumps([1, 1, "t1", "a", "rg", 1, 1, rel]).encode())
+        legacy.update(b"|albums|")
+        legacy.update(json.dumps([1, None, None, None, "WHAM"]).encode())
+        self.assertEqual(self._digest([rel]), legacy.hexdigest())
