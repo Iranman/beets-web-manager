@@ -130,6 +130,8 @@ function AcquisitionRow({
   }, [job?.status, onChanged]);
 
   async function runDownload(method: DownloadMethod) {
+    // 0.5.1: auto_import is on, so a download ends in a Beets import -- ask first.
+    if (!window.confirm(`Download and import ${item.artist} - ${item.album}? When the download finishes it is imported into the library, which can write tags and move files.`)) return;
     setAction(method);
     setError('');
     setNotice('');
@@ -459,7 +461,7 @@ export function AcquisitionPanel({
     const methodAllowed = effectiveMethod === 'slskd' || directDownloadMethodEnabled(effectiveMethod, ytdlpStatus);
     if ((!retryMode && !batchCanStart) || (retryMode && !methodAllowed) || !count) return;
     const confirmed = window.confirm(
-      `Start sequential ${downloadMethodLabel(effectiveMethod)} download for ${count} ${retryMode ? 'failed ' : ''}Acquire item(s)?`,
+      `Start sequential ${downloadMethodLabel(effectiveMethod)} download for ${count} ${retryMode ? 'failed ' : ''}Acquire item(s)? Each finished download is imported into the library, which can write tags and move files.`,
     );
     if (!confirmed) return;
     setBatchStarting(true);
