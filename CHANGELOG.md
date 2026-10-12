@@ -9,6 +9,8 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - TrueNAS rollout script: the online library identity digest now hashes item paths relative to the library directory Beets reports in `/webmanager/status`. Before, an engine restart that moved from plugin 1.15.0 to 1.16.0, which serves Beets 2.14 item paths as absolute paths, failed with "library identity digest changed across the engine restart" even though the library had not changed. A real path change still changes the digest. This applies to the pre/post-deploy, engine-restart and offline stop/start comparisons.
+- Beets adapter (#351 N5): a relative item or art path from Beets that contains a `..` segment is no longer collapsed into a path under the library directory. Beets only stores paths inside its library directory as relative, so such a row is treated as corrupt and its `path`/`artpath` becomes empty. A `library_directory` that is not absolute is ignored instead of being joined to relative paths. Normal Beets 2.14 relative paths still become absolute.
+- Beets adapter (#351 N6): stock Beets turns every `\` in a query term into `/`, and no URL encoding survives that, so a file name that contains a backslash cannot be queried exactly. Looking up a library item by such a path no longer accepts the item Beets matched when `web.include_paths` is off, because that item can be a different file. With `include_paths` on, the exact path comparison already rejected it. Other queries that contain a backslash still match `/`; this is a stock Beets limit.
 
 ## v0.4.0 - 2026-10-12
 
