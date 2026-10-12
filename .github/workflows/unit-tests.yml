@@ -70,4 +70,4 @@ jobs:
             tests.test_api_key_provisioning.ApiKeyProvisioningTests.test_applies_puid_pgid_ownership_when_configured \
             tests.test_backup_restore_scripts.BackupRestoreRoundTripTests.test_restored_files_keep_the_owner_of_what_they_replace \
             2>&1 | tee -a gated.log
-          if grep -q "skipped" gated.log; then echo "::error::a gated test skipped"; exit 1; fi
+          if grep -Eq ' \.\.\. skipped|skipped=' gated.log; then echo "::error::a gated test skipped"; exit 1; fi
