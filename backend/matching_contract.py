@@ -1148,6 +1148,12 @@ def build_album_matching_decision(
     identity_verified = bool(candidate_rg_id and not conflicts and canonical.identity_proof != IdentityProof.INSUFFICIENT)
     canonical_auto_ok = canonical.can_auto_accept(_ALBUM_DECISION_POLICY)
 
+    # #303: say how to get past review when the only gap is missing
+    # fingerprint evidence (no key, rejected key, outage).
+    acoustid_hint = (" No AcoustID fingerprint evidence was available (AcoustID not configured or not reachable): "
+                     "set ACOUSTID_API_KEY and re-check, or confirm the match manually in Review."
+                     if "acoustid_unavailable" in warnings else "")
+
     if conflicts:
         safety_result = "Conflict"
         safety_key = "conflict"
@@ -1172,7 +1178,7 @@ def build_album_matching_decision(
         confidence_tier = "medium"
         reason_code = "review_required"
         recommended_action = "Review candidate before attaching"
-        eligibility_reason = "Candidate has valid Release Group ID but requires review to verify local album equivalence."
+        eligibility_reason = "Candidate has valid Release Group ID but requires review to verify local album equivalence." + acoustid_hint
         action_allowed = False
         review_required = True
     elif not canonical_auto_ok:
@@ -1181,7 +1187,7 @@ def build_album_matching_decision(
         confidence_tier = "medium"
         reason_code = "rgid_match_without_track_evidence"
         recommended_action = "Review candidate before attaching"
-        eligibility_reason = "Release Group ID matches, but no track-level evidence confirms it for the tracks present; review before attaching."
+        eligibility_reason = "Release Group ID matches, but no track-level evidence confirms it for the tracks present; review before attaching." + acoustid_hint
         action_allowed = False
         review_required = True
     else:

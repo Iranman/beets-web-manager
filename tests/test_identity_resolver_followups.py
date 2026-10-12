@@ -164,5 +164,32 @@ class ProviderOutageReportingTests(unittest.TestCase):
         self.assertIsNotNone(self._track_candidates(ProviderResult("acoustid", ProviderOutcome.NO_RESULT, data=[])))
 
 
+class AcoustIDUnavailableReviewReasonTests(unittest.TestCase):
+    """#303: review stays the outcome without fingerprint evidence, but the
+    reason says how to resolve it."""
+
+    def _decide(self, items):
+        from backend.matching_contract import build_album_matching_decision
+        tracks = [{"title": "Song 1", "track": 1, "length": 200}, {"title": "Song 2", "track": 2, "length": 210}]
+        cand = {"mb_releasegroupid": RG, "mb_albumid": REL_A, "album": "Album", "artist": "Artist"}
+        return build_album_matching_decision(current={"album": "Album", "artist": "Artist"}, candidate=cand,
+                                             items=items, mb_tracks=tracks).decision
+
+    def test_review_reason_names_the_acoustid_fix(self):
+        d = self._decide([{"title": "Song 1", "track": 1, "length": 200},
+                          {"title": "Song 2", "track": 2, "length": 210}])
+        self.assertFalse(d["action_allowed"])
+        self.assertIn("acoustid_unavailable", d["warnings"])
+        self.assertIn("ACOUSTID_API_KEY", d["eligibility_reason"])
+
+    def test_answered_lookup_with_no_result_carries_no_key_hint(self):
+        # AcoustID answered (no match): still review, but setting a key is not the fix.
+        d = self._decide([{"title": "Song 1", "track": 1, "length": 200, "acoustid_hits": []},
+                          {"title": "Song 2", "track": 2, "length": 210, "acoustid_hits": []}])
+        self.assertFalse(d["action_allowed"])
+        self.assertNotIn("acoustid_unavailable", d["warnings"])
+        self.assertNotIn("ACOUSTID_API_KEY", d["eligibility_reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

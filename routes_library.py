@@ -4246,7 +4246,9 @@ def apply_album_duplicate_resolver(aid):
                     # route already uses.
                     stamp_mbid = _s(plan.get("mb_albumid") or "")
                     if stamp_mbid:
-                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid}, release_selected_by_operator=True)
+                        # #261 F-7: the release was verified to be in the album's own Release Group
+                        # above, so this is not an operator Release Group move.
+                        stamp_res = composite_workflows.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
                         if not stamp_res.get("ok"):
                             log.append(f"  WARN: could not stamp target album mb_albumid: {stamp_res.get('error')}")
 
