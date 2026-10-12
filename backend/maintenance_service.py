@@ -84,65 +84,61 @@ def _do_scan_job() -> str:
 
     job = jobs.start_python(_scan, label="Library scan")
     _SCAN_STATE["last_job_id"] = job.job_id
-
-    def _watch():
-        for _ in range(1800):
-            time.sleep(2)
-            j = jobs.get(job.job_id)
-            if j and j.status in ("success", "failed"):
-                if j.status == "success":
-                    _record_scan()
-                break
-    threading.Thread(target=_watch, daemon=True).start()
+    # Tracked by the job itself, not a watcher thread polling it.
+    job.add_done_callback(lambda j: _record_scan() if j.status == "success" else None)
     return job.job_id
 
 
-def _auto_scan_loop():
-    """Two-tier auto-scan (no button needed):
+_AUTO_SCAN_TICK_SECONDS = 20
+_AUTO_SCAN_STARTUP_DELAY = 30   # let Flask finish starting
+# Mutated in place; only the store's "legacy-auto-scan" schedule touches it.
+_AUTO_SCAN_STATE = {"started": False, "last_full": 0.0, "last_quick": 0.0}
+
+
+def _auto_scan_tick():
+    """One tick of the opt-in two-tier auto-scan, run every
+    _AUTO_SCAN_TICK_SECONDS by ``jobs.every`` (no button needed):
     - Every 2 min  → proactively rebuild the lib cache in the background
     - Every 30 min → full DB reconciliation (remove stale entries) + auto-normalize names
     """
-    time.sleep(30)   # let Flask finish starting
-    _run_normalize_artists_if_needed()   # fix any Unicode names immediately on startup
-    last_full  = 0.0
-    last_quick = 0.0
-    while True:
-        try:
-            now = time.time()
-            # ── Full scan (every 30 min) ──────────────────────────────────────
-            if now - last_full >= _FULL_SCAN_INTERVAL:
-                jid = _do_scan_job()
-                last_full  = now
-                last_quick = now   # full scan counts as a quick scan too
-                # Cap memory growth without wiping recent operator-facing job
-                # results/logs from Clean, Import, Playlists, and repair flows.
-                jobs.prune_finished()
-                _captured_jid = jid
-                def _post_scan():
-                    for _ in range(900):
-                        time.sleep(2)
-                        j = jobs.get(_captured_jid)
-                        if j and j.status in ("success", "failed"):
-                            if j.status == "success":
-                                _run_normalize_artists_if_needed()
-                            break
-                threading.Thread(target=_post_scan, daemon=True).start()
-            # ── Quick tick (every 2 min) ──────────────────────────────────────
-            # Rebuild in-place rather than just invalidating: this used to
-            # only invalidate, which forced whichever visitor loaded /library
-            # next to pay for the full rebuild synchronously (confirmed the
-            # dominant cause of "library takes forever to load every time" --
-            # the cache was rarely surviving more than ~2 minutes). Doing the
-            # rebuild here keeps the page fast without giving up the "stay
-            # in sync with external disk changes" behavior this loop exists
-            # for.
-            elif now - last_quick >= _QUICK_SCAN_INTERVAL:
-                _refresh_library_cache()
-                last_quick = now
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger(__name__).warning("_auto_scan_loop error: %s", _e)
-        time.sleep(20)   # heartbeat every 20s
+    state = _AUTO_SCAN_STATE
+    if not state["started"]:
+        state["started"] = True
+        _run_normalize_artists_if_needed()   # fix any Unicode names immediately on startup
+    now = time.time()
+    # ── Full scan (every 30 min) ──────────────────────────────────────────────
+    if now - state["last_full"] >= _FULL_SCAN_INTERVAL:
+        jid = _do_scan_job()
+        state["last_full"] = now
+        state["last_quick"] = now   # full scan counts as a quick scan too
+        # Cap memory growth without wiping recent operator-facing job
+        # results/logs from Clean, Import, Playlists, and repair flows.
+        jobs.prune_finished()
+        scan = jobs.get(jid)
+        if scan is not None:
+            scan.add_done_callback(lambda j: _run_normalize_artists_if_needed() if j.status == "success" else None)
+    # ── Quick tick (every 2 min) ──────────────────────────────────────────────
+    # Rebuild in-place rather than just invalidating: this used to
+    # only invalidate, which forced whichever visitor loaded /library
+    # next to pay for the full rebuild synchronously (confirmed the
+    # dominant cause of "library takes forever to load every time" --
+    # the cache was rarely surviving more than ~2 minutes). Doing the
+    # rebuild here keeps the page fast without giving up the "stay
+    # in sync with external disk changes" behavior this schedule exists
+    # for.
+    elif now - state["last_quick"] >= _QUICK_SCAN_INTERVAL:
+        _refresh_library_cache()
+        state["last_quick"] = now
+
+
+def start_auto_scan_schedule():
+    """Opt-in (BEETS_ENABLE_LEGACY_LOCAL_SCAN) background auto-scan on the
+    job store's scheduler. A second call (app.py re-imported) is a no-op."""
+    try:
+        return jobs.every("legacy-auto-scan", _AUTO_SCAN_TICK_SECONDS, _auto_scan_tick,
+                          initial_delay=_AUTO_SCAN_STARTUP_DELAY)
+    except ValueError:
+        return None
 
 
 def _library_health_payload(orphan_sample_limit: int = 100,

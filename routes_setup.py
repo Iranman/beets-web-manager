@@ -38,6 +38,7 @@ from flask import jsonify, request, session
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
 from backend import config_layers  # noqa: E402
+from backend.build_info import build_info  # noqa: E402
 from backend.web_manager_config_store import (  # noqa: E402
     WebManagerConfigStore,
     WebManagerConfigStoreConflictError,
@@ -185,15 +186,13 @@ DEMO_MODE=0
 
 
 def _app_version() -> str:
-    for candidate in (Path(__file__).parent / "VERSION", Path("/app/VERSION")):
-        try:
-            return candidate.read_text(encoding="utf-8").strip()
-        except Exception:
-            continue
-    return "unknown"
+    return build_info()["version"]
 
 
+# One source for the running build (backend/build_info.py): the image's
+# baked BUILD_INFO.json (= its OCI labels), else the VERSION file.
 _APP_VERSION = _app_version()
+_APP_REVISION = build_info()["revision"]
 
 
 def _config_store_for_target(target_file: Path) -> Tuple[WebManagerConfigStore, str]:
@@ -1317,8 +1316,11 @@ def _resolve_setting_item(
                 has_stored = True
 
         configured = bool(env_val or has_stored)
-        source = "environment" if env_val else ("persisted" if has_stored else "not_configured")
-        is_overridden = bool(env_val and has_stored)
+        # D12: the saved file is loaded into os.environ at boot, so an env value
+        # equal to the saved one that Docker did not set is the saved key.
+        from_docker = bool(env_val) and (config_layers.pinned_by_boot_environment(name) or env_val != persisted_val)
+        source = "environment" if from_docker else ("persisted" if (has_stored or env_val) else "not_configured")
+        is_overridden = bool(from_docker and has_stored)
         masked_val = _mask(env_val or persisted_val) if configured else ""
 
         return {
@@ -3120,6 +3122,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "ok": True,
         "status": "ready" if ready else "warning",
         "version": _APP_VERSION,
+        "revision": _APP_REVISION,
         "demo_mode": demo_mode,
         "setup_complete": _SETUP_COMPLETE_MARKER.exists(),
         "first_run": {
@@ -4079,7 +4082,7 @@ def health_live():
     """Liveness probe: the process is up and answering HTTP. No dependency
     checks — a failing DB/path should not make Docker/k8s kill the container
     (that's what readiness is for)."""
-    return jsonify({"status": "alive", "version": _APP_VERSION})
+    return jsonify({"status": "alive", "version": _APP_VERSION, "revision": _APP_REVISION})
 
 
 @app.get("/health/ready")

@@ -2318,5 +2318,5 @@ def dedup_maintenance_run():
     def _do(log, cancel_event=None, update_state=None):
         return _maintenance_full_duplicate_scan(log, cancel_event, progress=update_state)
 
-    job = jobs.start_python(_do, label="Duplicate maintenance run", metadata={"type": "maintenance-duplicates"})
+    job = jobs.start_python(_do, label="Duplicate maintenance run", metadata={"type": "maintenance-duplicates", "dedupe_key": "workflow:maintenance-duplicates"})
     return jsonify({"ok": True, "job_id": job.job_id})

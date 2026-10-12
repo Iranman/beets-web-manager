@@ -25,10 +25,30 @@ Durability (ARCH-004), enabled when the store is given a persistence dir:
 Engine-backed mutations are additionally protected by their transaction's
 idempotency key; see backend/transaction_recovery.py for how a transaction
 left Running by a restart is finished from engine evidence, never replayed.
+
+Duplicate starts (lost HTTP responses, retries, double clicks): the web layer
+opens a ``start scope`` per mutating request (``enter_start_scope``). The
+first job that request starts carries the request's fingerprint (method,
+path, query, body) and, when the client sent one, its ``Idempotency-Key``:
+
+* the same Idempotency-Key again returns the job it already started, in any
+  status (also after a restart, while the record is retained), and never
+  starts a second one -- ``DuplicateJobError`` with ``replay=True``;
+* without a key, an identical request while that job is still running is
+  refused with ``DuplicateJobError`` (read-only jobs are exempt).
+
+Recurring work: ``JobStore.every`` runs a tick on a store-owned schedule
+(stopped by ``close()``); the tick starts tracked jobs with ``start_python``.
+``PythonJob.add_done_callback`` replaces "poll until finished" watcher threads.
+
+Persisted ``log_tail`` and ``result`` are redacted centrally (#272).
 """
 import contextlib
+import contextvars
 import json
+import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -48,6 +68,79 @@ READ_ONLY_JOB_TYPES = frozenset({
     "folder-placeholder-scan", "artist-folder-scan", "root-folder-repair-scan", "album-folder-cleanup-scan",
     "music-format-scan", "musicbrainz-match", "batch-ai-suggest", "ytdlp-youtube-test",
 })
+
+_log = logging.getLogger("app.job_engine")
+
+# "scheme://user:pass@" -- provider_boundary.redact covers key=value, Bearer
+# and sensitive dict keys, but not credentials embedded in a URL.
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@:]+:[^\s/@]+@")
+
+
+def redact_for_persistence(value: Any) -> Any:
+    """Scrub secret-looking text from a job's log/result before it is written
+    to disk (#272). Producers still redact their own lines; this is the
+    backstop for one that forgets."""
+    from backend.provider_boundary import redact  # stdlib-only module; lazy keeps job_engine import-light
+
+    def userinfo(v):
+        if isinstance(v, str):
+            return _URL_USERINFO_RE.sub(r"\1[REDACTED]@", v)
+        if isinstance(v, dict):
+            return {k: userinfo(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [userinfo(x) for x in v]
+        return v
+
+    return redact(userinfo(value))
+
+
+class StartScope:
+    """What one HTTP request contributes to the first job it starts."""
+
+    def __init__(self, fingerprint_fn, idempotency_key: str = ""):
+        self._fingerprint_fn = fingerprint_fn
+        self._fingerprint: Optional[str] = None
+        self.idempotency_key = idempotency_key
+        self.used = False
+
+    @property
+    def fingerprint(self) -> str:
+        if self._fingerprint is None:  # lazy: the view has parsed its body by now
+            try:
+                self._fingerprint = str(self._fingerprint_fn() or "")
+            except Exception:
+                self._fingerprint = ""
+        return self._fingerprint
+
+
+_start_scope: "contextvars.ContextVar[Optional[StartScope]]" = contextvars.ContextVar("job_start_scope", default=None)
+
+
+def enter_start_scope(fingerprint_fn, idempotency_key: str = ""):
+    """Open the start scope for the current request; returns a token for
+    ``exit_start_scope``. The web layer calls this, never a job."""
+    return _start_scope.set(StartScope(fingerprint_fn, idempotency_key))
+
+
+def exit_start_scope(token) -> None:
+    try:
+        _start_scope.reset(token)
+    except (ValueError, RuntimeError):
+        _start_scope.set(None)
+
+
+def _active_scope() -> Optional[StartScope]:
+    scope = _start_scope.get()
+    return scope if scope is not None and not scope.used else None
+
+
+class IdempotencyKeyReuseError(ValueError):
+    """An Idempotency-Key was sent again with a different request."""
+
+    def __init__(self, job: "PythonJob"):
+        super().__init__("This Idempotency-Key was already used for a different request; "
+                         "send a new key for a new operation.")
+        self.job = job
 
 
 def _summarize_result(value):
@@ -145,6 +238,9 @@ class PythonJob:
         self.heartbeat_at: Optional[float] = None
         self.recovery: Optional[Dict[str, Any]] = None
         self._terminal: Optional[str]     = None  # set only for recovered records
+        # {"fingerprint", "idempotency_key"} of the request that started it.
+        self.start_keys: Dict[str, str]   = {}
+        self._done_callbacks: List[Any]   = []
         self._lock        = threading.Lock()
         self._fn          = fn
         self._cancel      = CancelSignal()
@@ -258,6 +354,28 @@ class PythonJob:
         finally:
             self.finished_at = time.time()
             self.save(force=True)
+            self._run_done_callbacks()
+
+    def add_done_callback(self, fn) -> None:
+        """Call ``fn(job)`` once the job is terminal (at once if it already is).
+        Use it instead of a thread that polls the job until it finishes."""
+        with self._lock:
+            if self.status == "running":
+                self._done_callbacks.append(fn)
+                return
+        self._call_done(fn)
+
+    def _run_done_callbacks(self) -> None:
+        with self._lock:
+            callbacks, self._done_callbacks = self._done_callbacks, []
+        for fn in callbacks:
+            self._call_done(fn)
+
+    def _call_done(self, fn) -> None:
+        try:
+            fn(self)
+        except Exception:
+            _log.exception("job %s: done callback failed", self.job_id)
 
     def to_dict(self, include_log=False, include_result=True):
         d = {
@@ -281,6 +399,8 @@ class PythonJob:
             d["metadata"] = self.metadata
         if self.recovery:
             d["recovery"] = self.recovery
+            # The process restarted while this job ran (see _recover).
+            d["interrupted"] = True
         with self._lock:
             has_structured_state = bool(self.state)
         if has_structured_state or self.metadata:
@@ -302,8 +422,10 @@ class PythonJob:
             "job_id": self.job_id, "label": self.label, "status": self.status,
             "created_at": self.created_at, "started_at": self.started_at, "finished_at": self.finished_at,
             "returncode": self.returncode, "heartbeat_at": self.heartbeat_at,
-            "metadata": self.metadata, "state": state, "log_tail": list(self.log[-LOG_TAIL_PERSISTED:]),
-            "log_lines": len(self.log), "result": result, "recovery": self.recovery,
+            "metadata": self.metadata, "state": state,
+            "log_tail": redact_for_persistence(list(self.log[-LOG_TAIL_PERSISTED:])),
+            "log_lines": len(self.log), "result": redact_for_persistence(result), "recovery": self.recovery,
+            "start_keys": self.start_keys,
         }
 
     @classmethod
@@ -319,6 +441,7 @@ class PythonJob:
         job.log = list(rec.get("log_tail") or [])
         job.result = rec.get("result")
         job.recovery = rec.get("recovery")
+        job.start_keys = dict(rec.get("start_keys") or {})
         status = rec.get("status")
         if status in TERMINAL_STATUSES:
             job._terminal = status
@@ -331,12 +454,20 @@ def reports_failure(result: Any) -> bool:
 
 
 class DuplicateJobError(RuntimeError):
-    """A job with the same ``dedupe_key`` is already running (BA-6, ARCH-004)."""
+    """A job with the same ``dedupe_key`` or request fingerprint is already
+    running (BA-6, ARCH-004), or -- ``replay`` -- this request's
+    Idempotency-Key already started ``job``. Nothing new was started."""
 
-    def __init__(self, job: "PythonJob"):
-        super().__init__(f"This job is already running ({job.label or job.job_id}); "
-                         "wait for it to finish before starting it again.")
+    def __init__(self, job: "PythonJob", replay: bool = False):
+        if replay:
+            message = (f"This request already started a job ({job.label or job.job_id}, {job.status}); "
+                       "it was not started again.")
+        else:
+            message = (f"This job is already running ({job.label or job.job_id}); "
+                       "wait for it to finish before starting it again.")
+        super().__init__(message)
         self.job = job
+        self.replay = replay
 
 
 def dedupe_key(metadata: Optional[Dict[str, Any]]) -> str:
@@ -383,6 +514,7 @@ class JobStore:
         # Every started job thread, also after clear/prune drops its job:
         # close() must join a thread whose final write is still in flight.
         self._threads: List[threading.Thread] = []
+        self._schedules: Dict[str, threading.Thread] = {}
         if self.root is not None:
             try:
                 self.root.mkdir(parents=True, exist_ok=True)
@@ -463,24 +595,55 @@ class JobStore:
                     job.save(force=True)
 
     # -- API ------------------------------------------------------------------
-    def find_duplicate(self, metadata=None) -> Optional["PythonJob"]:
-        """The running job with the same ``dedupe_key``, if any."""
+    @staticmethod
+    def _running_key(metadata) -> str:
+        """The key a new start is compared on: the explicit ``dedupe_key``,
+        else the starting request's fingerprint (mutating jobs only)."""
         key = dedupe_key(metadata)
+        scope = _active_scope()
+        if key or scope is None or is_read_only_job(metadata):
+            return key
+        return "request:" + scope.fingerprint if scope.fingerprint else ""
+
+    @staticmethod
+    def _job_key(job: "PythonJob") -> str:
+        key = dedupe_key(job.metadata)
+        fingerprint = job.start_keys.get("fingerprint")
+        return key or ("request:" + fingerprint if fingerprint else "")
+
+    def find_duplicate(self, metadata=None) -> Optional["PythonJob"]:
+        """The running job a new start with ``metadata`` would duplicate.
+
+        Raises DuplicateJobError(replay=True) when the current request's
+        Idempotency-Key already started a job (any status), and
+        IdempotencyKeyReuseError when that key came with a different request."""
+        scope = _active_scope()
+        if scope is not None and scope.idempotency_key:
+            for job in list(self._jobs.values()):
+                if job.start_keys.get("idempotency_key") == scope.idempotency_key:
+                    if job.start_keys.get("fingerprint") != scope.fingerprint:
+                        raise IdempotencyKeyReuseError(job)
+                    raise DuplicateJobError(job, replay=True)
+        key = self._running_key(metadata)
         if not key:
             return None
         for job in list(self._jobs.values()):
-            if job.status == "running" and dedupe_key(job.metadata) == key:
+            if job.status == "running" and self._job_key(job) == key:
                 return job
         return None
 
     def start_guard(self, metadata=None):
         """Hold across a caller's own duplicate check and the start it guards,
         so two racing starts cannot both pass the check (QA F3)."""
-        return self._lock if dedupe_key(metadata) else contextlib.nullcontext()
+        scope = _active_scope()
+        guarded = self._running_key(metadata) or (scope is not None and scope.idempotency_key)
+        return self._lock if guarded else contextlib.nullcontext()
 
     def start_python(self, fn, label="", metadata=None) -> PythonJob:
         """Start ``fn`` as a job. Raises DuplicateJobError when a job with the
-        same explicit ``metadata["dedupe_key"]`` is still running."""
+        same explicit ``metadata["dedupe_key"]``, or started by an identical
+        request, is still running, or when this request's Idempotency-Key
+        already started a job (see the module docstring)."""
         with self._lock:
             existing = self.find_duplicate(metadata)
             if existing is not None:
@@ -489,6 +652,13 @@ class JobStore:
             job  = PythonJob(jid, fn, label, persist=self._write if self.root else None, start=False)
             if metadata:
                 job.metadata = metadata
+            scope = _active_scope()
+            if scope is not None:
+                # Only the first job a request starts carries its keys: a
+                # request that starts several jobs is guarded by the first.
+                scope.used = True
+                job.start_keys = {k: v for k, v in (("fingerprint", scope.fingerprint),
+                                                    ("idempotency_key", scope.idempotency_key)) if v}
             self._jobs[jid] = job
         try:
             thread = threading.Thread(target=job._run, daemon=True)
@@ -505,14 +675,46 @@ class JobStore:
             raise
         return job
 
+    def every(self, name: str, interval_seconds: float, tick, *, initial_delay: float = 0.0) -> threading.Thread:
+        """Call ``tick()`` every ``interval_seconds`` until ``close()``.
+
+        The scheduler hook for recurring work: ``tick`` decides whether work
+        is due and starts it as a tracked job with ``start_python`` (it may
+        return that job). While the job a tick returned is still running,
+        later ticks are skipped, so a slow run is never overlapped. A tick
+        that raises is logged and the schedule continues. One schedule per
+        ``name``; a second ``every`` with the same name raises ValueError."""
+        def loop():
+            last: Optional[PythonJob] = None
+            if self._closed.wait(max(0.0, initial_delay)):
+                return
+            while True:
+                if last is None or last.status != "running":
+                    try:
+                        returned = tick()
+                        last = returned if isinstance(returned, PythonJob) else None
+                    except Exception:
+                        _log.exception("scheduled job tick %r failed", name)
+                if self._closed.wait(max(0.01, interval_seconds)):
+                    return
+
+        with self._lock:
+            if name in self._schedules:
+                raise ValueError(f"schedule {name!r} already exists")
+            thread = threading.Thread(target=loop, daemon=True, name=f"job-schedule-{name}")
+            self._schedules[name] = thread
+        thread.start()
+        return thread
+
     def close(self, timeout: float = 10.0) -> bool:
-        """Stop the heartbeat and wait (up to ``timeout`` in all) for every
-        job thread, including its final persisted write, to finish. Jobs are
-        not cancelled. True when no store thread is still alive."""
+        """Stop the heartbeat and schedules and wait (up to ``timeout`` in
+        all) for every job thread, including its final persisted write, to
+        finish. Jobs are not cancelled. True when no store thread is still
+        alive."""
         self._closed.set()
         deadline = time.monotonic() + timeout
         with self._lock:
-            threads = [self._heartbeat] + list(self._threads)
+            threads = [self._heartbeat] + list(self._schedules.values()) + list(self._threads)
         for thread in threads:
             if thread is not None and thread is not threading.current_thread():
                 thread.join(max(0.0, deadline - time.monotonic()))
