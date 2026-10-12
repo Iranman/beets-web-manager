@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -457,6 +458,8 @@ def _rejected_download_keep_reason(path: Path, preserve_source: Optional[bool]) 
     try:
         # Lazy: library_service sits above this helper and imports it indirectly.
         from backend.library_service import MUSIC_ROOT, _path_is_under, _preserve_torrent_source_file
+        if path.is_symlink():  # #325 TOCTOU: never move what a link points at
+            return "file is a symbolic link"
         if _path_is_under(path.resolve(strict=False), MUSIC_ROOT.resolve(strict=False)):
             return "file is in the music library"
         if preserve_source is None:
@@ -465,6 +468,38 @@ def _rejected_download_keep_reason(path: Path, preserve_source: Optional[bool]) 
     except Exception:
         return "could not confirm the file is not a preserved torrent source"
     return "file is a preserved torrent source that may still be seeding" if preserve_source else ""
+
+
+def _quarantine_root_refusal(root: Path) -> str:
+    """Why ``root`` may not hold quarantined files ("" = fine). #325 S-1: an
+    editable setting must not point into the library or a source tree."""
+    try:
+        from backend.library_service import (
+            DOWNLOADS_ALLOWED_ROOTS, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _path_is_under)
+        res = root.resolve(strict=False)
+        for label, guarded in (("the music library", [MUSIC_ROOT]), ("a torrent source root", TORRENT_SOURCE_ROOTS),
+                               ("a downloads root", DOWNLOADS_ALLOWED_ROOTS)):
+            for g in guarded or ():
+                g = Path(g).resolve(strict=False)
+                if _path_is_under(res, g) or _path_is_under(g, res):
+                    return f"the quarantine folder overlaps {label}"
+    except Exception:
+        return "could not confirm the quarantine folder is outside the library and source trees"
+    return ""
+
+
+def _reserve_quarantine_target(target_dir: Path, name: str) -> Path:
+    """Create the target name exclusively, so two same-named rejects never
+    share it (#325 S-2). The move then replaces only this placeholder."""
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for candidate in [name] + [f"{stem}-{uuid.uuid4().hex[:8]}{suffix}" for _ in range(5)]:
+        target = target_dir / candidate
+        try:
+            os.close(os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            return target
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"no free quarantine name for {name}")
 
 
 def handle_rejected_download(path_value: str, prefs: Optional[Dict[str, Any]] = None, *,
@@ -480,6 +515,8 @@ def handle_rejected_download(path_value: str, prefs: Optional[Dict[str, Any]] = 
     path = Path(path_value)
     handling = preferences.get("rejected_download_handling") or "quarantine"
     keep_reason = _rejected_download_keep_reason(path, preserve_source)
+    if not keep_reason and handling != "delete":
+        keep_reason = _quarantine_root_refusal(_quarantine_root())
     if keep_reason:
         if log is not None:
             log.append(f"Rejected download left in place ({keep_reason}): {path.name}")
@@ -495,10 +532,13 @@ def handle_rejected_download(path_value: str, prefs: Optional[Dict[str, Any]] = 
             root = _quarantine_root()
             target_dir = root / time.strftime("%Y%m%d")
             target_dir.mkdir(parents=True, exist_ok=True)
-            target = target_dir / path.name
-            if target.exists():
-                target = target_dir / f"{path.stem}-{int(time.time())}{path.suffix}"
-            shutil.move(str(path), str(target))
+            target = _reserve_quarantine_target(target_dir, path.name)
+            try:
+                shutil.move(str(path), str(target))
+            except Exception:
+                if path.exists():  # the source is intact: drop our empty placeholder
+                    target.unlink(missing_ok=True)
+                raise
             result["quarantined_to"] = str(target)
             result["removed"] = True
             if log is not None:

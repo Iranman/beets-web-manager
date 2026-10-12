@@ -614,15 +614,15 @@ def _app_managed_download_path(path: Path) -> bool:
         path_res = path
     if any(_path_is_under(path_res, root) for root in managed_roots):
         return True
-    name = path.name.casefold()
-    return any(
-        marker in name
-        for marker in (
-            " - yt missing ",
-            " - soundcloud missing ",
-            " - spotiflac missing ",
-        )
-    )
+    # #325 S-3: a name alone is spoofable; it must be the exact name the
+    # acquisition flow generates ("<album> - <source> missing <epoch ms>")
+    # and sit under a validated downloads root.
+    # ponytail: name-based; a marker file written at creation would be proof.
+    return bool(_APP_MANAGED_NAME.search(path.name.casefold())) and any(
+        _path_is_under(path_res, root) for root in DOWNLOADS_ALLOWED_ROOTS)
+
+
+_APP_MANAGED_NAME = re.compile(r" - (?:yt|ytdlp|soundcloud|spotiflac) missing \d{13}$")
 
 
 def _preserve_torrent_source_path(path_value: str | Path) -> bool:
