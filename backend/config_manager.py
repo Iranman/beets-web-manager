@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import secrets
 import stat
 import tempfile
@@ -86,6 +87,31 @@ def _write_backups(cfg: Path, text: str) -> None:
         config_layers.create_private_file(cfg.with_name(f"{cfg.name}.bak.{int(time.time())}"), text, unique=True)
     except Exception as exc:
         log.warning("Failed to create config backup for %s: %s", cfg.name, type(exc).__name__)
+    _prune_timestamped_backups(cfg)
+
+
+# #324 N-2: each save leaves a timestamped copy of config.yaml (secrets
+# included); keep only the newest few. config.yaml.bak (the revert source)
+# is a separate file and is never pruned.
+KEEP_TIMESTAMPED_BACKUPS = 10
+
+
+def _prune_timestamped_backups(cfg: Path, keep: int = KEEP_TIMESTAMPED_BACKUPS) -> None:
+    pattern = re.compile(re.escape(cfg.name) + r"\.bak\.(\d+)(?:-(\d+))?")
+    found = []
+    try:
+        for entry in os.scandir(cfg.parent):
+            m = pattern.fullmatch(entry.name)
+            if m and entry.is_file(follow_symlinks=False):
+                found.append(((int(m.group(1)), int(m.group(2) or 0)), entry.path))
+    except OSError as exc:
+        log.warning("Could not list config backups for pruning: %s", type(exc).__name__)
+        return
+    for _key, path in sorted(found)[:-keep]:
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            log.warning("Could not prune an old config backup: %s", type(exc).__name__)
 
 
 DEFAULT_CONFIG_DIR = "/config"
@@ -211,15 +237,25 @@ def _replace_config_file(cfg: Path, text: str) -> None:
     protection is the file mode. The unique temp file is created 0600
     (mkstemp) and gets the current file's mode before the replace, so a 0600
     config.yaml never becomes umask-readable (it did when the temp file was
-    created with open()). A missing or non-regular file gets 0600."""
+    created with open()). A missing or non-regular file gets 0600.
+
+    The editor works on universal-newline text; a file that used CRLF keeps
+    CRLF (#324 N-3), and the revision stays computed on the LF form that
+    GET returns."""
+    crlf = False
     try:
         st = os.lstat(cfg)
         mode = (st.st_mode & 0o7777) if stat.S_ISREG(st.st_mode) else 0o600
+        if stat.S_ISREG(st.st_mode):
+            with open(cfg, "rb") as current:
+                crlf = b"\r\n" in current.read()
     except FileNotFoundError:
         mode = 0o600
+    if crlf:
+        text = text.replace("\r\n", "\n").replace("\n", "\r\n")
     fd, tmp_name = tempfile.mkstemp(prefix=f".{cfg.name}.", suffix=".tmp", dir=str(cfg.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())

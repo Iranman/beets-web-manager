@@ -83,8 +83,12 @@ _SECRET_PATTERNS = [
     re.compile(r"((?:api[_\-]?key|client|token|password|secret|fingerprint)=)[^&\s'\"]+", re.IGNORECASE),
     re.compile(r"((?:api[_\-]?key|token|password|secret|authorization)\s*[:=]\s*['\"]?)[^'\"\s,}]{4,}", re.IGNORECASE),
 ]
+# Dict keys whose value is replaced whole. Not "client"/"fingerprint": as dict
+# keys they are a yt-dlp client name or an audio/request fingerprint, and
+# wiping them lost data in persisted job results (#351 N2). As URL query
+# parameters (AcoustID ``client=<key>``) they are still masked above.
 _SENSITIVE_KEYS = frozenset({"api_key", "apikey", "token", "access_token", "secret", "password", "authorization",
-                             "auth_token", "plex_token", "openai_api_key", "client", "fingerprint"})
+                             "auth_token", "plex_token", "openai_api_key"})
 
 
 def redact(value: Any) -> Any:

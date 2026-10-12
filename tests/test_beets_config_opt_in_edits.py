@@ -161,12 +161,18 @@ class ConfigWriteModeTests(_TempConfigMixin, unittest.TestCase):
         leftovers = [p.name for p in self.config_dir.iterdir() if "tmp" in p.name]
         self.assertEqual(leftovers, [])
 
-    def test_fresh_install_config_is_0644(self):
+    def test_fresh_install_config_is_0600(self):
+        """#324 N-2: config.yaml holds Beets' secrets once they are set. Beets
+        runs as the same PUID, so 0600 still lets it read the file."""
         from backend.beets_plugins import update_config_yaml_plugins
         path = self._make_config(text=None)
-        update_config_yaml_plugins(path)
+        old_umask = os.umask(0)
+        try:
+            update_config_yaml_plugins(path)
+        finally:
+            os.umask(old_umask)
         self.assertTrue(path.exists())
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
 class ConfigBackupTests(_TempConfigMixin, unittest.TestCase):

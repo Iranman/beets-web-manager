@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import hashlib
 import http.client
 import io
 import ipaddress
@@ -274,13 +275,20 @@ def same_endpoint_url(supplied: str, configured: str) -> bool:
 
 
 def redact_url_for_log(url: str) -> str:
+    """``scheme://host[:port]`` plus a short hash of the path, for logs and
+    error text. Never the path itself: webhook and signed URLs carry a
+    credential there (#350), and a password holding a raw ``/`` makes the
+    parser read part of it as the path (#239 F-3). The hash still lets two
+    log lines about the same URL be matched."""
     try:
         parsed = urllib.parse.urlsplit(url)
-        host = parsed.hostname or ""
-        netloc = host
+        netloc = parsed.hostname or ""
         if parsed.port:
             netloc = f"{netloc}:{parsed.port}"
-        return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path[:120], "", ""))
+        path = ""
+        if parsed.path not in ("", "/"):
+            path = "/[path " + hashlib.sha256(parsed.path.encode("utf-8", "replace")).hexdigest()[:8] + "]"
+        return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
     except Exception:
         return "<invalid-url>"
 

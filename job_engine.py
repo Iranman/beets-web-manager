@@ -48,7 +48,6 @@ import contextvars
 import json
 import logging
 import os
-import re
 import threading
 import time
 import uuid
@@ -71,20 +70,20 @@ READ_ONLY_JOB_TYPES = frozenset({
 
 _log = logging.getLogger("app.job_engine")
 
-# "scheme://user:pass@" -- provider_boundary.redact covers key=value, Bearer
-# and sensitive dict keys, but not credentials embedded in a URL.
-_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@:]+:[^\s/@]+@")
-
 
 def redact_for_persistence(value: Any) -> Any:
     """Scrub secret-looking text from a job's log/result before it is written
     to disk (#272). Producers still redact their own lines; this is the
-    backstop for one that forgets."""
-    from backend.provider_boundary import redact  # stdlib-only module; lazy keeps job_engine import-light
+    backstop for one that forgets. provider_boundary.redact covers key=value,
+    Bearer and sensitive dict keys; URL userinfo (``user:pass@``, a user-only
+    ``TOKEN@``, a password holding ``@`` or ``/``) is replaced whole (#351 N2)."""
+    # Both stdlib-only modules; lazy keeps job_engine import-light.
+    from backend.config_layers import redact_url_userinfo_in_text
+    from backend.provider_boundary import redact
 
     def userinfo(v):
         if isinstance(v, str):
-            return _URL_USERINFO_RE.sub(r"\1[REDACTED]@", v)
+            return redact_url_userinfo_in_text(v)
         if isinstance(v, dict):
             return {k: userinfo(x) for k, x in v.items()}
         if isinstance(v, (list, tuple)):
@@ -643,6 +642,8 @@ class JobStore:
         """Hold across a caller's own duplicate check and the start it guards,
         so two racing starts cannot both pass the check (QA F3)."""
         scope = _active_scope()
+        if scope is not None:
+            _ = scope.fingerprint  # before the caller takes the store lock (see start_python)
         guarded = self._running_key(metadata) or (scope is not None and scope.idempotency_key)
         return self._lock if guarded else contextlib.nullcontext()
 
@@ -651,6 +652,9 @@ class JobStore:
         same explicit ``metadata["dedupe_key"]``, or started by an identical
         request, is still running, or when this request's Idempotency-Key
         already started a job (see the module docstring)."""
+        scope = _active_scope()
+        if scope is not None:
+            _ = scope.fingerprint  # computed (it may hash a large upload) before the store lock, not under it
         with self._lock:
             existing = self.find_duplicate(metadata)
             if existing is not None:
@@ -659,7 +663,6 @@ class JobStore:
             job  = PythonJob(jid, fn, label, persist=self._write if self.root else None, start=False)
             if metadata:
                 job.metadata = metadata
-            scope = _active_scope()
             if scope is not None:
                 # Only the first job a request starts carries its keys: a
                 # request that starts several jobs is guarded by the first.

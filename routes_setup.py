@@ -1555,7 +1555,7 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
         variables.append(var_item)
     payload: Dict[str, Any] = {
         "ok": True,
-        "env_file": str(_SETUP_ENV_FILE),
+        "env_file": _SETUP_ENV_FILE.name,  # the file name only, never the container path (#183)
         "exists": exists,
         "example_file": str(_ENV_EXAMPLE_FILE),
         "restart_required_after_save": True,

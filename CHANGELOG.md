@@ -6,6 +6,17 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Security
+
+- Outbound-request log lines and provider HTTP errors no longer include the URL path, which can carry a webhook token or URL signature. They show the scheme, host, port and a short hash of the path (#350).
+- A URL password that contains a raw `/` (`http://user:pa/ss@host`) is now hidden in the config editor, the plugin preview diff, outbound-request logs and stored job records. Before, only the part before the `/` was hidden (#239 F-3).
+- Stored job logs and results now also hide a token-only URL login (`https://TOKEN@host`) and the whole of a password that contains `@` (#351 N2). Result fields named `fingerprint` or `client` are no longer blanked when a job is stored; a `client=` query parameter is still hidden.
+- The request fingerprint stored with each job is now an HMAC keyed with this install's secret key (`BEETS_WEB_SECRET_KEY` or `.flask_secret_key` in the data folder), not a plain SHA-256. The job files alone, without that key, can no longer be used to check guesses of a secret sent in a request. An uploaded file is hashed before the job store is locked, so a large upload no longer delays other job starts (#351 N1).
+- Two settings saves at the same moment no longer fail with a 500. Each save writes its own uniquely named, 0600 temporary file instead of a shared `.env.tmp` (#183).
+- `GET/POST /api/setup/env` returns the settings file name (`.env`), not its path inside the container (#183).
+- The Discogs token is read from Beets `config.yaml` only when `BEETS_CONFIG` is inside the Beets config folder (`BEETSDIR`), the same rule as every other reader of that file (#183, #239).
+- A `config.yaml` that Web Manager creates on a fresh install is now mode 0600 instead of 0644, because it holds Beets' secrets once they are set. Beets runs as the same `PUID`, so it can still read the file. Only the newest 10 timestamped config editor backups (`config.yaml.bak.<time>`) are kept (#324 N-2). Saving a CRLF `config.yaml` in the editor keeps its CRLF line endings (#324 N-3).
+
 ### Fixed
 
 - TrueNAS rollout script: the online library identity digest now hashes item paths relative to the library directory Beets reports in `/webmanager/status`. Before, an engine restart that moved from plugin 1.15.0 to 1.16.0, which serves Beets 2.14 item paths as absolute paths, failed with "library identity digest changed across the engine restart" even though the library had not changed. A real path change still changes the digest. This applies to the pre/post-deploy, engine-restart and offline stop/start comparisons.

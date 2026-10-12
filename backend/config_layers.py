@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 import unicodedata
 import urllib.parse
@@ -392,6 +393,47 @@ def url_has_userinfo(url: str) -> bool:
     return "@" in unicodedata.normalize("NFKC", urllib.parse.unquote(url or ""))
 
 
+# Where the authority part of a URL in free text can end at the latest.
+_URL_AUTHORITY_END_RE = re.compile(r"[\s\"'<>`]|://")
+_URL_AUTHORITY_END_KEEP_SPACES_RE = re.compile(r"[\r\n\"'<>`]|://")
+
+
+def url_userinfo_spans(text: str, *, spaces_end_url: bool = True) -> List[Tuple[int, int]]:
+    """(start, end) of every URL userinfo in ``text``: from just after
+    ``scheme://`` to the LAST ``@`` before the next whitespace, quote or
+    ``://``. A raw ``/ ? # @ :`` inside a password, or a user-only token
+    (``https://TOKEN@host``), is therefore inside the span (#239 F-3,
+    #351 N2). With ``spaces_end_url=False`` (one config line) a space does
+    not end the URL either, so a password holding a space is covered too.
+    Fails closed: an ``@`` later in a path (``http://h/a@b``) also yields a
+    span, over-redacting rather than leaking. Linear in len(text)."""
+    end_re = _URL_AUTHORITY_END_RE if spaces_end_url else _URL_AUTHORITY_END_KEEP_SPACES_RE
+    spans: List[Tuple[int, int]] = []
+    pos = 0
+    while True:
+        start = text.find("://", pos)
+        if start < 0:
+            return spans
+        auth = start + 3
+        m = end_re.search(text, auth)
+        end = m.start() if m else len(text)
+        at = text.rfind("@", auth, end)
+        if at > auth:
+            spans.append((auth, at))
+        pos = max(end, auth)
+
+
+def redact_url_userinfo_in_text(text: str, mask: str = "[REDACTED]") -> str:
+    """``text`` with every URL userinfo (see url_userinfo_spans) replaced by ``mask``."""
+    out: List[str] = []
+    pos = 0
+    for start, end in url_userinfo_spans(text):
+        out.append(text[pos:start] + mask)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def redact_url_userinfo(url: str) -> str:
     """``url`` without ``user:pass@``, query or fragment, for display/logs."""
     try:
@@ -448,10 +490,15 @@ def _url_secrets(value: str) -> List[str]:
     found: List[str] = []
     if "://" not in value:
         return found
+    for start, end in url_userinfo_spans(value):
+        # Not urlsplit's password: it stops at a raw "/" (#239 F-3). A
+        # user-only "https://name@host" stays visible here (often a plain
+        # user name; masking it would make the editor refuse the line).
+        _user, sep, password = value[start:end].partition(":")
+        if sep and password:
+            found.append(password)
     try:
         parts = urllib.parse.urlsplit(value.strip())
-        if parts.password:
-            found.append(parts.password)
         for name, qv in urllib.parse.parse_qsl(parts.query, keep_blank_values=False):
             if any(word in name.lower() for word in _SECRET_QUERY_KEYS):
                 found.append(qv)
@@ -582,11 +629,22 @@ def create_private_file(path: Path, data: str, *, unique: bool = False) -> Path:
 
 
 def replace_private_file(path: Path, data: str) -> None:
-    """Atomically replace ``path`` with ``data`` via a fresh 0600 temp file."""
-    tmp = path.with_name(f"{path.name}.tmp")
-    tmp.unlink(missing_ok=True)  # stale temp from a crash; never reuse its mode
-    create_private_file(tmp, data)  # mode set via the fd before the rename
-    tmp.replace(path)
+    """Atomically replace ``path`` with ``data`` via a fresh 0600 temp file.
+
+    The temp name is unique (mkstemp: O_EXCL, mode 0600), never a fixed
+    ``<name>.tmp``: two concurrent saves each rename their own file, where
+    one used to unlink the other's temp and fail (#183)."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data.encode("utf-8"))
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def ensure_private_mode(path: Path) -> None:
