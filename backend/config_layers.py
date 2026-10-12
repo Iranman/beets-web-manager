@@ -418,6 +418,131 @@ SECRET_CONFIG_KEYS = frozenset({
     "access_token", "refresh_token", "fanarttv_key", "genius_api_key",
     "google_key", "lastfm_key",
 })
+_SECRET_KEY_WORDS = ("password", "passwd", "passphrase", "secret", "token", "bearer", "credential")
+_SECRET_QUERY_KEYS = ("token", "key", "secret", "pass", "auth", "signature", "sig")
+
+
+def is_secret_config_key(key: str) -> bool:
+    """A config.yaml key whose value is treated as a secret: the exact list
+    above, any ``*key``/``*pass``/``*pwd`` suffix, ``auth*`` prefix, or a key
+    containing a secret word (SEC-237-5). One predicate for the config editor
+    and the setup preview diff."""
+    k = str(key).strip().strip("\"'").strip().lower()
+    if not k:
+        return False
+    return (
+        k in SECRET_CONFIG_KEYS
+        or k.endswith(("key", "pass", "pwd")) or k.startswith("auth")
+        or any(word in k for word in _SECRET_KEY_WORDS)
+    )
+
+
+# ponytail: values shorter than this are not masked by substring (masking "a"
+# everywhere would wreck the text); the line-based redaction still hides them
+# on ordinary ``key: value`` lines.
+_MIN_MASKED_SECRET_LEN = 4
+
+
+def _url_secrets(value: str) -> List[str]:
+    """Password from URL userinfo and values of secret-named query parameters."""
+    found: List[str] = []
+    if "://" not in value:
+        return found
+    try:
+        parts = urllib.parse.urlsplit(value.strip())
+        if parts.password:
+            found.append(parts.password)
+        for name, qv in urllib.parse.parse_qsl(parts.query, keep_blank_values=False):
+            if any(word in name.lower() for word in _SECRET_QUERY_KEYS):
+                found.append(qv)
+    except ValueError:
+        pass
+    return found
+
+
+def _walk_config(node, under_secret: bool, out_secret: set, out_all: Optional[list], seen: set) -> None:
+    # Containers are visited once by id(): YAML aliases share objects, so a
+    # "billion laughs" document is walked in linear time.
+    if isinstance(node, (dict, list)):
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        items = node.items() if isinstance(node, dict) else ((None, v) for v in node)
+        for k, v in items:
+            if k is not None and out_all is not None and isinstance(k, str):
+                out_all.append(k)
+            _walk_config(v, under_secret or (k is not None and is_secret_config_key(k)), out_secret, out_all, seen)
+        return
+    if node is None or isinstance(node, bool):
+        return
+    text = str(node)
+    if out_all is not None:
+        out_all.append(text)
+    if under_secret and text:
+        out_secret.add(text)
+    if isinstance(node, str):
+        out_secret.update(s for s in _url_secrets(node) if s)
+
+
+def _load_config_documents(text: str):
+    import yaml  # local: keep this module import-light
+    try:
+        return list(yaml.safe_load_all(text))
+    except Exception:  # yaml.YAMLError, RecursionError on absurd nesting, ...
+        return None
+
+
+def config_secret_values(text: str) -> Optional[set]:
+    """Every secret scalar in config text, found by parsing it as YAML (JSON
+    included): values under secret keys at any depth (flow mappings, explicit
+    ``? key`` entries, anchors read through aliases) plus URL userinfo
+    passwords and secret query parameters. None if the text does not parse."""
+    docs = _load_config_documents(text)
+    if docs is None:
+        return None
+    found: set = set()
+    seen: set = set()
+    for doc in docs:
+        _walk_config(doc, False, found, None, seen)
+    return found
+
+
+def config_scalars(text: str) -> Optional[List[str]]:
+    """Every key and scalar value in config text as strings; None if it does not parse."""
+    docs = _load_config_documents(text)
+    if docs is None:
+        return None
+    out: List[str] = []
+    seen: set = set()
+    for doc in docs:
+        _walk_config(doc, False, set(), out, seen)
+    return out
+
+
+def mask_config_secret_values(original: str, shown: str, mask: str) -> str:
+    """Mask, in ``shown`` (the line-redacted form of ``original``), every
+    secret value of ``original`` that is still visible.
+
+    Fails closed (ValueError, no detail) when a secret could not be located:
+    it is not written verbatim in ``original`` (escapes, folding) and it is
+    still present in the parsed masked text, or the masked text no longer
+    parses so that cannot be checked (#324 F2)."""
+    secrets = config_secret_values(original)
+    if not secrets:
+        return shown
+    unlocated = []
+    for value in sorted(secrets, key=len, reverse=True):
+        if len(value) < _MIN_MASKED_SECRET_LEN:
+            continue
+        if value in shown:
+            shown = shown.replace(value, mask)
+        elif value not in original:
+            unlocated.append(value)
+    if unlocated:
+        remaining = config_scalars(shown)
+        if remaining is None or any(v in r for v in unlocated for r in remaining):
+            raise ValueError("config secrets could not be redacted")
+    return shown
 
 
 # ── Private (mode 0600) files ────────────────────────────────────────────────

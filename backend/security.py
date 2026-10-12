@@ -968,3 +968,30 @@ def bounded_rate_key_store_sweep(store: Dict[str, Any], *, now: Optional[float] 
         return
     for key, _ in sorted(store.items(), key=lambda item: float(item[1].get("updated", 0)))[: len(store) - max_keys]:
         store.pop(key, None)
+
+
+# #340: SPOTIFLAC_SERVICES values become spotiflac argv after "--service".
+# Accepted: SpotiFLAC's own compatibility aliases (SpotiFLAC 5.x
+# extensions/catalog.py SERVICE_ALIASES) and "ext:<extension id>". Anything
+# else (an option such as "--output", a path, an unknown word) is refused at
+# save and again when the argv is built.
+SPOTIFLAC_KNOWN_SERVICES = (
+    "tidal", "qobuz", "deezer", "amazon", "soundcloud", "apple", "youtube", "youtube-music", "gdstudio", "pandora",
+)
+_SPOTIFLAC_EXT_RE = re.compile(r"^ext:[a-z0-9][a-z0-9._-]{0,63}$")
+SPOTIFLAC_SERVICES_INVALID_MESSAGE = (
+    "SPOTIFLAC_SERVICES must be a comma-separated list of SpotiFLAC services ("
+    + ", ".join(SPOTIFLAC_KNOWN_SERVICES) + ") or ext:<extension id>"
+)
+
+
+def parse_spotiflac_services(value: Any) -> Tuple[str, ...]:
+    """Split a SPOTIFLAC_SERVICES value into validated service names.
+
+    Raises ValueError (constant message, never the value) when any entry is
+    not a known service. An empty value returns ().
+    """
+    names = [item.strip().lower() for item in re.split(r"[\s,]+", str(value or "")) if item.strip()]
+    if any(name not in SPOTIFLAC_KNOWN_SERVICES and not _SPOTIFLAC_EXT_RE.match(name) for name in names):
+        raise ValueError(SPOTIFLAC_SERVICES_INVALID_MESSAGE)
+    return tuple(dict.fromkeys(names))

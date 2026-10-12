@@ -61,6 +61,7 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
                 "BEETS_WEB_MANAGER_VERSION": "0.1.10",
                 "WEB_MANAGER_DATA_DIR": str(self.data_dir),
                 "BEETS_CONFIG": str(self.beets_config_path),
+                "BEETSDIR": str(self.data_dir),  # config path must be inside BEETSDIR (SEC-237-3)
             },
             clear=False,
         )

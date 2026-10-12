@@ -2640,10 +2640,10 @@
    "module": "backend/config_service.py",
    "lines": [
     253,
-    266
+    273
    ],
-   "size": 14,
-   "body_lines": 9,
+   "size": 21,
+   "body_lines": 16,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2662,8 +2662,8 @@
    "name": "_config_path_label",
    "module": "backend/config_service.py",
    "lines": [
-    269,
-    270
+    284,
+    285
    ],
    "size": 2,
    "body_lines": 1,
@@ -2682,11 +2682,11 @@
    "name": "_restore_redacted_config_secrets",
    "module": "backend/config_service.py",
    "lines": [
-    273,
-    320
+    288,
+    344
    ],
-   "size": 48,
-   "body_lines": 36,
+   "size": 57,
+   "body_lines": 45,
    "route": null,
    "mutation_capable": false,
    "domain": "CONFIG",
@@ -2705,8 +2705,8 @@
    "name": "_plugin_installed_map",
    "module": "backend/config_service.py",
    "lines": [
-    333,
-    338
+    357,
+    362
    ],
    "size": 6,
    "body_lines": 5,
@@ -2725,8 +2725,8 @@
    "name": "_plugin_status_payload",
    "module": "backend/config_service.py",
    "lines": [
-    341,
-    361
+    365,
+    385
    ],
    "size": 21,
    "body_lines": 20,
@@ -11769,10 +11769,8 @@
    "domain": "YTDLP",
    "desired_owner": "backend/ytdlp_service.py",
    "migration_status": "EXTRACTED",
-   "callers": [
-    "_spotiflac_services"
-   ],
-   "caller_count": 1,
+   "callers": [],
+   "caller_count": 0,
    "dependencies": [
     "_s"
    ]
@@ -11807,9 +11805,9 @@
    "module": "backend/ytdlp_service.py",
    "lines": [
     665,
-    668
+    669
    ],
-   "size": 4,
+   "size": 5,
    "body_lines": 3,
    "route": null,
    "mutation_capable": false,
@@ -11818,19 +11816,17 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_spotiflac_download_url",
-    "_spotiflac_status"
+    "_spotiflac_services_status"
    ],
    "caller_count": 2,
-   "dependencies": [
-    "_spotiflac_list_from_env"
-   ]
+   "dependencies": []
   },
   {
    "name": "_spotiflac_command",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    671,
-    703
+    672,
+    704
    ],
    "size": 33,
    "body_lines": 32,
@@ -11849,8 +11845,8 @@
    "name": "_audio_files_in_dir",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    706,
-    714
+    707,
+    715
    ],
    "size": 9,
    "body_lines": 8,
@@ -11870,8 +11866,8 @@
    "name": "_ytdlp_find_first_url",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    717,
-    778
+    718,
+    779
    ],
    "size": 62,
    "body_lines": 61,
@@ -11904,11 +11900,11 @@
    "name": "_spotiflac_download_url",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    781,
-    815
+    782,
+    825
    ],
-   "size": 35,
-   "body_lines": 34,
+   "size": 44,
+   "body_lines": 43,
    "route": null,
    "mutation_capable": false,
    "domain": "YTDLP",
@@ -11921,16 +11917,61 @@
    "caller_count": 2,
    "dependencies": [
     "_audio_files_in_dir",
+    "_remove_new_symlinks",
     "_spotiflac_command",
-    "_spotiflac_services"
+    "_spotiflac_services",
+    "_symlinks_in_dir"
+   ]
+  },
+  {
+   "name": "_symlinks_in_dir",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    828,
+    832
+   ],
+   "size": 5,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_remove_new_symlinks",
+    "_spotiflac_download_url"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_remove_new_symlinks",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    835,
+    846
+   ],
+   "size": 12,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_spotiflac_download_url"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_symlinks_in_dir"
    ]
   },
   {
    "name": "_spotiflac_missing_tracks_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    818,
-    873
+    849,
+    904
    ],
    "size": 56,
    "body_lines": 53,
@@ -11960,8 +12001,8 @@
    "name": "_spotiflac_album_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    876,
-    904
+    907,
+    935
    ],
    "size": 29,
    "body_lines": 25,
@@ -11989,8 +12030,8 @@
    "name": "_ytdlp_outtmpl",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    907,
-    917
+    938,
+    948
    ],
    "size": 11,
    "body_lines": 4,
@@ -12010,8 +12051,8 @@
    "name": "_ytdlp_album_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    920,
-    1048
+    951,
+    1079
    ],
    "size": 129,
    "body_lines": 123,
@@ -12052,8 +12093,8 @@
    "name": "_ytdlp_missing_tracks_download",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1051,
-    1223
+    1082,
+    1254
    ],
    "size": 173,
    "body_lines": 168,
@@ -12099,8 +12140,8 @@
    "name": "_run_version_probe",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1226,
-    1227
+    1257,
+    1258
    ],
    "size": 2,
    "body_lines": 1,
@@ -12119,8 +12160,8 @@
    "name": "_js_runtime_available",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1230,
-    1235
+    1261,
+    1266
    ],
    "size": 6,
    "body_lines": 5,
@@ -12141,8 +12182,8 @@
    "name": "_cleanup_broken_managed_runtime",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1238,
-    1264
+    1269,
+    1295
    ],
    "size": 27,
    "body_lines": 26,
@@ -12162,8 +12203,8 @@
    "name": "_install_ytdlp",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1267,
-    1282
+    1298,
+    1313
    ],
    "size": 16,
    "body_lines": 15,
@@ -12183,8 +12224,8 @@
    "name": "_ytdlp_cookie_rejection_seen",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1285,
-    1290
+    1316,
+    1321
    ],
    "size": 6,
    "body_lines": 5,
@@ -12203,8 +12244,8 @@
    "name": "_ytdlp_netrc_machines",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1293,
-    1304
+    1324,
+    1335
    ],
    "size": 12,
    "body_lines": 11,
@@ -12223,8 +12264,8 @@
    "name": "_configured_ytdlp_cookie_auth",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1307,
-    1315
+    1338,
+    1346
    ],
    "size": 9,
    "body_lines": 8,
@@ -12245,8 +12286,8 @@
    "name": "_ytdlp_auth_smoke_check",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1318,
-    1418
+    1349,
+    1449
    ],
    "size": 101,
    "body_lines": 99,
@@ -12277,8 +12318,8 @@
    "name": "_usable_ytdlp_cookie_auths_with_smoke",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1421,
-    1441
+    1452,
+    1472
    ],
    "size": 21,
    "body_lines": 20,
@@ -12301,8 +12342,8 @@
    "name": "_ytdlp_cookie_candidates",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1444,
-    1455
+    1475,
+    1486
    ],
    "size": 12,
    "body_lines": 11,
@@ -12321,8 +12362,8 @@
    "name": "_package_version",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1458,
-    1462
+    1489,
+    1493
    ],
    "size": 5,
    "body_lines": 4,
@@ -12344,8 +12385,8 @@
    "name": "_yt_dlp_install_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1465,
-    1481
+    1496,
+    1512
    ],
    "size": 17,
    "body_lines": 16,
@@ -12367,8 +12408,8 @@
    "name": "_ffmpeg_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1484,
-    1488
+    1515,
+    1519
    ],
    "size": 5,
    "body_lines": 4,
@@ -12390,8 +12431,8 @@
    "name": "_ytdlp_netrc_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1491,
-    1497
+    1522,
+    1528
    ],
    "size": 7,
    "body_lines": 6,
@@ -12413,8 +12454,8 @@
    "name": "_spotiflac_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1500,
-    1528
+    1531,
+    1559
    ],
    "size": 29,
    "body_lines": 28,
@@ -12430,6 +12471,28 @@
    "dependencies": [
     "_package_version",
     "_spotiflac_input_sources",
+    "_spotiflac_services_status"
+   ]
+  },
+  {
+   "name": "_spotiflac_services_status",
+   "module": "backend/ytdlp_service.py",
+   "lines": [
+    1562,
+    1566
+   ],
+   "size": 5,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "YTDLP",
+   "desired_owner": "backend/ytdlp_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_spotiflac_status"
+   ],
+   "caller_count": 1,
+   "dependencies": [
     "_spotiflac_services"
    ]
   },
@@ -12437,8 +12500,8 @@
    "name": "_ytdlp_po_provider_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1531,
-    1549
+    1569,
+    1587
    ],
    "size": 19,
    "body_lines": 18,
@@ -12457,8 +12520,8 @@
    "name": "_ytdlp_bgutil_plugin_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1552,
-    1558
+    1590,
+    1596
    ],
    "size": 7,
    "body_lines": 6,
@@ -12479,8 +12542,8 @@
    "name": "_ytdlp_youtube_status",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1561,
-    1583
+    1599,
+    1621
    ],
    "size": 23,
    "body_lines": 22,
@@ -12506,8 +12569,8 @@
    "name": "_redacted_ytdlp_auth_label",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1586,
-    1592
+    1624,
+    1630
    ],
    "size": 7,
    "body_lines": 6,
@@ -12528,8 +12591,8 @@
    "name": "_redacted_ytdlp_rejection",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1595,
-    1602
+    1633,
+    1640
    ],
    "size": 8,
    "body_lines": 7,
@@ -12550,8 +12613,8 @@
    "name": "_redacted_ytdlp_candidate_labels",
    "module": "backend/ytdlp_service.py",
    "lines": [
-    1605,
-    1607
+    1643,
+    1645
    ],
    "size": 3,
    "body_lines": 2,
@@ -34493,10 +34556,10 @@
    "module": "routes_system.py",
    "lines": [
     129,
-    148
+    151
    ],
-   "size": 20,
-   "body_lines": 19,
+   "size": 23,
+   "body_lines": 22,
    "route": {
     "method": "GET",
     "path": "/api/config"
@@ -34516,8 +34579,8 @@
    "name": "save_config",
    "module": "routes_system.py",
    "lines": [
-    152,
-    188
+    155,
+    191
    ],
    "size": 37,
    "body_lines": 36,
@@ -34541,8 +34604,8 @@
    "name": "revert_config",
    "module": "routes_system.py",
    "lines": [
-    192,
-    213
+    195,
+    216
    ],
    "size": 22,
    "body_lines": 21,
@@ -34565,8 +34628,8 @@
    "name": "api_plugins_install_log",
    "module": "routes_system.py",
    "lines": [
-    217,
-    219
+    220,
+    222
    ],
    "size": 3,
    "body_lines": 1,
@@ -34586,8 +34649,8 @@
    "name": "api_plugins_installed",
    "module": "routes_system.py",
    "lines": [
-    223,
-    225
+    226,
+    228
    ],
    "size": 3,
    "body_lines": 1,

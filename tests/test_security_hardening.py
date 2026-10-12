@@ -70,7 +70,8 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertIn("BEETS_AUTH_RATE_LIMIT", APP)
     def test_config_and_status_responses_are_redacted(self):
         self.assertIn("def _redact_config_content", APP)
-        self.assertIn('"content": _redact_config_content(text)', APP)
+        self.assertIn('content = _redact_config_content(str(result.get("content") or ""))', APP)
+        self.assertIn('"content": content,', APP)
         self.assertIn("Refusing to save redacted secret placeholders", APP)
         self.assertIn("def _redacted_ytdlp_rejection", APP)
         self.assertIn('"cookie_file": ""', APP)
