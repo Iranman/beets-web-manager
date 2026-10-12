@@ -231,8 +231,14 @@ def _is_configured_root(path: Path) -> bool:
 
 def _folder_release_preflight(folder_path: str, mb_albumid: str,
                               existing_album_id: int = 0,
-                              log: Optional[list] = None) -> Dict[str, Any]:
-    """Check a folder/current album against an MB release before destructive repair."""
+                              log: Optional[list] = None, *,
+                              fingerprint_evidence: bool = False) -> Dict[str, Any]:
+    """Check a folder/current album against an MB release before destructive repair.
+
+    `fingerprint_evidence` (I-8, opt-in): give each locally scanned file's
+    answered AcoustID hits to the canonical evaluator. Only the deterministic
+    folder identification sets it; every other caller keeps the earlier
+    behavior, so fingerprints do not widen AI or repair gates."""
     result: Dict[str, Any] = {
         "ok": False,
         "matches": 0,
@@ -450,7 +456,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 str(fpath),
                 track=track,
                 disc=disc or 1,
-                acoustid_hits=_file_acoustid_hits(fpath),
+                acoustid_hits=_file_acoustid_hits(fpath) if fingerprint_evidence else None,
             )
 
     if existing_album_id:

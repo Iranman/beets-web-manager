@@ -230,7 +230,7 @@ class PreflightFingerprintEvidenceTests(_FolderFixture):
         for p in patches:
             p.start()
         try:
-            return ms._folder_release_preflight(str(self.folder), REL_A)
+            return ms._folder_release_preflight(str(self.folder), REL_A, fingerprint_evidence=True)
         finally:
             for p in reversed(patches):
                 p.stop()

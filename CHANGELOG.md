@@ -9,7 +9,7 @@ The project uses Semantic Versioning.
 ### Changed
 
 - The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.
-- The album preflight now gives the identity check each file's AcoustID result, so a fingerprint can prove a track in a folder that has no MusicBrainz tags. Before, fingerprints only flagged a mismatch (I-8).
+- Deterministic folder identification now gives the identity check each file's AcoustID result, so a fingerprint can prove a track in a folder that has no MusicBrainz tags (I-8). This is opt-in (`fingerprint_evidence=True`); every other preflight caller, including the AI batch gate, behaves as before.
 
 ### Added
 

@@ -14,11 +14,11 @@ evidence builder there). Only layer-5 workflows and routes may import it.
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import backend.provider_boundary as provider_boundary
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, acoustid_failure_status
-from backend.app_runtime import _MB_UUID_RE, _app_logger, _s
+from backend.app_runtime import AUDIO_EXT, _MB_UUID_RE, _app_logger, _s
 from backend.library_service import _build_folder_evidence
 from backend.matching.folder_identity import (
     HARD_CONFLICTS, confirmed_recording, decide_auto_import, file_conflicts, rank_folder_candidates,
@@ -59,6 +59,16 @@ def _embedded_mb_ids(path: str) -> Dict[str, str]:
             values = None
         out[field] = _uuid(values[0]) if values else ""
     return out
+
+
+def _recursive_audio(folder: str) -> List[str]:
+    """Same recursive set ``_folder_release_preflight`` proves, so conflict
+    scans cover nested files too."""
+    try:
+        return sorted((str(p) for p in Path(folder).rglob("*")
+                       if p.is_file() and p.suffix.lower() in AUDIO_EXT), key=str.lower)
+    except OSError:
+        return []
 
 
 def _acoustid_capability(statuses: Counter, files: int) -> str:
@@ -120,6 +130,8 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
 
     ev = _build_folder_evidence(folder)
     audio_files: List[str] = list(ev.get("audio_files") or [])
+    if audio_files:  # the evidence builder already validated the folder
+        audio_files = _recursive_audio(folder) or audio_files
 
     # Per-file evidence: embedded IDs (tier 1) and AcoustID (tier 3).
     files: List[Dict[str, Any]] = []
@@ -176,7 +188,7 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
         try:
             for rid in _text_search(ev, folder, log):
                 _seed(rid, "musicbrainz_search")
-        except provider_boundary.ProviderError as exc:
+        except Exception as exc:  # any search failure fails closed with a warning
             musicbrainz = "unavailable"
             warnings.append("musicbrainz_unavailable")
             _app_logger.warning("MusicBrainz search failed during folder identification: %s", type(exc).__name__)
@@ -189,7 +201,7 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
     audio_count = len(audio_files)
     for release_id, sources in seeds.items():
         try:
-            pre = _folder_release_preflight(folder, release_id, log=log)
+            pre = _folder_release_preflight(folder, release_id, log=log, fingerprint_evidence=True)
         except Exception as ex:
             _app_logger.warning("Folder preflight failed: %s", type(ex).__name__)
             pre = {"error": "Preflight failed to run."}
@@ -205,14 +217,19 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
             "error": _s(pre.get("error")) if not decision else "",
         })
 
-    candidates = rank_folder_candidates(releases, track_count, embedded_groups.keys())
+    # An embedded Release ID names its Release Group too.
+    tagged_groups = set(embedded_groups) | {
+        r["release_group_id"] for r in releases
+        if "embedded_release_id" in r["sources"] and r["release_group_id"]}
+    candidates = rank_folder_candidates(releases, track_count, tagged_groups)
     folder_level = file_conflicts(files)
-    if len(embedded_groups) > 1:
+    if len(tagged_groups) > 1:
         folder_level.append("embedded_release_group_conflict")
-    auto = decide_auto_import(candidates, skip_reason=skip_reason, audio_count=audio_count,
-                              folder_conflicts=folder_level)
-    conflicts = sorted(set(folder_level) | {c for cand in candidates[:1] for c in cand["evidence"]["conflicts"] if c in HARD_CONFLICTS})
     failed = sum(1 for r in releases if r["error"])
+    auto = decide_auto_import(candidates, skip_reason=skip_reason, audio_count=audio_count,
+                              folder_conflicts=folder_level, fingerprint_groups=group_hits.keys(),
+                              failed_lookups=failed)
+    conflicts = sorted(set(folder_level) | {c for cand in candidates[:1] for c in cand["evidence"]["conflicts"] if c in HARD_CONFLICTS})
     if failed:
         warnings.append(f"release_lookup_failed:{failed}")
     if not audio_files:

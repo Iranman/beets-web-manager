@@ -186,14 +186,19 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
 
 
 def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
-                       audio_count: int, folder_conflicts: Iterable[str] = ()) -> Dict[str, Any]:
+                       audio_count: int, folder_conflicts: Iterable[str] = (),
+                       fingerprint_groups: Iterable[str] = (), failed_lookups: int = 0) -> Dict[str, Any]:
     """Stage 2b: may Web Manager re-import this folder pinned to one release?
 
     Eligible only when every condition holds (audit conditions 1-6;
     condition 7 is ``POST_CONDITIONS``, checked by the import job):
 
     1. exactly one Release Group passes ``can_auto_accept(VERIFIED_SUBSET)``;
-    2. no other Release Group has any deterministic track proof;
+    2. no other Release Group has any deterministic track proof, either on an
+       evaluated candidate or directly in confirmed AcoustID hits
+       (`fingerprint_groups`); a fingerprint-indicated group that was never
+       evaluated, or any release lookup that went unanswered
+       (`failed_lookups`), is unknown evidence and blocks;
     3. no hard conflict (folder-level or on the chosen candidate);
     4. every local audio file is proven (fingerprint CONFIRMED or embedded
        Recording ID matched);
@@ -209,6 +214,11 @@ def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
     hard_folder = [c for c in folder_conflicts if c in HARD_CONFLICTS]
     if hard_folder:
         reasons.append("folder_conflict:" + ",".join(hard_folder))
+    if failed_lookups:
+        reasons.append(f"release_lookup_failed:{failed_lookups}")
+    fingerprint_groups = set(fingerprint_groups) - {""}
+    if fingerprint_groups - {c["release_group_id"] for c in candidates}:
+        reasons.append("fingerprint_group_not_evaluated")
 
     accepted = [c for c in candidates if c["evidence"]["action_allowed"]]
     chosen = accepted[0] if len(accepted) == 1 else None
@@ -221,7 +231,7 @@ def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
 
     if chosen is not None:
         others = [c for c in candidates if c is not chosen and c["evidence"]["any_track_proof"]]
-        if others:
+        if others or fingerprint_groups - {chosen["release_group_id"]}:
             reasons.append("other_release_group_has_track_proof")
         hard = [c for c in chosen["evidence"]["conflicts"] if c in HARD_CONFLICTS]
         if hard:

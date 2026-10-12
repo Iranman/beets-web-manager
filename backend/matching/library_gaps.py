@@ -39,9 +39,9 @@ def _has_id(value: Any) -> bool:
     return bool(_UUID_RE.match(str(value or "").strip().lower()))
 
 
-def _album_id(row: Dict[str, Any]) -> int:
+def _int(row: Dict[str, Any], key: str) -> int:
     try:
-        return int(row.get("album_id") or 0)
+        return int(row.get(key) or 0)
     except (TypeError, ValueError):
         return 0
 
@@ -66,7 +66,7 @@ def library_identity_gaps(albums: Iterable[Dict[str, Any]],
     albums = list(albums or [])
     by_album: Dict[int, List[Dict[str, Any]]] = {}
     for item in items:
-        aid = _album_id(item)
+        aid = _int(item, "album_id")
         if aid:
             by_album.setdefault(aid, []).append(item)
     albums_by_id = {}
@@ -89,7 +89,7 @@ def library_identity_gaps(albums: Iterable[Dict[str, Any]],
             kind = ALBUM_RELEASE_WITHOUT_GROUP
         else:
             kind = ALBUM_WITHOUT_IDS
-        tracks = sorted(by_album.get(aid, []), key=lambda it: (int(it.get("disc") or 0), int(it.get("track") or 0), int(it.get("id") or 0)))
+        tracks = sorted(by_album.get(aid, []), key=lambda it: (_int(it, "disc"), _int(it, "track"), _int(it, "id")))
         first = tracks[0] if tracks else {}
         row = dict(album)
         row.update({"first_item_id": first.get("id", 0), "first_item_path": first.get("path", ""), "tracks": len(tracks)})
@@ -98,7 +98,7 @@ def library_identity_gaps(albums: Iterable[Dict[str, Any]],
     for item in items:
         if _has_id(item.get("mb_trackid")):
             continue
-        aid = _album_id(item)
+        aid = _int(item, "album_id")
         if aid:
             album = albums_by_id.get(aid, {})
             row = dict(item)
@@ -109,5 +109,5 @@ def library_identity_gaps(albums: Iterable[Dict[str, Any]],
             gaps[SINGLETON_WITHOUT_RECORDING].append(dict(item))
 
     for rows in gaps.values():
-        rows.sort(key=lambda r: (_added(r), int(r.get("id") or 0)))
+        rows.sort(key=lambda r: (_added(r), _int(r, "id")))
     return gaps
