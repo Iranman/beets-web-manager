@@ -87,26 +87,45 @@ class ReviewFolderDeleteAlbumGateTests(unittest.TestCase):
     """F-243-3: an album_id only opens the library-delete gate when that
     album actually matches the folder."""
 
-    def _call(self, matches):
+    def _call(self, matches, pending=False, payload=None):
         import app as app_module  # noqa: F401  (registers routes)
         import routes_import
         with mock.patch.object(routes_import, "_library_no_mb_album_matches_folder", return_value=matches), \
-             mock.patch.object(routes_import, "_AI_PENDING_FILE",
-                               Path(tempfile.gettempdir()) / "no-such-pending.json"), \
+             mock.patch.object(routes_import, "_pending_review_matches", return_value=pending), \
+             mock.patch.object(routes_import, "MUSIC_ROOT", Path("/music")), \
              mock.patch.object(routes_import, "_delete_review_source_folder", return_value={}) as delete:
             with routes_import.app.test_request_context(
                     "/api/import/review-folder/delete", method="POST",
-                    json={"path": "/music/Artist/Album", "album_id": 5}):
-                routes_import.delete_import_review_folder()
-        return delete.call_args.kwargs
+                    json=payload or {"path": "/music/Artist/Album", "album_id": 5}):
+                resp = routes_import.delete_import_review_folder()
+        status = resp[1] if isinstance(resp, tuple) else 200
+        return status, (delete.call_args.kwargs if delete.called else None)
 
     def test_unmatched_album_id_is_not_a_gate(self):
-        kw = self._call(False)
-        self.assertEqual((kw["album_id"], kw["confirmed_wrong_library_folder"]), (0, False))
+        self.assertEqual(self._call(False), (400, None))
 
     def test_matched_album_id_opens_the_gate(self):
-        kw = self._call(True)
+        _, kw = self._call(True)
         self.assertEqual((kw["album_id"], kw["confirmed_wrong_library_folder"]), (5, True))
+
+    def test_client_library_flag_cannot_bypass_pending_review_check(self):
+        # REV-04: before the fix the client flag skipped the Pending Review check.
+        for flag in ("confirmed_wrong_library_folder", "allow_library_delete"):
+            with self.subTest(flag=flag):
+                self.assertEqual(self._call(False, payload={"path": "/music/Artist/Album", flag: True}),
+                                 (400, None))
+                self.assertEqual(self._call(False, payload={"path": "/downloads/A", flag: True}),
+                                 (400, None))
+
+    def test_server_decides_library_path_not_the_client(self):
+        # Pending item in the library, client says "not library": still quarantine mode.
+        _, kw = self._call(False, pending=True,
+                           payload={"path": "/music/Artist/Album", "confirmed_wrong_library_folder": False})
+        self.assertTrue(kw["confirmed_wrong_library_folder"])
+        # Pending item outside the library, client says "library": no library gate.
+        _, kw = self._call(False, pending=True,
+                           payload={"path": "/downloads/A", "confirmed_wrong_library_folder": True})
+        self.assertFalse(kw["confirmed_wrong_library_folder"])
 
 
 def _can_symlink(base):

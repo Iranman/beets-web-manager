@@ -430,6 +430,9 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         self.assertEqual(music_response.status_code, 200, music_response.get_json())
         self.assertEqual(downloads_response.get_json()["audio_count"], 1)
         self.assertEqual(music_response.get_json()["audio_count"], 1)
+        # REV-04: the server, not the client, decides library membership.
+        self.assertIs(downloads_response.get_json()["is_library_path"], False)
+        self.assertIs(music_response.get_json()["is_library_path"], True)
         self.assertEqual(root_response.status_code, 400, root_response.get_json())
         self.assertIn("approved root", root_response.get_json()["error"])
 
