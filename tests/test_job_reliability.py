@@ -417,7 +417,6 @@ class AdHocThreadInventoryTests(unittest.TestCase):
         "backend/transaction_recovery.py": 1,  # startup recovery sweep (library-transaction)
         "backend/ai_service.py": 1,            # per-folder AI calls inside an AI batch job
         "backend/playlist_service.py": 2,      # auto-sync worker + index warm (integrations)
-        "backend/plex_service.py": 1,          # Plex request wall timeout (integrations)
         "routes_maintenance.py": 1,            # /api/restart: re-exec after the response
         "app.py": 1,                           # yt-dlp availability probe at boot (security)
     }

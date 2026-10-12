@@ -357,7 +357,7 @@ class AutoSyncSchedulerTests(unittest.TestCase):
         start = mock.Mock()
         self.assertEqual(self._tick(start=start), "started")
         start.assert_called_once_with(trigger="auto")
-        running = mock.Mock(side_effect=DuplicateJobError(mock.Mock(label="Playlist sync", job_id="j1")))
+        running = mock.Mock(side_effect=DuplicateJobError(mock.Mock(label="Playlist sync", job_id="j1", status="running")))
         self.assertEqual(self._tick(start=running), "already_running")
 
     def test_start_error_is_logged_and_visible(self):
@@ -397,7 +397,7 @@ class AutoSyncSchedulerTests(unittest.TestCase):
 class SyncRouteTests(tir._RouteCase):
     def test_second_start_while_running_is_409(self):
         import routes_playlist
-        running = DuplicateJobError(mock.Mock(label="Playlist sync", job_id="j1"))
+        running = DuplicateJobError(mock.Mock(label="Playlist sync", job_id="j1", status="running"))
         with mock.patch.object(routes_playlist, "start_playlist_sync_job", side_effect=running):
             res = self.client.post("/api/playlists/sync", json={})
         self.assertEqual(res.status_code, 409)
