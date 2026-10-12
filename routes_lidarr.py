@@ -148,7 +148,10 @@ def wanted_lidarr():
     rows, error = _acq_fetch_lidarr_wanted()
     if error:
         app.logger.warning("Lidarr wanted-list fetch failed: %s", error)
-        return jsonify({"ok": False, "error": "Could not reach Lidarr", "missing": [], "total": 0}), 502
+        # _lidarr_wanted_error returns fixed texts only (IA-08), so the
+        # reason (unreachable / unexpected response / rejected key / policy
+        # block) is safe to show (QA D13).
+        return jsonify({"ok": False, "error": error, "missing": [], "total": 0}), 502
     return jsonify({"ok": True, "missing": rows, "total": len(rows)})
 
 

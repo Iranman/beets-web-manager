@@ -117,7 +117,10 @@ class PlexStatusTests(unittest.TestCase):
                  (urllib.error.HTTPError("u", 500, "x", {}, None), "http_error", "Plex returned HTTP 500."),
                  (TimeoutError("slow"), "timeout", "Plex did not answer in time."),
                  (urllib.error.URLError("refused"), "unreachable", "Could not reach Plex."),
-                 (_blocked(entry=""), "unreachable", "Could not reach Plex."),
+                 # QA D14: a refusal no entry can fix is still a policy block.
+                 (_blocked(entry=""), "outbound_not_allowlisted",
+                  "Plex is blocked by the outbound network policy. "
+                  "Use the Plex server's private network address in PLEX_URL."),
                  (KeyError("LEAK_MARKER"), "plex_error", "The Plex operation failed; see the server log.")]
         for exc, reason, error in cases:
             with self.subTest(reason=reason):

@@ -412,5 +412,110 @@ class SyncRouteTests(tir._RouteCase):
         start.assert_called_once_with(["Mix"], trigger="manual")
 
 
+class QaAuditDefectTests(tir._RouteCase):
+    """QA feature audit of v0.3.0: D5, D13, D14, D16, D17."""
+
+    def test_d5_index_sees_imports_made_directly_in_beets(self):
+        from backend.library_cache import library_cache
+        item = mock.Mock()
+        lib = mock.Mock()
+        lib.items.return_value = []
+        stats = mock.Mock(return_value={"items": 1, "albums": 1})
+        clock = [1000.0]
+        library_cache.invalidate()
+        self.addCleanup(library_cache.invalidate)
+        with mock.patch.object(ps, "lib", lib), \
+                mock.patch.object(ps.beets_adapter, "get_stats", stats), \
+                mock.patch.object(ps.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(ps, "_playlist_item_payload", return_value={"path": "/m/z.flac"}), \
+                mock.patch.object(ps, "_playlist_item_text_variants", return_value=[("Zeta", "Long Song 1")]):
+            ps._playlist_library_index()
+            self.assertEqual(lib.items.call_count, 1)
+            ps._playlist_library_index()  # within the recheck window: cached, no Beets call
+            self.assertEqual((lib.items.call_count, stats.call_count), (1, 1))
+            clock[0] += 60
+            ps._playlist_library_index()  # same counts: still cached
+            self.assertEqual(lib.items.call_count, 1)
+            lib.items.return_value = [item]  # `beet import` in the Beets container
+            stats.return_value = {"items": 2, "albums": 2}
+            clock[0] += 60
+            index = ps._playlist_library_index()
+            self.assertEqual(lib.items.call_count, 2)
+            self.assertIn((ps._norm("Zeta"), ps._norm("Long Song 1")), index["by_text"])
+            stats.side_effect = OSError("beets down")  # Beets cannot say: keep the index
+            clock[0] += 60
+            self.assertIs(ps._playlist_library_index(), index)
+
+    def test_d13_malformed_lidarr_response_is_not_unreachable(self):
+        import backend.acquisition_service as acq
+        import routes_lidarr
+        self.assertEqual(acq._lidarr_wanted_error(json.JSONDecodeError("x", "<html>", 0)),
+                         "Lidarr returned an unexpected response")
+        with mock.patch.object(routes_lidarr, "_lidarr_config_error", return_value=""), \
+                mock.patch.object(routes_lidarr, "_acq_fetch_lidarr_wanted",
+                                  return_value=([], "Lidarr returned an unexpected response")):
+            res = self.client.get("/api/wanted/lidarr")
+        self.assertEqual(res.status_code, 502)
+        self.assertEqual(res.get_json()["error"], "Lidarr returned an unexpected response")
+
+    def test_d14_policy_block_without_an_entry_is_not_unreachable(self):
+        import backend.plex_service as plex_service
+        from backend.security import OutboundPolicyError
+        blocked = plex_service._plex_failure(OutboundPolicyError("outbound host resolves to a prohibited address"),
+                                             "http://127.0.0.1:32400")
+        self.assertEqual(blocked["reason"], "outbound_not_allowlisted")
+        self.assertIn("blocked by the outbound network policy", blocked["error"])
+        dns = plex_service._plex_failure(OutboundPolicyError("outbound host could not be resolved"))
+        self.assertEqual(dns["reason"], "unreachable")
+
+    def test_d16_hand_placed_m3u_is_found_and_exports_are_skipped(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        own, legacy = Path(tmp.name) / "wm", Path(tmp.name) / "music" / "playlists"
+        own.mkdir()
+        legacy.mkdir(parents=True)
+        (own / "QA Local Mix.m3u").write_text("#EXTM3U\n#EXTINF:1,Zeta - Long Song 1\n/music/z.flac\n",
+                                              encoding="utf-8")
+        (own / "pl1_0123456789ab.m3u").write_text("#EXTM3U\n/music/x.flac\n", encoding="utf-8")
+        (legacy / "Smart.m3u").write_text("#EXTM3U\n/music/y.flac\n", encoding="utf-8")
+        with mock.patch.object(ps, "PLAYLIST_LEGACY_IMPORT_DIR", legacy), \
+                mock.patch.object(cw, "_get_playlist_dir", return_value=own):
+            names = sorted(p.name for p in ps._playlist_legacy_files())
+            self.assertEqual(names, ["QA Local Mix.m3u", "Smart.m3u"])
+            with mock.patch.object(ps, "_playlist_library_index", return_value={}), \
+                    mock.patch.object(ps, "_playlist_m3u_track_rows", return_value=([], [], [])), \
+                    mock.patch.object(ps, "_match_playlist_tracks", side_effect=lambda t: ([], list(t))):
+                body, status = ps.parse_playlist_request({"source": "local_m3u", "content": "QA Local Mix"})
+        self.assertNotEqual(status, 404)
+        self.assertIn({"artist": "Zeta", "title": "Long Song 1"},
+                      [{"artist": t.get("artist"), "title": t.get("title")} for t in body.get("tracks", [])])
+
+    def test_d17_plex_failure_makes_the_sync_job_fail(self):
+        detail = {"name": "Mix", "updated": True, "plex_error": "Plex returned HTTP 500."}
+        with mock.patch.multiple(
+                ps,
+                _plex_status_payload=mock.Mock(return_value={"configured": True, "connected": True}),
+                _playlist_ensure_state_dirs=mock.Mock(),
+                _playlist_import_legacy_lists=mock.Mock(return_value=[]),
+                _playlist_library_index=mock.Mock(return_value={}),
+                _plex_audio_playlists=mock.Mock(return_value=[]),
+                _playlist_web_manager_names=mock.Mock(return_value=["Mix"]),
+                _playlist_running_pipeline_job_id=mock.Mock(return_value=""),
+                _playlist_sync_one=mock.Mock(return_value=detail)):
+            jobs = mock.Mock()
+            jobs.start_python.return_value = mock.Mock(job_id="j")
+            with mock.patch.object(ps, "jobs", jobs):
+                ps.start_playlist_sync_job()
+            result = jobs.start_python.call_args.args[0]([], threading.Event())
+        self.assertIs(result["ok"], False)
+        self.assertEqual(result["playlists_failed"], 1)
+        self.assertIn("failed", ps._PLAYLIST_SYNC_STATE["last_error"])
+
+    def test_d17_empty_playlist_create_is_a_400(self):
+        res = self.client.post("/api/playlist/create", json={"name": "Empty", "items": [], "tracks": []})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "no_tracks")
+
+
 if __name__ == "__main__":
     unittest.main()

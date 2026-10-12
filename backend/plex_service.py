@@ -1376,6 +1376,15 @@ def _plex_failure(exc: BaseException, url: Optional[str] = None) -> Dict[str, st
         return {"reason": "http_error", "error": f"Plex returned HTTP {int(exc.code)}.", "hint": ""}
     if _plex_timeout_error(exc):
         return {"reason": "timeout", "error": "Plex did not answer in time.", "hint": ""}
+    if isinstance(exc, OutboundPolicyError) and any(
+            word in _s(exc) for word in ("prohibited", "metadata", "internal", "not allowed", "refused")):
+        # A refusal no allowlist entry can fix (loopback, metadata, scheme,
+        # cross-origin redirect): a policy block, not a network fault (QA D14).
+        # DNS failures and oversize responses stay "unreachable".
+        return {"reason": provider_boundary.OUTBOUND_NOT_ALLOWLISTED,
+                "error": "Plex is blocked by the outbound network policy. "
+                         "Use the Plex server's private network address in PLEX_URL.",
+                "hint": ""}
     if isinstance(exc, (urllib.error.URLError, ConnectionError, socket.gaierror, OutboundPolicyError)):
         return {"reason": "unreachable", "error": "Could not reach Plex.", "hint": ""}
     return {"reason": "plex_error", "error": "The Plex operation failed; see the server log.", "hint": ""}

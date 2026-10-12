@@ -125,7 +125,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **409 `job_already_running`**: a playlist sync (manual or automatic) is already running; wait for it on the Jobs page.
 * **A playlist was skipped with `pipeline_running`**: its download/import job is running; the next sync picks it up.
 * **A track came back after being removed in Plex**: remove it in Web Manager instead. The Web Manager list is the master copy; Plex-only removals are not applied.
-* **A playlist from an older version is missing**: it is imported once from `MUSIC_ROOT/playlists` at the next sync, unless Web Manager already has a list with that name.
+* **A playlist from an older version is missing**: it is imported once from `MUSIC_ROOT/playlists` (or a hand-placed `.m3u` in `WEB_MANAGER_DATA_DIR/playlists`) when the Playlists page loads or a sync runs, unless Web Manager already has a list with that name.
 
 ### 16b. slskd says "HTTP 401" / "slskd rejected the API key"
 * Set `SLSKD_API_KEY` (or `SLSKD_API_KEY_FILE`) to a key slskd accepts. A cancelled or failed playlist track cancels its queued slskd transfer and removes only the partial files proven to belong to it.

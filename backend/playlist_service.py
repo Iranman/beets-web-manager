@@ -17,7 +17,7 @@ from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _s
 from backend.app_runtime import _norm, _path_is_under, _redact_security_text, _safe_path_component
 from backend.audio_preferences import load_music_format_preferences as _load_music_format_preferences, validate_audio_file as _validate_audio_file_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
-from backend.beets_adapter import lib, BeetsUnavailableError
+from backend.beets_adapter import beets_adapter, lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 from backend.title_normalize import dash_suffix_group, split_ws_led, trailing_bracket_group
 from backend.library_cache import library_cache
@@ -2884,12 +2884,41 @@ def _playlist_item_identity(item: Dict[str, Any]) -> tuple:
     )
 
 
+_PLAYLIST_INDEX_RECHECK_SECONDS = 15.0
+
+
+def _playlist_library_signature() -> Optional[tuple]:
+    """(items, albums) from Beets /stats; None when Beets cannot say.
+
+    The generation only moves on Web Manager's own writes, so an import
+    made directly in Beets (``beet import``) would otherwise stay invisible
+    to playlist matching until a restart (QA D5)."""
+    try:
+        stats = beets_adapter.get_stats()
+        return int(stats.get("items") or 0), int(stats.get("albums") or 0)
+    except Exception:
+        return None
+
+
 def _playlist_library_index() -> Dict[str, Any]:
     gen = getattr(library_cache, "generation", 1)
     with library_cache.playlist_index_lock:
         cached = library_cache.playlist_index.get("index")
-        if cached is not None and library_cache.playlist_index.get("generation") == gen:
-            return cached
+        state = library_cache.playlist_index
+        signature = state.get("signature")
+        if cached is not None and state.get("generation") == gen:
+            # ponytail: counts miss an outside retag that keeps the totals;
+            # add a Beets library revision when the plugin exposes one.
+            now = time.time()
+            if now - float(state.get("checked_at") or 0) < _PLAYLIST_INDEX_RECHECK_SECONDS:
+                return cached
+            current = _playlist_library_signature()
+            state["checked_at"] = now
+            if current is None or current == signature:
+                return cached
+            signature = current
+        else:
+            signature = _playlist_library_signature()
         by_path: Dict[str, Dict[str, Any]] = {}
         by_text: Dict[tuple, Dict[str, Any]] = {}
         by_title: Dict[str, List[Dict[str, Any]]] = {}
@@ -2926,6 +2955,8 @@ def _playlist_library_index() -> Dict[str, Any]:
         library_cache.playlist_index["generation"] = gen
         library_cache.playlist_index["mtime"] = float(getattr(library_cache, "ts", 0.0) or 0.0)
         library_cache.playlist_index["index"] = index
+        library_cache.playlist_index["signature"] = signature
+        library_cache.playlist_index["checked_at"] = time.time()
         return index
 
 
@@ -3187,6 +3218,57 @@ def _playlist_legacy_tracks(path: Path) -> Tuple[str, List[Dict[str, Any]]]:
     return path.stem, rows
 
 
+_PLAYLIST_EXPORT_STEM_RE = re.compile(r"_[0-9a-f]{12}$")
+
+
+def _playlist_legacy_files() -> List[Path]:
+    """Playlist files Web Manager did not write: ``*.m3u`` and
+    ``*.playlist.json`` in ``MUSIC_ROOT/playlists`` (older versions, the
+    smartplaylist folder) and hand-placed ``*.m3u`` in Web Manager's own M3U
+    folder (its exports, named ``<id>_<hash>.m3u``, are skipped). Symlinks,
+    hidden and temp files are ignored. Read only."""
+    folders: List[Tuple[Path, bool]] = []
+    if PLAYLIST_LEGACY_IMPORT_DIR is not None:
+        folders.append((Path(PLAYLIST_LEGACY_IMPORT_DIR), False))
+    try:
+        folders.append((composite_workflows._get_playlist_dir(), True))
+    except OSError:
+        pass
+    found: List[Path] = []
+    for folder, own in folders:
+        try:
+            if not folder.is_dir():
+                continue
+            for p in folder.iterdir():
+                if p.name.startswith(".") or p.is_symlink() or not p.is_file():
+                    continue
+                if p.suffix.lower() == ".m3u":
+                    if own and _PLAYLIST_EXPORT_STEM_RE.search(p.stem):
+                        continue
+                elif own or not p.name.endswith(".playlist.json"):
+                    continue
+                found.append(p)
+        except OSError as exc:
+            _app_logger.warning("Playlist folder is unreadable: %s", type(exc).__name__)
+    # .playlist.json first: it also holds the tracks not in the library.
+    return sorted(dict.fromkeys(found), key=lambda p: (not p.name.endswith(".playlist.json"), p.name.casefold()))
+
+
+def _playlist_local_file_tracks(name: str) -> List[Dict[str, Any]]:
+    """Tracks of the not-yet-imported local playlist file named ``name``."""
+    wanted = _norm(_clean_playlist_name(name))
+    for path in _playlist_legacy_files():
+        try:
+            if path.stat().st_size > _PLAYLIST_LEGACY_MAX_BYTES:
+                continue
+            file_name, tracks = _playlist_legacy_tracks(path)
+        except Exception:
+            continue
+        if wanted and _norm(_clean_playlist_name(file_name)) == wanted:
+            return _playlist_clean_track_list(tracks)
+    return []
+
+
 def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
     """Import the playlists older versions kept in ``PLAYLIST_LEGACY_IMPORT_DIR``
     (default ``<MUSIC_ROOT>/playlists``) once, read-only.
@@ -3196,22 +3278,7 @@ def _playlist_import_legacy_lists(log: List[str]) -> List[str]:
     again (even after the Web Manager list is deleted). The legacy folder is
     never written to; ``*.tmp`` leftovers there are ignored.
     """
-    legacy_dir = PLAYLIST_LEGACY_IMPORT_DIR
-    if legacy_dir is None:
-        return []
-    try:
-        if not legacy_dir.is_dir():
-            return []
-        files = sorted(
-            (p for p in legacy_dir.iterdir()
-             if (p.name.endswith(".playlist.json") or p.suffix.lower() == ".m3u")
-             and not p.is_symlink() and p.is_file()),
-            # .playlist.json first: it also holds the tracks not in the library.
-            key=lambda p: (not p.name.endswith(".playlist.json"), p.name.casefold()),
-        )
-    except OSError as exc:
-        _app_logger.warning("Legacy playlist folder is unreadable: %s", type(exc).__name__)
-        return []
+    files = _playlist_legacy_files()
     if not files:
         return []
     ledger_path = PLAYLIST_STATE_ROOT / _PLAYLIST_LEGACY_LEDGER
@@ -3436,6 +3503,10 @@ def _playlist_sync_all(log: list, names: Optional[List[str]] = None,
             runtime_lock.release()
         if detail is None:
             continue
+        if detail.get("plex_error"):
+            # The Plex step failed (QA D17): the list counts as failed, so
+            # the job and the sync status do not report success.
+            summary["playlists_failed"] += 1
         summary["playlists_seen"] += 1
         summary["skipped"] += int(detail.get("skipped") or 0)
         summary["pending"] += int(detail.get("pending_count") or 0)
@@ -3594,6 +3665,10 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         local_name = _clean_playlist_name(content)
         index = _playlist_library_index()
         local_tracks, _matched, _missing = _playlist_m3u_track_rows(local_name, index)
+        if not local_tracks:
+            # A hand-placed or older-version M3U that is not a Web Manager
+            # list yet (QA D16); read only.
+            local_tracks = _playlist_local_file_tracks(local_name)
         if not local_tracks:
             return {"ok": False, "error": f"Engine M3U playlist not found: {local_name}"}, 404
         tracks.extend(local_tracks)
@@ -8752,6 +8827,10 @@ def start_playlist_sync_job(names: Optional[List[str]] = None, *, trigger: str =
         log.append(f"Starting playlist sync ({trigger})")
         result = _playlist_sync_all_locked(log, names=wanted or None, cancel_event=cancel_event)
         log.append(json.dumps({k: v for k, v in result.items() if k != "details"}, sort_keys=True))
+        if result.get("playlists_failed"):
+            # job_engine ends a job that returns ok=False as failed.
+            return {**result, "ok": False,
+                    "error": f"{result['playlists_failed']} playlist(s) failed to sync"}
         return result
 
     job = jobs.start_python(
