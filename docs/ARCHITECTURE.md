@@ -116,6 +116,19 @@ Identity evidence floors (enforced today; tests in `tests/test_identity_evidence
 - When the AcoustID top tier names both the requested recording and a different one, the result is review (`acoustid_ambiguous`), not a mismatch.
 - The import/reimport resolver (`library_service._resolve_album_release_for_import`) never sets album identity from a MusicBrainz text search alone: without a source folder to verify against it refuses, and a folder-backed search result must pass the folder preflight (`action_allowed`). A Release Group input is checked against at most `_RG_ALTERNATIVE_RELEASE_CAP` (25) of its Releases closest by track count, and a failed Release Group lookup fails closed.
 - `release_selected_by_operator` is passed only where the operator picked a Release that may move the album to another Release Group (manual match); paths that already verified the Release is in the album's own Release Group do not pass it.
+- `_folder_release_preflight` attaches each local file's AcoustID hits (`acoustid_hits`) to the tracks it hands the canonical evaluator, so fingerprints can prove tracks. The key is set only for an answered lookup; an unanswered one stays absent and reads as *unavailable*.
+
+Deterministic import identification (0.6.0; tests in `tests/test_import_folder_identity.py` and `tests/test_library_identity_gaps.py`):
+
+- `backend.import_identity.identify_import_folder(folder, skip_reason)` identifies a folder Beets skipped, without AI and without writes. It seeds releases from embedded IDs, from Release Groups and Releases confirmed by AcoustID, and from MusicBrainz text search. It runs `_folder_release_preflight` on each release, then groups the results by Release Group. The ranking rules are pure functions in `backend/matching/folder_identity.py`. The result's `auto_import.eligible` is the Stage 2b gate. It holds only when all of these are true:
+  - exactly one Release Group passes `can_auto_accept(VERIFIED_SUBSET)`;
+  - no other Release Group has any deterministic track proof;
+  - there is no hard conflict, such as an embedded Recording ID contradicted by a fingerprint, or an embedded Release Group that differs from the candidate's;
+  - every file is proven by a confirmed fingerprint or a matching embedded Recording ID;
+  - the skip reason is not `duplicate`.
+
+  The caller must still require a Beets strong match and exactly one new album with the planned Release Group (`post_conditions`). `ai_rank` is always `null` there.
+- `backend.matching.library_identity_gaps(albums, items)` is the pure membership rule for "Library: missing IDs". Album identity is keyed on `mb_releasegroupid`, so a Release ID without its Release Group is a gap. Only well-formed UUIDs count as IDs.
 
 ## Mutation Lifecycle
 

@@ -22,7 +22,7 @@ from helpers_mb import _resolve_release_group_to_release, acoustid_api_key
 from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError, beets_adapter
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
-from backend.acoustid_service import _acoustid_multi_file, _album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file,_album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist
 from backend.artwork_service import _get_album_item_dir
 from backend.slskd_service import _slskd_title_guess_from_name, _slskd_track_numbers_from_name, _strip_track_filename_id_suffix
 from backend.plex_service import _trigger_plex_refresh
@@ -395,19 +395,36 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
 
     def _add_candidate(title: str, path: str = "", track: int = 0,
                        disc: int = 1, mb_trackid: str = "",
-                       length: float = 0.0) -> None:
+                       length: float = 0.0,
+                       acoustid_hits: Optional[List[Dict[str, Any]]] = None) -> None:
         key = (_album_track_norm(title), _s(path), int(track or 0), int(disc or 1))
         if key in seen_keys:
             return
         seen_keys.add(key)
-        candidates.append({
+        row = {
             "title": _s(title) or Path(_s(path)).stem,
             "path": _s(path),
             "track": int(track or 0),
             "disc": int(disc or 1),
             "mb_trackid": _s(mb_trackid).strip().lower(),
             "length": float(length or 0),
-        })
+        }
+        # I-8: per-file fingerprint evidence for the canonical evaluator. The
+        # key is set only for a real AcoustID answer ([] = no result); a
+        # lookup that was never answered stays absent, which the evaluator
+        # reads as UNAVAILABLE, never as negative evidence.
+        if acoustid_hits is not None:
+            row["acoustid_hits"] = acoustid_hits
+        candidates.append(row)
+
+    def _file_acoustid_hits(path: Path) -> Optional[List[Dict[str, Any]]]:
+        try:
+            outcome = _acoustid_lookup_cached_outcome(str(path))
+        except Exception as ex:
+            if log is not None:
+                log.append(f"  [preflight] AcoustID lookup warning: {type(ex).__name__}")
+            return None
+        return list(outcome.data or []) if outcome.answered else None
 
     if inspect_evidence:
         for entry in inspect_evidence.get("audio_files") or []:
@@ -433,6 +450,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 str(fpath),
                 track=track,
                 disc=disc or 1,
+                acoustid_hits=_file_acoustid_hits(fpath),
             )
 
     if existing_album_id:

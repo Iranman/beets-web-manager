@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Changed
+
+- The album preflight now gives the identity check each file's AcoustID result, so a fingerprint can prove a track in a folder that has no MusicBrainz tags. Before, fingerprints only flagged a mismatch (I-8).
+
+### Added
+
+- Deterministic identification for import folders that Beets skipped (`backend.import_identity.identify_import_folder`). It builds candidates from embedded IDs, AcoustID and MusicBrainz, and ranks them by Release Group without AI. It also decides whether the folder may be re-imported automatically: that needs every file proven by a fingerprint or an embedded Recording ID, exactly one proven Release Group, no conflicts, and a skip reason other than duplicate. Routes and jobs that use it follow in a later change.
+- A rule that lists library albums and tracks missing MusicBrainz identity (`backend.matching.library_identity_gaps`). It keys albums on the Release Group, so an album with a Release ID but no Release Group now counts as missing. It also covers album tracks without a Recording ID (I-7). The review queue does not use it yet.
+
 ## v0.5.0 - 2026-10-12
 
 ### Upgrade Notes
