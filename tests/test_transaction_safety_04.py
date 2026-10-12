@@ -3,6 +3,7 @@ matrix). Real BeetsAdapter -> real webmanager plugin -> real Beets library
 and files (Flask test client in place of HTTP), on synthetic fixtures."""
 
 import os
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -423,3 +424,32 @@ class CleanAllBlankIdentityVerificationTests(_Engine):
         self.assertEqual(res["final_summary"]["placeholder_identity_folders_remaining"], 1)
         self.assertEqual([p["album_id"] for p in res["placeholder_folders"]], [blank.id])
         self.assertIn("[verification] Placeholder identity folders remaining: 1", log)
+
+
+class RootFolderRepairLeadingSpaceTests(unittest.TestCase):
+    """D6: "/music/ (0000)" holding tracked items was queued for review as
+    untracked audio: absolute Beets paths were skipped and the leading space
+    was stripped before matching the folder name."""
+
+    def test_tracked_shallow_folder_with_a_leading_space_is_recognised(self):
+        import tempfile
+        from types import SimpleNamespace
+        td = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, td, True)
+        root = Path(td) / "music"
+        (root / " (0000)").mkdir(parents=True)
+        (root / " (0000)" / "01.flac").write_bytes(b"x")
+        (root / "Untracked").mkdir()
+        (root / "Untracked" / "01.flac").write_bytes(b"y")
+        items = [SimpleNamespace(id=7, path=(root / " (0000)" / "01.flac").as_posix().encode())]
+        with mock.patch.object(ls, "lib", SimpleNamespace(items=lambda q: items)):
+            scan = ls._root_folder_repair_scan(root)
+        self.assertEqual([(f["name"], f["item_ids"]) for f in scan["shallow_folders"]], [(" (0000)", [7])])
+        self.assertEqual([f["name"] for f in scan["orphaned_folders"]], ["Untracked"])
+
+    def test_artwork_path_summary_keeps_the_leading_space(self):
+        from types import SimpleNamespace
+        import backend.artwork_service as art
+        album = SimpleNamespace(items=lambda: [SimpleNamespace(path=b" (0000)/01.flac")])
+        self.assertEqual(art._album_path_repair_summary(album)["first_track_path"],
+                         str(art.MUSIC_ROOT / " (0000)" / "01.flac"))

@@ -420,7 +420,7 @@ def _album_path_repair_summary(album) -> Dict[str, Any]:
     except Exception:
         items = []
     for item in items:
-        raw = _s(getattr(item, "path", "") or "").strip()
+        raw = _s(getattr(item, "path", "") or "")  # never strip: " (0000)" is a real folder name (D6)
         if not raw:
             continue
         p = Path(raw)
