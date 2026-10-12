@@ -171,15 +171,16 @@ class DiscogsTokenConfigPathTests(unittest.TestCase):
     def test_token_is_read_only_from_a_contained_config(self):
         """#239 note / #183: the Discogs token read honours BEETSDIR containment."""
         from backend import artwork_service
+        fixture = "discogs-fixture-value"  # not a credential; a plain marker value
         with tempfile.TemporaryDirectory() as beetsdir, tempfile.TemporaryDirectory() as outside:
             for folder in (beetsdir, outside):
-                Path(folder, "config.yaml").write_text(f"discogs:\n  user_token: {SECRET}\n", encoding="utf-8")
+                Path(folder, "config.yaml").write_text("discogs:\n  user_token: " + fixture + "\n", encoding="utf-8")
             env = {"BEETSDIR": beetsdir, "BEETS_CONFIG": os.path.join(outside, "config.yaml")}
             with mock.patch.dict(os.environ, env):
                 self.assertEqual(artwork_service._beets_config_discogs_token(), "")
             env["BEETS_CONFIG"] = os.path.join(beetsdir, "config.yaml")
             with mock.patch.dict(os.environ, env):
-                self.assertEqual(artwork_service._beets_config_discogs_token(), SECRET)
+                self.assertEqual(artwork_service._beets_config_discogs_token(), fixture)
 
 
 class ConfigBackupPruneTests(unittest.TestCase):
