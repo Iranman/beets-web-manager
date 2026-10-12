@@ -384,9 +384,11 @@ class JobRouteDuplicateStartTests(_RouteEnv):
         self.assertEqual((second.status_code, second.get_json()["code"], second.get_json()["job_id"]),
                          (409, "job_already_running", first.get_json()["job_id"]))
         other = Path(tempfile.mkdtemp())
-        self.assertEqual(self.client.post("/api/import", json={"path": str(other)}).status_code, 200)
+        third = self.client.post("/api/import", json={"path": str(other)})
+        self.assertEqual(third.status_code, 200)
         self.go.set()
         _wait(self._job(first.get_json()["job_id"]))
+        _wait(self._job(third.get_json()["job_id"]))  # it may run after the first one
         self.assertEqual(sorted(imports), sorted([str(src), str(other)]))
 
     def test_album_mb_routes_return_the_actionable_reason_only(self):
