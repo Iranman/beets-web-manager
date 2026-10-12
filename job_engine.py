@@ -583,6 +583,13 @@ class JobStore:
                                    "it is not re-run automatically"),
                 }
                 job.log.append(f"[{job._terminal}: the Web Manager process restarted while this job ran]")
+                workflow_lock = (rec.get("state") or {}).get("workflow_lock")
+                if workflow_lock:  # NB-1: its durable lock dies with it, not a ttl later
+                    try:
+                        from backend.job_contract import release_interrupted  # stdlib-only; lazy like redact
+                        job.recovery["released_locks"] = release_interrupted(workflow_lock)
+                    except Exception:
+                        pass  # the lock is still reclaimed on heartbeat expiry
                 self._write(job)
                 self.recovered.append({"job_id": job.job_id, "status": job._terminal,
                                        "type": job.metadata.get("type")})

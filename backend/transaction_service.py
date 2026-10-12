@@ -7,7 +7,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, EDITABLE_FIELDS, _s
 from backend.library_service import _require_attach_stage_success
-from backend.transaction_engine import metadata_diff
+from backend.transaction_engine import acting_as, current_actor, metadata_diff
 from backend.beets_adapter import lib
 import backend.composite_workflows as composite_workflows
 from backend.matching_service import _invalidate_lib_cache
@@ -99,7 +99,6 @@ def _transaction_create_for_job(label: str, metadata: Optional[Dict[str, Any]], 
         tx_metadata["command"] = [str(part) for part in command]
     return transactions.create(
         operation_type=str(operation_type),
-        initiating_user=_transaction_user_label(),
         status="Running",
         dry_run=dry_run,
         summary=summary,
@@ -119,6 +118,15 @@ def _install_transaction_job_hooks() -> None:
 
     def start_python_with_transaction(fn, label="", metadata=None):
         metadata_payload = dict(metadata or {})
+        # NB-3: transactions the job creates on its own thread record whoever
+        # started it: the parent job's actor, this request's verified user, or
+        # "system" when neither did (a schedule).
+        actor, inner = current_actor(), fn
+
+        def fn(log, cancel=None, update_state=None):
+            with acting_as(actor):
+                return _call_job_fn(inner, log, cancel, update_state)
+
         # The duplicate check, the transaction and the start happen under one
         # store lock, so a refused start never records a transaction (QA F3).
         with jobs.start_guard(metadata_payload):

@@ -5,6 +5,7 @@ beside the existing JobStore without changing the job architecture.
 """
 from __future__ import annotations
 
+import contextvars
 import csv
 import errno
 import hashlib
@@ -25,6 +26,42 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 
 LOG = logging.getLogger("beets_web.transaction_engine")
+
+#: Who a transaction records when no operator started it (a scheduled or
+#: unattended job). An operator-started one records the verified user (D7).
+SYSTEM_ACTOR = "system"
+_actor: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar("transaction_actor", default=None)
+_actor_resolver: Optional[Callable[[], Optional[str]]] = None
+
+
+def set_actor_resolver(resolver: Optional[Callable[[], Optional[str]]]) -> None:
+    """Register how to name the verified user of the current request
+    (auth_service does this); None outside a request."""
+    global _actor_resolver
+    _actor_resolver = resolver
+
+
+@contextmanager
+def acting_as(user: Optional[str]):
+    """Record ``user`` on every transaction created in this context (a job
+    thread started by an operator's request)."""
+    token = _actor.set(user or None)
+    try:
+        yield
+    finally:
+        _actor.reset(token)
+
+
+def current_actor() -> str:
+    """The user a transaction created now is attributed to: the job's
+    starter, else the current request's verified user, else SYSTEM_ACTOR."""
+    actor = _actor.get()
+    if not actor and _actor_resolver is not None:
+        try:
+            actor = _actor_resolver()
+        except Exception:
+            actor = None
+    return str(actor or SYSTEM_ACTOR)
 
 
 STATUSES = {
@@ -400,7 +437,7 @@ class TransactionStore:
         self,
         *,
         operation_type: str,
-        initiating_user: str = "operator",
+        initiating_user: Optional[str] = None,
         originating_job: Optional[str] = None,
         status: str = "Pending",
         dry_run: bool = False,
@@ -418,7 +455,7 @@ class TransactionStore:
             "id": _new_id(),
             "created_at": now,
             "updated_at": now,
-            "initiating_user": initiating_user or "operator",
+            "initiating_user": initiating_user or current_actor(),
             "originating_job": originating_job,
             "operation_type": _operation_type(operation_type),
             "status": _status(status),
@@ -770,7 +807,7 @@ class TransactionStore:
         expected_states: Optional[Dict[str, Any]] = None,
         reversibility: str = "RECOVERABLE",
         payload: Optional[Dict[str, Any]] = None,
-        created_by: str = "operator",
+        created_by: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Create a plan transaction with strict root containment and symlink checks."""
         resolved_target = Path(target_path).resolve()
