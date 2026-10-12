@@ -345,8 +345,10 @@ class SoundcloudCandidateTests(unittest.TestCase):  # ACQ-6
         ready = threading.Event()
         ready.set()
         log = []
+        import backend.ytdlp_guard as guard
         with mock.patch.dict(sys.modules, {"yt_dlp": _fake_yt_dlp(entries, dest, downloads)}), \
-                mock.patch.object(yts, "_ytdlp_ready", ready):
+                mock.patch.object(yts, "_ytdlp_ready", ready), \
+                mock.patch.object(guard, "resolve_public_target"):  # no real DNS for soundcloud.com
             n = yts._ytdlp_missing_tracks_download(
                 "Artist", "Album", "", dest, log,
                 [{"disc": 1, "track": 1, "title": "Song", "duration_ms": 200_000}], source="soundcloud")
