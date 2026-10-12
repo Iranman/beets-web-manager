@@ -150,6 +150,8 @@ def _check_relocate(lib, data: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     album = lib.get_album(int(data.get("album_id") or 0))
     if not album:
         raise _no("album not found", "ALBUM_NOT_FOUND")
+    if ops.album_identity_blank(album):  # D3: never "/music/ (0000)/ -  - 01 - ..."
+        raise _no("the album has no artist or album name to place it under", "BLANK_IDENTITY")
     before = _state(lib, album)
     expected = {str(k): _abs(lib, v) for k, v in (data.get("expected_paths") or {}).items()}
     if not expected or expected != before["items"]:
@@ -344,6 +346,9 @@ def _adoptable(lib, now: str, restore: Any, evidence: Any) -> str:
             or os.path.islink(target) or not os.path.isfile(target)):
         return ""
     st = _evidence(target)
+    # ponytail: size + mtime (±1 s) is the proof (#328 N2). A foreign file planted
+    # at the restore path with the same size and mtime would be adopted; that
+    # cannot lose or overwrite data. A content hash recorded at apply closes it.
     if st is None or st[0] != size or abs(st[1] - mtime) >= 1:
         return ""
     try:
@@ -640,6 +645,10 @@ def break_hard_link(item=None, path=None, tags=None, **_kw) -> None:
     identity before the write, for ``note_library_write``."""
     p = os.fsdecode(path if path is not None else item.path)
     key = os.path.normpath(p)
+    # A write that failed after its ``write`` event never fired ``after_write``:
+    # drop that stale identity first, so it can never vouch for whatever is
+    # at this path now (#336).
+    _pre_write.pop(key, None)
     try:
         st = os.lstat(p)
     except OSError:
@@ -708,7 +717,13 @@ def _refresh_library_evidence(item, p: str, pre: Any) -> None:
     iid = str(getattr(item, "id", None) or "")
     if not ops._durable_file or not iid or pre is None:
         return
-    ev = _evidence(p)
+    try:
+        st = os.lstat(p)  # never follow a symlink planted at the library path (#336)
+    except OSError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return
+    ev = _ev_of(st)
     changed = False
     with ops._operations_lock:
         # ponytail: linear scan of at most MAX_COMPLETED_OPERATIONS records per write; index by path if it shows up

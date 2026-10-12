@@ -39,7 +39,7 @@ class TransactionIntegrationSourceTests(unittest.TestCase):
         start = source.index('def _start_metadata_apply_transaction')
         end = source.index('@app.post("/api/items/<int:iid>/modify")', start)
         helper = source[start:end]
-        self.assertIn('if tx.get("status") != "Approved"', helper)
+        self.assertIn('if status != "Approved"', helper)
         self.assertIn('_metadata_transaction_pending_fields(tx)', helper)
         self.assertIn('jobs.start_python(', helper)
         self.assertIn('status="Completed"', helper)

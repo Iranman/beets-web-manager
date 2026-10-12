@@ -15,6 +15,7 @@ from job_engine import DuplicateJobError
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
 import backend.job_contract as job_contract
+from backend.transaction_engine import SettingsError
 from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
@@ -75,6 +76,13 @@ CLEAN_ALL_TASK_PHASES = {
     "stale_jobs": "Organizing",
     "playlist_refs": "Syncing",
 }
+
+#: Clean All tasks that can change the library (#317): once one starts, a
+#: cancel is no longer audited as "nothing happened".
+CLEAN_ALL_MUTATING_TASKS = frozenset({
+    "missing_files", "root_folder_repair", "artist_folder_merge", "release_group_merge",
+    "duplicates", "artwork", "genres",
+})
 
 
 @app.get("/api/jobs/maintenance-runner/report")
@@ -218,6 +226,9 @@ def start_maintenance_runner():
             emit(task_id, message)
             return True
         def set_task(task_id: str, status: str, detail: str = "", result: Any = None):
+            if status == "running" and task_id in CLEAN_ALL_MUTATING_TASKS and update_state:
+                # #317: from here a cancel may leave the library partly changed.
+                update_state({"mutation_started": True})
             idx = task_index[task_id]
             tasks[idx] = {**tasks[idx], "status": status}
             if detail:
@@ -236,7 +247,7 @@ def start_maintenance_runner():
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("cancelled")
 
-        def finish_partial(failed_message: str) -> Dict[str, Any]:
+        def finish_partial(failed_message: str, status: str = "partial") -> Dict[str, Any]:
             clean_counts = _maintenance_clean_all_counts(tasks, results)
             progress_percent = round(
                 (sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"}) / total) * 100
@@ -265,10 +276,11 @@ def start_maintenance_runner():
                         "clean_all_counts": clean_counts,
                     },
                 })
-            persist_checkpoint("partial", failed_message)
+            persist_checkpoint(status, failed_message)  # D15: "cancelled" when the operator cancelled
             log.append(f"Clean All partially completed: {failed_message}")
-            return {"ok": False, "partial": True, "status": "partial", "error": failed_message, "tasks": tasks, "results": results}
+            return {"ok": False, "partial": True, "status": status, "error": failed_message, "tasks": tasks, "results": results}
 
+        root_repair_error = ""
         log.append("Clean All started.")
         if resume_requested:
             log.append(
@@ -323,17 +335,30 @@ def start_maintenance_runner():
                 pass
             else:
                 set_task("root_folder_repair", "running", "Repairing misplaced root-level folders")
-                root_repair_result = _maintenance_root_folder_repair(
-                    log,
-                    cancel_event=cancel_event,
-                    progress=lambda updates: emit("root_folder_repair", _s(updates.get("current_result") or "")),
-                )
-                set_task(
-                    "root_folder_repair",
-                    "complete" if not root_repair_result.get("skipped") else "skipped",
-                    "Root folder repair complete",
-                    root_repair_result,
-                )
+                try:
+                    root_repair_result = _maintenance_root_folder_repair(
+                        log,
+                        cancel_event=cancel_event,
+                        progress=lambda updates: emit("root_folder_repair", _s(updates.get("current_result") or "")),
+                    )
+                except Exception as ex:
+                    # #298 N5: one stuck folder no longer stops Clean All. The
+                    # failure is recorded, the layout-dependent folder merges
+                    # wait for the next run, every independent task still runs,
+                    # and the job ends failed.
+                    if _s(ex).strip().lower() == "cancelled" or (cancel_event and cancel_event.is_set()):
+                        raise
+                    root_repair_error = _s(ex) or "root folder repair failed"
+                    log.append(f"[root-folder-repair] failed: {root_repair_error}; continuing with the "
+                               "tasks that do not depend on the folder layout.")
+                    set_task("root_folder_repair", "failed", f"Root folder repair failed: {root_repair_error}")
+                else:
+                    set_task(
+                        "root_folder_repair",
+                        "complete" if not root_repair_result.get("skipped") else "skipped",
+                        "Root folder repair complete",
+                        root_repair_result,
+                    )
 
             # 4. Resolve artist identity variants before album-level moves.
             ensure_not_cancelled()
@@ -362,6 +387,9 @@ def start_maintenance_runner():
             ensure_not_cancelled()
             if skip_completed_task("artist_folder_merge"):
                 pass
+            elif root_repair_error:
+                set_task("artist_folder_merge", "failed",
+                         "Not run: root folder repair failed; retried on the next run")
             else:
                 resume_op_id = _s(tasks[task_index["artist_folder_merge"]].get("operation_id")).strip()
                 set_task("artist_folder_merge", "running", "Merging safe MusicBrainz artist folder variants")
@@ -424,6 +452,9 @@ def start_maintenance_runner():
             ensure_not_cancelled()
             if skip_completed_task("release_group_merge"):
                 pass
+            elif root_repair_error:
+                set_task("release_group_merge", "failed",
+                         "Not run: root folder repair failed; retried on the next run")
             else:
                 set_task("release_group_merge", "running", "Merging duplicate Release Group album folders")
                 result = _maintenance_release_group_merge(
@@ -532,6 +563,9 @@ def start_maintenance_runner():
             )
             set_task("playlist_refs", "complete", "Playlist reference status checked", playlist_report)
 
+            failed_tasks = [task["label"] for task in tasks if task["status"] == "failed"]
+            if failed_tasks:
+                return finish_partial("Finished with failed task(s): " + ", ".join(failed_tasks))
             if update_state:
                 clean_counts = _maintenance_clean_all_counts(tasks, results)
                 update_state({
@@ -562,6 +596,7 @@ def start_maintenance_runner():
             return {"ok": True, "tasks": tasks, "results": results}
         except Exception as exc:
             failed_message = _s(exc) or "maintenance failed"
+            cancelled = failed_message.strip().lower() == "cancelled" or bool(cancel_event and cancel_event.is_set())
             completed_before_failure = sum(1 for task in tasks if task["status"] in {"complete", "skipped"})
             running_task = next((task for task in tasks if task["status"] == "running"), None)
             # Clean All resume reattachment: a running_task carrying a saved
@@ -576,7 +611,7 @@ def start_maintenance_runner():
             if running_task and not (running_task.get("id") == "artist_folder_merge" and running_task.get("operation_id")):
                 set_task(running_task["id"], "failed", failed_message)
             if completed_before_failure > 0:
-                return finish_partial(failed_message)
+                return finish_partial(failed_message, "cancelled" if cancelled else "partial")
             if update_state:
                 update_state({
                     "category": "Cleanup",
@@ -595,14 +630,18 @@ def start_maintenance_runner():
                         (sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"}) / total) * 100
                     ),
                 })
-            persist_checkpoint("failed", failed_message)
+            persist_checkpoint("cancelled" if cancelled else "failed", failed_message)
             log.append(f"Clean All failed: {failed_message}")
             raise
     try:
         # D1: the workflow key makes the running check and the start one atomic
-        # step under the JobStore lock; the check above is only a fast path.
+        # step under the JobStore lock; the check above is only a fast path. The
+        # guard is the cross-process half: a duplicate in another process fails
+        # at once instead of waiting to run after it, and a lock left by a dead
+        # process is reclaimed by acquire() once stale.
         job = jobs.start_python(
-            job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner"),
+            job_contract.guarded(_run_with_app_context(_run), workflow="maintenance-runner",
+                                 fail_fast_in_process=True, wait_seconds=0),
             label="Clean All",
             metadata={"type": "maintenance-runner", "workflow": "clean-all", "category": "Cleanup", "resumed": resume_requested,
                       "dedupe_key": "workflow:maintenance-runner",
@@ -614,7 +653,7 @@ def start_maintenance_runner():
         return jsonify({"ok": True, "job_id": exc.job.job_id, "already_running": True})
     resume_payload = _maintenance_resume_summary({
         "last_run": {
-            "status": "failed",
+            "status": resume_snapshot.get("previous_status") or "failed",  # D15: e.g. cancelled
             "tasks": resume_snapshot.get("tasks") or [],
             "results": resume_snapshot.get("results") or {},
         }
@@ -634,9 +673,13 @@ def api_transaction_settings():
 
 @app.post("/api/transactions/settings")
 def api_transaction_settings_save():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Send the settings as a JSON object."}), 400
     try:
         settings = transactions.save_settings(payload)
+    except SettingsError as ex:  # D8: our own fixed text, never clamped
+        return jsonify({"ok": False, "error": str(ex), "code": "invalid_setting"}), 400
     except Exception as ex:
         _app_logger.warning("Could not save transaction settings: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save transaction settings."}), 400
@@ -662,14 +705,9 @@ def api_transactions_list():
         operation=str(request.args.get("operation") or ""),
         query=str(request.args.get("q") or ""),
         job=str(request.args.get("job") or ""),
-    )
-    for row in rows:
         # A list row omits rollback.operations; judge from the full record.
-        try:
-            full = transactions.get(row["id"], limit=1)
-        except KeyError:
-            continue
-        row.setdefault("rollback", {}).update(_rollback_fields(full))
+        rollback_fields=_rollback_fields,
+    )
     return jsonify({"ok": True, "transactions": rows, "total": total})
 
 
@@ -736,12 +774,34 @@ def api_transaction_cancel(transaction_id):
             tx = transactions.transition(transaction_id, expected, "Cancelled")
             if tx is not None:
                 return jsonify({"ok": True, "transaction": tx})
-        current = transactions.get(transaction_id).get("status")
+        tx = transactions.get(transaction_id)
+        current = tx.get("status")
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    meta = tx.get("metadata") or {}
+    if (meta.get("mutation_family") == composite_workflows.MBSYNC_LIBRARY_FAMILY
+            and meta.get("engine_operation_id") and current in ("Running", "Recovery Required")):
+        return _cancel_engine_mbsync(transaction_id, str(meta["engine_operation_id"]))
     return jsonify({"ok": False, "code": "not_cancellable",
                     "error": f"Only a Pending, Preview or Approved transaction can be cancelled "
                              f"(this one is {current})."}), 409
+
+
+def _cancel_engine_mbsync(transaction_id: str, engine_op: str):
+    """#326 F6: stop a library sync Beets is still running, also one a
+    restart orphaned, by the operation id its transaction recorded. Beets
+    stops after the album it is on; synced albums keep their changes."""
+    try:
+        composite_workflows.beets_adapter.cancel_mbsync_library(engine_op)
+    except BeetsError as ex:
+        if ex.error_code == "NOT_RUNNING":
+            return jsonify({"ok": False, "code": "engine_not_running",
+                            "error": "Beets is no longer running this sync; nothing to cancel."}), 409
+        return jsonify({"ok": False, "code": "engine_unavailable",
+                        "error": f"Beets did not take the cancel ({ex.error_code})."}), 503
+    transactions.append_log(transaction_id, f"Cancel sent to Beets operation {engine_op}: it stops after "
+                                            "the album it is on; albums already synced keep their changes.")
+    return jsonify({"ok": True, "code": "engine_cancelling", "engine_operation_id": engine_op}), 202
 
 
 def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None):
@@ -795,6 +855,28 @@ _ENGINE_FAMILIES = {
                                                   composite_workflows.rollback_album_relocation),
 }
 
+#: Families applied only by their own workflow (the generic apply route
+#: would skip its re-validation), whose rollback this route still offers
+#: (#318). Eligibility follows the engine-family rule.
+_ROLLBACK_ONLY_FAMILIES = {
+    composite_workflows.ALBUM_METADATA_FAMILY: composite_workflows.rollback_album_metadata,
+}
+
+#: The ``engine_result`` key each executor's rollback requires (#245 F1): a
+#: result without it (an apply that failed before the engine answered) is
+#: refused as not_applied by the executor, so the verdict says so too.
+_ROLLBACK_EVIDENCE_KEY = {
+    composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY: "quarantine_id",
+    composite_workflows.TRACK_QUARANTINE_FAMILY: "quarantine_id",
+    duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: "quarantine_id",
+    album_row_merge.ALBUM_ROW_MERGE_FAMILY: "merge_id",
+    untracked_recovery.ATTACH_FAMILY: "record_id",
+    untracked_recovery.QUARANTINE_FAMILY: "record_id",
+    untracked_recovery.ATTACH_ALBUM_FAMILY: "record_id",
+    composite_workflows.ALBUM_ART_REPLACE_FAMILY: "art_id",
+    composite_workflows.ALBUM_RELOCATION_FAMILY: "after",
+}
+
 #: Families whose rollback executor acquires its resource locks before any
 #: engine call or store write, so a ResourceLockConflictError from it proves
 #: nothing changed (#227). The item replacement, track quarantine and reviewed
@@ -821,8 +903,8 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     Mirrors, without changing, the gate that route and the engine rollback
     executors apply, so the UI reads it instead of copying it:
 
-    * folder cleanup: needs ``metadata.engine_result`` and status Completed
-      or Failed (a part-way apply);
+    * folder cleanup: needs ``metadata.engine_result`` and status Completed,
+      Failed (a part-way apply) or Partially Rolled Back (retry the rest);
     * engine family (``_ENGINE_FAMILIES``): needs ``metadata.engine_result``
       and a status an apply leaves behind (not Rolled Back, nor one of
       composite_workflows.ROLLBACK_UNAPPLIED_STATUSES); album cleanup has
@@ -846,16 +928,24 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
-        if status not in ("Completed", "Failed"):
+        if status not in ("Completed", "Failed", "Partially Rolled Back"):  # #298 N4: retry the rest
             return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
-    if meta.get("mutation_family") in _ENGINE_FAMILIES:
+    if meta.get("mutation_family") in _ENGINE_FAMILIES or meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES:
         if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
             return refused("not_supported", "Album cleanup has no rollback.")
-        if not meta.get("engine_result"):
+        key = _ROLLBACK_EVIDENCE_KEY.get(meta.get("mutation_family"))
+        if not meta.get("engine_result") or (key and not (meta.get("engine_result") or {}).get(key)):
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
+        if (meta.get("mutation_family") == composite_workflows.ALBUM_METADATA_FAMILY
+                and not isinstance(meta.get("before_state"), dict)):
+            return refused("unavailable", "This transaction recorded no before-state to restore.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
+        if (meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES
+                and status not in ("Completed", "Failed", "Partially Rolled Back")):
+            # Its executor claims only these (composite_workflows._claim_rollback).
+            return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
         if status in composite_workflows.ROLLBACK_UNAPPLIED_STATUSES:
             return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
@@ -865,7 +955,7 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
         return refused("unavailable", rollback.get("reason") or "Rollback unavailable.")
     if any(op.get("type") not in _LOCAL_ROLLBACK_OPS for op in operations):
         return refused("unsupported_operation", "Rollback unavailable for one or more recorded operation types.")
-    if status == "Completed" or (status == "Failed" and meta.get("engine_result")):
+    if status in ("Completed", "Partially Rolled Back") or (status == "Failed" and meta.get("engine_result")):
         return {"allowed": True, "code": "allowed", "reason": ""}
     return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
 
@@ -1017,8 +1107,9 @@ def api_transaction_rollback(transaction_id):
         return _item_file_replacement_response(composite_workflows.rollback_folder_cleanup, transaction_id,
                                                rollback_family=family)
     engine_family = _ENGINE_FAMILIES.get(family)
-    if engine_family:
-        return _item_file_replacement_response(engine_family[1], transaction_id, rollback_family=family)
+    rollback_fn = engine_family[1] if engine_family else _ROLLBACK_ONLY_FAMILIES.get(family)
+    if rollback_fn:
+        return _item_file_replacement_response(rollback_fn, transaction_id, rollback_family=family)
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:
@@ -1046,7 +1137,10 @@ def api_transaction_rollback(transaction_id):
     # apply record (metadata.engine_result, the same proof claim_approved
     # uses); these local families record none, so a Failed one is refused.
     status = tx.get("status")
-    source = "Failed" if status == "Failed" and (tx.get("metadata") or {}).get("engine_result") else "Completed"
+    # Partially Rolled Back retries the rest; each restore is a no-op when the
+    # value is already back (#298 N4).
+    source = ("Failed" if status == "Failed" and (tx.get("metadata") or {}).get("engine_result")
+              else "Partially Rolled Back" if status == "Partially Rolled Back" else "Completed")
     if transactions.transition(transaction_id, source, "Running") is None:
         status = transactions.get(transaction_id).get("status")
         return jsonify({

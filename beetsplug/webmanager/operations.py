@@ -1,8 +1,10 @@
 """Operation implementations for the WebManager Beets integration plugin."""
 
+import math
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
 import logging
@@ -50,6 +52,7 @@ DURABLE_RETENTION_SECONDS = 7 * 86400
 REGISTRY_FILENAME = "webmanager_operations.json"
 _FINAL = ("succeeded", "failed")
 _durable_file: Optional[str] = None
+_IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")
 
 webmanager_bp = Blueprint("webmanager", __name__, url_prefix="/webmanager")
 
@@ -64,6 +67,11 @@ def _bind_library_music_dir():
     library's directory for this request's thread. Also loads the durable
     registry on the first request after a restart, so a tag write (a Web
     Manager edit, mbsync) keeps relocation records current (#332)."""
+    key = request.headers.get("Idempotency-Key")
+    if key is not None and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+        # Keys are saved to disk (#308): a bounded, plain-text key only.
+        return jsonify({"error": "Idempotency-Key must be 1-200 characters of A-Z a-z 0-9 . _ : -",
+                        "error_code": "INVALID_IDEMPOTENCY_KEY"}), 400
     lib = getattr(g, "lib", None)
     bind_music_dir(lib)
     if lib is not None:
@@ -98,25 +106,27 @@ def _prune_operations_locked():
     """Prune expired completed/failed operations from registry (must hold _operations_lock)."""
     now = time.time()
     to_delete = []
-    completed = []
+    # Durable outcomes have their own cap, so a burst of ordinary operations
+    # can never evict a folder-op or relocation record (#308).
+    completed: Dict[bool, List[Tuple[float, str]]] = {True: [], False: []}
 
     for op_id, op in _operations.items():
         if op.get("status") in _FINAL:
-            keep = DURABLE_RETENTION_SECONDS if op.get("type") in _DURABLE_TYPES else DEFAULT_RETENTION_SECONDS
+            durable = op.get("type") in _DURABLE_TYPES
+            keep = DURABLE_RETENTION_SECONDS if durable else DEFAULT_RETENTION_SECONDS
             if now - op.get("updated_at", now) > keep:
                 to_delete.append(op_id)
             else:
-                completed.append((op.get("updated_at", 0), op_id))
+                completed[durable].append((op.get("updated_at", 0), op_id))
 
     for op_id in to_delete:
         del _operations[op_id]
 
-    # Enforce hard upper bound on completed operations
-    if len(completed) > MAX_COMPLETED_OPERATIONS:
-        completed.sort(key=lambda x: x[0])  # oldest first
-        overflow = len(completed) - MAX_COMPLETED_OPERATIONS
-        for _, op_id in completed[:overflow]:
-            if op_id in _operations and _operations[op_id].get("status") != "running":
+    # Enforce hard upper bound on completed operations, per kind
+    for group in completed.values():
+        if len(group) > MAX_COMPLETED_OPERATIONS:
+            group.sort(key=lambda x: x[0])  # oldest first
+            for _, op_id in group[:len(group) - MAX_COMPLETED_OPERATIONS]:
                 del _operations[op_id]
 
 
@@ -125,15 +135,26 @@ def _save_durable_locked() -> None:
     if not _durable_file:
         return
     entries = [op for op in _operations.values() if op.get("type") in _DURABLE_TYPES and op.get("status") in _FINAL]
-    tmp = _durable_file + ".tmp"
+    tmp = None
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # A fresh O_EXCL temp file (mode 0600) never follows a planted
+        # symlink; os.replace keeps that mode on the registry (#308).
+        fd, tmp = tempfile.mkstemp(prefix=REGISTRY_FILENAME + ".", suffix=".tmp",
+                                   dir=os.path.dirname(_durable_file))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(entries, fh)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, _durable_file)
-    except OSError as exc:
+        tmp = None
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("webmanager: could not save the operation registry: %s", exc)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def bind_durable_registry(lib) -> None:
@@ -152,17 +173,20 @@ def bind_durable_registry(lib) -> None:
                 saved = json.load(fh)
         except FileNotFoundError:
             return
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             log.warning("webmanager: ignoring an unreadable operation registry: %s", exc)
             return
         for op in saved if isinstance(saved, list) else []:
             if not (isinstance(op, dict) and isinstance(op.get("operation_id"), str)
+                    and _IDEMPOTENCY_KEY_RE.fullmatch(op["operation_id"])
                     and op.get("type") in _DURABLE_TYPES and op.get("status") in _FINAL):
                 continue
             try:
                 created, updated = float(op.get("created_at") or 0), float(op.get("updated_at") or 0)
             except (TypeError, ValueError):
                 continue
+            if not (math.isfinite(created) and math.isfinite(updated)):
+                continue  # inf/nan would never be pruned (#308)
             _operations.setdefault(op["operation_id"], {
                 "operation_id": op["operation_id"], "type": op["type"], "_fingerprint": op.get("_fingerprint"),
                 "status": op["status"], "created_at": created, "updated_at": updated,
@@ -514,6 +538,90 @@ _QUIET_FALLBACKS = ("skip", "asis")
 _MB_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
+#: An artist or album value that names nothing: placing it would build a
+#: path such as "/music/ (0000)/ -  - 01 - Track.mp3" (D3).
+_PLACEHOLDER_IDENTITY = re.compile(r"^(\[?unknown( artist| album)?\]?|\[?untitled\]?)?$", re.I)
+
+
+def blank_identity(value: Any) -> bool:
+    return bool(_PLACEHOLDER_IDENTITY.match(str(value or "").strip()))
+
+
+def album_identity_blank(album) -> bool:
+    """D3: moving ``album`` would place it under a blank artist/album."""
+    return blank_identity(album.get("album")) or blank_identity(album.get("albumartist"))
+
+
+def item_identity_blank(item) -> bool:
+    if not item.get("album_id"):
+        return blank_identity(item.get("artist"))
+    return blank_identity(item.get("album")) or (
+        blank_identity(item.get("albumartist")) and blank_identity(item.get("artist")))
+
+
+def _task_identity_blank(task) -> bool:
+    """True when an as-is import of ``task`` would place files under an
+    empty or placeholder artist/album."""
+    items = list(getattr(task, "items", None) or [])
+    if not items and getattr(task, "item", None) is not None:
+        items = [task.item]
+    if not items:
+        return False
+    if not getattr(task, "is_album", False):  # singleton: Non-Album/$artist/$title
+        return any(blank_identity(it.get("artist")) for it in items)
+    return any(blank_identity(it.get("album"))
+               or (blank_identity(it.get("albumartist")) and blank_identity(it.get("artist")))
+               for it in items)  # not yet in the library, so no album_id to go by
+
+
+def _skip_action():
+    try:
+        from beets.importer import Action
+        return Action.SKIP
+    except ImportError:  # older beets
+        from beets.importer import action
+        return action.SKIP
+
+
+def _asis_action():
+    try:
+        from beets.importer import Action
+        return Action.ASIS
+    except ImportError:  # older beets
+        from beets.importer import action
+        return action.ASIS
+
+
+def _refuse_blank_identity(session, task) -> bool:
+    if not _task_identity_blank(task):
+        return False
+    task.webmanager_blank_identity = True
+    recorded = getattr(session, "webmanager_tasks", None)
+    if recorded is not None and task not in recorded:
+        recorded.append(task)
+    return True
+
+
+#: Album ids this request's import added (set only while run_import holds
+#: mutation_lock, so concurrent imports elsewhere never count, #344 c).
+_IMPORTED_ALBUM_IDS: Optional[List[int]] = None
+
+
+def on_album_imported(lib, album):
+    """``album_imported`` listener: record the album for the running request."""
+    if _IMPORTED_ALBUM_IDS is not None:
+        _IMPORTED_ALBUM_IDS.append(int(album.id))
+
+
+def on_import_task_created(session, task):
+    """``import_task_created`` listener (D3): without autotag, Beets places an
+    album by its own tags, so one with no artist or album name is skipped
+    before anything is added or moved. Only Web Manager imports are checked."""
+    if getattr(session, "webmanager_require_identity", False) and _refuse_blank_identity(session, task):
+        task.set_choice(_skip_action())
+    return None
+
+
 def _import_session_class(autotag: bool, tasks: List[Any]):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
@@ -531,13 +639,22 @@ def _import_session_class(autotag: bool, tasks: List[Any]):
             from beets.ui.commands import TerminalImportSession as base
 
     class _RecordingSession(base):
+        webmanager_tasks = tasks
+        webmanager_require_identity = not autotag
+
         def choose_match(self, task):
             tasks.append(task)
-            return super().choose_match(task)
+            return self._identity_checked(task, super().choose_match(task))
 
         def choose_item(self, task):
             tasks.append(task)
-            return super().choose_item(task)
+            return self._identity_checked(task, super().choose_item(task))
+
+        def _identity_checked(self, task, choice):
+            # D3: the as-is fallback keeps the file tags; none may be blank.
+            if choice == _asis_action() and _refuse_blank_identity(self, task):
+                return _skip_action()
+            return choice
 
         def get_duplicate_action(self, task, found_duplicates):
             task.webmanager_duplicate = True
@@ -567,6 +684,14 @@ def run_import():
     # happens to an album without a strong match (skip by default).
     autotag = bool(data.get("autotag", False))
     quiet_fallback = str(data.get("quiet_fallback") or "skip").lower()
+    if quiet_fallback == "asis":
+        # An unmatched album imported with whatever tags it has gets no
+        # verified identity (QA D3, music-identity). Refused, not gated: no
+        # operator setting can supply the evidence the match lacked.
+        return jsonify({
+            "error": "quiet_fallback 'asis' is refused: an album Beets cannot match is left in place for review",
+            "error_code": "ASIS_REFUSED",
+        }), 400
     if quiet_fallback not in _QUIET_FALLBACKS:
         return jsonify({
             "error": "quiet_fallback must be 'skip' or 'asis'",
@@ -752,13 +877,20 @@ def run_import():
                 session = _import_session_class(autotag, tasks)(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
-                session.run()
+                global _IMPORTED_ALBUM_IDS
+                _IMPORTED_ALBUM_IDS = imported_ids = []
+                try:
+                    session.run()
+                finally:
+                    _IMPORTED_ALBUM_IDS = None
 
                 skipped: List[str] = []
                 skipped_reasons: List[Dict[str, str]] = []
                 for task in tasks:
                     if getattr(task, "skip", False):
-                        if getattr(task, "webmanager_duplicate", False):
+                        if getattr(task, "webmanager_blank_identity", False):
+                            reason = "blank_identity"  # D3: no artist/album name to place it under
+                        elif getattr(task, "webmanager_duplicate", False):
                             reason = "duplicate"
                         elif not getattr(task, "candidates", None):
                             reason = "no_candidates"  # nothing found, or the source was unreachable
@@ -778,6 +910,7 @@ def run_import():
                     "duplicate_action": duplicate_action,
                     "skipped_paths": skipped,
                     "skipped": skipped_reasons,
+                    "imported_album_ids": sorted(set(imported_ids)),
                 }
                 if op_id_arg:
                     update_operation(op_id_arg, "succeeded", result=result)
@@ -828,6 +961,29 @@ def run_import():
         return jsonify({"error": "Import failed", "error_code": "IMPORT_FAILED"}), 500
 
 
+_ART_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+
+
+def _artpath_refusal(value: Any) -> Optional[str]:
+    """Why ``artpath`` may not be stored through modify, or None (#327).
+    Clearing it is always allowed. Otherwise it must name an existing regular
+    image file strictly inside the allowed roots with no symlink component,
+    the checks relocation rollback applies to a restored cover."""
+    if value in (None, "", b""):
+        return None
+    from . import folder_ops, relocation_ops  # they import this module
+    path = os.fsdecode(value) if isinstance(value, (bytes, str)) else None
+    try:
+        path, _root = relocation_ops._contained(path)
+    except folder_ops._Refused as exc:
+        return f"artpath: {exc.message}"
+    if os.path.splitext(path)[1].lower() not in _ART_EXTENSIONS:
+        return "artpath is not an image file"
+    if not os.path.isfile(path):
+        return "artpath is not an existing file"
+    return None
+
+
 @webmanager_bp.route("/modify", methods=["POST"])
 def run_modify():
     """Modify metadata of items or albums."""
@@ -837,7 +993,7 @@ def run_modify():
     query = data.get("query")
     raw_fields = data.get("fields") or {}
     write = bool(data.get("write", True))
-    move = bool(data.get("move", True))
+    move = bool(data.get("move", False))  # a move is never implied (#335)
 
     if not item_ids and not album_ids and not query:
         return jsonify({
@@ -864,6 +1020,9 @@ def run_modify():
                     "error": "No valid fields provided for modification",
                     "error_code": "INVALID_FIELDS",
                 }), 400
+            refused = _artpath_refusal(album_fields.get("artpath"))
+            if refused:
+                return jsonify({"error": refused, "error_code": "ARTPATH_INVALID"}), 400
 
             modified_items = 0
             modified_albums = 0
@@ -900,6 +1059,22 @@ def run_modify():
                     "error_code": "UNSUPPORTED_FIELDS",
                     "fields": unsupported,
                 }), 400
+
+            if move:
+                # D3: a move never places files under a blank artist/album.
+                def _after(obj, fields):
+                    keys = ("album", "albumartist", "artist", "album_id")
+                    return {k: fields[k] if k in fields else obj.get(k) for k in keys}
+                blank = [f"item {it.id}" for it in items_to_modify
+                         if item_fields and item_identity_blank(_after(it, item_fields))]
+                blank += [f"album {alb.id}" for alb in albums_to_modify
+                          if album_fields and album_identity_blank(_after(alb, album_fields))]
+                if blank:
+                    return jsonify({
+                        "error": "Refusing to move files under an empty or placeholder artist/album name",
+                        "error_code": "BLANK_IDENTITY",
+                        "targets": blank,
+                    }), 409
 
             write_failed: List[int] = []
 
@@ -1104,12 +1279,17 @@ def run_move():
     moved_albums = 0
     missing_item_ids: List[int] = []
     missing_album_ids: List[int] = []
+    blank_item_ids: List[int] = []
+    blank_album_ids: List[int] = []
     try:
         with mutation_lock:
             for iid in item_ids:
                 item = lib.get_item(iid)
                 if not item:
                     missing_item_ids.append(iid)
+                    continue
+                if item_identity_blank(item):  # D3: left where it is
+                    blank_item_ids.append(iid)
                     continue
                 item.move()
                 moved_items += 1
@@ -1118,6 +1298,9 @@ def run_move():
                 album = lib.get_album(aid)
                 if not album:
                     missing_album_ids.append(aid)
+                    continue
+                if album_identity_blank(album):
+                    blank_album_ids.append(aid)
                     continue
                 album.move()
                 moved_albums += 1
@@ -1128,6 +1311,8 @@ def run_move():
             "moved_albums": moved_albums,
             "missing_item_ids": missing_item_ids,
             "missing_album_ids": missing_album_ids,
+            "blank_identity_item_ids": blank_item_ids,
+            "blank_identity_album_ids": blank_album_ids,
         }
         update_operation(op_id, "succeeded", result=result)
         return jsonify({"operation_id": op_id, **result})

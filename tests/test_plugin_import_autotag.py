@@ -3,7 +3,7 @@ importer (beet import -q [--search-id]) and reports the folders Beets skipped.
 
 These run the real Beets importer offline. With no metadata-source plugin
 loaded Beets finds no candidates, so autotag + quiet_fallback=skip skips the
-album (left in place) and quiet_fallback=asis imports it with its tags.
+album (left in place); quiet_fallback=asis is refused (plugin 1.16.0).
 """
 import os
 import shutil
@@ -121,14 +121,64 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "no_strong_match"}])
         self.assertEqual(len(self.lib.albums()), 0)
 
-    def test_autotag_asis_imports_when_asked(self):
+    def test_autotag_asis_is_refused(self):
+        """An unmatched album never enters the library without a release
+        group (#261 F-5 / D3): quiet_fallback=asis is refused before Beets runs."""
         src = os.path.join(self.downloads, "Some Artist - Asis")
         _album(src, "Some Artist", "Asis")
         res = self._import(paths=[src], autotag=True, quiet_fallback="asis", copy=True, move=False)
-        self.assertEqual(res.get_json()["skipped_paths"], [])
-        self.assertEqual(res.get_json()["skipped"], [])
-        self.assertEqual([a.album for a in self.lib.albums()], ["Asis"])
-        self.assertTrue(os.path.isdir(src))
+        self.assertEqual((res.status_code, res.get_json()["error_code"]), (400, "ASIS_REFUSED"))
+        self.assertEqual(len(self.lib.albums()), 0)
+        self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
+
+    def test_untagged_album_is_never_placed_under_a_blank_identity(self):
+        """D3: an as-is import of a folder with no artist/album tags would land
+        at "/music/ (0000)/ -  - 01 - ...". It is skipped, nothing is added
+        or moved, and the reason is reported."""
+        for name, body in (("Plain", {}),):
+            with self.subTest(name):
+                src = os.path.join(self.downloads, name)
+                _album(src, "", "")
+                res = self._import(paths=[src], **body)  # move=True, the default
+                self.assertEqual(res.status_code, 200, res.get_json())
+                self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "blank_identity"}])
+                self.assertEqual(len(self.lib.albums()), 0)
+                self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
+                self.assertEqual(os.listdir(self.music), [])
+
+    def test_modify_and_move_never_place_files_under_a_blank_identity(self):
+        """D3: modify(move=True) refuses before writing; /move leaves the
+        blank-identity target where it is and reports it."""
+        src = os.path.join(self.downloads, "Some Artist - Kept")
+        _album(src, "Some Artist", "Kept")
+        res = self._import(paths=[src], copy=True, move=False)
+        album = self.lib.albums()[0]
+        self.assertEqual(res.get_json()["imported_album_ids"], [album.id])  # #344 c
+        paths = sorted(i.path for i in album.items())
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+        for body in ({"album_ids": [album.id], "fields": {"album": ""}},
+                     {"album_ids": [album.id], "fields": {"albumartist": "[unknown]"}},
+                     {"item_ids": [album.items()[0].id], "fields": {"album": " "}}):
+            res = self.client.post("/webmanager/modify", headers=auth, json={**body, "move": True})
+            self.assertEqual((res.status_code, res.get_json()["error_code"]), (409, "BLANK_IDENTITY"), body)
+        self.assertEqual(self.lib.get_album(album.id).album, "Kept")
+        self.assertEqual(sorted(i.path for i in self.lib.get_album(album.id).items()), paths)
+
+        # Without a move the metadata edit itself is allowed; a later /move leaves it alone.
+        res = self.client.post("/webmanager/modify", headers=auth,
+                               json={"album_ids": [album.id], "fields": {"album": ""}, "move": False})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        res = self.client.post("/webmanager/move", headers=auth, json={"album_ids": [album.id]})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual((res.get_json()["moved_albums"], res.get_json()["blank_identity_album_ids"]),
+                         (0, [album.id]))
+        self.assertEqual(sorted(i.path for i in self.lib.get_album(album.id).items()), paths)
+
+    def test_placeholder_identity_values(self):
+        for value in ("", "  ", "[unknown]", "Unknown Artist", "unknown album", "[Untitled]"):
+            self.assertTrue(ops_mod.blank_identity(value), value)
+        for value in ("Album", "Artist", "Unknown Mortal Orchestra", "Ke$ha", "!!!"):
+            self.assertFalse(ops_mod.blank_identity(value), value)
 
     def test_duplicate_skip_is_reported(self):
         src = os.path.join(self.downloads, "Some Artist - Dup")

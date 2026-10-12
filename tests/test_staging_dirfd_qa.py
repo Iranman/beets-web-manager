@@ -69,7 +69,7 @@ class SwapAtSyscallTests(_Env):
         (self.music / "f.flac").write_bytes(b"library")
         p_src = cw._validated_staging_target(self.dl / "p" / "f.flac", "move")
         p_dst = cw._validated_staging_target(self.dl / "out.flac", "move to")
-        with _swap_at_syscall(os, "rename", self.dl / "p", self.music):
+        with _swap_at_syscall(os, "link", self.dl / "p", self.music):  # files move by link+unlink (#230)
             try:
                 cw._move_resolved(p_src, p_dst)
             except (ValueError, OSError):
@@ -85,7 +85,7 @@ class SwapAtSyscallTests(_Env):
         before = sorted(os.listdir(self.music / "sub"))
         p_src = cw._validated_staging_target(self.dl / "f.flac", "move")
         p_dst = cw._validated_staging_target(self.dl / "a" / "sub" / "f.flac", "move to")
-        with _swap_at_syscall(os, "rename", self.dl / "a", self.music):
+        with _swap_at_syscall(os, "link", self.dl / "a", self.music):
             try:
                 cw._move_resolved(p_src, p_dst)
             except (ValueError, OSError):

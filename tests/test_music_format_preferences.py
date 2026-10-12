@@ -1,6 +1,7 @@
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -233,14 +234,62 @@ class RejectedDownloadPreservedSourceTests(unittest.TestCase):
         # should reach the same decision as the folder import for an
         # app-created "- YT missing" folder, which is quarantined.
         import backend.library_service as lib
-        folder = self.downloads / "Artist - YT missing Album"
-        staged = self._file("downloads", "Artist - YT missing Album", "a.flac")
+        # The exact name acquisition_service generates (#325 S-3).
+        folder = self.downloads / "Album - yt missing 1700000000000"
+        staged = self._file("downloads", "Album - yt missing 1700000000000", "a.flac")
         # Default deployment: TORRENT_SOURCE_ROOTS defaults to DOWNLOADS_ROOT.
         with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads,)):
             self.assertFalse(lib._preserve_torrent_source_path(folder))
             result, _ = self._handle(staged, "quarantine")
         self.assertEqual(result["handling"], "quarantine")
         self.assertFalse(staged.exists())
+
+    def test_spoofed_marker_name_does_not_make_a_torrent_folder_app_managed(self):
+        """#325 S-3: a folder merely containing the marker text is not app-created."""
+        import backend.library_service as lib
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", (self.downloads,)):
+            for name in ("Artist - YT missing Album", "x - yt missing 12", "a - yt missing 1700000000000 (FLAC)"):
+                staged = self._file("downloads", name, "a.flac")
+                result, _ = self._handle(staged, "delete")
+                self.assertEqual(result["handling"], "kept", name)
+                self.assertTrue(staged.exists(), name)
+
+    def test_quarantine_root_inside_library_or_torrent_root_keeps_the_file(self):
+        """#325 S-1: fail closed; nothing is written into those trees."""
+        staged = self._file("downloads", "_beets_missing_import", "slskd-1", "a.flac")
+        for bad in (self.music / "q", self.downloads / "torrents" / "q", self.root):
+            with mock.patch.dict("os.environ", {"MUSIC_FORMAT_QUARANTINE_DIR": str(bad)}):
+                result, log = self._handle(staged, "quarantine")
+            self.assertEqual(result["handling"], "kept", bad)
+            self.assertIn("quarantine folder overlaps", result["reason"])
+            self.assertTrue(staged.exists())
+            self.assertFalse((bad / time.strftime("%Y%m%d")).exists())
+
+    def test_two_same_named_rejects_are_both_kept_in_quarantine(self):
+        """#325 S-2: same name, same second: neither copy is overwritten."""
+        first = self._file("downloads", "_beets_missing_import", "one", "a.flac")
+        second = self._file("downloads", "_beets_missing_import", "two", "a.flac")
+        second.write_text("second", encoding="utf-8")
+        third = self._file("downloads", "_beets_missing_import", "three", "a.flac")
+        third.write_text("third", encoding="utf-8")
+        with mock.patch("time.time", return_value=1_700_000_000):
+            results = [self._handle(p, "quarantine")[0] for p in (first, second, third)]
+        targets = [r["quarantined_to"] for r in results]
+        self.assertEqual(len(set(targets)), 3, targets)
+        self.assertEqual([Path(t).read_text(encoding="utf-8") for t in targets], ["x", "second", "third"])
+
+    def test_symlinked_reject_is_never_moved(self):
+        """#325 TOCTOU: the link is not followed to move its target."""
+        real = self._file("elsewhere", "real.flac")
+        link = self.downloads / "_beets_missing_import" / "l.flac"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(real)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        result, _ = self._handle(link, "quarantine")
+        self.assertEqual(result["handling"], "kept")
+        self.assertTrue(real.exists() and link.is_symlink())
 
     def test_marker_subfolder_inside_torrent_folder_is_kept(self):
         # QA R1 (PR #321): a marker on a sub-folder does not unpreserve the

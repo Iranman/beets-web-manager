@@ -698,10 +698,14 @@ def _client_ip_is_lan() -> bool:
 
 
 def _transaction_user_label() -> str:
+    """Who to record on a transaction: the signed-in session user, else a
+    verified Basic-auth user, else the configured username (D7)."""
     try:
-        auth = request.authorization
-        if auth and auth.username:
-            return str(auth.username)
+        from flask import session
+        if _session_authorized():
+            return str(session.get("user"))
+        if _basic_authorized(request.headers.get("Authorization", "")):
+            return str(request.authorization.username)
     except RuntimeError:
         pass
     return os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "operator"

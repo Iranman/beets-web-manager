@@ -45,7 +45,13 @@ class SweepSafety(_Env):
         ad = mock.Mock()
         ad.get_operation.return_value = {"status": "running"}
         transaction_recovery.sweep(adapter=ad, store=self.store, before=later)
-        self.assertEqual([self.store.get(x)["status"] for x in (engine, job, folder)], ["Running"] * 3)
+        # A folder cleanup records each step as it lands and nothing else ever
+        # finishes it (Waitress is one process; the apply refuses a started
+        # Running one), so after a restart it is Recovery Required, not Running
+        # for good (failure-injection matrix). The engine one is still running
+        # in Beets and the evidence-less job wrapper follows its job.
+        self.assertEqual([self.store.get(x)["status"] for x in (engine, job, folder)],
+                         ["Running", "Running", "Recovery Required"])
 
     def test_recovery_required_after_restart_rollback_eligibility(self):
         """What an operator can do next with a swept apply."""

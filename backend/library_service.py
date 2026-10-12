@@ -621,15 +621,15 @@ def _app_managed_download_path(path: Path) -> bool:
         path_res = path
     if any(_path_is_under(path_res, root) for root in managed_roots):
         return True
-    name = path.name.casefold()
-    return any(
-        marker in name
-        for marker in (
-            " - yt missing ",
-            " - soundcloud missing ",
-            " - spotiflac missing ",
-        )
-    )
+    # #325 S-3: a name alone is spoofable; it must be the exact name the
+    # acquisition flow generates ("<album> - <source> missing <epoch ms>")
+    # and sit under a validated downloads root.
+    # ponytail: name-based; a marker file written at creation would be proof.
+    return bool(_APP_MANAGED_NAME.search(path.name.casefold())) and any(
+        _path_is_under(path_res, root) for root in DOWNLOADS_ALLOWED_ROOTS)
+
+
+_APP_MANAGED_NAME = re.compile(r" - (?:yt|ytdlp|soundcloud|spotiflac) missing \d{13}$")
 
 
 def _preserve_torrent_source_path(path_value: str | Path) -> bool:
@@ -1069,7 +1069,8 @@ def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[s
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=False)
+        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=False,
+                                                         within_transaction=True)
         _require_attach_stage_success(result, "rollback metadata restore")
         _invalidate_lib_cache()
         log.append(f"  [rollback] Restored metadata for item {item_id}.")
@@ -1118,7 +1119,8 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True)
+        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True,
+                                                         within_transaction=True)
         _require_attach_stage_success(result, "rollback recording identity restore")
         album_id = 0
         try:
@@ -3480,12 +3482,21 @@ def _root_folder_repair_scan(root: Optional[Path] = None) -> Dict[str, Any]:
 
     # Item id -> its top-level folder name, for items whose path is exactly
     # "<folder>/<file>" directly under MUSIC_ROOT (no artist-folder level).
+    # Beets stores absolute paths; they used to be skipped, so a tracked
+    # shallow folder was queued as "untracked audio". Never strip: a leading
+    # space is part of a folder name such as " (0000)" (D6).
     shallow_by_folder: Dict[str, List[int]] = {}
+    roots = {scan_root.as_posix(), Path(root or MUSIC_ROOT).as_posix()}
     try:
         for item in lib.items([]):
-            path = _s(getattr(item, "path", "")).strip().replace("\\", "/")
-            if not path or path.startswith("/"):
+            path = _s(getattr(item, "path", "")).replace("\\", "/")
+            if not path:
                 continue
+            if path.startswith("/"):
+                base = next((r for r in roots if path.startswith(r.rstrip("/") + "/")), None)
+                if base is None:
+                    continue
+                path = path[len(base.rstrip("/")) + 1:]
             parts = path.split("/")
             if len(parts) == 2:
                 shallow_by_folder.setdefault(parts[0], []).append(int(item.id))

@@ -151,7 +151,7 @@ class CleanMergeDuplicateAlbumTests(_MergeTestBase):
 
         with mock.patch.object(
             app_module.composite_workflows, "merge_duplicate_albums",
-            return_value={"ok": True, "moved": 1, "inherit_fields": {"year": 2001, "label": "Cool Label"}},
+            return_value={"ok": True, "moved": 1, "retired_album_ids": [102], "operation_id": "txn_1_abcdefgh"},
         ) as mock_merge:
             response, log = self._run_job_body(
                 app_module.clean_merge_duplicate_album,
@@ -160,8 +160,10 @@ class CleanMergeDuplicateAlbumTests(_MergeTestBase):
             )
         mock_merge.assert_called_once_with(101, 102)
         self.assertTrue(any("Moved 1 item" in line for line in log))
-        self.assertTrue(any("Inherited year=" in line for line in log))
-        self.assertTrue(any("Deleted source album row 102" in line for line in log))
+        # D18: an album-row merge changes ownership only; nothing is inherited.
+        self.assertFalse(any("Inherited" in line for line in log))
+        self.assertTrue(any("Retired source album row(s) [102]" in line and "txn_1_abcdefgh" in line
+                            for line in log))
 
     def test_merge_engine_rejection_raises_not_swallowed(self):
         self._insert_album(101, artist="Artist", album="Album", mbid=SAME_MBID)

@@ -140,23 +140,48 @@ def _install_transaction_job_hooks() -> None:
                 # undo work it already did, so the real outcome stands (D4).
                 # Job sync no longer corrects a final status afterwards
                 # (QA-217-7).
+                progress = {"mutated": False}
+
+                def tracked_state(updates=None, **kwargs):
+                    # #317: a mutating job publishes ``mutation_started`` once
+                    # it may have changed the library; a later cooperative
+                    # cancel is then never audited as "nothing happened".
+                    if (updates or {}).get("mutation_started") or kwargs.get("mutation_started"):
+                        progress["mutated"] = True
+                    if update_state is not None:
+                        return update_state(updates, **kwargs)
+                    return None
+
+                def cancelled(result=None):
+                    if not (progress["mutated"] or (isinstance(result, dict) and result.get("mutation_started"))):
+                        return "Cancelled"
+                    transactions.update(tx_id, metadata={"engine_result": {"mutation_started": True,
+                                                                           "partial_cancel": True}})
+                    transactions.append_log(tx_id, "Cancelled part-way after it started changing the library: "
+                                                   "recorded as Failed (partially applied), not Cancelled. "
+                                                   "Check the log for what changed.")
+                    progress["partial"] = True
+                    return "Failed"
+
                 def finish(status):
                     transactions.update(tx_id, status=status)
-                    if status != "Cancelled" and cancel_requested(cancel):
+                    if status != "Cancelled" and cancel_requested(cancel) and not progress.get("partial"):
                         transactions.append_log(tx_id, "Cancel requested, but the job had already done "
                                                        f"its work: recorded as {status}.")
 
                 transactions.update(tx_id, status="Running")
                 try:
-                    result = _call_job_fn(fn, log, cancel, update_state)
+                    result = _call_job_fn(fn, log, cancel, tracked_state)
                 except Exception as ex:
-                    finish("Cancelled" if cancel_honoured(cancel, ex) else "Failed")
+                    finish(cancelled() if cancel_honoured(cancel, ex) else "Failed")
                     transactions.append_log(tx_id, f"ERROR: {ex}")
                     raise
                 next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
                 if reports_failure(result):
                     next_status = "Failed"  # BA-3: the same rule as job_engine
-                finish("Cancelled" if cancel_honoured(cancel) else next_status)
+                if isinstance(result, dict) and result.get("outcome_partly_unknown"):
+                    next_status = "Recovery Required"  # lost contact mid-run: not provably Failed (#326 F2)
+                finish(cancelled(result) if cancel_honoured(cancel) else next_status)
                 return result
         else:
             wrapped = fn
@@ -239,8 +264,11 @@ def _start_metadata_apply_transaction(transaction_id: str):
     tx = transactions.get(transaction_id)
     if tx.get("operation_type") != "Metadata Update":
         raise ValueError("Only metadata update transactions can be applied by this endpoint.")
-    if tx.get("status") != "Approved":
+    status = tx.get("status")
+    if status in ("Preview", "Pending"):
         raise ValueError("Approve the transaction before applying it.")
+    if status != "Approved":  # D15: a replay is told what happened, not to approve
+        raise ValueError(f"This transaction cannot be applied again (status is {status}); nothing was changed.")
     metadata = tx.get("metadata") or {}
     item_id = int(metadata.get("item_id") or 0)
     if not item_id:
@@ -256,7 +284,10 @@ def _start_metadata_apply_transaction(transaction_id: str):
 
     def _do(log, cancel_event=None):
         try:
-            result = composite_workflows.update_item_metadata(item_id, fields)
+            # #318: from here Beets may store the edit even if the tag write
+            # fails (WRITE_FAILED), so a Failed apply keeps its rollback.
+            transactions.update(transaction_id, metadata={"engine_result": {"mutation_started": True}})
+            result = composite_workflows.update_item_metadata(item_id, fields, within_transaction=True)
             _require_attach_stage_success(result, "metadata update")
             _invalidate_lib_cache()
             transactions.update(transaction_id, status="Completed", logs=list(log)[-500:], counts={"items": 1, "changes": len(changed_fields)})

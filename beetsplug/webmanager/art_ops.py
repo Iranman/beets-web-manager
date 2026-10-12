@@ -397,3 +397,70 @@ def _album_art_rollback():
         ops.log.exception("album-art rollback failed")
         ops.update_operation(op_id, "failed", error="Rollback failed", error_code="ROLLBACK_FAILED")
         return _error("Rollback failed", "ROLLBACK_FAILED", 500)
+
+
+@ops.webmanager_bp.route("/album-art/remove", methods=["POST"])
+def run_remove_album_art():
+    """Remove the album's cover file (D10): the file is kept in the engine's
+    quarantine folder, artpath is cleared, and /album-art/rollback puts both
+    back. Embedded art is not touched."""
+    with ops.mutation_lock:
+        return _remove_album_art()
+
+
+def _remove_album_art():
+    data = request.get_json(force=True, silent=True) or {}
+    lib = g.lib
+    op_id, _fingerprint, early = ops._idempotency_precheck("album_art_remove", data)
+    if early is not None:
+        return early
+
+    def fail(message: str, code: str, status: int = 400):
+        ops.update_operation(op_id, "failed", error=message, error_code=code)
+        return _error(message, code, status)
+
+    album, err = _album_check(lib, data)
+    if err is not None:
+        return fail(*err)
+    old_artpath = _fspath(album.artpath)
+    if not old_artpath:
+        return fail("the album has no cover file", "NO_ART", 409)
+    if not _inside_allowed(old_artpath) or os.path.islink(old_artpath):
+        return fail("the current cover is outside the allowed roots", "OLD_ART_PATH_INVALID")
+    art_id = uuid.uuid4().hex
+    folder = os.path.join(_quarantine_root(), art_id)
+    manifest: Dict[str, Any] = {"kind": MANIFEST_KIND, "album_id": album.id, "status": "applying", "remove": True,
+                                "old_artpath": old_artpath, "previous_cover": "", "new_artpath": "", "embedded": {}}
+    try:
+        os.makedirs(folder)
+        on_disk = os.path.isfile(old_artpath)
+        if on_disk:
+            # Kept until the copy is proven identical (never delete the only copy).
+            manifest["previous_cover"] = os.path.join(folder, "previous" + os.path.splitext(old_artpath)[1])
+            shutil.copy2(old_artpath, manifest["previous_cover"])
+            if _sha_file(manifest["previous_cover"]) != _sha_file(old_artpath):
+                raise OSError("quarantine copy differs from the cover")
+        _write_manifest(folder, manifest)
+        album.artpath = None
+        album.store()
+        if on_disk:
+            os.remove(old_artpath)
+        manifest["status"] = "applied"
+        _write_manifest(folder, manifest)
+        removed = [old_artpath] if on_disk else []
+        result = {"success": True, "album_id": album.id, "art_id": art_id, "artpath": "",
+                  "old_artpath": old_artpath, "removed": removed, "removed_count": len(removed),
+                  "embedded_items": 0, "item_count": len(list(album.items()))}
+        ops.update_operation(op_id, "succeeded", result=result)
+        return jsonify({"operation_id": op_id, **result})
+    except Exception:
+        ops.log.exception("album-art remove failed; restoring")
+        try:
+            if os.path.exists(os.path.join(folder, MANIFEST_NAME)):
+                album.load()
+                _restore(lib, album, manifest, folder)
+                manifest["status"] = "compensated"
+                _write_manifest(folder, manifest)
+        except Exception:
+            ops.log.exception("album-art remove restore failed")
+        return fail("Removing album art failed", "ALBUM_ART_FAILED", 500)

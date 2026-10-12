@@ -30,11 +30,13 @@ def _swap_on_check(parent, victim_root):
 
 
 def _failing_rename(exc):
-    """Patch os.rename to raise ``exc`` while keeping it in supports_dir_fd."""
+    """Patch os.rename and os.link (files move by link+unlink since #230) to
+    raise ``exc`` while keeping them in supports_dir_fd."""
     fake = mock.Mock(side_effect=exc)
     stack = contextlib.ExitStack()
     stack.enter_context(mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {fake}))
     stack.enter_context(mock.patch("os.rename", fake))
+    stack.enter_context(mock.patch("os.link", fake))
     return stack
 
 

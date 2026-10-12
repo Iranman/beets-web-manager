@@ -682,12 +682,13 @@ def clean_library_health_scan():
 
 @app.post("/api/clean/merge-duplicate-album")
 def clean_merge_duplicate_album():
-    """Merge source album rows into target album (DB only, audio untouched).
+    """Merge a source album row into the target row (DB only, audio untouched).
 
     Body: { target_album_id: int, source_album_id: int }
-    The source album's items are re-assigned to the target; the source album row
-    is deleted. Target album inherits any metadata the source has that target lacks
-    (mb_albumid, year, label, etc.).
+    Runs the album-row merge transaction family (backend.album_row_merge:
+    plan, the operator's request recorded as the approval, apply, verify;
+    rollback restores the rows and item ownership). Only item ownership
+    changes; no metadata is inherited (D18).
     """
     payload = request.get_json(silent=True) or {}
     target_id = int(payload.get("target_album_id") or 0)
@@ -775,18 +776,20 @@ def clean_merge_duplicate_album():
             raise RuntimeError(merge_res.get("error") or "Engine rejected duplicate album merge")
         moved = int(merge_res.get("moved") or 0)
         log.append(f"  Moved {moved} item(s) to target album")
-        for col, val in (merge_res.get("inherit_fields") or {}).items():
-            log.append(f"  Inherited {col}={_s(val)!r} from source")
-        log.append(f"  Deleted source album row {source_id}")
+        log.append(f"  Retired source album row(s) {merge_res.get('retired_album_ids') or []} "
+                   f"(transaction {merge_res.get('operation_id')}; roll it back from Transactions)")
 
         _invalidate_lib_cache()
         log.append("Done.")
-        return {"ok": True, "moved": moved, "target_album_id": target_id, "source_album_id": source_id}
+        return {"ok": True, "moved": moved, "target_album_id": target_id, "source_album_id": source_id,
+                "transaction_id": merge_res.get("operation_id")}
 
+    # D18: the merge records its own rollbackable transaction; a job wrapper
+    # row would claim rollback is unavailable.
     job = jobs.start_python(
         _do,
         label=f"Merge duplicate album {source_id}→{target_id}",
-        metadata={"type": "merge-duplicate-album",
+        metadata={"type": "merge-duplicate-album", "transaction": False,
                   "target_album_id": target_id, "source_album_id": source_id},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -891,9 +894,8 @@ def clean_rgid_group_merge():
             raise RuntimeError(merge_res.get("error") or "Engine rejected release-group duplicate merge")
         moved = int(merge_res.get("moved") or 0)
         log.append(f"  Moved {moved} item(s) to target album")
-        for col, val in (merge_res.get("inherit_fields") or {}).items():
-            log.append(f"  Inherited {col}={_s(val)!r} from source")
-        log.append(f"  Deleted source album row {source_id}")
+        log.append(f"  Retired source album row(s) {merge_res.get('retired_album_ids') or []} "
+                   f"(transaction {merge_res.get('operation_id')}; roll it back from Transactions)")
 
         _clear_rgid_resolution(rgid)
         _invalidate_lib_cache()
@@ -1643,7 +1645,9 @@ def apply_safe_folder_placeholder_renames_job():
                     raise RuntimeError(plan_res.get("error") or "Folder cleanup planning failed")
                 apply_res = composite_workflows.apply_folder_cleanup(plan_res["operation_id"])
                 if not apply_res.get("ok"):
-                    raise RuntimeError(apply_res.get("error") or "Folder cleanup execution failed")
+                    # #298: name the transaction, so a part-way apply can be rolled back.
+                    raise RuntimeError(f"{apply_res.get('error') or 'Folder cleanup execution failed'} "
+                                       f"(transaction {plan_res['operation_id']})")
 
                 log.append(f"  [{i + 1}/{total}] RENAMED: {src.name} (engine controlled)")
                 log.append(f"           → {dst.name}")
@@ -1667,7 +1671,8 @@ def apply_safe_folder_placeholder_renames_job():
         summary = f"Safe rename complete: {renamed} renamed, {skipped} skipped, {failed} failed."
         log.append(summary)
         return {
-            "ok": True,
+            "ok": failed == 0,  # #298: a failed rename fails the job, not just a count
+            "partial": bool(failed),
             "renamed": renamed,
             "skipped": skipped,
             "failed": failed,

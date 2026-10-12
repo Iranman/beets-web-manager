@@ -36,7 +36,9 @@ RG = "33333333-3333-3333-3333-333333333333"
 
 def jpeg(color=(200, 10, 10)):
     buf = io.BytesIO()
-    Image.new("RGB", (32, 32), color).save(buf, format="JPEG")
+    img = Image.new("RGB", (64, 64), color)
+    img.paste(Image.effect_noise((64, 32), 80).convert("RGB"))  # over MIN_ALBUM_ART_BYTES; the color half differs
+    img.save(buf, format="JPEG")
     return buf.getvalue()
 
 

@@ -420,7 +420,7 @@ def _album_path_repair_summary(album) -> Dict[str, Any]:
     except Exception:
         items = []
     for item in items:
-        raw = _s(getattr(item, "path", "") or "").strip()
+        raw = _s(getattr(item, "path", "") or "")  # never strip: " (0000)" is a real folder name (D6)
         if not raw:
             continue
         p = Path(raw)
@@ -468,6 +468,11 @@ def _album_art_candidates(album) -> List[Path]:
     return candidates
 
 
+# D10: one floor for an uploaded cover and a usable one on disk; an upload
+# the art scan would then call unusable is refused instead.
+MIN_ALBUM_ART_BYTES = 1000
+
+
 def _usable_album_art_file(path: Optional[Path]) -> bool:
     try:
         return bool(
@@ -477,7 +482,7 @@ def _usable_album_art_file(path: Optional[Path]) -> bool:
             and not _path_has_symlink_component_under(path, MUSIC_ROOT)
             and path.exists()
             and path.is_file()
-            and path.stat().st_size >= 1000
+            and path.stat().st_size >= MIN_ALBUM_ART_BYTES
         )
     except Exception:
         return False
@@ -909,6 +914,8 @@ def _validate_album_art_bytes(data: bytes) -> Dict[str, Any]:
         raise
     except Exception as exc:
         raise AlbumArtRequestError("Cover image could not be safely decoded", 400) from exc
+    if len(data) < MIN_ALBUM_ART_BYTES:  # D10: the art scan would call a smaller cover unusable
+        raise AlbumArtRequestError(f"Cover image is too small (under {MIN_ALBUM_ART_BYTES} bytes)", 400)
     return {"format": image_format, "width": width, "height": height, "bytes": len(data)}
 
 
