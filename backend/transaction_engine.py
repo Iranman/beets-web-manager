@@ -20,7 +20,7 @@ import time
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 
 LOG = logging.getLogger("beets_web.transaction_engine")
@@ -516,7 +516,11 @@ class TransactionStore:
         operation: str = "",
         query: str = "",
         job: str = "",
+        rollback_fields: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
+        """``rollback_fields(full_tx)`` is merged into each returned row's
+        ``rollback`` from the record already read here (#245 F3: no second
+        read per row)."""
         self._ensure()
         status_lc = status.strip().lower()
         operation_lc = operation.strip().lower()
@@ -547,11 +551,15 @@ class TransactionStore:
                     }, ensure_ascii=False, default=str).lower()
                     if query_lc not in haystack:
                         continue
-                rows.append(row)
+                rows.append((row, tx))
         total = len(rows)
         offset = max(0, int(offset or 0))
         limit = max(1, min(500, int(limit or 50)))
-        return rows[offset:offset + limit], total
+        page = rows[offset:offset + limit]
+        if rollback_fields is not None:
+            for row, tx in page:
+                row.setdefault("rollback", {}).update(rollback_fields(tx))
+        return [row for row, _tx in page], total
 
     def update(self, transaction_id: str, **updates: Any) -> Dict[str, Any]:
         with self._lock:

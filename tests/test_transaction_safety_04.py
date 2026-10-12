@@ -773,6 +773,91 @@ class PathQueryTests(_Engine):
             self.assertEqual(isvc._prune_stale_wanted_rows_before_import(album.id, "", wanted, log), 0)
         self.assertIsNotNone(self.lib.get_item(kept.id))
 
+class ConcurrentAlbumCleanupApplyTests(_FolderEnv):
+    """#246: the test that flaked was removed with the old album-cleanup
+    engine in #249. Its rule still holds for album_cleanup_v1: concurrent
+    applies of one approved transaction reach Beets exactly once."""
+
+    def test_concurrent_applies_remove_once(self):
+        import threading
+        from tests.test_wave0_s1_containment import FakeAdapter
+        for _ in range(20):  # repeat: a race shows up as a second remove
+            ad = FakeAdapter(items={7: {"id": 7, "album_id": 5, "path": self.media("A/B/01.flac")}},
+                             albums={5: {"id": 5, "album": "B"}})
+            op = cw.plan_album_cleanup(5, adapter=ad, store=self.store)["operation_id"]
+            from backend import resource_locks
+            self.assertIsNotNone(resource_locks.approve_preview(self.store, op, "operator"))
+            gate, results = threading.Barrier(6), []
+
+            def apply():
+                gate.wait()
+                try:
+                    results.append(cw.apply_album_cleanup(op, adapter=ad, store=self.store).get("ok"))
+                except Exception as ex:  # a refused claim may raise; it must not remove
+                    results.append(type(ex).__name__)
+            threads = [threading.Thread(target=apply) for _ in range(6)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(10)
+            self.assertEqual(len(ad.destructive_calls()), 1, (results, ad.destructive_calls()))
+            self.assertEqual(results.count(True), 1, results)
+
+
+class RollbackEligibilityTableTests(_RouteEnvBase):
+    """#245 F1/F2: family x status x engine_result through the real route.
+    Whatever rollback_eligibility says, the route's executor agrees: an
+    allowed verdict never meets a not-applied/not-eligible refusal, and a
+    refused one never runs."""
+
+    GATE_REFUSALS = {"not_applied", "rollback_not_eligible", "not_completed", "rollback_unavailable"}
+    STATUSES = ("Pending", "Preview", "Approved", "Running", "Completed", "Failed", "Recovery Required",
+                "Partially Rolled Back", "Rolled Back", "Cancelled")
+
+    def test_verdict_matches_route_for_every_engine_family(self):
+        import routes_maintenance as rm
+        from backend.beets_adapter import BeetsAdapterConnectionError
+        families = [f for f in (*rm._ENGINE_FAMILIES, *rm._ROLLBACK_ONLY_FAMILIES) if f != cw.ALBUM_CLEANUP_FAMILY]
+        down = BeetsAdapterConnectionError("down")
+        mismatches, rows = [], 0
+        for family in families:
+            key = rm._ROLLBACK_EVIDENCE_KEY.get(family)
+            results = [{}, {"ok": False, "error": "x"}] + ([{key: "k1"}] if key else [{"ok": True}])
+            for status in self.STATUSES:
+                for engine_result in results:
+                    meta = {"mutation_family": family, "engine_result": engine_result, "album_id": 1,
+                            "before_state": {"album": {"id": 1, "fields": {}}, "items": []}}
+                    tx = self.store.create(operation_type="X", status=status, metadata=meta)["id"]
+                    verdict = rm.rollback_eligibility(self.store.get(tx))
+                    ad = mock.Mock()
+                    ad.configure_mock(**{n: mock.Mock(side_effect=down) for n in (
+                        "rollback_item_file_replacement", "rollback_track_quarantine", "rollback_reviewed_cleanup",
+                        "rollback_album_row_merge", "rollback_untracked", "rollback_album_art",
+                        "relocate_album", "get_operation", "modify", "get_album", "get_item",
+                        "find_all_items_by_album_id", "get_items", "get_albums")})
+                    with mock.patch.object(cw, "beets_adapter", ad):
+                        resp = self.client.post(f"/api/transactions/{tx}/rollback")
+                    body = resp.get_json() or {}
+                    rows += 1
+                    row = (family, status, engine_result, verdict["code"], resp.status_code, body.get("code"))
+                    if verdict["allowed"] and body.get("code") in self.GATE_REFUSALS:
+                        mismatches.append(("allowed but refused", *row))
+                    if not verdict["allowed"] and verdict["code"] != "already_rolled_back" and body.get("ok"):
+                        mismatches.append(("refused but ran", *row))
+        self.assertGreater(rows, 200)
+        self.assertEqual(mismatches, [])
+
+    def test_list_judges_eligibility_without_a_second_read_per_row(self):
+        """#245 F3."""
+        ok = self.store.create(operation_type="Replace", status="Completed", metadata={
+            "mutation_family": cw.ITEM_FILE_REPLACEMENT_FAMILY, "engine_result": {"quarantine_id": "q"}})["id"]
+        no = self.store.create(operation_type="Replace", status="Completed", metadata={
+            "mutation_family": cw.ITEM_FILE_REPLACEMENT_FAMILY, "engine_result": {"ok": False}})["id"]
+        with mock.patch.object(self.store, "get", side_effect=AssertionError("N+1 read")):
+            body = self.client.get("/api/transactions").get_json()
+        rows = {r["id"]: r["rollback"] for r in body["transactions"]}
+        self.assertEqual((rows[ok]["allowed"], rows[no]["allowed_code"]), (True, "not_applied"))
+
 
 if __name__ == "__main__":
     unittest.main()

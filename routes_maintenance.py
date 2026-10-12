@@ -696,14 +696,9 @@ def api_transactions_list():
         operation=str(request.args.get("operation") or ""),
         query=str(request.args.get("q") or ""),
         job=str(request.args.get("job") or ""),
-    )
-    for row in rows:
         # A list row omits rollback.operations; judge from the full record.
-        try:
-            full = transactions.get(row["id"], limit=1)
-        except KeyError:
-            continue
-        row.setdefault("rollback", {}).update(_rollback_fields(full))
+        rollback_fields=_rollback_fields,
+    )
     return jsonify({"ok": True, "transactions": rows, "total": total})
 
 
@@ -858,6 +853,21 @@ _ROLLBACK_ONLY_FAMILIES = {
     composite_workflows.ALBUM_METADATA_FAMILY: composite_workflows.rollback_album_metadata,
 }
 
+#: The ``engine_result`` key each executor's rollback requires (#245 F1): a
+#: result without it (an apply that failed before the engine answered) is
+#: refused as not_applied by the executor, so the verdict says so too.
+_ROLLBACK_EVIDENCE_KEY = {
+    composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY: "quarantine_id",
+    composite_workflows.TRACK_QUARANTINE_FAMILY: "quarantine_id",
+    duplicate_cleanup.REVIEWED_CLEANUP_FAMILY: "quarantine_id",
+    album_row_merge.ALBUM_ROW_MERGE_FAMILY: "merge_id",
+    untracked_recovery.ATTACH_FAMILY: "record_id",
+    untracked_recovery.QUARANTINE_FAMILY: "record_id",
+    untracked_recovery.ATTACH_ALBUM_FAMILY: "record_id",
+    composite_workflows.ALBUM_ART_REPLACE_FAMILY: "art_id",
+    composite_workflows.ALBUM_RELOCATION_FAMILY: "after",
+}
+
 #: Families whose rollback executor acquires its resource locks before any
 #: engine call or store write, so a ResourceLockConflictError from it proves
 #: nothing changed (#227). The item replacement, track quarantine and reviewed
@@ -915,10 +925,18 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     if meta.get("mutation_family") in _ENGINE_FAMILIES or meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES:
         if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
             return refused("not_supported", "Album cleanup has no rollback.")
-        if not meta.get("engine_result"):
+        key = _ROLLBACK_EVIDENCE_KEY.get(meta.get("mutation_family"))
+        if not meta.get("engine_result") or (key and not (meta.get("engine_result") or {}).get(key)):
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
+        if (meta.get("mutation_family") == composite_workflows.ALBUM_METADATA_FAMILY
+                and not isinstance(meta.get("before_state"), dict)):
+            return refused("unavailable", "This transaction recorded no before-state to restore.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
+        if (meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES
+                and status not in ("Completed", "Failed", "Partially Rolled Back")):
+            # Its executor claims only these (composite_workflows._claim_rollback).
+            return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
         if status in composite_workflows.ROLLBACK_UNAPPLIED_STATUSES:
             return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
