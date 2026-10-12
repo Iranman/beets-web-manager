@@ -10,7 +10,7 @@ entry in Plex forever (moved to the end as an "extra"). The tombstone carries
 the file path, but _plex_track_removed_in_web_manager only compares
 artist/title text.
 
-expectedFailure until the owner fixes it; remove the decorator then.
+Fixed: a tombstone with a path is matched by file identity (B1).
 """
 import unittest
 
@@ -40,7 +40,6 @@ class PlexRemovalPropagationTests(unittest.TestCase):
         self.assertTrue(ps._plex_track_removed_in_web_manager(
             _plex_track("Song 3 of Album One"), _manifest("Song 3 of Album One")))
 
-    @unittest.expectedFailure
     def test_same_file_with_different_title_text_is_removable(self):
         self.assertTrue(ps._plex_track_removed_in_web_manager(
             _plex_track("Song 3 of Album One"), _manifest("Album One - 03 - Song 3 of Album One")))

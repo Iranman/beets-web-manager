@@ -146,6 +146,98 @@ class CreateOutputsIdempotencyTests(unittest.TestCase):
         self.assertEqual(fake.keys("100"), self.KEYS + ["99"])
 
 
+def _with_files(fake, files):
+    """Plex playlist entries that also report their media file, as Plex does."""
+    def request(path, params=None, *, method="GET", **kw):
+        out = fake.request(path, params, method=method, **kw)
+        if method == "GET" and path.endswith("/items"):
+            for row in out["MediaContainer"]["Metadata"]:
+                row["title"] = files[row["ratingKey"]][1]
+                row["Media"] = [{"Part": [{"file": files[row["ratingKey"]][0]}]}]
+        return out
+    return request
+
+
+class TombstoneFileIdentityTests(unittest.TestCase):
+    """B1: a Web Manager removal reaches Plex by file identity, never by
+    text alone, and never removes a different file that only reads alike."""
+    ITEMS = tir.PlexPlaylistReplaceTests.ITEMS
+    KEYS = tir.PlexPlaylistReplaceTests.KEYS
+    GONE = "/music/a/99 - Album One - 03 - Song 3.flac"
+    LOOKALIKE = "/music/other/98.flac"
+    FILES = {"11": ("/music/a/1.flac", "T1"), "12": ("/music/a/2.flac", "T2"),
+             "13": ("/music/a/3.flac", "T3"), "99": (GONE, "Song 3"),
+             "98": (LOOKALIKE, "Album One - 03 - Song 3")}
+
+    def test_in_place_sync_deletes_the_tombstoned_file_and_keeps_a_lookalike(self):
+        fake = _FakePlex({"100": {"title": "Mix", "items": ["11", "99", "12", "13", "98"]}})
+        # Web Manager's title for the removed row was filename-derived; Plex
+        # shows the tag title. The Plex-side addition 98 has the tombstone's
+        # text but is another file.
+        manifest = {"last_plex": {"rating_key": "100"},
+                    "removed_tracks": [{"artist": "A", "title": "Album One - 03 - Song 3", "path": self.GONE}]}
+        plex, _ = tir.PlexPlaylistReplaceTests._sync(
+            self, mock.Mock(request=_with_files(fake, self.FILES)), manifest)
+        self.assertEqual(plex["mode"], "in_place")
+        self.assertEqual(plex["tracks_removed"], 1)
+        deletes = [c for c in fake.calls if c[0] == "DELETE"]
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(fake.keys("100"), ["11", "12", "13", "98"])
+        self.assertEqual(list(fake.playlists), ["100"])  # same ratingKey, never recreated
+
+    def test_lookalike_plex_addition_is_not_removable(self):
+        manifest = {"removed_tracks": [{"artist": "A", "title": "Album One - 03 - Song 3", "path": self.GONE}]}
+        lookalike = {"title": "Album One - 03 - Song 3", "grandparentTitle": "A",
+                     "Media": [{"Part": [{"file": self.LOOKALIKE}]}]}
+        self.assertFalse(ps._plex_track_removed_in_web_manager(lookalike, manifest))
+
+    def test_mapped_plex_root_is_the_same_file(self):
+        manifest = {"removed_tracks": [{"artist": "A", "title": "x", "path": "/music/a/9.flac"}]}
+        track = {"title": "Other text", "Media": [{"Part": [{"file": "/data/music/a/9.flac"}]}]}
+        self.assertTrue(ps._plex_track_removed_in_web_manager(track, manifest, ["/data/music"]))
+        self.assertFalse(ps._plex_track_removed_in_web_manager(track, manifest, ["/elsewhere"]))
+
+    def test_text_is_the_fallback_only_when_a_side_has_no_file(self):
+        no_path = {"removed_tracks": [{"artist": "A", "title": "Song"}]}
+        with_file = {"title": "Song", "grandparentTitle": "A", "Media": [{"Part": [{"file": "/music/x.flac"}]}]}
+        self.assertTrue(ps._plex_track_removed_in_web_manager(with_file, no_path))
+        self.assertFalse(ps._plex_track_removed_in_web_manager(
+            {"title": "Other", "grandparentTitle": "A"}, no_path))
+
+
+class TitleSearchDeadlineTests(unittest.TestCase):
+    """NB-2: the per-track Plex title searches share one total time limit."""
+
+    def test_slow_plex_stops_searching_at_the_limit_and_leaves_tracks_pending(self):
+        import backend.plex_service as plex_service
+        clock = [1000.0]
+        searched = []
+
+        def find(section, artist, title, deadline=None):
+            searched.append((title, deadline))
+            clock[0] += 8  # a slow Plex: each search takes 8 s
+            return None
+
+        items = [{"artist": "A", "title": f"T{i}", "path": f"/music/a/{i}.flac"} for i in range(10)]
+        log = []
+        with mock.patch.multiple(
+                plex_service,
+                PLEX_API_TIMEOUT=20, PLEX_SYNC_MAX_FALLBACK_SEARCHES=10,
+                _plex_section_track_index=mock.Mock(side_effect=OSError("index down")),
+                _plex_is_final_library_path=mock.Mock(return_value=True),
+                _plex_find_track=find), \
+                mock.patch.object(plex_service.time, "time", side_effect=lambda: clock[0]):
+            keys, details = plex_service._plex_track_keys_for_items("3", items, log=log, return_details=True)
+        self.assertEqual(keys, [])
+        self.assertEqual(len(searched), 3)  # 0 s, 8 s, 16 s; at 24 s the 20 s limit is spent
+        self.assertEqual({d for _t, d in searched}, {1020.0})  # every request carries the one deadline
+        reasons = [row["reason"] for row in details["pending_tracks"]]
+        self.assertEqual(len(reasons), 10)
+        self.assertEqual(reasons.count("Plex title search time limit reached; retry later"), 7)
+        self.assertTrue(any("20s total" in line for line in log))
+        self.assertTrue(any("stopped at the 20s time limit" in line for line in log))
+
+
 class SyncOneTests(unittest.TestCase):
     """The manifest is the master copy; M3U/Plex additions merge in."""
 
@@ -271,6 +363,9 @@ class LegacyImportTests(unittest.TestCase):
         (self.legacy / "Existing.m3u").write_text("#EXTM3U\n/music/x.flac\n", encoding="utf-8")
         self.before = {p.name: p.read_bytes() for p in self.legacy.iterdir()}
         self.write = mock.Mock()
+        patcher = mock.patch.object(ps, "_playlist_library_index", return_value={})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _import(self):
         with mock.patch.multiple(ps, PLAYLIST_LEGACY_IMPORT_DIR=self.legacy, PLAYLIST_STATE_ROOT=self.state,
@@ -290,6 +385,23 @@ class LegacyImportTests(unittest.TestCase):
         self.assertEqual(self.write.call_count, 2)
         # The legacy folder is never written to.
         self.assertEqual({p.name: p.read_bytes() for p in self.legacy.iterdir()}, self.before)
+
+    def test_path_only_entries_take_library_metadata_and_counts(self):  # NB-7, NB-9
+        (self.legacy / "Paths.m3u").write_text(
+            "#EXTM3U\n/music/A/One/A - One - 03 - Song 3.flac\n/music/gone.flac\n", encoding="utf-8")
+        item = {"id": 3, "artist": "Artist A", "title": "Song 3", "path": "/music/A/One/A - One - 03 - Song 3.flac"}
+        index = {"by_path": {key: item for key in ps._playlist_path_keys(item["path"])}}
+        with mock.patch.object(ps, "_playlist_library_index", return_value=index):
+            self._import()
+        call = next(c for c in self.write.call_args_list if c.args[0] == "Paths")
+        desired = call.args[1]
+        self.assertEqual((desired[0]["artist"], desired[0]["title"]), ("Artist A", "Song 3"))
+        self.assertEqual(desired[0]["path"], item["path"])
+        self.assertEqual(len(call.kwargs["matched_tracks"]), 1)
+        self.assertEqual(len(call.kwargs["missing_tracks"]), 1)
+        summary = ps._playlist_manifest_list_summary("Paths", {
+            "desired_tracks": desired, "matched_count": 1, "missing_count": 1})
+        self.assertEqual((summary["available"], summary["missing"]), (1, 1))
 
     def test_disabled_folder_imports_nothing(self):
         with mock.patch.multiple(ps, PLAYLIST_LEGACY_IMPORT_DIR=None, _playlist_write_manifest=self.write):

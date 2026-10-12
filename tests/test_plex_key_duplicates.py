@@ -41,6 +41,7 @@ class PlexKeyDuplicateTests(unittest.TestCase):
             "math": math,
             "time": time,
             "PLEX_SYNC_MAX_FALLBACK_SEARCHES": 0,
+            "PLEX_API_TIMEOUT": 20,
             "_s": lambda value: "" if value is None else str(value),
             "_norm": lambda value: " ".join(str(value or "").lower().split()),
             "_plex_is_final_library_path": lambda value: bool(value),
