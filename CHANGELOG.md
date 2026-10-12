@@ -12,6 +12,11 @@ The project uses Semantic Versioning.
 - `POST /api/import/review-folder/delete` no longer lets the client's `confirmed_wrong_library_folder` / `allow_library_delete` flag skip the Pending Review check. Every delete must be a Pending Review folder or a matching Needs MB ID album row; the server decides from `MUSIC_ROOT` whether the folder is in the library (library files are quarantined, as before), and refuses a path whose symlinked component moves it into or out of the library. The flags are still accepted and ignored. `GET /api/import/folder-stats` now returns `is_library_path` (REV-04).
 - `DELETE /api/ai-pending-review` with no `path` no longer clears the whole Pending Review queue: send a `path`, or `{"all": true}` to clear everything. The queue file is written atomically (F15).
 
+### Fixed
+
+- Import Review: opening or browsing a review item no longer changes any files or starts an import. Before, showing an item could quarantine or permanently delete up to 4 of its rejected files, and could queue an import for a high-confidence match, without a click. Now **Remove N rejected files…** opens a confirmation that lists the files and says whether they will be quarantined or permanently deleted, and imports start only from the Import button and its confirmation. The bulk **Revalidate** button and backend auto-import jobs are unchanged.
+- Import Review keyboard shortcuts (`[`, `]`, `i`) no longer fire while another Import tab is open or while Ctrl, Alt, Shift or Meta is held. The candidate Left/Right arrow keys now work only while focus is inside the candidate carousel, not anywhere on the page.
+
 ## v0.5.0 - 2026-10-12
 
 ### Upgrade Notes

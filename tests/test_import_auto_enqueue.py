@@ -147,20 +147,21 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('skip_import_lock = bool(payload.get("skip_import_lock"))', body)
         self.assertIn('[reimport] Running inside parent import slot', body)
         self.assertIn('"skip_import_lock": skip_import_lock', body)
-    def test_frontend_calls_backend_auto_enqueue_after_safe_preview(self):
-        body = section(REVIEW_PAGE, 'Backend-owned auto-enqueue', 'Keep ref in sync')
-        self.assertIn('autoEnqueueImport(payload)', body)
-        self.assertIn('!preview.safe', body)
-        self.assertIn('selectedImportSourceFiles(sm, preview)', body)
-        self.assertIn('removeLocalItem(item)', body)
-        self.assertIn('pollJobBackground(jobId, item, label, keepReviewAfterSuccess)', body)
-
-    def test_frontend_auto_enqueue_is_not_manual_click_simulation(self):
-        body = section(REVIEW_PAGE, 'Backend-owned auto-enqueue', 'Keep ref in sync')
-        self.assertNotIn('runApply(', body)
-        self.assertNotIn('onApply(', body)
-        self.assertNotIn('.click(', body)
-
+    def test_frontend_never_enqueues_an_import_on_view(self):
+        # 0.5.1 hotfix (REV-02): viewing/selecting an item must never start an import.
+        # Backend auto-enqueue stays available to backend jobs and the explicit Revalidate button.
+        page = (_REVIEW_FEATURE / "ImportReviewPage.tsx").read_text(encoding="utf-8")
+        self.assertNotIn('autoEnqueueImport', page)
+        self.assertNotIn('reconcileAutoEnqueueImport', page)
+        self.assertNotIn('Backend-owned auto-enqueue', page)
+        self.assertIn('REV-02: no import is ever started by viewing or selecting an item', page)
+    def test_frontend_import_runs_only_through_explicit_confirmation(self):
+        start_apply = section(REVIEW_PAGE, 'const startApply = useCallback', 'const runApply = useCallback')
+        self.assertIn("setConfirmIntent({ kind: 'apply', item, mbid })", start_apply)
+        self.assertNotIn('importWithId(', start_apply)
+        confirm = section(REVIEW_PAGE, 'const confirm = useCallback', 'const selectFilter = useCallback')
+        self.assertIn("if (intent.kind === 'apply') void runApply(intent.item, intent.mbid)", confirm)
+        self.assertIn('onApply={() => startApply(activeItem)}', REVIEW_PAGE)
     def test_api_types_and_client_are_registered(self):
         self.assertIn('export interface AutoEnqueueImportPayload extends ImportWithIdPayload', TYPES)
         self.assertIn('export interface AutoEnqueueImportResponse extends JobStartResponse', TYPES)
@@ -193,20 +194,14 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('setSelectedMatches((current)', body)
         self.assertIn('setActions((current)', body)
 
-    def test_frontend_enqueue_timeout_reconciles_instead_of_resubmitting(self):
-        body = section(REVIEW_PAGE, 'Backend-owned auto-enqueue', 'Keep ref in sync')
-        self.assertIn('withTimeout(autoEnqueueImport(payload)', body)
-        self.assertIn('reconcileAutoEnqueueImport(payload)', body)
-        self.assertIn('Retry enqueue', body)
-
+    def test_frontend_explicit_import_waits_for_backend_verdict(self):
+        body = section(REVIEW_PAGE, 'const runApply = useCallback', 'useEffect(')
+        self.assertIn('decideImportReviewRemote(', body)
+        self.assertIn('if (!verdict || !verdict.can_apply)', body)
+        self.assertIn('nothing was started', body)
     def test_frontend_preview_button_payload_counts_share_selection(self):
-        body = section(REVIEW_PAGE, 'Backend-owned auto-enqueue', 'Keep ref in sync')
-        self.assertIn('const previewCount = preview.tracks_to_import_count ?? selectedSourceFiles.length', body)
-        self.assertIn('selectedSourceFiles.length !== previewCount', body)
-        self.assertIn('selected_source_files: selectedSourceFiles', body)
         self.assertIn('function actionLabel(item: ReviewItem, selectedMatch?: SelectedMatch, preview?: ImportTargetPreviewResponse)', REVIEW_PAGE)
-
-
+        self.assertIn('const previewCount = preview?.tracks_to_import_count ?? selectedCount', REVIEW_PAGE)
     def test_revalidate_endpoint_uses_shared_mapping_and_auto_enqueue_gate(self):
         self.assertIn('@app.post("/api/import-review/revalidate")', APP)
         body = section(APP, 'def import_review_revalidate', '@app.post("/api/folders/ai-suggest")')
@@ -267,14 +262,10 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('status="stale_job_missing"', body)
         self.assertNotIn('job.status in {"running", "success"}', body)
 
-    def test_frontend_does_not_auto_enqueue_failed_enqueue_rows(self):
-        body = section(REVIEW_PAGE, 'Backend-owned auto-enqueue', 'Keep ref in sync')
-        self.assertIn("const statusKey = (item.status_key || item.status || '').trim().toLowerCase().replace", body)
-        self.assertIn("['auto_enqueue_failed', 'format_policy_rejected', 'import_failed', 'failed'].includes(statusKey)", body)
-        self.assertIn('if (started.handled)', body)
-        self.assertIn('if (result.handled)', body)
-        self.assertIn("status: 'warning'", body)
-        self.assertIn('if (started.pending_review_exists === false) removeLocalItem(item)', body)
+    def test_frontend_has_no_view_triggered_enqueue_effect(self):
+        page = (_REVIEW_FEATURE / "ImportReviewPage.tsx").read_text(encoding="utf-8")
+        self.assertNotIn('autoEnqueueKeysRef', page)
+        self.assertNotIn('enqueue acknowledgement timed out', page)
 if __name__ == "__main__":
     unittest.main()
 
