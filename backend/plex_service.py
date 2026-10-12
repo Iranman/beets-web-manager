@@ -426,12 +426,19 @@ def _plex_client_headers() -> Dict[str, str]:
     }
 
 
+def _plex_response_socket(response: Any) -> Any:
+    """The socket under an http.client response (``fp.raw._sock``), or None."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    return sock if isinstance(sock, socket.socket) else None
+
+
 def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
                   *, method: str = "GET", timeout: Optional[int] = None,
                   attempts: int = 2, deadline: Optional[float] = None) -> Dict[str, Any]:
     """``deadline`` (a time.time() value) bounds the whole call, body read
     included, without a helper thread (#339): each socket wait is capped at
-    the time left and the body is read in chunks, checked between chunks."""
+    the time left and the body is read as it arrives, checked between reads.
+    Without `deadline` the body read gets `timeout` in total."""
     settings = _plex_settings()
     if not settings["url"]:
         raise RuntimeError("Plex URL is not configured")
@@ -460,16 +467,25 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     with provider_boundary.opened("plex", req, timeout=timeout,
                                   max_attempts=max(1, int(attempts or 1))) as r:
         if deadline is None:
-            raw = r.read()
-        else:
-            chunks = []
-            while True:
-                remaining()
-                chunk = r.read(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            raw = b"".join(chunks)
+            # Without a caller deadline the body still gets at most
+            # ``timeout`` in total, not ``timeout`` per received byte.
+            deadline = time.time() + timeout
+        # read1 returns the bytes that have arrived (Content-Length or
+        # chunked); read(n) would block until n bytes or EOF, so a trickling
+        # body could outlive the deadline (#339 QA). Each recv also waits at
+        # most the time left.
+        read = getattr(r, "read1", None) or r.read
+        sock = _plex_response_socket(r)
+        chunks = []
+        while True:
+            left = remaining()
+            if sock is not None and sock.fileno() != -1:  # closed once the body is complete
+                sock.settimeout(max(0.01, left))
+            chunk = read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
     if not raw:
         return {}
     try:
