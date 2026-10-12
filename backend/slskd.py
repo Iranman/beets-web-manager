@@ -371,9 +371,10 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
             continue
         candidates = [root / rp.parent.name, peer_root / rp.parent]
         # #281: the flattened peer path <peer>/<remote folder name> is only a
-        # fallback layout. When the full peer path exists, slskd used that
-        # layout, and the flattened folder can be another album of this peer.
-        if not (peer_root / rp.parent).is_dir():
+        # fallback. When the file exists at the full peer path, slskd used
+        # that layout, and the flattened folder can be another album of this
+        # peer; the transfer proof still guards the fallback.
+        if not os.path.lexists(peer_root / rp.parent / rp.name):
             candidates.append(peer_root / rp.parent.name)
         for d in dict.fromkeys(candidates):
             if not within_roots(d, allowed):

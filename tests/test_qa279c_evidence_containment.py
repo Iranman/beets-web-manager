@@ -46,12 +46,17 @@ class EvidenceBackedContainment(unittest.TestCase):
         self.assertTrue(file_victim.exists())
 
     def test_symlink_case_is_not_vacuous(self):
-        """With within_roots disabled the same inputs DO delete: the gate is
-        what protects, not missing evidence."""
+        """The evidence does match the symlinked victims, so a refusal is the
+        containment's doing. With within_roots disabled, the O_NOFOLLOW
+        dir_fd unlink (#281) still refuses: two independent gates."""
         dl, remotes, dir_victim, file_victim = self._symlink_case()
+        self.assertTrue(slskd_mod._proven_from_transfer(dl / "peer" / "Album" / "01.flac", remotes[0]))
+        self.assertTrue(slskd_mod._proven_from_transfer(dl / "peer" / "Real" / "02.flac", remotes[1]))
         with mock.patch.object(slskd_mod, "within_roots", return_value=True):
             removed = cleanup_failed_candidate_files(dl, "peer", remotes, [".flac"], [], [dl])
-        self.assertGreater(removed, 0)
+        self.assertEqual(removed, 0)
+        self.assertTrue(dir_victim.exists())
+        self.assertTrue(file_victim.exists())
 
     def test_hostile_vectors_with_matching_evidence_stay_in_downloads(self):
         for i in range(5):

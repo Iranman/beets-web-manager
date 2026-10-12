@@ -332,14 +332,15 @@ def _slskd_pause(seconds: float, cancel_event: Optional[Any] = None) -> None:
         raise RuntimeError("cancelled")
 
 
-def _slskd_bounded_walk(root: Path, deadline: float, cancel_event: Optional[Any] = None):
+def _slskd_bounded_walk(root: Path, budget: float, cancel_event: Optional[Any] = None):
     """Yield the paths of files under ``root`` (symlinked folders are not
-    followed), stopping once ``deadline`` (epoch seconds) passes; a job
-    cancel raises "cancelled". Checked once per folder (#263)."""
+    followed), stopping once ``budget`` seconds have passed; a job cancel
+    raises "cancelled". Checked once per folder (#263)."""
+    stop_at = time.monotonic() + max(1.0, budget)
     for dirpath, _dirnames, filenames in os.walk(root):
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("cancelled")
-        if time.time() >= deadline:
+        if time.monotonic() >= stop_at:
             return
         for name in filenames:
             yield Path(dirpath) / name
@@ -784,7 +785,7 @@ def _find_slskd_downloaded_files(username: str, remote_files: list,
                     # #263: one pass over a large torrent tree must not
                     # outlive the wait's deadline or ignore a cancel.
                     matches = [
-                        f for f in _slskd_bounded_walk(root, deadline, cancel_event)
+                        f for f in _slskd_bounded_walk(root, max(5.0, deadline - time.time()), cancel_event)
                         if f.suffix.lower() in audio_exts
                         and f.name.lower() in queued_names
                         and f.is_file()

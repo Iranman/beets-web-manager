@@ -6437,8 +6437,11 @@ def _playlist_slskd_download_track(artist: str, title: str,
         # queued in slskd (it could land in downloads later). Same contained
         # cleanup album acquisition uses (#277).
         if username and queued:
-            _slskd_cancel_queued_downloads(username, queued, inner_log)
-            _slskd_cleanup_failed_candidate_files(username, queued, inner_log)
+            try:
+                _slskd_cancel_queued_downloads(username, queued, inner_log)
+                _slskd_cleanup_failed_candidate_files(username, queued, inner_log)
+            except Exception as cleanup_exc:  # never hide the original failure
+                _app_logger.warning("slskd playlist cleanup failed: %s", type(cleanup_exc).__name__)
         raise
     finally:
         if raw_log is None:
