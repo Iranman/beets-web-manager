@@ -230,8 +230,11 @@ container, through its own web API and never by opening SQLite, the script
 reads `/stats` (item/album counts), `/item/` and `/album/` (an identity
 digest over every item's id, album row, Recording/Release/Release Group
 IDs, disc, track and path, and every album's IDs), and `/webmanager/status`
-(plugin health; the plugin key is read inside the container and never
-printed). Deploy fails if counts or the digest change.
+(plugin health and Beets' library directory; the plugin key is read inside
+the container and never printed). Item paths are hashed relative to that
+library directory, so a plugin that serves them absolute instead of
+library-relative does not change the digest, while a real path change
+does. Deploy fails if counts or the digest change.
 
 **Offline byte identity** (explicit, separate mode; briefly stops Beets):
 
