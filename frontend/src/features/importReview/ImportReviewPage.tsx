@@ -4005,7 +4005,7 @@ export function ImportReviewPage({
         const aiReason = s?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
         const notChecked = notCheckedReason(response);
         setAction(item.id, {
-          status: aiAvailable === false || notChecked ? 'warning' : 'success',
+          status: notChecked ? 'warning' : aiAvailable === false ? 'warning' : 'success',
           message: s?.reason || backendCandidate?.reason || (mbTrackId
             ? aiAvailable === false
               ? `Recording evidence ready. ${aiReason}`
@@ -4049,7 +4049,7 @@ export function ImportReviewPage({
       const aiReason = suggestion?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
       const notChecked = notCheckedReason(response);
       setAction(item.id, {
-        status: aiAvailable === false || notChecked ? 'warning' : 'success',
+        status: notChecked ? 'warning' : aiAvailable === false ? 'warning' : 'success',
         message: suggestion?.reason || (backendSelectedMatch
           ? aiAvailable === false
             ? `Matched using MusicBrainz and AcoustID. ${aiReason}`
