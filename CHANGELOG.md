@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.5.0 - 2026-10-12
+
+### Upgrade Notes
+
+- Legacy playlist import no longer reads a `MUSIC_ROOT/playlists` folder that is a symlink, a file larger than 5 MB, or more than 500 files in one folder. If your `playlists` folder is a symlink, replace it with a real folder (or move the files into Web Manager) before upgrading. Web Manager's own playlist folder is not affected.
+- After the upgrade, the first startup moves transactions that were left Running by an earlier crash or restart, and that no recovery step covers, to Recovery Required. They then show up in Library Changes for you to review; nothing in the library is changed.
+- Cancelling a job that is waiting on a child job (imports, downloads, Clean All artwork/genre steps) can now take up to 5 minutes, so the job reports the child's real outcome instead of abandoning it.
 
 ### Security
 
