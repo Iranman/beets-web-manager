@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
 from backend import config_layers
-import copy, difflib, json, os, re, time
+import copy, difflib, json, os, re, threading, time
 import urllib.error
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -23,8 +23,9 @@ import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
-from backend.app_runtime import jobs
+from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
 from backend.job_service import _wait_for_child_job
+from job_engine import DuplicateJobError
 from backend.serializers import _json_from_flask_response
 
 # ── ARCH-001 extracted code ──
@@ -1192,6 +1193,8 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
     1000 are read until ``totalRecords`` is covered, each through
     provider_boundary with a 60 s timeout (the lidarr policy retries a
     timeout or 5xx once), and rows are de-duplicated by Lidarr album id.
+    Fewer distinct records than the last page's ``totalRecords`` is an
+    error, also when the list changed during the fetch.
 
     ``progress(done, total)`` is called after each page. ``cancel()`` is
     checked before each page; True ends the fetch with
@@ -1205,7 +1208,7 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
     seen_ids: set = set()
     earlier_passes = 0
     for monitored in ((True, False) if include_unmonitored else (True,)):
-        page, pages, total = 1, 1, 0
+        page, pages, total, pass_records = 1, 1, 0, 0
         prev_total: Optional[int] = None
         while page <= pages:
             if cancel is not None and cancel():
@@ -1227,22 +1230,29 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
                 return [], reason
             for rec in records:
                 row = _lidarr_wanted_row(rec)
-                if row is None:
-                    continue
-                if row["lidarr_id"]:
+                if row is not None and row["lidarr_id"]:
                     if row["lidarr_id"] in seen_ids:
                         continue  # the list moved between pages
                     seen_ids.add(row["lidarr_id"])
-                results.append(row)
+                pass_records += 1  # a record Lidarr counted, kept or not
+                if row is not None:
+                    results.append(row)
             if progress is not None:
                 progress(len(results), earlier_passes + total)
             page += 1
+        # QA #379 N3: when totalRecords moved between pages, the list shifted
+        # under the paging and rows can fall between two pages. Fewer distinct
+        # records than the final totalRecords is an incomplete list.
+        if pass_records < total:
+            _app_logger.warning("Lidarr wanted-list fetch incomplete: %d of %d records (the list changed "
+                                "during the fetch)", pass_records, total)
+            return [], "Lidarr returned an unexpected response"
         earlier_passes += total
     return results, ""
 
 
-def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
-    return fetch_lidarr_wanted()
+def _acq_fetch_lidarr_wanted(**kwargs: Any) -> Tuple[List[Dict[str, Any]], str]:
+    return fetch_lidarr_wanted(**kwargs)
 
 
 def _acq_item_mbid(item: Dict[str, Any]) -> str:
@@ -1303,12 +1313,28 @@ def _acq_action_flags(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
+def _build_acquisition_queue_payload(force: bool = False, *, include_unmonitored: bool = False,
+                                     update_state: Optional[Callable[..., None]] = None,
+                                     cancel: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    """The whole Find Music list. Slow (library walk plus every Lidarr wanted
+    page): only the acquisition-queue-build job calls it (F7)."""
     # Acquisition always includes disk-only folders (as GET /api/library did
-    # for /api/acquisition requests); `force` is the caller's ?refresh=1.
+    # for /api/acquisition requests); `force` is an explicit Refresh.
+    phase = update_state or (lambda **_kw: None)
+    timings: Dict[str, float] = {}
+    started = time.monotonic()
+    phase(phase="library")
     library_payload = get_library_payload(force=force, include_disk_only=True)
     library_error = "" if library_payload.get("ok") else _s(library_payload.get("error") or "")
-    wanted_rows, wanted_error = _acq_fetch_lidarr_wanted()
+    timings["library"] = round(time.monotonic() - started, 2)
+    started = time.monotonic()
+    phase(phase="lidarr")
+    wanted_rows, wanted_error = _acq_fetch_lidarr_wanted(
+        progress=lambda done, total: phase(phase="lidarr", lidarr_rows=done, lidarr_total=total),
+        cancel=cancel, include_unmonitored=include_unmonitored)
+    timings["lidarr"] = round(time.monotonic() - started, 2)
+    started = time.monotonic()
+    phase(phase="merge")
     by_identity: Dict[str, Dict[str, Any]] = {}
     by_text: Dict[str, Dict[str, Any]] = {}
     complete_local_by_identity: Dict[str, Dict[str, Any]] = {}
@@ -1408,11 +1434,13 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
         [row for row in by_identity.values() if (row.get("actions") or {}).get("can_download")],
         key=lambda row: row.get("sort_key") or "",
     )
+    timings["merge"] = round(time.monotonic() - started, 2)
     return {
         "ok": True,
         "items": items,
         "total": len(items),
         "counts": {
+            "all": len(items),
             "beets": sum(1 for row in items if "beets" in row.get("sources", [])),
             "lidarr": sum(
                 1 for row in items
@@ -1427,23 +1455,231 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
         "library_error": library_error,
         "wanted_error": wanted_error,
         "library_version": library_payload.get("library_version"),
-        "download_sources": _download_sources_status(),
+        "include_unmonitored": bool(include_unmonitored),
+        "timings": timings,
     }
+
+
+_SOURCE_PROBE_TTL = 300.0
+_source_probe_cache: Dict[str, Any] = {"at": 0.0, "fallbacks": None}
 
 
 def _download_sources_status() -> Dict[str, Any]:
     """Whether slskd can run and which direct sources a fallback can use
-    (ACQ-1/ACQ-5), so the UI can say so before a download starts."""
-    fallbacks = {}
-    for source in ("ytdlp", "soundcloud", "spotiflac"):
-        reason = _direct_source_unavailable_reason(source)
-        fallbacks[source] = {"available": not reason, "reason": reason}
+    (ACQ-1/ACQ-5), so the UI can say so before a download starts. The source
+    probes run subprocesses (``deno --version``), so they are cached for
+    ``_SOURCE_PROBE_TTL`` seconds (QA #379 F6); the cheap config checks are not."""
+    fallbacks = _source_probe_cache["fallbacks"]
+    if fallbacks is None or time.monotonic() - _source_probe_cache["at"] > _SOURCE_PROBE_TTL:
+        fallbacks = {}
+        for source in ("ytdlp", "soundcloud", "spotiflac"):
+            reason = _direct_source_unavailable_reason(source)
+            fallbacks[source] = {"available": not reason, "reason": reason}
+        _source_probe_cache.update(at=time.monotonic(), fallbacks=fallbacks)
     return {
         "slskd_configured": slskd_configured(),
         "slskd_error": "" if slskd_configured() else SLSKD_NOT_CONFIGURED,
         "fallback_chain": _slskd_fallback_methods(),
-        "fallbacks": fallbacks,
+        "fallbacks": copy.deepcopy(fallbacks),
     }
+
+
+# ── Find Music list snapshot (F7/F8, ACQ-10) ──
+#
+# The list is built only by the acquisition-queue-build job; requests read the
+# last good snapshot. A failed or cancelled build never replaces it.
+
+ACQ_QUEUE_JOB_TYPE = "acquisition-queue-build"
+ACQ_QUEUE_MAX_AGE = 6 * 3600.0  # older than this, a read starts a background rebuild
+_ACQ_QUEUE_RETRY_AFTER = 300.0  # after a failed build, reads wait this long before retrying
+_ACQ_QUEUE_CACHE_FILE = WEB_MANAGER_DATA_DIR / "acquisition_queue_cache.json"
+_LIDARR_NOT_CONFIGURED = "LIDARR_API_KEY not configured"
+
+_acq_queue_lock = threading.Lock()
+# snapshot: {"items", "counts", "library_error", "wanted_error", "library_version",
+# "include_unmonitored", "built_at", "build_seconds"} -- never mutated once published.
+_acq_queue: Dict[str, Any] = {"snapshot": None, "loaded": False, "job_id": "",
+                              "last_error": "", "last_error_at": 0.0}
+
+
+def _acq_queue_load() -> None:
+    """Read the persisted snapshot once per process (so a restart serves the
+    last list at once). Caller holds ``_acq_queue_lock``."""
+    if _acq_queue["loaded"]:
+        return
+    _acq_queue["loaded"] = True
+    try:
+        data = json.loads(_ACQ_QUEUE_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("items"), list) and data.get("built_at"):
+            _acq_queue["snapshot"] = data
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        _app_logger.warning("Find Music snapshot could not be read: %s", type(exc).__name__)
+
+
+def _acq_queue_save(snapshot: Dict[str, Any]) -> None:
+    try:
+        _ACQ_QUEUE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ACQ_QUEUE_CACHE_FILE.with_name(f".{_ACQ_QUEUE_CACHE_FILE.name}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, _ACQ_QUEUE_CACHE_FILE)
+    except Exception as exc:  # the in-memory snapshot still serves
+        _app_logger.warning("Find Music snapshot could not be saved: %s", type(exc).__name__)
+
+
+def acquisition_queue_snapshot() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """``(snapshot or None, cache status)``. Never builds anything."""
+    with _acq_queue_lock:
+        _acq_queue_load()
+        snap, job_id = _acq_queue["snapshot"], _acq_queue["job_id"]
+        last_error, last_error_at = _acq_queue["last_error"], _acq_queue["last_error_at"]
+    job = jobs.get(job_id) if job_id else None
+    refreshing = bool(job is not None and job.status == "running")
+    built_at = float(snap["built_at"]) if snap else None
+    age = max(0.0, time.time() - built_at) if built_at else None
+    if snap is None:
+        state = "building" if refreshing else ("failed" if last_error else "empty")
+    elif last_error and last_error_at >= (built_at or 0):
+        state = "failed"
+    else:
+        state = "stale" if age > ACQ_QUEUE_MAX_AGE else "ready"
+    return snap, {
+        "state": state,
+        "built_at": built_at,
+        "age_seconds": int(age) if age is not None else None,
+        "build_seconds": snap.get("build_seconds") if snap else None,
+        "max_age_seconds": int(ACQ_QUEUE_MAX_AGE),
+        "job_id": job_id or None,
+        "refreshing": refreshing,
+        "last_error": last_error,
+        "last_error_at": last_error_at or None,
+        "include_unmonitored": bool(snap.get("include_unmonitored")) if snap else False,
+    }
+
+
+def _acq_queue_build_job(force: bool, include_unmonitored: bool) -> Callable[..., Dict[str, Any]]:
+    def _do(log, cancel_event, update_state):
+        started = time.time()
+        log.append(f"Building the Find Music list (library refresh: {'yes' if force else 'no'}, "
+                   f"unmonitored: {'yes' if include_unmonitored else 'no'})")
+        try:
+            payload = _build_acquisition_queue_payload(force, include_unmonitored=include_unmonitored,
+                                                       update_state=update_state, cancel=cancel_event.is_set)
+        except Exception:
+            with _acq_queue_lock:
+                _acq_queue.update(last_error="The Find Music list could not be built", last_error_at=time.time())
+            raise
+        for name, seconds in (payload.get("timings") or {}).items():
+            log.append(f"  {name}: {seconds:.1f} s")
+        if payload.get("wanted_error") == LIDARR_WANTED_CANCELLED or cancel_event.is_set():
+            raise RuntimeError("cancelled")  # the previous snapshot stays
+        wanted_error = _s(payload.get("wanted_error") or "")
+        # Lidarr not configured is a setup state (library rows only), not a failure.
+        error = _s(payload.get("library_error") or "") or (
+            wanted_error if wanted_error != _LIDARR_NOT_CONFIGURED else "")
+        if error:
+            # Never publish a list missing one side: keep the last good one.
+            with _acq_queue_lock:
+                _acq_queue.update(last_error=error, last_error_at=time.time())
+            return {"ok": False, "error": f"Find Music list not updated: {error}"}
+        snapshot = {
+            "items": payload["items"],
+            "counts": payload["counts"],
+            "library_error": "",
+            "wanted_error": wanted_error,
+            "library_version": payload.get("library_version"),
+            "include_unmonitored": bool(include_unmonitored),
+            "built_at": time.time(),
+            "build_seconds": round(time.time() - started, 1),
+        }
+        _acq_queue_save(snapshot)
+        with _acq_queue_lock:
+            _acq_queue.update(snapshot=snapshot, loaded=True, last_error="", last_error_at=0.0)
+        log.append(f"Find Music list ready: {len(snapshot['items'])} row(s) in {snapshot['build_seconds']} s")
+        return {"ok": True, "total": len(snapshot["items"]), "build_seconds": snapshot["build_seconds"]}
+    return _do
+
+
+def start_acquisition_queue_build(*, force: bool = False,
+                                  include_unmonitored: bool = False) -> Tuple[str, bool]:
+    """Start the snapshot job; ``(job_id, already_running)``. A build already
+    running is returned, never duplicated (dedupe_key)."""
+    try:
+        job = jobs.start_python(
+            _acq_queue_build_job(force, include_unmonitored),
+            label="Find Music: build list",
+            metadata={"type": ACQ_QUEUE_JOB_TYPE, "category": "acquisition", "mutating": False,
+                      "dedupe_key": ACQ_QUEUE_JOB_TYPE, "include_unmonitored": bool(include_unmonitored),
+                      "force": bool(force)},
+        )
+        job_id, running = job.job_id, False
+    except DuplicateJobError as exc:
+        job_id, running = exc.job.job_id, True
+    with _acq_queue_lock:
+        _acq_queue["job_id"] = job_id
+    return job_id, running
+
+
+def ensure_acquisition_queue_fresh(*, include_unmonitored: bool = False) -> None:
+    """Stale-while-revalidate: start a background build when the snapshot is
+    missing, older than ACQ_QUEUE_MAX_AGE or lacks the unmonitored rows asked
+    for -- unless one is running or a build failed under _ACQ_QUEUE_RETRY_AFTER ago."""
+    snap, cache = acquisition_queue_snapshot()
+    if cache["refreshing"]:
+        return
+    if cache["last_error_at"] and time.time() - cache["last_error_at"] < _ACQ_QUEUE_RETRY_AFTER:
+        return
+    had_unmonitored = cache["include_unmonitored"]
+    if snap is None or cache["state"] == "stale" or (include_unmonitored and not had_unmonitored):
+        start_acquisition_queue_build(include_unmonitored=include_unmonitored or had_unmonitored)
+
+
+_ACQ_QUEUE_SOURCES = ("all", "beets", "lidarr", "merged", "unmonitored")
+
+
+def _acq_row_album_type(row: Dict[str, Any]) -> str:
+    """Lidarr's albumType, else Beets' albumtype, lower case; "unknown" if neither."""
+    wanted = row.get("wanted") or {}
+    local = row.get("local") or {}
+    return _s(wanted.get("type") or local.get("albumtype") or "").strip().lower() or "unknown"
+
+
+def _acq_row_unmonitored(row: Dict[str, Any]) -> bool:
+    wanted = row.get("wanted") or {}
+    return bool(wanted) and wanted.get("monitored", True) is False
+
+
+def acquisition_queue_page(items: List[Dict[str, Any]], *, search: str = "", source: str = "all",
+                           album_types: Optional[set] = None, include_unmonitored: bool = False,
+                           sort: str = "sort_key") -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Filter and sort snapshot rows: ``(rows, album_type_counts)``. The
+    album-type counts are over the rows every other filter keeps."""
+    needle = search.casefold()
+    show_unmonitored = include_unmonitored or source == "unmonitored"
+    kept: List[Dict[str, Any]] = []
+    type_counts: Dict[str, int] = {}
+    for row in items:
+        sources = row.get("sources") or []
+        if not show_unmonitored and _acq_row_unmonitored(row) and not row.get("local"):
+            continue
+        if source == "merged" and len(sources) < 2:
+            continue
+        if source == "unmonitored" and not ("lidarr" in sources and _acq_row_unmonitored(row)):
+            continue
+        if source in ("beets", "lidarr") and source not in sources:
+            continue
+        if needle and not any(needle in _s(row.get(field) or "").casefold()
+                              for field in ("artist", "album", "year", "mbid")):
+            continue
+        kind = _acq_row_album_type(row)
+        type_counts[kind] = type_counts.get(kind, 0) + 1
+        if album_types and kind not in album_types:
+            continue
+        kept.append(row)
+    if sort == "year_desc":  # stable: equal years keep the snapshot's sort_key order
+        kept.sort(key=lambda row: _s(row.get("year") or "0000"), reverse=True)
+    return kept, type_counts
 
 
 _ACQ_DOWNLOAD_ALL_LAST_FILE = Path("/config/acquisition_download_all_last.json")

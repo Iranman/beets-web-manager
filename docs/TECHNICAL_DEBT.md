@@ -236,6 +236,17 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `TransactionSettings.automatic_approval_threshold` is stored and validated but nothing reads it.
 - Priority: P3. Status: Open.
 
+## ARCH-028 Find Music Snapshot Freshness (0.6.0 T2)
+
+- Affected area: `backend/acquisition_service.py` (Find Music list snapshot, `fetch_lidarr_wanted`).
+- Evidence: the list is now a snapshot built by the `acquisition-queue-build` job and rebuilt only by age (6 h) or Refresh (F7/F8). Lidarr's wanted list is read page by page; a page short of `totalRecords`, or fewer distinct albums in all than the last page's `totalRecords`, fails the build (QA #379 N3).
+- Current risk:
+  - A download or import does not remove its row from the snapshot until the next build, so a finished album can stay listed for up to 6 h (Download All's child job and the per-row `_acq_can_download` re-check still apply).
+  - Paging gap that remains: if Lidarr removes an album already read and, in the same read, the shift moves another album across a page boundary, the count still matches `totalRecords` while that one album is missing. It is rare (the list must change during a ~25 s read) and the next build includes the missed album.
+- Desired state: event-driven patching of the snapshot from our own download/import jobs, and, only if still needed, Lidarr `history/since` to drop rows Lidarr imported itself. A full read that is consistent by construction (re-read when `totalRecords` changed mid-read).
+- Safe migration approach: patch rows by `key` from job done-callbacks under `_acq_queue_lock`; keep the age-based rebuild as the backstop.
+- Priority: P3. Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
