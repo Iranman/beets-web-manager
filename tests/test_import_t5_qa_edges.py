@@ -206,9 +206,12 @@ class TrustedStoredReviewPathTests(_Base):
         super().setUp()
         self.other = self.root / "other"
         self.other.mkdir()
-        downloads, music = self.downloads, self.music
+        self.downloads2 = self.root / "downloads2"
+        self.downloads2.mkdir()
+        downloads, downloads2, music = self.downloads, self.downloads2, self.music
         self.patch(ser, "_import_review_cleanup_roots",
-                   lambda *, allow_music=False: [downloads] + ([music] if allow_music else []))
+                   lambda *, allow_music=False: [downloads, downloads2] + ([music] if allow_music else []))
+        self.patch(prs, "MUSIC_ROOT", music)
 
     def test_refusals(self):
         (self.downloads / "A").mkdir()
@@ -225,11 +228,23 @@ class TrustedStoredReviewPathTests(_Base):
 
     def test_accepts(self):
         (self.music / "Lib").mkdir()
-        os.symlink(self.music / "Lib", self.downloads / "intolib")
+        (self.downloads2 / "Alb").mkdir()
         self.assertEqual(prs._trusted_stored_review_path(str(self.downloads / "A" / ".." / "B")),
                          str(self.downloads / "B"))
-        self.assertEqual(prs._trusted_stored_review_path(str(self.downloads / "intolib")),
-                         str(self.downloads / "intolib"))  # #392: into another approved root
+        # #392: a symlink from one download root into another still matches.
+        os.symlink(self.downloads2 / "Alb", self.downloads / "todl2")
+        self.assertEqual(prs._trusted_stored_review_path(str(self.downloads / "todl2")),
+                         str(self.downloads / "todl2"))
+        # A real in-library path (no symlink) still matches.
+        self.assertEqual(prs._trusted_stored_review_path(str(self.music / "Lib")), str(self.music / "Lib"))
+
+    def test_low5_symlink_from_downloads_into_music_is_refused(self):
+        (self.music / "Lib" / "Deep").mkdir(parents=True)
+        os.symlink(self.music / "Lib", self.downloads / "intolib")
+        os.symlink(self.music / "Lib", self.downloads2 / "intolib2")
+        for raw in (self.downloads / "intolib", self.downloads / "intolib" / "Deep", self.downloads2 / "intolib2"):
+            with self.subTest(raw=str(raw)):
+                self.assertIsNone(prs._trusted_stored_review_path(str(raw)))
 
 
 class CompactJobAndLedgerTests(_Base):
