@@ -108,8 +108,14 @@ describe('Import Review: viewing an item makes no mutating request', () => {
 
   it('removes rejected files only after the button and the confirmation dialog', async () => {
     renderPage();
-    const button = await screen.findByRole('button', { name: /Remove 1 rejected file…/ });
-    fireEvent.click(button);
+    // The auto Find Match on first view keeps the action buttons disabled
+    // (busy) for a moment; a click then is ignored by design, so wait for it.
+    const enabledRemoveButton = async () => {
+      const btn = await screen.findByRole('button', { name: /Remove 1 rejected file…/ });
+      await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+      return btn;
+    };
+    fireEvent.click(await enabledRemoveButton());
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Quarantine Rejected Files')).toBeTruthy();
@@ -121,7 +127,7 @@ describe('Import Review: viewing an item makes no mutating request', () => {
     await settle();
     expect(mocked.cleanupReviewFiles).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: /Remove 1 rejected file…/ }));
+    fireEvent.click(await enabledRemoveButton());
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Quarantine 1 file' }));
     await waitFor(() => expect(mocked.cleanupReviewFiles).toHaveBeenCalledTimes(1));
     expect(mocked.cleanupReviewFiles).toHaveBeenCalledWith({
