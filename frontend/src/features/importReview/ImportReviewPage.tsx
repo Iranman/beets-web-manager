@@ -71,6 +71,9 @@ import type {
   FolderStatsResponse,
   ImportReviewFileCleanupResponse,
   ImportReviewManualIdResponse,
+  ImportReviewRevalidateJobStart,
+  ImportReviewRevalidateResponse,
+  ImportReviewRevalidateResult,
   ImportTargetPreviewResponse,
   JobStartResponse,
   LibraryMissingMbKind,
@@ -271,6 +274,38 @@ type PageResponse = {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A revalidation of more than 25 items runs as a job (#396): the start
+ * answer has a job_id and no counts. */
+function isRevalidateJobStart(response: ImportReviewRevalidateResponse): response is ImportReviewRevalidateJobStart {
+  return typeof (response as ImportReviewRevalidateJobStart).job_id === 'string'
+    && typeof (response as ImportReviewRevalidateResult).reviewed_count !== 'number';
+}
+
+export const REVALIDATE_JOB_STORAGE_KEY = 'importReview_revalidateJobId';
+const REVALIDATE_JOB_POLL_MS = 2500;
+
+/** Counts from a finished revalidation job, or null when the job result has
+ * none (a persisted result over 1 MB keeps only its scalar summary). */
+export function revalidateJobCounts(result: Record<string, unknown> | undefined | null): ImportReviewRevalidateResult | null {
+  if (!result) return null;
+  const summary = (result.summary as { scalars?: Record<string, unknown> } | undefined)?.scalars;
+  const source = typeof result.reviewed_count === 'number' ? result : summary;
+  if (!source || typeof source.reviewed_count !== 'number') return null;
+  const num = (value: unknown) => (typeof value === 'number' ? value : 0);
+  return {
+    ok: source.ok !== false,
+    reviewed_count: num(source.reviewed_count),
+    updated_count: num(source.updated_count),
+    queued_count: num(source.queued_count),
+    failed_count: num(source.failed_count),
+    items: Array.isArray(result.items) ? (result.items as ImportReviewRevalidateResult['items']) : [],
+  };
+}
+
+export function revalidateSummaryText(result: ImportReviewRevalidateResult): string {
+  return `Revalidated ${result.reviewed_count}; queued ${result.queued_count}; updated ${result.updated_count}; failed ${result.failed_count}.`;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -3541,7 +3576,9 @@ export function ImportReviewPage({
   // A new filter or search starts again at the first page.
   useEffect(() => { setOffset(0); }, [serverStatus, sourceFilter, debouncedQuery, evidenceOnly, kind]);
   useEffect(() => {
-    if (!active) return;
+    // Missing IDs: every read is a full Beets library read, so the list
+    // reloads only on Refresh, a filter/page change, or after a change succeeds.
+    if (!active || missingIdsMode) return;
     const id = window.setInterval(() => {
       if (document.hidden || confirmIntent || isEditableTarget(document.activeElement) || hasUnsavedManualId(manualValidations) || reviewInteractionIsExpanded()) return;
       void fetchPage()
@@ -3554,7 +3591,7 @@ export function ImportReviewPage({
         .catch(() => undefined);
     }, 60000);
     return () => window.clearInterval(id);
-  }, [active, confirmIntent, fetchPage, manualValidations]);
+  }, [active, confirmIntent, fetchPage, manualValidations, missingIdsMode]);
 
   const visibleItems = useMemo(() => {
     return items.filter((item) => {
@@ -3614,12 +3651,8 @@ export function ImportReviewPage({
     setConfirmIntent({ kind: 'revalidate', ids });
   }, [visibleItems]);
 
-  // Runs only from the confirm dialog: auto_enqueue may start imports for eligible items.
-  const handleRevalidateQueue = useCallback(async (ids: string[]) => {
-    setRevalidateBusy(true);
-    setRevalidateMsg(`Revalidating ${ids.length} review item${ids.length === 1 ? '' : 's'}...`);
-    try {
-      const result = await revalidateImportReview({ review_item_ids: ids, auto_enqueue: true, limit: ids.length });
+  // Applies a finished revalidation (synchronous answer or job result).
+  const applyRevalidateResult = useCallback(async (result: ImportReviewRevalidateResult, prefix = '') => {
       await loadQueue(true);
       const hydrated = (result.items ?? []).filter((row) => row.ok && !row.queued && row.selected_match);
       if (hydrated.length) {
@@ -3650,15 +3683,99 @@ export function ImportReviewPage({
           return next;
         });
       }
-      setRevalidateMsg(
-        `Revalidated ${result.reviewed_count ?? 0}; queued ${result.queued_count ?? 0}; updated ${result.updated_count ?? 0}; failed ${result.failed_count ?? 0}.`,
-      );
-    } catch (err) {
-      setRevalidateMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRevalidateBusy(false);
-    }
+      setRevalidateMsg(prefix + revalidateSummaryText(result));
   }, [loadQueue]);
+
+  // A large revalidation runs as a job (#396). Follow it until it ends, then
+  // report the job's own counts. The job id is kept in localStorage so a
+  // reload keeps following it. revalidateJobRef is cleared on unmount, which
+  // stops the loop without forgetting the job.
+  const revalidateJobRef = useRef<object | null>(null);
+  const followRevalidateJob = useCallback(async (jobId: string, how: 'started' | 'already_running' | 'resumed') => {
+    // A fresh token per follow: a second follow (or unmount) stops this loop.
+    const token = {};
+    revalidateJobRef.current = token;
+    try { localStorage.setItem(REVALIDATE_JOB_STORAGE_KEY, jobId); } catch { /* storage unavailable */ }
+    setRevalidateBusy(true);
+    setRevalidateMsg(
+      how === 'started'
+        ? `Revalidation is running as a background job (${jobId}). Results appear here when it finishes; you can keep working.`
+        : how === 'already_running'
+          ? `A revalidation is already running as a background job (${jobId}); nothing new was started. Following it; results appear here when it finishes.`
+          : `Following the background revalidation job (${jobId}); results appear here when it finishes.`,
+    );
+    let ended = false;
+    let errors = 0;
+    try {
+      for (;;) {
+        await wait(REVALIDATE_JOB_POLL_MS);
+        if (revalidateJobRef.current !== token) return;
+        let job: Awaited<ReturnType<typeof getJob>>;
+        try {
+          job = await getJob(jobId);
+          errors = 0;
+        } catch (err) {
+          errors += 1;
+          if (errors < 3) continue;
+          ended = true;
+          setRevalidateMsg(
+            `Could not check the background revalidation job (${jobId}): ${err instanceof Error ? err.message : String(err)}. It may still be running; check the Jobs page, then click Refresh.`,
+          );
+          return;
+        }
+        if (revalidateJobRef.current !== token) return;
+        if (job.status === 'running') continue;
+        ended = true;
+        const counts = job.status === 'success' ? revalidateJobCounts(job.result) : null;
+        if (counts) {
+          await applyRevalidateResult(counts, 'Background revalidation finished. ');
+        } else {
+          await loadQueue(true);
+          const lastLine = (job.log ?? []).filter(Boolean).slice(-1)[0];
+          setRevalidateMsg(
+            job.status === 'success'
+              ? 'Background revalidation finished, but the job reported no counts. The queue was reloaded; see the Jobs page for its log.'
+              : `Background revalidation ${job.status}${lastLine ? `: ${lastLine}` : ''}. Items it reached before stopping may already be updated or queued; the queue was reloaded. See the Jobs page for the log.`,
+          );
+        }
+        return;
+      }
+    } finally {
+      if (ended) {
+        try { localStorage.removeItem(REVALIDATE_JOB_STORAGE_KEY); } catch { /* storage unavailable */ }
+      }
+      if (revalidateJobRef.current === token) {
+        revalidateJobRef.current = null;
+        setRevalidateBusy(false);
+      }
+    }
+  }, [applyRevalidateResult, loadQueue]);
+
+  useEffect(() => {
+    if (missingIdsMode) return undefined;
+    let stored: string | null = null;
+    try { stored = localStorage.getItem(REVALIDATE_JOB_STORAGE_KEY); } catch { /* storage unavailable */ }
+    if (stored) void followRevalidateJob(stored, 'resumed');
+    return () => { revalidateJobRef.current = null; };
+  }, [followRevalidateJob, missingIdsMode]);
+
+  // Runs only from the confirm dialog: auto_enqueue may start imports for eligible items.
+  const handleRevalidateQueue = useCallback(async (ids: string[]) => {
+    setRevalidateBusy(true);
+    setRevalidateMsg(`Revalidating ${ids.length} review item${ids.length === 1 ? '' : 's'}...`);
+    try {
+      const result = await revalidateImportReview({ review_item_ids: ids, auto_enqueue: true, limit: ids.length });
+      if (isRevalidateJobStart(result)) {
+        // No counts yet: never report "Revalidated 0" for a job that only started.
+        void followRevalidateJob(result.job_id, result.already_running ? 'already_running' : 'started');
+        return;
+      }
+      await applyRevalidateResult(result);
+    } catch (err) {
+      setRevalidateMsg(`Revalidation failed: ${err instanceof Error ? err.message : String(err)}. Click Refresh to see the current queue, then try again.`);
+    }
+    setRevalidateBusy(false);
+  }, [applyRevalidateResult, followRevalidateJob]);
 
   // Target path preview — only for the active item
   useEffect(() => {
@@ -4404,6 +4521,11 @@ export function ImportReviewPage({
   const hasPrevPage = offset > 0;
   const hasNextPage = offset + REVIEW_PAGE_SIZE < total;
   const pageBucketFilter = filter !== 'all' && filter !== 'pending_ai' && filter !== 'skipped';
+  const resultsAnnouncement = error
+    ? ''
+    : total === 0
+      ? (debouncedQuery ? `No results for "${debouncedQuery}".` : 'No items.')
+      : `Showing ${pageStart} to ${pageEnd} of ${total}${debouncedQuery ? ` results for "${debouncedQuery}"` : ''}.`;
 
   const statusFilterLabel = filters.find((entry) => entry.id === filter)?.label ?? 'All';
   const sourceFilterLabel = originLabel(sourceFilter);
@@ -4724,6 +4846,10 @@ export function ImportReviewPage({
           </div>
           </>
           )}
+          {/* Screen readers hear page changes and search results (QA #395 F5). */}
+          <div role="status" aria-live="polite" className="sr-only">
+            {loading ? '' : resultsAnnouncement}
+          </div>
           {total > REVIEW_PAGE_SIZE || offset > 0 ? (
             <nav aria-label="Pages" className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-600">
               <span>Showing {pageStart}–{pageEnd} of {total}</span>

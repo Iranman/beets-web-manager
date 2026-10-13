@@ -176,7 +176,7 @@ describe('Intake: retry and recover actions confirm first', () => {
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(mocked.retryLibraryImportAllFailed).not.toHaveBeenCalled();
     await waitFor(() => expect(localStorage.getItem(JOB_KEY)).toBe('job2'));
-    expect(await screen.findByText(/Retry started for the failed folders/)).toBeTruthy();
+    expect(await screen.findByText(/Retry started for \d+ failed folders?\. Progress shows below\./)).toBeTruthy();
   });
 
   it('Retry failed imports: nothing to retry keeps the confirm button disabled', async () => {
