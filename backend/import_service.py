@@ -1613,12 +1613,26 @@ def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:
             raise RuntimeError(f"Could not record skipped import folders ({type(ex).__name__}).") from ex
 
 
+_IMPORT_LOG_TAIL_BYTES = 8 * 1024 * 1024
+
+
+def _read_log_tail(path: Any, max_bytes: int = _IMPORT_LOG_TAIL_BYTES) -> List[str]:
+    """The lines in the last ``max_bytes`` of a log, without reading the rest (F18)."""
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - max_bytes))
+            data = fh.read()
+    except FileNotFoundError:
+        return []
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    return lines[1:] if size > max_bytes else lines  # first line may be cut
+
+
 def _import_skipped_items(limit: int = 500, *, deep_scan: bool = True,
                           max_log_lines: int = 0) -> List[Dict[str, Any]]:
-    try:
-        lines = Path(LOG_FILE).read_text(errors="replace").splitlines()
-    except FileNotFoundError:
-        lines = []
+    # ponytail: only the last 8 MB of beet.log is scanned; older skips drop off.
+    lines = _read_log_tail(LOG_FILE)
     if max_log_lines > 0:
         lines = lines[-max_log_lines:]
 
