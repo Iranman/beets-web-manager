@@ -66,11 +66,13 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
         self.env_patcher.stop()
 
     def test_review_queue_fails_closed_503_on_beets_unavailable(self):
-        """Review queue must return HTTP 503 with ENGINE_UNAVAILABLE when engine is down."""
+        """Missing-IDs view must return HTTP 503 with ENGINE_UNAVAILABLE when engine is down.
+        (The import review queue no longer reads Beets; it stays 200.)"""
         with mock.patch("app.composite_workflows.get_unmatched_review_items") as mock_unmatched:
             mock_unmatched.side_effect = BeetsUnavailableError("Engine connection refused: [WinError 10061]")
 
-            response = self.client.get("/api/import/review-queue")
+            self.assertEqual(self.client.get("/api/import/review-queue").status_code, 200)
+            response = self.client.get("/api/library/missing-mb-ids")
 
             self.assertEqual(
                 response.status_code,

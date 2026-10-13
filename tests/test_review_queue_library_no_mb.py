@@ -115,8 +115,10 @@ class LibraryNoMbQueryTextFactoryTests(unittest.TestCase):
 
 class LibraryNoMbQuerySourceFixTests(unittest.TestCase):
     def test_query_now_uses_text_factory_bytes(self):
-        # Under ARCH-007, import_review_queue uses structured BeetsClient calls
-        self.assertIn("composite_workflows.get_unmatched_review_items", APP_SOURCE)
+        # Under ARCH-007 the rows come from structured BeetsClient calls; since
+        # the Review Queue split they are built by library_missing_mb_payload.
+        src = (ROOT / "backend" / "library_service.py").read_text(encoding="utf-8")
+        self.assertIn("composite_workflows.get_unmatched_review_items(limit=0", src)
 
 
 if __name__ == "__main__":

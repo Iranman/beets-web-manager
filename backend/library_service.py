@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, EDITABLE_FIELDS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, TORRENT_SOURCE_MOVE_ALLOWED, TORRENT_SOURCE_ROOTS, WEB_MANAGER_DATA_DIR, _ANSI_RE, _LITERAL_PLACEHOLDER_RE, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _s, _up, _ur
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE, _ai_evidence_clean_artist_guess, _ai_evidence_clean_segment, _ai_evidence_extract_year, _ai_evidence_scene_guess, _ai_evidence_weak_album_guess, _ai_evidence_weak_artist_guess, _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
-from backend.pending_review_store import _load_pending_reviews, _queue_folder_for_manual_review, _remove_pending_review_for_path
+from backend.pending_review_store import _apply_review_origin, _is_music_root_path, _load_pending_reviews, _queue_folder_for_manual_review, _remove_pending_review_for_path
 from backend.playlist_service import _artist_folder_merge_key, _safe_artist_folder_name
 from backend.import_reconciliation_service import _apply_artist_folder_reconcile_resilient
 from backend.cleanup_service import _album_cleanup_file_info, _album_cleanup_quality_tuple, _album_cleanup_remove_empty_tree, _album_cleanup_verified_same_file, _artist_alias_key, _unique_dest
@@ -26,10 +26,10 @@ import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
-from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
+from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from backend.musicbrainz_service import _artist_album_index, _artist_folder_key, _mb_artist_lookup_by_id, _mb_artist_search_one, _mb_canonical_for_artist_entries, _mb_release_has_tracks, _mb_release_search_by_folder_tracks
-from backend.serializers import _DOWNLOADS_ROOTS, _format_duration, _import_review_path_text_error, _leaked_db_paths_summary, _resolve_import_review_source_path
+from backend.serializers import _DOWNLOADS_ROOTS, _format_duration, _import_review_path_text_error, _leaked_db_paths_summary, _resolve_import_review_source_path, _review_origin_payload
 from backend.plex_service import _trigger_plex_refresh
 
 from backend.artwork_service import _art_repair_build_report, _art_repair_save_last, _repair_album_art
@@ -80,7 +80,12 @@ def _album_folder_for_album_id(album_id: int) -> str:
         items,
         key=lambda it: (int(it.get("disc") or 1), int(it.get("track") or 0), int(it.get("id") or 0)),
     )
-    raw = _s(sorted_items[0].get("path") or "")
+    return _album_folder_from_item_path(sorted_items[0].get("path"))
+
+
+def _album_folder_from_item_path(item_path: Any) -> str:
+    """The album folder of one item path: its parent, with a Disc/CD folder collapsed."""
+    raw = _s(item_path or "")
     if not raw:
         return ""
     fpath = Path(raw)
@@ -4494,3 +4499,171 @@ _STAMP_DB_PATH_COLUMNS = {
     ("items", "path"),
     ("albums", "artpath"),
 }
+
+
+# ── Library: missing MusicBrainz IDs (Review Queue split, audit F5/F6) ────────
+
+MISSING_MB_KINDS = ("all", "album", "item")
+MISSING_MB_SORTS = ("added_desc", "added_asc", "artist", "title")
+MISSING_MB_MOVED_TO = "/api/library/missing-mb-ids"
+
+
+def _missing_mb_album_row(r: Dict[str, Any]) -> Dict[str, Any]:
+    folder = _album_folder_from_item_path(r.get("first_item_path"))
+    album = _s(r.get("album"))
+    albumartist = _s(r.get("albumartist"))
+    return {
+        "id": f"album:{r['id']}",
+        "type": "library_no_mb",
+        "target_kind": "album",
+        "status": "Needs MB ID",
+        "status_key": "needs_mb_id",
+        "missing_id_type": "Release ID",
+        "title": album or "(unknown album)",
+        "artist": albumartist,
+        "album": album,
+        "albumartist": albumartist,
+        "year": int(r.get("year") or 0),
+        "album_id": int(r["id"]),
+        "item_id": 0,
+        "first_item_id": int(r.get("first_item_id") or 0),
+        "tracks": int(r.get("tracks") or 0),
+        "path": folder,
+        "folder": str(Path(folder).parent) if folder else "",
+        "folder_name": Path(folder).name if folder else "",
+        "sort_ts": float(r.get("added") or 0),
+    }
+
+
+def _missing_mb_item_row(r: Dict[str, Any]) -> Dict[str, Any]:
+    item_path = _s(r.get("path"))
+    abs_path = item_path if item_path.startswith("/") else str(MUSIC_ROOT / item_path)
+    title = _s(r.get("title"))
+    artist = _s(r.get("artist"))
+    albumartist = _s(r.get("albumartist"))
+    album = _s(r.get("album"))
+    year = int(r.get("year") or 0)
+    track_number = int(r.get("track") or 0)
+    duration_seconds = float(r.get("length") or 0)
+    mb_trackid = _s(r.get("mb_trackid"))
+    mb_albumid = _s(r.get("mb_albumid"))
+    return {
+        "id": f"item:{int(r['id'])}",
+        "type": "library_no_mb",
+        "target_kind": "item",
+        "status": "Needs recording ID",
+        "status_key": "needs_mb_id",
+        "missing_id_type": "Recording ID",
+        "title": title or Path(abs_path).stem or "(unknown title)",
+        "artist": artist,
+        "album": album,
+        "albumartist": albumartist,
+        "year": year,
+        "track": track_number or "",
+        "duration": _format_duration(duration_seconds),
+        "duration_seconds": duration_seconds,
+        "mb_trackid": mb_trackid,
+        "mb_albumid": mb_albumid,
+        "album_id": 0,
+        "item_id": int(r["id"]),
+        "first_item_id": int(r["id"]),
+        "tracks": 1,
+        "path": abs_path,
+        "folder": str(Path(abs_path).parent),
+        "folder_name": Path(abs_path).parent.name,
+        "sort_ts": float(r.get("added") or 0),
+        "evidence": {
+            "missing_id_type": "Recording ID",
+            "current": {
+                "filename": Path(abs_path).name,
+                "source_path": abs_path,
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "albumartist": albumartist,
+                "year": str(year) if year else "",
+                "track": track_number or "",
+                "disc": int(r.get("disc") or 0) or "",
+                "duration_seconds": duration_seconds,
+                "duration": _format_duration(duration_seconds),
+                "mb_trackid": mb_trackid,
+                "mb_albumid": mb_albumid,
+            },
+            "fingerprint": {"status": "not_checked", "acoustid_status": "not_checked"},
+            "recording_candidates": [],
+        },
+    }
+
+
+_MISSING_MB_SORT_KEYS = {
+    "added_desc": lambda r: (-r["sort_ts"], r["id"]),
+    "added_asc": lambda r: (r["sort_ts"], r["id"]),
+    "artist": lambda r: (_s(r.get("artist")).casefold(), _s(r.get("title")).casefold(), r["id"]),
+    "title": lambda r: (_s(r.get("title")).casefold(), _s(r.get("artist")).casefold(), r["id"]),
+}
+
+
+def library_missing_mb_payload(*, kind: str = "all", search: str = "", offset: int = 0,
+                               limit: int = 100, sort: str = "added_desc") -> Dict[str, Any]:
+    """Library albums (no Release ID) and singleton items (no Recording ID)
+    under MUSIC_ROOT, as review rows. One full ``get_items`` + ``get_albums``
+    read per call; no per-album Beets calls (F6). The whole list is built and
+    sorted before the page is sliced, so ``total``/``counts`` are real (F5).
+
+    ``counts`` are per kind after the search filter; ``total`` is the row
+    count after search and kind. Beets errors propagate to the route.
+    """
+    unmatched = composite_workflows.get_unmatched_review_items(limit=0, offset=0, include_singletons=True)
+
+    claimed: set = set()
+    for pending in _load_pending_reviews(prune_resolved=False):
+        for aid in ((pending.get("suggestion") or {}).get("existing_album_ids") or []):
+            try:
+                claimed.add(int(aid))
+            except (TypeError, ValueError):
+                pass
+    suggestions = _load_album_mb_suggestions() or {}
+
+    rows: List[Dict[str, Any]] = []
+    for r in unmatched.get("albums", []):
+        if not _is_music_root_path(r.get("first_item_path") or ""):
+            continue
+        row = _missing_mb_album_row(r)
+        row["in_import_review"] = row["album_id"] in claimed
+        stored = suggestions.get(str(row["album_id"]))
+        if stored:
+            row.update({
+                "mb_albumid": stored.get("mb_albumid", ""),
+                "mb_releasegroupid": stored.get("mb_releasegroupid", ""),
+                "mb_releasegroupurl": stored.get("mb_releasegroupurl", ""),
+                "confidence": stored.get("confidence", ""),
+                "reason": stored.get("reason", ""),
+                "mb_valid": bool(stored.get("mb_valid")),
+                "mb_url": stored.get("mb_url", ""),
+                "top_candidates": stored.get("top_candidates") or [],
+                "preflight": stored.get("preflight"),
+            })
+        rows.append(row)
+    for r in unmatched.get("singletons", []):
+        if not _is_music_root_path(_s(r.get("path"))):
+            continue
+        row = _missing_mb_item_row(r)
+        row["in_import_review"] = False
+        rows.append(row)
+
+    needle = _s(search).strip().casefold()
+    if needle:
+        rows = [r for r in rows if needle in " ".join(
+            _s(r.get(f)) for f in ("title", "artist", "album", "path")).casefold()]
+
+    counts = Counter(r["target_kind"] for r in rows)
+    counts_out = {"all": len(rows), "album": counts.get("album", 0), "item": counts.get("item", 0)}
+    if kind != "all":
+        rows = [r for r in rows if r["target_kind"] == kind]
+    rows.sort(key=_MISSING_MB_SORT_KEYS[sort])
+    page = rows[offset:offset + limit] if limit else []
+    for row in page:
+        _apply_review_origin(row, _review_origin_payload(row["path"], row, item=row,
+                                                         evidence=row.get("evidence") or {}))
+    return {"ok": True, "items": page, "total": len(rows), "offset": offset, "limit": limit,
+            "counts": counts_out}

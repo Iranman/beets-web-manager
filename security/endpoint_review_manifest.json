@@ -1174,6 +1174,23 @@
     },
     {
       "method": "GET",
+      "endpoint": "library_missing_mb_ids",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Read-only page of library albums and singleton items missing MusicBrainz IDs (moved out of the import review queue).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
       "endpoint": "library_scan_status",
       "security_classification": "ADMIN_ONLY",
       "purpose": "library scan status",
