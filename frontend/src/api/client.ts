@@ -83,6 +83,8 @@ import type {
   ReimportDiskPayload,
   ReviewQueueParams,
   ReviewQueueResponse,
+  LibraryMissingMbParams,
+  LibraryMissingMbResponse,
   RgidGroupDetailResponse,
   FolderPlaceholderReview,
   FolderPlaceholderMergePreview,
@@ -255,12 +257,23 @@ export function getReviewQueue(options: number | ReviewQueueParams = 500): Promi
     params.set('limit', String(options));
   } else {
     params.set('limit', String(options.limit ?? 500));
+    if (options.offset) params.set('offset', String(options.offset));
     if (options.status && options.status !== 'all') params.set('status', options.status);
     if (options.origin_type && options.origin_type !== 'all') params.set('origin_type', options.origin_type);
     if (options.search?.trim()) params.set('search', options.search.trim());
     if (options.evidence_only) params.set('evidence_only', 'true');
   }
   return apiJson<ReviewQueueResponse>(`/api/import/review-queue?${params.toString()}`);
+}
+
+export function getLibraryMissingMbIds(options: LibraryMissingMbParams = {}): Promise<LibraryMissingMbResponse> {
+  const params = new URLSearchParams();
+  params.set('limit', String(options.limit ?? 100));
+  if (options.offset) params.set('offset', String(options.offset));
+  if (options.kind && options.kind !== 'all') params.set('kind', options.kind);
+  if (options.search?.trim()) params.set('search', options.search.trim());
+  if (options.sort) params.set('sort', options.sort);
+  return apiJson<LibraryMissingMbResponse>(`/api/library/missing-mb-ids?${params.toString()}`);
 }
 
 export interface CleanupStaleResponse {

@@ -39,7 +39,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - 0.7.0 (IMPLEMENTED, CI pending; not live verified): the batch import no longer starts a raw thread per folder for AI suggestions (F11). Its folders run one after another inside the batch's `job_engine` job, so `backend/ai_service.py` has no `threading.Thread` site left and was removed from that pin list. A restart requeues every unfinished folder (`requeued by recovery`), so recovery never trusts a cached per-folder decision.
 - Remaining (why this is not Closed):
   - Resume is still each workflow's own: Clean All and playlist download resume from their own checkpoint files, AI batch from its state store. The contract makes the position visible in the job record; it does not resume a job. A restart still leaves the job `recovery_required` for the operator.
-  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, folder and root repairs, Release-Group relinks, resolver jobs). They now have the request-level guard above, but no per-resource lock: two *different* requests that touch the same album (e.g. rename, then fix-metadata) can still run together, serialized only by the webmanager plugin's global `mutation_lock`. Specific guards on top of the request guard: Move All / MBSync All `dedupe_key`; Clean All `dedupe_key: workflow:maintenance-runner` (atomic start, D1) plus the `workflow:` lock at run time; duplicate maintenance `dedupe_key: workflow:maintenance-duplicates`; `POST /api/import` `dedupe_key: import-source:<path>` (D2); dedup scan/cleanup still only `_running_job_of_type` across types. Import `albums_imported` is the library album-count delta, so imports of *different* folders running together can still over-count each other (composite_workflows.reimport_source; needs a per-import count from the plugin). Across processes, all of them rely on `recovery_required`.
+  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, folder and root repairs, Release-Group relinks, resolver jobs). They now have the request-level guard above, but no per-resource lock: two *different* requests that touch the same album (e.g. rename, then fix-metadata) can still run together, serialized only by the webmanager plugin's global `mutation_lock`. Specific guards on top of the request guard: Move All / MBSync All `dedupe_key`; Clean All `dedupe_key: workflow:maintenance-runner` (atomic start, D1) plus the `workflow:` lock at run time; duplicate maintenance `dedupe_key: workflow:maintenance-duplicates`; `POST /api/import` `dedupe_key: import-source:<path>` (D2); Import Review revalidate-all (`import-review-revalidate`, also for more than 25 ids; it used to run up to 2000 items on the request thread) and the ready-items auto-import job (`import-review-auto-enqueue-ready`) each carry a `type` and a `dedupe_key` (0.7.0 F10); dedup scan/cleanup still only `_running_job_of_type` across types. Import `albums_imported` is the library album-count delta, so imports of *different* folders running together can still over-count each other (composite_workflows.reimport_source; needs a per-import count from the plugin). Across processes, all of them rely on `recovery_required`.
   - The frontend does not send `Idempotency-Key` yet, so a retry after a job *finished* starts it again; a retry while it runs is refused.
   - Jobs are durable only when `WEB_MANAGER_DATA_DIR` is set explicitly (every shipped Compose file does) or `BEETS_WEB_DURABLE_JOBS=1`.
   - A hook-created transaction whose job ends `recovery_required` is synced to `Failed`, not `Recovery Required` (`TransactionStore.update_from_job`). This is library-transaction work. (A Running transaction no recovery family covers is moved to Recovery Required by the startup sweep since 0.4.1, #266 item 3.)
@@ -242,12 +242,37 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 
 - Affected area: `backend/acquisition_service.py` (Find Music list snapshot, `fetch_lidarr_wanted`).
 - Evidence: the list is now a snapshot built by the `acquisition-queue-build` job and rebuilt only by age (6 h) or Refresh (F7/F8). Lidarr's wanted list is read page by page; a page short of `totalRecords`, or fewer distinct albums in all than the last page's `totalRecords`, fails the build (QA #379 N3).
+- Narrowed in 0.7.0:
+  - A Find Music download (row or Download All) whose import put the album into the library (`album_ids` from the reimport job; not Pending Review, an in-place repair or an already-complete album) now drops its row from the snapshot at once (`acquisition_queue_mark_done`, matched by key, the row's MBID or local album id). A build already running when the download finished drops it too. The first `POST /api/acquisition/queue/refresh` with `after_download: true` within 120 s of such a patch reuses the patched snapshot (`reused: true`), so the UI's refresh after each download no longer walks every Lidarr page (F2). A Refresh without that flag (a user's click) always rebuilds.
+  - The paging gap (QA #385 N2) is closed for the common case: a pass during which `totalRecords` moved is read once more, and only a second moving pass falls back to the count check.
 - Current risk:
-  - A download or import does not remove its row from the snapshot until the next build, so a finished album can stay listed for up to 6 h (Download All's child job and the per-row `_acq_can_download` re-check still apply).
-  - Paging gap that remains: if Lidarr removes an album already read and, in the same read, the shift moves another album across a page boundary, the count still matches `totalRecords` while that one album is missing. It is rare (the list must change during a ~25 s read) and the next build includes the missed album.
-- Desired state: event-driven patching of the snapshot from our own download/import jobs, and, only if still needed, Lidarr `history/since` to drop rows Lidarr imported itself. A full read that is consistent by construction (re-read when `totalRecords` changed mid-read).
-- Safe migration approach: patch rows by `key` from job done-callbacks under `_acq_queue_lock`; keep the age-based rebuild as the backstop.
-- Priority: P3. Status: Open.
+  - Downloads and imports started outside Find Music (Discography, Wanted, Import page) patch the snapshot only when their payload names a listed row's MBID or album id; Lidarr's own imports are not patched. Those rows stay listed until the next build (6 h at most, or Refresh).
+  - A download that imports only part of an album also drops the row; the next build lists it again.
+  - An import that repaired an existing album in place or found it already complete leaves its row listed until the next build.
+  - If Lidarr removes one album and adds another between two page reads, `totalRecords` does not move and a row can still be missed until the next build.
+- Desired state: Lidarr `history/since` to drop rows Lidarr imported itself, if still needed.
+- Priority: P3. Status: Open (narrowed).
+
+## ARCH-031 Cold `/api/library` Build Cost
+
+- Affected area: `backend/library_service.py` `_build_library_payload` (cold `GET /api/library`, the 2-minute cache warmer, and the Find Music build's library read), `backend/beets_adapter.py` `get_items`/`get_albums`.
+- Evidence: the live instance took about 98 s for a cold `GET /api/library` on 0.5.0 and 0.6.0. In code, the builder did one `stat` per Beets item (`Path.exists`), one per walked entry (`is_dir`/`is_file` after `iterdir`), and up to six cover-art `exists` probes per album folder, and it matched missing-file buckets by scanning every bucket for every album folder and every artist (quadratic).
+- Measured on a local synthetic fixture (`python:3.13-slim` container, fixture in the container's own /tmp, Beets faked, so the Beets HTTP fetch is not included):
+
+  | Fixture | Before | After | `stat` calls before / after |
+  |---|---|---|---|
+  | 1,000 artists, 5,000 albums, 60,000 items, 0 missing | 5.8 s | 3.6 s | 161,001 / 1 |
+  | 1,000 artists, 5,000 albums, 64,000 items, 4,000 missing albums | 10.0 s | 4.4 s | 165,001 / 4,001 |
+  | 2,000 artists, 10,000 albums, 128,000 items, 8,000 missing albums | 27.3 s | 9.0 s | 330,001 / 8,001 |
+
+  The payload is byte-identical before and after on a fixture with cover art, disc sub-folders, loose files, not-imported extras and missing tracks in present folders.
+- Fixed in 0.7.0: each folder is listed once with `os.scandir` and that listing answers both the item existence check and the walk (only items not found in their folder's listing are `stat`-ed). Missing buckets are indexed by artist.
+- Current risk:
+  - On a cold page cache each `stat` reaches the disk, so the remaining cost on a NAS is about one directory read per folder plus one `stat` per missing item. It was not measured on the live instance.
+  - The two full Beets reads (`GET /item/` and `GET /album/` through the webmanager plugin) serialise every item and album on each build. They were not measurable locally and are likely a large part of the remaining time on a big library. A fields-limited plugin endpoint would cut that (owner beets-integration-engineer).
+  - The build still runs on the request thread whenever the cache is older than `_LIB_CACHE_TTL` (180 s). The 2-minute warmer (`maintenance_service._auto_scan_tick`) runs only with `BEETS_ENABLE_LEGACY_LOCAL_SCAN`, which is off by default, so with default settings the first `GET /api/library` after any 3-minute gap pays the whole build, not only the first one after a restart.
+- Desired state: stale-while-revalidate as for the Find Music list (serve the last payload, rebuild in a `job_engine` job), and Beets reads that fetch only the fields the builder uses.
+- Priority: P2. Status: Open (narrowed).
 
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 

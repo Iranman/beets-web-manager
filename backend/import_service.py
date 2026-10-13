@@ -12,7 +12,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
-from backend.pending_review_store import _library_album_ids_for_folder, _queue_folder_for_manual_review, _remove_pending_review_for_path
+from backend.pending_review_store import _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
@@ -1568,49 +1568,6 @@ def _resolve_import_review_db_music_path(
         expected_type=expected_type,
         require_exists=require_exists,
     )
-
-
-# Folders Beets skipped during a Web Manager import. /webmanager/import runs
-# Beets' importer without an import log, so beet.log never names them.
-_IMPORT_SKIPPED_FILE = Path(os.environ["WEB_MANAGER_DATA_DIR"]) / "import_skipped.json"
-
-
-_import_skipped_lock = threading.Lock()
-
-
-def _load_recorded_import_skips() -> List[Dict[str, Any]]:
-    try:
-        rows = json.loads(_IMPORT_SKIPPED_FILE.read_text())
-    except (OSError, ValueError):
-        return []
-    if not isinstance(rows, list):
-        return []
-    return [r for r in rows if isinstance(r, dict) and _s(r.get("path"))]
-
-
-def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:
-    """Replace the recorded skips under ``source`` with this import's skips:
-    one entry per folder, so a re-import never duplicates one and a folder
-    that has since imported drops out."""
-    src = _s(source)
-    now = int(time.time())
-    fresh: Dict[str, Dict[str, Any]] = {}
-    for r in skipped:
-        path = _s(r.get("path"))
-        if path:
-            fresh[path] = {"path": path, "reason": _s(r.get("reason")) or "not_matched",
-                           "source": src, "skipped_at": now}
-    with _import_skipped_lock:
-        kept = [r for r in _load_recorded_import_skips()
-                if r["path"] not in fresh and not Path(r["path"]).is_relative_to(src)]
-        rows = (list(fresh.values()) + kept)[:1000]
-        try:
-            _IMPORT_SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _IMPORT_SKIPPED_FILE.with_name(_IMPORT_SKIPPED_FILE.name + ".tmp")
-            tmp.write_text(json.dumps(rows, indent=2))
-            os.replace(tmp, _IMPORT_SKIPPED_FILE)
-        except OSError as ex:
-            raise RuntimeError(f"Could not record skipped import folders ({type(ex).__name__}).") from ex
 
 
 _IMPORT_LOG_TAIL_BYTES = 8 * 1024 * 1024

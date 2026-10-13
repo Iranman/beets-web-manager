@@ -189,10 +189,12 @@ class CacheFileTests(_CacheCase):
 
     def test_missing_file_is_empty_and_a_read_starts_a_build(self):
         self._reload()
+        release = self._hold_builds()
         status, body = self._get("?limit=10")
         self.assertEqual(status, 200)
         self.assertEqual((body["items"], body["total"]), ([], 0))
         self.assertIn(body["cache"]["state"], ("building", "empty"))
+        release.set()
         self.store.get(body["cache"]["job_id"])._thread.join(10)
         self.assertEqual(self._get("?limit=10")[1]["total"], 250)
 
@@ -224,8 +226,10 @@ class CacheFileTests(_CacheCase):
         data["built_at"] = time.time() - 7 * 3600
         self.cache_file.write_text(json.dumps(data), encoding="utf-8")
         self._reload()
+        release = self._hold_builds()
         status, body = self._get("?limit=1")
         self.assertEqual((status, body["total"], body["cache"]["state"]), (200, 250, "stale"))
+        release.set()
         self.store.get(body["cache"]["job_id"])._thread.join(10)
         self.assertEqual(self._get("?limit=1")[1]["cache"]["state"], "ready")
 
@@ -270,7 +274,7 @@ class PagingBoundsTests(_CacheCase):
 
     def test_empty_params_use_defaults(self):
         status, body = self._get("?offset=&limit=&source=&sort=&album_type=")
-        self.assertEqual((status, body["offset"], body["limit"], body["total"]), (200, 0, None, 250))
+        self.assertEqual((status, body["offset"], body["limit"], body["total"]), (200, 0, 500, 250))
 
 
 class FilterCountTests(_CacheCase):
@@ -388,14 +392,13 @@ class NoRequestThreadBuildTests(_CacheCase):
         with mock.patch.object(base.routes.jobs, "start_python", started):
             self.client.post("/api/acquisition/download-all", json={})  # no snapshot: starts a build
         self._join_all()
-        self.client.get("/api/acquisition/queue?limit=1&refresh=1")
-        self._join_all()
+
         self.client.post("/api/acquisition/queue/refresh", json={})
         self._join_all()
         _acq()._acq_queue["snapshot"] = dict(_acq()._acq_queue["snapshot"], built_at=1.0)
         self.client.get("/api/acquisition/queue?limit=1")
         self._join_all()
-        self.assertEqual(len(self.build_threads), 4)
+        self.assertEqual(len(self.build_threads), 3)
         self.assertNotIn(me, self.build_threads)
         self.assertNotIn(me, [t.ident for _, t in self.library_calls])
 
@@ -404,20 +407,21 @@ class LidarrShrinkDuringFetchTests(unittest.TestCase):
     """A wanted row removed from an earlier page while paging shifts a still-wanted
     row out of both pages; distinct records then equal the final totalRecords."""
 
-    @unittest.expectedFailure  # QA #385 finding N2: reported complete with a row missing
-    def test_removal_between_pages_is_not_complete(self):
+    def test_removal_between_pages_is_not_complete(self):  # QA #385 N2: fixed by the re-read (ARCH-028)
         import tests.test_integrations_reliability as tir
         acq = _acq()
         page1 = [dict(tir._WANTED, id=i) for i in range(1, 4)]  # ids 1-3 of 6
         page2 = [dict(tir._WANTED, id=i) for i in (5, 6)]       # id 2 removed: id 4 shifted onto page 1
-        responses = [tir._wanted_page(page1, total=6), tir._wanted_page(page2, total=5)]
+        # The total moved during the pass, so it is read again; the re-read is stable.
+        reread = [tir._wanted_page([dict(tir._WANTED, id=i) for i in (1, 3, 4)], total=5),
+                  tir._wanted_page(page2, total=5)]
+        responses = [tir._wanted_page(page1, total=6), tir._wanted_page(page2, total=5)] + reread
         with mock.patch.object(acq, "LIDARR_KEY", "k"), \
                 mock.patch.object(acq, "LIDARR_URL", "http://lidarr.test:8686"), \
                 mock.patch.object(acq, "_LIDARR_WANTED_PAGE_SIZE", 3), \
                 mock.patch.object(tir.urllib.request, "urlopen", side_effect=responses):
             rows, error = acq.fetch_lidarr_wanted()
-        self.assertTrue(error or 4 in [row["lidarr_id"] for row in rows],
-                        (error, [row["lidarr_id"] for row in rows]))
+        self.assertEqual((error, sorted(row["lidarr_id"] for row in rows)), ("", [1, 3, 4, 5, 6]))
 
 
 if __name__ == "__main__":

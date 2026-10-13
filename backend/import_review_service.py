@@ -12,7 +12,7 @@ from backend.ai_service import _compact_track_ai_candidate, _run_ai_release_pref
 from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD, _IMPORT_REVIEW_IMPORTABLE_STATUSES, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_review_confidence_score, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import _album_folder_for_album_id, _folder_import_track_count, _target_preview_year
 from backend.ai_evidence_service import _enrich_track_ai_candidate
-from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews
+from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _trusted_stored_review_path
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _import_review_auto_job_for_key, _resolve_import_review_selected_audio_file, _review_paths_equal, _review_status_key
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _redact_security_text
@@ -949,6 +949,9 @@ def _pending_item_is_ready_for_backend_auto_import(item: Dict[str, Any]) -> bool
     return bool((item or {}).get("path"))
 
 
+_UNTRUSTED_STORED_REVIEW_PATH = "Stored review path is not under an approved import root."
+
+
 def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
                                                 log: Optional[List[str]] = None,
                                                 cancel_event=None) -> Dict[str, Any]:
@@ -967,6 +970,12 @@ def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
             if queued >= limit:
                 break
             path = _s((item or {}).get("path")).strip()
+            if path and _trusted_stored_review_path(path) is None:
+                skipped += 1
+                results.append({"path": path, "queued": False, "reason": _UNTRUSTED_STORED_REVIEW_PATH})
+                if log is not None:
+                    log.append(f"Skipped a review item: {_UNTRUSTED_STORED_REVIEW_PATH}")
+                continue
             if not _pending_item_is_ready_for_backend_auto_import(item):
                 skipped += 1
                 continue
@@ -1271,3 +1280,171 @@ def _redact_unmatched_draft_tracks(tracks: Any) -> List[Dict[str, str]]:
             for field in _UNMATCHED_DRAFT_TRACK_FIELDS
         })
     return result
+
+
+# Revalidating more items than this runs as a tracked job, never on the
+# request thread (F10, ADR-0005).
+IMPORT_REVIEW_REVALIDATE_SYNC_MAX = 25
+IMPORT_REVIEW_REVALIDATE_JOB_TYPE = "import-review-revalidate"
+
+
+def _run_import_review_revalidation(review_ids: Iterable[str], *, auto_enqueue: bool = False,
+                                    limit: int = 2000, log: Optional[List[str]] = None,
+                                    cancel_event=None) -> Dict[str, Any]:
+    """Re-run the track comparison and acoustic preflight for pending review
+    items (all of them when ``review_ids`` is empty), persist the refreshed
+    match, and queue eligible items when ``auto_enqueue``. Per-item errors
+    are fixed text; exception detail goes to the server log only (F17)."""
+    review_ids = set(review_ids or ())
+    pending = _load_pending_reviews()
+    results: List[Dict[str, Any]] = []
+    reviewed = updated = queued = failed = 0
+
+    for item in pending:
+        if reviewed >= limit:
+            break
+        if cancel_event and cancel_event.is_set():
+            if log is not None:
+                log.append("[cancelled]")
+            break
+        item = item if isinstance(item, dict) else {}
+        path = _s(item.get("path")).strip()
+        review_item_id = f"pending:{path}" if path else ""
+        if review_ids and review_item_id not in review_ids and path not in review_ids:
+            continue
+        reviewed += 1
+        try:
+            suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
+            release_group_id = _extract_mb_uuid(
+                _s(suggestion.get("mb_releasegroupid") or item.get("mb_releasegroupid"))
+            )
+            representative_release_id = _extract_mb_uuid(
+                _s(suggestion.get("representative_mb_albumid") or suggestion.get("mb_albumid"))
+            )
+            if not path or (not representative_release_id and not release_group_id):
+                failed += 1
+                results.append({
+                    "ok": False,
+                    "review_item_id": review_item_id,
+                    "path": path,
+                    "error": "Review item has no source path or MusicBrainz Release Group ID.",
+                })
+                continue
+            comparison = _candidate_track_comparison_payload(
+                representative_release_id,
+                path,
+                release_group_id=release_group_id,
+            )
+            if not comparison.get("ok"):
+                failed += 1
+                results.append({
+                    "ok": False,
+                    "review_item_id": review_item_id,
+                    "path": path,
+                    "error": comparison.get("error") or "Track comparison failed.",
+                })
+                continue
+            representative_release_id = _extract_mb_uuid(
+                _s(comparison.get("representative_release_id") or comparison.get("mb_albumid") or representative_release_id)
+            )
+            try:
+                existing_album_id = int((suggestion.get("existing_album_ids") or [0])[0] or 0)
+            except (TypeError, ValueError, IndexError, KeyError):
+                existing_album_id = 0
+            acoustic_preflight = _run_ai_release_preflight(
+                path,
+                representative_release_id,
+                existing_album_id=existing_album_id,
+            ) if representative_release_id else None
+            preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
+            selected_match = _import_review_build_revalidated_match(item, comparison, preflight)
+            note = selected_match.get("preflight_reason", "")
+            if _update_pending_review_revalidation(path, selected_match, preflight, note):
+                updated += 1
+            auto_payload = {
+                "path": path,
+                "review_item_id": review_item_id,
+                "mb_albumid": selected_match.get("representative_release_id", ""),
+                "mb_releasegroupid": selected_match.get("release_group_id", ""),
+                "artist": selected_match.get("artist", ""),
+                "album": selected_match.get("album", ""),
+                "year": selected_match.get("year", ""),
+                "existing_album_id": existing_album_id,
+                "track_mapping": selected_match.get("track_mapping") or [],
+                "selected_match": selected_match,
+                "confidence_score": selected_match.get("confidence_score"),
+                "ai_suggestion": suggestion,
+            }
+            eligibility = evaluate_import_eligibility(auto_payload)
+            result = {
+                "ok": True,
+                "review_item_id": review_item_id,
+                "path": path,
+                "selected_match": selected_match,
+                "eligibility": eligibility,
+                "queued": False,
+            }
+            if auto_enqueue and eligibility.get("eligible"):
+                try:
+                    with _import_review_auto_lock:
+                        queue_result = _import_review_start_auto_import(auto_payload, eligibility)
+                    result.update({
+                        "queued": bool(queue_result.get("queued")),
+                        "job_id": queue_result.get("job_id", ""),
+                        "existing_job": bool(queue_result.get("existing_job")),
+                    })
+                    queued += 1 if result.get("queued") else 0
+                except Exception as ex:
+                    failed += 1
+                    _app_logger.warning("import review revalidate: queueing %r failed: %s", path, type(ex).__name__)
+                    result.update({"ok": False, "error": "Could not queue this import.", "queued": False})
+            results.append(result)
+            if log is not None:
+                log.append(f"{Path(path).name or path}: {'queued' if result.get('queued') else ('failed' if not result['ok'] else 'revalidated')}")
+
+        except Exception as ex:
+            # LOW-3: one bad stored item never aborts the job, and the job
+            # log/result carry fixed text, never the exception string.
+            failed += 1
+            _app_logger.warning("import review revalidate: item %r failed: %s", path, type(ex).__name__)
+            results.append({"ok": False, "review_item_id": review_item_id, "path": path,
+                            "error": "Could not revalidate this item."})
+            if log is not None:
+                log.append(f"{Path(path).name or path}: failed")
+    summary = {
+        "ok": True,
+        "reviewed_count": reviewed,
+        "updated_count": updated,
+        "queued_count": queued,
+        "failed_count": failed,
+        "items": results,
+    }
+    if log is not None:
+        log.append(f"Revalidated {reviewed}; updated {updated}; queued {queued}; failed {failed}.")
+    return summary
+
+
+IMPORT_REVIEW_REVALIDATE_JOB_ITEMS_MAX = 200
+
+
+def _compact_revalidation_summary(summary: Dict[str, Any],
+                                  cap: int = IMPORT_REVIEW_REVALIDATE_JOB_ITEMS_MAX) -> Dict[str, Any]:
+    """The persisted job result (QA N3): counts plus at most ``cap`` rows of
+    id, path, status and error -- no selected_match or track mapping."""
+    items = summary.get("items") or []
+    rows = []
+    for row in items[:cap]:
+        if not row.get("ok"):
+            status = "failed"
+        elif row.get("queued"):
+            status = "queued"
+        elif (row.get("eligibility") or {}).get("eligible"):
+            status = "eligible"
+        else:
+            status = "revalidated"
+        rows.append({"review_item_id": row.get("review_item_id", ""), "path": row.get("path", ""),
+                     "status": status, "error": row.get("error", "")})
+    compact = {k: v for k, v in summary.items() if k != "items"}
+    compact["items"] = rows
+    compact["items_truncated"] = len(items) > cap
+    return compact

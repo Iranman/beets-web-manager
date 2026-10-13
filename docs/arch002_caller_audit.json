@@ -584,6 +584,18 @@
     "backend/ai_service.py::_ai_batch_review_suggestion": [
       "DISPLAY_ONLY",
       "Review-row suggestion for a folder Beets skipped: a fixed confidence label of low; the deterministic decision travels in the evidence and gates nothing here."
+    ],
+    "backend/import_review_service.py::_run_import_review_revalidation": [
+      "DISPLAY_ONLY",
+      "Revalidation loop moved from the route (F10); eligibility is evaluate_import_eligibility."
+    ],
+    "routes_import.py::<module>": [
+      "DISPLAY_ONLY",
+      "Allowlist of client identity fields for POST /api/ai-pending-review (F16); trust fields are dropped, not decided."
+    ],
+    "routes_import.py::_review_row_search_text": [
+      "DISPLAY_ONLY",
+      "Review Queue search haystack; confidence is matched as text, never compared or decided (#395)."
     ]
   }
 }

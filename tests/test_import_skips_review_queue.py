@@ -14,6 +14,7 @@ from unittest import mock
 
 import app as APP
 import backend.import_service as isvc
+import backend.pending_review_store as prs
 import routes_import
 
 
@@ -30,9 +31,9 @@ class ImportSkipsReachReviewQueueTests(unittest.TestCase):
         self.album.mkdir(parents=True)
         (self.album / "01.flac").write_bytes(b"x")
         # beet.log does not exist: /webmanager/import writes no Beets import log.
-        for name, value in (("_IMPORT_SKIPPED_FILE", self.root / "import_skipped.json"),
-                            ("LOG_FILE", str(self.root / "beet.log"))):
-            p = mock.patch.object(isvc, name, value)
+        for mod, name, value in ((prs, "_IMPORT_SKIPPED_FILE", self.root / "import_skipped.json"),
+                                 (isvc, "LOG_FILE", str(self.root / "beet.log"))):
+            p = mock.patch.object(mod, name, value)
             p.start()
             self.addCleanup(p.stop)
         self.client = APP.app.test_client()

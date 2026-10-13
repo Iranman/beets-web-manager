@@ -9,7 +9,7 @@ from flask import jsonify, request
 import backend.job_contract as job_contract
 import backend.provider_boundary as provider_boundary
 from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses
-from backend.acquisition_service import _ACQ_QUEUE_SOURCES, _DOWNLOAD_METHODS, _acq_download_all_record, _acq_download_payload, _acq_item_mbid, _acq_start_download_job, _acq_trim_batch_log, _download_sources_status, _load_acq_download_all_last, acquisition_queue_page, acquisition_queue_snapshot, ensure_acquisition_queue_fresh, start_acquisition_queue_build, _qbit_hardlink_missing_impl, _qbit_status_payload, _save_acq_download_all_last, start_album_download
+from backend.acquisition_service import _ACQ_QUEUE_SOURCES, _DOWNLOAD_METHODS, _acq_download_all_record, _acq_download_payload, _acq_item_mbid, _acq_start_download_job, _acq_trim_batch_log, _download_sources_status, _load_acq_download_all_last, acquisition_queue_mark_done, acquisition_queue_page, download_entered_library, acquisition_queue_snapshot, ensure_acquisition_queue_fresh, refresh_acquisition_queue, start_acquisition_queue_build, _qbit_hardlink_missing_impl, _qbit_status_payload, _save_acq_download_all_last, start_album_download
 from backend.app_runtime import QBIT_CATEGORY, QBIT_FILTER, QBIT_URL, YTDLP_ALLOW_BROWSER_COOKIES, _app_logger, _s, _ytdlp_ready, jobs
 from backend.job_service import _wait_for_child_job
 from backend.matching_service import _invalidate_lib_cache
@@ -200,7 +200,8 @@ def acquisition_queue():
     at once with what it has."""
     include_unmonitored = _flag(request.args.get("include_unmonitored"))
     offset, err = _int_arg("offset", 0, 10_000_000)
-    limit, err2 = _int_arg("limit", -1, _ACQ_QUEUE_MAX_LIMIT)
+    # An absent limit is one full page, never the whole list (#385 F3).
+    limit, err2 = _int_arg("limit", _ACQ_QUEUE_MAX_LIMIT, _ACQ_QUEUE_MAX_LIMIT)
     search = _s(request.args.get("search") or "").strip()
     source = _s(request.args.get("source") or "all").strip().lower()
     sort = _s(request.args.get("sort") or "sort_key").strip().lower()
@@ -218,16 +219,13 @@ def acquisition_queue():
     if error:
         return jsonify({"ok": False, "error": error}), 400
 
-    if _flag(request.args.get("refresh")):
-        start_acquisition_queue_build(force=True, include_unmonitored=include_unmonitored)
-    else:
-        ensure_acquisition_queue_fresh(include_unmonitored=include_unmonitored)
+    # Refresh is POST /api/acquisition/queue/refresh only; a GET never forces a build.
+    ensure_acquisition_queue_fresh(include_unmonitored=include_unmonitored)
     snap, cache = acquisition_queue_snapshot()
     rows, type_counts = acquisition_queue_page(
         (snap or {}).get("items") or [], search=search, source=source, album_types=album_types,
         include_unmonitored=include_unmonitored, sort=sort)
-    # No limit: the whole filtered list (back-compat until the UI pages).
-    page = rows[offset:] if limit < 0 else rows[offset:offset + limit]
+    page = rows[offset:offset + limit]
     counts = dict((snap or {}).get("counts") or {})
     for key in ("all", "beets", "lidarr", "merged", "unmonitored"):
         counts.setdefault(key, 0)
@@ -236,7 +234,7 @@ def acquisition_queue():
         "items": page,
         "total": len(rows),
         "offset": offset,
-        "limit": limit if limit >= 0 else None,
+        "limit": limit,
         "counts": counts,
         "album_types": type_counts,
         "cache": cache,
@@ -249,13 +247,19 @@ def acquisition_queue():
 
 @app.post("/api/acquisition/queue/refresh")
 def acquisition_queue_refresh():
-    """Start (or join) the Find Music list build; returns at once."""
+    """Start (or join) the Find Music list build; returns at once. Only the
+    UI's automatic refresh after a finished download sends
+    ``after_download: true``, which may reuse the list that download just
+    patched (F2); a user's Refresh always builds or joins a build (QA #398 N5)."""
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "body must be a JSON object"}), 400
-    job_id, running = start_acquisition_queue_build(
-        force=True, include_unmonitored=payload.get("include_unmonitored") is True)
-    return jsonify({"ok": True, "job_id": job_id, "already_running": running}), 202
+    job_id, running, reused = refresh_acquisition_queue(
+        include_unmonitored=payload.get("include_unmonitored") is True,
+        after_download=payload.get("after_download") is True)
+    if reused:  # a download just patched the list; no rebuild (F2)
+        return jsonify({"ok": True, "job_id": None, "already_running": False, "reused": True}), 200
+    return jsonify({"ok": True, "job_id": job_id, "already_running": running, "reused": False}), 202
 
 
 _acq_download_all_lock = threading.Lock()
@@ -376,6 +380,7 @@ def acquisition_download_all():
             "ytdlp_fallback_disabled": False,
             "failures": [],
         }
+        done_keys: List[str] = []
         try:
             contract = job_contract.enter(
                 "acquisition-download-all", log=log, cancel_event=cancel_event, update_state=update_state,
@@ -410,6 +415,8 @@ def acquisition_download_all():
                             prefix=prefix, timeout=2400,
                         )
                         totals["success"] += 1
+                        if download_entered_library(result):
+                            done_keys.append(key)
                         if isinstance(result, dict) and result.get("aldir"):
                             log.append(f"  imported from: {result.get('aldir')}")
                         log.append(f"  OK: {artist} - {album}")
@@ -430,6 +437,7 @@ def acquisition_download_all():
                 )
                 _persist("success", totals, log)
                 _invalidate_lib_cache()
+                acquisition_queue_mark_done(keys=done_keys)
                 return totals
             except Exception as exc:
                 _persist("failed", totals, log, error=str(exc))
