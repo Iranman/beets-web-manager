@@ -1422,3 +1422,29 @@ def _run_import_review_revalidation(review_ids: Iterable[str], *, auto_enqueue: 
     if log is not None:
         log.append(f"Revalidated {reviewed}; updated {updated}; queued {queued}; failed {failed}.")
     return summary
+
+
+IMPORT_REVIEW_REVALIDATE_JOB_ITEMS_MAX = 200
+
+
+def _compact_revalidation_summary(summary: Dict[str, Any],
+                                  cap: int = IMPORT_REVIEW_REVALIDATE_JOB_ITEMS_MAX) -> Dict[str, Any]:
+    """The persisted job result (QA N3): counts plus at most ``cap`` rows of
+    id, path, status and error -- no selected_match or track mapping."""
+    items = summary.get("items") or []
+    rows = []
+    for row in items[:cap]:
+        if not row.get("ok"):
+            status = "failed"
+        elif row.get("queued"):
+            status = "queued"
+        elif (row.get("eligibility") or {}).get("eligible"):
+            status = "eligible"
+        else:
+            status = "revalidated"
+        rows.append({"review_item_id": row.get("review_item_id", ""), "path": row.get("path", ""),
+                     "status": status, "error": row.get("error", "")})
+    compact = {k: v for k, v in summary.items() if k != "items"}
+    compact["items"] = rows
+    compact["items_truncated"] = len(items) > cap
+    return compact

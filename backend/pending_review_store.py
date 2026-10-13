@@ -9,7 +9,7 @@ from __future__ import annotations
 import json, os, threading, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _s
+from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _app_logger, _s
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.import_reconciliation_service import _reconcile_pending_review_enqueue_item
 from backend.beets_adapter import BeetsUnavailableError
@@ -388,7 +388,7 @@ def _load_recorded_import_skips() -> List[Dict[str, Any]]:
         return []
     if not isinstance(rows, list):
         return []
-    return [r for r in rows if isinstance(r, dict) and _s(r.get("path"))]
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str) and r["path"].strip()]
 
 
 def _write_recorded_import_skips(rows: List[Dict[str, Any]]) -> None:
@@ -436,7 +436,8 @@ def _forget_import_skip(folder_path: str) -> bool:
                 return False
             _write_recorded_import_skips(kept)
         return True
-    except OSError:
+    except Exception as ex:  # QA N1: never fail the import that called it
+        _app_logger.warning("could not update the import skip ledger: %s", type(ex).__name__)
         return False
 
 
@@ -559,7 +560,7 @@ def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
 def _trusted_stored_review_path(raw: Any) -> Optional[str]:
     """A stored Pending Review path, normalized, when it is still inside an
     approved Import Review root (or the library), is not a root itself, and
-    no symlink moves it out of that root; else None. The path is taken
+    no symlink moves it outside every approved root; else None. The path is taken
     literally (never URL-decoded, #387), so folder names with ``%``, ``+``
     or backslashes keep working. Entries stored before POST /api/ai-pending-review
     validated paths are re-checked here wherever an entry authorizes an
@@ -572,14 +573,17 @@ def _trusted_stored_review_path(raw: Any) -> Optional[str]:
         real = os.path.realpath(lexical)
     except (OSError, ValueError):
         return None
-    for root in _serializers._import_review_cleanup_roots(allow_music=True):
-        root_text = os.path.normpath(str(root))
-        if lexical == root_text:
-            return None
-        if lexical.startswith(root_text.rstrip(os.sep) + os.sep):
-            real_root = os.path.realpath(root_text)
-            return lexical if real.startswith(real_root.rstrip(os.sep) + os.sep) else None
-    return None
+    roots = [os.path.normpath(str(r)) for r in _serializers._import_review_cleanup_roots(allow_music=True)]
+
+    def _strictly_under(path: str, bases: List[str]) -> bool:
+        return any(path.startswith(b.rstrip(os.sep) + os.sep) for b in bases)
+
+    if lexical in roots or not _strictly_under(lexical, roots):
+        return None
+    # A symlink may move the folder to another approved root (#392 keeps that
+    # working); it must never move it outside every root or onto one.
+    real_roots = [os.path.realpath(r) for r in roots]
+    return lexical if real not in real_roots and _strictly_under(real, real_roots) else None
 
 
 def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:

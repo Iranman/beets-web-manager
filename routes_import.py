@@ -19,7 +19,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.beets_plugins import _atomic_write_text
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
-from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
+from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
 from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
@@ -396,8 +396,19 @@ def _review_row_search_text(row: Dict[str, Any]) -> str:
         row.get("folder"), row.get("folder_name"), row.get("reason"), row.get("status"),
         row.get("status_key"), row.get("origin_label"), row.get("source_playlist_name"),
         row.get("source_batch_id"), row.get("created_by_workflow"), row.get("mb_albumid"),
-        row.get("mb_releasegroupid"),
+        row.get("mb_releasegroupid"), row.get("year"), row.get("confidence"),
+        row.get("blocked_reason"), row.get("blocked_next_action"),
     ]
+    # #395 QA: the fields the client-side search used to match on.
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    folder = evidence.get("folder") if isinstance(evidence.get("folder"), dict) else {}
+    values += [folder.get("guessed_artist"), folder.get("guessed_album"), folder.get("guessed_year")]
+    preflight = evidence.get("preflight") if isinstance(evidence.get("preflight"), dict) else {}
+    if preflight.get("acoustid_mismatch"):
+        top = preflight.get("acoustid_top_release")
+        values.append(
+            f"AcoustID fingerprint mismatch: selected release {preflight.get('acoustid_target_hits') or 0} hit(s), "
+            f"strongest alternate {preflight.get('acoustid_top_hits') or 0} hit(s)." + (f" Top release: {top}." if top else ""))
     return " ".join(_s(v) for v in values if v).casefold()
 
 
@@ -967,8 +978,8 @@ def import_review_revalidate():
         # F10: a large revalidation is one tracked job; a second start while
         # it runs answers 409 job_already_running (DuplicateJobError handler).
         def _do(log, cancel_event=None):
-            return _run_import_review_revalidation(
-                review_ids, auto_enqueue=auto_enqueue, limit=limit, log=log, cancel_event=cancel_event)
+            return _compact_revalidation_summary(_run_import_review_revalidation(
+                review_ids, auto_enqueue=auto_enqueue, limit=limit, log=log, cancel_event=cancel_event))
 
         job = jobs.start_python(_do, label="Revalidate Import Review items", metadata={
             "type": IMPORT_REVIEW_REVALIDATE_JOB_TYPE,

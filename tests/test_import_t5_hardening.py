@@ -304,5 +304,62 @@ class ImportedFolderLeavesSkipLedgerTests(_Base):
         self.assertEqual([r["path"] for r in isvc._import_skipped_items()], [str(other)])
 
 
+
+class SkipLedgerNeverRaisesTests(_Base):
+    """QA N1: _forget_import_skip runs unwrapped inside import paths."""
+
+    def test_non_string_rows_and_unexpected_errors_are_swallowed(self):
+        ledger = self.root / "import_skipped.json"
+        self.patch(prs, "_IMPORT_SKIPPED_FILE", ledger)
+        ledger.write_text(json.dumps([{"path": 5}, {"path": ["x"]}, {"path": str(self.album)}, "junk"]))
+        self.assertTrue(prs._forget_import_skip(str(self.album)))
+        self.assertEqual(prs._load_recorded_import_skips(), [])
+        with mock.patch.object(prs, "_write_recorded_import_skips", side_effect=RuntimeError("boom")):
+            ledger.write_text(json.dumps([{"path": str(self.album)}]))
+            self.assertFalse(prs._forget_import_skip(str(self.album)))
+
+
+class RevalidateJobResultIsCompactTests(unittest.TestCase):
+    """QA N3: the persisted job result keeps counts and small capped rows."""
+
+    def test_rows_are_capped_and_stripped(self):
+        items = [{"ok": True, "review_item_id": f"pending:/d/{i}", "path": f"/d/{i}",
+                  "selected_match": {"track_mapping": [1] * 50}, "eligibility": {"eligible": i % 2 == 0},
+                  "queued": i == 0} for i in range(250)]
+        items.append({"ok": False, "review_item_id": "pending:/d/x", "path": "/d/x", "error": "E"})
+        out = irs._compact_revalidation_summary({"ok": True, "reviewed_count": 251, "failed_count": 1, "items": items})
+        self.assertEqual((out["reviewed_count"], out["failed_count"]), (251, 1))
+        self.assertEqual(len(out["items"]), irs.IMPORT_REVIEW_REVALIDATE_JOB_ITEMS_MAX)
+        self.assertTrue(out["items_truncated"])
+        self.assertEqual(set(out["items"][0]), {"review_item_id", "path", "status", "error"})
+        self.assertEqual([r["status"] for r in out["items"][:3]], ["queued", "revalidated", "eligible"])
+        self.assertNotIn("track_mapping", json.dumps(out))
+        small = irs._compact_revalidation_summary({"items": items[-1:]})
+        self.assertEqual(small["items"][0]["status"], "failed")
+        self.assertFalse(small["items_truncated"])
+
+
+class ReviewRowSearchTextTests(unittest.TestCase):
+    """#395 QA finding 1: server-side search matches what the client search did."""
+
+    def test_each_restored_field_is_searchable(self):
+        cases = {
+            "year": ({"year": 1997}, "1997"),
+            "confidence": ({"confidence": "medium"}, "medium"),
+            "blocked_reason": ({"blocked_reason": "Tracklist preflight failed"}, "preflight failed"),
+            "blocked_next_action": ({"blocked_next_action": "Pick another release"}, "another release"),
+            "guessed_artist": ({"evidence": {"folder": {"guessed_artist": "Boards of Canada"}}}, "boards of canada"),
+            "guessed_album": ({"evidence": {"folder": {"guessed_album": "Geogaddi"}}}, "geogaddi"),
+            "guessed_year": ({"evidence": {"folder": {"guessed_year": "2002"}}}, "2002"),
+            "audio_mismatch": ({"evidence": {"preflight": {"acoustid_mismatch": True, "acoustid_target_hits": 1,
+                                                           "acoustid_top_hits": 9, "acoustid_top_release": "Other LP"}}},
+                               "fingerprint mismatch"),
+        }
+        for name, (row, needle) in cases.items():
+            with self.subTest(field=name):
+                self.assertIn(needle, routes_import._review_row_search_text(row))
+        self.assertIn("other lp", routes_import._review_row_search_text(cases["audio_mismatch"][0]))
+        self.assertNotIn("mismatch", routes_import._review_row_search_text({"evidence": {"preflight": {}}}))
+
 if __name__ == "__main__":
     unittest.main()
