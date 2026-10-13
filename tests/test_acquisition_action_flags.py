@@ -65,7 +65,7 @@ class AcquisitionActionFlagTests(unittest.TestCase):
         self.assertNotIn("is_local_repair and try_source_fallback", app_source)
         self.assertIn("fallback_scope = (", app_source)
         self.assertIn('"the full album"', app_source)
-        self.assertIn("SLSKD download failed; direct-source fallback also failed", app_source)
+        self.assertIn('f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "', app_source)
         self.assertNotIn("SLSKD missing-track download failed; direct-source fallback", app_source)
 
         self.assertIn("const sourceFallback = method === 'slskd' && ytdlpEnabled;", ui_source)

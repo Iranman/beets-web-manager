@@ -309,7 +309,6 @@ def _music_format_replacement_payload(row: Dict[str, Any], prefs: Dict[str, Any]
         "replace_existing": True,
         "method": method,
         "try_source_fallback": bool(prefs.get("replacement_fallback", {}).get("try_alternate_source")),
-        "fallback_method": "spotiflac",
     }
     album_id = int(row.get("album_id") or 0)
     if album_id:

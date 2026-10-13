@@ -9,7 +9,7 @@ from backend.matching import verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_if_already_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _library_album_ids_for_folder, _queue_folder_for_manual_review, _remove_pending_review_for_path
@@ -379,34 +379,7 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
     return False
 
 
-# ── Recent imports tracking ───────────────────────────────────────────────────
-
-_RECENT_IMPORTS_FILE = Path("/config/recent_imports.json")
-
-
-_recent_imports_lock = threading.Lock()
-
-
-def _record_recent_import(artist: str, album: str, year: int,
-                          track_count: int, mb_albumid: str, aldir: str):
-    """Append an album-level entry to the recent imports log."""
-    entry = {
-        "artist": artist,
-        "album": album,
-        "year": year,
-        "tracks": track_count,
-        "mb_albumid": mb_albumid,
-        "aldir": aldir,
-        "imported_at": int(time.time()),
-    }
-    with _recent_imports_lock:
-        try:
-            existing = json.loads(_RECENT_IMPORTS_FILE.read_text()) if _RECENT_IMPORTS_FILE.exists() else []
-        except Exception:
-            existing = []
-        existing.insert(0, entry)
-        _RECENT_IMPORTS_FILE.write_text(json.dumps(existing[:100], indent=2))
-
+# Recent imports (History) live in ai_service, the lowest layer that records them.
 
 _IMPORT_JOB_LOCK = threading.Lock()
 
@@ -1267,26 +1240,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except Exception as _ae:
                 log.append(f"  [artwork] Warning: {_ae}")
 
-        # ── Record recent import ───────────────────────────────────────────────
-        try:
-            _ri_artist, _ri_album, _ri_year, _ri_tracks = "", Path(aldir).name, 0, 0
-            _aid_for_rec = album_ids[0] if album_ids else None
-            if _aid_for_rec:
-                try:
-                    _rrow = composite_workflows.get_album(_aid_for_rec)
-                    _ri_items = composite_workflows.find_all_items_by_album_id(_aid_for_rec)
-                    _ri_tracks = len(_ri_items)
-                except Exception:
-                    _rrow = None
-                    _ri_tracks = 0
-                if _rrow:
-                    _ri_artist = _rrow.get("albumartist") or ""
-                    _ri_album  = _rrow.get("album") or Path(aldir).name
-                    _ri_year   = int(_rrow.get("year") or 0)
-            _record_recent_import(_ri_artist, _ri_album, _ri_year,
-                                  _ri_tracks, mb_albumid, aldir)
-        except Exception as _rce:
-            log.append(f"  [recent] Warning: {_rce}")
+        _record_recent_import_for_album(album_ids[0] if album_ids else None, log,
+                                        mb_albumid=mb_albumid, aldir=aldir)
 
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
@@ -2872,6 +2827,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         album_ids = [int(apply_res["album_id"])]
         log.append(f"[2/2] Beets imported album_id {album_ids[0]} as release {mb_albumid} "
                    f"(Release Group {apply_res.get('mb_releasegroupid') or '?'}, verified).")
+        # History (F9). The existing-album handoff above records through
+        # start_reimport_disk instead, so each import adds exactly one row.
+        _record_recent_import_for_album(album_ids[0], log, mb_albumid=mb_albumid)
 
         partial_remaining_audio: List[Path] = []
         if selected_subset_import:
@@ -3171,3 +3129,8 @@ def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]
     ):
         return None, "Path is outside the allowed import source roots"
     return resolved, None
+
+
+# The batch import's scan-root rule (F3/F4) is _resolve_import_scan_root in
+# backend/serializers.py, next to the Import Review validator it extends, so
+# the batch walk in ai_service can re-check it too.

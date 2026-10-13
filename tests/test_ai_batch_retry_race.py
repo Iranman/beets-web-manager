@@ -224,7 +224,7 @@ class RunAiBatchImportReconciliationCommitOrderTests(unittest.TestCase):
             self.fn.index("if not recover or not folder_states:"):self.fn.index("else:")
         ]
         self.assertIn("_ai_batch_commit(state, update_state)", fresh_branch)
-        walk_pos = fresh_branch.index("_ai_batch_find_audio_dirs(scan_path)")
+        walk_pos = fresh_branch.index("_ai_batch_find_audio_dirs(scan_path")
         commit_pos = fresh_branch.index("_ai_batch_commit(state, update_state)")
         self.assertLess(commit_pos, walk_pos)
 
