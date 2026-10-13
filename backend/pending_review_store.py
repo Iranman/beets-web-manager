@@ -370,12 +370,82 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
     return True
 
 
+# Folders Beets skipped during a Web Manager import. /webmanager/import runs
+# Beets' importer without an import log, so beet.log never names them. The
+# ledger lives here, beside the Pending Review store, so the one "folder is
+# done" hook (_remove_pending_review_for_path) can drop a folder from both.
+_IMPORT_SKIPPED_FILE = Path(os.environ["WEB_MANAGER_DATA_DIR"]) / "import_skipped.json"
+
+
+_import_skipped_lock = threading.Lock()
+
+
+def _load_recorded_import_skips() -> List[Dict[str, Any]]:
+    try:
+        rows = json.loads(_IMPORT_SKIPPED_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and _s(r.get("path"))]
+
+
+def _write_recorded_import_skips(rows: List[Dict[str, Any]]) -> None:
+    """Atomic write; the caller holds _import_skipped_lock."""
+    _IMPORT_SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _IMPORT_SKIPPED_FILE.with_name(_IMPORT_SKIPPED_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(rows, indent=2))
+    os.replace(tmp, _IMPORT_SKIPPED_FILE)
+
+
+def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:
+    """Replace the recorded skips under ``source`` with this import's skips:
+    one entry per folder, so a re-import never duplicates one and a folder
+    that has since imported drops out."""
+    src = _s(source)
+    now = int(time.time())
+    fresh: Dict[str, Dict[str, Any]] = {}
+    for r in skipped:
+        path = _s(r.get("path"))
+        if path:
+            fresh[path] = {"path": path, "reason": _s(r.get("reason")) or "not_matched",
+                           "source": src, "skipped_at": now}
+    with _import_skipped_lock:
+        kept = [r for r in _load_recorded_import_skips()
+                if r["path"] not in fresh and not Path(r["path"]).is_relative_to(src)]
+        try:
+            _write_recorded_import_skips((list(fresh.values()) + kept)[:1000])
+        except OSError as ex:
+            raise RuntimeError(f"Could not record skipped import folders ({type(ex).__name__}).") from ex
+
+
+def _forget_import_skip(folder_path: str) -> bool:
+    """Drop ``folder_path`` (and anything under it) from the skip ledger once
+    the folder is imported or resolved (QA #391 N1). File-only, no Beets
+    read; never raises, so it cannot fail the import that called it."""
+    raw = _s(folder_path).strip()
+    if not raw:
+        return False
+    target = Path(os.path.normpath(raw))
+    try:
+        with _import_skipped_lock:
+            rows = _load_recorded_import_skips()
+            kept = [r for r in rows if not Path(os.path.normpath(r["path"])).is_relative_to(target)]
+            if len(kept) == len(rows):
+                return False
+            _write_recorded_import_skips(kept)
+        return True
+    except OSError:
+        return False
+
+
 def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] = None,
                                     *, decision_note: str = "removed after import or repair",
                                     log_note: str = "repaired/imported folder") -> bool:
     raw = _s(folder_path).strip()
     if not raw:
         return False
+    _forget_import_skip(raw)
 
     def _same_path(a: str, b: str) -> bool:
         if a == b:
