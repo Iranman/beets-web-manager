@@ -69,25 +69,23 @@ class TestImportSourcePathDoesNotRequireLocalExistence(unittest.TestCase):
         self.assertNotIn("require_exists=True", window)
 
     def test_start_ai_batch_job_does_not_require_local_existence(self):
-        """Wave 26 (PR #101) Docker acceptance round: the exact same bug
-        class as import_folder_with_id() above, found by actually running
-        /api/ai-batch-import against the real two-service compose topology
-        -- _start_ai_batch_job()'s own _resolve_import_review_source_path()
-        call still defaulted to require_exists=True, so every real call
-        failed with "Source path does not exist" regardless of whether the
-        engine-side folder was genuinely there. Fixed to require_exists=False,
-        matching the established precedent; the engine's own
-        discover_import_sources() call (inside _ai_batch_find_audio_dirs)
-        is the real, disk-backed existence check."""
+        """Wave 26 (PR #101): validating the batch scan root must not probe
+        the disk. Since 0.6.0 (F1/F3) both batch entry points use
+        _resolve_import_scan_root, which validates with require_exists=False;
+        the batch's own folder walk (Web Manager mounts the downloads root)
+        is the existence check."""
         idx = self.app_source.index("def _start_ai_batch_job(")
         window = self.app_source[idx: idx + 2000]
-        self.assertIn("require_exists=False", window)
-        self.assertNotIn("require_exists=True", window)
+        self.assertIn("_resolve_import_scan_root(scan_path)", window)
+        helper = self.app_source.index("def _resolve_import_scan_root(")
+        helper_window = self.app_source[helper: helper + 2500]
+        self.assertIn("require_exists=False", helper_window)
+        self.assertNotIn("require_exists=True", helper_window)
 
     def test_start_ai_batch_import_route_does_not_require_local_existence(self):
         idx = self.app_source.index("def start_ai_batch_import()")
         window = self.app_source[idx: idx + 3000]
-        self.assertIn("require_exists=False", window)
+        self.assertIn("_resolve_import_scan_root(scan_path)", window)
         self.assertNotIn("require_exists=True", window)
 
     def test_compose_files_confirm_web_manager_has_no_media_mount(self):
