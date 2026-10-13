@@ -202,7 +202,7 @@ class CacheFileTests(_CacheCase):
             with self.subTest(text=text[:30]):
                 self.cache_file.write_text(text, encoding="utf-8", errors="surrogateescape")
                 self._reload()
-                with mock.patch.object(_acq(), "ensure_acquisition_queue_fresh"):
+                with mock.patch.object(base.routes, "ensure_acquisition_queue_fresh"):
                     status, body = self._get("?limit=10")
                 self.assertEqual(status, 200, body)
                 self.assertEqual(body["total"], 0)
