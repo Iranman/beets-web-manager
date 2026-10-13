@@ -1702,25 +1702,39 @@ def acquisition_queue_mark_done(*, keys: Any = (), mbid: Any = "", album_id: Any
     return removed
 
 
+def download_entered_library(result: Any) -> bool:
+    """True only when a download job's child import put an album into the
+    library: the reimport job returns ``album_ids`` only on that path, while a
+    Pending Review outcome raises, and an in-place repair, an already-complete
+    album or "no useful missing tracks" returns none (QA #398 N6)."""
+    if not isinstance(result, dict) or not result.get("imported"):
+        return False
+    inner = result.get("import_result")
+    return isinstance(inner, dict) and bool(inner.get("album_ids"))
+
+
 def _mark_queue_done_after(fn: Callable[..., Any], *, mbid: str, album_id: int) -> Callable[..., Any]:
-    """Wrap a download job: once it has imported, its Find Music row is done (F2)."""
+    """Wrap a download job: once it has put the album into the library, its
+    Find Music row is done (F2)."""
     def _job(log, cancel_event=None):
         result = fn(log, cancel_event)
-        if isinstance(result, dict) and result.get("imported"):
+        if download_entered_library(result):
             acquisition_queue_mark_done(mbid=mbid, album_id=album_id)
         return result
     return _job
 
 
-def refresh_acquisition_queue(*, include_unmonitored: bool = False) -> Tuple[Optional[str], bool, bool]:
-    """POST Refresh: ``(job_id, already_running, reused)``. The first Refresh
-    within _ACQ_QUEUE_REFRESH_ABSORB of a download patch reuses the patched
-    snapshot (the UI refreshes after every finished download, F2); any other
-    Refresh starts (or joins) a full build."""
+def refresh_acquisition_queue(*, include_unmonitored: bool = False,
+                               after_download: bool = False) -> Tuple[Optional[str], bool, bool]:
+    """POST Refresh: ``(job_id, already_running, reused)``. The first
+    ``after_download`` Refresh within _ACQ_QUEUE_REFRESH_ABSORB of a download
+    patch reuses the patched snapshot (the UI refreshes after every finished
+    download, F2); any other Refresh, a user's click included, starts (or
+    joins) a full build (QA #398 N5)."""
     with _acq_queue_lock:
         _acq_queue_load()
         snap = _acq_queue["snapshot"]
-        reuse = (snap is not None and time.time() < _acq_queue["absorb_refresh_until"]
+        reuse = (after_download and snap is not None and time.time() < _acq_queue["absorb_refresh_until"]
                  and time.time() - float(snap.get("built_at") or 0) <= ACQ_QUEUE_MAX_AGE
                  and (bool(snap.get("include_unmonitored")) or not include_unmonitored))
         _acq_queue["absorb_refresh_until"] = 0.0

@@ -46,8 +46,8 @@ class DownloadPatchTests(_CacheCase):
         self._build()
         self.rows = _acq().acquisition_queue_snapshot()[0]["items"]
 
-    def _refresh(self):
-        res = self.client.post("/api/acquisition/queue/refresh", json={})
+    def _refresh(self, **body):
+        res = self.client.post("/api/acquisition/queue/refresh", json=body)
         return res.status_code, res.get_json()
 
     def test_mark_done_drops_the_row_and_persists(self):
@@ -63,25 +63,34 @@ class DownloadPatchTests(_CacheCase):
     def test_refresh_after_a_download_reuses_the_list_once(self):
         builds = len(_builds(self.store))
         _acq().acquisition_queue_mark_done(keys=[self.rows[0]["key"]])
-        status, body = self._refresh()
+        status, body = self._refresh(after_download=True)
         self.assertEqual((status, body["reused"], body["job_id"]), (200, True, None))
         self.assertEqual(len(_builds(self.store)), builds)
-        # The next Refresh (the user's own) rebuilds.
-        status, body = self._refresh()
+        # A second automatic refresh in the window rebuilds.
+        status, body = self._refresh(after_download=True)
         self.assertEqual((status, body["reused"]), (202, False))
         self.store.get(body["job_id"])._thread.join(10)
+
+    def test_a_user_refresh_in_the_window_always_builds(self):
+        # QA #398 N5: only the automatic post-download refresh may reuse.
+        _acq().acquisition_queue_mark_done(keys=[self.rows[0]["key"]])
+        for body in ({}, {"after_download": "true"}, {"after_download": 1}):
+            status, res = self._refresh(**body)
+            self.assertEqual((status, res["reused"]), (202, False), body)
+            self.store.get(res["job_id"])._thread.join(10)
+            _acq().acquisition_queue_mark_done(keys=[self.rows[0]["key"]])
 
     def test_a_run_of_single_downloads_causes_no_rebuild(self):
         builds = len(_builds(self.store))
         for row in self.rows[:4]:
             _acq().acquisition_queue_mark_done(mbid=row["mbid"])
-            self.assertEqual(self._refresh()[1]["reused"], True)
+            self.assertEqual(self._refresh(after_download=True)[1]["reused"], True)
         self.assertEqual(len(_builds(self.store)), builds)
         self.assertEqual(len(_acq().acquisition_queue_snapshot()[0]["items"]), 1)
 
     def test_no_matching_row_does_not_swallow_a_refresh(self):
         _acq().acquisition_queue_mark_done(mbid="https://musicbrainz.org/release-group/none")
-        status, body = self._refresh()
+        status, body = self._refresh(after_download=True)
         self.assertEqual((status, body["reused"]), (202, False))
         self.store.get(body["job_id"])._thread.join(10)
 
@@ -100,14 +109,30 @@ class DownloadPatchTests(_CacheCase):
         self._build(force=True)
         self.assertEqual(len(_acq().acquisition_queue_snapshot()[0]["items"]), 5)
 
-    def test_download_job_wrapper_marks_only_an_import(self):
+    def test_download_job_wrapper_marks_only_an_album_that_entered_the_library(self):
+        # QA #398 N6: shapes the download job returns. Only the reimport job's
+        # album_ids prove the album is in the library; a Pending Review outcome
+        # (the child raises, so no import_result), an in-place repair (None), an
+        # already-complete album and "no useful missing tracks" do not.
         row = self.rows[0]
-        wrapped = _acq()._mark_queue_done_after(lambda log, cancel=None: {"aldir": "/d"}, mbid=row["mbid"],
-                                                album_id=0)
-        wrapped([])
-        self.assertEqual(len(_acq().acquisition_queue_snapshot()[0]["items"]), 5)
-        wrapped = _acq()._mark_queue_done_after(lambda log, cancel=None: {"imported": True}, mbid=row["mbid"],
-                                                album_id=0)
+        not_entered = (
+            {"aldir": "/d"},
+            {"imported": True},
+            {"imported": True, "already_complete": True, "existing_album_id": 3},
+            {"imported": True, "import_result": None},
+            {"imported": True, "import_result": {"status": "no_useful_missing_tracks", "existing_album_id": 3}},
+            {"imported": True, "import_result": {"job_id": "c", "status": "success",
+                                                 "result_inferred_from_log": True}},
+            {"imported": True, "import_result": {"album_ids": [], "aldir": "/d"}},
+        )
+        for result in not_entered:
+            wrapped = _acq()._mark_queue_done_after(lambda log, cancel=None, r=result: r, mbid=row["mbid"],
+                                                    album_id=0)
+            wrapped([])
+            self.assertEqual(len(_acq().acquisition_queue_snapshot()[0]["items"]), 5, result)
+        entered = {"imported": True, "import_result": {"album_ids": [7], "item_ids": [], "aldir": "/d",
+                                                       "mb_albumid": row["mbid"], "existing_album_id": 0}}
+        wrapped = _acq()._mark_queue_done_after(lambda log, cancel=None: entered, mbid=row["mbid"], album_id=0)
         wrapped([])
         self.assertEqual(len(_acq().acquisition_queue_snapshot()[0]["items"]), 4)
 
@@ -115,10 +140,14 @@ class DownloadPatchTests(_CacheCase):
         started = mock.Mock(return_value=mock.Mock(job_id="batch"))
         with mock.patch.object(base.routes.jobs, "start_python", started):
             res = self.client.post("/api/acquisition/download-all",
-                                   json={"keys": [self.rows[0]["key"], self.rows[1]["key"]]})
+                                   json={"keys": [self.rows[0]["key"], self.rows[1]["key"],
+                                                  self.rows[2]["key"]]})
         self.assertEqual(res.status_code, 200, res.get_json())
         job_fn = started.call_args.args[0]
-        outcomes = iter([{"aldir": "/a"}, RuntimeError("no source")])
+        # Imported into the library; failed; succeeded but only went to Pending Review / repair.
+        outcomes = iter([{"aldir": "/a", "imported": True, "import_result": {"album_ids": [9]}},
+                         RuntimeError("no source"),
+                         {"aldir": "/c", "imported": True, "import_result": None}])
 
         def wait(*_a, **_kw):
             out = next(outcomes)
@@ -131,11 +160,12 @@ class DownloadPatchTests(_CacheCase):
                 mock.patch.object(base.routes, "_save_acq_download_all_last"), \
                 mock.patch.object(base.routes.job_contract, "enter"):
             totals = job_fn([], threading.Event(), lambda **kw: None)
-        self.assertEqual((totals["success"], totals["failed"]), (1, 1))
+        self.assertEqual((totals["success"], totals["failed"]), (2, 1))
         keys = [r["key"] for r in _acq().acquisition_queue_snapshot()[0]["items"]]
         self.assertNotIn(self.rows[0]["key"], keys)
         self.assertIn(self.rows[1]["key"], keys)
-        self.assertEqual(self._refresh()[1]["reused"], True)
+        self.assertIn(self.rows[2]["key"], keys)
+        self.assertEqual(self._refresh(after_download=True)[1]["reused"], True)
 
 
 if __name__ == "__main__":

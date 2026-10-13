@@ -79,7 +79,7 @@ class RefreshReuseLimits(_CacheCase):
     def test_window_expired_rebuilds(self):
         self.acq.acquisition_queue_mark_done(mbid=self.rows[0]["mbid"])
         self.acq._acq_queue["absorb_refresh_until"] = time.time() - 1
-        status, body = self._refresh()
+        status, body = self._refresh(after_download=True)
         self.assertEqual((status, body["reused"]), (202, False))
         self._join(body)
 
@@ -87,13 +87,13 @@ class RefreshReuseLimits(_CacheCase):
         self.acq.acquisition_queue_mark_done(mbid=self.rows[0]["mbid"])
         snap = self.acq._acq_queue["snapshot"]
         self.acq._acq_queue["snapshot"] = dict(snap, built_at=time.time() - 7 * 3600)
-        status, body = self._refresh()
+        status, body = self._refresh(after_download=True)
         self.assertEqual((status, body["reused"]), (202, False))
         self._join(body)
 
     def test_unmonitored_request_is_not_served_by_a_monitored_only_list(self):
         self.acq.acquisition_queue_mark_done(mbid=self.rows[0]["mbid"])
-        status, body = self._refresh(include_unmonitored=True)
+        status, body = self._refresh(include_unmonitored=True, after_download=True)
         self.assertEqual((status, body["reused"]), (202, False))
         self._join(body)
 
