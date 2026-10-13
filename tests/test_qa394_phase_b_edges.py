@@ -131,7 +131,6 @@ class SymlinkEdgeTests(_Batch):
         self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
         self.assertNotIn(self.folders[0], self._beets_folders())
 
-    @unittest.expectedFailure  # QA394-F3: remove once Stage 1 reuses import_identity._recursive_audio
     def test_symlinked_directory_of_audio_is_refused(self):
         # Beets' sorted_walk follows a symlinked directory, so its audio
         # would be imported (and moved) without ever being checked here.

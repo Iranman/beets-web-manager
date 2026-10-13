@@ -20,7 +20,7 @@ from backend.app_runtime import _path_is_under
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
-from backend.import_identity import identify_import_folder
+from backend.import_identity import _recursive_audio, identify_import_folder
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
 from backend.artwork_service import _fetch_artwork_after_retag
@@ -2053,12 +2053,15 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
     log.append(f"  Stage 1: Beets import ({'copy, torrent source' if preserve else 'move'})")
     try:
-        audio_files = [p for p in Path(folder).rglob("*") if p.suffix.lower() in AUDIO_EXT]
-        # A symlinked audio file is a hard identity conflict (it may point
-        # anywhere, even into the library): Beets never gets the folder.
-        linked = [str(p) for p in audio_files if p.is_symlink()]
-        if linked:
-            reason = f"symlinked_audio: {len(linked)} audio file(s) are symlinks; import refused"
+        # Symlinked audio is a hard identity conflict (it may point anywhere,
+        # even into the library): Beets never gets the folder. The identity
+        # engine's walk also catches audio behind a symlinked directory, which
+        # beets.util.sorted_walk follows (QA394-F3).
+        audio_files, has_linked_audio = _recursive_audio(folder)
+        if has_linked_audio:
+            # The link entries themselves (not descended), for the reviewer.
+            linked = sorted(str(p) for p in Path(folder).rglob("*") if p.is_symlink())
+            reason = "symlinked_audio: audio is reached through a symlink; import refused"
             log.append(f"  {reason}")
             review(plain_suggestion(reason),
                    {"origin_step": "pre_import", "conflict": "symlinked_audio", "symlinked_paths": linked,

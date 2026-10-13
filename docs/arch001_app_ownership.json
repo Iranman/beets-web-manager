@@ -24808,10 +24808,10 @@
    "module": "backend/ai_service.py",
    "lines": [
     1990,
-    2177
+    2180
    ],
-   "size": 188,
-   "body_lines": 181,
+   "size": 191,
+   "body_lines": 184,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -24845,8 +24845,8 @@
    "name": "_ai_batch_run_folders",
    "module": "backend/ai_service.py",
    "lines": [
-    2180,
-    2224
+    2183,
+    2227
    ],
    "size": 45,
    "body_lines": 41,
@@ -24871,8 +24871,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2227,
-    2239
+    2230,
+    2242
    ],
    "size": 13,
    "body_lines": 12,
@@ -24895,8 +24895,8 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2242,
-    2300
+    2245,
+    2303
    ],
    "size": 59,
    "body_lines": 55,
@@ -24921,8 +24921,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2303,
-    2440
+    2306,
+    2443
    ],
    "size": 138,
    "body_lines": 137,
@@ -24961,8 +24961,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2453,
-    2471
+    2456,
+    2474
    ],
    "size": 19,
    "body_lines": 16,
@@ -24981,8 +24981,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2474,
-    2496
+    2477,
+    2499
    ],
    "size": 23,
    "body_lines": 19,
@@ -25009,8 +25009,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2499,
-    2626
+    2502,
+    2629
    ],
    "size": 128,
    "body_lines": 122,
@@ -25041,8 +25041,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2629,
-    2663
+    2632,
+    2666
    ],
    "size": 35,
    "body_lines": 25,
