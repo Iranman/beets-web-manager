@@ -242,12 +242,12 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Affected area: `backend/acquisition_service.py` (Find Music list snapshot, `fetch_lidarr_wanted`).
 - Evidence: the list is now a snapshot built by the `acquisition-queue-build` job and rebuilt only by age (6 h) or Refresh (F7/F8). Lidarr's wanted list is read page by page; a page short of `totalRecords`, or fewer distinct albums in all than the last page's `totalRecords`, fails the build (QA #379 N3).
 - Narrowed in 0.7.0:
-  - A Find Music download (row or Download All) that ends in an import now drops its row from the snapshot at once (`acquisition_queue_mark_done`, matched by key, the row's MBID or local album id). A build already running when the download finished drops it too. The first `POST /api/acquisition/queue/refresh` within 120 s of such a patch reuses the patched snapshot (`reused: true`), so the UI's refresh after each download no longer walks every Lidarr page (F2).
+  - A Find Music download (row or Download All) whose import put the album into the library (`album_ids` from the reimport job; not Pending Review, an in-place repair or an already-complete album) now drops its row from the snapshot at once (`acquisition_queue_mark_done`, matched by key, the row's MBID or local album id). A build already running when the download finished drops it too. The first `POST /api/acquisition/queue/refresh` with `after_download: true` within 120 s of such a patch reuses the patched snapshot (`reused: true`), so the UI's refresh after each download no longer walks every Lidarr page (F2). A Refresh without that flag (a user's click) always rebuilds.
   - The paging gap (QA #385 N2) is closed for the common case: a pass during which `totalRecords` moved is read once more, and only a second moving pass falls back to the count check.
 - Current risk:
   - Downloads and imports started outside Find Music (Discography, Wanted, Import page) patch the snapshot only when their payload names a listed row's MBID or album id; Lidarr's own imports are not patched. Those rows stay listed until the next build (6 h at most, or Refresh).
   - A download that imports only part of an album also drops the row; the next build lists it again.
-  - A Refresh the user clicks within 120 s of a download is the one that is reused, if the UI's own refresh did not come first.
+  - An import that repaired an existing album in place or found it already complete leaves its row listed until the next build.
   - If Lidarr removes one album and adds another between two page reads, `totalRecords` does not move and a row can still be missed until the next build.
 - Desired state: Lidarr `history/since` to drop rows Lidarr imported itself, if still needed.
 - Priority: P3. Status: Open (narrowed).
