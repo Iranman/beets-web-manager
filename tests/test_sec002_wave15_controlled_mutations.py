@@ -285,7 +285,7 @@ class FlaskEndpointTests(unittest.TestCase):
         self.client = flask_app.app.test_client()
 
     def test_flask_import_review_folder_delete_endpoint(self):
-        with patch_app_family("app", "composite_workflows") as mock_bc:
+        with patch_app_family("app", "composite_workflows") as mock_bc, patch_app_family("app", "_pending_review_matches", return_value=True):
             mock_bc.plan_import_review_cleanup.return_value = {
                 "ok": True,
                 "operation_id": "tx-folder-del",

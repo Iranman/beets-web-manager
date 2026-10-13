@@ -48,7 +48,6 @@ class ImportSkipsReachReviewQueueTests(unittest.TestCase):
         with mock.patch.object(routes_import, "_resolve_import_source_path", return_value=(self.src, None)), \
              mock.patch.object(routes_import, "_preserve_torrent_source_path", return_value=False), \
              mock.patch.object(routes_import, "_validate_import_source_audio"), \
-             mock.patch.object(routes_import, "_delete_if_already_in_library"), \
              mock.patch.object(routes_import, "_invalidate_lib_cache", create=True), \
              mock.patch.object(routes_import.jobs, "start_python", side_effect=run_now), \
              mock.patch.object(APP.composite_workflows, "reimport_source", side_effect=fake_reimport):

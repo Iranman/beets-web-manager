@@ -138,7 +138,13 @@ export function HistoryPanel() {
   useEffect(() => { void load(); }, [load]);
 
   const handleClearRecent = async () => {
-    await clearRecentImports();
+    if (!window.confirm('Clear the recently imported list? This only clears the history shown here; imported albums and files stay in the library.')) return;
+    try {
+      await clearRecentImports();
+    } catch (err) {
+      setError(`Could not clear the recently imported list: ${err instanceof Error ? err.message : String(err)}. Click Refresh to see the current list, then try again.`);
+      return;
+    }
     void load();
   };
 

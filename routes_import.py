@@ -15,13 +15,14 @@ import backend.import_reconciliation as _import_reconciliation
 import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
 from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _RECENT_IMPORTS_FILE, _record_recent_import_for_album, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
-from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _redact_security_text, _s, jobs
+from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _path_is_under, _redact_security_text, _s, jobs
+from backend.beets_plugins import _atomic_write_text
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _update_pending_review_revalidation
 from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
-from backend.library_service import _album_folder_for_album_id, _delete_if_already_in_library, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
-from backend.matching_service import _invalidate_lib_cache, _load_album_mb_suggestions
+from backend.library_service import _album_folder_for_album_id, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
+from backend.matching_service import _ai_api_key, _invalidate_lib_cache, _load_album_mb_suggestions
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
 from backend.pending_review_store import _AI_PENDING_FILE, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _is_music_root_path, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path, _review_path_is_resolved
 from backend.serializers import _format_duration, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result
@@ -98,17 +99,21 @@ def import_folder_stats():
         "ok": True, "path": raw_path, "exists": True,
         "audio_count": audio_count, "art_count": art_count, "other_count": other_count,
         "total_count": audio_count + art_count + other_count,
+        "is_library_path": _path_is_under(folder, MUSIC_ROOT),
     })
 
 
 @app.post("/api/import/review-folder/delete")
 def delete_import_review_folder():
-    payload = request.json or {}
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
     src_path = _s(payload.get("path")).strip()
-    confirmed_wrong_library_folder = bool(
-        payload.get("confirmed_wrong_library_folder")
-        or payload.get("allow_library_delete")
-    )
+    if not src_path:
+        return jsonify({"ok": False, "error": "Review path is required."}), 400
+    # REV-04: the client's confirmed_wrong_library_folder / allow_library_delete
+    # flags are still accepted for back-compat but never authorize anything.
+    # The server decides whether the path is in the library (MUSIC_ROOT), and
+    # every delete must be a Pending Review folder or a Needs MB ID album row.
     try:
         album_id = int(payload.get("album_id") or 0)
     except Exception:
@@ -116,11 +121,18 @@ def delete_import_review_folder():
     log: List[str] = []
 
     resolved = Path(src_path).resolve(strict=False)
+    is_library_path = _path_is_under(resolved, MUSIC_ROOT)
+    lexical = Path(os.path.normpath(src_path))
+    lexical_library = lexical == Path(os.path.normpath(str(MUSIC_ROOT))) or \
+        Path(os.path.normpath(str(MUSIC_ROOT))) in lexical.parents
+    if is_library_path != lexical_library:
+        # A symlinked component moves the path into or out of the library:
+        # refuse rather than guess which side the operator meant.
+        return jsonify({"ok": False, "error": "Symlinks are not permitted."}), 400
     missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
 
-    if not confirmed_wrong_library_folder and not missing_mbid_album_match:
-        if _AI_PENDING_FILE.exists() and not _pending_review_matches(src_path, ""):
-            return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match."}), 400
+    if not missing_mbid_album_match and not _pending_review_matches(src_path, ""):
+        return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match."}), 400
 
     # CodeQL #1388: the ValueError and the log carry executor and exception
     # text (paths, raw errors). Both stay in the server log; the client gets
@@ -129,7 +141,8 @@ def delete_import_review_folder():
         result = _delete_review_source_folder(
             src_path,
             log,
-            confirmed_wrong_library_folder=confirmed_wrong_library_folder or missing_mbid_album_match,
+            # Library files are quarantined (rollbackable), never deleted.
+            confirmed_wrong_library_folder=is_library_path,
             album_id=album_id if missing_mbid_album_match else 0,
         )
         _app_logger.info("delete_import_review_folder log for %r: %r", src_path, log)
@@ -209,7 +222,9 @@ def cleanup_import_review_files():
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     allow_delete = bool(payload.get("allow_delete"))
-    # Permanent delete requires allow_delete=true
+    # allow_delete is passed through for the audit record only; it gates
+    # nothing. A delete_* action is authorized by the Pending Review match
+    # above, and library paths are always quarantined instead (S1).
     plan_req = {
         "path": folder_path,
         "files": raw_files,
@@ -1225,8 +1240,14 @@ def add_ai_pending_review():
 
 @app.delete("/api/ai-pending-review")
 def clear_ai_pending_review():
-    payload = request.get_json(silent=True) or {}
-    folder_path = payload.get("path", "").strip()
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    folder_path = _s(payload.get("path")).strip()
+    clear_all = payload.get("all") is True
+    # F15: an empty body must never wipe the whole queue; clearing all needs
+    # an explicit {"all": true}.
+    if not folder_path and not clear_all:
+        return jsonify({"ok": False, "error": "path required (or all: true to clear every item)"}), 400
     removed_items = []
     with _ai_pending_lock:
         items = _load_pending_reviews()
@@ -1236,7 +1257,8 @@ def clear_ai_pending_review():
         else:
             removed_items = list(items)
             items = []
-        _AI_PENDING_FILE.write_text(json.dumps(items, indent=2))
+        _AI_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(_AI_PENDING_FILE, json.dumps(items, indent=2))
     for item in removed_items:
         _record_ai_review_decision(
             "cleared",
@@ -1593,7 +1615,6 @@ def start_import():
         # imports stay out of History.
         for album_id in res.get("imported_album_ids") or []:
             _record_recent_import_for_album(album_id, log)
-        _delete_if_already_in_library(path, "", log)
         _invalidate_lib_cache()
         not_matched = [{"path": r["path"], "status": IMPORT_NOT_MATCHED_STATUS, "reason": r["reason"]}
                        for r in res.get("skipped")

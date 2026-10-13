@@ -371,7 +371,6 @@ class JobRouteDuplicateStartTests(_RouteEnv):
         for target, name, value in (
                 (routes_import, "_resolve_import_source_path", lambda raw: (Path(raw), None)),
                 (routes_import, "_validate_import_source_audio", lambda *a, **k: None),
-                (routes_import, "_delete_if_already_in_library", lambda *a, **k: None),
                 (routes_import, "_record_import_skips", lambda *a, **k: None),
                 (routes_import, "_invalidate_lib_cache", lambda *a, **k: None),
                 (routes_import.composite_workflows, "reimport_source", fake_reimport)):

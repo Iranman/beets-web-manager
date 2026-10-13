@@ -238,8 +238,8 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("selectedCleanupSourceFiles(selectedMatch, targetPreviewState?.preview)", review_source)
         self.assertIn("onCleanupFiles", review_source)
         self.assertNotIn("Verify with fingerprint", review_source)
-        self.assertIn("cleanupPurgeReady", review_source)
-        self.assertIn("{cleanupPurgeReady ? 'Purge' : 'Quarantine'} {cleanupFiles.length", review_source)
+        # The button names no action; the confirmation dialog says delete vs quarantine.
+        self.assertIn("Remove {cleanupFiles.length} rejected file{cleanupFiles.length === 1 ? '' : 's'}…", review_source)
         self.assertIn("const runCleanupFiles = useCallback", review_source)
         self.assertIn("cleanupReviewFiles({", review_source)
         self.assertIn("action: cleanupAction", review_source)
@@ -260,38 +260,41 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("outside_review_folder", app_source)
         self.assertIn("resolved.suffix.lower() not in AUDIO_EXT", app_source)
         self.assertIn("IMPORT_REVIEW_QUARANTINE_DIR", app_source)
-        self.assertIn("Permanent delete requires allow_delete=true", app_source)
+        self.assertIn("allow_delete is passed through for the audit record only; it gates", app_source)
         self.assertIn("_remove_pending_review_for_path(folder_path, log)", app_source)
         self.assertIn("_mark_pending_review_status(", app_source)
         self.assertIn("_record_ai_review_decision(", app_source)
 
-    def test_small_rejected_cleanup_batches_auto_quarantine(self):
+    def test_rejected_file_cleanup_requires_explicit_confirmation(self):
+        # 0.5.1 hotfix (REV-01): viewing an item never quarantines or deletes files.
         root = Path(__file__).resolve().parents[1]
         review_source = _review_page_source(root)
 
-        self.assertIn("const AUTO_QUARANTINE_REJECTED_MAX_FILES = 5", review_source)
-        self.assertIn("const autoCleanupKeysRef = useRef<Set<string>>(new Set())", review_source)
         self.assertIn("function persistSubmittedItemIds", review_source)
         self.assertIn("restoredStaleSubmittedIds", review_source)
         self.assertIn("hiddenByActiveJob", review_source)
         self.assertIn("activeJobHiddenCount", review_source)
-        self.assertIn("files.length < 1 || files.length >= AUTO_QUARANTINE_REJECTED_MAX_FILES", review_source)
-        self.assertIn("const preview = previewState?.status === 'ready' ? previewState.preview : undefined", review_source)
-        self.assertIn("selectedCleanupSourceFiles(selectedMatch, preview)", review_source)
-        self.assertIn("autoCleanupKeysRef.current.has(key)", review_source)
-        self.assertIn("Auto-quarantining", review_source)
-        auto_cleanup_pos = review_source.index("Auto-quarantining")
-        auto_cleanup_region = review_source[auto_cleanup_pos - 900:auto_cleanup_pos + 1800]
-        self.assertNotIn("submittedItemIdsRef.current.has(item.id)", auto_cleanup_region)
-        self.assertIn("hasDestructiveCleanupMismatch", review_source)
-        self.assertIn("delete_rejected", review_source)
-        self.assertIn("allow_delete: destructive", review_source)
-        self.assertIn("Auto-purging", review_source)
-        self.assertIn("Auto-quarantined", review_source)
-        self.assertIn("action: cleanupAction", review_source)
-        self.assertIn("pending_review_removed || result.remaining_audio_count === 0", review_source)
-        self.assertIn("autoCleanupKeysRef.current.delete(key)", review_source)
-
+        # No view-triggered cleanup effect remains.
+        self.assertNotIn("AUTO_QUARANTINE_REJECTED_MAX_FILES", review_source)
+        self.assertNotIn("autoCleanupKeysRef", review_source)
+        self.assertNotIn("Auto-quarantin", review_source)
+        self.assertNotIn("Auto-purg", review_source)
+        self.assertEqual(review_source.count("cleanupReviewFiles({"), 1)
+        # The button only opens a confirmation listing the files and the action.
+        self.assertIn("onCleanupFiles={() => requestCleanupFiles(activeItem)}", review_source)
+        request = review_source[review_source.index("const requestCleanupFiles = useCallback"):review_source.index("const runCleanupFiles = useCallback")]
+        self.assertIn("selectedCleanupSourceFiles(sm, preview)", request)
+        self.assertIn("setConfirmIntent({ kind: 'cleanup_files', item, files, destructive: hasDestructiveCleanupMismatch(sm, preview) })", request)
+        self.assertNotIn("cleanupReviewFiles(", request)
+        self.assertIn("else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files, intent.destructive)", review_source)
+        self.assertIn("{intent.files.map((file) => (", review_source)
+        self.assertIn("'Permanently Delete Rejected Files' : 'Quarantine Rejected Files'", review_source)
+        # The confirmed request still carries the backend-enforced delete gate.
+        run = review_source[review_source.index("const runCleanupFiles = useCallback"):review_source.index("const runDeleteFolder = useCallback")]
+        self.assertIn("const cleanupAction = destructive ? 'delete_rejected' : 'quarantine_rejected'", run)
+        self.assertIn("allow_delete: destructive", run)
+        self.assertIn("action: cleanupAction", run)
+        self.assertIn("pending_review_removed || result.remaining_audio_count === 0", run)
     def test_saved_revalidated_track_mapping_hydrates_selected_match(self):
         root = Path(__file__).resolve().parents[1]
         review_source = _review_page_source(root)

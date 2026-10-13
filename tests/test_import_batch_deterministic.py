@@ -341,7 +341,6 @@ class HistoryTests(_Roots):
                 mock.patch.object(cw, "reimport_source", return_value=reimport), \
                 patch_app_family(APP, "_validate_import_source_audio"), \
                 patch_app_family(APP, "_preserve_torrent_source_path", return_value=False), \
-                patch_app_family(APP, "_delete_if_already_in_library"), \
                 patch_app_family(APP, "_invalidate_lib_cache"), \
                 patch_app_family(APP, "_record_import_skips"):
             with APP.app.test_client() as client:

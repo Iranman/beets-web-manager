@@ -32,6 +32,9 @@ class ReviewFolderDeleteNoLeakQATests(unittest.TestCase):
     _make_symlink = _Base._make_symlink
 
     def _post(self, folder, confirmed=True):
+        # REV-04: the client flag no longer skips the Pending Review check, so
+        # the planner refusals below are reached through a pending item.
+        self._write_pending(folder)
         resp = self.client.post("/api/import/review-folder/delete",
                                 json={"path": str(folder), "confirmed_wrong_library_folder": confirmed})
         return resp.status_code, resp.get_json()
@@ -87,6 +90,18 @@ class ReviewFolderDeleteNoLeakQATests(unittest.TestCase):
                 self.assertNotIn(name, json.dumps(data))
                 self.assertEqual(data["error"], OUTSIDE)
                 self.assertTrue((folder / "t.flac").exists())
+
+    def test_client_flag_without_pending_item_deletes_nothing(self):
+        # REV-04, real planner: a folder that is not in Pending Review stays,
+        # whatever library flag the client sends.
+        for folder in (self.downloads / "not-pending", self.music / "Artist" / "Album"):
+            with self.subTest(folder=folder.name):
+                self._write_audio(folder / "01.flac")
+                resp = self.client.post("/api/import/review-folder/delete", json={
+                    "path": str(folder), "confirmed_wrong_library_folder": True,
+                    "allow_library_delete": True})
+                self.assertEqual(resp.status_code, 400, resp.get_json())
+                self.assertTrue((folder / "01.flac").exists())
 
     def test_success_has_result_fields_and_no_log(self):
         folder = self.downloads / "good-album"

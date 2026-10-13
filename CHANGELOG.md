@@ -32,6 +32,32 @@ The project uses Semantic Versioning.
 
 - The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.
 
+## v0.6.0 - 2026-10-13
+
+This is a safety release. Imports and deletes now happen only after an explicit click and confirmation, and a downloads folder is deleted only with proof that its audio is already in the library.
+
+### Upgrade Notes
+
+- After an import, a downloads folder is no longer deleted unless every audio file in it is proven (byte or AcoustID match) to be in the library album. Folders without that proof now stay in downloads, and the import log says why. Clean them up from Import Review.
+- Scripts that call `DELETE /api/ai-pending-review` with no body to clear the whole Pending Review queue must now send `{"all": true}`. A request with no `path` and no `all` is refused.
+- `POST /api/import/review-folder/delete` ignores `confirmed_wrong_library_folder` and `allow_library_delete`. The folder must be in Pending Review or be a Needs MB ID album's own folder.
+- Paths sent to the Import Review delete and file-cleanup endpoints are used exactly as sent and are no longer URL-decoded.
+
+### Security
+
+- A downloads source folder is deleted as "already in library" only with proof: every audio file in it must be a byte match or an AcoustID same-recording match for an item of the library album, and that album's Release Group must be the target one. Only library items under `MUSIC_ROOT` and outside the source folder count as proof, so an album imported in place cannot prove itself. Any file that is neither proven audio nor a known sidecar (artwork, `.cue`, `.log`, `.txt`, `.nfo`, playlists, checksums, `.pdf`) keeps the folder, and so does any change to the folder between the proof and the delete. Matching titles or file names are no longer enough; without proof the folder is kept and the log says why. The import paths no longer pass the "already in library" phrase themselves, and the dead `_delete_if_already_in_library(path, "")` call after `/api/import` is gone (I-4).
+- `POST /api/import/review-folder/delete` no longer lets the client's `confirmed_wrong_library_folder` / `allow_library_delete` flag skip the Pending Review check. Every delete must be a Pending Review folder or a matching Needs MB ID album row; the server decides from `MUSIC_ROOT` whether the folder is in the library (library files are quarantined, as before), and refuses a path whose symlinked component moves it into or out of the library. The flags are still accepted and ignored. `GET /api/import/folder-stats` now returns `is_library_path` (REV-04).
+- `DELETE /api/ai-pending-review` with no `path` no longer clears the whole Pending Review queue: send a `path`, or `{"all": true}` to clear everything. The queue file is written atomically (F15).
+- Import Review folder delete and file cleanup now act on exactly the path that was checked against Pending Review. Before, the path was URL-decoded first, so deleting a review folder named `Mix%20Tape` could permanently delete a different folder, `Mix Tape`, that was never in review. File names in a cleanup request are no longer decoded either: `a%20b.flac` means that literal file (N1).
+- A Needs MB ID album row now opens a review-folder delete only for that album's own folder, and only when every audio file in it belongs to that album. Before, sending the album's id with its artist folder quarantined the artist's other albums too (N2).
+
+### Fixed
+
+- Import Review: opening or browsing a review item no longer changes any files or starts an import. Before, showing an item could quarantine or permanently delete up to 4 of its rejected files, and could queue an import for a high-confidence match, without a click. Now **Remove N rejected files…** opens a confirmation that lists the files and says whether they will be quarantined or permanently deleted, and imports start only from the Import button and its confirmation. Backend auto-import jobs are unchanged.
+- Import page: every button that starts imports or changes stored data now asks first. **Revalidate** is renamed **Revalidate & Import…** and its confirmation gives the number of items and says eligible items may be imported. **Retry failed imports**, **Retry eligible failures** and **Recover batch** confirm that imports will start. **Clean Stale…** and History's **Clear** confirm that only review or history metadata changes. Cancel sends nothing.
+- Find Music: a per-album download now asks first, because the finished download is imported into the library. The **Download next N** confirmation now says the downloads are imported. Import Review's reconciliation **Keep existing** and **Keep imported** now ask first, because they quarantine or replace a library file; **Keep both** changes nothing and does not ask.
+- Import Review keyboard shortcuts (`[`, `]`, `i`) no longer fire while another Import tab is open or while Ctrl, Alt or Meta is held. Shift and AltGr are allowed, so the shortcuts work on layouts that need them to type `[` or `]` (for example German). The candidate Left/Right arrow keys now work only while focus is inside the candidate carousel, not anywhere on the page.
+
 ## v0.5.0 - 2026-10-12
 
 ### Upgrade Notes

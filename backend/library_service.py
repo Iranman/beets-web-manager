@@ -23,7 +23,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
 import backend.recording_review as recording_review
-from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
@@ -662,21 +662,129 @@ def _preserve_torrent_source_file(path_value: str | Path) -> bool:
 _MUSIC_LIBRARY_ROOT = str(MUSIC_ROOT)
 
 
-def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) -> bool:
-    """Delete source folder(s) that beet reported as already in the library.
+# Non-audio files a source folder may hold besides proven audio (I-4/B2).
+# Anything else (an unlisted audio format, an archive, ...) keeps the folder.
+_PROVEN_SOURCE_SIDECAR_EXTS = frozenset(_ART_EXTS) | {
+    ".cue", ".log", ".txt", ".nfo", ".m3u", ".m3u8", ".sfv", ".md5", ".accurip", ".pdf"}
+
+
+def _source_tree_snapshot(folder_path: str) -> Dict[str, tuple]:
+    """lstat identity of every entry under a folder (symlinks not followed),
+    so a delete can refuse a tree that changed after its proof (I-4/B3)."""
+    root = str(folder_path)
+    snap: Dict[str, tuple] = {}
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise):
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            st = os.lstat(full)
+            snap[os.path.relpath(full, root)] = (st.st_mode, st.st_ino, st.st_size, st.st_mtime_ns)
+    return snap
+
+
+def _raise(ex: BaseException) -> None:
+    raise ex
+
+
+def _source_proven_in_library(folder_path: str, album_id: int, target_releasegroupid: str) -> Dict[str, Any]:
+    """Proof that a source folder is wholly a copy of one library album (I-4).
+
+    Proven only when the library album's mb_releasegroupid equals the target
+    Release Group AND every regular file in the folder (recursively) is either
+    a known non-audio sidecar or audio that is a byte match or an AcoustID
+    same-recording match (same_recording_proof) for an item of that album
+    that lives in the music library and outside this folder. Titles, tags and
+    file names are never proof. Fails closed: any missing evidence, error,
+    unrecognised file or unproven audio -> not proven.
+    Returns {"proven", "reason", "files": [{"path", "proof", ...}]}."""
+    ev: Dict[str, Any] = {"proven": False, "reason": "", "files": []}
+    target = _s(target_releasegroupid).strip().lower()
+    try:
+        album = composite_workflows.get_album(int(album_id)) if album_id else None
+        album_rg = _s((album or {}).get("mb_releasegroupid")).strip().lower()
+        if not target or album_rg != target:
+            ev["reason"] = "release_group_mismatch"
+            return ev
+        folder = Path(folder_path).resolve()
+        lib_files = []
+        for it in composite_workflows.find_all_items_by_album_id(int(album_id)):
+            p = _album_item_abs_path(it.get("path"))
+            # B1: an item can only prove a source file from inside the library;
+            # an item that IS the source file (in-place import) proves nothing.
+            if not p or not Path(p).is_file():
+                continue
+            real = Path(p).resolve()
+            if _path_is_under(real, MUSIC_ROOT) and not _path_is_under(real, folder):
+                lib_files.append((p, _s(it.get("mb_trackid")).strip().lower(),
+                                  _album_cleanup_file_info(Path(p))))
+        files = sorted((p for p in Path(folder_path).rglob("*") if p.is_file()), key=lambda p: str(p))
+    except Exception as ex:
+        ev["reason"] = f"evidence_unavailable: {type(ex).__name__}"
+        return ev
+    audio = [p for p in files if p.suffix.lower() in AUDIO_EXT]
+    unrecognised = [p for p in files
+                    if p.suffix.lower() not in AUDIO_EXT and p.suffix.lower() not in _PROVEN_SOURCE_SIDECAR_EXTS]
+    if unrecognised:
+        ev["reason"] = "unrecognised_file"
+        ev["files"] = [{"path": str(p), "proof": ""} for p in unrecognised[:20]]
+        return ev
+    if not audio or not lib_files:
+        ev["reason"] = "no_audio" if not audio else "no_library_files"
+        return ev
+    for src in audio:
+        src_info = _album_cleanup_file_info(src)
+        entry: Dict[str, Any] = {"path": str(src), "proof": ""}
+        match = next((p for p, _, info in lib_files if _album_cleanup_verified_same_file(src_info, info)), "")
+        if match:
+            entry.update(proof="byte", library_path=match)
+        else:
+            for lib_path, rid, _ in lib_files:
+                proof = same_recording_proof(str(src), lib_path, rid)
+                if proof.get("proven"):
+                    entry.update(proof="fingerprint", library_path=lib_path,
+                                 recording_id=proof.get("recording_id", ""))
+                    break
+                entry["last_status"] = proof.get("reason", "")
+        ev["files"].append(entry)
+        if not entry["proof"]:
+            # Stop at the first unproven file: one is enough to keep the folder.
+            ev["reason"] = "unproven_file"
+            return ev
+    ev["proven"] = True
+    return ev
+
+
+def _delete_source_if_proven_in_library(src_path: str, album_id: int, target_releasegroupid: str,
+                                        log: list) -> Dict[str, Any]:
+    """Delete a downloads source folder only when _source_proven_in_library
+    proves every file is accounted for in the target library album, and the
+    folder has not changed since. Otherwise the folder is kept. Returns the
+    evidence plus "deleted": bool."""
+    try:
+        snapshot = _source_tree_snapshot(src_path)
+    except OSError as ex:
+        ev = {"proven": False, "reason": f"evidence_unavailable: {type(ex).__name__}", "files": []}
+    else:
+        ev = _source_proven_in_library(src_path, album_id, target_releasegroupid)
+    ev["deleted"] = False
+    if not ev["proven"]:
+        log.append(f"  [cleanup] Source kept (no fingerprint/byte proof it is in the library: "
+                   f"{ev['reason']}): {Path(src_path).name}")
+        return ev
+    ev["deleted"] = _delete_source_folder_already_in_library(src_path, log, expected_snapshot=snapshot)
+    return ev
+
+
+def _delete_source_folder_already_in_library(src_path: str, log: list, *,
+                                             expected_snapshot: Dict[str, tuple]) -> bool:
+    """Delete one proven-duplicate source folder. Callers must hold proof
+    (_delete_source_if_proven_in_library) and the tree snapshot taken before
+    it; the folder is kept if anything in it changed since.
 
     Safe only when the source is under a downloads/temp root — never touches
     the music library itself.
 
     Returns True if anything was deleted.
     """
-
-    output_lower = beet_output.lower()
-    _already_phrases = ("already in the library", "already in library",
-                        "already imported", "no files imported", "nothing was imported")
-    if not any(p in output_lower for p in _already_phrases):
-        return False
-
     src = Path(src_path)
     # Refuse to touch anything inside the music library
     try:
@@ -696,69 +804,31 @@ def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) ->
         log.append(f"  [cleanup] Skipped (path not under downloads root): {src}")
         return False
 
-    audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav",
-                  ".aiff", ".wv", ".ape", ".alac", ".aac"}
-
-    # Strategy 1: parse specific folder paths from beet output lines
-    # Beet outputs lines like:
-    #   "Artist/Album (Year): Already in library"
-    #   "Skipping: /path/to/folder"
-    deleted_any = False
-    folders_to_delete: set = set()
-
-    # Look for paths explicitly mentioned before "already in the library"
-    for line in beet_output.splitlines():
-        line_lower = line.lower()
-        if not any(p in line_lower for p in _already_phrases):
-            continue
-        # Try to extract a path from the beginning of the line
-        # Pattern: "/some/path: Already in library" or "/some/path Already in library"
-        candidate = line.split(":")[0].strip().strip('"').strip("'")
-        if candidate and Path(candidate).exists() and Path(candidate).is_dir():
-            sub = Path(candidate)
-            try:
-                sub_resolved = str(sub.resolve())
-            except Exception:
-                sub_resolved = str(sub)
-            if (any(_path_is_under(Path(sub_resolved), Path(r)) for r in _DOWNLOADS_ROOTS)
-                    and not _path_is_under(Path(sub_resolved), MUSIC_ROOT)):
-                folders_to_delete.add(str(sub))
-
-    def _delete_staging_folder(folder) -> bool:
-        # Resolve once against the staging roots (never the library, a
-        # staging root itself, protected data, or a symlink), then re-check
-        # with lstat right before deleting (S1/F3). Failures are reported,
-        # never swallowed.
-        try:
-            target = composite_workflows._validated_staging_target(folder, "delete")
-            if _path_is_under(target, MUSIC_ROOT):
-                raise ValueError(f"Refusing to delete inside the music library: {folder}")
-            composite_workflows._remove_resolved(target)
-            return True
-        except (OSError, ValueError) as ex:
-            log.append(f"  [cleanup] Not deleted {Path(str(folder)).name}: {ex}")
+    # Only a leaf album folder (audio directly inside) is deleted, never a
+    # parent that may hold other albums. Resolve once against the staging
+    # roots (never the library, a staging root itself, protected data, or a
+    # symlink), then re-check with lstat right before deleting (S1/F3).
+    # Failures are reported, never swallowed.
+    if not src.is_dir():
+        return False
+    try:
+        if not any(f.is_file() and f.suffix.lower() in AUDIO_EXT for f in src.iterdir()):
             return False
-
-    for folder in folders_to_delete:
-        if _delete_staging_folder(folder):
-            log.append(f"  [cleanup] Deleted (already in library): {Path(folder).name}")
-            deleted_any = True
-
-    # Strategy 2: if no specific folders were found and src DIRECTLY contains
-    # audio files (i.e. it IS a leaf album folder), delete it.
-    # Intentionally NOT recursive — avoids nuking a parent folder that has
-    # unimported albums in subdirectories alongside the already-present one.
-    if not deleted_any and src.is_dir():
-        try:
-            direct_audio = [f for f in src.iterdir()
-                            if f.is_file() and f.suffix.lower() in audio_exts]
-            if direct_audio and _delete_staging_folder(src):
-                log.append(f"  [cleanup] Deleted source (already in library): {src.name}")
-                deleted_any = True
-        except Exception as ex:
-            log.append(f"  [cleanup] Warning during cleanup: {ex}")
-
-    return deleted_any
+        target = composite_workflows._validated_staging_target(src, "delete")
+        # B3: the proof covered the tree as it was; anything added, removed or
+        # rewritten since was never proven.
+        # ponytail: a tiny window remains between this check and the rmtree.
+        if _source_tree_snapshot(str(target)) != expected_snapshot:
+            log.append(f"  [cleanup] Source kept (changed since proof): {src.name}")
+            return False
+        if _path_is_under(target, MUSIC_ROOT):
+            raise ValueError(f"Refusing to delete inside the music library: {src.name}")
+        composite_workflows._remove_resolved(target)
+    except (OSError, ValueError) as ex:
+        log.append(f"  [cleanup] Not deleted {src.name}: {ex}")
+        return False
+    log.append(f"  [cleanup] Deleted source (already in library, proven): {src.name}")
+    return True
 
 
 def _delete_album_ids_from_db(album_ids: list, log: list, *,
@@ -1493,7 +1563,7 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
     if not rows:
         return False
 
-    matched = 0
+    item_paths = set()
     for row in rows:
         raw_path = _s(row["path"])
         if not raw_path:
@@ -1501,10 +1571,31 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
         abs_path = Path(raw_path)
         if not abs_path.is_absolute():
             abs_path = MUSIC_ROOT / raw_path
+        abs_path = abs_path.resolve(strict=False)
         if not _path_is_under(abs_path, folder):
             return False
-        matched += 1
-    return matched > 0
+        item_paths.add(abs_path)
+
+    # N2: "every item is under the folder" also holds for the artist folder
+    # (or any ancestor), which would sweep sibling albums into the delete.
+    # The folder must be the album's own folder: the deepest folder holding
+    # all its items, one disc level stripped ...
+    try:
+        own = Path(os.path.commonpath([str(p.parent) for p in item_paths]))
+    except ValueError:
+        return False
+    if re.match(r'^(?:disc|cd|disk)\s*\d+$', own.name, re.I):
+        own = own.parent
+    if own != folder:
+        return False
+    # ... and every audio file in it must be one of this album's items.
+    try:
+        for p in folder.rglob("*"):
+            if p.suffix.lower() in AUDIO_EXT and p.is_file() and p.resolve(strict=False) not in item_paths:
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _delete_review_source_folder(src_path: str, log: list,
