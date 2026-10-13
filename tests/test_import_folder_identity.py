@@ -264,6 +264,14 @@ class FolderIdentityTests(_FolderFixture):
         self.assertNotIn(str(link), files)
         self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
 
+    def test_symlink_loop_terminates_and_blocks(self):
+        try:
+            (self.folder / "loop").symlink_to(self.folder, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported here")
+        files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, True))
+
     def test_no_audio_files(self):
         self.paths = []
         result = self.identify()

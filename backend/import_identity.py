@@ -13,6 +13,7 @@ evidence builder there). Only layer-5 workflows and routes may import it.
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,17 +67,39 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     cover nested files too. Like ``_build_folder_evidence``, a symlinked file
     (or one reached through a symlinked directory) is not evidence; the flag
     reports that one exists, because a pinned Beets import would still pick
-    it up unproven."""
+    it up unproven (``beets.util.sorted_walk`` follows symlinked directories)."""
+    def is_link(p: Path) -> bool:
+        return p.is_symlink() or os.path.isjunction(p) or p.resolve() != p
+
+    def has_audio(top: Path) -> bool:  # follows links; `seen` guards loops
+        seen = set()
+        for dirpath, dirnames, filenames in os.walk(top, followlinks=True):
+            real = os.path.realpath(dirpath)
+            if real in seen:
+                dirnames[:] = []
+                continue
+            seen.add(real)
+            if any(Path(n).suffix.lower() in AUDIO_EXT for n in filenames):
+                return True
+        return False
+
     try:
         root = Path(folder).resolve(strict=True)
         files, linked = [], False
-        for p in root.rglob("*"):
-            if p.suffix.lower() not in AUDIO_EXT:
-                continue
-            if p.is_symlink() or p.resolve() != p:
-                linked = True
-            elif p.is_file():
-                files.append(str(p))
+        for dirpath, dirnames, filenames in os.walk(root):  # never descends links
+            here = Path(dirpath)
+            for name in list(dirnames):
+                if is_link(here / name):
+                    dirnames.remove(name)
+                    linked = linked or has_audio(here / name)
+            for name in filenames:
+                p = here / name
+                if p.suffix.lower() not in AUDIO_EXT:
+                    continue
+                if is_link(p):
+                    linked = True
+                elif p.is_file():
+                    files.append(str(p))
         return sorted(files, key=str.lower), linked
     except OSError:
         return [], False
