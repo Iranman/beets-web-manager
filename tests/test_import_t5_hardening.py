@@ -254,6 +254,22 @@ class StoredPendingPathRevalidationTests(_Base):
         self.assertEqual((out["queued_count"], out["skipped_count"], out["failed_count"]), (0, 1, 0))
         self.assertEqual(out["items"][0]["reason"], irs._UNTRUSTED_STORED_REVIEW_PATH)
 
+    def test_symlink_from_downloads_into_music_never_matches(self):
+        # Security LOW-5: the music library is an approved root, but a stored
+        # downloads path may not reach it through a symlink.
+        self.patch(prs, "MUSIC_ROOT", self.music)
+        (self.music / "Artist" / "Album").mkdir(parents=True)
+        link = self.downloads / "into-music"
+        try:
+            os.symlink(self.music / "Artist", link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self._store(link / "Album")
+        self.assertFalse(prs._pending_review_matches(str(link / "Album")))
+        in_music = self.music / "Artist" / "Album"
+        self._store(in_music)
+        self.assertTrue(prs._pending_review_matches(str(in_music)))
+
 
 class RevalidateItemIsolationTests(_Base):
     """Security LOW-3: one failing item never aborts the run or leaks text."""

@@ -560,7 +560,8 @@ def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
 def _trusted_stored_review_path(raw: Any) -> Optional[str]:
     """A stored Pending Review path, normalized, when it is still inside an
     approved Import Review root (or the library), is not a root itself, and
-    no symlink moves it outside every approved root; else None. The path is taken
+    no symlink moves it outside every approved root or into the music
+    library from outside it; else None. The path is taken
     literally (never URL-decoded, #387), so folder names with ``%``, ``+``
     or backslashes keep working. Entries stored before POST /api/ai-pending-review
     validated paths are re-checked here wherever an entry authorizes an
@@ -583,7 +584,12 @@ def _trusted_stored_review_path(raw: Any) -> Optional[str]:
     # A symlink may move the folder to another approved root (#392 keeps that
     # working); it must never move it outside every root or onto one.
     real_roots = [os.path.realpath(r) for r in roots]
-    return lexical if real not in real_roots and _strictly_under(real, real_roots) else None
+    if real in real_roots or not _strictly_under(real, real_roots):
+        return None
+    # Security LOW-5: never into the music library from outside it.
+    music = os.path.normpath(str(MUSIC_ROOT))
+    into_music = _strictly_under(real, [os.path.realpath(music)]) and not _strictly_under(lexical, [music])
+    return None if into_music else lexical
 
 
 def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:
