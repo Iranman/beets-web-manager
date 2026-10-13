@@ -1190,6 +1190,42 @@
       ]
     },
     {
+      "method": "POST",
+      "endpoint": "library_missing_mb_ids_batch_preview",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Read-only background job that proves up to 50 Library missing-ID rows with AcoustID/MusicBrainz evidence (no AI) and records a Preview transaction with a random confirm token. Writes nothing to the library.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_missing_mb_batch.py",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_missing_mb_ids_batch_apply",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Apply a proven Missing IDs batch preview: requires the preview's confirm token, claims the transaction once, snapshots state, re-proves each row and writes MusicBrainz IDs through the existing Match album / attach-recording transactions in a background job.",
+      "required_role_or_privilege": "owner/admin shared application secret plus per-preview confirm token",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_missing_mb_batch.py",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
       "method": "GET",
       "endpoint": "library_scan_status",
       "security_classification": "ADMIN_ONLY",
