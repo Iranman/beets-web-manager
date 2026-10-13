@@ -50,7 +50,8 @@ class _CacheCase(unittest.TestCase):
             mock.patch.object(acq, "jobs", self.store),
             mock.patch.object(acq, "_ACQ_QUEUE_CACHE_FILE", self.cache_file),
             mock.patch.dict(acq._acq_queue, {"snapshot": None, "loaded": False, "job_id": "",
-                                             "last_error": "", "last_error_at": 0.0}),
+                                             "last_error": "", "last_error_at": 0.0,
+                                             "done": [], "absorb_refresh_until": 0.0}),
             mock.patch.object(acq, "get_library_payload", side_effect=self._library),
             mock.patch.object(acq, "_acq_fetch_lidarr_wanted", side_effect=self._fetch),
             mock.patch.object(acq, "_download_sources_status", return_value={"fallbacks": {}}),
@@ -75,6 +76,14 @@ class _CacheCase(unittest.TestCase):
         if progress:
             progress(len(rows), len(rows))
         return [dict(r) for r in rows], ""
+
+    def _hold_builds(self):
+        """Builds block in the library read until the returned event is set, so
+        a test sees the state a read leaves before the build can publish."""
+        release = threading.Event()
+        self.addCleanup(release.set)
+        acq.get_library_payload.side_effect = lambda **kw: (release.wait(10), self._library(**kw))[1]
+        return release
 
     def _build(self, **kwargs):
         job_id, running = acq.start_acquisition_queue_build(**kwargs)
@@ -216,8 +225,8 @@ class QueueRouteTests(_CacheCase):
         self.assertEqual((counts_only["items"], counts_only["total"]), ([], 241))
         self.assertEqual(counts_only["counts"]["all"], 246)
         self.assertEqual(counts_only["counts"]["unmonitored"], 5)
-        _, everything = self._get()  # no limit: the whole filtered list (back-compat)
-        self.assertEqual((len(everything["items"]), everything["limit"]), (241, None))
+        _, default = self._get()  # no limit: one full page (#385 F3)
+        self.assertEqual((len(default["items"]), default["limit"]), (241, 500))
 
     def test_search_filters_and_sort(self):
         _, body = self._get("?search=zeta%20BACH&limit=100")
@@ -247,10 +256,12 @@ class QueueRouteTests(_CacheCase):
 
     def test_stale_snapshot_is_served_and_rebuilt_in_the_background(self):
         acq._acq_queue["snapshot"] = dict(acq._acq_queue["snapshot"], built_at=time.time() - 7 * 3600)
+        release = self._hold_builds()
         status, body = self._get("?limit=5")
         self.assertEqual((status, body["total"], body["cache"]["state"]), (200, 241, "stale"))
         job = self.store.get(body["cache"]["job_id"])
         self.assertIsNotNone(job)
+        release.set()
         job._thread.join(10)
         self.assertEqual(acq.acquisition_queue_snapshot()[1]["state"], "ready")
 

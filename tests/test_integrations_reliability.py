@@ -612,13 +612,16 @@ class LidarrWantedTests(_BoundaryCase):
 
     def test_short_page_is_accepted_when_total_records_moved(self):  # QA F4
         full = [dict(_WANTED, id=i) for i in range(1, 1001)]
-        rows, error = self._fetch([_wanted_page(full, total=1500), _wanted_page([], total=1000)])
+        # The moving pass is read again (ARCH-028 N2); the stable re-read is the list.
+        rows, error = self._fetch([_wanted_page(full, total=1500), _wanted_page([], total=1000),
+                                   _wanted_page(full, total=1000)])
         self.assertEqual((len(rows), error), (1000, ""))
 
     def test_moved_total_with_rows_missing_is_not_complete(self):  # QA #379 N3
         full = [dict(_WANTED, id=i) for i in range(1, 1001)]
         short = [dict(_WANTED, id=i) for i in range(1001, 1501)]
-        self.assertEqual(self._fetch([_wanted_page(full, total=2000), _wanted_page(short, total=1600)]),
+        moving = [_wanted_page(full, total=2000), _wanted_page(short, total=1600)]
+        self.assertEqual(self._fetch(moving + [_wanted_page(full, total=2000), _wanted_page(short, total=1600)]),
                          ([], "Lidarr returned an unexpected response"))
 
     def test_missing_total_records_is_malformed(self):  # ACQ-9: paging needs it
