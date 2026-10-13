@@ -440,11 +440,13 @@ export function AcquisitionPanel({
     if (queue && offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor((total - 1) / PAGE_SIZE) * PAGE_SIZE));
   }, [offset, queue, total]);
 
-  const refreshList = useCallback(async () => {
+  const refreshList = useCallback(async (afterDownload = false) => {
     setRefreshStarting(true);
     setRefreshError('');
     try {
-      await refreshAcquisitionQueue(showUnmonitored);
+      // reused: true means the list was still current and no job started; the reload below
+      // shows it as is. Otherwise the reload sees cache.refreshing and the status poll follows the build.
+      await refreshAcquisitionQueue(showUnmonitored, afterDownload);
       await load();
     } catch (err) {
       setRefreshError(`The list refresh could not be started: ${errorMessage(err)}. The list shown is unchanged. Try again, or check the Jobs page.`);
@@ -573,7 +575,7 @@ export function AcquisitionPanel({
   useEffect(() => {
     if (batchJob?.status !== 'success' || batchSuccessHandledRef.current) return;
     batchSuccessHandledRef.current = true;
-    void refreshList();
+    void refreshList(true);
   }, [batchJob?.status, refreshList]);
 
   useEffect(() => {
@@ -920,7 +922,7 @@ export function AcquisitionPanel({
                 <AcquisitionRow
                   key={item.key}
                   item={item}
-                  onChanged={() => void refreshList()}
+                  onChanged={() => void refreshList(true)}
                   ytdlpEnabled={ytdlpEnabled}
                   ytdlpMessage={ytdlpMessage}
                   ytdlpStatus={ytdlpStatus}

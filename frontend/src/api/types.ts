@@ -346,6 +346,68 @@ export interface LibraryMissingMbResponse {
   counts: { all: number; album: number; item: number };
 }
 
+/** Missing IDs batch fix (#399). The server proves each row; the UI only shows its decision. */
+export type MissingMbBatchPreviewPayload =
+  | { ids: string[] }
+  | { kind: LibraryMissingMbKind; search?: string; limit: number };
+
+export interface MissingMbBatchStartResponse extends ApiOkResponse {
+  job_id: string;
+  /** Preview: number of rows selected. */
+  rows?: number;
+  transaction_id?: string;
+  /** Set when the start was followed to a job that was already running (409). */
+  already_running?: boolean;
+}
+
+export type MissingMbWrite = { mb_releasegroupid?: string; mb_albumid?: string; mb_trackid?: string };
+
+export interface MissingMbPreviewRow {
+  row_id: string;
+  kind: 'album' | 'item' | '';
+  target_id: number;
+  proven: boolean;
+  status: 'proven' | 'needs_review';
+  reasons: string[];
+  write: MissingMbWrite;
+  /** Fixed user-facing text from the server. */
+  message: string;
+}
+
+export interface MissingMbPreviewResult {
+  ok: boolean;
+  /** null when no row was proven: there is nothing to apply. */
+  transaction_id: string | null;
+  confirm_token: string | null;
+  counts: { rows: number; proven: number; needs_review: number };
+  rows: MissingMbPreviewRow[];
+}
+
+export type MissingMbApplyRowStatus =
+  | 'written' | 'already_set' | 'evidence_changed' | 'no_longer_proven' | 'evidence_unavailable'
+  | 'write_failed' | 'recovery_required' | 'cancelled' | 'not_attempted';
+
+export interface MissingMbApplyRow {
+  row_id: string;
+  kind: 'album' | 'item' | '';
+  target_id: number;
+  status: MissingMbApplyRowStatus | string;
+  message: string;
+  write: MissingMbWrite;
+  transaction_ids?: string[];
+  reasons?: string[];
+}
+
+export interface MissingMbApplyResult {
+  ok: boolean;
+  transaction_id: string;
+  status: 'Completed' | 'Failed' | 'Recovery Required' | 'Cancelled' | string;
+  counts: Record<string, number>;
+  rows: MissingMbApplyRow[];
+  code?: string;
+  error?: string;
+}
+
 export interface ApiOkResponse {
   ok: boolean;
   error?: string | null;
@@ -1215,6 +1277,8 @@ export interface JobResponse extends ApiOkResponse {
   log?: string[];
   // PythonJob return value — present only when status === 'success'
   result?: Record<string, unknown>;
+  /** Structured progress a Python job publishes (job_engine update_state). */
+  state?: { progress?: { done?: number; total?: number } } & Record<string, unknown>;
 }
 
 export interface AlbumArtCandidate {
@@ -2034,8 +2098,10 @@ export interface AcquisitionQueueResponse extends ApiOkResponse {
 }
 
 export interface AcquisitionQueueRefreshResponse extends ApiOkResponse {
-  job_id: string;
+  /** null when the server reused a still-current list (reused: true); there is no job to follow. */
+  job_id: string | null;
   already_running: boolean;
+  reused: boolean;
 }
 
 export type DownloadMethod = 'slskd' | 'spotiflac' | 'ytdlp' | 'soundcloud';

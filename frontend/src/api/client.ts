@@ -85,6 +85,8 @@ import type {
   ReviewQueueResponse,
   LibraryMissingMbParams,
   LibraryMissingMbResponse,
+  MissingMbBatchPreviewPayload,
+  MissingMbBatchStartResponse,
   RgidGroupDetailResponse,
   FolderPlaceholderReview,
   FolderPlaceholderMergePreview,
@@ -274,6 +276,19 @@ export function getLibraryMissingMbIds(options: LibraryMissingMbParams = {}): Pr
   if (options.search?.trim()) params.set('search', options.search.trim());
   if (options.sort) params.set('sort', options.sort);
   return apiJson<LibraryMissingMbResponse>(`/api/library/missing-mb-ids?${params.toString()}`);
+}
+
+/** Start the read-only proof job for up to 50 Missing IDs rows. */
+export function previewMissingMbBatch(payload: MissingMbBatchPreviewPayload): Promise<MissingMbBatchStartResponse> {
+  return apiJson<MissingMbBatchStartResponse>('/api/library/missing-mb-ids/batch/preview', jsonRequest('POST', payload));
+}
+
+/** Start writing the proven rows of one preview. confirm_token goes only here. */
+export function applyMissingMbBatch(transactionId: string, confirmToken: string): Promise<MissingMbBatchStartResponse> {
+  return apiJson<MissingMbBatchStartResponse>(
+    '/api/library/missing-mb-ids/batch/apply',
+    jsonRequest('POST', { transaction_id: transactionId, confirm_token: confirmToken }),
+  );
 }
 
 export interface CleanupStaleResponse {
@@ -1015,10 +1030,15 @@ export function getAcquisitionQueue(options: AcquisitionQueueParams = {}): Promi
 }
 
 /** Start (or join) the background Find Music list build. */
-export function refreshAcquisitionQueue(includeUnmonitored = false): Promise<AcquisitionQueueRefreshResponse> {
+export function refreshAcquisitionQueue(includeUnmonitored = false, afterDownload = false): Promise<AcquisitionQueueRefreshResponse> {
+  // after_download lets the server reuse a list that is still current; only the automatic
+  // refresh after a finished download sends it, never the user's Refresh button.
   return apiJson<AcquisitionQueueRefreshResponse>(
     '/api/acquisition/queue/refresh',
-    jsonRequest('POST', includeUnmonitored ? { include_unmonitored: true } : {}),
+    jsonRequest('POST', {
+      ...(includeUnmonitored ? { include_unmonitored: true } : {}),
+      ...(afterDownload ? { after_download: true } : {}),
+    }),
   );
 }
 

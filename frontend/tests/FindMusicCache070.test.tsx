@@ -212,7 +212,7 @@ describe('Find Music refresh', () => {
       .mockResolvedValue(response({ items: [row(2)], cache: cache({ age_seconds: 2 }) }));
     renderPanel();
     fireEvent.click(await screen.findByRole('button', { name: 'Refresh list' }));
-    await waitFor(() => expect(mocked.refreshAcquisitionQueue).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(mocked.refreshAcquisitionQueue).toHaveBeenCalledWith(false, false));
     expect(await screen.findByText(/Updating in the background/)).toBeTruthy();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(REFRESH_POLL_MS); });

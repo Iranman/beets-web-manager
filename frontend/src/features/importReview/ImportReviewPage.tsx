@@ -46,6 +46,7 @@ import {
   validateManualMusicBrainzId,
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
+import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -4871,6 +4872,8 @@ export function ImportReviewPage({
           {error}. {missingIdsMode ? 'This list is read from Beets; check the Beets status on the System page, then click Refresh.' : 'Click Refresh to try again.'}
         </Alert>
       ) : null}
+
+      {missingIdsMode ? <MissingIdsBatchPanel rows={items} onWritten={() => void loadQueue(true)} /> : null}
 
       {/* Background import status strip */}
       {Object.keys(backgroundJobs).length > 0 ? (

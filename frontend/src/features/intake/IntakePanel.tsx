@@ -197,6 +197,23 @@ export function folderWarningLabel(code: string) {
   return FOLDER_WARNING_LABELS[code] || code.replace(/_/g, ' ');
 }
 
+/** Chip label for a folder that needs attention: names the specific outcome
+ * where the status alone would be vague (backend/ai_service.py, #394). */
+export function folderAttentionLabel(folder: AiBatchFolderState) {
+  if (folder.failure_reason === 'symlinked_audio') return 'Symlinked audio';
+  // A partial Beets import: some albums were kept, the skipped paths have a review row.
+  if (folder.status === 'review_required' && folder.metadata_imported && folder.review_item_id) return 'Imported in part';
+  return folderStatusLabel(folder.status);
+}
+
+/** Readable text for failure_reason codes; sentences from the server pass through. */
+export function folderFailureText(reason?: string) {
+  if (reason === 'symlinked_audio') {
+    return 'Not imported: some audio files are symlinks, which could point anywhere (even into the library). Replace them with the real files, then decide in the Review Queue.';
+  }
+  return reason || '';
+}
+
 export function folderStageLabel(stage?: string) {
   return stage ? STAGE_LABELS[stage] || stage.replace(/_/g, ' ') : '';
 }
@@ -734,7 +751,7 @@ function JobLog({
                       <div className="truncate text-xs text-zinc-500">
                         {folder.artwork_retryable
                           ? 'Imported and tagged successfully; album artwork could not be fetched.'
-                          : folder.failure_reason || beetsSkipLabel(folder.beets_skip_reason) || folder.ai_suggest_error || folder.current_step || 'Needs review'}
+                          : folderFailureText(folder.failure_reason) || beetsSkipLabel(folder.beets_skip_reason) || folder.ai_suggest_error || folder.current_step || 'Needs review'}
                       </div>
                       {folder.auto_import && !folder.auto_import.eligible && folder.auto_import.reasons.length ? (
                         <div className="truncate text-xs text-zinc-500">
@@ -750,13 +767,14 @@ function JobLog({
                       ) : null}
                     </div>
                     <div className="flex flex-wrap items-center gap-1">
-                      {folder.status === 'review_created' || folder.status === 'review_required' ? (
+                      {folder.review_item_id || folder.status === 'review_created' || folder.status === 'review_required' ? (
+                        // Review rows are keyed by folder path, so a path search lands on the row review_item_id names.
                         <Button
                           size="small"
                           variant="outlined"
                           onClick={() => navigate(`/import?tab=review&q=${encodeURIComponent(folder.source_folder)}`)}
                         >
-                          Open in review
+                          {folder.review_item_id ? 'Open review item' : 'Open in review'}
                         </Button>
                       ) : null}
                       {folder.retry_exhausted || folder.manual_review_required ? (
@@ -777,7 +795,7 @@ function JobLog({
                           ) : null}
                         </>
                       ) : null}
-                      <Chip label={folderStatusLabel(folder.status)} size="small" variant="outlined" />
+                      <Chip label={folderAttentionLabel(folder)} size="small" variant="outlined" />
                     </div>
                   </div>
                 ))}
