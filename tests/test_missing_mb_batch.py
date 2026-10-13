@@ -74,6 +74,11 @@ class _World:
           side_effect=lambda aid: self.album_items.get(aid, []))
         p("backend.missing_mb_batch.identify_import_folder", side_effect=lambda folder: self.idents[folder])
         p("backend.missing_mb_batch._missing_mb_rows", side_effect=lambda search="": list(self.rows))
+        self.real_folders = set()
+        real_scan = mb._recursive_audio
+        p("backend.missing_mb_batch._recursive_audio", side_effect=lambda folder: real_scan(folder)
+          if folder in self.real_folders else (self.folder_files.get(folder, []), False))
+        self.folder_files = {}
         p("backend.missing_mb_batch._reconstruct_track_recording_candidates",
           side_effect=lambda item, iid: ({}, self.candidates.get(iid, []), item.path, Path(item.path).name))
         p("backend.missing_mb_batch._acoustid_lookup_cached_outcome",
@@ -95,7 +100,18 @@ class _World:
         self.albums[aid] = SimpleNamespace(mb_albumid="", mb_releasegroupid="", albumartist="A", album="B")
         self.album_items[aid] = [{"id": aid * 10 + n, "path": f"Artist/Album{aid}/0{n}.flac"} for n in (1, 2)]
         self.idents[f"{FOLDER}{aid}"] = _ident(aid, **ident_kw)
+        self.folder_files[f"{FOLDER}{aid}"] = [str(MUSIC_ROOT / it["path"]) for it in self.album_items[aid]]
         row = _album_row(aid)
+        self.rows.append(row)
+        return row
+
+    def add_real_album(self, aid, folder, item_paths):
+        """An album on a real temp filesystem: the folder scan is not faked."""
+        self.albums[aid] = SimpleNamespace(mb_albumid="", mb_releasegroupid="", albumartist="A", album="B")
+        self.album_items[aid] = [{"id": aid * 10 + n, "path": str(p)} for n, p in enumerate(item_paths)]
+        self.idents[str(folder)] = _ident(aid, files=len(item_paths), tracks=len(item_paths))
+        self.real_folders.add(str(folder))
+        row = _album_row(aid, path=str(folder))
         self.rows.append(row)
         return row
 
@@ -150,6 +166,50 @@ class ProofTests(_Case):
     def test_album_folder_with_extra_audio_is_not_proven(self):
         proof = mb.prove_row(self.w.add_album(1, files=3))
         self.assertIn("folder_audio_count_mismatch:3/2", proof["reasons"])
+
+    def _tree(self):
+        root = Path(tempfile.mkdtemp(prefix="mbbatch_fs_"))
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        (root / "A").mkdir()
+        (root / "B").mkdir()
+        return root
+
+    def _link(self, target, link, **kw):
+        try:
+            os.symlink(target, link, **kw)
+        except (OSError, NotImplementedError) as ex:  # Windows without symlink rights
+            self.skipTest(f"symlinks unavailable: {ex}")
+
+    def test_real_album_folder_is_proven(self):
+        root = self._tree()
+        for n in ("x", "y"):
+            (root / "B" / f"{n}.flac").write_bytes(b"a")
+        proof = mb.prove_row(self.w.add_real_album(1, root / "B", [root / "B" / "x.flac", root / "B" / "y.flac"]))
+        self.assertTrue(proof["proven"], proof["reasons"])
+
+    def test_item_stored_through_a_symlinked_file_is_not_proven(self):
+        # album folder B; item 2 is stored as A/y.flac, a link to B/y.flac
+        root = self._tree()
+        for n in ("x", "y"):
+            (root / "B" / f"{n}.flac").write_bytes(b"a")
+        self._link(root / "B" / "y.flac", root / "A" / "y.flac")
+        proof = mb.prove_row(self.w.add_real_album(1, root / "B", [root / "B" / "x.flac", root / "A" / "y.flac"]))
+        self.assertEqual((proof["proven"], proof["reasons"]), (False, ["symlinked_item_path"]))
+
+    def test_item_stored_through_a_symlinked_parent_dir_is_not_proven(self):
+        root = self._tree()
+        for n in ("x", "y"):
+            (root / "B" / f"{n}.flac").write_bytes(b"a")
+        self._link(root / "B", root / "L", target_is_directory=True)
+        proof = mb.prove_row(self.w.add_real_album(1, root / "B", [root / "B" / "x.flac", root / "L" / "y.flac"]))
+        self.assertEqual((proof["proven"], proof["reasons"]), (False, ["symlinked_item_path"]))
+
+    def test_folder_with_same_count_but_other_files_is_not_proven(self):
+        root = self._tree()
+        for n in ("x", "z"):
+            (root / "B" / f"{n}.flac").write_bytes(b"a")
+        proof = mb.prove_row(self.w.add_real_album(1, root / "B", [root / "B" / "x.flac", root / "B" / "y.flac"]))
+        self.assertEqual((proof["proven"], proof["reasons"]), (False, ["folder_files_mismatch:2/2"]))
 
     def test_album_conflict_or_import_review_claim_is_not_proven(self):
         self.assertIn("conflicts:symlinked_audio_file",
@@ -287,6 +347,15 @@ class BatchTests(_BatchCase):
         self.assertEqual(mb.check_apply_request(tid, None, store=self.store)[1], 400)
         self.assertEqual(mb.check_apply_request(tid, "", store=self.store)[0]["code"], "confirm_token_required")
         self.assertEqual(mb.check_apply_request(tid, "nope", store=self.store)[0]["code"], "confirm_token_mismatch")
+        self.assertEqual(mb.check_apply_request(tid, "t\u00f6k\u00e9n\ud800", store=self.store),
+                         ({"ok": False, "code": "confirm_token_mismatch",
+                           "error": "The confirm_token does not match this preview."}, 409))
+        meta = self.store.get(tid)["metadata"]
+        self.assertNotIn("confirm_token", meta)  # only its hash is stored
+        self.assertNotIn(pre["confirm_token"], str(self.store.get(tid)))
+        # The live job result keeps the token for the UI; the persisted job copy does not.
+        import job_engine
+        self.assertNotIn(pre["confirm_token"], str(job_engine.redact_for_persistence(pre)))
         self.assertEqual(mb.check_apply_request("txn_missing", "x", store=self.store)[1], 404)
         self.assertEqual(mb.check_apply_request(tid, pre["confirm_token"], store=self.store), (None, 200))
 
@@ -386,6 +455,11 @@ class RouteTests(_Case):
         res = self.client.post("/api/library/missing-mb-ids/batch/preview",
                                json={"ids": [f"album:{n}" for n in range(mb.MAX_BATCH_ROWS + 1)]})
         self.assertEqual(res.status_code, 400)
+
+    def test_malformed_ids_are_rejected(self):
+        for bad in ("album:0", "album:012", "album:12x", " album:12", "track:3", "album:12345678901", "item:-1"):
+            res = self.client.post("/api/library/missing-mb-ids/batch/preview", json={"ids": [bad]})
+            self.assertEqual((res.status_code, res.get_json()["error_code"]), (400, "INVALID_PARAM"), bad)
 
     def test_unknown_row_id_is_reported_not_written(self):
         pre = self.preview(["album:999"])

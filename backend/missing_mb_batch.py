@@ -38,6 +38,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -47,7 +49,7 @@ import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path
 from backend.app_runtime import _app_logger, _path_is_under, _redact_security_text, _s, transactions
 from backend.beets_adapter import beets_adapter, lib
-from backend.import_identity import identify_import_folder
+from backend.import_identity import _recursive_audio, identify_import_folder
 from backend.library_service import _missing_mb_rows, _reconstruct_track_recording_candidates
 from backend.matching.folder_identity import confirmed_recording
 from backend.transaction_engine import metadata_diff
@@ -55,6 +57,7 @@ from backend.transaction_engine import metadata_diff
 FAMILY = "missing_mb_ids_batch_v1"
 MAX_BATCH_ROWS = 50
 SOURCE = "Library Missing IDs batch"
+_ROW_ID_RE = re.compile(r"(album|item):([1-9]\d{0,9})")
 _FINGERPRINT_PROOFS = frozenset({"acoustid_recording_id", "multi_source_deterministic"})
 
 #: Fixed, user-facing text per row outcome. Exception detail goes to the
@@ -83,6 +86,19 @@ class RecoveryRequired(RuntimeError):
 
 class NotWritten(RuntimeError):
     """A writer's own gate refused the row before writing anything."""
+
+
+def _has_link_component(path: str) -> bool:
+    return os.path.realpath(path) != os.path.abspath(path)
+
+
+def _norm_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _token_hash(token: str) -> str:
+    """Only this hash is stored; the raw token lives in the preview job result."""
+    return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _uuid(value: Any) -> str:
@@ -128,10 +144,21 @@ def prove_album(album_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str
     paths = [_album_item_abs_path(_s(it.get("path"))) for it in items]
     folder = _s(row.get("path")).strip()
     reasons: List[str] = []
-    if not items or not folder:
+    if not items or not folder or not all(paths):
         reasons.append("no_items")
-    elif not all(p and _path_is_under(Path(p), Path(folder)) for p in paths):
+    elif any(_has_link_component(p) for p in paths):
+        # Match writes tags through the path: a link could reach another item's file.
+        reasons.append("symlinked_item_path")
+    elif not all(_path_is_under(Path(p), Path(folder)) for p in paths):
         reasons.append("items_outside_album_folder")
+    else:
+        # The folder must hold exactly this album's files, not just as many.
+        folder_files, linked = _recursive_audio(folder)
+        if linked:
+            reasons.append("symlinked_audio_in_folder")
+        item_set = {_norm_path(p) for p in paths}
+        if len(item_set) != len(paths) or item_set != {_norm_path(f) for f in folder_files}:
+            reasons.append(f"folder_files_mismatch:{len(folder_files)}/{len(items)}")
     if reasons:
         return _proof("album", album_id, row_id, reasons, {}, {"album_items": len(items)}, current)
 
@@ -223,7 +250,8 @@ def prove_row(row: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return prove_album(target, row) if kind == "album" else prove_item(target, row)
     except Exception as ex:  # any evidence failure fails closed
-        _app_logger.warning("missing-mb batch: evidence for %s failed: %s", row.get("id"), type(ex).__name__)
+        _app_logger.warning("missing-mb batch: evidence for %s:%d failed: %s",
+                            "album" if kind == "album" else "item", target, type(ex).__name__)
         return _proof(_s(kind), target, _s(row.get("id")), ["evidence_unavailable"], {}, {}, {})
 
 
@@ -239,7 +267,10 @@ def select_rows(payload: Dict[str, Any]) -> tuple:
         if (not isinstance(ids, list) or not ids or len(ids) > MAX_BATCH_ROWS
                 or not all(isinstance(i, str) for i in ids)):
             return [], f"ids must be a list of 1-{MAX_BATCH_ROWS} row ids like \"album:12\" or \"item:34\""
-        wanted = list(dict.fromkeys(i.strip() for i in ids))
+        matches = [_ROW_ID_RE.fullmatch(i) for i in ids]
+        if not all(matches):
+            return [], "each id must look like \"album:12\" or \"item:34\""
+        wanted = list(dict.fromkeys(f"{m[1]}:{int(m[2])}" for m in matches))
         by_id = {r["id"]: r for r in _missing_mb_rows("")}
         rows = [by_id.get(i) or {"id": i, "target_kind": "", "missing": True} for i in wanted]
         return rows, ""
@@ -288,7 +319,7 @@ def run_preview(rows: List[Dict[str, Any]], log: List[str], cancel_event=None, u
         reason="Batch fix of library rows missing MusicBrainz IDs; proven matches only.",
         changes=changes, rollback_available=False,
         rollback_reason="Each row is written by its own rollback-capable transaction; see metadata.results.",
-        metadata={"mutation_family": FAMILY, "rows": proofs, "confirm_token": token, "requires_approval": True,
+        metadata={"mutation_family": FAMILY, "rows": proofs, "confirm_token_sha256": _token_hash(token), "requires_approval": True,
                   "apply_endpoint": "/api/library/missing-mb-ids/batch/apply"},
     )
     store.update(tx["id"], counts={"items": len(proven)})
@@ -310,7 +341,7 @@ def check_apply_request(tx_id: str, token: Any, store=None) -> tuple:
     meta = tx.get("metadata") or {}
     if meta.get("mutation_family") != FAMILY:
         return {"ok": False, "code": "wrong_transaction", "error": "Not a Missing IDs batch preview."}, 400
-    if not hmac.compare_digest(_s(meta.get("confirm_token")), token):
+    if not hmac.compare_digest(_s(meta.get("confirm_token_sha256")).encode(), _token_hash(token).encode()):
         return {"ok": False, "code": "confirm_token_mismatch",
                 "error": "The confirm_token does not match this preview."}, 409
     if tx.get("status") not in ("Preview", "Approved"):
