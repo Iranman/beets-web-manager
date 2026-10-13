@@ -420,6 +420,20 @@ def _leaked_db_paths_summary(rows: List[Dict[str, Any]],
     }
 
 
+def query_int_arg(args: Any, name: str, default: int, hi: int) -> Tuple[int, str]:
+    """``(value, error)`` for a bounded non-negative integer query arg."""
+    raw = args.get(name)
+    if raw is None or raw == "":
+        return default, ""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default, f"{name} must be an integer"
+    if value < 0 or value > hi:
+        return default, f"{name} must be between 0 and {hi}"
+    return value, ""
+
+
 def json_route_result(body: Any, status: int = 200):
     """Route return value for a request-free service result (ARCH-001).
 
