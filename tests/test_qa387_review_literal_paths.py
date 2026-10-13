@@ -124,7 +124,8 @@ class ReviewLiteralPathTests(unittest.TestCase):
                                       action="delete_rejected", allow_delete=True)
         data = response.get_json()
         self.assertEqual(response.status_code, 200, data)
-        self.assertEqual(data["deleted_count"], 2, data)
+        # #380 F3: delete_rejected is downgraded to a restorable quarantine.
+        self.assertEqual((data["deleted_count"], data["quarantined_count"]), (0, 2), data)
         self.assertFalse(bad.exists())
         self.assertFalse(nested.exists())
         self.assertTrue(good.exists())
