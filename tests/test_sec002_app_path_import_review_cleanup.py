@@ -202,7 +202,8 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400, data)
         self.assertFalse(data["ok"])
-        self.assertIn("outside", data["error"])
+        # #396 LOW-4: an out-of-root stored path never matches Pending Review.
+        self.assertEqual(data["error"], "Review item does not match the source folder.")
         self.assertTrue(sentinel.exists())
         self.assertNotIn(str(sentinel), data["error"])
 
@@ -239,7 +240,8 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400, data)
         self.assertFalse(data["ok"])
-        self.assertIn("approved root", data["error"])
+        # #396 LOW-4: a stored path equal to an approved root never matches.
+        self.assertEqual(data["error"], "Review item does not match the source folder.")
         self.assertTrue(root_track.exists())
         self.assertTrue(self.downloads.exists())
 
