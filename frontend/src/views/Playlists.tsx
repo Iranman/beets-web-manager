@@ -1795,7 +1795,7 @@ export default function Playlists() {
       done: 0,
       failed: 0,
       total: useParsedTracks ? tracksToDownload.length : 0,
-      download_methods: downloadMethod === 'auto' ? ['slskd', 'spotiflac', 'ytdlp', 'soundcloud'] : [downloadMethod],
+      download_methods: downloadMethod === 'auto' ? ['slskd', 'ytdlp', 'soundcloud'] : [downloadMethod],
     });
     try {
       const started = await startPlaylistDownload({

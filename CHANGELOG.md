@@ -10,6 +10,7 @@ The project uses Semantic Versioning.
 
 - `YTDLP_PO_PROVIDER_URL` is now blank by default, so the bgutil PO token provider is used only when you set it (`docker-compose.full.yml` still sets it for its sidecar).
 - SpotiFLAC is no longer in the default slskd fallback chain (now `ytdlp,soundcloud`), and a download request (Find Music, Download All, track replacement) can no longer add or reorder sources: the chain comes only from `SLSKD_FALLBACK_METHODS`. yt-dlp (YouTube) is always in it: a list that leaves `ytdlp` out gets it added before `soundcloud`, or at the end. To keep using SpotiFLAC, list `spotiflac` there and install its CLI. Track replacement now uses a direct-source fallback only when its "try an alternate source" setting is on.
+- Playlist downloads no longer try SpotiFLAC by default either: the **Auto** chain (`PLAYLIST_DOWNLOAD_METHODS`) is now `slskd,ytdlp,soundcloud`. To keep using it, set `PLAYLIST_DOWNLOAD_METHODS=slskd,spotiflac,ytdlp,soundcloud` (and install its CLI), or pick SpotiFLAC as the method for one download.
 
 ### Fixed
 
@@ -34,6 +35,7 @@ The project uses Semantic Versioning.
 - Download All now picks its rows from that snapshot instead of rebuilding the whole list in its POST request. Without a snapshot it returns 409 `queue_not_ready` with the build job's id. Its `?refresh=1` query argument is ignored.
 - The direct-source availability checks reported with the Find Music list (`download_sources`, which run `deno --version` and similar) are cached for 5 minutes.
 - The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.
+- `YTDLP_REMOTE_COMPONENTS` (lets yt-dlp download and run remote solver code) is now classified operator-only: set it only in the Compose environment; the Settings page cannot save it. The unused `[blocked] Deno auto-install` stubs were removed.
 - Deterministic folder identification now gives the identity check each file's AcoustID result, so a fingerprint can prove a track in a folder that has no MusicBrainz tags (I-8). This is opt-in (`fingerprint_evidence=True`); every other preflight caller, including the AI batch gate, behaves as before.
 
 ### Added

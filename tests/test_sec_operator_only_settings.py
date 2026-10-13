@@ -26,7 +26,7 @@ CANARY = "canary-value-must-not-be-logged-7f3a"
 class OperatorOnlyClassificationTests(unittest.TestCase):
     def test_operator_keys_are_deployment_layer_and_never_saveable_or_loadable(self):
         for key in ("BEETS_OUTBOUND_ALLOWLIST", "SPOTIFLAC_CMD", "YTDLP_COOKIE_FILE", "YTDLP_NETRC_FILE",
-                    "YTDLP_JS_RUNTIMES", "SLSKD_API_KEY_FILE", "BEETS_WEB_AUTH_DISABLED", "BEETS_TRUSTED_PROXIES"):
+                    "YTDLP_JS_RUNTIMES", "YTDLP_REMOTE_COMPONENTS", "SLSKD_API_KEY_FILE", "BEETS_WEB_AUTH_DISABLED", "BEETS_TRUSTED_PROXIES"):
             with self.subTest(key=key):
                 self.assertIn(key, cl.OPERATOR_KEYS)
                 self.assertEqual(cl.classify(key), cl.LAYER_DEPLOYMENT)

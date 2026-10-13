@@ -292,7 +292,8 @@ PLAYLIST_MIN_DOWNLOAD_SECONDS = max(0, int(os.environ.get("PLAYLIST_MIN_DOWNLOAD
 PLAYLIST_DOWNLOAD_BATCH_SIZE = _env_int("PLAYLIST_DOWNLOAD_BATCH_SIZE", 0, minimum=0)
 
 
-PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,spotiflac,ytdlp,soundcloud")
+# SpotiFLAC is opt-in (list it in PLAYLIST_DOWNLOAD_METHODS), as for Find Music.
+PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,ytdlp,soundcloud")
 
 
 # Absolute only (config_layers.container_path): an empty or relative value
