@@ -110,6 +110,103 @@ class NoDeletionTests(_Batch):
             self.assertTrue((Path(f) / "01.flac").exists())
 
 
+class SymlinkEdgeTests(_Batch):
+    """N4 re-verify: no symlinked audio may reach Beets Stage 1."""
+
+    def _link(self, link: Path, target: Path, **kw):
+        try:
+            link.symlink_to(target, **kw)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+
+    def _beets_folders(self):
+        return [c.args[0] for c in self.stubs["reimport_source"].call_args_list]
+
+    def test_symlink_to_audio_outside_the_folder_is_refused(self):
+        outside = self.tmp.parent / f"qa394_out_{id(self)}.flac"
+        outside.write_bytes(b"x")
+        self.addCleanup(outside.unlink)
+        self._link(Path(self.folders[0]) / "02.flac", outside)
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
+        self.assertNotIn(self.folders[0], self._beets_folders())
+
+    @unittest.expectedFailure  # QA394-F3: remove once Stage 1 reuses import_identity._recursive_audio
+    def test_symlinked_directory_of_audio_is_refused(self):
+        # Beets' sorted_walk follows a symlinked directory, so its audio
+        # would be imported (and moved) without ever being checked here.
+        disc = self.tmp / "elsewhere_disc"
+        disc.mkdir()
+        (disc / "02.flac").write_bytes(b"x")
+        self._link(Path(self.folders[0]) / "CD2", disc, target_is_directory=True)
+        _, folders = self.run_batch()
+        self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
+
+    def test_symlink_to_non_audio_does_not_block(self):
+        art = self.tmp / "cover_src.jpg"
+        art.write_bytes(b"x")
+        self._link(Path(self.folders[0]) / "cover.jpg", art)
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["status"], "imported")
+
+    def test_broken_audio_symlink_is_refused(self):
+        self._link(Path(self.folders[0]) / "03.flac", self.tmp / "missing.flac")
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
+        self.assertNotIn(self.folders[0], self._beets_folders())
+
+
+class LegacyAiRunningTests(RecoveryTests):
+    """N6 re-verify: a pre-phase-B "ai_running" folder is never stranded."""
+
+    def test_stale_batch_times_out_ai_running_via_reconcile(self):
+        from backend.import_reconciliation_service import _ai_batch_reconcile_state
+        state = self._state_with("ai_running", ai_suggest_started_at=1.0)
+        state.update({"status": "running", "heartbeat_at": 1.0})
+        with mock.patch("backend.import_reconciliation_service._ai_batch_worker_registered", return_value=False), \
+                mock.patch("backend.import_reconciliation_service._ai_batch_commit"):
+            out = _ai_batch_reconcile_state(state)
+        self.assertEqual({f["status"] for f in out["folder_states"].values()}, {"timed_out"})
+
+    def test_recover_with_fresh_heartbeat_reruns_ai_running_deterministically(self):
+        state = self._state_with("ai_running", ai_suggest_started_at=1.0)
+        with mock.patch.object(ai, "_ai_import_folder", side_effect=AssertionError("AI path")):
+            _, folders = self._recover(state)
+        self.assertEqual({f["status"] for f in folders.values()}, {"imported"}, self.log)
+        self.assertEqual(self.stubs["reimport_source"].call_count, 2)
+
+
+class SkipRaceTests(_Batch):
+    def test_skip_pressed_during_a_skipped_stage1_still_skips_that_folder_only(self):
+        first = self.folders[0]
+
+        def reimport(folder, opts, timeout):
+            if folder == first:
+                ai._ai_batch_control(self.batch_id)["skip_current"] = True
+                return skipped(folder)
+            return imported([7])
+
+        self.stubs["reimport_source"].side_effect = reimport
+        _, folders = self.run_batch()
+        self.assertEqual(folders[first]["failure_reason"], "skipped by user")
+        self.assertEqual(folders[self.folders[1]]["status"], "imported")
+
+
+class PartialReviewRowTests(_Batch):
+    def test_partial_import_creates_exactly_one_row_including_final_tally(self):
+        disc2 = str(Path(self.folders[0]) / "CD2")
+        self.reimport[self.folders[0]] = {"ok": True, "albums_imported": 1, "imported_album_ids": [7],
+                                          "skipped": [{"path": disc2, "reason": "duplicate"}],
+                                          "not_matched": [disc2], "not_matched_known": True}
+        _, folders = self.run_batch()
+        rows = [c for c in self.queued.call_args_list if c.args[0] == self.folders[0]]
+        self.assertEqual(len(rows), 1)  # _ai_batch_process_decisions adds none
+        ev = rows[0].kwargs["evidence"]
+        self.assertEqual((ev["origin_step"], ev["beets_skip_reason"]), ("beets_partial", "duplicate"))
+        self.assertEqual(rows[0].args[1]["mb_releasegroupid"], "")  # no identity invented
+
+
 class Stage2bCancelTests(_Batch):
     def test_cancel_after_pinned_beets_import_goes_to_review(self):
         # Pre-existing edge (implementer-reported): cancel lands inside
