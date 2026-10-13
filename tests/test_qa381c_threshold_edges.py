@@ -161,6 +161,57 @@ class SymlinkEdges(_FolderFixture):
         self.assertTrue(linked, "audio under a symlinked directory is not flagged")
         self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
 
+    def _outside_with_audio(self, rel="01 Unproven.flac"):
+        outside = Path(self.tmp.name) / "elsewhere"
+        target = outside / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"synthetic")
+        return outside
+
+    def test_deeply_nested_linked_dir_blocks(self):
+        deep = self.folder / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        self._link(deep / "Disc 2", self._outside_with_audio(), is_dir=True)
+        files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, True))
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
+
+    def test_linked_dir_with_audio_only_in_plain_subdir_blocks(self):
+        outside = self._outside_with_audio("sub/deeper/01 Unproven.flac")
+        self._link(self.folder / "Extras", outside, is_dir=True)
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
+
+    def test_linked_dir_chain_blocks(self):
+        # link -> plain dir containing another link -> audio
+        outside = Path(self.tmp.name) / "hop1"
+        outside.mkdir()
+        self._link(outside / "hop2", self._outside_with_audio(), is_dir=True)
+        self._link(self.folder / "Extras", outside, is_dir=True)
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
+
+    def test_dangling_audio_symlink_blocks_and_does_not_crash(self):
+        self._link(self.folder / "04 Gone.flac", Path(self.tmp.name) / "missing.flac")
+        files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, True))
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
+
+    def test_dangling_dir_symlink_does_not_block(self):
+        self._link(self.folder / "Gone", Path(self.tmp.name) / "missing_dir", is_dir=True)
+        files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, False))
+        auto = self.identify()["auto_import"]
+        self.assertTrue(auto["eligible"], auto)
+
+    def test_link_back_into_folder_subdir_blocks_and_terminates(self):
+        sub = self.folder / "CD2"
+        sub.mkdir()
+        (sub / "01 X.flac").write_bytes(b"synthetic")
+        self._link(sub / "up", self.folder, is_dir=True)          # cycle to root
+        self._link(self.folder / "again", sub, is_dir=True)       # sibling alias
+        files, linked = ii._recursive_audio(str(self.folder))
+        self.assertTrue(linked)
+        self.assertEqual(len(files), 4)  # real files counted once, none via links
+
     def test_symlinked_directory_without_audio_does_not_block(self):
         outside = Path(self.tmp.name) / "art"
         outside.mkdir()
