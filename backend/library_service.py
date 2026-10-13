@@ -1589,8 +1589,10 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
     if own != folder:
         return False
     # ... and every audio file in it must be one of this album's items.
+    # Walk `own` (derived from the album's Beets item paths, equal to
+    # `folder` here), not the request-supplied path (CodeQL #1418).
     try:
-        for p in folder.rglob("*"):
+        for p in own.rglob("*"):
             if p.suffix.lower() in AUDIO_EXT and p.is_file() and p.resolve(strict=False) not in item_paths:
                 return False
     except OSError:
