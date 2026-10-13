@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
 from backend import config_layers
-import copy, difflib, json, os, re, threading, time
+import copy, difflib, json, math, os, re, threading, time
 import urllib.error
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1510,8 +1510,14 @@ def _acq_queue_load() -> None:
     _acq_queue["loaded"] = True
     try:
         data = json.loads(_ACQ_QUEUE_CACHE_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("items"), list) and data.get("built_at"):
+        built_at = data.get("built_at") if isinstance(data, dict) else None
+        # QA #385 N1: a valid-JSON file with a bad field must read as absent, not 500 every GET.
+        if (isinstance(built_at, (int, float)) and not isinstance(built_at, bool)
+                and math.isfinite(built_at) and built_at > 0
+                and isinstance(data.get("items"), list) and all(isinstance(r, dict) for r in data["items"])):
             _acq_queue["snapshot"] = data
+        else:
+            _app_logger.warning("Find Music snapshot ignored: unexpected content")
     except FileNotFoundError:
         pass
     except Exception as exc:

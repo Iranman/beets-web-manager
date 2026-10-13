@@ -208,7 +208,6 @@ class CacheFileTests(_CacheCase):
                 self.assertEqual(body["total"], 0)
                 self.assertIsNone(body["cache"]["built_at"])
 
-    @unittest.expectedFailure  # QA #385 finding N1: valid JSON with a bad field 500s every read
     def test_malformed_fields_never_500(self):
         for text in (json.dumps({"items": [], "built_at": "abc"}), json.dumps({"items": [1, "x"], "built_at": 5})):
             with self.subTest(text=text[:30]):
