@@ -64,7 +64,8 @@ class ImportAutoEnqueueTests(unittest.TestCase):
     def test_backend_ready_enqueue_has_controlled_worker_endpoint(self):
         self.assertIn('@app.post("/api/import-review/auto-enqueue-ready/job")', APP)
         body = section(APP, 'def import_review_auto_enqueue_ready_job', '@app.post("/api/import-review/auto-enqueue")')
-        self.assertIn('jobs.start_python(_do, label="Auto-import ready review items")', body)
+        self.assertIn('jobs.start_python(_do, label="Auto-import ready review items", metadata=', body)
+        self.assertIn('"dedupe_key": "import-review-auto-enqueue-ready"', body)
         self.assertIn('_run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)', body)
     def test_backend_ready_enqueue_skips_failed_or_running_statuses(self):
         body = section(APP, 'def _pending_item_is_ready_for_backend_auto_import', '@app.post("/api/import-review/auto-enqueue-ready")')
@@ -205,6 +206,8 @@ class ImportAutoEnqueueTests(unittest.TestCase):
     def test_revalidate_endpoint_uses_shared_mapping_and_auto_enqueue_gate(self):
         self.assertIn('@app.post("/api/import-review/revalidate")', APP)
         body = section(APP, 'def import_review_revalidate', '@app.post("/api/folders/ai-suggest")')
+        self.assertIn('_run_import_review_revalidation(', body)
+        body += section(APP, 'def _run_import_review_revalidation(', 'Revalidated {reviewed}')
         self.assertIn('release_group_id=release_group_id', body)
         self.assertIn('_import_review_build_revalidated_match(item, comparison, preflight)', body)
         self.assertIn('_update_pending_review_revalidation(path, selected_match, preflight, note)', body)
@@ -227,7 +230,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         route_start = APP.index('@app.get("/api/candidates/<mb_albumid>/tracks")')
         route_end = APP.index('\ndef _target_preview_year(', route_start)
         route = APP[route_start:route_end]
-        revalidator = section(APP, 'def import_review_revalidate', '@app.post("/api/folders/ai-suggest")')
+        revalidator = section(APP, 'def _run_import_review_revalidation(', 'Revalidated {reviewed}')
         self.assertIn('_candidate_track_comparison_payload(mb_albumid, folder, release_group_id=release_group_id)', route)
         self.assertIn('release_group_id=release_group_id', revalidator)
 

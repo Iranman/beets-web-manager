@@ -580,6 +580,18 @@
     "routes_submissions.py::_fetch_open_graph_metadata": [
       "DISPLAY_ONLY",
       "Per-field provenance labels."
+    ],
+    "backend/import_review_service.py::_run_import_review_revalidation": [
+      "DISPLAY_ONLY",
+      "Revalidation loop moved from the route (F10); eligibility is evaluate_import_eligibility."
+    ],
+    "routes_import.py::<module>": [
+      "DISPLAY_ONLY",
+      "Allowlist of client identity fields for POST /api/ai-pending-review (F16); trust fields are dropped, not decided."
+    ],
+    "routes_import.py::_review_row_search_text": [
+      "DISPLAY_ONLY",
+      "Review Queue search haystack; confidence is matched as text, never compared or decided (#395)."
     ]
   }
 }

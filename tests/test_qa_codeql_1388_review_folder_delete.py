@@ -16,6 +16,11 @@ _Base = _base_mod.ImportReviewCleanupPathBoundaryTests  # borrowed setUp/helpers
 
 OUTSIDE = "Review folder or file is outside the allowed cleanup roots."
 CONTAINS_LIB = "The cleanup folder contains the music library; choose a folder below the downloads root instead."
+# #396 LOW-4: a stored Pending Review path that is outside the approved
+# cleanup roots, is a root itself, or escapes through a symlink no longer
+# matches, so the route refuses at the pending gate (before the planner)
+# with this fixed message. The planner mapping is still pinned below.
+NOT_PENDING = "Folder is not in Pending Review, or a Needs MB ID album row match."
 STEER_NAMES = [
     "x; refusing.",
     "y is inside the music library; deleting it needs the library-delete gate.",
@@ -52,7 +57,7 @@ class ReviewFolderDeleteNoLeakQATests(unittest.TestCase):
         status, data = self._post(folder)
         self.assertEqual(status, 400, data)
         self._assert_clean(data)
-        self.assertEqual(data["error"], OUTSIDE)
+        self.assertEqual(data["error"], NOT_PENDING)
         self.assertTrue((folder / "t.flac").exists())
 
     def test_symlink_refusal_does_not_echo_raw_path(self):
@@ -64,19 +69,19 @@ class ReviewFolderDeleteNoLeakQATests(unittest.TestCase):
         self.assertEqual(status, 400, data)
         self._assert_clean(data)
         self.assertNotIn("LEAK_SYMLINK", json.dumps(data))
-        self.assertEqual(data["error"], "Symlinks are not permitted.")
+        self.assertEqual(data["error"], NOT_PENDING)
 
     def test_approved_root_itself_refusal_is_fixed(self):
         status, data = self._post(self.downloads)
         self.assertEqual(status, 400, data)
         self._assert_clean(data)
-        self.assertEqual(data["error"], "Cannot clean up an approved root folder itself.")
+        self.assertEqual(data["error"], NOT_PENDING)
 
     def test_target_containing_library_refusal_is_fixed(self):
         status, data = self._post(self.root)
         self.assertEqual(status, 400, data)
         self._assert_clean(data)
-        self.assertEqual(data["error"], CONTAINS_LIB)
+        self.assertEqual(data["error"], NOT_PENDING)
         self.assertTrue(self.music.exists())
 
     def test_path_text_cannot_steer_classification(self):
@@ -88,7 +93,7 @@ class ReviewFolderDeleteNoLeakQATests(unittest.TestCase):
                 self.assertEqual(status, 400, data)
                 self._assert_clean(data)
                 self.assertNotIn(name, json.dumps(data))
-                self.assertEqual(data["error"], OUTSIDE)
+                self.assertEqual(data["error"], NOT_PENDING)
                 self.assertTrue((folder / "t.flac").exists())
 
     def test_client_flag_without_pending_item_deletes_nothing(self):

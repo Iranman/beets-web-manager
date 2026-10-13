@@ -6,7 +6,7 @@ from __future__ import annotations
 import json, os, re, threading, time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from flask import jsonify, request
 import backend.job_contract as job_contract
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
@@ -19,8 +19,8 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.beets_plugins import _atomic_write_text
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
-from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _update_pending_review_revalidation
-from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
+from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
+from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
@@ -33,12 +33,24 @@ from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_b
 # ── ARCH-001 extracted code ──
 
 
+def _invalid_param(error: str):
+    return jsonify({"ok": False, "error": error, "error_code": "INVALID_PARAM"}), 400
+
+
+def _limit_arg(source: Any, default: int, cap: int) -> Tuple[int, str]:
+    """F13: a non-integer ``limit`` is a 400, not a 500; large values clamp to ``cap``."""
+    value, error = query_int_arg(source, "limit", default, 10**9)
+    return min(value, cap), error
+
+
 @app.get("/api/unmatched-tracks")
 def unmatched_tracks():
     """Tracks with no mb_trackid whose album also has no mb_albumid.
     Albums that have already been matched to MusicBrainz (mb_albumid set) are excluded
     even if individual track IDs weren't stored."""
-    limit = min(int(request.args.get("limit", 300)), 2000)
+    limit, err = _limit_arg(request.args, 300, 2000)
+    if err:
+        return _invalid_param(err)
 
     try:
         review_data = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
@@ -335,7 +347,9 @@ def get_recent_imports():
 
 @app.get("/api/ai-match-history")
 def get_ai_match_history():
-    limit = min(int(request.args.get("limit", 50)), 200)
+    limit, err = _limit_arg(request.args, 50, 200)
+    if err:
+        return _invalid_param(err)
     try:
         data = json.loads(_AI_MATCH_HISTORY_FILE.read_text()) \
                if _AI_MATCH_HISTORY_FILE.exists() else []
@@ -355,12 +369,12 @@ def clear_recent_imports():
 
 @app.get("/api/import-log")
 def import_log():
-    limit = min(int(request.args.get("limit", 300)), 1000)
-    try:
-        lines = Path(LOG_FILE).read_text(errors="replace").splitlines()
-        return jsonify({"ok": True, "lines": lines[-limit:], "total": len(lines)})
-    except FileNotFoundError:
-        return jsonify({"ok": True, "lines": [], "total": 0})
+    limit, err = _limit_arg(request.args, 300, 1000)
+    if err:
+        return _invalid_param(err)
+    # Only the last 8 MB of beet.log is read; ``total`` counts the lines in it.
+    lines = _read_log_tail(LOG_FILE)
+    return jsonify({"ok": True, "lines": lines[-limit:] if limit else [], "total": len(lines)})
 
 
 @app.get("/api/import-skipped")
@@ -369,7 +383,9 @@ def import_skipped():
     The beet log format for skips is:  skip /path/to/folder
     Multiple folders can appear on one line separated by '; '.
     """
-    limit = min(int(request.args.get("limit", 500)), 2000)
+    limit, err = _limit_arg(request.args, 500, 2000)
+    if err:
+        return _invalid_param(err)
     skipped = _import_skipped_items(limit)
     return jsonify({"ok": True, "skipped": skipped, "total": len(skipped)})
 
@@ -380,8 +396,19 @@ def _review_row_search_text(row: Dict[str, Any]) -> str:
         row.get("folder"), row.get("folder_name"), row.get("reason"), row.get("status"),
         row.get("status_key"), row.get("origin_label"), row.get("source_playlist_name"),
         row.get("source_batch_id"), row.get("created_by_workflow"), row.get("mb_albumid"),
-        row.get("mb_releasegroupid"),
+        row.get("mb_releasegroupid"), row.get("year"), row.get("confidence"),
+        row.get("blocked_reason"), row.get("blocked_next_action"),
     ]
+    # #395 QA: the fields the client-side search used to match on.
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    folder = evidence.get("folder") if isinstance(evidence.get("folder"), dict) else {}
+    values += [folder.get("guessed_artist"), folder.get("guessed_album"), folder.get("guessed_year")]
+    preflight = evidence.get("preflight") if isinstance(evidence.get("preflight"), dict) else {}
+    if preflight.get("acoustid_mismatch"):
+        top = preflight.get("acoustid_top_release")
+        values.append(
+            f"AcoustID fingerprint mismatch: selected release {preflight.get('acoustid_target_hits') or 0} hit(s), "
+            f"strongest alternate {preflight.get('acoustid_top_hits') or 0} hit(s)." + (f" Top release: {top}." if top else ""))
     return " ".join(_s(v) for v in values if v).casefold()
 
 
@@ -628,26 +655,28 @@ def import_review_decision():
 @app.post("/api/import-review/auto-enqueue-ready")
 def import_review_auto_enqueue_ready():
     payload = request.get_json(silent=True) or {}
-    try:
-        limit = int(payload.get("limit") or 5)
-    except Exception:
-        limit = 5
-    return jsonify(_run_import_review_auto_enqueue_ready_batch(limit))
+    limit, err = _limit_arg(payload, 5, 25)
+    if err:
+        return _invalid_param(err)
+    return jsonify(_run_import_review_auto_enqueue_ready_batch(limit or 5))
 
 
 @app.post("/api/import-review/auto-enqueue-ready/job")
 def import_review_auto_enqueue_ready_job():
     payload = request.get_json(silent=True) or {}
-    try:
-        limit = int(payload.get("limit") or 5)
-    except Exception:
-        limit = 5
+    limit, err = _limit_arg(payload, 5, 25)
+    if err:
+        return _invalid_param(err)
+    limit = limit or 5
 
     def _do(log, cancel_event=None):
-        _run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)
+        return _run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)
 
-    job = jobs.start_python(_do, label="Auto-import ready review items")
-    return jsonify({"ok": True, "job_id": job.job_id, "limit": max(1, min(limit, 25))})
+    # F10: typed and deduplicated, so two ready-batches never run at once.
+    job = jobs.start_python(_do, label="Auto-import ready review items", metadata={
+        "type": "import-review-auto-enqueue-ready", "category": "import", "mutating": True,
+        "dedupe_key": "import-review-auto-enqueue-ready", "limit": limit})
+    return jsonify({"ok": True, "job_id": job.job_id, "limit": limit})
 
 
 @app.get("/api/import-reconciliation/reviews")
@@ -924,10 +953,15 @@ def import_review_revalidate():
     raw_ids = payload.get("review_item_ids") or ([] if not payload.get("review_item_id") else [payload.get("review_item_id")])
     if isinstance(raw_ids, str):
         raw_ids = [raw_ids]
+    if not isinstance(raw_ids, list):
+        raw_ids = []
     review_ids = {_s(value).strip() for value in raw_ids if _s(value).strip()}
     explicit_all = payload.get("all") is True or payload.get("review_all") is True
     auto_enqueue = payload.get("auto_enqueue") is True
-    limit = min(int(payload.get("limit") or 2000), 2000)
+    limit, err = _limit_arg(payload, 2000, 2000)
+    if err:
+        return _invalid_param(err)
+    limit = limit or 2000
     if not review_ids and not explicit_all:
         return jsonify({
             "ok": False,
@@ -938,108 +972,26 @@ def import_review_revalidate():
             "failed_count": 0,
             "items": [],
         }), 400
-    pending = _load_pending_reviews()
-    results: List[Dict[str, Any]] = []
-    reviewed = updated = queued = failed = 0
+    if explicit_all:
+        review_ids = set()
+    if explicit_all or len(review_ids) > IMPORT_REVIEW_REVALIDATE_SYNC_MAX:
+        # F10: a large revalidation is one tracked job; a second start while
+        # it runs answers 409 job_already_running (DuplicateJobError handler).
+        def _do(log, cancel_event=None):
+            return _compact_revalidation_summary(_run_import_review_revalidation(
+                review_ids, auto_enqueue=auto_enqueue, limit=limit, log=log, cancel_event=cancel_event))
 
-    for item in pending:
-        if reviewed >= limit:
-            break
-        item = item if isinstance(item, dict) else {}
-        path = _s(item.get("path")).strip()
-        review_item_id = f"pending:{path}" if path else ""
-        if review_ids and review_item_id not in review_ids and path not in review_ids:
-            continue
-        reviewed += 1
-        suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
-        release_group_id = _extract_mb_uuid(
-            _s(suggestion.get("mb_releasegroupid") or item.get("mb_releasegroupid"))
-        )
-        representative_release_id = _extract_mb_uuid(
-            _s(suggestion.get("representative_mb_albumid") or suggestion.get("mb_albumid"))
-        )
-        if not path or (not representative_release_id and not release_group_id):
-            failed += 1
-            results.append({
-                "ok": False,
-                "review_item_id": review_item_id,
-                "path": path,
-                "error": "Review item has no source path or MusicBrainz Release Group ID.",
-            })
-            continue
-        comparison = _candidate_track_comparison_payload(
-            representative_release_id,
-            path,
-            release_group_id=release_group_id,
-        )
-        if not comparison.get("ok"):
-            failed += 1
-            results.append({
-                "ok": False,
-                "review_item_id": review_item_id,
-                "path": path,
-                "error": comparison.get("error") or "Track comparison failed.",
-            })
-            continue
-        representative_release_id = _extract_mb_uuid(
-            _s(comparison.get("representative_release_id") or comparison.get("mb_albumid") or representative_release_id)
-        )
-        acoustic_preflight = _run_ai_release_preflight(
-            path,
-            representative_release_id,
-            existing_album_id=int((suggestion.get("existing_album_ids") or [0])[0] or 0),
-        ) if representative_release_id else None
-        preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
-        selected_match = _import_review_build_revalidated_match(item, comparison, preflight)
-        note = selected_match.get("preflight_reason", "")
-        if _update_pending_review_revalidation(path, selected_match, preflight, note):
-            updated += 1
-        auto_payload = {
-            "path": path,
-            "review_item_id": review_item_id,
-            "mb_albumid": selected_match.get("representative_release_id", ""),
-            "mb_releasegroupid": selected_match.get("release_group_id", ""),
-            "artist": selected_match.get("artist", ""),
-            "album": selected_match.get("album", ""),
-            "year": selected_match.get("year", ""),
-            "existing_album_id": int((suggestion.get("existing_album_ids") or [0])[0] or 0),
-            "track_mapping": selected_match.get("track_mapping") or [],
-            "selected_match": selected_match,
-            "confidence_score": selected_match.get("confidence_score"),
-            "ai_suggestion": suggestion,
-        }
-        eligibility = evaluate_import_eligibility(auto_payload)
-        result = {
-            "ok": True,
-            "review_item_id": review_item_id,
-            "path": path,
-            "selected_match": selected_match,
-            "eligibility": eligibility,
-            "queued": False,
-        }
-        if auto_enqueue and eligibility.get("eligible"):
-            try:
-                with _import_review_auto_lock:
-                    queue_result = _import_review_start_auto_import(auto_payload, eligibility)
-                result.update({
-                    "queued": bool(queue_result.get("queued")),
-                    "job_id": queue_result.get("job_id", ""),
-                    "existing_job": bool(queue_result.get("existing_job")),
-                })
-                queued += 1 if result.get("queued") else 0
-            except Exception as ex:
-                failed += 1
-                result.update({"ok": False, "error": str(ex), "queued": False})
-        results.append(result)
-
-    return jsonify({
-        "ok": True,
-        "reviewed_count": reviewed,
-        "updated_count": updated,
-        "queued_count": queued,
-        "failed_count": failed,
-        "items": results,
-    })
+        job = jobs.start_python(_do, label="Revalidate Import Review items", metadata={
+            "type": IMPORT_REVIEW_REVALIDATE_JOB_TYPE,
+            "category": "import",
+            "mutating": auto_enqueue,
+            "dedupe_key": IMPORT_REVIEW_REVALIDATE_JOB_TYPE,
+            "auto_enqueue": auto_enqueue,
+            "all": explicit_all,
+            "item_count": len(review_ids),
+        })
+        return jsonify({"ok": True, "job_id": job.job_id, "mode": "job"}), 202
+    return jsonify(_run_import_review_revalidation(review_ids, auto_enqueue=auto_enqueue, limit=limit))
 
 
 @app.post("/api/folders/ai-suggest")
@@ -1070,7 +1022,9 @@ def get_ai_pending_review():
 
 @app.get("/api/ai-review-decisions")
 def get_ai_review_decisions():
-    limit = min(int(request.args.get("limit", 100)), 500)
+    limit, err = _limit_arg(request.args, 100, 500)
+    if err:
+        return _invalid_param(err)
     try:
         data = (
             json.loads(_AI_REVIEW_DECISIONS_FILE.read_text())
@@ -1083,22 +1037,41 @@ def get_ai_review_decisions():
     return jsonify({"ok": True, "items": data[:limit]})
 
 
+# F16: a client may propose an identity, never evidence. Everything the
+# server computes (mb_valid, confidence, preflight, track_mapping, status,
+# review_evidence, ...) is dropped; revalidation recomputes it.
+_PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS = (
+    "mb_albumid", "mb_releasegroupid", "representative_mb_albumid", "album", "albumartist",
+    "artist", "year", "label", "country", "reason",
+)
+_PENDING_REVIEW_CLIENT_TEXT_MAX = 500  # per client-supplied string (suggestion and origin)
+
+
 @app.post("/api/ai-pending-review")
 def add_ai_pending_review():
-    payload = request.get_json(silent=True) or {}
-    folder_path = payload.get("path", "").strip()
-    if not folder_path:
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    if not _s(payload.get("path")).strip():
         return jsonify({"ok": False, "error": "path required"}), 400
-    suggestion = payload.get("suggestion") or {}
-    allow_existing = bool(payload.get("allow_existing") or suggestion.get("allow_existing_review"))
-    origin = _review_origin_payload(
-        folder_path,
-        suggestion,
-        origin=payload or {"origin_type": "manual_import"},
-        evidence=payload.get("evidence") or payload.get("review_evidence") or None,
-    )
+    # Same roots as an Import Review source folder; never the library or a root itself.
+    folder, path_error = _resolve_import_review_source_path(
+        payload.get("path"), allow_music=False, expected_type="dir")
+    if path_error or folder is None:
+        return jsonify({"ok": False, "error": path_error or "Source path is not allowed."}), 400
+    folder_path = str(folder)
+    raw_suggestion = payload.get("suggestion") if isinstance(payload.get("suggestion"), dict) else {}
+    suggestion = {k: (v[:_PENDING_REVIEW_CLIENT_TEXT_MAX] if isinstance(v, str) else v)
+                  for k in _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS
+                  for v in (raw_suggestion.get(k),)
+                  if isinstance(v, (str, int)) and not isinstance(v, bool)}
+    allow_existing = payload.get("allow_existing") is True
+    origin = _review_origin_payload(folder_path, suggestion, origin=payload)
     if _normalize_review_origin_type(origin.get("origin_type")) == "unknown":
         origin = {**origin, "origin_type": "manual_import", "origin_label": "Manual", "created_by_workflow": "manual_import"}
+    # Origin is display-only client text: plain strings, bounded, and the
+    # folder is always the validated one (security LOW-1).
+    origin = {k: _s(v)[:_PENDING_REVIEW_CLIENT_TEXT_MAX] for k, v in origin.items()}
+    origin["source_folder"] = folder_path
     added = _add_to_pending(folder_path, suggestion, allow_existing=allow_existing, origin=origin)
     return jsonify({"ok": True, "added": bool(added), "skipped_existing": not bool(added)})
 

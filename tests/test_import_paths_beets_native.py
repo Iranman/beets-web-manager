@@ -205,9 +205,9 @@ class ApiImportRouteTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.client = APP.app.test_client()
         self.logs = []
-        import backend.import_service as isvc
-        skips = mock.patch.object(isvc, "_IMPORT_SKIPPED_FILE",
-                                  isvc.Path(self.tmp.name) / "import_skipped.json")
+        import backend.pending_review_store as prs
+        skips = mock.patch.object(prs, "_IMPORT_SKIPPED_FILE",
+                                  prs.Path(self.tmp.name) / "import_skipped.json")
         skips.start()
         self.addCleanup(skips.stop)
 
