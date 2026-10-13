@@ -1932,6 +1932,32 @@ def _build_library_payload() -> dict:
     except Exception:
         pass
 
+    # ARCH-031: one scandir per folder, shared by the item existence check and
+    # the walk below. DirEntry types come with the directory read, so neither
+    # stats every file (a stat per item and per walked entry made a cold build
+    # cost one syscall per file, plus six cover-art probes per album).
+    listings: Dict[str, Optional[Tuple[List[str], set]]] = {}
+
+    def _listing(folder: str) -> Optional[Tuple[List[str], set]]:
+        """(sub-folder names, file names) of ``folder``, or None if unreadable."""
+        if folder not in listings:
+            try:
+                dirs: List[str] = []
+                files: set = set()
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if entry.is_dir():
+                            dirs.append(entry.name)
+                        elif entry.is_file():
+                            files.add(entry.name)
+                listings[folder] = (dirs, files)
+            except OSError:
+                listings[folder] = None
+        return listings[folder]
+
+    def _is_audio_name(name: str) -> bool:
+        return os.path.splitext(name)[1].lower() in AUDIO_EXT
+
     # Collect library items whose file is MISSING from disk
     # Group them by (artist, album) so we can inject them into the right tree bucket
     missing_by_bucket: Dict[tuple, list] = defaultdict(list)
@@ -1939,7 +1965,13 @@ def _build_library_payload() -> dict:
         p = _s(item.path)
         # Resolve relative beets path to absolute for the exists() check
         abs_p = (_MROOT + "/" + p) if (p and not p.startswith("/")) else p
-        if not Path(abs_p).exists():
+        parent, _sep, base_name = abs_p.rpartition("/")
+        parent_listing = _listing(parent) if parent else None
+        if parent_listing is not None and base_name in parent_listing[1]:
+            continue  # on disk
+        # os.path.exists, not Path.exists(): an unreadable folder (PermissionError)
+        # makes the item count as missing instead of failing the whole build (QA #398 N3).
+        if not os.path.exists(abs_p):
             artist = item.albumartist or item.artist or "Unknown Artist"
             album  = item.album  or "Unknown Album"
             year   = item.year   or 0
@@ -1959,6 +1991,17 @@ def _build_library_payload() -> dict:
                 "mb_trackid": _s(getattr(item, "mb_trackid", "")),
             })
 
+    # ARCH-031: missing buckets indexed by lower-cased artist, so each album
+    # folder and each artist looks only at its own buckets instead of all of
+    # them (quadratic in folders x missing albums). Insertion order is kept.
+    missing_keys_by_artist: Dict[str, Dict[tuple, None]] = defaultdict(dict)
+    for _key in missing_by_bucket:
+        missing_keys_by_artist[_key[0].lower()][_key] = None
+
+    def _pop_missing(key: tuple) -> list:
+        missing_keys_by_artist.get(key[0].lower(), {}).pop(key, None)
+        return missing_by_bucket.pop(key, [])
+
     # Build set of folder paths already queued for manual review (load once).
     try:
         _review_paths: set = {
@@ -1973,13 +2016,11 @@ def _build_library_payload() -> dict:
     seen_buckets: set = set()   # (artist_name, album_name) pairs we've added from disk
     seen_disk_album_ids: set = set()
 
-    try:
-        artist_dirs = sorted(
-            [d for d in MUSIC_ROOT.iterdir() if d.is_dir()],
-            key=lambda d: d.name.lower()
-        ) if MUSIC_ROOT.exists() else []
-    except PermissionError:
-        artist_dirs = []
+    root_listing = _listing(str(MUSIC_ROOT)) if MUSIC_ROOT.exists() else None
+    artist_dirs = sorted(
+        [MUSIC_ROOT / name for name in root_listing[0]],
+        key=lambda d: d.name.lower()
+    ) if root_listing else []
 
     for adir in artist_dirs:
         artist_name = adir.name
@@ -1987,18 +2028,17 @@ def _build_library_payload() -> dict:
         albums: list = []
         total = imported_count = 0
 
-        try:
-            album_dirs = sorted(
-                [d for d in adir.iterdir() if d.is_dir()],
-                key=lambda d: d.name.lower()
-            )
-            loose_files = sorted(
-                [f for f in adir.iterdir()
-                 if f.is_file() and f.suffix.lower() in AUDIO_EXT],
-                key=lambda f: f.name.lower()
-            )
-        except PermissionError:
+        artist_listing = _listing(str(adir))
+        if artist_listing is None:
             continue
+        album_dirs = sorted(
+            [adir / name for name in artist_listing[0]],
+            key=lambda d: d.name.lower()
+        )
+        loose_files = sorted(
+            [adir / name for name in artist_listing[1] if _is_audio_name(name)],
+            key=lambda f: f.name.lower()
+        )
 
         if loose_files:
             album_dirs = [None] + list(album_dirs)
@@ -2012,25 +2052,25 @@ def _build_library_payload() -> dict:
                 m2 = re.search(r'\((\d{4})\)\s*$', album_name)
                 if m2:
                     year = int(m2.group(1))
-                try:
-                    files = sorted(
-                        [f for f in aldir.iterdir()
-                         if f.is_file() and f.suffix.lower() in AUDIO_EXT],
-                        key=lambda f: f.name.lower()
-                    )
-                    # Multi-disc albums: Lidarr may store files in CD 01/, CD 02/,
-                    # Disc 1/, Disc 2/ etc. sub-folders. Recurse one level if no
-                    # audio files were found directly in the album folder.
-                    if not files:
-                        for sub in sorted(aldir.iterdir(), key=lambda d: d.name.lower()):
-                            if sub.is_dir():
-                                files += sorted(
-                                    [f for f in sub.iterdir()
-                                     if f.is_file() and f.suffix.lower() in AUDIO_EXT],
-                                    key=lambda f: f.name.lower()
-                                )
-                except PermissionError:
-                    files = []
+                album_listing = _listing(str(aldir))
+                files = sorted(
+                    [aldir / name for name in album_listing[1] if _is_audio_name(name)],
+                    key=lambda f: f.name.lower()
+                ) if album_listing else []
+                # Multi-disc albums: Lidarr may store files in CD 01/, CD 02/,
+                # Disc 1/, Disc 2/ etc. sub-folders. Recurse one level if no
+                # audio files were found directly in the album folder.
+                if album_listing and not files:
+                    for sub_name in sorted(album_listing[0], key=str.lower):
+                        sub = aldir / sub_name
+                        sub_listing = _listing(str(sub))
+                        if sub_listing is None:  # unreadable: the folder shows no files, as before
+                            files = []
+                            break
+                        files += sorted(
+                            [sub / name for name in sub_listing[1] if _is_audio_name(name)],
+                            key=lambda f: f.name.lower()
+                        )
 
             _disc_sub_re = re.compile(
                 r'^(?:cd|disc|disk)\s*0*(\d+)$', re.IGNORECASE)
@@ -2082,7 +2122,7 @@ def _build_library_payload() -> dict:
             # (e.g. year=20220729, year=20220802, year=20221020 for "Multiverse").
             # Without consuming all of them here, the leftovers appear as phantom cards.
             bucket_key = (artist_name, album_name, year)
-            missing_here = missing_by_bucket.pop(bucket_key, [])
+            missing_here = _pop_missing(bucket_key)
 
             # Collect every remaining key that matches artist + album (exact or year-stripped)
             artist_lc_bare = re.sub(
@@ -2091,15 +2131,14 @@ def _build_library_payload() -> dict:
             ).strip().lower()
             album_lc  = album_name.lower()
             extra_keys = [
-                k for k in list(missing_by_bucket.keys())
-                if k[0].lower() == artist_lc_bare
-                and (k[1].lower() == album_lc
+                k for k in list(missing_keys_by_artist.get(artist_lc_bare, ()))
+                if (k[1].lower() == album_lc
                      or _restore_time_colon_title(
                          re.sub(r'\s*[\(\[]\d{4,8}[\)\]]\s*$', '', k[1]).strip()
                      ).lower() == album_name_bare_lc)
             ]
             for k in extra_keys:
-                missing_here += missing_by_bucket.pop(k, [])
+                missing_here += _pop_missing(k)
 
             # Deduplicate missing tracks by (title, track) so re-imports don't double-count
             seen_mt: set = set()
@@ -2170,11 +2209,21 @@ def _build_library_payload() -> dict:
             # Detect cover art on disk even for albums not in beets DB
             disk_art = ""
             if aldir:
+                art_dirs, art_files = _listing(str(aldir)) or ((), set())
+                folded: Optional[Dict[str, str]] = None
                 for aname in ("albumart.jpg", "albumart.png", "folder.jpg",
                               "cover.jpg", "front.jpg", "cover.png"):
-                    c = aldir / aname
-                    if c.exists():
-                        disk_art = str(c)
+                    if aname in art_files or aname in art_dirs:  # as Path.exists() did
+                        disk_art = str(aldir / aname)
+                        break
+                    # QA #398 N1: on a case-insensitive filesystem (SMB, NTFS)
+                    # Path.exists() also found Cover.JPG; a stat confirms the
+                    # filesystem folds case, and the on-disk name is returned.
+                    if folded is None:
+                        folded = {n.casefold(): n for n in (*art_dirs, *art_files)}
+                    real = folded.get(aname)
+                    if real and (aldir / aname).exists():
+                        disk_art = str(aldir / real)
                         break
             mb_health = _fast_album_mb_health_fields(
                 tracks, expected_track_count, missing_cnt)
@@ -2210,10 +2259,8 @@ def _build_library_payload() -> dict:
         # Inject missing-only albums (library items with no matching disk folder).
         # Group multiple beets entries for the SAME album (different release dates) into ONE card.
         missing_album_groups: Dict[str, dict] = {}  # group_key → merged card data
-        for (mart, malb, myr), mitems in list(missing_by_bucket.items()):
-            if mart.lower() != artist_name_lc_bare:
-                continue
-            missing_by_bucket.pop((mart, malb, myr), None)
+        for (mart, malb, myr) in list(missing_keys_by_artist.get(artist_name_lc_bare, ())):
+            mitems = _pop_missing((mart, malb, myr))
             m_album_ids = [
                 int(t.get("album_id") or 0)
                 for t in mitems

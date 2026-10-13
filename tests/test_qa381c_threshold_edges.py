@@ -220,6 +220,33 @@ class SymlinkEdges(_FolderFixture):
         auto = self.identify()["auto_import"]
         self.assertTrue(auto["eligible"], auto)
 
+    def test_linked_dir_over_probe_budget_fails_closed(self):
+        # #381 non-blocking: the link-target probe is bounded; too big to scan
+        # counts as linked audio rather than walking without limit.
+        outside = Path(self.tmp.name) / "big"
+        outside.mkdir()
+        for i in range(12):
+            (outside / f"scan{i}.jpg").write_bytes(b"synthetic")
+        self._link(self.folder / "Scans", outside, is_dir=True)
+        from unittest import mock
+        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", 5):
+            files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, True))
+        files, linked = ii._recursive_audio(str(self.folder))  # default budget: no audio
+        self.assertEqual((len(files), linked), (3, False))
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "needs a non-root POSIX user")
+    def test_unreadable_dir_under_link_fails_closed(self):
+        outside = Path(self.tmp.name) / "locked"
+        (outside / "inner").mkdir(parents=True)
+        self._link(self.folder / "Extras", outside, is_dir=True)
+        os.chmod(outside / "inner", 0)
+        try:
+            files, linked = ii._recursive_audio(str(self.folder))
+        finally:
+            os.chmod(outside / "inner", 0o755)
+        self.assertEqual((len(files), linked), (3, True))
+
 
 if __name__ == "__main__":
     unittest.main()
