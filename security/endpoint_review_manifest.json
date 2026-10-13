@@ -129,17 +129,37 @@
       "method": "GET",
       "endpoint": "acquisition_queue",
       "security_classification": "ADMIN_ONLY",
-      "purpose": "acquisition queue",
+      "purpose": "acquisition queue (pages the cached Find Music list; may start its build job)",
       "required_role_or_privilege": "owner/admin shared application secret",
       "handles_secrets": false,
       "accesses_files": false,
-      "creates_background_job": false,
-      "invokes_external_services_or_subprocesses": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
       "destructive_or_high_impact": false,
       "rate_limit_required": false,
       "rate_limit_implemented": false,
       "existing_security_tests": [
-        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_acquisition_queue_cache.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "acquisition_queue_refresh",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "acquisition queue refresh (starts or joins the Find Music list build job)",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_acquisition_queue_cache.py",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
       ]
     },
     {
