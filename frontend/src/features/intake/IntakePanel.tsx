@@ -8,7 +8,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
+import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
 import type { AiBatchFolderState, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
 import { LogViewer } from '../../components/LogViewer';
 import { downloadsRootProblem, useDownloadsRoot, useJobPoll } from '../../lib/hooks';
@@ -145,8 +145,18 @@ function isAiBatchTerminal(status?: string) {
   return Boolean(status && AI_BATCH_TERMINAL_STATUSES.has(status));
 }
 
-function folderStatusLabel(status?: string) {
+export function folderStatusLabel(status?: string) {
   const labels: Record<string, string> = {
+    queued: 'Queued',
+    claimed: 'Starting',
+    scanning: 'Scanning',
+    ai_queued: 'Waiting for match',
+    ai_running: 'Finding match',
+    ai_completed: 'Match found',
+    importing: 'Importing',
+    retrying: 'Retrying',
+    failed: 'Failed',
+    canceled: 'Canceled',
     imported: 'Imported',
     completed: 'Completed',
     review_created: 'Review created',
@@ -162,6 +172,132 @@ function folderStatusLabel(status?: string) {
     skipped: 'Skipped',
   };
   return labels[String(status || '')] || String(status || 'Unknown');
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  beets_import: 'Beets import',
+  identify: 'Identifying with MusicBrainz',
+  pinned_import: 'Importing with the chosen release',
+  done: 'Done',
+};
+
+const BEETS_SKIP_LABELS: Record<string, string> = {
+  duplicate: 'Beets skipped it: already in the library',
+  blank_identity: 'Beets skipped it: the files have no usable tags',
+  no_strong_match: 'Beets skipped it: no strong MusicBrainz match',
+  no_candidates: 'Beets skipped it: no MusicBrainz candidates',
+};
+
+const FOLDER_WARNING_LABELS: Record<string, string> = {
+  imported_without_fingerprint: 'Imported without fingerprint proof',
+};
+
+/** Label for a folder warning code; unknown codes are shown as-is. */
+export function folderWarningLabel(code: string) {
+  return FOLDER_WARNING_LABELS[code] || code.replace(/_/g, ' ');
+}
+
+export function folderStageLabel(stage?: string) {
+  return stage ? STAGE_LABELS[stage] || stage.replace(/_/g, ' ') : '';
+}
+
+export function beetsSkipLabel(reason?: string) {
+  return reason ? BEETS_SKIP_LABELS[reason] || `Beets skipped it: ${reason.replace(/_/g, ' ')}` : '';
+}
+
+// Display only: the backend decides what a retry restarts and reports the count
+// as folders_retryable. This lists the folders so the confirmation can name them.
+const AI_BATCH_RETRYABLE_STATUSES = new Set(['failed', 'import_failed', 'ai_failed', 'timed_out', 'replacement_unavailable']);
+
+export function retryableFolders(state: AiBatchState | null | undefined) {
+  return (state?.folders ?? []).filter((folder) => AI_BATCH_RETRYABLE_STATUSES.has(folder.status) && !folder.retry_exhausted);
+}
+
+/** Batch-level evidence warnings: AcoustID fingerprinting is off, so imports
+ * rely on tags and MusicBrainz metadata only. */
+export function batchEvidenceWarnings(state: AiBatchState | null | undefined) {
+  const caps = state?.evidence_capabilities;
+  const messages = [...(state?.warnings ?? [])];
+  if (caps && (!caps.beets_fingerprinting || !caps.acoustid_key) && !messages.length) {
+    messages.push(
+      !caps.beets_fingerprinting
+        ? 'Beets fingerprinting (chroma plugin) is not available, so albums are imported without fingerprint proof.'
+        : 'No AcoustID API key is configured, so albums are imported without fingerprint proof.',
+    );
+  }
+  return messages;
+}
+
+function RetryFailuresDialog({
+  open,
+  state,
+  loading,
+  error,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  state: AiBatchState | null;
+  loading: boolean;
+  error: string;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const folders = retryableFolders(state);
+  const count = state?.folders_retryable ?? folders.length;
+  const shown = folders.slice(0, 10);
+  return (
+    <Dialog open={open} onClose={busy ? () => undefined : onClose} className="relative z-50">
+      <DialogBackdrop className="fixed inset-0 bg-graphite-950/70" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="w-full max-w-lg rounded-md border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+          <DialogTitle className="text-base font-semibold text-zinc-100">Retry failed imports from this batch?</DialogTitle>
+          {loading ? (
+            <div className="mt-3"><LinearProgress /></div>
+          ) : error ? (
+            <Alert className="mt-3" severity="error">
+              Could not load the last batch import: {error}. Nothing was retried. Refresh and try again.
+            </Alert>
+          ) : !state ? (
+            <p className="mt-2 text-sm text-zinc-400">No batch import has run yet, so there is nothing to retry.</p>
+          ) : count === 0 ? (
+            <p className="mt-2 text-sm text-zinc-400">
+              The last batch import ({state.source_path || state.batch_job_id}) has no failed folders that can be retried.
+              Folders that reached their retry limit need manual review in the Review Queue.
+            </p>
+          ) : (
+            <>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">
+                This retries {count} failed folder{count !== 1 ? 's' : ''} from the last batch import. Imports can write
+                tags and move files into the library. Completed folders are not redone.
+              </p>
+              <div className="mt-3 rounded border border-graphite-800 bg-graphite-950 p-3">
+                <div className="truncate font-mono text-xs text-zinc-300">{state.source_path || state.batch_job_id}</div>
+                <ul className="mt-2 space-y-1 text-xs text-zinc-400">
+                  {shown.map((folder) => (
+                    <li key={folder.folder_id} className="truncate">
+                      {folderName(folder.source_folder)} <span className="text-zinc-600">({folderStatusLabel(folder.status)})</span>
+                    </li>
+                  ))}
+                </ul>
+                {count > shown.length ? <div className="mt-1 text-xs text-zinc-600">and {count - shown.length} more</div> : null}
+              </div>
+            </>
+          )}
+          <div className="mt-5 flex justify-end gap-2">
+            <Button disabled={busy} variant="outlined" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button disabled={busy || loading || Boolean(error) || !state || count === 0} variant="contained" onClick={onConfirm}>
+              {busy ? 'Starting...' : `Retry ${count} folder${count !== 1 ? 's' : ''}`}
+            </Button>
+          </div>
+        </DialogPanel>
+      </div>
+    </Dialog>
+  );
 }
 
 function artworkStatusChipLabel(status?: string) {
@@ -275,7 +411,12 @@ function JobLog({
   const lastUpdateAge = ageFromTimestamp(batchState?.updated_at);
   const activeFolders = (batchState?.folders ?? []).filter((folder) => AI_BATCH_ACTIVE_FOLDER_STATUSES.has(folder.status));
   const attentionFolders = (batchState?.folders ?? [])
-    .filter((folder) => AI_BATCH_ATTENTION_FOLDER_STATUSES.has(folder.status) || folder.artwork_retryable)
+    .filter((folder) => (
+      AI_BATCH_ATTENTION_FOLDER_STATUSES.has(folder.status)
+      || folder.artwork_retryable
+      // imported_without_fingerprint is summarised once in the batch warning.
+      || (folder.warnings ?? []).some((code) => code !== 'imported_without_fingerprint')
+    ))
     .slice(0, 8);
   const importedCount = batchState?.folders_completed ?? 0;
   const reviewCount = batchState?.folders_review ?? 0;
@@ -376,11 +517,11 @@ function JobLog({
     }
   };
 
+  const [retryDialogOpen, setRetryDialogOpen] = useState(false);
+
   const recoverBatch = async (retryFailed = false) => {
-    const prompt = retryFailed
-      ? 'Retry eligible failures? This starts imports again for failed folders that are eligible for retry. Imports can write tags and move files into the library.'
-      : 'Recover this batch? This resumes imports for unfinished folders. Imports can write tags and move files into the library; completed folders are not redone.';
-    if (!window.confirm(prompt)) return;
+    // Retry is confirmed in RetryFailuresDialog, which lists the folders.
+    if (!retryFailed && !window.confirm('Recover this batch? This resumes imports for unfinished folders. Imports can write tags and move files into the library; completed folders are not redone.')) return;
     setRecovering(true);
     setActionError('');
     try {
@@ -388,13 +529,17 @@ function JobLog({
       const nextJobId = result.state?.job_id || result.job_id;
       onJobIdChange(nextJobId);
       if (result.state) setBatchState(result.state);
-      setSkipNotice(retryFailed ? 'Retry started for eligible failures.' : 'Batch reconciled. Completed folders will not be redone.');
+      setSkipNotice(retryFailed ? 'Retry started for eligible failures. Progress shows below.' : 'Batch reconciled. Completed folders will not be redone.');
+      setRetryDialogOpen(false);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      setActionError(`Could not start the retry: ${err instanceof Error ? err.message : String(err)}. Nothing was retried.`);
+      setRetryDialogOpen(false);
     } finally {
       setRecovering(false);
     }
   };
+  const evidenceWarnings = batchEvidenceWarnings(batchState);
+  const unprovenImports = (batchState?.folders ?? []).filter((folder) => folder.warnings?.includes('imported_without_fingerprint')).length;
 
   const stopJob = async () => {
     if (!window.confirm('Stop the running AI batch import job?')) return;
@@ -449,7 +594,7 @@ function JobLog({
                   </Button>
                 ) : null}
                 {retryableCount ? (
-                  <Button disabled={recovering} size="small" variant="outlined" onClick={() => void recoverBatch(true)}>
+                  <Button disabled={recovering} size="small" variant="outlined" onClick={() => setRetryDialogOpen(true)}>
                     {recovering ? 'Retrying...' : 'Retry eligible failures'}
                   </Button>
                 ) : null}
@@ -488,6 +633,22 @@ function JobLog({
         {missing ? (
           <Alert severity="error">
             Batch job no longer exists for this ID. Use Re-scan to start a fresh import, or check Jobs for its history.
+          </Alert>
+        ) : null}
+
+        {evidenceWarnings.length ? (
+          <Alert severity="warning">
+            {evidenceWarnings.map((message) => <div key={message}>{message}</div>)}
+            {unprovenImports ? (
+              <div className="mt-1">
+                {unprovenImports} folder{unprovenImports !== 1 ? 's were' : ' was'} imported without fingerprint proof.
+              </div>
+            ) : null}
+            {unprovenImports || batchState?.evidence_capabilities?.beets_fingerprinting === false || batchState?.evidence_capabilities?.acoustid_key === false ? (
+              <div className="mt-1 text-xs">
+                To add fingerprint proof, enable the Beets chroma plugin and set an AcoustID API key (see System).
+              </div>
+            ) : null}
           </Alert>
         ) : null}
 
@@ -547,10 +708,31 @@ function JobLog({
                       <div className="truncate text-xs text-zinc-500">
                         {folder.artwork_retryable
                           ? 'Imported and tagged successfully; album artwork could not be fetched.'
-                          : folder.failure_reason || folder.ai_suggest_error || folder.current_step || 'Needs review'}
+                          : folder.failure_reason || beetsSkipLabel(folder.beets_skip_reason) || folder.ai_suggest_error || folder.current_step || 'Needs review'}
                       </div>
+                      {folder.auto_import && !folder.auto_import.eligible && folder.auto_import.reasons.length ? (
+                        <div className="truncate text-xs text-zinc-500">
+                          Not auto-imported: {folder.auto_import.reasons.join('; ')}
+                        </div>
+                      ) : null}
+                      {folder.warnings?.length ? (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {folder.warnings.map((code) => (
+                            <Chip key={code} label={folderWarningLabel(code)} size="small" color="warning" variant="outlined" />
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-1">
+                      {folder.status === 'review_created' || folder.status === 'review_required' ? (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => navigate(`/import?tab=review&q=${encodeURIComponent(folder.source_folder)}`)}
+                        >
+                          Open in review
+                        </Button>
+                      ) : null}
                       {folder.retry_exhausted || folder.manual_review_required ? (
                         <Chip label="Manual review" size="small" color="warning" variant="outlined" />
                       ) : null}
@@ -589,7 +771,9 @@ function JobLog({
                       <div className="min-w-0">
                         <div className="truncate text-sm text-zinc-200">{folderName(folder.source_folder)}</div>
                         <div className="truncate font-mono text-[0.7rem] text-zinc-500">
-                          {staleWorker ? 'worker stopped before this folder finished' : folder.current_step || folder.ai_suggest_status}
+                          {staleWorker
+                            ? 'worker stopped before this folder finished'
+                            : [folderStatusLabel(folder.status), folderStageLabel(folder.stage), folder.current_step].filter(Boolean).join(' · ') || folder.ai_suggest_status}
                         </div>
                       </div>
                       <Button size="small" variant="outlined" onClick={() => void skipCurrent(folder.folder_id)}>
@@ -642,6 +826,15 @@ function JobLog({
             lines={log.length ? log : batchState?.current_step ? [`[status] ${batchState.current_step}`] : []}
           />
         )}
+        <RetryFailuresDialog
+          busy={recovering}
+          error=""
+          loading={false}
+          open={retryDialogOpen}
+          state={batchState}
+          onClose={() => setRetryDialogOpen(false)}
+          onConfirm={() => void recoverBatch(true)}
+        />
       </CardContent>
     </Card>
   );
@@ -767,17 +960,40 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     [newFolders],
   );
 
-  const retryFailedImports = async () => {
-    if (!window.confirm('Retry failed imports? This starts an import job for every album that failed in the last Import All run. Imports can write tags and move files into the library.')) return;
-    setRetryingFailed(true);
+  // "Retry failed imports" retries the failed folders of this tab's last batch
+  // import, after a confirmation that names them; the job is then tracked below.
+  const [retryDialogOpen, setRetryDialogOpen] = useState(false);
+  const [retryState, setRetryState] = useState<AiBatchState | null>(null);
+  const [retryLoading, setRetryLoading] = useState(false);
+  const openRetryDialog = async () => {
+    setRetryDialogOpen(true);
     setRetryNotice('');
     setRetryError('');
+    setRetryState(null);
+    setRetryLoading(true);
     try {
-      await retryLibraryImportAllFailed();
-      setRetryNotice('Failed import folders were queued for retry.');
-      await onJobStarted?.();
+      const result = await getAiBatchStatus();
+      setRetryState(result.state?.batch_job_id || result.state?.job_id ? result.state : null);
     } catch (err) {
       setRetryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRetryLoading(false);
+    }
+  };
+  const retryFailedImports = async () => {
+    if (!retryState) return;
+    setRetryingFailed(true);
+    try {
+      const result = await recoverAiBatch(retryState.batch_job_id || retryState.job_id, true);
+      const nextJobId = result.state?.job_id || result.job_id;
+      if (!nextJobId) throw new Error('the server did not return a job id');
+      rememberJobId(nextJobId);
+      setRetryDialogOpen(false);
+      setRetryNotice('Retry started for the failed folders. Progress shows below.');
+      await onJobStarted?.();
+    } catch (err) {
+      setRetryDialogOpen(false);
+      setRetryError(`Could not start the retry: ${err instanceof Error ? err.message : String(err)}. Nothing was retried.`);
     } finally {
       setRetryingFailed(false);
     }
@@ -864,7 +1080,8 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
                 color="warning"
                 disabled={scanning || Boolean(jobId) || retryingFailed}
                 variant="outlined"
-                onClick={() => void retryFailedImports()}
+                title="Retry the failed folders from the last batch import"
+                onClick={() => void openRetryDialog()}
               >
                 {retryingFailed ? 'Retrying...' : 'Retry failed imports'}
               </Button>
@@ -894,7 +1111,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
 
       {preflightError ? <Alert severity="error">{preflightError}</Alert> : null}
       {retryNotice ? <Alert severity="info" onClose={() => setRetryNotice('')}>{retryNotice}</Alert> : null}
-      {retryError ? <Alert severity="error">{retryError}</Alert> : null}
+      {retryError && !retryDialogOpen ? <Alert severity="error">{retryError}</Alert> : null}
 
       {preflight && !jobId ? (
         <div className="space-y-4">
@@ -958,6 +1175,18 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         path={path.trim() || downloadsRoot}
         onClose={() => setConfirmOpen(false)}
         onConfirm={() => void startImport()}
+      />
+      <RetryFailuresDialog
+        busy={retryingFailed}
+        error={retryError}
+        loading={retryLoading}
+        open={retryDialogOpen}
+        state={retryState}
+        onClose={() => {
+          setRetryDialogOpen(false);
+          setRetryError('');
+        }}
+        onConfirm={() => void retryFailedImports()}
       />
     </div>
   );
