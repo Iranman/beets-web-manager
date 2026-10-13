@@ -233,7 +233,10 @@ class ImportAutoEnqueueTests(unittest.TestCase):
 
     def test_revalidate_client_types_and_wrapper_are_registered(self):
         self.assertIn('export interface ImportReviewRevalidatePayload', TYPES)
-        self.assertIn('export interface ImportReviewRevalidateResponse', TYPES)
+        # 0.7.0 (#396): large revalidations return a job start instead of counts.
+        self.assertIn('export interface ImportReviewRevalidateResult', TYPES)
+        self.assertIn('export interface ImportReviewRevalidateJobStart', TYPES)
+        self.assertIn('export type ImportReviewRevalidateResponse = ImportReviewRevalidateResult | ImportReviewRevalidateJobStart;', TYPES)
         self.assertIn('export function revalidateImportReview(payload: ImportReviewRevalidatePayload)', CLIENT)
         self.assertIn("'/api/import-review/revalidate'", CLIENT)
 

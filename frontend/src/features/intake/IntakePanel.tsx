@@ -228,6 +228,28 @@ export function batchEvidenceWarnings(state: AiBatchState | null | undefined) {
   return messages;
 }
 
+export type RetryOutcome = 'started' | 'already_running' | 'nothing_to_retry';
+
+/** What a recover-with-retry call actually did. `reconnected` means nothing
+ * new was started: either a worker for the batch is already running, or the
+ * batch had nothing left to retry (routes_import.ai_batch_import_recover). */
+export function retryOutcome(result: { reconnected?: boolean; state?: AiBatchState | null }): RetryOutcome {
+  if (!result.reconnected) return 'started';
+  const state = result.state;
+  if (state && isAiBatchTerminal(state.status) && !(state.folders_retryable ?? 0)) return 'nothing_to_retry';
+  return 'already_running';
+}
+
+export function retryOutcomeMessage(outcome: RetryOutcome, requested: number): string {
+  if (outcome === 'started') {
+    return `Retry started for ${requested} failed folder${requested !== 1 ? 's' : ''}. Progress shows below.`;
+  }
+  if (outcome === 'already_running') {
+    return 'Nothing new was started: an import for this batch is already running. Its progress shows below.';
+  }
+  return 'Nothing was retried: the batch has no failed folders left that can be retried. Folders at their retry limit need manual review in the Review Queue.';
+}
+
 function RetryFailuresDialog({
   open,
   state,
@@ -255,7 +277,7 @@ function RetryFailuresDialog({
         <DialogPanel className="w-full max-w-lg rounded-md border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
           <DialogTitle className="text-base font-semibold text-zinc-100">Retry failed imports from this batch?</DialogTitle>
           {loading ? (
-            <div className="mt-3"><LinearProgress /></div>
+            <div className="mt-3"><LinearProgress aria-label="Loading the last batch import" /></div>
           ) : error ? (
             <Alert className="mt-3" severity="error">
               Could not load the last batch import: {error}. Nothing was retried. Refresh and try again.
@@ -529,7 +551,11 @@ function JobLog({
       const nextJobId = result.state?.job_id || result.job_id;
       onJobIdChange(nextJobId);
       if (result.state) setBatchState(result.state);
-      setSkipNotice(retryFailed ? 'Retry started for eligible failures. Progress shows below.' : 'Batch reconciled. Completed folders will not be redone.');
+      setSkipNotice(
+        retryFailed
+          ? retryOutcomeMessage(retryOutcome(result), batchState?.folders_retryable ?? retryableFolders(batchState).length)
+          : 'Batch reconciled. Completed folders will not be redone.',
+      );
       setRetryDialogOpen(false);
     } catch (err) {
       setActionError(`Could not start the retry: ${err instanceof Error ? err.message : String(err)}. Nothing was retried.`);
@@ -985,12 +1011,15 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     setRetryingFailed(true);
     try {
       const result = await recoverAiBatch(retryState.batch_job_id || retryState.job_id, true);
+      const outcome = retryOutcome(result);
       const nextJobId = result.state?.job_id || result.job_id;
-      if (!nextJobId) throw new Error('the server did not return a job id');
-      rememberJobId(nextJobId);
+      if (outcome !== 'nothing_to_retry') {
+        if (!nextJobId) throw new Error('the server did not return a job id');
+        rememberJobId(nextJobId);
+      }
       setRetryDialogOpen(false);
-      setRetryNotice('Retry started for the failed folders. Progress shows below.');
-      await onJobStarted?.();
+      setRetryNotice(retryOutcomeMessage(outcome, retryState.folders_retryable ?? retryableFolders(retryState).length));
+      if (outcome === 'started') await onJobStarted?.();
     } catch (err) {
       setRetryDialogOpen(false);
       setRetryError(`Could not start the retry: ${err instanceof Error ? err.message : String(err)}. Nothing was retried.`);

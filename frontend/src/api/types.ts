@@ -2558,13 +2558,28 @@ export interface ImportReviewRevalidateItem {
   error?: string;
 }
 
-export interface ImportReviewRevalidateResponse extends ApiOkResponse {
+/** Counts and rows of a finished revalidation: the synchronous answer for up
+ * to 25 items, and the job result of a larger one (#396). */
+export interface ImportReviewRevalidateResult extends ApiOkResponse {
   reviewed_count: number;
   updated_count: number;
   queued_count: number;
   failed_count: number;
   items: ImportReviewRevalidateItem[];
 }
+
+/** More than 25 items (or all): 202 {ok, job_id, mode: 'job'} with no counts.
+ * A second start while it runs is a 409 job_already_running that apiJson
+ * turns into {ok, job_id, already_running}. */
+export interface ImportReviewRevalidateJobStart extends ApiOkResponse {
+  job_id: string;
+  mode?: 'job';
+  already_running?: boolean;
+  replay?: boolean;
+  job_status?: string;
+}
+
+export type ImportReviewRevalidateResponse = ImportReviewRevalidateResult | ImportReviewRevalidateJobStart;
 export interface ImportTargetPreviewTrack {
   track: number;
   status: string;
