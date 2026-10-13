@@ -6,6 +6,17 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.6.0 - 2026-10-13
+
+This is a safety release. Imports and deletes now happen only after an explicit click and confirmation, and a downloads folder is deleted only with proof that its audio is already in the library.
+
+### Upgrade Notes
+
+- After an import, a downloads folder is no longer deleted unless every audio file in it is proven (byte or AcoustID match) to be in the library album. Folders without that proof now stay in downloads, and the import log says why. Clean them up from Import Review.
+- Scripts that call `DELETE /api/ai-pending-review` with no body to clear the whole Pending Review queue must now send `{"all": true}`. A request with no `path` and no `all` is refused.
+- `POST /api/import/review-folder/delete` ignores `confirmed_wrong_library_folder` and `allow_library_delete`. The folder must be in Pending Review or be a Needs MB ID album's own folder.
+- Paths sent to the Import Review delete and file-cleanup endpoints are used exactly as sent and are no longer URL-decoded.
+
 ### Security
 
 - A downloads source folder is deleted as "already in library" only with proof: every audio file in it must be a byte match or an AcoustID same-recording match for an item of the library album, and that album's Release Group must be the target one. Only library items under `MUSIC_ROOT` and outside the source folder count as proof, so an album imported in place cannot prove itself. Any file that is neither proven audio nor a known sidecar (artwork, `.cue`, `.log`, `.txt`, `.nfo`, playlists, checksums, `.pdf`) keeps the folder, and so does any change to the folder between the proof and the delete. Matching titles or file names are no longer enough; without proof the folder is kept and the log says why. The import paths no longer pass the "already in library" phrase themselves, and the dead `_delete_if_already_in_library(path, "")` call after `/api/import` is gone (I-4).
