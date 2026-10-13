@@ -15,6 +15,7 @@ export type ReviewOriginCounts = Partial<Record<ReviewOriginType, number>>;
 
 export interface ReviewQueueParams {
   limit?: number;
+  offset?: number;
   status?: string;
   origin_type?: ReviewOriginType;
   search?: string;
@@ -304,14 +305,45 @@ export interface ReviewItem {
   source_batch_id?: string;
   source_folder?: string;
   created_by_workflow?: string;
+  /** Missing-IDs rows: a Pending Review folder already claims this album. */
+  in_import_review?: boolean;
 }
 
 export interface ReviewQueueResponse {
   ok: true;
   items: ReviewItem[];
+  /** Rows matching every filter (the whole filtered list, not this page). */
   total: number;
+  offset?: number;
+  limit?: number;
   counts: ReviewCounts;
   origin_counts?: ReviewOriginCounts;
+  /** Set when the requested status moved elsewhere (status=library_no_mb). */
+  moved_to?: string;
+}
+
+export type LibraryMissingMbKind = 'all' | 'album' | 'item';
+
+export interface LibraryMissingMbParams {
+  kind?: LibraryMissingMbKind;
+  search?: string;
+  offset?: number;
+  /** Server maximum is 500. */
+  limit?: number;
+  sort?: 'added_desc' | 'added_asc' | 'artist' | 'title';
+}
+
+/** GET /api/library/missing-mb-ids: library albums with no Release ID and
+ * singleton tracks with no Recording ID (rows of type "library_no_mb"). */
+export interface LibraryMissingMbResponse {
+  ok: true;
+  items: ReviewItem[];
+  /** Rows after search and kind (the whole list, not this page). */
+  total: number;
+  offset: number;
+  limit: number;
+  /** Per kind, after the search filter. */
+  counts: { all: number; album: number; item: number };
 }
 
 export interface ApiOkResponse {
@@ -1045,9 +1077,27 @@ export interface AiBatchFolderState {
   artwork_status?: string;
   artwork_retryable?: boolean;
   album_id?: number | null;
+  album_ids?: number[];
+  /** Deterministic import (#288 phase B). */
+  stage?: 'beets_import' | 'identify' | 'pinned_import' | 'done' | string;
+  /** Why Beets skipped the folder (duplicate, blank_identity, no_strong_match, no_candidates). */
+  beets_skip_reason?: string;
+  /** Codes, e.g. imported_without_fingerprint. */
+  warnings?: string[];
+  auto_import?: { eligible: boolean; reasons: string[] };
+  missing_release_group_album_ids?: number[];
+}
+
+export interface AiBatchEvidenceCapabilities {
+  beets_fingerprinting: boolean;
+  acoustid_key: boolean;
+  ai_configured: boolean;
 }
 
 export interface AiBatchState {
+  evidence_capabilities?: AiBatchEvidenceCapabilities;
+  /** Batch-level warnings, as full sentences. */
+  warnings?: string[];
   batch_job_id: string;
   job_id?: string;
   source_path: string;
@@ -2508,13 +2558,28 @@ export interface ImportReviewRevalidateItem {
   error?: string;
 }
 
-export interface ImportReviewRevalidateResponse extends ApiOkResponse {
+/** Counts and rows of a finished revalidation: the synchronous answer for up
+ * to 25 items, and the job result of a larger one (#396). */
+export interface ImportReviewRevalidateResult extends ApiOkResponse {
   reviewed_count: number;
   updated_count: number;
   queued_count: number;
   failed_count: number;
   items: ImportReviewRevalidateItem[];
 }
+
+/** More than 25 items (or all): 202 {ok, job_id, mode: 'job'} with no counts.
+ * A second start while it runs is a 409 job_already_running that apiJson
+ * turns into {ok, job_id, already_running}. */
+export interface ImportReviewRevalidateJobStart extends ApiOkResponse {
+  job_id: string;
+  mode?: 'job';
+  already_running?: boolean;
+  replay?: boolean;
+  job_status?: string;
+}
+
+export type ImportReviewRevalidateResponse = ImportReviewRevalidateResult | ImportReviewRevalidateJobStart;
 export interface ImportTargetPreviewTrack {
   track: number;
   status: string;
@@ -2624,7 +2689,11 @@ export interface ImportReviewFileCleanupPayload {
 }
 
 export interface ImportReviewFileCleanupResponse extends ApiOkResponse {
+  /** What ran. A delete_* request is downgraded to quarantine_* (#392). */
   action: ImportReviewFileCleanupAction;
+  requested_action?: ImportReviewFileCleanupAction;
+  downgraded_to_quarantine?: boolean;
+  operation_id?: string;
   quarantined: Array<{ source: string; quarantined: string }>;
   deleted: string[];
   skipped: Array<{ path: string; reason: string }>;

@@ -73,7 +73,10 @@ class ImportReviewOriginFilterTests(unittest.TestCase):
         self.assertIn("origin_type", self.client_source)
         self.assertIn("evidence_only", self.client_source)
         self.assertIn("new URLSearchParams", self.client_source)
-        self.assertIn("getReviewQueue({ limit: REVIEW_SUMMARY_LIMIT })", (self.root / "frontend" / "src" / "views" / "Import.tsx").read_text(encoding="utf-8"))
+        import_source = (self.root / "frontend" / "src" / "views" / "Import.tsx").read_text(encoding="utf-8")
+        # The summary only needs totals: limit 0 returns counts without rows.
+        self.assertIn("getReviewQueue({ limit: 0 })", import_source)
+        self.assertIn("if (options.offset) params.set('offset', String(options.offset));", self.client_source)
 
     def test_review_ui_has_source_filter_row_and_badges(self):
         self.assertIn("const originFilters", self.review_source)

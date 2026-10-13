@@ -348,9 +348,9 @@ function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<number, A
     variant: 'primary',
   };
   if (health.releaseMbMissing) return {
-    label: 'Identify in Import',
-    path: '/import?tab=review&filter=library_no_mb',
-    title: 'No MusicBrainz release ID — assign one in Import Review',
+    label: 'Fix missing IDs',
+    path: '/library/missing-ids',
+    title: 'No MusicBrainz release ID — assign one in Library > Missing IDs',
     variant: 'primary',
   };
   if (health.missing > 0) return {
@@ -1400,8 +1400,11 @@ export default function Library() {
               )}
             </div>
           </div>
-          <div className="text-xs text-zinc-500 lg:text-right">
-            {data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}
+          <div className="flex flex-col gap-1 text-xs text-zinc-500 lg:items-end lg:text-right">
+            <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
+            <button type="button" className="text-zinc-300 underline hover:text-zinc-100" onClick={() => handleNavigate('/library/missing-ids')}>
+              Missing MusicBrainz IDs
+            </button>
           </div>
         </div>
         {loading ? <LinearProgress sx={{ mt: 2, borderRadius: 1 }} /> : null}

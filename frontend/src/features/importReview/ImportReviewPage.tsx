@@ -17,7 +17,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { apiGet } from '../../lib/api';
 import {
   albumAddMbids,
@@ -31,6 +31,7 @@ import {
   deletePendingReview,
   getFolderStats,
   getJob,
+  getLibraryMissingMbIds,
   getReviewQueue,
   importWithId,
   matchAlbum,
@@ -68,9 +69,15 @@ import type {
   AiSuggestion,
   AttachRecordingResponse,
   FolderStatsResponse,
+  ImportReviewFileCleanupResponse,
   ImportReviewManualIdResponse,
+  ImportReviewRevalidateJobStart,
+  ImportReviewRevalidateResponse,
+  ImportReviewRevalidateResult,
   ImportTargetPreviewResponse,
   JobStartResponse,
+  LibraryMissingMbKind,
+  LibraryMissingMbResponse,
   RecordingLocalEvidence,
   ReviewCandidate,
   ReviewCounts,
@@ -82,13 +89,14 @@ import type {
   ReviewRecordingCandidate,
 } from '../../api/types';
 
-/** Unified filter for the Review Queue. Type-based (pending_ai, skipped, library_no_mb)
- *  and state-based (ready, blocked, audio_mismatch, no_candidate, failed) filters live in one row. */
+/** Unified filter for the Review Queue. Type-based (pending_ai, skipped; sent to the
+ *  server) and state-based (ready, blocked, audio_mismatch, no_candidate, failed; the
+ *  loaded page only) filters live in one row. Library rows missing MusicBrainz IDs
+ *  are not import decisions: they are on Library > Missing IDs (mode="missing_ids"). */
 export type QueueFilter =
   | 'all'
   | 'pending_ai'
   | 'skipped'
-  | 'library_no_mb'
   | 'ready'
   | 'blocked'
   | 'audio_mismatch'
@@ -120,7 +128,7 @@ type ConfirmIntent =
   | { kind: 'apply'; item: ReviewItem; mbid: string }
   | { kind: 'dismiss'; item: ReviewItem }
   | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
-  | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; destructive: boolean }
+  | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; wrongAudio: boolean }
   | { kind: 'attach_recording_confirm'; item: ReviewItem; mbid: string; candidate: ReviewRecordingCandidate }
   | { kind: 'revalidate'; ids: string[] }
   | { kind: 'clean_stale' };
@@ -159,7 +167,6 @@ const filters: Array<{ id: QueueFilter; label: string }> = [
   { id: 'ready', label: 'Ready to Import' },
   { id: 'blocked', label: 'Blocked' },
   { id: 'audio_mismatch', label: 'Audio Mismatch' },
-  { id: 'library_no_mb', label: 'Needs MusicBrainz ID' },
   { id: 'no_candidate', label: 'No Candidate' },
   { id: 'failed', label: 'Failed' },
   { id: 'skipped', label: 'Skipped' },
@@ -244,11 +251,61 @@ function persistSubmittedItemIds(ids: Set<string>) {
     else localStorage.removeItem('importReview_submittedIds');
   } catch {}
 }
-const REVIEW_QUEUE_LIMIT = 5000;
+/** Rows per page; the server sorts and filters the whole list before slicing. */
+export const REVIEW_PAGE_SIZE = 100;
+const SEARCH_DEBOUNCE_MS = 300;
+
+export type ReviewPageMode = 'queue' | 'missing_ids';
+
+const missingKindFilters: Array<{ id: LibraryMissingMbKind; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'album', label: 'Albums (no Release ID)' },
+  { id: 'item', label: 'Tracks (no Recording ID)' },
+];
+
+type PageResponse = {
+  items: ReviewItem[];
+  total: number;
+  counts: ReviewCounts;
+  originCounts: ReviewOriginCounts;
+  kindCounts?: LibraryMissingMbResponse['counts'];
+};
 
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A revalidation of more than 25 items runs as a job (#396): the start
+ * answer has a job_id and no counts. */
+function isRevalidateJobStart(response: ImportReviewRevalidateResponse): response is ImportReviewRevalidateJobStart {
+  return typeof (response as ImportReviewRevalidateJobStart).job_id === 'string'
+    && typeof (response as ImportReviewRevalidateResult).reviewed_count !== 'number';
+}
+
+export const REVALIDATE_JOB_STORAGE_KEY = 'importReview_revalidateJobId';
+const REVALIDATE_JOB_POLL_MS = 2500;
+
+/** Counts from a finished revalidation job, or null when the job result has
+ * none (a persisted result over 1 MB keeps only its scalar summary). */
+export function revalidateJobCounts(result: Record<string, unknown> | undefined | null): ImportReviewRevalidateResult | null {
+  if (!result) return null;
+  const summary = (result.summary as { scalars?: Record<string, unknown> } | undefined)?.scalars;
+  const source = typeof result.reviewed_count === 'number' ? result : summary;
+  if (!source || typeof source.reviewed_count !== 'number') return null;
+  const num = (value: unknown) => (typeof value === 'number' ? value : 0);
+  return {
+    ok: source.ok !== false,
+    reviewed_count: num(source.reviewed_count),
+    updated_count: num(source.updated_count),
+    queued_count: num(source.queued_count),
+    failed_count: num(source.failed_count),
+    items: Array.isArray(result.items) ? (result.items as ImportReviewRevalidateResult['items']) : [],
+  };
+}
+
+export function revalidateSummaryText(result: ImportReviewRevalidateResult): string {
+  return `Revalidated ${result.reviewed_count}; queued ${result.queued_count}; updated ${result.updated_count}; failed ${result.failed_count}.`;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -403,32 +460,6 @@ function matchReviewNote(item: ReviewItem): string {
     return 'No valid MusicBrainz release-group ID is selected yet. Use Find Match, enter a MusicBrainz ID, or delete the source folder if the files are wrong.';
   }
   return '';
-}
-
-function searchText(item: ReviewItem): string {
-  const folderEvidence = item.evidence?.folder;
-  return [
-    itemTitle(item),
-    matchLabels[itemMatchBucket(item)],
-    item.artist,
-    item.album,
-    item.year,
-    item.path,
-    item.reason,
-    item.status_key,
-    storedBlockedReason(item),
-    item.blocked_next_action,
-    item.origin_label,
-    item.source_playlist_name,
-    item.source_batch_id,
-    item.created_by_workflow,
-    item.mb_albumid,
-    item.confidence,
-    audioMismatchDetail(item),
-    folderEvidence?.guessed_artist,
-    folderEvidence?.guessed_album,
-    folderEvidence?.guessed_year,
-  ].filter(Boolean).join(' ').toLowerCase();
 }
 
 function scoreValue(candidate: ReviewCandidate): number | string | undefined {
@@ -1291,11 +1322,32 @@ function selectedCleanupSourceFiles(
   return [...new Set(files)];
 }
 
-function hasDestructiveCleanupMismatch(
+/** Some selected files are different/conflicting audio, not just extras. */
+function hasWrongAudioCleanupMismatch(
   match?: Pick<SelectedMatch, 'track_mapping' | 'identity_validated'>,
   preview?: ImportTargetPreviewResponse,
 ): boolean {
   return cleanupTrackRows(match, preview).some((row) => row.status === 'conflicting' || row.status === 'different');
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/** Reports what the server did, not what was asked: a delete request is
+ * downgraded to quarantine (#392), and the counts come from the response. */
+export function cleanupResultMessage(result: ImportReviewFileCleanupResponse): string {
+  const quarantined = result.quarantined_count ?? 0;
+  const deleted = result.deleted_count ?? 0;
+  const skipped = result.skipped_count ?? 0;
+  const remaining = result.remaining_audio_count ?? 0;
+  const parts = [`Quarantined ${plural(quarantined, 'file')}`];
+  if (deleted) parts.push(`deleted ${plural(deleted, 'file')}`);
+  if (skipped) parts.push(`skipped ${plural(skipped, 'file')}`);
+  let message = `${parts.join('; ')}. ${plural(remaining, 'audio file')} remain in the folder.`;
+  if (quarantined) message += ' Quarantined files can be restored.';
+  if (result.downgraded_to_quarantine) message += ' The server quarantined them instead of deleting them.';
+  return message;
 }
 
 function unmatchedExtraTrackCount(match?: Pick<SelectedMatch, 'track_mapping'>): number {
@@ -2696,6 +2748,15 @@ export function ReviewCard({
               ) : item.mb_valid ? (
                 <Chip size="small" color="success" label="MB valid" />
               ) : null}
+              {item.in_import_review ? (
+                <Chip
+                  size="small"
+                  color="info"
+                  variant="outlined"
+                  label="In import review"
+                  title="A folder in the Import Review queue already targets this album. Resolve it there first, or match here if you are sure."
+                />
+              ) : null}
             </div>
 
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
@@ -3002,7 +3063,7 @@ function ConfirmDialog({
   const deletingLibraryFolder = intent?.kind === 'delete_folder' && isMusicLibraryPath(item?.path);
   const wrongSourceNote = intent?.kind === 'delete_folder' ? wrongSourceEvidenceNote(item) : '';
   const isAttachConfirm = intent?.kind === 'attach_recording_confirm';
-  const cleanupDestructive = intent?.kind === 'cleanup_files' && intent.destructive;
+  const cleanupWrongAudio = intent?.kind === 'cleanup_files' && intent.wrongAudio;
   const [reason, setReason] = useState('');
   useEffect(() => { setReason(''); }, [intent]);
   const reasonTrimmed = reason.trim();
@@ -3012,7 +3073,7 @@ function ConfirmDialog({
     : intent?.kind === 'delete_folder'
       ? deletingLibraryFolder ? 'Delete Library Folder' : 'Delete Source Folder'
       : intent?.kind === 'cleanup_files'
-        ? cleanupDestructive ? 'Permanently Delete Rejected Files' : 'Quarantine Rejected Files'
+        ? 'Quarantine Rejected Files'
       : isAttachConfirm
         ? 'Confirm Recording ID (Review Required)'
       : intent?.kind === 'revalidate'
@@ -3027,9 +3088,7 @@ function ConfirmDialog({
         ? 'This permanently deletes this folder from the music library, removes matching Beets DB rows, and removes it from Pending Review. Use this only when the tracks are confirmed wrong.'
         : 'This permanently deletes the source folder from disk and removes it from Pending Review. Use this only when the tracks are confirmed wrong.'
       : intent?.kind === 'cleanup_files'
-        ? cleanupDestructive
-          ? 'These files will be permanently deleted from disk. This cannot be undone. Other files in the folder stay in review.'
-          : 'These files will be moved to the import-review quarantine folder, not deleted. Other files in the folder stay in review.'
+        ? `${cleanupWrongAudio ? 'Some of these files do not match the selected release (different or conflicting audio). ' : ''}These files will be moved to the import-review quarantine folder, not deleted, and can be restored. Other files in the folder stay in review.`
       : isAttachConfirm
         ? 'The backend flagged this candidate as needing human review before it can be attached. Confirming only attaches this Recording ID -- it does not authorize any other action.'
       : intent?.kind === 'revalidate'
@@ -3112,7 +3171,7 @@ function ConfirmDialog({
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="text" onClick={onClose}>Cancel</Button>
             <Button
-              color={intent?.kind === 'delete_folder' || cleanupDestructive ? 'error' : 'primary'}
+              color={intent?.kind === 'delete_folder' ? 'error' : 'primary'}
               variant="contained"
               disabled={isAttachConfirm && !reasonTrimmed}
               onClick={() => onConfirm(reasonTrimmed)}
@@ -3120,7 +3179,7 @@ function ConfirmDialog({
               {intent?.kind === 'delete_folder'
                 ? deleteFolderActionLabel(item)
                 : intent?.kind === 'cleanup_files'
-                  ? `${cleanupDestructive ? 'Delete' : 'Quarantine'} ${intent.files.length} file${intent.files.length === 1 ? '' : 's'}`
+                  ? `Quarantine ${intent.files.length} file${intent.files.length === 1 ? '' : 's'}`
                   : intent?.kind === 'revalidate'
                     ? `Revalidate ${intent.ids.length} and import eligible`
                     : intent?.kind === 'clean_stale'
@@ -3252,19 +3311,33 @@ function BackgroundJobsStrip({
 
 export function ImportReviewPage({
   initialFilter = 'all',
+  initialQuery = '',
   onFilterChange,
   active = true,
+  mode = 'queue',
 }: {
   initialFilter?: QueueFilter;
+  /** Prefills the search box (e.g. a batch folder linking to its review item). */
+  initialQuery?: string;
   onFilterChange?: (filter: QueueFilter) => void;
   active?: boolean;
+  /** 'queue': Import Review (pending and skipped folders). 'missing_ids': library
+   * albums/tracks missing MusicBrainz IDs, with the same per-row actions. */
+  mode?: ReviewPageMode;
 }) {
+  const missingIdsMode = mode === 'missing_ids';
+  const bgJobsStorageKey = missingIdsMode ? 'libraryMissingIds_backgroundJobs' : 'importReview_backgroundJobs';
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [counts, setCounts] = useState<ReviewCounts>({});
   const [originCounts, setOriginCounts] = useState<ReviewOriginCounts>({});
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [kind, setKind] = useState<LibraryMissingMbKind>('all');
+  const [kindCounts, setKindCounts] = useState<LibraryMissingMbResponse['counts']>({ all: 0, album: 0, item: 0 });
   const [filter, setFilter] = useState<QueueFilter>(initialFilter);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery);
+  const [debouncedQuery, setDebouncedQuery] = useState(initialQuery.trim());
   const [evidenceOnly, setEvidenceOnly] = useState(false);
   const [mbids, setMbids] = useState<Record<string, string>>({});
   const [suggestions, setSuggestions] = useState<Record<string, AiSuggestResponse>>({});
@@ -3291,7 +3364,7 @@ export function ImportReviewPage({
   const reconnectJobsRef = useRef<BgJob[]>([]);
   const [backgroundJobs, setBackgroundJobs] = useState<Record<string, BgJob>>(() => {
     try {
-      const saved = localStorage.getItem('importReview_backgroundJobs');
+      const saved = localStorage.getItem(bgJobsStorageKey);
       if (!saved) return {};
       const parsed = JSON.parse(saved) as Record<string, BgJob>;
       const result: Record<string, BgJob> = {};
@@ -3330,6 +3403,7 @@ export function ImportReviewPage({
     submittedItemIdsRef.current.add(item.id);
     persistSubmittedItemIds(submittedItemIdsRef.current);
     setItems((current) => current.filter((row) => row.id !== item.id));
+    setTotal((current) => Math.max(0, current - 1));
     setCounts((current) => ({
       ...current,
       all: Math.max(0, (current.all ?? 0) - 1),
@@ -3345,12 +3419,55 @@ export function ImportReviewPage({
     });
   }, []);
 
+  // Type filters and search go to the server, so paging, totals and counts
+  // cover the whole list. The state buckets (ready, blocked, ...) depend on
+  // per-item evidence and are applied to the loaded page only.
+  const serverStatus = filter === 'pending_ai' || filter === 'skipped' ? filter : 'all';
+  const fetchPage = useCallback(async (): Promise<PageResponse> => {
+    if (missingIdsMode) {
+      const response = await getLibraryMissingMbIds({
+        kind,
+        search: debouncedQuery,
+        offset,
+        limit: REVIEW_PAGE_SIZE,
+      });
+      return {
+        items: response.items ?? [],
+        total: response.total ?? 0,
+        counts: { all: response.total ?? 0 },
+        originCounts: {},
+        kindCounts: response.counts,
+      };
+    }
+    const params = { origin_type: sourceFilter, search: debouncedQuery, evidence_only: evidenceOnly };
+    const [response, allStatuses] = await Promise.all([
+      getReviewQueue({ ...params, limit: REVIEW_PAGE_SIZE, offset, status: serverStatus }),
+      // Counts per status for the filter buttons; the page request's counts
+      // only cover the status it asked for.
+      serverStatus === 'all' ? null : getReviewQueue({ ...params, limit: 0 }),
+    ]);
+    const counts: ReviewCounts = allStatuses
+      ? { ...(allStatuses.counts ?? {}), [serverStatus]: response.total ?? 0 }
+      : response.counts ?? {};
+    return {
+      items: response.items ?? [],
+      total: response.total ?? 0,
+      counts,
+      originCounts: (allStatuses ?? response).origin_counts ?? {},
+    };
+  }, [debouncedQuery, evidenceOnly, kind, missingIdsMode, offset, serverStatus, sourceFilter]);
+
+  const loadSeqRef = useRef(0);
   const loadQueue = useCallback(async (silent = false) => {
+    // Only the newest request may apply its page: filter and page changes can
+    // overlap, and an older response must not overwrite a newer one.
+    const seq = ++loadSeqRef.current;
     if (!silent) setLoading(true);
     setError('');
     try {
-      const response = await getReviewQueue({ limit: REVIEW_QUEUE_LIMIT, origin_type: sourceFilter });
-      const allItems = response.items ?? [];
+      const response = await fetchPage();
+      if (seq !== loadSeqRef.current) return;
+      const allItems = response.items;
       let hiddenByActiveJob = 0;
       let restoredStaleSubmittedIds = false;
       const nextItems = allItems.filter((it) => {
@@ -3422,9 +3539,11 @@ export function ImportReviewPage({
         return next;
       });
       setItems(nextItems);
-      setCounts(response.counts ?? {});
-      setOriginCounts(response.origin_counts ?? {});
-      queueSnapshotRef.current = reviewQueueSnapshot(nextItems, response.counts ?? {});
+      setTotal(response.total);
+      setCounts(response.counts);
+      setOriginCounts(response.originCounts);
+      if (response.kindCounts) setKindCounts(response.kindCounts);
+      queueSnapshotRef.current = reviewQueueSnapshot(nextItems, response.counts);
       setQueueUpdatesAvailable(false);
       setMbids((current) => {
         const next = { ...current };
@@ -3435,23 +3554,36 @@ export function ImportReviewPage({
         return next;
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (seq === loadSeqRef.current) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (!silent) setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
-  }, [sourceFilter]);
+  }, [fetchPage]);
 
   useEffect(() => {
     if (active) void loadQueue();
   }, [active, loadQueue]);
   useEffect(() => { setFilter(initialFilter); }, [initialFilter]);
   useEffect(() => {
-    if (!active) return;
+    if (!initialQuery) return;
+    setQuery(initialQuery);
+    setDebouncedQuery(initialQuery.trim());
+  }, [initialQuery]);
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedQuery(query.trim()), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [query]);
+  // A new filter or search starts again at the first page.
+  useEffect(() => { setOffset(0); }, [serverStatus, sourceFilter, debouncedQuery, evidenceOnly, kind]);
+  useEffect(() => {
+    // Missing IDs: every read is a full Beets library read, so the list
+    // reloads only on Refresh, a filter/page change, or after a change succeeds.
+    if (!active || missingIdsMode) return;
     const id = window.setInterval(() => {
       if (document.hidden || confirmIntent || isEditableTarget(document.activeElement) || hasUnsavedManualId(manualValidations) || reviewInteractionIsExpanded()) return;
-      void getReviewQueue({ limit: REVIEW_QUEUE_LIMIT, origin_type: sourceFilter })
+      void fetchPage()
         .then((response) => {
-          const snapshot = reviewQueueSnapshot(response.items ?? [], response.counts ?? {});
+          const snapshot = reviewQueueSnapshot(response.items, response.counts);
           if (queueSnapshotRef.current && snapshot !== queueSnapshotRef.current) {
             setQueueUpdatesAvailable(true);
           }
@@ -3459,14 +3591,13 @@ export function ImportReviewPage({
         .catch(() => undefined);
     }, 60000);
     return () => window.clearInterval(id);
-  }, [active, confirmIntent, manualValidations, sourceFilter]);
+  }, [active, confirmIntent, fetchPage, manualValidations, missingIdsMode]);
 
   const visibleItems = useMemo(() => {
-    const q = query.trim().toLowerCase();
     return items.filter((item) => {
       if (!itemMatchesSourceFilter(item, sourceFilter)) return false;
       if (filter !== 'all') {
-        if (filter === 'pending_ai' || filter === 'skipped' || filter === 'library_no_mb') {
+        if (filter === 'pending_ai' || filter === 'skipped') {
           if (item.type !== filter) return false;
         } else if (filter === 'ready') {
           const selectedMatch = selectedMatches[item.id];
@@ -3484,14 +3615,12 @@ export function ImportReviewPage({
           if (itemMatchBucket(item) !== filter) return false;
         }
       }
-      if (evidenceOnly && !item.evidence?.top_candidates?.length && !item.evidence?.preflight) return false;
-      if (q && !searchText(item).includes(q)) return false;
       return true;
     });
-  }, [evidenceOnly, filter, items, mbids, query, selectedMatches, sourceFilter, targetPreviews]);
+  }, [filter, items, mbids, selectedMatches, sourceFilter, targetPreviews]);
 
-  // Reset cursor when filters/search change; restore visible position by review item ID after queue updates.
-  useEffect(() => { setCursor(0); setActiveItemId(''); }, [filter, sourceFilter, query, evidenceOnly]);
+  // Reset cursor when filters/search/page change; restore visible position by review item ID after queue updates.
+  useEffect(() => { setCursor(0); setActiveItemId(''); }, [filter, sourceFilter, debouncedQuery, evidenceOnly, kind, offset]);
   useEffect(() => {
     if (visibleItems.length === 0) {
       if (activeItemId) setActiveItemId('');
@@ -3522,12 +3651,8 @@ export function ImportReviewPage({
     setConfirmIntent({ kind: 'revalidate', ids });
   }, [visibleItems]);
 
-  // Runs only from the confirm dialog: auto_enqueue may start imports for eligible items.
-  const handleRevalidateQueue = useCallback(async (ids: string[]) => {
-    setRevalidateBusy(true);
-    setRevalidateMsg(`Revalidating ${ids.length} review item${ids.length === 1 ? '' : 's'}...`);
-    try {
-      const result = await revalidateImportReview({ review_item_ids: ids, auto_enqueue: true, limit: ids.length });
+  // Applies a finished revalidation (synchronous answer or job result).
+  const applyRevalidateResult = useCallback(async (result: ImportReviewRevalidateResult, prefix = '') => {
       await loadQueue(true);
       const hydrated = (result.items ?? []).filter((row) => row.ok && !row.queued && row.selected_match);
       if (hydrated.length) {
@@ -3558,15 +3683,99 @@ export function ImportReviewPage({
           return next;
         });
       }
-      setRevalidateMsg(
-        `Revalidated ${result.reviewed_count ?? 0}; queued ${result.queued_count ?? 0}; updated ${result.updated_count ?? 0}; failed ${result.failed_count ?? 0}.`,
-      );
-    } catch (err) {
-      setRevalidateMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRevalidateBusy(false);
-    }
+      setRevalidateMsg(prefix + revalidateSummaryText(result));
   }, [loadQueue]);
+
+  // A large revalidation runs as a job (#396). Follow it until it ends, then
+  // report the job's own counts. The job id is kept in localStorage so a
+  // reload keeps following it. revalidateJobRef is cleared on unmount, which
+  // stops the loop without forgetting the job.
+  const revalidateJobRef = useRef<object | null>(null);
+  const followRevalidateJob = useCallback(async (jobId: string, how: 'started' | 'already_running' | 'resumed') => {
+    // A fresh token per follow: a second follow (or unmount) stops this loop.
+    const token = {};
+    revalidateJobRef.current = token;
+    try { localStorage.setItem(REVALIDATE_JOB_STORAGE_KEY, jobId); } catch { /* storage unavailable */ }
+    setRevalidateBusy(true);
+    setRevalidateMsg(
+      how === 'started'
+        ? `Revalidation is running as a background job (${jobId}). Results appear here when it finishes; you can keep working.`
+        : how === 'already_running'
+          ? `A revalidation is already running as a background job (${jobId}); nothing new was started. Following it; results appear here when it finishes.`
+          : `Following the background revalidation job (${jobId}); results appear here when it finishes.`,
+    );
+    let ended = false;
+    let errors = 0;
+    try {
+      for (;;) {
+        await wait(REVALIDATE_JOB_POLL_MS);
+        if (revalidateJobRef.current !== token) return;
+        let job: Awaited<ReturnType<typeof getJob>>;
+        try {
+          job = await getJob(jobId);
+          errors = 0;
+        } catch (err) {
+          errors += 1;
+          if (errors < 3) continue;
+          ended = true;
+          setRevalidateMsg(
+            `Could not check the background revalidation job (${jobId}): ${err instanceof Error ? err.message : String(err)}. It may still be running; check the Jobs page, then click Refresh.`,
+          );
+          return;
+        }
+        if (revalidateJobRef.current !== token) return;
+        if (job.status === 'running') continue;
+        ended = true;
+        const counts = job.status === 'success' ? revalidateJobCounts(job.result) : null;
+        if (counts) {
+          await applyRevalidateResult(counts, 'Background revalidation finished. ');
+        } else {
+          await loadQueue(true);
+          const lastLine = (job.log ?? []).filter(Boolean).slice(-1)[0];
+          setRevalidateMsg(
+            job.status === 'success'
+              ? 'Background revalidation finished, but the job reported no counts. The queue was reloaded; see the Jobs page for its log.'
+              : `Background revalidation ${job.status}${lastLine ? `: ${lastLine}` : ''}. Items it reached before stopping may already be updated or queued; the queue was reloaded. See the Jobs page for the log.`,
+          );
+        }
+        return;
+      }
+    } finally {
+      if (ended) {
+        try { localStorage.removeItem(REVALIDATE_JOB_STORAGE_KEY); } catch { /* storage unavailable */ }
+      }
+      if (revalidateJobRef.current === token) {
+        revalidateJobRef.current = null;
+        setRevalidateBusy(false);
+      }
+    }
+  }, [applyRevalidateResult, loadQueue]);
+
+  useEffect(() => {
+    if (missingIdsMode) return undefined;
+    let stored: string | null = null;
+    try { stored = localStorage.getItem(REVALIDATE_JOB_STORAGE_KEY); } catch { /* storage unavailable */ }
+    if (stored) void followRevalidateJob(stored, 'resumed');
+    return () => { revalidateJobRef.current = null; };
+  }, [followRevalidateJob, missingIdsMode]);
+
+  // Runs only from the confirm dialog: auto_enqueue may start imports for eligible items.
+  const handleRevalidateQueue = useCallback(async (ids: string[]) => {
+    setRevalidateBusy(true);
+    setRevalidateMsg(`Revalidating ${ids.length} review item${ids.length === 1 ? '' : 's'}...`);
+    try {
+      const result = await revalidateImportReview({ review_item_ids: ids, auto_enqueue: true, limit: ids.length });
+      if (isRevalidateJobStart(result)) {
+        // No counts yet: never report "Revalidated 0" for a job that only started.
+        void followRevalidateJob(result.job_id, result.already_running ? 'already_running' : 'started');
+        return;
+      }
+      await applyRevalidateResult(result);
+    } catch (err) {
+      setRevalidateMsg(`Revalidation failed: ${err instanceof Error ? err.message : String(err)}. Click Refresh to see the current queue, then try again.`);
+    }
+    setRevalidateBusy(false);
+  }, [applyRevalidateResult, followRevalidateJob]);
 
   // Target path preview — only for the active item
   useEffect(() => {
@@ -3781,12 +3990,12 @@ export function ImportReviewPage({
   useEffect(() => {
     try {
       if (Object.keys(backgroundJobs).length === 0) {
-        localStorage.removeItem('importReview_backgroundJobs');
+        localStorage.removeItem(bgJobsStorageKey);
       } else {
-        localStorage.setItem('importReview_backgroundJobs', JSON.stringify(backgroundJobs));
+        localStorage.setItem(bgJobsStorageKey, JSON.stringify(backgroundJobs));
       }
     } catch {}
-  }, [backgroundJobs]);
+  }, [backgroundJobs, bgJobsStorageKey]);
 
   // Resume polling for jobs that were in-flight when the page was last closed.
   // Fires once when pollJobBackground first becomes available (after loadQueue is stable).
@@ -4189,29 +4398,25 @@ export function ImportReviewPage({
       setAction(item.id, { status: 'error', message: 'No rejected or extra source files are selected for cleanup.' });
       return;
     }
-    setConfirmIntent({ kind: 'cleanup_files', item, files, destructive: hasDestructiveCleanupMismatch(sm, preview) });
+    setConfirmIntent({ kind: 'cleanup_files', item, files, wrongAudio: hasWrongAudioCleanupMismatch(sm, preview) });
   }, [selectedMatches, setAction, targetPreviews]);
 
-  // Sends exactly the files and action the user confirmed in the dialog.
-  const runCleanupFiles = useCallback(async (item: ReviewItem, files: string[], destructive: boolean) => {
+  // Sends exactly the files the user confirmed in the dialog. Always a
+  // quarantine: the server cannot prove a file is rejected, so it never
+  // deletes on this path (#380/#392); quarantined files can be restored.
+  const runCleanupFiles = useCallback(async (item: ReviewItem, files: string[]) => {
     if (!item.path) return;
-    const cleanupAction = destructive ? 'delete_rejected' : 'quarantine_rejected';
-    setAction(item.id, { status: 'running', message: `${destructive ? 'Purging' : 'Quarantining'} ${files.length} rejected file${files.length === 1 ? '' : 's'}...` });
+    setAction(item.id, { status: 'running', message: `Quarantining ${files.length} rejected file${files.length === 1 ? '' : 's'}...` });
     try {
       const result = await cleanupReviewFiles({
         path: item.path,
         review_item_id: item.id,
         files,
-        action: cleanupAction,
-        allow_delete: destructive,
+        action: 'quarantine_rejected',
+        allow_delete: false,
       });
       const handled = (result.quarantined_count ?? 0) + (result.deleted_count ?? 0);
-      setAction(item.id, {
-        status: 'success',
-        message: destructive
-          ? `Purged ${result.deleted_count ?? 0} file${result.deleted_count === 1 ? '' : 's'}; ${result.remaining_audio_count ?? 0} audio file${result.remaining_audio_count === 1 ? '' : 's'} remain.`
-          : `Quarantined ${result.quarantined_count ?? 0} file${result.quarantined_count === 1 ? '' : 's'}; ${result.remaining_audio_count ?? 0} audio file${result.remaining_audio_count === 1 ? '' : 's'} remain.`,
-      });
+      setAction(item.id, { status: 'success', message: cleanupResultMessage(result) });
       if (result.pending_review_removed || result.remaining_audio_count === 0) {
         removeLocalItem(item);
       } else if (handled > 0) {
@@ -4253,7 +4458,7 @@ export function ImportReviewPage({
     if (!intent) return;
     if (intent.kind === 'apply') void runApply(intent.item, intent.mbid);
     else if (intent.kind === 'dismiss') void runDismiss(intent.item);
-    else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files, intent.destructive);
+    else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files);
     else if (intent.kind === 'attach_recording_confirm') {
       void runConfirmedAttach(intent.item, intent.mbid, intent.candidate, reason || '');
     } else if (intent.kind === 'revalidate') void handleRevalidateQueue(intent.ids);
@@ -4275,6 +4480,7 @@ export function ImportReviewPage({
     setSourceFilter('all');
     setQuery('');
     setEvidenceOnly(false);
+    setKind('all');
     onFilterChange?.('all');
   }, [onFilterChange]);
 
@@ -4294,31 +4500,39 @@ export function ImportReviewPage({
     const failed = nonSkipped.filter((i) => itemMatchBucket(i) === 'failed').length;
     const noCand = nonSkipped.filter((i) => itemMatchBucket(i) === 'no_candidate').length;
     return {
-      all: counts.all ?? items.length,
+      all: counts.all ?? total,
       pending_ai: counts.pending_ai ?? 0,
       skipped: counts.skipped ?? 0,
-      library_no_mb: counts.library_no_mb ?? 0,
       ready,
       blocked,
       audio_mismatch: audioMismatch,
       no_candidate: noCand,
       failed,
     };
-  }, [counts, items, mbids, selectedMatches, targetPreviews]);
+  }, [counts, items, mbids, selectedMatches, total, targetPreviews]);
 
   const sourceFilterCounts = useMemo((): Record<SourceFilter, number> => {
     const result = Object.fromEntries(originFilters.map((entry) => [entry.id, originCountFor(originCounts, entry.id)])) as Record<SourceFilter, number>;
     if (!result.all) result.all = originCounts.all ?? items.length;
     return result;
   }, [items.length, originCounts]);
-  const unloadedReviewCount = Math.max(0, (counts.all ?? items.length) - items.length - activeJobHiddenCount);
+  const pageStart = total ? Math.min(offset + 1, total) : 0;
+  const pageEnd = Math.min(offset + REVIEW_PAGE_SIZE, total);
+  const hasPrevPage = offset > 0;
+  const hasNextPage = offset + REVIEW_PAGE_SIZE < total;
+  const pageBucketFilter = filter !== 'all' && filter !== 'pending_ai' && filter !== 'skipped';
+  const resultsAnnouncement = error
+    ? ''
+    : total === 0
+      ? (debouncedQuery ? `No results for "${debouncedQuery}".` : 'No items.')
+      : `Showing ${pageStart} to ${pageEnd} of ${total}${debouncedQuery ? ` results for "${debouncedQuery}"` : ''}.`;
 
   const statusFilterLabel = filters.find((entry) => entry.id === filter)?.label ?? 'All';
   const sourceFilterLabel = originLabel(sourceFilter);
   const activeFilterSummary = [sourceFilter !== 'all' ? sourceFilterLabel : '', filter !== 'all' ? statusFilterLabel : '']
     .filter(Boolean)
     .join(' + ');
-  const hasExtraFilters = filter !== 'all' || sourceFilter !== 'all' || Boolean(query.trim()) || evidenceOnly;
+  const hasExtraFilters = filter !== 'all' || sourceFilter !== 'all' || Boolean(query.trim()) || evidenceOnly || kind !== 'all';
 
   const moveToIndex = useCallback((nextIndex: number) => {
     if (visibleItems.length < 1) return;
@@ -4474,49 +4688,60 @@ export function ImportReviewPage({
 
   return (
     <section className="flex flex-col gap-5">
-      <ReconciliationReviewPanel />
+      {missingIdsMode ? null : <ReconciliationReviewPanel />}
       {/* Counts + action bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
-          <span className="text-zinc-700">{countFor(counts, 'all')} total</span>
+          <span className="text-zinc-700">{total} total</span>
           {activeJobHiddenCount ? <span className="text-zinc-700">{activeJobHiddenCount} active job hidden</span> : null}
-          {unloadedReviewCount ? <span className="text-zinc-700">{unloadedReviewCount} not loaded</span> : null}
-          {(
-            [
-              { id: 'pending_ai', label: 'pending AI' },
-              { id: 'skipped', label: 'skipped' },
-              { id: 'library_no_mb', label: 'missing MB ID' },
-            ] as Array<{ id: ReviewItemType; label: string }>
-          ).map(({ id, label }) => {
-            const n = countFor(counts, id);
-            return (
-              <span key={id} className="text-zinc-700">
-                {n} {label}
-              </span>
-            );
-          })}
+          {missingIdsMode ? (
+            <>
+              <span className="text-zinc-700">{kindCounts.album} album{kindCounts.album === 1 ? '' : 's'} without a Release ID</span>
+              <span className="text-zinc-700">{kindCounts.item} track{kindCounts.item === 1 ? '' : 's'} without a Recording ID</span>
+            </>
+          ) : (
+            <>
+              {(
+                [
+                  { id: 'pending_ai', label: 'pending AI' },
+                  { id: 'skipped', label: 'skipped' },
+                ] as Array<{ id: ReviewItemType; label: string }>
+              ).map(({ id, label }) => (
+                <span key={id} className="text-zinc-700">
+                  {countFor(counts, id)} {label}
+                </span>
+              ))}
+              <Link to="/library/missing-ids" className="text-sky-700 underline underline-offset-2">
+                Library albums and tracks missing IDs are in Library: Missing IDs
+              </Link>
+            </>
+          )}
         </div>
         <div className="flex flex-col items-end gap-1.5">
           <div className="flex gap-2">
-            <Button
-              disabled={revalidateBusy || loading || revalidatePendingCount < 1}
-              size="small"
-              variant="outlined"
-              onClick={requestRevalidateQueue}
-              title="Re-check visible pending items; eligible items may be imported after you confirm"
-            >
-              {revalidateBusy ? 'Revalidating…' : 'Revalidate & Import…'}
-            </Button>
-            <Button disabled={cleanupBusy || loading} size="small" variant="outlined" onClick={() => setConfirmIntent({ kind: 'clean_stale' })}>
-              {cleanupBusy ? 'Cleaning…' : 'Clean Stale…'}
-            </Button>
+            {missingIdsMode ? null : (
+              <>
+                <Button
+                  disabled={revalidateBusy || loading || revalidatePendingCount < 1}
+                  size="small"
+                  variant="outlined"
+                  onClick={requestRevalidateQueue}
+                  title="Re-check visible pending items; eligible items may be imported after you confirm"
+                >
+                  {revalidateBusy ? 'Revalidating…' : 'Revalidate & Import…'}
+                </Button>
+                <Button disabled={cleanupBusy || loading} size="small" variant="outlined" onClick={() => setConfirmIntent({ kind: 'clean_stale' })}>
+                  {cleanupBusy ? 'Cleaning…' : 'Clean Stale…'}
+                </Button>
+              </>
+            )}
             <Button variant="contained" onClick={() => void loadQueue()} disabled={loading}>
               Refresh
             </Button>
           </div>
           {queueUpdatesAvailable ? (
             <span className="inline-flex items-center gap-2 text-xs font-medium text-zinc-700">
-              Review queue updates are available.
+              {missingIdsMode ? 'Updates to this list are available.' : 'Review queue updates are available.'}
               <Button size="small" variant="text" onClick={() => void loadQueue()} disabled={loading}>Load updates</Button>
             </span>
           ) : null}
@@ -4530,22 +4755,24 @@ export function ImportReviewPage({
         <CardContent>
           <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
             <TextField
-              label="Search review queue"
+              label={missingIdsMode ? 'Search title, artist, album or path' : 'Search review queue'}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               size="small"
               fullWidth
             />
-            <div className="flex items-center justify-between gap-3 rounded border border-graphite-200 bg-graphite-50 px-3 py-2">
-              <span className="text-sm font-medium text-zinc-700">Evidence only</span>
-              <Switch
-                checked={evidenceOnly}
-                onChange={setEvidenceOnly}
-                className="group inline-flex h-7 w-12 items-center rounded-full bg-graphite-300 transition data-[checked]:bg-sky-600"
-              >
-                <span className="size-5 translate-x-1 rounded-full bg-white shadow transition group-data-[checked]:translate-x-6" />
-              </Switch>
-            </div>
+            {missingIdsMode ? null : (
+              <div className="flex items-center justify-between gap-3 rounded border border-graphite-200 bg-graphite-50 px-3 py-2">
+                <span className="text-sm font-medium text-zinc-700">Evidence only</span>
+                <Switch
+                  checked={evidenceOnly}
+                  onChange={setEvidenceOnly}
+                  className="group inline-flex h-7 w-12 items-center rounded-full bg-graphite-300 transition data-[checked]:bg-sky-600"
+                >
+                  <span className="size-5 translate-x-1 rounded-full bg-white shadow transition group-data-[checked]:translate-x-6" />
+                </Switch>
+              </div>
+            )}
           </div>
           {activeFilterSummary ? (
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
@@ -4559,6 +4786,22 @@ export function ImportReviewPage({
               <Button size="small" variant="text" onClick={clearFilters}>Clear filters</Button>
             </div>
           ) : null}
+          {missingIdsMode ? (
+            <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Missing ID kind">
+              {missingKindFilters.map((entry) => (
+                <Button
+                  key={entry.id}
+                  size="small"
+                  variant={kind === entry.id ? 'contained' : 'outlined'}
+                  aria-pressed={kind === entry.id}
+                  onClick={() => setKind(entry.id)}
+                >
+                  {entry.label} ({kindCounts[entry.id]})
+                </Button>
+              ))}
+            </div>
+          ) : (
+          <>
           <div className="mt-4 flex flex-wrap gap-2">
             {filters.map((entry) => {
               const count = filterCounts[entry.id];
@@ -4577,6 +4820,11 @@ export function ImportReviewPage({
               );
             })}
           </div>
+          {pageBucketFilter ? (
+            <div className="mt-2 text-xs text-zinc-500">
+              This filter applies to the {items.length} item{items.length === 1 ? '' : 's'} on this page.
+            </div>
+          ) : null}
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Source</span>
             {originFilters.map((entry) => {
@@ -4596,11 +4844,33 @@ export function ImportReviewPage({
               );
             })}
           </div>
+          </>
+          )}
+          {/* Screen readers hear page changes and search results (QA #395 F5). */}
+          <div role="status" aria-live="polite" className="sr-only">
+            {loading ? '' : resultsAnnouncement}
+          </div>
+          {total > REVIEW_PAGE_SIZE || offset > 0 ? (
+            <nav aria-label="Pages" className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-600">
+              <span>Showing {pageStart}–{pageEnd} of {total}</span>
+              <Button size="small" variant="outlined" disabled={!hasPrevPage || loading} onClick={() => setOffset(Math.max(0, offset - REVIEW_PAGE_SIZE))}>
+                Previous page
+              </Button>
+              <Button size="small" variant="outlined" disabled={!hasNextPage || loading} onClick={() => setOffset(offset + REVIEW_PAGE_SIZE)}>
+                Next page
+              </Button>
+            </nav>
+          ) : null}
         </CardContent>
         {loading ? <LinearProgress /> : null}
       </Card>
 
-      {error ? <Alert severity="error">{error}</Alert> : null}
+      {error ? (
+        <Alert severity="error">
+          {missingIdsMode ? 'Could not load library albums and tracks missing MusicBrainz IDs: ' : 'Could not load the review queue: '}
+          {error}. {missingIdsMode ? 'This list is read from Beets; check the Beets status on the System page, then click Refresh.' : 'Click Refresh to try again.'}
+        </Alert>
+      ) : null}
 
       {/* Background import status strip */}
       {Object.keys(backgroundJobs).length > 0 ? (
@@ -4632,7 +4902,13 @@ export function ImportReviewPage({
 
       {/* One-at-a-time queue */}
       {!loading && !error && visibleItems.length === 0 ? (
-        <Alert severity="success">No more albums need review.</Alert>
+        hasExtraFilters ? (
+          <Alert severity="info">Nothing matches these filters{pageBucketFilter ? ' on this page' : ''}. Clear the filters to see everything.</Alert>
+        ) : (
+          <Alert severity="success">
+            {missingIdsMode ? 'No library albums or tracks are missing MusicBrainz IDs.' : 'No more albums need review.'}
+          </Alert>
+        )
       ) : visibleItems.length > 0 ? (
         <>
           {/* Queue position navigator */}
@@ -4648,9 +4924,8 @@ export function ImportReviewPage({
             </button>
             <div className="min-w-0 flex-1 text-center">
               <div className="text-[0.7rem] text-zinc-200">
-                {activeIndex + 1} of {visibleItems.length} shown · {filterCounts[filter]} in filter · {items.length} loaded of {filterCounts.all} total
+                {activeIndex + 1} of {visibleItems.length} shown · items {pageStart}–{pageEnd} of {total}
                 {activeJobHiddenCount ? ` · ${activeJobHiddenCount} hidden by active jobs` : ''}
-                {unloadedReviewCount ? ` · ${unloadedReviewCount} beyond page limit` : ''}
               </div>
               {activeItem ? (
                 <div className="truncate text-sm font-semibold text-zinc-200" title={itemTitle(activeItem)}>
