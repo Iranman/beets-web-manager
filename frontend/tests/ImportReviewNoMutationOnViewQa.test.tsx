@@ -117,30 +117,37 @@ describe('Import Review QA: no mutation while browsing', () => {
   });
 });
 
-describe('Import Review QA: permanent delete needs its own explicit confirmation', () => {
-  it('names permanent deletion and sends delete_rejected only after confirming', async () => {
+describe('Import Review QA: wrong-audio files are quarantined, never deleted, and only after confirming', () => {
+  it('names the mismatch, never offers permanent deletion, and sends quarantine_rejected only after confirming', async () => {
+    mocked.cleanupReviewFiles.mockResolvedValue({ ok: true, quarantined_count: 1, deleted_count: 0, remaining_audio_count: 1 } as never);
     render(page(true));
     await screen.findAllByText('First Album');
     fireEvent.keyDown(window, { key: ']' });
     const button = await screen.findByRole('button', { name: /Remove 1 rejected file…/ });
     await settle();
     expectNoMutation();
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
 
     fireEvent.click(button);
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('Permanently Delete Rejected Files')).toBeTruthy();
-    expect(within(dialog).getByText(/permanently deleted from disk/)).toBeTruthy();
+    expect(within(dialog).getByText('Quarantine Rejected Files')).toBeTruthy();
+    expect(within(dialog).getByText(/do not match the selected release/)).toBeTruthy();
+    expect(within(dialog).getByText(/not deleted, and can be restored/)).toBeTruthy();
+    expect(within(dialog).queryByText(/Permanently Delete/)).toBeNull();
+    expect(within(dialog).queryByText(/permanently deleted/)).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: /^Delete/ })).toBeNull();
     expect(within(dialog).getByText(WRONG)).toBeTruthy();
     expect(mocked.cleanupReviewFiles).not.toHaveBeenCalled();
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 1 file' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Quarantine 1 file' }));
     await waitFor(() => expect(mocked.cleanupReviewFiles).toHaveBeenCalledTimes(1));
     expect(mocked.cleanupReviewFiles).toHaveBeenCalledWith({
       path: `${FOLDER}-b`,
       review_item_id: 'b',
       files: [WRONG],
-      action: 'delete_rejected',
-      allow_delete: true,
+      action: 'quarantine_rejected',
+      allow_delete: false,
     });
+    expect(await screen.findByText(/Quarantined 1 file.*can be restored/)).toBeTruthy();
   });
 });
