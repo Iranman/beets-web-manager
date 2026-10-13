@@ -174,7 +174,6 @@ function DownloadControls({
         existing_album_id: missingTrackMode ? localAlbum?.album_id : undefined,
         method,
         auto_import: true,
-        fallback_method: sourceFallback ? 'spotiflac' : undefined,
         try_ytdlp_fallback: sourceFallback,
         try_source_fallback: sourceFallback,
       });
@@ -197,7 +196,7 @@ function DownloadControls({
           <Button
             disabled={busy}
             size="small"
-            title={missingTrackMode && ytdlpEnabled ? 'Try Soulseek first, then SpotiFLAC, YouTube, and SoundCloud if Soulseek has no usable candidate' : undefined}
+            title={missingTrackMode && ytdlpEnabled ? 'Try Soulseek first, then the configured fallback sources (SLSKD_FALLBACK_METHODS) if Soulseek has no usable candidate' : undefined}
             variant="outlined"
             onClick={() => void download('slskd')}
           >
@@ -238,7 +237,7 @@ function DownloadControls({
       {missingTrackMode && canDownload && !dlDone ? (
         <p className="text-xs text-amber-300">
           {localMissingCount || localNotImportedCount || localAlbum?.track_count || 'Missing'} local track(s) need import repair.
-          {ytdlpEnabled ? ' SLSKD can fall back to SpotiFLAC, YouTube, and SoundCloud if no usable Soulseek source works.' : ''}
+          {ytdlpEnabled ? ' SLSKD can fall back to the configured direct sources if no usable Soulseek source works.' : ''}
         </p>
       ) : null}
       {mbEditionGap ? (
