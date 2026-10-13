@@ -87,6 +87,7 @@ OPERATOR_KEYS = frozenset({
     "BEETS_AUTH_ACCOUNT_RATE_WINDOW",
     "SPOTIFLAC_CMD",                     # command line that is executed
     "YTDLP_JS_RUNTIMES",                 # may name an executable path (node:/path)
+    "YTDLP_REMOTE_COMPONENTS",           # lets yt-dlp fetch and run remote solver code
     "YTDLP_COOKIE_FILE",                 # credential file path read by yt-dlp
     "YTDLP_NETRC_FILE",                  # credential file path read by yt-dlp
     "YTDLP_ALLOW_BROWSER_COOKIES",       # lets yt-dlp read browser credential stores

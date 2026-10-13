@@ -23,23 +23,11 @@ def _pip_install(*packages, timeout=300) -> bool:
     return False
 
 
-def _install_deno_runtime_if_needed() -> None:
-    _plugin_install_log.append(
-        "[blocked] Deno auto-install disabled; provide a pinned deno binary in the image build or YTDLP_JS_RUNTIMES"
-    )
-
-
 def _run_install_command(cmd: List[str], timeout: int = 240) -> bool:
     _plugin_install_log.append(
         "[blocked] runtime package-manager execution disabled; install required tools during image build"
     )
     return False
-
-
-def _install_system_js_runtime_if_needed() -> None:
-    _plugin_install_log.append(
-        "[blocked] system JS runtime auto-install disabled; preinstall node/deno/quickjs in the image build"
-    )
 
 
 def _binary_status(name: str) -> Dict[str, Any]:
