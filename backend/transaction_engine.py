@@ -1080,7 +1080,13 @@ def execute_import_review_cleanup_plan(
                     # continue with the relative remainder; no decoding.
                     f_abs = os.path.normpath(f_raw)
                     rel = ""
-                    for base in (os.path.normpath(raw_path), os.path.normpath(str(resolved_target))):
+                    # S-LOW-1: normpath collapses ".." textually, which can
+                    # disagree with the resolved folder through a symlink;
+                    # trust the raw prefix only when it has no ./.. parts.
+                    bases = [os.path.normpath(str(resolved_target))]
+                    if not any(p in {".", ".."} for p in raw_path.replace("\\", "/").split("/")):
+                        bases.insert(0, os.path.normpath(raw_path))
+                    for base in bases:
                         if f_abs.startswith(base + os.sep):
                             rel = f_abs[len(base) + len(os.sep):]
                             break

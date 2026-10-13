@@ -5,6 +5,8 @@ F3: delete_* is the client's claim, so the route downgrades it to a
 restorable quarantine. NB1: the UI sends absolute source_path values; only
 those lexically under the authorized review folder are acted on."""
 
+import os
+import sys
 import unittest
 
 try:
@@ -12,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover
     from tests.test_sec002_app_path_import_review_cleanup import ImportReviewCleanupPathBoundaryTests as _Base
 
-from backend.transaction_engine import rollback_import_review_cleanup
+from backend.transaction_engine import execute_import_review_cleanup_plan, rollback_import_review_cleanup
 
 
 class RejectedCleanupTests(unittest.TestCase):
@@ -43,7 +45,7 @@ class RejectedCleanupTests(unittest.TestCase):
         self.assertEqual(data["quarantined_count"], 2, data)
         self.assertEqual(data["deleted_count"], 0, data)
         self.assertEqual({p.name for p in (bad, nested)},
-                         {item["source"].rsplit("/", 1)[-1] for item in data["quarantined"]})
+                         {os.path.basename(item["source"]) for item in data["quarantined"]})
         self.assertFalse(bad.exists())
         self.assertFalse(nested.exists())
         for kept in (good, prefix_sibling, victim, outside):
@@ -84,6 +86,33 @@ class RejectedCleanupTests(unittest.TestCase):
         self.assertFalse(dup.exists())
         self.assertEqual(len(self._snapshot(self.quarantine)), 1)
         self.assertTrue(data["pending_review_removed"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "symlink + POSIX path semantics")
+    def test_raw_folder_with_dotdot_through_symlink_uses_resolved_prefix_only(self):
+        # S-LOW-1: raw "dl/hop/../Album" with hop -> dl/deep/sub resolves to
+        # dl/deep/Album, but normpath says dl/Album. A client path under
+        # dl/Album must not be mapped onto dl/deep/Album.
+        (self.downloads / "deep" / "sub").mkdir(parents=True)
+        os.symlink(self.downloads / "deep" / "sub", self.downloads / "hop")
+        real = self._write_audio(self.downloads / "deep" / "Album" / "x.flac")
+        decoy = self._write_audio(self.downloads / "Album" / "x.flac")
+        raw = f"{self.downloads}/hop/../Album"
+
+        res = execute_import_review_cleanup_plan(
+            self.tx_store, {"path": raw, "files": [str(decoy)], "action": "quarantine_rejected"},
+            [str(self.downloads)], music_root=str(self.music))
+
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["skipped"], [{"file": str(decoy), "reason": "outside_review_folder"}])
+        steps = self.tx_store.get(res["operation_id"])["metadata"]["steps"]
+        self.assertEqual(steps, [])
+        # The resolved folder's own absolute path is still accepted.
+        res2 = execute_import_review_cleanup_plan(
+            self.tx_store, {"path": raw, "files": [str(real)], "action": "quarantine_rejected"},
+            [str(self.downloads)], music_root=str(self.music))
+        self.assertEqual([s["source"] for s in self.tx_store.get(res2["operation_id"])["metadata"]["steps"]],
+                         [str(real)])
+        self.assertTrue(decoy.exists() and real.exists())
 
 
 del _Base  # borrow its fixtures without re-running its tests here
