@@ -2026,10 +2026,15 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         log.append(f"  Import outcome: {outcome['reason']}")
         mark(status=outcome["status"], current_step=outcome["current_step"], failure_reason=outcome["reason"])
 
-    def review(suggestion: Dict[str, Any], evidence: Dict[str, Any], **fields) -> None:
+    def review(suggestion: Dict[str, Any], evidence: Dict[str, Any], status: str = "review_created",
+               current_step: str = "review item created", **fields) -> None:
         review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=evidence, batch_job_id=batch_id)
         log.append(f"review item created: {folder}")
-        mark(status="review_created", current_step="review item created", review_item_id=review_id, **fields)
+        mark(status=status, current_step=current_step, review_item_id=review_id, **fields)
+
+    def plain_suggestion(reason: str) -> Dict[str, Any]:
+        # No candidates: folder name only, empty IDs.
+        return dict(_ai_batch_review_suggestion(folder, "", {}), reason=reason)
 
     log.append(f"\n{Path(folder).name}")
     if stop(interrupted()):
@@ -2048,8 +2053,20 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
     log.append(f"  Stage 1: Beets import ({'copy, torrent source' if preserve else 'move'})")
     try:
+        audio_files = [p for p in Path(folder).rglob("*") if p.suffix.lower() in AUDIO_EXT]
+        # A symlinked audio file is a hard identity conflict (it may point
+        # anywhere, even into the library): Beets never gets the folder.
+        linked = [str(p) for p in audio_files if p.is_symlink()]
+        if linked:
+            reason = f"symlinked_audio: {len(linked)} audio file(s) are symlinks; import refused"
+            log.append(f"  {reason}")
+            review(plain_suggestion(reason),
+                   {"origin_step": "pre_import", "conflict": "symlinked_audio", "symlinked_paths": linked,
+                    "ai_rank": None, "batch_job_id": batch_id},
+                   failure_reason="symlinked_audio", stage="done")
+            return
         _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
-        audio = sum(1 for p in Path(folder).rglob("*") if p.suffix.lower() in AUDIO_EXT)
+        audio = len(audio_files)
         # Same scale as import_service._beet_import_timeout_for_count (a higher layer).
         res = composite_workflows.reimport_source(
             folder, {"quiet_fallback": "skip", "copy": preserve, "move": not preserve, "write": True},
@@ -2089,7 +2106,11 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         elif partial:
             reason = f"Beets imported part of this folder and skipped {len(partial)} path(s): {', '.join(partial)}"
             log.append(f"  {reason}")
-            mark(status="review_required", current_step="imported in part", failure_reason=reason, **fields)
+            # One review row so the skipped paths are visible (QA394-N1).
+            review(dict(plain_suggestion(reason), kept_album_ids=ids),
+                   {"origin_step": "beets_partial", "skipped_paths": partial, "kept_album_ids": ids,
+                    "beets_skip_reason": _ai_batch_skip_reason(res), "ai_rank": None, "batch_job_id": batch_id},
+                   status="review_required", current_step="imported in part", failure_reason=reason, **fields)
         else:
             mark(status="imported", current_step="imported", **fields)
         return
@@ -2183,6 +2204,9 @@ def _ai_batch_run_folders(state: Dict[str, Any], log: list, cancel_event=None, u
             state["current_step"] = "paused"
             _ai_batch_commit(state, update_state)
             return "paused"
+        # "Skip current" means the folder running when it was pressed; one that
+        # finished (e.g. Beets imported it) must not pass it on (QA394-F1).
+        control["skip_current"] = False
         state["current_step"] = f"Importing {Path(_s(folders[fid].get('source_folder'))).name}"
         try:
             _ai_batch_process_folder(state, fid, log, cancel_event, update_state)
@@ -2369,11 +2393,9 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
                 _ai_batch_mark_folder(state, fid, status="review_created", current_step="review item already exists", review_item_id=fid)
                 terminal += 1
                 continue
-            if status == "ai_running":
-                reason = "stale AI-running folder recovered"
-                _ai_batch_mark_folder(state, fid, status="timed_out", current_step="stale AI suggestion timed out", ai_suggest_status="timed_out", ai_suggest_error=reason, failure_reason=reason)
-                terminal += 1
-            elif status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES:
+            # A legacy "ai_running" folder was already timed out by
+            # _ai_batch_reconcile_state (_ai_batch_mark_stale_ai_running_folders).
+            if status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES:
                 # Queued, interrupted mid-import, or a cached AI decision from
                 # before phase B: run the deterministic stages again. A folder
                 # Beets already imported is caught by the library check.

@@ -20,7 +20,6 @@ def setUpModule():
 
 
 class SkipControlTests(_Batch):
-    @unittest.expectedFailure  # QA394-F1: remove once Skip no longer leaks to the next folder
     def test_skip_pressed_during_a_successful_stage1_does_not_skip_the_next_folder(self):
         first = self.folders[0]
 

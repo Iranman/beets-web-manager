@@ -168,6 +168,38 @@ class Stage1Tests(_Batch):
         self.assertEqual(folders[self.folders[1]]["status"], "imported")
         self.assertEqual(out["folders_retryable"], 1)
 
+    def test_partial_import_gets_one_review_row_listing_skipped_paths(self):
+        disc2 = str(Path(self.folders[0]) / "CD2")
+        self.reimport[self.folders[0]] = {"ok": True, "albums_imported": 1, "imported_album_ids": [7],
+                                          "skipped": [{"path": disc2, "reason": "no_strong_match"}],
+                                          "not_matched": [disc2], "not_matched_known": True}
+        _, folders = self.run_batch()
+        a = folders[self.folders[0]]
+        self.assertEqual(a["status"], "review_required")
+        self.assertEqual(a["review_item_id"], "rid")
+        self.queued.assert_called_once()
+        call = self.queued.call_args
+        self.assertEqual(call.args[1]["kept_album_ids"], [7])
+        ev = self.evidence(call)
+        self.assertEqual((ev["origin_step"], ev["skipped_paths"], ev["kept_album_ids"]),
+                         ("beets_partial", [disc2], [7]))
+
+    def test_symlinked_audio_is_never_handed_to_beets(self):
+        target = self.tmp / "elsewhere.flac"
+        target.write_bytes(b"x")
+        try:
+            (Path(self.folders[0]) / "02.flac").symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        _, folders = self.run_batch()
+        a = folders[self.folders[0]]
+        self.assertEqual((a["status"], a["failure_reason"]), ("review_created", "symlinked_audio"))
+        self.assertEqual([c.args[0] for c in self.stubs["reimport_source"].call_args_list], [self.folders[1]])
+        ev = self.evidence(self.queued.call_args)
+        self.assertEqual((ev["conflict"], ev["symlinked_paths"]),
+                         ("symlinked_audio", [str(Path(self.folders[0]) / "02.flac")]))
+        self.assertEqual(folders[self.folders[1]]["status"], "imported")
+
     def test_older_plugin_without_album_ids_is_not_verified(self):
         self.reimport[self.folders[0]] = {"ok": True, "albums_imported": 1, "imported_album_ids": None,
                                           "skipped": [], "not_matched": [], "not_matched_known": False}
