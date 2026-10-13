@@ -206,6 +206,82 @@ class AddPendingReviewTrustTests(_Base):
         self.assertFalse(irs._pending_item_is_ready_for_backend_auto_import(item))
 
 
+    def test_client_origin_cannot_override_the_folder_and_is_bounded(self):
+        res = self.client.post("/api/ai-pending-review", json={
+            "path": str(self.album),
+            "source_folder": "/etc", "origin": {"source_folder": "/etc"},
+            "origin_label": "L" * 5000, "source_playlist_name": {"nested": "dict"},
+            "suggestion": {"album": "A" * 5000, "mb_url": "https://evil.example/x"},
+        })
+        self.assertEqual(res.status_code, 200, res.get_json())
+        [item] = self._items()
+        self.assertEqual(item["source_folder"], str(self.album))
+        self.assertEqual(item["suggestion"]["source_folder"], str(self.album))
+        self.assertLessEqual(len(item["origin_label"]), 500)
+        self.assertIsInstance(item["source_playlist_name"], str)
+        self.assertEqual(len(item["suggestion"]["album"]), 500)
+        self.assertNotIn("mb_url", item["suggestion"])
+
+
+class StoredPendingPathRevalidationTests(_Base):
+    """Security LOW-4: an entry stored before paths were validated authorizes
+    nothing unless its path still resolves under an approved root."""
+
+    def setUp(self):
+        super().setUp()
+        self.pending_file = self.root / "ai_pending_review.json"
+        self.patch(prs, "_AI_PENDING_FILE", self.pending_file)
+        downloads, music = self.downloads, self.music
+        self.patch(ser, "_import_review_cleanup_roots",
+                   lambda *, allow_music=False: [downloads] + ([music] if allow_music else []))
+        self.outside = self.root / "elsewhere" / "Album"
+        self.outside.mkdir(parents=True)
+
+    def _store(self, *paths):
+        self.pending_file.write_text(json.dumps([
+            {"path": str(p), "suggestion": {"mb_valid": True}, "status": "ready_to_import"} for p in paths]))
+
+    def test_legacy_outside_entry_does_not_authorize_a_delete(self):
+        self._store(self.outside, self.album)
+        self.assertFalse(prs._pending_review_matches(str(self.outside)))
+        self.assertTrue(prs._pending_review_matches(str(self.album)))
+
+    def test_legacy_outside_entry_is_not_auto_enqueued(self):
+        self._store(self.outside)
+        with mock.patch.object(irs, "_load_pending_reviews", return_value=json.loads(self.pending_file.read_text())), \
+             mock.patch.object(irs, "evaluate_import_eligibility", side_effect=AssertionError("must not evaluate")):
+            out = irs._run_import_review_auto_enqueue_ready_batch(5)
+        self.assertEqual((out["queued_count"], out["skipped_count"], out["failed_count"]), (0, 1, 0))
+        self.assertEqual(out["items"][0]["reason"], irs._UNTRUSTED_STORED_REVIEW_PATH)
+
+
+class RevalidateItemIsolationTests(_Base):
+    """Security LOW-3: one failing item never aborts the run or leaks text."""
+
+    def test_a_raising_item_fails_alone_with_fixed_text(self):
+        rg = "11111111-1111-1111-1111-111111111111"
+        bad, good = str(self.downloads / "bad"), str(self.album)
+        items = [{"path": bad, "suggestion": {"mb_releasegroupid": rg}},
+                 {"path": good, "suggestion": {"mb_releasegroupid": rg, "existing_album_ids": ["not-an-int"]}}]
+
+        def comparison(rep, path, release_group_id=""):
+            if path == bad:
+                raise RuntimeError("SECRET-DETAIL /internal/path")
+            return {"ok": True}
+        with mock.patch.object(irs, "_load_pending_reviews", return_value=items), \
+             mock.patch.object(irs, "_candidate_track_comparison_payload", side_effect=comparison), \
+             mock.patch.object(irs, "_import_review_revalidation_preflight", return_value={}), \
+             mock.patch.object(irs, "_import_review_build_revalidated_match", return_value={}), \
+             mock.patch.object(irs, "_update_pending_review_revalidation", return_value=True), \
+             mock.patch.object(irs, "evaluate_import_eligibility", return_value={"eligible": False}):
+            log = []
+            out = irs._run_import_review_revalidation(set(), log=log)
+        self.assertEqual((out["reviewed_count"], out["updated_count"], out["failed_count"]), (2, 1, 1))
+        self.assertEqual(out["items"][0]["error"], "Could not revalidate this item.")
+        self.assertTrue(out["items"][1]["ok"])
+        self.assertNotIn("SECRET-DETAIL", json.dumps(out) + " ".join(log))
+
+
 class ImportedFolderLeavesSkipLedgerTests(_Base):
     """QA #391 N1: a folder that imports drops out of the recorded skip ledger,
     with no Beets read."""

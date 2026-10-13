@@ -17,6 +17,7 @@ import backend.composite_workflows as composite_workflows
 from backend.serializers import REVIEW_ORIGIN_FIELDS, REVIEW_ORIGIN_LABELS, _normalize_review_origin_type, _review_origin_payload
 import hashlib
 from backend.serializers import _resolve_import_review_source_path
+import backend.serializers as _serializers
 from backend.ai_batch_state_service import _music_format_policy_review_note
 from backend.import_reconciliation_service import _MUSIC_FORMAT_POLICY_REVIEW_STATUS, _remaining_audio_files, _review_paths_equal
 
@@ -555,6 +556,32 @@ def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
     return False
 
 
+def _trusted_stored_review_path(raw: Any) -> Optional[str]:
+    """A stored Pending Review path, normalized, when it is still inside an
+    approved Import Review root (or the library), is not a root itself, and
+    no symlink moves it out of that root; else None. The path is taken
+    literally (never URL-decoded, #387), so folder names with ``%``, ``+``
+    or backslashes keep working. Entries stored before POST /api/ai-pending-review
+    validated paths are re-checked here wherever an entry authorizes an
+    action, with no raw-text shortcut (security LOW-4)."""
+    text = _s(raw).strip()
+    if not text or chr(0) in text or not os.path.isabs(text):
+        return None
+    lexical = os.path.normpath(text)
+    try:
+        real = os.path.realpath(lexical)
+    except (OSError, ValueError):
+        return None
+    for root in _serializers._import_review_cleanup_roots(allow_music=True):
+        root_text = os.path.normpath(str(root))
+        if lexical == root_text:
+            return None
+        if lexical.startswith(root_text.rstrip(os.sep) + os.sep):
+            real_root = os.path.realpath(root_text)
+            return lexical if real.startswith(real_root.rstrip(os.sep) + os.sep) else None
+    return None
+
+
 def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:
     folder_path = _s(folder_path).strip()
     if not folder_path or not _review_id_matches_path(review_item_id, folder_path):
@@ -565,7 +592,9 @@ def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:
         items = json.loads(_AI_PENDING_FILE.read_text())
         if not isinstance(items, list):
             return False
-        return any(_review_paths_equal(_s((item or {}).get("path", "")), folder_path) for item in items)
+        target = _trusted_stored_review_path(folder_path)
+        return target is not None and any(
+            _trusted_stored_review_path(_s((item or {}).get("path", ""))) == target for item in items)
     except Exception:
         return False
 

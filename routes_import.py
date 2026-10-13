@@ -1020,8 +1020,9 @@ def get_ai_review_decisions():
 # review_evidence, ...) is dropped; revalidation recomputes it.
 _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS = (
     "mb_albumid", "mb_releasegroupid", "representative_mb_albumid", "album", "albumartist",
-    "artist", "year", "label", "country", "reason", "mb_url",
+    "artist", "year", "label", "country", "reason",
 )
+_PENDING_REVIEW_CLIENT_TEXT_MAX = 500  # per client-supplied string (suggestion and origin)
 
 
 @app.post("/api/ai-pending-review")
@@ -1037,12 +1038,18 @@ def add_ai_pending_review():
         return jsonify({"ok": False, "error": path_error or "Source path is not allowed."}), 400
     folder_path = str(folder)
     raw_suggestion = payload.get("suggestion") if isinstance(payload.get("suggestion"), dict) else {}
-    suggestion = {k: raw_suggestion[k] for k in _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS
-                  if isinstance(raw_suggestion.get(k), (str, int)) and not isinstance(raw_suggestion.get(k), bool)}
+    suggestion = {k: (v[:_PENDING_REVIEW_CLIENT_TEXT_MAX] if isinstance(v, str) else v)
+                  for k in _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS
+                  for v in (raw_suggestion.get(k),)
+                  if isinstance(v, (str, int)) and not isinstance(v, bool)}
     allow_existing = payload.get("allow_existing") is True
     origin = _review_origin_payload(folder_path, suggestion, origin=payload)
     if _normalize_review_origin_type(origin.get("origin_type")) == "unknown":
         origin = {**origin, "origin_type": "manual_import", "origin_label": "Manual", "created_by_workflow": "manual_import"}
+    # Origin is display-only client text: plain strings, bounded, and the
+    # folder is always the validated one (security LOW-1).
+    origin = {k: _s(v)[:_PENDING_REVIEW_CLIENT_TEXT_MAX] for k, v in origin.items()}
+    origin["source_folder"] = folder_path
     added = _add_to_pending(folder_path, suggestion, allow_existing=allow_existing, origin=origin)
     return jsonify({"ok": True, "added": bool(added), "skipped_existing": not bool(added)})
 
