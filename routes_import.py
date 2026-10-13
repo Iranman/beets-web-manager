@@ -234,9 +234,15 @@ def cleanup_import_review_files():
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     allow_delete = bool(payload.get("allow_delete"))
-    # allow_delete is passed through for the audit record only; it gates
-    # nothing. A delete_* action is authorized by the Pending Review match
-    # above, and library paths are always quarantined instead (S1).
+    # #380 F3: "rejected"/"duplicate" is the client's claim; the backend
+    # holds no per-file proof that a file is rejected and not in the
+    # library. A delete_* request is therefore downgraded to the matching
+    # quarantine (restorable through rollback), never a permanent delete.
+    # allow_delete is kept for the audit record only.
+    requested_action = action
+    if action.startswith("delete_"):
+        action = "quarantine_" + action[len("delete_"):]
+        log.append("Permanent delete downgraded to quarantine: the server cannot prove these files are rejected.")
     plan_req = {
         "path": folder_path,
         "files": raw_files,
@@ -281,9 +287,10 @@ def cleanup_import_review_files():
             except Exception:
                 pass
 
+        pending_review_removed = False
         if remaining_audio == 0:
             try:
-                _remove_pending_review_for_path(folder_path, log)
+                pending_review_removed = bool(_remove_pending_review_for_path(folder_path, log))
             except Exception as ex:
                 log.append(f"  Pending review removal warning: {ex}")
         else:
@@ -301,12 +308,16 @@ def cleanup_import_review_files():
             "ok": True,
             "operation_id": op_id,
             "action": action,
+            "requested_action": requested_action,
+            "downgraded_to_quarantine": requested_action != action,
             "quarantined": moved,
             "deleted": deleted,
             "skipped": skipped,
             "quarantined_count": len(moved),
             "deleted_count": len(deleted),
             "skipped_count": len(skipped),
+            "remaining_audio_count": remaining_audio,
+            "pending_review_removed": pending_review_removed,
             "log": log,
         })
     except BeetsError as ex:

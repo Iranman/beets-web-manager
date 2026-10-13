@@ -152,6 +152,21 @@ export function useDownloadsRoot(): { root: string; loading: boolean; error: str
   };
 }
 
+/**
+ * Whether the optional AI provider is configured, from GET /api/setup/status
+ * (integrations.ai.configured). `null` while loading or when the status is
+ * unavailable -- callers must not treat unknown as "not configured".
+ */
+export function useAiConfigured(): boolean | null {
+  const query = useQuery({
+    queryKey: ['setup-status'],
+    queryFn: () => getSetupStatus(),
+    staleTime: 60_000,
+  });
+  const configured = query.data?.integrations?.ai?.configured;
+  return typeof configured === 'boolean' ? configured : null;
+}
+
 /** User-facing problem text for a failed/empty downloads root, or '' when fine or still loading. */
 export function downloadsRootProblem({ root, loading, error }: ReturnType<typeof useDownloadsRoot>): string {
   if (loading || root) return '';
