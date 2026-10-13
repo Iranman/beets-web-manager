@@ -260,7 +260,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("outside_review_folder", app_source)
         self.assertIn("resolved.suffix.lower() not in AUDIO_EXT", app_source)
         self.assertIn("IMPORT_REVIEW_QUARANTINE_DIR", app_source)
-        self.assertIn("Permanent delete requires allow_delete=true", app_source)
+        self.assertIn("allow_delete is passed through for the audit record only; it gates", app_source)
         self.assertIn("_remove_pending_review_for_path(folder_path, log)", app_source)
         self.assertIn("_mark_pending_review_status(", app_source)
         self.assertIn("_record_ai_review_decision(", app_source)
