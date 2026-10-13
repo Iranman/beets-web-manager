@@ -213,6 +213,57 @@ class FolderIdentityTests(_FolderFixture):
         self.assertEqual(result["candidates"][0]["representative_release_id"], rel_a2)
         self.assertEqual(result["auto_import"]["release_id"], rel_a2)
 
+    # ── competing proof threshold ─────────────────────────────────────────
+
+    def test_album_and_single_sharing_one_track_is_eligible(self):
+        rel_s, rg_s = "f0000000-0000-0000-0000-00000000000f", "f1000000-0000-0000-0000-00000000000f"
+        self.releases[rel_s] = (rg_s, _tracks(1))
+        self.search = [REL_A, rel_s]  # the single is evaluated and proves one file
+        self.file_hits[self.paths[0]] = [_hit(RECS[0]) | {"mb_releasegroupids": [RG_A, rg_s]}]
+        result = self.identify()
+        self.assertIn(rg_s, {c["release_group_id"] for c in result["candidates"]})
+        self.assertTrue(result["auto_import"]["eligible"], result["auto_import"])
+
+    def test_unevaluated_single_group_from_fingerprint_does_not_block(self):
+        self.file_hits[self.paths[0]] = [_hit(RECS[0]) | {"mb_releasegroupids": [RG_A, "f1000000-0000-0000-0000-00000000000f"]}]
+        auto = self.identify()["auto_import"]
+        self.assertTrue(auto["eligible"], auto)
+
+    def test_deluxe_with_near_equal_coverage_blocks(self):
+        self.releases[REL_B] = (RG_B, _tracks(5))
+        self.search = [REL_A, REL_B]
+        self.assertFalse(self.identify()["auto_import"]["eligible"])
+
+    def test_compilation_with_majority_coverage_blocks(self):
+        self.releases[REL_B] = (RG_B, _tracks(3, [RECS[0], RECS[1], OTHER_REC]))
+        self.search = [REL_A, REL_B]
+        self.assertNotEligible(self.identify(), "other_release_group_has_track_proof")
+
+    def test_embedded_release_past_seed_cap_blocks(self):
+        extra = ["a%d000000-0000-0000-0000-00000000000a" % i for i in (5, 6)]
+        for rid in extra:
+            self.releases[rid] = (RG_A, _tracks(3))
+        self.embedded = {self.paths[0]: {"mb_albumid": REL_A}, self.paths[1]: {"mb_albumid": extra[0]},
+                         self.paths[2]: {"mb_albumid": extra[1]}}
+        with mock.patch.object(ii, "MAX_RELEASES", 2):
+            self.assertNotEligible(self.identify(), "embedded_release_not_evaluated")
+
+    # ── symlinks ──────────────────────────────────────────────────────────
+
+    def test_symlinked_audio_is_not_evidence_and_blocks(self):
+        outside = Path(self.tmp.name) / "elsewhere.flac"
+        outside.write_bytes(b"synthetic")
+        link = self.folder / "04 Linked.flac"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported here")
+        files, linked = ii._recursive_audio(str(self.folder))
+        self.assertTrue(linked)
+        self.assertEqual(len(files), 3)
+        self.assertNotIn(str(link), files)
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
+
     def test_no_audio_files(self):
         self.paths = []
         result = self.identify()

@@ -18,7 +18,7 @@ plus no conflicts and a resolved Release Group (see
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .track_alignment import _hit_recording_id, _hit_score
 
@@ -34,6 +34,7 @@ HARD_CONFLICTS = frozenset({
     "wrong_release_group",
     "embedded_release_group_conflict",
     "candidate_metadata_mixed",
+    "symlinked_audio_file",
 })
 
 #: Checked by the import job after the pinned re-import, not here (condition 7).
@@ -185,20 +186,35 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
     return rows
 
 
+def could_be_folder_identity(coverage: int, audio_count: int) -> bool:
+    """Competing-proof threshold: a Release Group other than the winner can
+    plausibly be the folder's identity when it covers at least half of the
+    folder's audio files. A group sharing fewer (a single, a compilation
+    track) is not evidence against the winner, because the winner itself must
+    prove every file."""
+    return coverage > 0 and 2 * coverage >= audio_count
+
+
 def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
                        audio_count: int, folder_conflicts: Iterable[str] = (),
-                       fingerprint_groups: Iterable[str] = (), failed_lookups: int = 0) -> Dict[str, Any]:
+                       fingerprint_groups: Mapping[str, int] = None, unconfirmed_files: Optional[int] = None,
+                       failed_lookups: int = 0, embedded_releases: Iterable[str] = ()) -> Dict[str, Any]:
     """Stage 2b: may Web Manager re-import this folder pinned to one release?
 
     Eligible only when every condition holds (audit conditions 1-6;
     condition 7 is ``POST_CONDITIONS``, checked by the import job):
 
     1. exactly one Release Group passes ``can_auto_accept(VERIFIED_SUBSET)``;
-    2. no other Release Group has any deterministic track proof, either on an
-       evaluated candidate or directly in confirmed AcoustID hits
-       (`fingerprint_groups`); a fingerprint-indicated group that was never
-       evaluated, or any release lookup that went unanswered
-       (`failed_lookups`), is unknown evidence and blocks;
+    2. no other Release Group could plausibly be the folder's identity
+       (``could_be_folder_identity``). Its coverage is the larger of its best
+       evaluated release's proven tracks and the number of files whose
+       confirmed fingerprint names it (`fingerprint_groups`, {group: files}).
+       A fingerprint-indicated group that was never evaluated counts as
+       covering its fingerprint files plus every file without a confirmed
+       fingerprint (`unconfirmed_files`; unknown means all files). Any release
+       lookup that went unanswered (`failed_lookups`) and any embedded Release
+       ID that was not evaluated (`embedded_releases`) is unknown evidence
+       and blocks;
     3. no hard conflict (folder-level or on the chosen candidate);
     4. every local audio file is proven (fingerprint CONFIRMED or embedded
        Recording ID matched);
@@ -216,8 +232,14 @@ def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
         reasons.append("folder_conflict:" + ",".join(hard_folder))
     if failed_lookups:
         reasons.append(f"release_lookup_failed:{failed_lookups}")
-    fingerprint_groups = set(fingerprint_groups) - {""}
-    if fingerprint_groups - {c["release_group_id"] for c in candidates}:
+    evaluated = {r["release_id"] for c in candidates for r in c["evidence"]["releases_evaluated"]}
+    if {_s(r) for r in embedded_releases} - {""} - evaluated:
+        reasons.append("embedded_release_not_evaluated")
+    fingerprint_groups = {g: n for g, n in (fingerprint_groups or {}).items() if g}
+    unconfirmed = audio_count if unconfirmed_files is None else unconfirmed_files
+    candidate_groups = {c["release_group_id"] for c in candidates}
+    if any(could_be_folder_identity(n + unconfirmed, audio_count)
+           for g, n in fingerprint_groups.items() if g not in candidate_groups):
         reasons.append("fingerprint_group_not_evaluated")
 
     accepted = [c for c in candidates if c["evidence"]["action_allowed"]]
@@ -230,8 +252,10 @@ def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
         reasons.append("multiple_release_groups_verified")
 
     if chosen is not None:
-        others = [c for c in candidates if c is not chosen and c["evidence"]["any_track_proof"]]
-        if others or fingerprint_groups - {chosen["release_group_id"]}:
+        def coverage(c: Dict[str, Any]) -> int:
+            best = max((r["local_tracks_verified"] for r in c["evidence"]["releases_evaluated"]), default=0)
+            return max(best, fingerprint_groups.get(c["release_group_id"], 0))
+        if any(could_be_folder_identity(coverage(c), audio_count) for c in candidates if c is not chosen):
             reasons.append("other_release_group_has_track_proof")
         hard = [c for c in chosen["evidence"]["conflicts"] if c in HARD_CONFLICTS]
         if hard:

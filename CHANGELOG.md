@@ -13,7 +13,7 @@ The project uses Semantic Versioning.
 
 ### Added
 
-- Deterministic identification for import folders that Beets skipped (`backend.import_identity.identify_import_folder`). It builds candidates from embedded IDs, AcoustID and MusicBrainz, and ranks them by Release Group without AI. It also decides whether the folder may be re-imported automatically: that needs every file proven by a fingerprint or an embedded Recording ID, exactly one proven Release Group, no conflicts, and a skip reason other than duplicate. Routes and jobs that use it follow in a later change.
+- Deterministic identification for import folders that Beets skipped (`backend.import_identity.identify_import_folder`). It builds candidates from embedded IDs, AcoustID and MusicBrainz, and ranks them by Release Group without AI. It also decides whether the folder may be re-imported automatically: that needs every file proven by a fingerprint or an embedded Recording ID, exactly one proven Release Group, no conflicts, and a skip reason other than duplicate. Another Release Group blocks it only when it covers at least half of the folder's files, so an album track that is also on a single does not. Every embedded Release ID must be checked, and a symlinked audio file sends the folder to review. Routes and jobs that use it follow in a later change.
 - A rule that lists library albums and tracks missing MusicBrainz identity (`backend.matching.library_identity_gaps`). It keys albums on the Release Group, so an album with a Release ID but no Release Group now counts as missing. It also covers album tracks without a Recording ID (I-7). The review queue does not use it yet.
 
 ## v0.5.0 - 2026-10-12

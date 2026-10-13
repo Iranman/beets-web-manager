@@ -85,8 +85,10 @@ class Stage2bGateEdges(_FolderFixture):
         self.assertNotEligible(self.identify(), "no_release_group_verified")
 
     def test_competitor_group_with_partial_proof_blocks(self):
-        # RG_B shares one recording: it has track proof, so RG_A is not unique.
-        self.releases[REL_B] = (RG_B, _tracks(1))
+        # RG_B proves two of the three files: it could be the folder's identity,
+        # so RG_A is not unique. (Rule changed in #381 re-QA: a group sharing
+        # only one track no longer blocks; see test_import_folder_identity.)
+        self.releases[REL_B] = (RG_B, _tracks(2))
         self.search = [REL_A, REL_B]
         result = self.identify()
         self.assertNotEligible(result, "other_release_group_has_track_proof")

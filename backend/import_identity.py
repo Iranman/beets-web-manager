@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, acoustid_failure_status
 from backend.app_runtime import AUDIO_EXT, _MB_UUID_RE, _app_logger, _s
@@ -61,14 +61,25 @@ def _embedded_mb_ids(path: str) -> Dict[str, str]:
     return out
 
 
-def _recursive_audio(folder: str) -> List[str]:
-    """Same recursive set ``_folder_release_preflight`` proves, so conflict
-    scans cover nested files too."""
+def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
+    """Audio files under the resolved folder, recursively, so conflict scans
+    cover nested files too. Like ``_build_folder_evidence``, a symlinked file
+    (or one reached through a symlinked directory) is not evidence; the flag
+    reports that one exists, because a pinned Beets import would still pick
+    it up unproven."""
     try:
-        return sorted((str(p) for p in Path(folder).rglob("*")
-                       if p.is_file() and p.suffix.lower() in AUDIO_EXT), key=str.lower)
+        root = Path(folder).resolve(strict=True)
+        files, linked = [], False
+        for p in root.rglob("*"):
+            if p.suffix.lower() not in AUDIO_EXT:
+                continue
+            if p.is_symlink() or p.resolve() != p:
+                linked = True
+            elif p.is_file():
+                files.append(str(p))
+        return sorted(files, key=str.lower), linked
     except OSError:
-        return []
+        return [], False
 
 
 def _acoustid_capability(statuses: Counter, files: int) -> str:
@@ -130,14 +141,17 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
 
     ev = _build_folder_evidence(folder)
     audio_files: List[str] = list(ev.get("audio_files") or [])
+    linked_audio = False
     if audio_files:  # the evidence builder already validated the folder
-        audio_files = _recursive_audio(folder) or audio_files
+        scanned, linked_audio = _recursive_audio(folder)
+        audio_files = scanned or audio_files
 
     # Per-file evidence: embedded IDs (tier 1) and AcoustID (tier 3).
     files: List[Dict[str, Any]] = []
     statuses: Counter = Counter()
     release_hits: Counter = Counter()
     group_hits: Counter = Counter()
+    confirmed_files = 0
     for path in audio_files:
         try:
             outcome = _acoustid_lookup_cached_outcome(path)
@@ -150,13 +164,16 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
         row = {"path": path, "acoustid_hits": hits, **_embedded_mb_ids(path)}
         files.append(row)
         recording = confirmed_recording(hits)
+        if not recording:
+            continue
+        file_releases, file_groups = set(), set()
         for hit in hits or []:
-            if not recording or _hit_recording_id(hit) != recording:
-                continue
-            for rid in {_uuid(r) for r in hit.get("mb_albumids") or []} - {""}:
-                release_hits[rid] += 1
-            for rg in {_uuid(g) for g in hit.get("mb_releasegroupids") or [hit.get("mb_releasegroupid")]} - {""}:
-                group_hits[rg] += 1
+            if _hit_recording_id(hit) == recording:
+                file_releases |= {_uuid(r) for r in hit.get("mb_albumids") or []}
+                file_groups |= {_uuid(g) for g in hit.get("mb_releasegroupids") or [hit.get("mb_releasegroupid")]}
+        confirmed_files += 1
+        release_hits.update(file_releases - {""})  # counts files, not hits
+        group_hits.update(file_groups - {""})
 
     embedded_releases = Counter(f["mb_albumid"] for f in files if f["mb_albumid"])
     embedded_groups = Counter(f["mb_releasegroupid"] for f in files if f["mb_releasegroupid"])
@@ -175,7 +192,7 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
 
     track_count = int(ev.get("folder_track_count") or len(audio_files))
     year = _s(ev.get("guessed_year"))
-    for rid in _top(embedded_releases, 2):
+    for rid in _top(embedded_releases, MAX_RELEASES):  # every one; any left out blocks Stage 2b
         _seed(rid, "embedded_release_id")
     for rg in _top(embedded_groups, 2):
         _seed(_resolve_release_group_to_release(rg, log, year=year, track_count=track_count), "embedded_release_group_id")
@@ -225,10 +242,13 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
     folder_level = file_conflicts(files)
     if len(tagged_groups) > 1:
         folder_level.append("embedded_release_group_conflict")
+    if linked_audio:
+        folder_level.append("symlinked_audio_file")
     failed = sum(1 for r in releases if r["error"])
     auto = decide_auto_import(candidates, skip_reason=skip_reason, audio_count=audio_count,
-                              folder_conflicts=folder_level, fingerprint_groups=group_hits.keys(),
-                              failed_lookups=failed)
+                              folder_conflicts=folder_level, fingerprint_groups=group_hits,
+                              unconfirmed_files=audio_count - confirmed_files,
+                              failed_lookups=failed, embedded_releases=embedded_releases.keys())
     conflicts = sorted(set(folder_level) | {c for cand in candidates[:1] for c in cand["evidence"]["conflicts"] if c in HARD_CONFLICTS})
     if failed:
         warnings.append(f"release_lookup_failed:{failed}")
