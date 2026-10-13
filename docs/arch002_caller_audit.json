@@ -576,6 +576,10 @@
     "routes_submissions.py::_fetch_open_graph_metadata": [
       "DISPLAY_ONLY",
       "Per-field provenance labels."
+    ],
+    "backend/ai_service.py::_ai_batch_review_suggestion": [
+      "DISPLAY_ONLY",
+      "Review-row suggestion for a folder Beets skipped: a fixed confidence label of low; the deterministic decision travels in the evidence and gates nothing here."
     ]
   }
 }

@@ -186,7 +186,7 @@ class FolderDiscoveryTests(_Roots):
         with mock.patch.object(ai, "_ai_batch_find_audio_dirs", side_effect=fake_find), \
                 mock.patch.object(ai, "_ai_batch_commit"), \
                 mock.patch.object(ai, "_ai_batch_load_state", return_value=state), \
-                mock.patch.object(ai, "_ai_batch_run_suggestions", return_value="done"), \
+                mock.patch.object(ai, "_ai_batch_run_folders", return_value="done"), \
                 mock.patch.object(ai, "_ai_batch_process_decisions", return_value={}), \
                 mock.patch.object(ai, "_invalidate_lib_cache"):
             out = ai._run_ai_batch_import("b-unread", str(self.dl), [], None, None)
@@ -276,7 +276,7 @@ class BatchRouteTests(_Roots):
         with mock.patch.object(ai, "_ai_batch_find_audio_dirs", return_value=[]), \
                 mock.patch.object(ai, "_ai_batch_commit"), \
                 mock.patch.object(ai, "_ai_batch_load_state", return_value=state), \
-                mock.patch.object(ai, "_ai_batch_run_suggestions", return_value="done"), \
+                mock.patch.object(ai, "_ai_batch_run_folders", return_value="done"), \
                 mock.patch.object(ai, "_ai_batch_process_decisions", return_value={}), \
                 mock.patch.object(ai, "_invalidate_lib_cache"):
             out = ai._run_ai_batch_import("b1", str(self.dl), [], None, None)
