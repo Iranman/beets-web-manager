@@ -75,6 +75,16 @@ describe('History AI section', () => {
     await waitFor(() => expect(screen.queryByText(/AI-matched imports/)).toBeNull());
   });
 
+  it('QA #390: kept when AI is not configured but past AI imports exist', async () => {
+    mocked.getRecentImports.mockResolvedValue({ imports: [] } as never);
+    mocked.getAiMatchHistory.mockResolvedValue({ history: [{ ...entry, album: 'Past AI album' }] } as never);
+    mocked.getSetupStatus.mockResolvedValue({ integrations: { ai: { configured: false, required: false } } } as never);
+    render(withQuery(<HistoryPanel />));
+    await waitFor(() => expect(mocked.getSetupStatus).toHaveBeenCalled());
+    expect(await screen.findByText(/AI-matched imports/)).toBeTruthy();
+    expect(await screen.findByText(/Past AI album/)).toBeTruthy();
+  });
+
   it('shown when AI is configured', async () => {
     mocked.getRecentImports.mockResolvedValue({ imports: [] } as never);
     mocked.getAiMatchHistory.mockResolvedValue({ history: [] } as never);

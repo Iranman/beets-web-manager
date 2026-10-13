@@ -182,6 +182,23 @@ describe('Find Music paging and filters', () => {
     fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'year_desc' } });
     await waitFor(() => expect(mocked.getAcquisitionQueue).toHaveBeenLastCalledWith(expect.objectContaining({ sort: 'year_desc' })));
   });
+
+  it('QA #390: search is debounced into one server request and resets to page 1', async () => {
+    mocked.getAcquisitionQueue.mockResolvedValue(response({ total: 250 }));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(mocked.getAcquisitionQueue).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 100 })));
+    const before = mocked.getAcquisitionQueue.mock.calls.length;
+
+    const input = screen.getByLabelText('Search');
+    fireEvent.change(input, { target: { value: 'ab' } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    expect(mocked.getAcquisitionQueue.mock.calls.length).toBe(before); // nothing inside the 300 ms debounce
+    fireEvent.change(input, { target: { value: 'abba ' } });
+    await waitFor(() => expect(mocked.getAcquisitionQueue).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'abba', offset: 0 })));
+    const searchCalls = mocked.getAcquisitionQueue.mock.calls.slice(before).filter(([opts]) => opts?.search);
+    expect(searchCalls.map(([opts]) => opts?.search)).toEqual(['abba']);
+  });
 });
 
 describe('Find Music refresh', () => {
