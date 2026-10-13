@@ -1084,7 +1084,7 @@ def execute_import_review_cleanup_plan(
                     # disagree with the resolved folder through a symlink;
                     # trust the raw prefix only when it has no ./.. parts.
                     bases = [os.path.normpath(str(resolved_target))]
-                    if not any(p in {".", ".."} for p in raw_path.replace("\\", "/").split("/")):
+                    if not any(p in {".", ".."} for p in re.split(r"[\\/]", raw_path)):
                         bases.insert(0, os.path.normpath(raw_path))
                     for base in bases:
                         if f_abs.startswith(base + os.sep):
