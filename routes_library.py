@@ -32,14 +32,14 @@ from backend.import_reconciliation_service import _run_artist_folder_reconcile_f
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
 from backend.job_service import _wait_for_child_job
-from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _lastgenre_cmd, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _require_beet_ok, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _scan_leaked_db_paths, _strip_year_from_album_name, album_dict, get_library_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
+from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _lastgenre_cmd, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _require_beet_ok, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _SCAN_STATE, _do_scan_job
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_mb_completeness, _album_mb_match_plan, _disc_cache, _disc_cache_discogs, _disc_cache_discogs_lock, _disc_cache_lock, _invalidate_lib_cache, _load_album_mb_suggestions, _match_tracks_from_mb, _remove_album_track_items
 from backend.musicbrainz_service import _discogs_artist_discography, _discogs_track_search, _ensure_release_group_art, _mb_release_group_for_release
 from backend.pending_review_store import _is_music_root_path, _queue_folder_for_manual_review
 from backend.plex_service import _trigger_plex_refresh
 import backend.item_replacement as _item_replacement
-from backend.serializers import _format_duration, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result
+from backend.serializers import _format_duration, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result, query_int_arg
 from backend.transaction_service import _item_metadata_transaction_payload, _start_metadata_apply_transaction
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 from helpers_mb import _fetch_mb_release_candidate
@@ -2545,6 +2545,40 @@ def rebuild_album_art():
         metadata={"type": "album-art-rebuild", "mode": "full_rebuild"},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
+
+
+@app.get("/api/library/missing-mb-ids")
+def library_missing_mb_ids():
+    """Library albums and singleton items missing MusicBrainz IDs (the rows
+    that used to be the Import Review ``library_no_mb`` status)."""
+    args = request.args
+    kind = _s(args.get("kind") or "all").strip().lower()
+    sort = _s(args.get("sort") or "added_desc").strip().lower()
+    offset, err = query_int_arg(args, "offset", 0, 10**9)
+    limit, limit_err = query_int_arg(args, "limit", 100, 500)
+    err = err or limit_err
+    if kind not in MISSING_MB_KINDS:
+        err = "kind must be one of: " + ", ".join(MISSING_MB_KINDS)
+    elif sort not in MISSING_MB_SORTS:
+        err = "sort must be one of: " + ", ".join(MISSING_MB_SORTS)
+    if err:
+        return jsonify({"ok": False, "error": err, "error_code": "INVALID_PARAM"}), 400
+    try:
+        return jsonify(library_missing_mb_payload(
+            kind=kind, search=_s(args.get("search") or "")[:200], offset=offset, limit=limit, sort=sort))
+    except BeetsUnavailableError as ex:
+        _app_logger.warning("library_missing_mb_ids: Beets engine unavailable: %s", ex)
+        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
+    except BeetsAuthError as ex:
+        _app_logger.warning("library_missing_mb_ids: Beets engine auth failed: %s", ex)
+        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
+    except BeetsError as ex:
+        _app_logger.warning("library_missing_mb_ids: Beets engine error: %s", ex)
+        return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
+    except Exception:
+        _app_logger.exception("Unexpected error in library_missing_mb_ids")
+        return jsonify({"ok": False, "error": "Internal error loading missing IDs",
+                        "error_code": "INTERNAL_ERROR"}), 500
 
 
 @app.get("/api/library")

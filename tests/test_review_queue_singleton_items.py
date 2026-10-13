@@ -44,29 +44,29 @@ def _function_source(src: str, start_marker: str, end_marker: str) -> str:
 
 
 class SingletonReviewQueryTests(unittest.TestCase):
+    """The Review Queue split moved these rows to /api/library/missing-mb-ids
+    (backend/library_service.library_missing_mb_payload); behavior is covered
+    in tests/test_library_missing_mb_ids.py."""
+
     def setUp(self):
-        self._fn = _function_source(
-            APP_SOURCE, "def import_review_queue():", "@app.post(\"/api/import/cleanup-stale\")"
-        )
+        src = (ROOT / "backend" / "library_service.py").read_text(encoding="utf-8")
+        self._fn = src[src.index("def _missing_mb_album_row("):]
 
     def test_queries_items_with_no_album_row(self):
-        # Under ARCH-007, import_review_queue requests singletons from structured engine method
-        self.assertIn("composite_workflows.get_unmatched_review_items", self._fn)
-        self.assertIn("include_singletons=True", self._fn)
+        self.assertIn("composite_workflows.get_unmatched_review_items(limit=0, offset=0, include_singletons=True)",
+                      self._fn)
 
     def test_reuses_library_no_mb_type_so_existing_filters_pick_it_up(self):
         self.assertIn('"type": "library_no_mb"', self._fn)
         self.assertIn('"target_kind": "item"', self._fn)
 
-    def test_uses_text_factory_bytes(self):
-        # Under ARCH-007, Web Manager no longer uses direct sqlite queries
-        self.assertIn("composite_workflows.get_unmatched_review_items", self._fn)
-
     def test_still_respects_music_root_path_guard(self):
-        self.assertIn("composite_workflows.get_unmatched_review_items", self._fn)
+        self.assertIn("if not _is_music_root_path(_s(r.get(\"path\"))):", self._fn)
 
-    def test_query_scoped_by_the_same_limit_param_as_the_album_query(self):
-        self.assertIn("composite_workflows.get_unmatched_review_items(limit=limit", self._fn)
+    def test_import_review_queue_no_longer_reads_beets(self):
+        fn = _function_source(APP_SOURCE, "def import_review_queue():", "@app.post(\"/api/import/cleanup-stale\")")
+        self.assertNotIn("composite_workflows", fn)
+        self.assertNotIn('"library_no_mb"', fn.replace('status_filter == "library_no_mb"', ""))
 
 
 

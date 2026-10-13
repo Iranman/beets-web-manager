@@ -22,7 +22,7 @@ const TABS = [
 const TAB_NAMES = TABS.map((tab) => tab.id);
 type TabId = (typeof TABS)[number]['id'];
 const REVIEW_FILTERS: QueueFilter[] = ['all', 'pending_ai', 'skipped', 'library_no_mb'];
-const SOURCE_FILTERS: SourceFilter[] = ['all', 'beets', 'lidarr'];
+const SOURCE_FILTERS: SourceFilter[] = ['all', 'beets', 'lidarr', 'merged', 'unmonitored'];
 const REVIEW_SUMMARY_LIMIT = 5000;
 
 type SummaryState = {
@@ -118,12 +118,12 @@ export default function Import() {
     setSelectedIndex(defaultIndex);
   }, [defaultIndex]);
 
-  const loadSummary = useCallback(async (force = false, silent = false) => {
+  const loadSummary = useCallback(async (silent = false) => {
     if (!silent) {
       setSummary((current) => ({ ...current, loading: true, error: '' }));
     }
     const [acquireResult, reviewResult, jobsResult] = await Promise.allSettled([
-      getAcquisitionQueue(force),
+      getAcquisitionQueue({ limit: 0 }),
       getReviewQueue({ limit: REVIEW_SUMMARY_LIMIT }),
       apiJson<JobListResponse>('/api/jobs'),
     ]);
@@ -163,7 +163,7 @@ export default function Import() {
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
-      if (!document.hidden) void loadSummary(false, true);
+      if (!document.hidden) void loadSummary(true);
     }, 45000);
     return () => window.clearInterval(intervalId);
   }, [loadSummary]);
@@ -202,7 +202,8 @@ export default function Import() {
     } else {
       nextParams.set('tab', tabId);
     }
-    setSearchParams(nextParams, { replace: true });
+    // A tab change is a navigation (Back returns to the previous tab); filter changes below replace.
+    setSearchParams(nextParams);
   }
 
   function syncAcquireSource(nextSource: SourceFilter) {
@@ -279,7 +280,7 @@ export default function Import() {
 
         <TabPanels className="mt-5">
           <TabPanel>
-            <IntakePanel onJobStarted={() => loadSummary(false, true)} />
+            <IntakePanel onJobStarted={() => loadSummary(true)} />
           </TabPanel>
 
           <TabPanel>

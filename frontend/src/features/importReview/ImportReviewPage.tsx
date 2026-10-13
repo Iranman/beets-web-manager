@@ -3629,7 +3629,7 @@ export function ImportReviewPage({
       if (res.removed_total > 0) {
         setCleanupMsg(
           `Removed ${res.removed_total} stale entr${res.removed_total === 1 ? 'y' : 'ies'} ` +
-          `(${res.removed_folder_gone} folder gone, ${res.removed_mb_in_library} already in library). ` +
+          `(${res.removed_folder_gone} folder gone, ${res.removed_resolved} already resolved in Beets). ` +
           `${res.remaining} remaining.`
         );
         void loadQueue(true);

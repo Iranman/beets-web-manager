@@ -45,10 +45,14 @@ class ImportReviewDeleteFolderTests(unittest.TestCase):
         self.assertIn('album_id = int(payload.get("album_id") or 0)', delete_source)
         self.assertIn("album_id=album_id", delete_source)
 
-        self.assertIn('album_folder = _album_folder_for_album_id(int(r["id"] or 0))', queue_source)
-        self.assertIn('"path": album_folder', queue_source)
-        self.assertIn('"folder": str(Path(album_folder).parent) if album_folder else ""', queue_source)
-        self.assertIn('"folder_name": Path(album_folder).name if album_folder else ""', queue_source)
+        # Needs MB ID rows moved to /api/library/missing-mb-ids; the folder is
+        # still the album folder the delete gate checks, from the first item path.
+        lib_source = (root / "backend" / "library_service.py").read_text(encoding="utf-8")
+        row_source = lib_source[lib_source.index("def _missing_mb_album_row("):lib_source.index("def _missing_mb_item_row(")]
+        self.assertIn('folder = _album_folder_from_item_path(r.get("first_item_path"))', row_source)
+        self.assertIn('"path": folder', row_source)
+        self.assertIn('"folder": str(Path(folder).parent) if folder else ""', row_source)
+        self.assertIn('"folder_name": Path(folder).name if folder else ""', row_source)
 
         self.assertIn("function canDeleteFolder(item: ReviewItem): boolean", review_source)
         self.assertIn("item.type === 'pending_ai' || item.type === 'library_no_mb'", review_source)
