@@ -232,7 +232,11 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES', APP)
         self.assertNotIn('retry_failed and status in _AI_BATCH_POLICY_WARNING_STATUSES', APP)
         self.assertIn('retryable failure requeued', APP)
-        self.assertIn('if status in (_AI_BATCH_IMPORTED_FOLDER_STATUSES | _AI_BATCH_SKIPPED_FOLDER_STATUSES', APP)
+        # Phase B: the final tally classifies only terminal outcome sets.
+        tally = section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import(')
+        for name in ("_AI_BATCH_SKIPPED_FOLDER_STATUSES", "_AI_BATCH_FAILED_FOLDER_STATUSES",
+                     "_AI_BATCH_IMPORTED_FOLDER_STATUSES", "_AI_BATCH_REVIEW_FOLDER_STATUSES"):
+            self.assertIn(f"status in {name}:", tally)
 
     def test_stale_cached_ai_completed_finalizes_as_review_required(self):
         self.assertIn('def _ai_batch_mark_orphaned_ai_completed_for_review', APP)
