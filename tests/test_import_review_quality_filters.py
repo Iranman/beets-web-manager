@@ -263,7 +263,8 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("outside_review_folder", app_source)
         self.assertIn("resolved.suffix.lower() not in AUDIO_EXT", app_source)
         self.assertIn("IMPORT_REVIEW_QUARANTINE_DIR", app_source)
-        self.assertIn("allow_delete is passed through for the audit record only; it gates", app_source)
+        # #380 F3: a client-claimed delete_* is downgraded to restorable quarantine.
+        self.assertIn('action = "quarantine_" + action[len("delete_"):]', app_source)
         self.assertIn("_remove_pending_review_for_path(folder_path, log)", app_source)
         self.assertIn("_mark_pending_review_status(", app_source)
         self.assertIn("_record_ai_review_decision(", app_source)
