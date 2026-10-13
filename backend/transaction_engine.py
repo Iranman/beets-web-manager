@@ -1070,9 +1070,24 @@ def execute_import_review_cleanup_plan(
 
                 norm_raw = f_raw.replace("\\", "/")
                 parts_raw = [p for p in norm_raw.split("/") if p]
-                if any(p in {".", ".."} for p in parts_raw) or f_raw.startswith(("/", "\\")):
+                if any(p in {".", ".."} for p in parts_raw):
                     skipped.append({"file": f_raw, "reason": "outside_review_folder"})
                     continue
+                if f_raw.startswith(("/", "\\")) or os.path.isabs(f_raw):
+                    # #387 NB1: the UI sends each file's absolute
+                    # source_path. Accept it only when it is lexically under
+                    # the authorized folder (literal or resolved form), and
+                    # continue with the relative remainder; no decoding.
+                    f_abs = os.path.normpath(f_raw)
+                    rel = ""
+                    for base in (os.path.normpath(raw_path), os.path.normpath(str(resolved_target))):
+                        if f_abs.startswith(base + os.sep):
+                            rel = f_abs[len(base) + len(os.sep):]
+                            break
+                    if not rel:
+                        skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                        continue
+                    f_raw = rel
 
                 # N1: act on the literal name only, never URL-decoded: the
                 # route authorized exactly these strings.
