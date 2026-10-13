@@ -1082,9 +1082,17 @@ def execute_import_review_cleanup_plan(
                     skipped.append({"file": f_raw, "reason": "outside_review_folder"})
                     continue
 
-                fp = Path(f_raw)
-                if not fp.is_absolute():
-                    fp = resolved_target / fp
+                # Textual normpath + prefix barrier on the exact value that
+                # reaches the probes below (CodeQL py/path-injection #1419-
+                # #1421, #696-#702). ".." and absolute names were refused
+                # above, so this is the same literal path; the component
+                # containment and symlink checks below still decide.
+                target_text = os.path.normpath(str(resolved_target))
+                fp_text = os.path.normpath(os.path.join(target_text, f_raw))
+                if not fp_text.startswith(target_text + os.sep):
+                    skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                    continue
+                fp = Path(fp_text)
                 fp_resolved = fp.resolve(strict=False)
 
                 if fp_resolved == resolved_target or resolved_target not in fp_resolved.parents:
