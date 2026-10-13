@@ -14,17 +14,17 @@ import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
 import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
-from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
+from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _RECENT_IMPORTS_FILE, _record_recent_import_for_album, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _redact_security_text, _s, jobs
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _update_pending_review_revalidation
-from backend.import_service import _RECENT_IMPORTS_FILE, _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
+from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import _album_folder_for_album_id, _delete_if_already_in_library, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
-from backend.matching_service import _ai_api_key, _invalidate_lib_cache, _load_album_mb_suggestions
+from backend.matching_service import _invalidate_lib_cache, _load_album_mb_suggestions
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
 from backend.pending_review_store import _AI_PENDING_FILE, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _is_music_root_path, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path, _review_path_is_resolved
-from backend.serializers import _format_duration, _normalize_review_origin_type, _resolve_import_review_source_path, _review_origin_payload, json_route_result
+from backend.serializers import _format_duration, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
 from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
@@ -1500,29 +1500,12 @@ def start_ai_batch_import():
 
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
-    # scan_path feeds _ai_batch_find_audio_dirs(), which now discovers
-    # candidate folders via the real engine (composite_workflows.discover_import_sources()),
-    # not a local os.walk() -- it must still be confined to the same
-    # trusted import-source roots as the rest of the import-review/AI-suggest
-    # flow (a fast, local, pure-string root-containment check), but
-    # require_exists=False for the same reason import_folder_with_id() was
-    # already fixed to pass it (Wave 25 Docker acceptance round, found by
-    # actually exercising the real two-service deployment): this process
-    # (beets-web-manager) has no filesystem mount for the downloads root or
-    # the library at all -- only the engine container does. A local
-    # existence check here made every real /api/ai-batch-import call fail
-    # with "Source path does not exist" regardless of whether the folder
-    # was genuinely there. The engine's own discover_import_sources() call
-    # (inside _ai_batch_find_audio_dirs) is the real, disk-backed
-    # existence check.
-    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
-        scan_path, allow_music=True, expected_type="dir", require_exists=False,
-    )
+    # Deterministic import (#288): no AI key needed. The scan root may be a
+    # download root itself (F3); _start_ai_batch_job re-checks it.
+    trusted_scan_path, scan_path_error = _resolve_import_scan_root(scan_path)
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
     scan_path = str(trusted_scan_path)
-    if not _ai_api_key():
-        return jsonify({"ok": False, "error": "AI is not configured (set OPENAI_API_KEY, OPENROUTER_API_KEY, or AI_API_KEY)"}), 400
 
     if not recover_batch_job_id:
         latest = _ai_batch_latest_state()
@@ -1606,6 +1589,10 @@ def start_import():
         res = composite_workflows.reimport_source(path, beets_options=beets_options, timeout=300.0)
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Beets import failed.")
+        # History (F9). An older plugin does not report the album IDs; those
+        # imports stay out of History.
+        for album_id in res.get("imported_album_ids") or []:
+            _record_recent_import_for_album(album_id, log)
         _delete_if_already_in_library(path, "", log)
         _invalidate_lib_cache()
         not_matched = [{"path": r["path"], "status": IMPORT_NOT_MATCHED_STATUS, "reason": r["reason"]}
@@ -1827,15 +1814,8 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     # /api/ai-batch-import/recover, which can source scan_path from a
     # stored job-state file rather than the current request) must go
     # through this check -- stored state is untrusted at execution time
-    # just like a fresh request body. require_exists=False for the same
-    # reason as the sibling check in start_ai_batch_import() above: this
-    # process has no local mount for the downloads root or the library,
-    # so a local existence check here always fails regardless of whether
-    # the path is genuinely valid -- the engine-side discovery call is the
-    # real, disk-backed check.
-    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
-        scan_path, allow_music=True, expected_type="dir", require_exists=False,
-    )
+    # just like a fresh request body. The scan itself checks existence.
+    trusted_scan_path, scan_path_error = _resolve_import_scan_root(scan_path)
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
     scan_path = str(trusted_scan_path)
@@ -1914,8 +1894,9 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # job_id for longer than necessary.
         job = jobs.start_python(
             _do,
-            label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
-            metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
+            label=f"Import: {Path(scan_path).name or scan_path}" + (" retry" if retry_failed else ""),
+            metadata={"type": "ai-batch-import", "workflow": "import-batch",
+                      "batch_job_id": batch_job_id, "source_path": scan_path},
         )
         # From this point on, a worker thread exists and is blocked waiting
         # for handoff_ready. Cleanup responsibility transfers to it
