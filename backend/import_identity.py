@@ -33,6 +33,9 @@ from helpers_mb import _mb_release_search, _resolve_release_group_to_release
 #: MusicBrainz tracklist fetch and a preflight).
 MAX_RELEASES = 10
 
+# Directory entries the symlink-target audio probe may visit per folder (#381).
+_LINKED_AUDIO_PROBE_MAX_ENTRIES = 20_000
+
 _EMBEDDED_KEYS = {
     "mb_trackid": "musicbrainz_trackid",
     "mb_albumid": "musicbrainz_albumid",
@@ -71,16 +74,30 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     def is_link(p: Path) -> bool:
         return p.is_symlink() or os.path.isjunction(p) or p.resolve() != p
 
+    budget = [_LINKED_AUDIO_PROBE_MAX_ENTRIES]
+
     def has_audio(top: Path) -> bool:  # follows links; `seen` guards loops
+        # Fails closed: a link target too big to scan within the shared entry
+        # budget, or one that cannot be read, counts as linked audio (#381).
         seen = set()
-        for dirpath, dirnames, filenames in os.walk(top, followlinks=True):
-            real = os.path.realpath(dirpath)
-            if real in seen:
-                dirnames[:] = []
-                continue
-            seen.add(real)
-            if any(Path(n).suffix.lower() in AUDIO_EXT for n in filenames):
-                return True
+
+        def _raise(exc: OSError) -> None:
+            raise exc
+
+        try:
+            for dirpath, dirnames, filenames in os.walk(top, followlinks=True, onerror=_raise):
+                real = os.path.realpath(dirpath)
+                if real in seen:
+                    dirnames[:] = []
+                    continue
+                seen.add(real)
+                budget[0] -= 1 + len(dirnames) + len(filenames)
+                if budget[0] < 0:
+                    return True
+                if any(Path(n).suffix.lower() in AUDIO_EXT for n in filenames):
+                    return True
+        except OSError:
+            return True
         return False
 
     try:
