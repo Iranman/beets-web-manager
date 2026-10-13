@@ -32,7 +32,7 @@ class ImportPageNavigationTests(unittest.TestCase):
         self.assertIn("function syncReviewFilter(nextFilter: QueueFilter)", self.import_source)
         self.assertIn("nextParams.set('filter', nextFilter)", self.import_source)
         self.assertIn("{ id: 'intake', label: 'Import Source' }", self.import_source)
-        self.assertIn("<IntakePanel onJobStarted={() => loadSummary(false, true)} />", self.import_source)
+        self.assertIn("<IntakePanel onJobStarted={() => loadSummary(true)} />", self.import_source)
         self.assertIn(
             "<AcquisitionPanel initialSourceFilter={sourceParam} onSourceFilterChange={syncAcquireSource} />",
             self.import_source,
@@ -43,7 +43,7 @@ class ImportPageNavigationTests(unittest.TestCase):
         )
 
     def test_mounted_import_panels_sync_when_url_focus_changes(self):
-        self.assertIn("export type SourceFilter = 'all' | QueueSource", self.acquire_source)
+        self.assertIn("export type SourceFilter = AcquisitionQueueSourceFilter", self.acquire_source)
         self.assertIn("initialSourceFilter = 'all'", self.acquire_source)
         self.assertIn("setSourceFilter(initialSourceFilter)", self.acquire_source)
         self.assertIn("}, [initialSourceFilter]);", self.acquire_source)
