@@ -277,6 +277,10 @@
       "DISPLAY_ONLY",
       "Queue serialization."
     ],
+    "backend/library_service.py::library_missing_mb_payload": [
+      "DISPLAY_ONLY",
+      "Missing-MB-ID row serialization (copies stored suggestion confidence for display); decides nothing."
+    ],
     "app.py::import_review_revalidate": [
       "DISPLAY_ONLY",
       "Response plumbing; eligibility is evaluate_import_eligibility."

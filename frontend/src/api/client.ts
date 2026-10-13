@@ -7,6 +7,8 @@ import type {
   AcquisitionDownloadAllActiveResponse,
   AcquisitionDownloadAllPayload,
   AcquisitionDownloadAllStartResponse,
+  AcquisitionQueueParams,
+  AcquisitionQueueRefreshResponse,
   AcquisitionQueueResponse,
   AiMatchHistoryResponse,
   AutoEnqueueImportPayload,
@@ -264,7 +266,8 @@ export function getReviewQueue(options: number | ReviewQueueParams = 500): Promi
 export interface CleanupStaleResponse {
   ok: boolean;
   removed_folder_gone: number;
-  removed_mb_in_library: number;
+  /** Entries whose album is already resolved in Beets. */
+  removed_resolved: number;
   removed_total: number;
   remaining: number;
 }
@@ -984,8 +987,26 @@ export function getWantedLidarr(): Promise<WantedResponse> {
   return apiJson<WantedResponse>('/api/wanted/lidarr');
 }
 
-export function getAcquisitionQueue(refresh = false): Promise<AcquisitionQueueResponse> {
-  return apiJson<AcquisitionQueueResponse>(`/api/acquisition/queue${refresh ? '?refresh=1' : ''}`);
+/** One page of the cached Find Music list. Never asks the server to rebuild it. */
+export function getAcquisitionQueue(options: AcquisitionQueueParams = {}): Promise<AcquisitionQueueResponse> {
+  const params = new URLSearchParams();
+  if (options.offset) params.set('offset', String(options.offset));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.search?.trim()) params.set('search', options.search.trim());
+  if (options.source && options.source !== 'all') params.set('source', options.source);
+  if (options.album_type?.length) params.set('album_type', options.album_type.join(','));
+  if (options.sort && options.sort !== 'sort_key') params.set('sort', options.sort);
+  if (options.include_unmonitored) params.set('include_unmonitored', '1');
+  const query = params.toString();
+  return apiJson<AcquisitionQueueResponse>(`/api/acquisition/queue${query ? `?${query}` : ''}`);
+}
+
+/** Start (or join) the background Find Music list build. */
+export function refreshAcquisitionQueue(includeUnmonitored = false): Promise<AcquisitionQueueRefreshResponse> {
+  return apiJson<AcquisitionQueueRefreshResponse>(
+    '/api/acquisition/queue/refresh',
+    jsonRequest('POST', includeUnmonitored ? { include_unmonitored: true } : {}),
+  );
 }
 
 export function startAcquisitionDownloadAll(

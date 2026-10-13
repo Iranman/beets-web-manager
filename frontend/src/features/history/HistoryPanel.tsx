@@ -5,6 +5,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import { useCallback, useEffect, useState } from 'react';
 import { clearRecentImports, getAiMatchHistory, getRecentImports } from '../../api/client';
 import type { RecentImport } from '../../api/types';
+import { useAiConfigured } from '../../lib/hooks';
 
 const CONF_COLOR = {
   high:   'success',
@@ -116,6 +117,7 @@ function HistorySection({
 }
 
 export function HistoryPanel() {
+  const aiConfigured = useAiConfigured();
   const [recent, setRecent] = useState<RecentImport[]>([]);
   const [aiHistory, setAiHistory] = useState<RecentImport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -167,10 +169,13 @@ export function HistoryPanel() {
             entries={recent}
             onClear={handleClearRecent}
           />
-          <HistorySection
-            title="AI-matched imports"
-            entries={aiHistory}
-          />
+          {/* No AI provider: hide the empty section; past AI imports stay visible. */}
+          {aiConfigured === false && !aiHistory.length ? null : (
+            <HistorySection
+              title="AI-matched imports"
+              entries={aiHistory}
+            />
+          )}
         </div>
       )}
     </div>

@@ -1927,18 +1927,65 @@ export interface AcquisitionQueueItem {
   actions: AcquisitionQueueActions;
 }
 
+export type AcquisitionQueueSourceFilter = 'all' | 'beets' | 'lidarr' | 'merged' | 'unmonitored';
+export type AcquisitionQueueSort = 'sort_key' | 'year_desc';
+
+export interface AcquisitionQueueParams {
+  offset?: number;
+  limit?: number;
+  search?: string;
+  source?: AcquisitionQueueSourceFilter;
+  album_type?: string[];
+  sort?: AcquisitionQueueSort;
+  include_unmonitored?: boolean;
+}
+
+/** State of the server-side Find Music snapshot (GET /api/acquisition/queue `cache`). */
+export interface AcquisitionQueueCache {
+  state: 'ready' | 'stale' | 'building' | 'empty' | 'failed';
+  built_at: number | null;
+  age_seconds: number | null;
+  build_seconds: number | null;
+  max_age_seconds: number;
+  job_id: string | null;
+  refreshing: boolean;
+  last_error: string;
+  last_error_at: number | null;
+  include_unmonitored: boolean;
+}
+
+export interface AcquisitionDownloadSources {
+  slskd_configured: boolean;
+  slskd_error: string;
+  fallback_chain: string[];
+  fallbacks: Record<string, { available: boolean; reason: string }>;
+}
+
 export interface AcquisitionQueueResponse extends ApiOkResponse {
   items: AcquisitionQueueItem[];
+  /** Rows matching the filters (the whole filtered list, not this page). */
   total: number;
+  offset?: number;
+  limit?: number | null;
+  /** Whole-snapshot counts, independent of the filters. */
   counts: {
+    all?: number;
     beets: number;
     lidarr: number;
     merged: number;
-    unmonitored: number;
+    unmonitored?: number;
   };
+  album_types?: Record<string, number>;
+  cache?: AcquisitionQueueCache;
+  download_sources?: AcquisitionDownloadSources;
   library_error?: string;
   wanted_error?: string;
   library_version?: number;
+}
+
+export interface AcquisitionQueueRefreshResponse extends ApiOkResponse {
+  job_id: string;
+  already_running: boolean;
 }
 
 export type DownloadMethod = 'slskd' | 'spotiflac' | 'ytdlp' | 'soundcloud';
