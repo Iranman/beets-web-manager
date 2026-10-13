@@ -118,6 +118,80 @@ class FolderDiscoveryTests(_Roots):
         with self.assertRaisesRegex(RuntimeError, "not found"):
             ai._ai_batch_find_audio_dirs(str(self.dl / "gone"))
 
+    def test_unreadable_folder_is_logged_and_counted(self):
+        """#383 N1: os.walk errors are no longer silent."""
+        self.audio("Album/01.flac")
+        locked = self.dl / "Locked"
+        locked.mkdir()
+        (locked / "01.flac").write_bytes(b"x")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        if os.access(str(locked), os.R_OK):
+            self.skipTest("permissions are not enforced here (root or Windows)")
+        log, unreadable = [], []
+        found = ai._ai_batch_find_audio_dirs(str(self.dl), log, unreadable)
+        self.assertEqual(found, [str(self.dl / "Album")])
+        self.assertEqual(unreadable, [str(locked)])
+        self.assertTrue(any("not readable" in line and str(locked) in line for line in log), log)
+
+    def test_walk_error_handler_records_each_path(self):
+        # Platform-independent: drive onerror directly.
+        self.audio("Album/01.flac")
+        real_walk = os.walk
+
+        def walk(top, onerror=None, **kw):
+            onerror(PermissionError(13, "denied", str(self.dl / "A")))
+            onerror(PermissionError(13, "denied", str(self.dl / "B")))
+            return real_walk(top, onerror=onerror, **kw)
+
+        log, unreadable = [], []
+        with mock.patch.object(ai.os, "walk", side_effect=walk):
+            found = ai._ai_batch_find_audio_dirs(str(self.dl), log, unreadable)
+        self.assertEqual(found, [str(self.dl / "Album")])
+        self.assertEqual(unreadable, [str(self.dl / "A"), str(self.dl / "B")])
+        self.assertEqual(sum("not readable" in line for line in log), 2, log)
+
+    def test_nested_app_managed_folders_are_skipped_and_logged(self):
+        """#383 N2: playlist roots and acquisition folders under the scan root
+        belong to their own workflows."""
+        playlists = self.dl / "Playlists"
+        for name, value in (("PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", [playlists]),
+                            ("DOWNLOADS_ALLOWED_ROOTS", [self.dl])):
+            p = patch_app_family(APP, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.audio("Album/01.flac")
+        self.audio("Playlists/Mix/01.flac")
+        self.audio("Artist/Record - yt missing 1700000000000/01.flac")
+        self.audio("_beets_missing_import/X/01.flac")
+        log = []
+        found = ai._ai_batch_find_audio_dirs(str(self.dl), log)
+        self.assertEqual(found, [str(self.dl / "Album")])
+        skipped = [line for line in log if "app-managed download folder skipped" in line]
+        self.assertEqual(len(skipped), 3, log)
+        # Scanning inside an app-managed root on purpose still walks it.
+        self.assertEqual(ai._ai_batch_find_audio_dirs(str(playlists), []), [str(playlists / "Mix")])
+
+    def test_batch_summary_reports_unreadable_count(self):
+        import backend.ai_batch_state_service as bss
+        self.assertNotIn("unreadable", bss._ai_batch_terminal_summary({"folders_processed": 1}))
+        self.assertIn("2 unreadable folder(s) skipped",
+                      bss._ai_batch_terminal_summary({"folders_processed": 1, "folders_unreadable": 2}))
+        state = ai._ai_batch_initial_state("b-unread", str(self.dl))
+
+        def fake_find(root, log=None, unreadable=None):
+            unreadable.extend(["/x/a", "/x/b"])
+            return []
+
+        with mock.patch.object(ai, "_ai_batch_find_audio_dirs", side_effect=fake_find), \
+                mock.patch.object(ai, "_ai_batch_commit"), \
+                mock.patch.object(ai, "_ai_batch_load_state", return_value=state), \
+                mock.patch.object(ai, "_ai_batch_run_suggestions", return_value="done"), \
+                mock.patch.object(ai, "_ai_batch_process_decisions", return_value={}), \
+                mock.patch.object(ai, "_invalidate_lib_cache"):
+            out = ai._run_ai_batch_import("b-unread", str(self.dl), [], None, None)
+        self.assertEqual(out.get("folders_unreadable"), 2)
+
     def test_engine_discovery_is_not_used(self):
         self.audio("Album/01.flac")
         with mock.patch.object(ai.composite_workflows, "discover_import_sources",
@@ -276,6 +350,53 @@ class HistoryTests(_Roots):
         self.assertIn("value", result, result)
         rows = self.rows()
         self.assertEqual([(r["artist"], r["album"], r["tracks"]) for r in rows], [("Artist", "Album", 2)])
+
+    def test_review_queue_import_with_id_records_history_once(self):
+        """#383 N3: start_folder_import_with_id (Review Queue / import-with-id)
+        writes one History row for the album Beets imported."""
+        import backend.import_service as isvc
+        folder = self.dl / "Album"  # not created: the source cleanup branch is skipped
+        result = {}
+
+        def run_now(fn, label="", metadata=None):
+            log = []
+            result["value"] = fn(log)
+            result["log"] = log
+            return mock.Mock(job_id="job-1")
+
+        with mock.patch.object(isvc.jobs, "start_python", side_effect=run_now), \
+                mock.patch.object(isvc.job_contract, "held"), \
+                mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=False), \
+                mock.patch.object(isvc, "_library_album_ids_for_folder", return_value=[]), \
+                mock.patch.object(isvc, "_validate_import_source_audio"), \
+                mock.patch.object(isvc, "_fetch_mb_release_tracklist",
+                                  return_value={"ok": True, "release_group": RG, "tracks": []}), \
+                mock.patch.object(isvc, "_beet_import_timeout", return_value=300), \
+                mock.patch.object(cw, "plan_confirmed_import", return_value={"ok": True, "operation_id": "op"}), \
+                mock.patch.object(cw, "apply_confirmed_import",
+                                  return_value={"ok": True, "album_id": 7, "mb_releasegroupid": RG}), \
+                mock.patch.object(isvc, "_remove_pending_review_for_path"), \
+                mock.patch.object(isvc, "lib"), \
+                mock.patch.object(isvc, "_auto_merge_case_duplicate_artist_folder"), \
+                mock.patch.object(isvc, "_invalidate_lib_cache"), \
+                mock.patch.object(isvc, "_trigger_plex_refresh"):
+            body, status = isvc.start_folder_import_with_id(
+                {"path": str(folder), "mb_albumid": REL, "mb_releasegroupid": RG})
+        self.assertEqual(status, 200, body)
+        self.assertIn("value", result, result)
+        rows = self.rows()
+        self.assertEqual([(r["artist"], r["album"], r["tracks"], r["mb_albumid"]) for r in rows],
+                         [("Artist", "Album", 2, REL)], result.get("log"))
+
+    def test_import_with_id_records_through_one_call_site(self):
+        # The existing-album handoff records via start_reimport_disk, so the
+        # service itself has exactly one recorder call and never chains into
+        # the batch recorder (_ai_import_folder).
+        import inspect
+        import backend.import_service as isvc
+        src = inspect.getsource(isvc.start_folder_import_with_id)
+        self.assertEqual(src.count("_record_recent_import"), 1)
+        self.assertNotIn("_ai_import_folder", src)
 
     def test_history_failure_never_fails_the_import(self):
         log = []

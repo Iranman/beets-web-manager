@@ -2827,6 +2827,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         album_ids = [int(apply_res["album_id"])]
         log.append(f"[2/2] Beets imported album_id {album_ids[0]} as release {mb_albumid} "
                    f"(Release Group {apply_res.get('mb_releasegroupid') or '?'}, verified).")
+        # History (F9). The existing-album handoff above records through
+        # start_reimport_disk instead, so each import adds exactly one row.
+        _record_recent_import_for_album(album_ids[0], log, mb_albumid=mb_albumid)
 
         partial_remaining_audio: List[Path] = []
         if selected_subset_import:
