@@ -5,6 +5,7 @@ run in the web manager and in the flattened beets control-agent image.
 """
 
 from .evidence import evaluate_release_group_candidate
+from .library_gaps import GAP_KINDS, library_identity_gaps
 from .models import (
     AcoustIDStatus,
     ActionScope,
@@ -73,6 +74,8 @@ __all__ = [
     "align_tracks_global",
     "best_album_track_match",
     "evaluate_release_group_candidate",
+    "GAP_KINDS",
+    "library_identity_gaps",
     "normalize_artist",
     "normalize_title",
     "normalize_track_title_for_matching",

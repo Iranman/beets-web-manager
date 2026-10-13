@@ -353,6 +353,26 @@
       "CANONICAL_FINAL_DECISION",
       "Canonical album evaluator."
     ],
+    "backend/matching/folder_identity.py::<module>": [
+      "CANONICAL_FINAL_DECISION",
+      "Docstring for the Stage 2b folder decision; describes action_allowed, decides nothing."
+    ],
+    "backend/matching/folder_identity.py::_release_key": [
+      "CANONICAL_FINAL_DECISION",
+      "Deterministic representative-release order inside one Release Group; reads action_allowed and canonical score."
+    ],
+    "backend/matching/folder_identity.py::could_be_folder_identity": [
+      "CANONICAL_FINAL_DECISION",
+      "Stage 2b competing-proof threshold: another Release Group blocks when it covers at least half of the folder's files. Pure count rule; no AI input."
+    ],
+    "backend/matching/folder_identity.py::decide_auto_import": [
+      "CANONICAL_FINAL_DECISION",
+      "Stage 2b gate: narrows can_auto_accept(VERIFIED_SUBSET) with uniqueness, conflict, per-file proof and skip-reason checks. No AI input."
+    ],
+    "backend/matching/folder_identity.py::rank_folder_candidates": [
+      "CANONICAL_FINAL_DECISION",
+      "Deterministic Release Group ranking: canonical action_allowed, then verified tracks, then canonical score."
+    ],
     "backend/matching/models.py::<module>": [
       "CANONICAL_FINAL_DECISION",
       "Canonical enums/policy definitions."

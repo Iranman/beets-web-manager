@@ -31,6 +31,12 @@ The project uses Semantic Versioning.
 ### Changed
 
 - The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.
+- Deterministic folder identification now gives the identity check each file's AcoustID result, so a fingerprint can prove a track in a folder that has no MusicBrainz tags (I-8). This is opt-in (`fingerprint_evidence=True`); every other preflight caller, including the AI batch gate, behaves as before.
+
+### Added
+
+- Deterministic identification for import folders that Beets skipped (`backend.import_identity.identify_import_folder`). It builds candidates from embedded IDs, AcoustID and MusicBrainz, and ranks them by Release Group without AI. It also decides whether the folder may be re-imported automatically: that needs every file proven by a fingerprint or an embedded Recording ID, exactly one proven Release Group, no conflicts, and a skip reason other than duplicate. Another Release Group blocks it only when it covers at least half of the folder's files, so an album track that is also on a single does not. Every embedded Release ID must be checked, and a symlinked audio file sends the folder to review. Routes and jobs that use it follow in a later change.
+- A rule that lists library albums and tracks missing MusicBrainz identity (`backend.matching.library_identity_gaps`). It keys albums on the Release Group, so an album with a Release ID but no Release Group now counts as missing. It also covers album tracks without a Recording ID (I-7). The review queue does not use it yet.
 
 ## v0.6.0 - 2026-10-13
 
