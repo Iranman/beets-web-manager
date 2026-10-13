@@ -16,6 +16,7 @@ from backend.transaction_engine import metadata_diff
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsAdapterNotFoundError, BeetsAdapterConnectionError, BeetsAdapterTimeoutError
 import backend.composite_workflows as composite_workflows
+import backend.missing_mb_batch as missing_mb_batch
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
 from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached_outcome, acoustid_failure_status, _normalize_albumartist, same_recording_proof
@@ -477,7 +478,12 @@ def item_attach_recording(iid: int):
     all report success, the item is re-read again and the actual persisted
     mb_trackid/mb_albumid/mb_releasegroupid are what get audited as
     "Completed" -- never the pre-mutation candidate-expected identity."""
-    payload = request.get_json(silent=True) or {}
+    return _item_attach_recording(iid, request.get_json(silent=True) or {})
+
+
+def _item_attach_recording(iid: int, payload: Dict[str, Any]):
+    """The attach-recording writer behind the route above, also called by the
+    Missing IDs batch (inside an app context). Returns a Flask response."""
     mb_trackid = _s(payload.get("mb_trackid") or "").strip().lower()
     if not mb_trackid:
         return jsonify({"ok": False, "error": "mb_trackid is required.", "code": "recording_id_required"}), 400
@@ -2208,110 +2214,128 @@ def match_album(aid):
     label = f"Match: {album.albumartist or album.album or f'album {aid}'}"
 
     def _do(log, cancel_event=None):
-        # 0 ── resolve release-group → release if needed
-        mb_albumid = _resolve_mb_release_id(mb_input, log)
-        if not mb_albumid:
-            raise RuntimeError("Could not extract a MusicBrainz UUID from the input")
-
-        # 1 ── validate before touching tags/paths. MI-8: a track that does not
-        # match the selected release is NOT deleted (a wrong manual match, an
-        # incomplete tracklist or a bad fingerprint lookup must never cost the
-        # user a file). The match stops before any write and the nonmatching
-        # tracks are reported for review; nothing is stamped with the release.
-        log.append("[1/6] Validating current album against selected MusicBrainz release ...")
-        plan = _album_mb_match_plan(aid, mb_albumid, log)
-        matched_count = int(plan.get("matched_count") or 0)
-        actual_count = int(plan.get("actual_count") or 0)
-        expected_count = int(plan.get("expected_count") or 0)
-        log.append(
-            f"  Selected release: {plan.get('release_title') or mb_albumid}"
-        )
-        log.append(
-            f"  Current album matches {matched_count}/{actual_count} local track(s) "
-            f"against {expected_count} MusicBrainz track(s)."
-        )
-        unmatched_items = list(plan.get("unmatched_items") or [])
-        if unmatched_items or matched_count <= 0:
-            log.append(
-                f"  {len(unmatched_items)} track(s) do not match the selected release; "
-                "nothing was changed and no file was removed. Review them (or pick another "
-                "release) before matching."
-            )
-            for item in unmatched_items[:50]:
-                log.append(f"    needs review: {item.get('filename') or item.get('title')} (item {item.get('id')})")
-            # Raised (not returned) so the job reads as not-done, never as a
-            # successful match.
-            raise RuntimeError(
-                f"requires_review: {len(unmatched_items)} track(s) do not match the selected release "
-                f"({matched_count}/{actual_count} matched); nothing was changed."
-            )
-
-        # 2 ── set mb_albumid on both items AND the album record
-        log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
-        metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
-        _require_attach_stage_success(metadata_result, "match album metadata update")
-        rg_change = metadata_result.get("release_group_change") if isinstance(metadata_result, dict) else None
-        if rg_change:
-            log.append(f"  Release Group changed {rg_change.get('from')} -> {rg_change.get('to')} (operator-selected Release)")
-        meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
-        log.append(f"  albums.mb_albumid set to {mb_albumid}")
-
-        # 3 ── match & number tracks from MB release data. This local DB pass
-        # is best-effort evidence enrichment; the required identity sync below
-        # still owns the authoritative Beets repair/verification stage.
-        log.append("[3/6] Numbering tracks from MusicBrainz release ...")
-        try:
-            matched = _match_tracks_from_mb(mb_albumid, aid, log)
-            log.append(f"  -> {matched} track(s) matched and numbered.")
-        except Exception as ex:
-            log.append(f"  WARN: track numbering failed: {ex}")
-
-        # 4 ── sync all metadata (titles, track numbers, artist, year...) from MusicBrainz
-        log.append("[4/6] Syncing metadata from MusicBrainz (mbsync) ...")
-        try:
-            repair_plan = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
-            _require_attach_stage_success(repair_plan, "match album MB track repair plan")
-            operation_id = repair_plan.get("operation_id")
-            if operation_id:
-                repair_apply = composite_workflows.apply_album_mb_track_repair(operation_id, write_tags=True)
-                _require_attach_stage_success(repair_apply, "match album MB track repair apply")
-        except Exception as repair_exc:
-            _compensate_committed_metadata_or_raise(aid, meta_op_id, "match album MB track repair", repair_exc, log)
-
-        # Strip trailing year from album name before move (avoid "Album (2025) (2025)")
-        _strip_year_from_album_name(aid, log)
-
-        # 5 ── write tags to audio files
-        log.append("[5/6] Writing tags to audio files ...")
-        write_result = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
-        _require_attach_stage_success(write_result, "match album tag write")
-        # A relocation failure after this point should compensate the most
-        # recently committed metadata operation (this tag write), not the
-        # earlier mb_albumid-only one from step 2 -- rolling back a
-        # superseded operation against the album's now-current state would
-        # be incorrect.
-        if isinstance(write_result, dict) and write_result.get("operation_id"):
-            meta_op_id = write_result.get("operation_id")
-
-        # 6 ── move / rename files into Artist/Album/Track - Title structure
-        log.append("[6/6] Moving files into library structure ...")
-        _run_attach_relocation_stage(aid, meta_op_id, "match album relocation", log)
-
-        _invalidate_lib_cache()
-
-        # report final paths
-        try:
-            updated = lib.get_album(aid)
-            if updated:
-                items = list(updated.items())
-                log.append(f"✓ {len(items)} track(s) organised:")
-                for it in sorted(items, key=lambda i: i.track or 0):
-                    log.append(f"  {_s(it.path)}")
-        except Exception:
-            pass
+        _match_album_run(aid, mb_input, log)
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
+
+
+def _match_album_run(aid: int, mb_input: str, log) -> List[str]:
+    """The Match album writer: validate the album against one MusicBrainz
+    release, then stamp it, sync tracks, write tags and relocate through the
+    engine transactions, rolling metadata back if a later stage fails.
+    Shared by POST /api/albums/<aid>/match and the Missing IDs batch.
+    Returns the engine operation ids it committed."""
+    operation_ids: List[str] = []
+    # 0 ── resolve release-group → release if needed
+    mb_albumid = _resolve_mb_release_id(mb_input, log)
+    if not mb_albumid:
+        raise RuntimeError("Could not extract a MusicBrainz UUID from the input")
+
+    # 1 ── validate before touching tags/paths. MI-8: a track that does not
+    # match the selected release is NOT deleted (a wrong manual match, an
+    # incomplete tracklist or a bad fingerprint lookup must never cost the
+    # user a file). The match stops before any write and the nonmatching
+    # tracks are reported for review; nothing is stamped with the release.
+    log.append("[1/6] Validating current album against selected MusicBrainz release ...")
+    plan = _album_mb_match_plan(aid, mb_albumid, log)
+    matched_count = int(plan.get("matched_count") or 0)
+    actual_count = int(plan.get("actual_count") or 0)
+    expected_count = int(plan.get("expected_count") or 0)
+    log.append(
+        f"  Selected release: {plan.get('release_title') or mb_albumid}"
+    )
+    log.append(
+        f"  Current album matches {matched_count}/{actual_count} local track(s) "
+        f"against {expected_count} MusicBrainz track(s)."
+    )
+    unmatched_items = list(plan.get("unmatched_items") or [])
+    if unmatched_items or matched_count <= 0:
+        log.append(
+            f"  {len(unmatched_items)} track(s) do not match the selected release; "
+            "nothing was changed and no file was removed. Review them (or pick another "
+            "release) before matching."
+        )
+        for item in unmatched_items[:50]:
+            log.append(f"    needs review: {item.get('filename') or item.get('title')} (item {item.get('id')})")
+        # Raised (not returned) so the job reads as not-done, never as a
+        # successful match.
+        raise RuntimeError(
+            f"requires_review: {len(unmatched_items)} track(s) do not match the selected release "
+            f"({matched_count}/{actual_count} matched); nothing was changed."
+        )
+
+    # 2 ── set mb_albumid on both items AND the album record
+    log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
+    metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
+    _require_attach_stage_success(metadata_result, "match album metadata update")
+    rg_change = metadata_result.get("release_group_change") if isinstance(metadata_result, dict) else None
+    if rg_change:
+        log.append(f"  Release Group changed {rg_change.get('from')} -> {rg_change.get('to')} (operator-selected Release)")
+    meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
+    operation_ids += [meta_op_id] if meta_op_id else []
+    log.append(f"  albums.mb_albumid set to {mb_albumid}")
+
+    # 3 ── match & number tracks from MB release data. This local DB pass
+    # is best-effort evidence enrichment; the required identity sync below
+    # still owns the authoritative Beets repair/verification stage.
+    log.append("[3/6] Numbering tracks from MusicBrainz release ...")
+    try:
+        matched = _match_tracks_from_mb(mb_albumid, aid, log)
+        log.append(f"  -> {matched} track(s) matched and numbered.")
+    except Exception as ex:
+        log.append(f"  WARN: track numbering failed: {ex}")
+
+    # 4 ── sync all metadata (titles, track numbers, artist, year...) from MusicBrainz
+    log.append("[4/6] Syncing metadata from MusicBrainz (mbsync) ...")
+    try:
+        repair_plan = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+        _require_attach_stage_success(repair_plan, "match album MB track repair plan")
+        operation_id = repair_plan.get("operation_id")
+        if operation_id:
+            operation_ids.append(operation_id)
+            repair_apply = composite_workflows.apply_album_mb_track_repair(operation_id, write_tags=True)
+            _require_attach_stage_success(repair_apply, "match album MB track repair apply")
+    except Exception as repair_exc:
+        _compensate_committed_metadata_or_raise(aid, meta_op_id, "match album MB track repair", repair_exc, log)
+
+    # Strip trailing year from album name before move (avoid "Album (2025) (2025)")
+    _strip_year_from_album_name(aid, log)
+
+    # 5 ── write tags to audio files
+    log.append("[5/6] Writing tags to audio files ...")
+    try:
+        write_result = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
+        _require_attach_stage_success(write_result, "match album tag write")
+    except Exception as write_exc:
+        # A failed tag write must not leave the Release ID from step 2 committed.
+        _compensate_committed_metadata_or_raise(aid, meta_op_id, "match album tag write", write_exc, log)
+    # A relocation failure after this point should compensate the most
+    # recently committed metadata operation (this tag write), not the
+    # earlier mb_albumid-only one from step 2 -- rolling back a
+    # superseded operation against the album's now-current state would
+    # be incorrect.
+    if isinstance(write_result, dict) and write_result.get("operation_id"):
+        meta_op_id = write_result.get("operation_id")
+        operation_ids.append(meta_op_id)
+
+    # 6 ── move / rename files into Artist/Album/Track - Title structure
+    log.append("[6/6] Moving files into library structure ...")
+    _run_attach_relocation_stage(aid, meta_op_id, "match album relocation", log)
+
+    _invalidate_lib_cache()
+
+    # report final paths
+    try:
+        updated = lib.get_album(aid)
+        if updated:
+            items = list(updated.items())
+            log.append(f"✓ {len(items)} track(s) organised:")
+            for it in sorted(items, key=lambda i: i.track or 0):
+                log.append(f"  {_s(it.path)}")
+    except Exception:
+        pass
+    return operation_ids
 
 
 @app.post("/api/albums/<int:album_id>/cleanup/plan")
@@ -2579,6 +2603,99 @@ def library_missing_mb_ids():
         _app_logger.exception("Unexpected error in library_missing_mb_ids")
         return jsonify({"ok": False, "error": "Internal error loading missing IDs",
                         "error_code": "INTERNAL_ERROR"}), 500
+
+
+# ── Missing IDs batch fix (proven matches only; backend/missing_mb_batch.py) ──
+
+_BATCH_CHILD_TIMEOUT_SECONDS = 900
+
+
+def _batch_write_album(album_id: int, proof: Dict[str, Any], log) -> Dict[str, Any]:
+    """The batch's album writer is the Match album writer."""
+    try:
+        operation_ids = _match_album_run(album_id, proof["write"]["mb_albumid"], log)
+    except RuntimeError as ex:
+        if str(ex).startswith("requires_review"):  # refused before any write
+            raise missing_mb_batch.NotWritten(str(ex)) from ex
+        raise
+    return {"changed": True, "transaction_ids": operation_ids}
+
+
+def _batch_write_item(item_id: int, proof: Dict[str, Any], log) -> Dict[str, Any]:
+    """The batch's track writer is attach-recording in safe mode, pinned to the
+    previewed decision_version; its own job is awaited, never cancelled."""
+    payload = {"mb_trackid": proof["write"]["mb_trackid"], "mode": "safe",
+               "decision_version": _s((proof.get("evidence") or {}).get("decision_version"))}
+    with app.app_context():
+        resp = _item_attach_recording(item_id, payload)
+        resp, status = resp if isinstance(resp, tuple) else (resp, resp.status_code)
+        body = resp.get_json() or {}
+    if not body.get("ok"):
+        raise missing_mb_batch.NotWritten(f"attach-recording refused ({status}): {body.get('code')}")
+    if body.get("changed") is False:
+        return {"changed": False, "transaction_ids": []}
+    job = jobs.get(body.get("job_id"))
+    done = threading.Event()
+    job.add_done_callback(lambda _job: done.set())
+    if not done.wait(_BATCH_CHILD_TIMEOUT_SECONDS):
+        raise missing_mb_batch.RecoveryRequired(f"attach-recording job {job.job_id} did not finish in time")
+    if job.status != "success":
+        raise RuntimeError(f"attach-recording job {job.job_id} {job.status}")
+    return {"changed": True, "transaction_ids": [body.get("audit_id")]}
+
+
+def _batch_beets_error(ex: Exception):
+    if isinstance(ex, BeetsAuthError):
+        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
+    if isinstance(ex, BeetsUnavailableError):
+        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
+    return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
+
+
+@app.post("/api/library/missing-mb-ids/batch/preview")
+def library_missing_mb_ids_batch_preview():
+    """Read-only job: prove each selected row and record a Preview transaction."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        rows, err = missing_mb_batch.select_rows(payload)
+    except BeetsError as ex:
+        _app_logger.warning("missing-mb batch preview: Beets error: %s", type(ex).__name__)
+        return _batch_beets_error(ex)
+    if err:
+        return jsonify({"ok": False, "error": err, "error_code": "INVALID_PARAM"}), 400
+    if not rows:
+        return jsonify({"ok": False, "error": "No rows match this selection.", "error_code": "NO_ROWS"}), 400
+
+    user = _transaction_user_label()
+
+    def _do(log, cancel_event=None, update_state=None):
+        return missing_mb_batch.run_preview(rows, log, cancel_event, update_state, user=user)
+
+    job = jobs.start_python(_do, label=f"Missing IDs batch preview ({len(rows)} rows)", metadata={
+        "type": "missing-mb-ids-batch-preview", "category": "library", "mutating": False,
+        "dedupe_key": "missing-mb-ids-batch-preview"})
+    return jsonify({"ok": True, "job_id": job.job_id, "rows": len(rows)})
+
+
+@app.post("/api/library/missing-mb-ids/batch/apply")
+def library_missing_mb_ids_batch_apply():
+    """Mutating job: write the proven rows of one preview (needs its confirm_token)."""
+    payload = request.get_json(silent=True) or {}
+    tx_id = _s(payload.get("transaction_id")).strip()
+    err, status = missing_mb_batch.check_apply_request(tx_id, payload.get("confirm_token"))
+    if err:
+        return jsonify(err), status
+
+    def _do(log, cancel_event=None, update_state=None):
+        return missing_mb_batch.run_apply(tx_id, apply_album=_batch_write_album, apply_item=_batch_write_item,
+                                          log=log, cancel_event=cancel_event, update_state=update_state)
+
+    job = jobs.start_python(_do, label="Missing IDs batch apply", metadata={
+        "type": "missing-mb-ids-batch-apply", "category": "library", "mutating": True,
+        "dedupe_key": "missing-mb-ids-batch-apply", "transaction_id": tx_id})
+    transactions.attach_job(tx_id, job.job_id)
+    transactions.update(tx_id, metadata={"applied_by": _transaction_user_label()})
+    return jsonify({"ok": True, "job_id": job.job_id, "transaction_id": tx_id})
 
 
 @app.get("/api/library")
