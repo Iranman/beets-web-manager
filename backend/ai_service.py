@@ -10,7 +10,7 @@ from backend.matching import similarity as _canonical_similarity
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_BATCH_MEDIUM_RATIO, _AI_BATCH_MIN_CONF, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _s
-from backend.library_service import _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
+from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import _add_to_pending, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
@@ -1820,22 +1820,42 @@ def _ai_batch_initial_state(batch_job_id: str, source_path: str, job_id: str = "
     }
 
 
-def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None) -> List[str]:
+def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
+                              unreadable: Optional[List[str]] = None) -> List[str]:
     """Album folders under a validated scan root (F1): every folder that holds
     audio, with a Disc N / CD N subfolder folded into its album folder. A
     local walk: Web Manager mounts the downloads root. Symlinks and hidden
     folders are not followed. A folder the per-folder import checks refuse
     (an approved root itself, e.g. loose files directly in Downloads) is
-    logged and left in place, never imported."""
+    logged and left in place, never imported. A folder the walk cannot read
+    is logged and appended to ``unreadable``. An app-managed download folder
+    (playlist/acquisition output) nested under the scan root is logged and
+    skipped: its own workflow imports it."""
     base, err = _resolve_import_scan_root(root)  # callers check too; stored state is untrusted
     if err or base is None:
         raise RuntimeError(f"Import source folder refused: {err}")
     if not base.is_dir():
         raise RuntimeError(f"Import source folder not found: {root}")
+    skipped_unreadable = unreadable if unreadable is not None else []
+
+    def _on_walk_error(exc: OSError) -> None:
+        skipped_unreadable.append(str(exc.filename))
+        if log is not None:
+            log.append(f"folder not readable, skipped: {exc.filename} ({type(exc).__name__})")
+
+    # Scanning inside an app-managed root on purpose walks it normally.
+    skip_managed = not _app_managed_download_path(base)
     found = set()
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+    for dirpath, dirnames, filenames in os.walk(base, onerror=_on_walk_error):
         here = Path(dirpath)
+        kept = []
+        for d in sorted(d for d in dirnames if not d.startswith(".")):
+            if skip_managed and _app_managed_download_path(here / d):
+                if log is not None:
+                    log.append(f"app-managed download folder skipped: {here / d}")
+                continue
+            kept.append(d)
+        dirnames[:] = kept
         if not any(Path(f).suffix.lower() in AUDIO_EXT and not (here / f).is_symlink() for f in filenames):
             continue
         if here != base and _AI_EVIDENCE_DISC_FOLDER_RE.match(here.name):
@@ -2312,7 +2332,9 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         # runs. The single commit after the if/else below always sees
         # fully-reconciled folder_states first.
         _ai_batch_commit(state, update_state)
-        folders = _ai_batch_find_audio_dirs(scan_path, log)
+        unreadable: List[str] = []
+        folders = _ai_batch_find_audio_dirs(scan_path, log, unreadable)
+        state["folders_unreadable"] = len(unreadable)
         log.append(f"folders discovered count: {len(folders)}")
         for folder in folders:
             fid = _ai_batch_folder_id(folder)

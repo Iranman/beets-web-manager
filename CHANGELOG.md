@@ -24,6 +24,9 @@ The project uses Semantic Versioning.
 - The batch import no longer needs an AI provider (#288). Without an AI key it matches with MusicBrainz and AcoustID, imports only what passes the same track-match check as before, and sends everything else to the Review Queue. With a key, AI only re-ranks the MusicBrainz candidates. The batch status now has `ai_configured` so the page can say which way the run matched.
 - The batch import can now scan the downloads folder itself ("import everything in Downloads"). Before, it refused that folder, although it was the default. The music library folder itself is still refused, because the batch moves files. The batch job is now labelled "Import: <folder>".
 - Albums imported by the batch import and by `POST /api/import` now appear in the History tab. Before, only re-imports from disk did. `POST /api/import` records them only with a webmanager plugin that reports the imported album IDs (1.16.0 or later).
+- Albums imported from the Review Queue (`POST /api/folders/import-with-id`) now appear in the History tab too, once per album.
+- The batch import no longer skips folders it cannot read without saying so. The job log names each one, and the batch status has `folders_unreadable` and adds the count to its summary.
+- The batch import now skips playlist download folders and the acquisition flow's missing-track folders that sit inside the folder being scanned, and logs each one. Those workflows import their own folders. Scanning one of those folders directly still works.
 
 ### Changed
 
