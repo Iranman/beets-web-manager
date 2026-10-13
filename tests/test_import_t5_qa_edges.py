@@ -198,5 +198,108 @@ class AddPendingReviewPathEdgeTests(_Base):
         self.assertEqual(res.status_code, 200, res.get_json())
 
 
+
+class TrustedStoredReviewPathTests(_Base):
+    """Re-verification (b): LOW-4 stored-path gate."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = self.root / "other"
+        self.other.mkdir()
+        downloads, music = self.downloads, self.music
+        self.patch(ser, "_import_review_cleanup_roots",
+                   lambda *, allow_music=False: [downloads] + ([music] if allow_music else []))
+
+    def test_refusals(self):
+        (self.downloads / "A").mkdir()
+        os.symlink(self.other, self.downloads / "escape")
+        os.symlink(self.downloads, self.downloads / "toroot")
+        os.symlink(self.music, self.downloads / "tomusicroot")
+        for raw in (str(self.downloads), str(self.downloads) + "/", str(self.music),
+                    str(self.other / "x"), str(self.downloads / ".." / "other"),
+                    str(self.root / "downloadsX" / "a"), "relative/a", "", None, "/dl\x00/a",
+                    str(self.downloads / "escape"), str(self.downloads / "escape" / "deep"),
+                    str(self.downloads / "toroot"), str(self.downloads / "tomusicroot")):
+            with self.subTest(raw=raw):
+                self.assertIsNone(prs._trusted_stored_review_path(raw))
+
+    def test_accepts(self):
+        (self.music / "Lib").mkdir()
+        os.symlink(self.music / "Lib", self.downloads / "intolib")
+        self.assertEqual(prs._trusted_stored_review_path(str(self.downloads / "A" / ".." / "B")),
+                         str(self.downloads / "B"))
+        self.assertEqual(prs._trusted_stored_review_path(str(self.downloads / "intolib")),
+                         str(self.downloads / "intolib"))  # #392: into another approved root
+
+
+class CompactJobAndLedgerTests(_Base):
+    """Re-verification (c) compact job result and (e) ledger never raises."""
+
+    def test_compact_summary(self):
+        items = [{"ok": True, "review_item_id": f"pending:/d/{i}", "path": f"/d/{i}",
+                  "selected_match": {"track_mapping": [1] * 50}, "eligibility": {"eligible": i % 2 == 0},
+                  "queued": i == 0} for i in range(250)]
+        items.append({"ok": False, "review_item_id": "x", "path": "/d/x", "error": "Could not revalidate this item."})
+        out = irs._compact_revalidation_summary({"ok": True, "reviewed_count": 251, "items": items})
+        self.assertEqual(out["reviewed_count"], 251)
+        self.assertEqual(len(out["items"]), 200)
+        self.assertTrue(out["items_truncated"])
+        self.assertNotIn("selected_match", json.dumps(out))
+        self.assertEqual([r["status"] for r in out["items"][:3]], ["queued", "revalidated", "eligible"])
+        small = irs._compact_revalidation_summary({"ok": True, "items": items[-1:]})
+        self.assertEqual(small["items"][0]["status"], "failed")
+        self.assertFalse(small["items_truncated"])
+
+    def test_forget_never_raises(self):
+        ledger = self.root / "import_skipped.json"
+        self.patch(prs, "_IMPORT_SKIPPED_FILE", ledger)
+        ledger.write_text(json.dumps([{"path": 5}, {"path": None}, "junk", {"path": "/dl/A"}, {"path": ["x"]}]))
+        self.assertTrue(prs._forget_import_skip("/dl/A"))
+        with mock.patch.object(prs, "_load_recorded_import_skips", side_effect=ValueError("boom")):
+            self.assertFalse(prs._forget_import_skip("/dl/B"))
+        with mock.patch.object(prs, "_write_recorded_import_skips", side_effect=TypeError("x")):
+            ledger.write_text(json.dumps([{"path": "/dl/C"}]))
+            self.assertFalse(prs._forget_import_skip("/dl/C"))
+        self.assertFalse(prs._forget_import_skip(None))
+
+
+class RevalidationItemIsolationTests(_Base):
+    def test_one_bad_item_does_not_abort_the_run(self):
+        rg = "11111111-1111-1111-1111-111111111111"
+        items = [{"path": "/d/bad", "suggestion": {"mb_releasegroupid": rg}},
+                 {"path": "/d/good", "suggestion": {"mb_releasegroupid": rg, "existing_album_ids": ["nope"]}}]
+        calls = []
+
+        def compare(_r, path, **_):
+            calls.append(path)
+            if path == "/d/bad":
+                raise RuntimeError("SECRET /internal")
+            return {"ok": False, "error": "Track comparison failed."}
+        with mock.patch.object(irs, "_load_pending_reviews", return_value=items), \
+             mock.patch.object(irs, "_candidate_track_comparison_payload", compare):
+            out = irs._run_import_review_revalidation(set())
+        self.assertEqual(calls, ["/d/bad", "/d/good"])
+        self.assertEqual(out["failed_count"], 2)
+        self.assertNotIn("SECRET", json.dumps(out))
+
+
+class ReviewSearchTextTests(unittest.TestCase):
+    """Re-verification (d): widened server search text."""
+
+    def test_fields_and_malformed_evidence(self):
+        row = {"year": 1999, "confidence": "high", "blocked_reason": "Needs AcoustID",
+               "blocked_next_action": "Run fingerprint",
+               "evidence": {"folder": {"guessed_artist": "Guessed Band", "guessed_album": "GAlbum", "guessed_year": "2001"},
+                            "preflight": {"acoustid_mismatch": True, "acoustid_target_hits": 1,
+                                          "acoustid_top_hits": 7, "acoustid_top_release": "Other Rel"}}}
+        text = routes_import._review_row_search_text(row)
+        for needle in ("1999", "high", "needs acoustid", "run fingerprint", "guessed band", "galbum",
+                       "2001", "acoustid fingerprint mismatch", "other rel"):
+            self.assertIn(needle, text)
+        for bad in ({"evidence": "x"}, {"evidence": {"folder": [1], "preflight": None}},
+                    {"evidence": {"preflight": {"acoustid_mismatch": False, "acoustid_top_release": "Hidden"}}}):
+            self.assertNotIn("hidden", routes_import._review_row_search_text(bad))
+
+
 if __name__ == "__main__":
     unittest.main()
