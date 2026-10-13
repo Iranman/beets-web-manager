@@ -269,6 +269,13 @@ class QueueRouteTests(_CacheCase):
         self.assertEqual(len(self.store.all()), before)
         self.assertEqual(body["cache"]["state"], "failed")
 
+    def test_recent_failure_with_no_snapshot_starts_no_build(self):  # amplification guard
+        acq._acq_queue.update(snapshot=None, last_error="Could not reach Lidarr", last_error_at=time.time())
+        before = len(self.store.all())
+        status, body = self._get("?limit=1")
+        self.assertEqual((status, body["cache"]["state"]), (200, "failed"))
+        self.assertEqual(len(self.store.all()), before)
+
     def test_unmonitored_toggle_reaches_the_build(self):  # QA #379 F3
         self.assertTrue(self.fetch_calls[-1]["include_unmonitored"])
         acq._acq_queue["snapshot"] = dict(acq._acq_queue["snapshot"], include_unmonitored=False)

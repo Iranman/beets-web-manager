@@ -1521,9 +1521,8 @@ def _acq_queue_load() -> None:
 def _acq_queue_save(snapshot: Dict[str, Any]) -> None:
     try:
         _ACQ_QUEUE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _ACQ_QUEUE_CACHE_FILE.with_name(f".{_ACQ_QUEUE_CACHE_FILE.name}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, _ACQ_QUEUE_CACHE_FILE)
+        config_layers.replace_private_file(  # mkstemp (O_EXCL, 0600) + os.replace
+            _ACQ_QUEUE_CACHE_FILE, json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")))
     except Exception as exc:  # the in-memory snapshot still serves
         _app_logger.warning("Find Music snapshot could not be saved: %s", type(exc).__name__)
 

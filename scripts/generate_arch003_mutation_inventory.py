@@ -358,8 +358,6 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_plex_client_identifier": ("APP_STATE", "app_state_v1", "plex-client-identifier-state"),
     "_record_scan": ("APP_STATE", "app_state_v1", "library-scan-timestamp-state"),
     "_save_acq_download_all_last": ("APP_STATE", "app_state_v1", "acquisition-last-download-history-state"),
-    # F7: atomic write of the Find Music list snapshot under WEB_MANAGER_DATA_DIR.
-    "_acq_queue_save": ("CACHE_STATE", "cache_v1", "acquisition-queue-snapshot-cache"),
     "_save_rgid_resolutions": ("APP_STATE", "app_state_v1", "rgid-resolutions-decision-state"),
     "_spotiflac_download_url": ("STAGING_ONLY", "staging_v1", "spotiflac-download-staging-dir"),
     "_remove_new_symlinks": ("STAGING_ONLY", "staging_v1", "spotiflac-staging-symlink-confinement"),
