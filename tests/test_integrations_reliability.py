@@ -615,6 +615,12 @@ class LidarrWantedTests(_BoundaryCase):
         rows, error = self._fetch([_wanted_page(full, total=1500), _wanted_page([], total=1000)])
         self.assertEqual((len(rows), error), (1000, ""))
 
+    def test_moved_total_with_rows_missing_is_not_complete(self):  # QA #379 N3
+        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        short = [dict(_WANTED, id=i) for i in range(1001, 1501)]
+        self.assertEqual(self._fetch([_wanted_page(full, total=2000), _wanted_page(short, total=1600)]),
+                         ([], "Lidarr returned an unexpected response"))
+
     def test_missing_total_records_is_malformed(self):  # ACQ-9: paging needs it
         self.assertEqual(self._fetch([_Resp({"records": [_WANTED]})]),
                          ([], "Lidarr returned an unexpected response"))
@@ -627,14 +633,14 @@ class LidarrWantedTests(_BoundaryCase):
             page = int(req.full_url.split("page=")[1].split("&")[0])
             # The list moved between pages: id 2 shows up on both.
             return _wanted_page([dict(_WANTED, id=1), dict(_WANTED, id=2)] if page == 1
-                                else [dict(_WANTED, id=2), dict(_WANTED, id=3)], total=4)
+                                else [dict(_WANTED, id=2), dict(_WANTED, id=3)], total=3)
         progress = []
         with mock.patch.object(acq, "_LIDARR_WANTED_PAGE_SIZE", 2), \
                 mock.patch.object(urllib.request, "urlopen", side_effect=fake):
             rows, error = acq.fetch_lidarr_wanted(progress=lambda done, total: progress.append((done, total)))
         self.assertEqual(error, "")
         self.assertEqual([row["lidarr_id"] for row in rows], [1, 2, 3])
-        self.assertEqual(progress, [(2, 4), (3, 4)])
+        self.assertEqual(progress, [(2, 3), (3, 3)])
         self.assertEqual(len(opened), 2)
         self.assertTrue(all(timeout == 60.0 for _, timeout in opened))
         self.assertIn("pageSize=2", opened[0][0])

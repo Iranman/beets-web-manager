@@ -507,8 +507,10 @@
     "_acq_health",
     "_acq_item_mbid",
     "_acq_local_issue",
+    "_acq_queue_build_job",
     "_acq_release_group_url",
     "_acq_release_identity",
+    "_acq_row_album_type",
     "_acq_start_download_job",
     "_acq_start_import_disk_job",
     "_acq_text_key",
@@ -521,11 +523,9 @@
     "_ai_batch_normalize_folder_outcome",
     "_ai_batch_process_decisions",
     "_ai_batch_public_state",
-    "_ai_batch_queue_pending_review",
-    "_ai_batch_recalculate_batch_state",
-    "_ai_batch_recompute_counts"
+    "_ai_batch_queue_pending_review"
    ],
-   "caller_count": 606,
+   "caller_count": 611,
    "dependencies": []
   },
   {
@@ -4896,11 +4896,12 @@
     "_ai_suggest_folder_internal",
     "_album_track_fingerprint_check",
     "_audio_identity_decision",
+    "_folder_release_preflight",
     "_reconstruct_track_recording_candidates",
     "_validate_wanted_album_items_with_acoustid",
     "ai_suggest"
    ],
-   "caller_count": 9,
+   "caller_count": 10,
    "dependencies": [
     "_audio_cache_file_identity"
    ]
@@ -7496,10 +7497,10 @@
    "module": "backend/matching_service.py",
    "lines": [
     232,
-    610
+    634
    ],
-   "size": 379,
-   "body_lines": 375,
+   "size": 403,
+   "body_lines": 393,
    "route": null,
    "mutation_capable": false,
    "domain": "MATCHING",
@@ -7515,6 +7516,7 @@
    ],
    "caller_count": 6,
    "dependencies": [
+    "_acoustid_lookup_cached_outcome",
     "_acoustid_multi_file",
     "_album_track_norm",
     "_artist_folder_name_without_mbid",
@@ -7533,8 +7535,8 @@
    "name": "_preflight_rejection_reason",
    "module": "backend/matching_service.py",
    "lines": [
-    613,
-    636
+    637,
+    660
    ],
    "size": 24,
    "body_lines": 18,
@@ -7556,8 +7558,8 @@
    "name": "_preflight_review_reason",
    "module": "backend/matching_service.py",
    "lines": [
-    639,
-    698
+    663,
+    722
    ],
    "size": 60,
    "body_lines": 58,
@@ -7580,8 +7582,8 @@
    "name": "_invalidate_lib_cache",
    "module": "backend/matching_service.py",
    "lines": [
-    713,
-    727
+    737,
+    751
    ],
    "size": 15,
    "body_lines": 14,
@@ -7624,8 +7626,8 @@
    "name": "_fast_album_mb_health_fields",
    "module": "backend/matching_service.py",
    "lines": [
-    730,
-    765
+    754,
+    789
    ],
    "size": 36,
    "body_lines": 28,
@@ -7646,8 +7648,8 @@
    "name": "_ai_api_key",
    "module": "backend/matching_service.py",
    "lines": [
-    768,
-    781
+    792,
+    805
    ],
    "size": 14,
    "body_lines": 5,
@@ -7674,8 +7676,8 @@
    "name": "_ai_model_and_endpoint",
    "module": "backend/matching_service.py",
    "lines": [
-    784,
-    803
+    808,
+    827
    ],
    "size": 20,
    "body_lines": 3,
@@ -7699,8 +7701,8 @@
    "name": "_load_album_mb_suggestions",
    "module": "backend/matching_service.py",
    "lines": [
-    806,
-    813
+    830,
+    837
    ],
    "size": 8,
    "body_lines": 7,
@@ -7720,8 +7722,8 @@
    "name": "_compact_preflight",
    "module": "backend/matching_service.py",
    "lines": [
-    816,
-    846
+    840,
+    870
    ],
    "size": 31,
    "body_lines": 30,
@@ -7745,8 +7747,8 @@
    "name": "_album_preflight_folder",
    "module": "backend/matching_service.py",
    "lines": [
-    849,
-    870
+    873,
+    894
    ],
    "size": 22,
    "body_lines": 21,
@@ -7768,8 +7770,8 @@
    "name": "_match_tracks_from_mb",
    "module": "backend/matching_service.py",
    "lines": [
-    873,
-    887
+    897,
+    911
    ],
    "size": 15,
    "body_lines": 7,
@@ -7792,8 +7794,8 @@
    "name": "_match_tracks_from_mb_shared",
    "module": "backend/matching_service.py",
    "lines": [
-    890,
-    972
+    914,
+    996
    ],
    "size": 83,
    "body_lines": 56,
@@ -7812,8 +7814,8 @@
    "name": "_album_track_feature_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    998,
-    1004
+    1022,
+    1028
    ],
    "size": 7,
    "body_lines": 5,
@@ -7832,8 +7834,8 @@
    "name": "_album_track_parenthetical_alias_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1007,
-    1013
+    1031,
+    1037
    ],
    "size": 7,
    "body_lines": 5,
@@ -7852,8 +7854,8 @@
    "name": "_album_track_path_prefixes",
    "module": "backend/matching_service.py",
    "lines": [
-    1016,
-    1081
+    1040,
+    1105
    ],
    "size": 66,
    "body_lines": 64,
@@ -7876,8 +7878,8 @@
    "name": "_album_track_title_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1084,
-    1144
+    1108,
+    1168
    ],
    "size": 61,
    "body_lines": 60,
@@ -7904,8 +7906,8 @@
    "name": "_mb_release_tracklist_cache_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1147,
-    1164
+    1171,
+    1188
    ],
    "size": 18,
    "body_lines": 4,
@@ -7928,8 +7930,8 @@
    "name": "_mb_release_tracklist_read_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1167,
-    1184
+    1191,
+    1208
    ],
    "size": 18,
    "body_lines": 17,
@@ -7950,8 +7952,8 @@
    "name": "_mb_release_tracklist_write_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1187,
-    1202
+    1211,
+    1226
    ],
    "size": 16,
    "body_lines": 15,
@@ -7972,8 +7974,8 @@
    "name": "_fetch_mb_release_tracklist",
    "module": "backend/matching_service.py",
    "lines": [
-    1205,
-    1288
+    1229,
+    1312
    ],
    "size": 84,
    "body_lines": 83,
@@ -8020,8 +8022,8 @@
    "name": "_album_track_score",
    "module": "backend/matching_service.py",
    "lines": [
-    1291,
-    1296
+    1315,
+    1320
    ],
    "size": 6,
    "body_lines": 5,
@@ -8040,8 +8042,8 @@
    "name": "_best_album_track_match",
    "module": "backend/matching_service.py",
    "lines": [
-    1299,
-    1304
+    1323,
+    1328
    ],
    "size": 6,
    "body_lines": 5,
@@ -8069,8 +8071,8 @@
    "name": "_ai_review_album_track_candidates",
    "module": "backend/matching_service.py",
    "lines": [
-    1307,
-    1409
+    1331,
+    1433
    ],
    "size": 103,
    "body_lines": 99,
@@ -8094,8 +8096,8 @@
    "name": "_scan_album_track_integrity",
    "module": "backend/matching_service.py",
    "lines": [
-    1417,
-    1623
+    1441,
+    1647
    ],
    "size": 207,
    "body_lines": 202,
@@ -8122,8 +8124,8 @@
    "name": "_album_mb_match_plan",
    "module": "backend/matching_service.py",
    "lines": [
-    1626,
-    1701
+    1650,
+    1725
    ],
    "size": 76,
    "body_lines": 74,
@@ -8149,8 +8151,8 @@
    "name": "_album_mb_completeness",
    "module": "backend/matching_service.py",
    "lines": [
-    1704,
-    1809
+    1728,
+    1833
    ],
    "size": 106,
    "body_lines": 104,
@@ -8181,8 +8183,8 @@
    "name": "_remove_album_track_items",
    "module": "backend/matching_service.py",
    "lines": [
-    1812,
-    1857
+    1836,
+    1881
    ],
    "size": 46,
    "body_lines": 32,
@@ -8207,8 +8209,8 @@
    "name": "_artist_folder_name_without_mbid",
    "module": "backend/matching_service.py",
    "lines": [
-    1866,
-    1867
+    1890,
+    1891
    ],
    "size": 2,
    "body_lines": 1,
@@ -8237,8 +8239,8 @@
    "name": "_stamp_folder_for_item_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1870,
-    1897
+    1894,
+    1921
    ],
    "size": 28,
    "body_lines": 22,
@@ -8259,8 +8261,8 @@
    "name": "_artist_folder_album_rows",
    "module": "backend/matching_service.py",
    "lines": [
-    1900,
-    1908
+    1924,
+    1932
    ],
    "size": 9,
    "body_lines": 4,
@@ -8281,8 +8283,8 @@
    "name": "_stamp_artist_folder_album_mbid_counts",
    "module": "backend/matching_service.py",
    "lines": [
-    1911,
-    1952
+    1935,
+    1976
    ],
    "size": 42,
    "body_lines": 37,
@@ -8306,8 +8308,8 @@
    "name": "_playlist_artist_credit_info",
    "module": "backend/matching_service.py",
    "lines": [
-    1958,
-    1984
+    1982,
+    2008
    ],
    "size": 27,
    "body_lines": 26,
@@ -25626,8 +25628,8 @@
    "name": "_wanted_tracks_satisfied_by_names",
    "module": "backend/acquisition_service.py",
    "lines": [
-    33,
-    57
+    34,
+    58
    ],
    "size": 25,
    "body_lines": 23,
@@ -25651,8 +25653,8 @@
    "name": "_download_method_job_label",
    "module": "backend/acquisition_service.py",
    "lines": [
-    63,
-    70
+    64,
+    71
    ],
    "size": 8,
    "body_lines": 7,
@@ -25673,8 +25675,8 @@
    "name": "_download_folder_segment",
    "module": "backend/acquisition_service.py",
    "lines": [
-    77,
-    84
+    78,
+    85
    ],
    "size": 8,
    "body_lines": 2,
@@ -25693,8 +25695,8 @@
    "name": "_download_dest_under",
    "module": "backend/acquisition_service.py",
    "lines": [
-    87,
-    95
+    88,
+    96
    ],
    "size": 9,
    "body_lines": 7,
@@ -25713,8 +25715,8 @@
    "name": "start_album_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    100,
-    793
+    101,
+    794
    ],
    "size": 694,
    "body_lines": 691,
@@ -25776,8 +25778,8 @@
    "name": "_validate_wanted_download_identity_before_import",
    "module": "backend/acquisition_service.py",
    "lines": [
-    796,
-    896
+    797,
+    897
    ],
    "size": 101,
    "body_lines": 96,
@@ -25806,8 +25808,8 @@
    "name": "_deno_download_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    899,
-    900
+    900,
+    901
    ],
    "size": 2,
    "body_lines": 1,
@@ -25824,8 +25826,8 @@
    "name": "_acq_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    905,
-    906
+    906,
+    907
    ],
    "size": 2,
    "body_lines": 1,
@@ -25847,8 +25849,8 @@
    "name": "_acq_display_year",
    "module": "backend/acquisition_service.py",
    "lines": [
-    909,
-    911
+    910,
+    912
    ],
    "size": 3,
    "body_lines": 2,
@@ -25870,8 +25872,8 @@
    "name": "_acq_release_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    914,
-    919
+    915,
+    920
    ],
    "size": 6,
    "body_lines": 5,
@@ -25894,8 +25896,8 @@
    "name": "_acq_release_identity",
    "module": "backend/acquisition_service.py",
    "lines": [
-    922,
-    931
+    923,
+    932
    ],
    "size": 10,
    "body_lines": 7,
@@ -25917,8 +25919,8 @@
    "name": "_acq_release_group_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    934,
-    938
+    935,
+    939
    ],
    "size": 5,
    "body_lines": 2,
@@ -25942,8 +25944,8 @@
    "name": "_acq_album_has_no_track_rows",
    "module": "backend/acquisition_service.py",
    "lines": [
-    941,
-    947
+    942,
+    948
    ],
    "size": 7,
    "body_lines": 6,
@@ -25966,8 +25968,8 @@
    "name": "_acq_expected_track_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    950,
-    963
+    951,
+    964
    ],
    "size": 14,
    "body_lines": 13,
@@ -25993,8 +25995,8 @@
    "name": "_acq_imported_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    966,
-    977
+    967,
+    978
    ],
    "size": 12,
    "body_lines": 11,
@@ -26019,8 +26021,8 @@
    "name": "_acq_track_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    980,
-    983
+    981,
+    984
    ],
    "size": 4,
    "body_lines": 3,
@@ -26041,8 +26043,8 @@
    "name": "_acq_is_extra_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    986,
-    996
+    987,
+    997
    ],
    "size": 11,
    "body_lines": 10,
@@ -26066,8 +26068,8 @@
    "name": "_acq_is_leftover_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    999,
-    1008
+    1000,
+    1009
    ],
    "size": 10,
    "body_lines": 9,
@@ -26091,8 +26093,8 @@
    "name": "_acq_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1011,
-    1030
+    1012,
+    1031
    ],
    "size": 20,
    "body_lines": 19,
@@ -26118,8 +26120,8 @@
    "name": "_acq_health",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1033,
-    1081
+    1034,
+    1082
    ],
    "size": 49,
    "body_lines": 48,
@@ -26147,8 +26149,8 @@
    "name": "_acq_needs_acquisition",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1084,
-    1089
+    1085,
+    1090
    ],
    "size": 6,
    "body_lines": 4,
@@ -26171,8 +26173,8 @@
    "name": "_acq_locally_satisfies_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1092,
-    1103
+    1093,
+    1104
    ],
    "size": 12,
    "body_lines": 10,
@@ -26197,8 +26199,8 @@
    "name": "_acq_local_issue",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1106,
-    1113
+    1107,
+    1114
    ],
    "size": 8,
    "body_lines": 7,
@@ -26221,8 +26223,8 @@
    "name": "_lidarr_wanted_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1122,
-    1136
+    1123,
+    1137
    ],
    "size": 15,
    "body_lines": 13,
@@ -26241,8 +26243,8 @@
    "name": "_lidarr_wanted_page",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1139,
-    1155
+    1140,
+    1156
    ],
    "size": 17,
    "body_lines": 14,
@@ -26261,8 +26263,8 @@
    "name": "_lidarr_wanted_row",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1158,
-    1182
+    1159,
+    1183
    ],
    "size": 25,
    "body_lines": 21,
@@ -26284,11 +26286,11 @@
    "name": "fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1185,
-    1241
+    1186,
+    1251
    ],
-   "size": 57,
-   "body_lines": 40,
+   "size": 66,
+   "body_lines": 47,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -26308,8 +26310,8 @@
    "name": "_acq_fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1244,
-    1245
+    1254,
+    1255
    ],
    "size": 2,
    "body_lines": 1,
@@ -26330,8 +26332,8 @@
    "name": "_acq_item_mbid",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1248,
-    1252
+    1258,
+    1262
    ],
    "size": 5,
    "body_lines": 4,
@@ -26357,8 +26359,8 @@
    "name": "_acq_can_import_disk",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1255,
-    1261
+    1265,
+    1271
    ],
    "size": 7,
    "body_lines": 6,
@@ -26380,8 +26382,8 @@
    "name": "_acq_can_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1264,
-    1278
+    1274,
+    1288
    ],
    "size": 15,
    "body_lines": 14,
@@ -26403,8 +26405,8 @@
    "name": "_acq_action_flags",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1281,
-    1303
+    1291,
+    1313
    ],
    "size": 23,
    "body_lines": 22,
@@ -26427,21 +26429,20 @@
    "name": "_build_acquisition_queue_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1306,
-    1431
+    1316,
+    1460
    ],
-   "size": 126,
-   "body_lines": 123,
+   "size": 145,
+   "body_lines": 138,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
    "desired_owner": "backend/acquisition_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "acquisition_download_all",
-    "acquisition_queue"
+    "_acq_queue_build_job"
    ],
-   "caller_count": 2,
+   "caller_count": 1,
    "dependencies": [
     "_acq_action_flags",
     "_acq_display_year",
@@ -26455,7 +26456,6 @@
     "_acq_release_identity",
     "_acq_release_text_key",
     "_acq_text_key",
-    "_download_sources_status",
     "_s",
     "get_library_payload",
     "health",
@@ -26466,18 +26466,18 @@
    "name": "_download_sources_status",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1434,
-    1446
+    1467,
+    1484
    ],
-   "size": 13,
-   "body_lines": 10,
+   "size": 18,
+   "body_lines": 13,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
    "desired_owner": "backend/acquisition_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_build_acquisition_queue_payload"
+    "acquisition_queue"
    ],
    "caller_count": 1,
    "dependencies": [
@@ -26487,11 +26487,214 @@
    ]
   },
   {
+   "name": "_acq_queue_load",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1505,
+    1524
+   ],
+   "size": 20,
+   "body_lines": 17,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_queue_snapshot"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_acq_queue_save",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1527,
+    1533
+   ],
+   "size": 7,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_acq_queue_build_job"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "acquisition_queue_snapshot",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1536,
+    1563
+   ],
+   "size": 28,
+   "body_lines": 26,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_download_all",
+    "acquisition_queue",
+    "ensure_acquisition_queue_fresh"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_acq_queue_load"
+   ]
+  },
+  {
+   "name": "_acq_queue_build_job",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1566,
+    1606
+   ],
+   "size": 41,
+   "body_lines": 40,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "start_acquisition_queue_build"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_acq_queue_save",
+    "_build_acquisition_queue_payload",
+    "_s"
+   ]
+  },
+  {
+   "name": "start_acquisition_queue_build",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1609,
+    1626
+   ],
+   "size": 18,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_download_all",
+    "acquisition_queue",
+    "acquisition_queue_refresh",
+    "ensure_acquisition_queue_fresh"
+   ],
+   "caller_count": 4,
+   "dependencies": [
+    "_acq_queue_build_job"
+   ]
+  },
+  {
+   "name": "ensure_acquisition_queue_fresh",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1629,
+    1640
+   ],
+   "size": 12,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_queue"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "acquisition_queue_snapshot",
+    "start_acquisition_queue_build"
+   ]
+  },
+  {
+   "name": "_acq_row_album_type",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1646,
+    1650
+   ],
+   "size": 5,
+   "body_lines": 3,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_queue_page"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_acq_row_unmonitored",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1653,
+    1655
+   ],
+   "size": 3,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_queue_page"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "acquisition_queue_page",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    1658,
+    1687
+   ],
+   "size": 30,
+   "body_lines": 25,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "acquisition_queue"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_acq_row_album_type",
+    "_acq_row_unmonitored",
+    "_s",
+    "items"
+   ]
+  },
+  {
    "name": "_acq_download_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1452,
-    1473
+    1693,
+    1714
    ],
    "size": 22,
    "body_lines": 20,
@@ -26512,8 +26715,8 @@
    "name": "_acq_start_download_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1476,
-    1481
+    1717,
+    1722
    ],
    "size": 6,
    "body_lines": 5,
@@ -26536,8 +26739,8 @@
    "name": "_acq_start_import_disk_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1484,
-    1496
+    1725,
+    1737
    ],
    "size": 13,
    "body_lines": 12,
@@ -26559,8 +26762,8 @@
    "name": "_acq_trim_batch_log",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1499,
-    1505
+    1740,
+    1746
    ],
    "size": 7,
    "body_lines": 6,
@@ -26579,8 +26782,8 @@
    "name": "_acq_download_all_record",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1508,
-    1530
+    1749,
+    1771
    ],
    "size": 23,
    "body_lines": 15,
@@ -26599,8 +26802,8 @@
    "name": "_save_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1533,
-    1540
+    1774,
+    1781
    ],
    "size": 8,
    "body_lines": 7,
@@ -26619,8 +26822,8 @@
    "name": "_load_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1543,
-    1550
+    1784,
+    1791
    ],
    "size": 8,
    "body_lines": 7,
@@ -26639,8 +26842,8 @@
    "name": "_qbit_status_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1553,
-    1567
+    1794,
+    1808
    ],
    "size": 15,
    "body_lines": 14,
@@ -26660,8 +26863,8 @@
    "name": "_qbit_login_cookie",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1570,
-    1602
+    1811,
+    1843
    ],
    "size": 33,
    "body_lines": 32,
@@ -26680,8 +26883,8 @@
    "name": "_qbit_request_json",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1605,
-    1613
+    1846,
+    1854
    ],
    "size": 9,
    "body_lines": 7,
@@ -26700,8 +26903,8 @@
    "name": "_qbit_post",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1616,
-    1623
+    1857,
+    1864
    ],
    "size": 8,
    "body_lines": 7,
@@ -26720,8 +26923,8 @@
    "name": "_qbit_path_alias_pairs",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1626,
-    1636
+    1867,
+    1877
    ],
    "size": 11,
    "body_lines": 10,
@@ -26740,8 +26943,8 @@
    "name": "_qbit_map_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1639,
-    1654
+    1880,
+    1895
    ],
    "size": 16,
    "body_lines": 8,
@@ -26763,8 +26966,8 @@
    "name": "_qbit_allowed_repair_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1657,
-    1664
+    1898,
+    1905
    ],
    "size": 8,
    "body_lines": 7,
@@ -26785,8 +26988,8 @@
    "name": "_qbit_candidate_target_paths",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1667,
-    1701
+    1908,
+    1942
    ],
    "size": 35,
    "body_lines": 33,
@@ -26808,8 +27011,8 @@
    "name": "_library_file_candidates_for_qbit",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1704,
-    1750
+    1945,
+    1991
    ],
    "size": 47,
    "body_lines": 46,
@@ -26831,8 +27034,8 @@
    "name": "_qbit_scene_text",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1759,
-    1763
+    2000,
+    2004
    ],
    "size": 5,
    "body_lines": 4,
@@ -26854,8 +27057,8 @@
    "name": "_qbit_torrent_scene_artist_slug",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1766,
-    1768
+    2007,
+    2009
    ],
    "size": 3,
    "body_lines": 2,
@@ -26876,8 +27079,8 @@
    "name": "_qbit_torrent_album_guess",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1771,
-    1781
+    2012,
+    2022
    ],
    "size": 11,
    "body_lines": 10,
@@ -26899,8 +27102,8 @@
    "name": "_qbit_track_guess_from_scene_file",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1784,
-    1806
+    2025,
+    2047
    ],
    "size": 23,
    "body_lines": 22,
@@ -26923,8 +27126,8 @@
    "name": "_library_file_candidates_for_qbit_metadata",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1809,
-    1898
+    2050,
+    2139
    ],
    "size": 90,
    "body_lines": 87,
@@ -26951,8 +27154,8 @@
    "name": "_qbit_hardlink_public_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1916,
-    1930
+    2157,
+    2171
    ],
    "size": 15,
    "body_lines": 6,
@@ -26971,8 +27174,8 @@
    "name": "_qbit_hardlink_missing_impl",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1933,
-    2169
+    2174,
+    2410
    ],
    "size": 237,
    "body_lines": 231,
@@ -27001,8 +27204,8 @@
    "name": "_audio_files_under",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2172,
-    2181
+    2413,
+    2422
    ],
    "size": 10,
    "body_lines": 9,
@@ -30350,7 +30553,7 @@
     "_playlist_m3u_items",
     "_plex_playlist_items"
    ],
-   "caller_count": 42,
+   "caller_count": 43,
    "dependencies": [
     "item_dict"
    ]
@@ -35215,14 +35418,56 @@
    ]
   },
   {
+   "name": "_flag",
+   "module": "routes_acquisition.py",
+   "lines": [
+    178,
+    179
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "acquisition_queue"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_int_arg",
+   "module": "routes_acquisition.py",
+   "lines": [
+    182,
+    193
+   ],
+   "size": 12,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "acquisition_queue"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "acquisition_queue",
    "module": "routes_acquisition.py",
    "lines": [
-    175,
-    177
+    197,
+    247
    ],
-   "size": 3,
-   "body_lines": 2,
+   "size": 51,
+   "body_lines": 47,
    "route": {
     "method": "GET",
     "path": "/api/acquisition/queue"
@@ -35234,18 +35479,48 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_build_acquisition_queue_payload"
+    "_download_sources_status",
+    "_flag",
+    "_int_arg",
+    "_s",
+    "acquisition_queue_page",
+    "acquisition_queue_snapshot",
+    "ensure_acquisition_queue_fresh",
+    "start_acquisition_queue_build"
+   ]
+  },
+  {
+   "name": "acquisition_queue_refresh",
+   "module": "routes_acquisition.py",
+   "lines": [
+    251,
+    258
+   ],
+   "size": 8,
+   "body_lines": 6,
+   "route": {
+    "method": "POST",
+    "path": "/api/acquisition/queue/refresh"
+   },
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "start_acquisition_queue_build"
    ]
   },
   {
    "name": "acquisition_download_all",
    "module": "routes_acquisition.py",
    "lines": [
-    184,
-    359
+    265,
+    448
    ],
-   "size": 176,
-   "body_lines": 175,
+   "size": 184,
+   "body_lines": 183,
    "route": {
     "method": "POST",
     "path": "/api/acquisition/download-all"
@@ -35262,20 +35537,21 @@
     "_acq_item_mbid",
     "_acq_start_download_job",
     "_acq_trim_batch_log",
-    "_build_acquisition_queue_payload",
     "_invalidate_lib_cache",
     "_normalise_download_method",
     "_s",
     "_save_acq_download_all_last",
-    "_wait_for_child_job"
+    "_wait_for_child_job",
+    "acquisition_queue_snapshot",
+    "start_acquisition_queue_build"
    ]
   },
   {
    "name": "acquisition_download_all_active",
    "module": "routes_acquisition.py",
    "lines": [
-    363,
-    378
+    452,
+    467
    ],
    "size": 16,
    "body_lines": 15,
@@ -35297,8 +35573,8 @@
    "name": "qbit_status",
    "module": "routes_acquisition.py",
    "lines": [
-    382,
-    383
+    471,
+    472
    ],
    "size": 2,
    "body_lines": 1,
@@ -35320,8 +35596,8 @@
    "name": "qbit_hardlink_missing",
    "module": "routes_acquisition.py",
    "lines": [
-    387,
-    465
+    476,
+    554
    ],
    "size": 79,
    "body_lines": 78,
@@ -35345,8 +35621,8 @@
    "name": "music_format_replacement_statuses",
    "module": "routes_acquisition.py",
    "lines": [
-    469,
-    473
+    558,
+    562
    ],
    "size": 5,
    "body_lines": 4,
@@ -35366,8 +35642,8 @@
    "name": "start_music_format_library_scan",
    "module": "routes_acquisition.py",
    "lines": [
-    477,
-    489
+    566,
+    578
    ],
    "size": 13,
    "body_lines": 12,
@@ -35389,8 +35665,8 @@
    "name": "start_music_format_replacement_retry",
    "module": "routes_acquisition.py",
    "lines": [
-    493,
-    514
+    582,
+    603
    ],
    "size": 22,
    "body_lines": 21,

@@ -233,6 +233,8 @@ class SourceAvailabilityTests(unittest.TestCase):  # ACQ-5
             self.assertEqual(yts._direct_source_unavailable_reason("spotiflac"), "")
 
     def test_queue_payload_reports_slskd_and_fallbacks(self):
+        acq._source_probe_cache.update(at=0.0, fallbacks=None)  # probes are cached (QA F6)
+        self.addCleanup(acq._source_probe_cache.update, at=0.0, fallbacks=None)
         with mock.patch.object(slskd, "SLSKD_API_KEY", ""), \
                 mock.patch.object(acq, "_direct_source_unavailable_reason",
                                   side_effect=lambda m: "" if m == "soundcloud" else "missing"):
@@ -241,6 +243,7 @@ class SourceAvailabilityTests(unittest.TestCase):  # ACQ-5
         self.assertEqual(status["slskd_error"], NOT_CONFIGURED)
         self.assertEqual(status["fallbacks"]["soundcloud"], {"available": True, "reason": ""})
         self.assertEqual(status["fallbacks"]["ytdlp"], {"available": False, "reason": "missing"})
+        acq._source_probe_cache.update(at=0.0, fallbacks=None)
         with mock.patch.object(slskd, "SLSKD_API_KEY", "secret-value"), \
                 mock.patch.object(acq, "_direct_source_unavailable_reason", return_value=""):
             status = acq._download_sources_status()
