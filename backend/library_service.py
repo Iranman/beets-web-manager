@@ -1563,7 +1563,7 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
     if not rows:
         return False
 
-    matched = 0
+    item_paths = set()
     for row in rows:
         raw_path = _s(row["path"])
         if not raw_path:
@@ -1571,10 +1571,31 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
         abs_path = Path(raw_path)
         if not abs_path.is_absolute():
             abs_path = MUSIC_ROOT / raw_path
+        abs_path = abs_path.resolve(strict=False)
         if not _path_is_under(abs_path, folder):
             return False
-        matched += 1
-    return matched > 0
+        item_paths.add(abs_path)
+
+    # N2: "every item is under the folder" also holds for the artist folder
+    # (or any ancestor), which would sweep sibling albums into the delete.
+    # The folder must be the album's own folder: the deepest folder holding
+    # all its items, one disc level stripped ...
+    try:
+        own = Path(os.path.commonpath([str(p.parent) for p in item_paths]))
+    except ValueError:
+        return False
+    if re.match(r'^(?:disc|cd|disk)\s*\d+$', own.name, re.I):
+        own = own.parent
+    if own != folder:
+        return False
+    # ... and every audio file in it must be one of this album's items.
+    try:
+        for p in folder.rglob("*"):
+            if p.suffix.lower() in AUDIO_EXT and p.is_file() and p.resolve(strict=False) not in item_paths:
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _delete_review_source_folder(src_path: str, log: list,

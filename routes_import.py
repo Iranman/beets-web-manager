@@ -222,7 +222,9 @@ def cleanup_import_review_files():
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     allow_delete = bool(payload.get("allow_delete"))
-    # Permanent delete requires allow_delete=true
+    # allow_delete is passed through for the audit record only; it gates
+    # nothing. A delete_* action is authorized by the Pending Review match
+    # above, and library paths are always quarantined instead (S1).
     plan_req = {
         "path": folder_path,
         "files": raw_files,
