@@ -591,7 +591,9 @@ export function AcquisitionPanel({
     const effectiveMethod = methodOverride ?? batchMethod;
     const selectedKeys = keysOverride?.length
       ? keysOverride
-      : orderedProcessableItems.map((item) => item.key);
+      // Exactly the rows shown and confirmed: the server orders its snapshot by sort_key
+      // before applying `limit`, so sending more keys could download different albums.
+      : batchItems.map((item) => item.key);
     const count = retryMode ? selectedKeys.length : batchItems.length;
     const methodAllowed = effectiveMethod === 'slskd' || directDownloadMethodEnabled(effectiveMethod, ytdlpStatus);
     if ((!retryMode && !batchCanStart) || (retryMode && !methodAllowed) || !count) return;

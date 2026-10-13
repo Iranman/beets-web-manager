@@ -294,6 +294,24 @@ describe('Find Music downloads', () => {
     expect(payload.fallback_method).toBeUndefined();
   });
 
+  it('QA #390 F1: Download next N sends exactly the rows shown (year_desc, missing first off, N < page)', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    // Server order for year_desc differs from sort_key order: k3 (2020), k1 (2010), k2 (2000).
+    const shown = [
+      { ...row(3), year: '2020', sort_key: 'c' },
+      { ...row(1), year: '2010', sort_key: 'a' },
+      { ...row(2), year: '2000', sort_key: 'b' },
+    ];
+    mocked.getAcquisitionQueue.mockResolvedValue(response({ items: shown, total: 3 }));
+    renderPanel();
+    fireEvent.change(await screen.findByLabelText('Sort'), { target: { value: 'year_desc' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Missing first' }));
+    fireEvent.change(screen.getByLabelText('Limit'), { target: { value: '2' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Download next 2' }));
+    await waitFor(() => expect(mocked.startAcquisitionDownloadAll).toHaveBeenCalledTimes(1));
+    expect(mocked.startAcquisitionDownloadAll.mock.calls[0][0]).toMatchObject({ keys: ['k3', 'k1'], limit: 2 });
+  });
+
   it('Download next N still confirms; Cancel sends nothing', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderPanel();
