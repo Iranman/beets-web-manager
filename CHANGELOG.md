@@ -6,6 +6,21 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- `YTDLP_PO_PROVIDER_URL` is now blank by default, so the bgutil PO token provider is used only when you set it (`docker-compose.full.yml` still sets it for its sidecar).
+- SpotiFLAC is no longer in the default slskd fallback chain (now `ytdlp,soundcloud`), and a download request (Find Music, Download All, track replacement) can no longer add it: the chain is exactly `SLSKD_FALLBACK_METHODS`. To keep using SpotiFLAC, list `spotiflac` there and install its CLI. Track replacement now uses a direct-source fallback only when its "try an alternate source" setting is on.
+
+### Fixed
+
+- An slskd download without `SLSKD_API_KEY` no longer fails deep inside the job. Without a fallback it is refused with `slskd is not configured (SLSKD_API_KEY)`. With a fallback it goes straight to the direct sources, and the job log says why. The acquisition queue now reports `download_sources` (slskd configured, and whether each fallback can run).
+- When slskd fails, the job log shows its real reason (rejected API key, rate limiting, timeout, unreachable, unexpected response), and that reason comes first in the final error. These are fixed messages that never include provider bodies or keys.
+- Direct-source fallbacks that cannot run here (yt-dlp missing, no JavaScript runtime for YouTube, no SpotiFLAC CLI) are skipped once per job, with the reason in the log, instead of each failing in turn.
+- A configured PO token provider that is blocked by the outbound policy or unreachable no longer fails YouTube downloads. They continue without PO tokens, and a warning is logged.
+- SoundCloud missing-track downloads now try up to five search results in order. Results whose length is more than 10% off the MusicBrainz length are skipped, as are clips of 45 s or less (previews), and DRM-protected results. Identity verification after download is unchanged.
+- yt-dlp per-chunk `[download] x%` progress lines are no longer written to the job log (0% and 100% are kept), so a long download keeps the start of the job in the saved log.
+- The Lidarr wanted list is read in pages of 1000 until `totalRecords` is covered, de-duplicated by Lidarr album id, with a 60 s timeout per page and one retry after a timeout or 5xx. Large wanted lists no longer time out after 10 s per 100-album page. A failed page, or a page shorter than `totalRecords` promises while `totalRecords` has not changed, still means no list, never a partial one.
+
 ### Changed
 
 - The Web Manager image now ships Deno 2.9.7 (`/usr/local/bin/deno`, from the digest-pinned `denoland/deno:bin-2.9.7` image), so yt-dlp can solve YouTube's signature challenges without any extra setup. The solver scripts come from the bundled `yt-dlp-ejs` package; nothing is downloaded at runtime (`YTDLP_REMOTE_COMPONENTS` stays empty). Deno's cache is `DENO_DIR=/tmp/deno`, which works with the hardened Compose settings (`read_only`, `/tmp` tmpfs). The image is about 96 MB larger uncompressed (about 42 MB compressed). CI now checks that the app's yt-dlp runtime probe finds Deno and that Deno runs JavaScript as the app user under those settings.

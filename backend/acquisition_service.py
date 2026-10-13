@@ -8,20 +8,20 @@ from backend import config_layers
 import copy, difflib, json, os, re, time
 import urllib.error
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
-from backend.ytdlp_service import _audio_files_in_dir, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
+from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
 from backend.import_service import _delete_staged_import_folder, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
 from backend.playlist_service import _playlist_download_audio_allowed, _playlist_download_match, _playlist_filter_preview_downloads, _playlist_identity_log, _playlist_stamp_download_tags
-from backend.app_runtime import _path_under, validated_downloads_root
+from backend.app_runtime import _path_under, _redact_security_text, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm
-from backend.slskd_service import _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
+from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
@@ -113,10 +113,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     auto_import = bool(data.get("auto_import", True))
     forced_albumartist = _artist_folder_name_without_mbid(data.get("albumartist") or artist).strip()
     raw_fallback_method = data.get("fallback_method")
-    fallback_method = _normalise_download_method(raw_fallback_method or "spotiflac", "spotiflac")
-    source_fallback_methods = _slskd_fallback_methods(fallback_method)
+    fallback_method = _normalise_download_method(raw_fallback_method, "") if raw_fallback_method else ""
+    source_fallback_methods = _slskd_fallback_methods()
     try_source_fallback = (
-        (raw_fallback_method is not None and fallback_method in {"soundcloud", "spotiflac"})
+        (raw_fallback_method is not None and fallback_method in {"soundcloud", "spotiflac", "ytdlp"})
         or bool(data.get("try_ytdlp_fallback"))
         or bool(data.get("ytdlp_fallback"))
         or bool(data.get("try_source_fallback"))
@@ -163,6 +163,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             downloads_root, safe_artist, safe_album and safe_album + yr_sfx))
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}, 200
+    # ACQ-1: without an API key slskd cannot run. With a direct-source
+    # fallback the job skips straight to it (and logs why); without one
+    # there is nothing to start.
+    if method == "slskd" and not slskd_configured() and not try_source_fallback:
+        return {"ok": False, "error": SLSKD_NOT_CONFIGURED}, 200
 
     def _do(log, cancel_event=None):
         download_result: Dict[str, Any]
@@ -440,13 +445,20 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
             if not try_source_fallback:
                 raise slskd_error
+            # ACQ-2: the real slskd reason, in the log and first in the final error.
+            slskd_reason = _redact_security_text(slskd_error)
+            log.append(f"[slskd] Failed: {slskd_reason}")
             fallback_tracks = active_tracks or None
             fallback_scope = (
                 f"{len(active_tracks)} missing track(s)"
                 if active_tracks
                 else "the full album"
             )
-            methods = list(source_fallback_methods)
+            methods = _available_fallbacks()
+            if not methods:
+                raise RuntimeError(
+                    f"SLSKD failed: {slskd_reason}; no direct-source fallback is available"
+                ) from slskd_error
             failures: List[str] = []
             log.append(
                 f"[fallback] SLSKD could not provide a valid candidate for "
@@ -482,9 +494,30 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             fallback_result.get("aldir", ""), log
                         )
             raise RuntimeError(
-                "SLSKD download failed; direct-source fallback also failed: "
+                f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "
                 + "; ".join(failures)
             ) from slskd_error
+
+        available_fallbacks: List[str] = []
+        fallbacks_checked = False
+
+        def _available_fallbacks() -> List[str]:
+            # ACQ-5: cheap availability checks, once per job.
+            nonlocal fallbacks_checked
+            if not fallbacks_checked:
+                fallbacks_checked = True
+                for candidate in source_fallback_methods:
+                    reason = _direct_source_unavailable_reason(candidate)
+                    if reason:
+                        log.append(
+                            f"[fallback] Skipped {_download_method_label(candidate)}: {reason}")
+                    else:
+                        available_fallbacks.append(candidate)
+            return available_fallbacks
+
+        if method == "slskd" and not slskd_configured():
+            log.append(f"[slskd] Skipped: {SLSKD_NOT_CONFIGURED}; going straight to direct sources.")
+            return _try_direct_sources_after_slskd(RuntimeError(SLSKD_NOT_CONFIGURED))
 
         if method == "slskd":
             # ── Soulseek via slskd ───────────────────────────────────────────
@@ -1080,7 +1113,10 @@ def _acq_local_issue(album: Dict[str, Any], health: Dict[str, Any]) -> str:
     return _s(health.get("label") or "Needs acquisition")
 
 
-_LIDARR_WANTED_MAX_PAGES = 200  # 20,000 wanted albums; a paging bug must not loop forever
+_LIDARR_WANTED_PAGE_SIZE = 1000
+_LIDARR_WANTED_MAX_PAGES = 100  # 100,000 wanted albums; a paging bug must not loop forever
+_LIDARR_WANTED_PAGE_TIMEOUT = 60.0  # seconds per page; the lidarr policy retries once
+LIDARR_WANTED_CANCELLED = "Lidarr wanted-list fetch was cancelled"
 
 
 def _lidarr_wanted_error(exc: BaseException) -> str:
@@ -1100,58 +1136,113 @@ def _lidarr_wanted_error(exc: BaseException) -> str:
     return "Could not reach Lidarr"
 
 
-def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
-    """Every wanted/missing album, or ([], reason) -- never a partial list
-    presented as complete. ``foreignAlbumId`` is a MusicBrainz release
-    group, so it is reported as ``mb_releasegroupid`` (IA-07)."""
+def _lidarr_wanted_page(page: int, monitored: bool) -> Tuple[List[Any], int]:
+    """One wanted/missing page: (records, totalRecords). Raises on any
+    transport failure or malformed body."""
+    url = (
+        f"{LIDARR_URL}/api/v1/wanted/missing?page={page}"
+        f"&pageSize={_LIDARR_WANTED_PAGE_SIZE}&sortKey=releaseDate&sortDirection=descending"
+        f"&includeArtist=true&monitored={'true' if monitored else 'false'}"
+    )
+    req = _ur.Request(url, headers={"X-Api-Key": LIDARR_KEY})
+    with provider_boundary.opened("lidarr", req, timeout=_LIDARR_WANTED_PAGE_TIMEOUT) as r:
+        data = json.loads(r.read())
+    if not isinstance(data, dict) or not isinstance(data.get("records"), list):
+        raise ValueError("unexpected wanted/missing payload")
+    total = data.get("totalRecords")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise ValueError("wanted/missing payload has no totalRecords")
+    return data["records"], total
+
+
+def _lidarr_wanted_row(rec: Any) -> Optional[Dict[str, Any]]:
+    """The fields the acquisition queue needs, taken from one record (the
+    rest of the record is dropped at once). ``foreignAlbumId`` is a
+    MusicBrainz release group, so it is ``mb_releasegroupid`` (IA-07)."""
+    if not isinstance(rec, dict):
+        return None
+    artist_obj = rec.get("artist") if isinstance(rec.get("artist"), dict) else {}
+    rgid = _s(rec.get("foreignAlbumId") or "").strip().lower()
+    if rgid and not _MB_UUID_RE.match(rgid):
+        rgid = ""
+    try:
+        lidarr_id = int(rec.get("id") or 0)
+    except (TypeError, ValueError):
+        lidarr_id = 0
+    return {
+        "artist": _s(artist_obj.get("artistName") or ""),
+        "album": _s(rec.get("title") or ""),
+        "year": _s(rec.get("releaseDate") or "")[:4],
+        "type": _s(rec.get("albumType") or ""),
+        "lidarr_id": lidarr_id,
+        "mb_albumid": "",
+        "mb_releasegroupid": rgid,
+        "mb_url": _acq_release_group_url(rgid),
+        "monitored": rec.get("monitored", True) is not False,
+    }
+
+
+def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None,
+                        cancel: Optional[Callable[[], bool]] = None,
+                        include_unmonitored: bool = False) -> Tuple[List[Dict[str, Any]], str]:
+    """Every wanted/missing album as ``(rows, "")``, or ``([], reason)`` --
+    never a partial list presented as complete (ACQ-8/9/11).
+
+    Needs no request context, so a background job can call it. Pages of
+    1000 are read until ``totalRecords`` is covered, each through
+    provider_boundary with a 60 s timeout (the lidarr policy retries a
+    timeout or 5xx once), and rows are de-duplicated by Lidarr album id.
+
+    ``progress(done, total)`` is called after each page. ``cancel()`` is
+    checked before each page; True ends the fetch with
+    ``([], LIDARR_WANTED_CANCELLED)``. ``include_unmonitored`` adds Lidarr's
+    ``monitored=false`` list (a second paging pass). ``reason`` is one of
+    ``_lidarr_wanted_error``'s fixed texts, "LIDARR_API_KEY not configured"
+    or ``LIDARR_WANTED_CANCELLED``."""
     if not LIDARR_KEY:
         return [], "LIDARR_API_KEY not configured"
     results: List[Dict[str, Any]] = []
-    page = 1
-    try:
-        while True:
-            url = (
-                f"{LIDARR_URL}/api/v1/wanted/missing?page={page}"
-                "&pageSize=100&sortKey=releaseDate&sortDirection=descending"
-            )
-            req = _ur.Request(url, headers={"X-Api-Key": LIDARR_KEY})
-            with provider_boundary.opened("lidarr", req, timeout=10) as r:
-                data = json.loads(r.read())
-            if not isinstance(data, dict) or not isinstance(data.get("records", []), list):
-                raise ValueError("unexpected wanted/missing payload")
-            records = data.get("records", [])
+    seen_ids: set = set()
+    earlier_passes = 0
+    for monitored in ((True, False) if include_unmonitored else (True,)):
+        page, pages, total = 1, 1, 0
+        prev_total: Optional[int] = None
+        while page <= pages:
+            if cancel is not None and cancel():
+                return [], LIDARR_WANTED_CANCELLED
+            try:
+                records, total = _lidarr_wanted_page(page, monitored)
+                pages = -(-total // _LIDARR_WANTED_PAGE_SIZE)
+                if pages > _LIDARR_WANTED_MAX_PAGES:
+                    raise ValueError("wanted/missing has too many pages")
+                # A short page is only legitimate when the list changed under
+                # us (totalRecords moved); otherwise rows would silently go missing.
+                expected = min(_LIDARR_WANTED_PAGE_SIZE, total - (page - 1) * _LIDARR_WANTED_PAGE_SIZE)
+                if len(records) < expected and prev_total in (None, total):
+                    raise ValueError("wanted/missing page is short of totalRecords")
+                prev_total = total
+            except Exception as exc:
+                reason = _lidarr_wanted_error(exc)
+                _app_logger.warning("Lidarr wanted-list fetch failed: %s (%s)", reason, type(exc).__name__)
+                return [], reason
             for rec in records:
-                if not isinstance(rec, dict):
+                row = _lidarr_wanted_row(rec)
+                if row is None:
                     continue
-                artist_obj = rec.get("artist") if isinstance(rec.get("artist"), dict) else {}
-                rgid = _s(rec.get("foreignAlbumId") or "").strip().lower()
-                if rgid and not _MB_UUID_RE.match(rgid):
-                    rgid = ""
-                try:
-                    lidarr_id = int(rec.get("id") or 0)
-                except (TypeError, ValueError):
-                    lidarr_id = 0
-                results.append({
-                    "artist": _s(artist_obj.get("artistName") or ""),
-                    "album": _s(rec.get("title") or ""),
-                    "year": _s(rec.get("releaseDate") or "")[:4],
-                    "type": _s(rec.get("albumType") or ""),
-                    "lidarr_id": lidarr_id,
-                    "mb_albumid": "",
-                    "mb_releasegroupid": rgid,
-                    "mb_url": _acq_release_group_url(rgid),
-                    "monitored": rec.get("monitored", True) is not False,
-                })
-            if len(records) < 100:
-                break
+                if row["lidarr_id"]:
+                    if row["lidarr_id"] in seen_ids:
+                        continue  # the list moved between pages
+                    seen_ids.add(row["lidarr_id"])
+                results.append(row)
+            if progress is not None:
+                progress(len(results), earlier_passes + total)
             page += 1
-            if page > _LIDARR_WANTED_MAX_PAGES:
-                raise ValueError("wanted/missing paging did not end")
-        return results, ""
-    except Exception as exc:
-        reason = _lidarr_wanted_error(exc)
-        _app_logger.warning("Lidarr wanted-list fetch failed: %s (%s)", reason, type(exc).__name__)
-        return [], reason
+        earlier_passes += total
+    return results, ""
+
+
+def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
+    return fetch_lidarr_wanted()
 
 
 def _acq_item_mbid(item: Dict[str, Any]) -> str:
@@ -1336,6 +1427,22 @@ def _build_acquisition_queue_payload(force: bool = False) -> Dict[str, Any]:
         "library_error": library_error,
         "wanted_error": wanted_error,
         "library_version": library_payload.get("library_version"),
+        "download_sources": _download_sources_status(),
+    }
+
+
+def _download_sources_status() -> Dict[str, Any]:
+    """Whether slskd can run and which direct sources a fallback can use
+    (ACQ-1/ACQ-5), so the UI can say so before a download starts."""
+    fallbacks = {}
+    for source in ("ytdlp", "soundcloud", "spotiflac"):
+        reason = _direct_source_unavailable_reason(source)
+        fallbacks[source] = {"available": not reason, "reason": reason}
+    return {
+        "slskd_configured": slskd_configured(),
+        "slskd_error": "" if slskd_configured() else SLSKD_NOT_CONFIGURED,
+        "fallback_chain": _slskd_fallback_methods(),
+        "fallbacks": fallbacks,
     }
 
 
@@ -1361,7 +1468,6 @@ def _acq_download_payload(item: Dict[str, Any], method: str,
     if track_count:
         payload["track_count"] = track_count
     if method == "slskd" and try_source_fallback:
-        payload["fallback_method"] = "spotiflac"
         payload["try_ytdlp_fallback"] = True
         payload["try_source_fallback"] = True
     return payload

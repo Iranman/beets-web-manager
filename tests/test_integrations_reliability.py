@@ -509,22 +509,32 @@ class SlskdTests(_BoundaryCase):
             with self.assertRaisesRegex(RuntimeError, "No Soulseek results"):
                 slskd._slskd_search_and_queue("Artist", "Album", "", [])
 
-    def test_request_failure_modes(self):  # IA-08
-        cases = [(http_error(401, body=b"Unauthorized"), RuntimeError, "HTTP 401"),
-                 (http_error(503), RuntimeError, "HTTP 503"),
-                 (http_error(429), RuntimeError, "HTTP 429"),
-                 (socket.timeout("slow"), socket.timeout, ""),
-                 (urllib.error.URLError("Name or service not known"), urllib.error.URLError, "")]
-        for effect, exc_type, text in cases:
+    def test_request_failure_modes(self):  # IA-08, ACQ-2: fixed text for every failure
+        cases = [(http_error(401, body=b"Unauthorized"),
+                  "slskd GET /searches/x → HTTP 401 (slskd rejected the API key; check SLSKD_API_KEY)"),
+                 (http_error(503), "slskd GET /searches/x → HTTP 503"),
+                 (http_error(429), "slskd GET /searches/x → HTTP 429 (slskd is rate limiting requests)"),
+                 (socket.timeout("slow"), "slskd GET /searches/x timed out"),
+                 (urllib.error.URLError("Name or service not known"), "slskd GET /searches/x is unreachable")]
+        for effect, text in cases:
             with self.subTest(effect=effect):
                 with mock.patch.object(urllib.request, "urlopen", side_effect=effect):
-                    with self.assertRaises(exc_type) as ctx:
+                    with self.assertRaises(RuntimeError) as ctx:
                         slskd._slskd_req("GET", "searches/x")
-                self.assertIn(text, str(ctx.exception))
-                self.assertNotIn("X-API-Key", str(ctx.exception))
+                self.assertEqual(str(ctx.exception), text)  # exact: no key, body or host
         with mock.patch.object(urllib.request, "urlopen", side_effect=[_Resp(b"{not json")]):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(RuntimeError, "^slskd GET /searches/x returned an unexpected response$"):
                 slskd._slskd_req("GET", "searches/x")
+        with mock.patch.object(urllib.request, "urlopen", side_effect=[_Resp({"state": "Completed"})]):
+            self.assertEqual(slskd._slskd_req("GET", "searches/x"), {"state": "Completed"})
+
+    def test_missing_api_key_is_a_fixed_message(self):  # ACQ-1
+        with mock.patch.object(slskd, "SLSKD_API_KEY", ""), \
+                mock.patch.object(urllib.request, "urlopen") as urlopen:
+            with self.assertRaisesRegex(RuntimeError, r"^slskd is not configured \(SLSKD_API_KEY\)$"):
+                slskd._slskd_req("GET", "searches/x")
+            self.assertFalse(slskd.slskd_configured())
+        urlopen.assert_not_called()
 
     def test_provider_body_is_never_echoed(self):
         body = b"secret-peer-token /home/someone/private"
@@ -543,8 +553,8 @@ class SlskdTests(_BoundaryCase):
 
 # -- Lidarr acquisition: IA-07, IA-08 -------------------------------------------------
 
-def _wanted_page(records):
-    return _Resp({"page": 1, "records": records})
+def _wanted_page(records, total=None):
+    return _Resp({"page": 1, "records": records, "totalRecords": len(records) if total is None else total})
 
 
 _WANTED = {"id": 7, "title": "Album", "releaseDate": "1999-01-01T00:00:00Z", "albumType": "Album",
@@ -583,9 +593,94 @@ class LidarrWantedTests(_BoundaryCase):
                 self.assertEqual(self._fetch(effects), ([], reason))
 
     def test_a_failed_later_page_is_not_a_partial_success(self):
-        full = [dict(_WANTED, id=i) for i in range(100)]
-        self.assertEqual(self._fetch([_wanted_page(full)] + [socket.timeout("slow")] * 2),
+        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        self.assertEqual(self._fetch([_wanted_page(full, total=1500)] + [socket.timeout("slow")] * 2),
                          ([], "Could not reach Lidarr"))
+
+    def test_short_page_with_unchanged_total_is_not_complete(self):  # QA F4
+        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        more = [dict(_WANTED, id=i) for i in range(1001, 2001)]
+        self.assertEqual(self._fetch([_wanted_page(full, total=2500), _wanted_page([], total=2500)]),
+                         ([], "Lidarr returned an unexpected response"))
+        # Final page short of what totalRecords promises is just as incomplete.
+        self.assertEqual(self._fetch([_wanted_page(full, total=2500), _wanted_page(more, total=2500),
+                                      _wanted_page([], total=2500)]),
+                         ([], "Lidarr returned an unexpected response"))
+        # A short first page contradicting its own totalRecords too.
+        self.assertEqual(self._fetch([_wanted_page([_WANTED], total=5)]),
+                         ([], "Lidarr returned an unexpected response"))
+
+    def test_short_page_is_accepted_when_total_records_moved(self):  # QA F4
+        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        rows, error = self._fetch([_wanted_page(full, total=1500), _wanted_page([], total=1000)])
+        self.assertEqual((len(rows), error), (1000, ""))
+
+    def test_missing_total_records_is_malformed(self):  # ACQ-9: paging needs it
+        self.assertEqual(self._fetch([_Resp({"records": [_WANTED]})]),
+                         ([], "Lidarr returned an unexpected response"))
+
+    def test_pages_by_total_records_and_dedupes_by_id(self):  # ACQ-8/9
+        opened = []
+
+        def fake(req, timeout=None):
+            opened.append((req.full_url, timeout))
+            page = int(req.full_url.split("page=")[1].split("&")[0])
+            # The list moved between pages: id 2 shows up on both.
+            return _wanted_page([dict(_WANTED, id=1), dict(_WANTED, id=2)] if page == 1
+                                else [dict(_WANTED, id=2), dict(_WANTED, id=3)], total=4)
+        progress = []
+        with mock.patch.object(acq, "_LIDARR_WANTED_PAGE_SIZE", 2), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=fake):
+            rows, error = acq.fetch_lidarr_wanted(progress=lambda done, total: progress.append((done, total)))
+        self.assertEqual(error, "")
+        self.assertEqual([row["lidarr_id"] for row in rows], [1, 2, 3])
+        self.assertEqual(progress, [(2, 4), (3, 4)])
+        self.assertEqual(len(opened), 2)
+        self.assertTrue(all(timeout == 60.0 for _, timeout in opened))
+        self.assertIn("pageSize=2", opened[0][0])
+        self.assertIn("monitored=true", opened[0][0])
+
+    def test_default_page_size_is_1000(self):
+        url = []
+        with mock.patch.object(urllib.request, "urlopen",
+                               side_effect=lambda req, timeout=None: url.append(req.full_url) or _wanted_page([])):
+            self.assertEqual(acq.fetch_lidarr_wanted(), ([], ""))
+        self.assertIn("pageSize=1000", url[0])
+
+    def test_one_retry_on_timeout_then_success(self):  # ACQ-11
+        rows, error = self._fetch([socket.timeout("slow"), _wanted_page([_WANTED])])
+        self.assertEqual((len(rows), error), (1, ""))
+
+    def test_one_retry_on_5xx_then_success(self):
+        rows, error = self._fetch([http_error(502), _wanted_page([_WANTED])])
+        self.assertEqual((len(rows), error), (1, ""))
+
+    def test_cancel_before_a_page_returns_no_partial_list(self):
+        calls = iter([False, True])
+        with mock.patch.object(acq, "_LIDARR_WANTED_PAGE_SIZE", 1), \
+                mock.patch.object(urllib.request, "urlopen",
+                                  side_effect=[_wanted_page([_WANTED], total=2)]) as urlopen:
+            result = acq.fetch_lidarr_wanted(cancel=lambda: next(calls))
+        self.assertEqual(result, ([], acq.LIDARR_WANTED_CANCELLED))
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_include_unmonitored_adds_the_monitored_false_list(self):
+        urls = []
+
+        def fake(req, timeout=None):
+            urls.append(req.full_url)
+            if "monitored=false" in req.full_url:
+                return _wanted_page([dict(_WANTED, id=9, monitored=False)])
+            return _wanted_page([_WANTED])
+        with mock.patch.object(urllib.request, "urlopen", side_effect=fake):
+            rows, error = acq.fetch_lidarr_wanted(include_unmonitored=True)
+        self.assertEqual(error, "")
+        self.assertEqual([(r["lidarr_id"], r["monitored"]) for r in rows], [(7, True), (9, False)])
+        self.assertEqual(len(urls), 2)
+
+    def test_no_api_key(self):
+        with mock.patch.object(acq, "LIDARR_KEY", ""):
+            self.assertEqual(acq.fetch_lidarr_wanted(), ([], "LIDARR_API_KEY not configured"))
 
     def test_bad_rows_are_skipped_not_fatal(self):
         rows, error = self._fetch([_wanted_page(["junk", dict(_WANTED, id="abc", foreignAlbumId="x")])])

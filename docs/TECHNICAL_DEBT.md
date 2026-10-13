@@ -81,6 +81,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - yt-dlp and SLSKD downloads run as subprocesses or long-polls outside this boundary.
   - `routes_submissions._extract_ytdlp_info` runs yt-dlp metadata extraction on the request thread (wave 5 removed its helper thread) with no overall deadline; only yt-dlp's own socket timeouts bound it. Add a total deadline when yt-dlp extraction moves behind the provider boundary.
   - The AI provider is never retried (every call is a POST).
+  - 0.6.0 (ACQ-3): the PO token provider URL (`YTDLP_PO_PROVIDER_URL`) is validated with its implicit configured-URL trust and probed through the boundary. A blocked or unreachable provider is dropped, and the result is cached for 300 s. The bgutil yt-dlp plugin then connects to it with its own HTTP stack, outside `secure_urlopen`. With a hostname value that leaves a DNS-rebinding or redirect window within the private floor; loopback and metadata are still refused at validation. Closing it needs address pinning in the plugin.
 - Priority: P2. Status: Open (narrowed).
 
 ## ARCH-010 Composite Mutation Workflows Still Call The Retired `backend/beets_client.py`
