@@ -63,6 +63,36 @@ class LibraryBuildSyscallTests(unittest.TestCase):
         self.assertEqual(albums[("Artist 1", "Gone")]["missing"], 1)
         self.assertEqual(payload["stats"]["tracks"], 20)
 
+    def _albums(self):
+        payload = ls._build_library_payload()
+        return {(a["name"], al["album"]): al for a in payload["artists"] for al in a["albums"]}
+
+    def test_cover_art_case_folds_like_path_exists_did(self):
+        # QA #398 N1: a case-insensitive filesystem (SMB) is simulated by a
+        # Path.exists() that folds case; the on-disk name comes back.
+        folder = self.root / "Artist 2" / "Album 1 (2001)"
+        (folder / "cover.jpg").rename(folder / "Cover.JPG")
+        real_exists = Path.exists
+
+        def folding_exists(path, *a, **kw):
+            parent = os.path.dirname(str(path))
+            if os.path.isdir(parent):
+                return any(n.casefold() == path.name.casefold() for n in os.listdir(parent))
+            return real_exists(path, *a, **kw)
+        with mock.patch.object(Path, "exists", folding_exists):
+            art = self._albums()[("Artist 2", "Album 1")]["disk_art"]
+        self.assertEqual(Path(art).name, "Cover.JPG")
+
+    @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "needs a non-root POSIX user")
+    def test_unreadable_artist_folder_does_not_fail_the_build(self):
+        # QA #398 N3: its items count as missing; the rest of the library builds.
+        locked = self.root / "Artist 1"
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        albums = self._albums()
+        self.assertEqual(albums[("Artist 0", "Album 0")]["missing"], 1)
+        self.assertEqual(albums[("Artist 1", "Album 0")]["missing"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

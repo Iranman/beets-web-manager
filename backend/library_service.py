@@ -1969,7 +1969,9 @@ def _build_library_payload() -> dict:
         parent_listing = _listing(parent) if parent else None
         if parent_listing is not None and base_name in parent_listing[1]:
             continue  # on disk
-        if not Path(abs_p).exists():
+        # os.path.exists, not Path.exists(): an unreadable folder (PermissionError)
+        # makes the item count as missing instead of failing the whole build (QA #398 N3).
+        if not os.path.exists(abs_p):
             artist = item.albumartist or item.artist or "Unknown Artist"
             album  = item.album  or "Unknown Album"
             year   = item.year   or 0
@@ -2208,10 +2210,20 @@ def _build_library_payload() -> dict:
             disk_art = ""
             if aldir:
                 art_dirs, art_files = _listing(str(aldir)) or ((), set())
+                folded: Optional[Dict[str, str]] = None
                 for aname in ("albumart.jpg", "albumart.png", "folder.jpg",
                               "cover.jpg", "front.jpg", "cover.png"):
                     if aname in art_files or aname in art_dirs:  # as Path.exists() did
                         disk_art = str(aldir / aname)
+                        break
+                    # QA #398 N1: on a case-insensitive filesystem (SMB, NTFS)
+                    # Path.exists() also found Cover.JPG; a stat confirms the
+                    # filesystem folds case, and the on-disk name is returned.
+                    if folded is None:
+                        folded = {n.casefold(): n for n in (*art_dirs, *art_files)}
+                    real = folded.get(aname)
+                    if real and (aldir / aname).exists():
+                        disk_art = str(aldir / real)
                         break
             mb_health = _fast_album_mb_health_fields(
                 tracks, expected_track_count, missing_cnt)
