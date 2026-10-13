@@ -121,7 +121,9 @@ type ConfirmIntent =
   | { kind: 'dismiss'; item: ReviewItem }
   | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
   | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; destructive: boolean }
-  | { kind: 'attach_recording_confirm'; item: ReviewItem; mbid: string; candidate: ReviewRecordingCandidate };
+  | { kind: 'attach_recording_confirm'; item: ReviewItem; mbid: string; candidate: ReviewRecordingCandidate }
+  | { kind: 'revalidate'; ids: string[] }
+  | { kind: 'clean_stale' };
 
 type BgJobStatus =
   | 'running'
@@ -257,6 +259,15 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function hasModifierKey(e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): boolean {
   return e.altKey || e.ctrlKey || e.metaKey || e.shiftKey;
+}
+
+// Character shortcuts ([, ], i) compare e.key, so Shift and AltGr are allowed:
+// many layouts need them to type [ or ] (AltGr is reported as Ctrl+Alt on Windows).
+// Only real Ctrl/Meta/Alt chords are ignored.
+function isCommandChord(e: KeyboardEvent): boolean {
+  const altGraph = e.getModifierState?.('AltGraph') || (e.ctrlKey && e.altKey);
+  if (altGraph) return e.metaKey;
+  return e.ctrlKey || e.metaKey || e.altKey;
 }
 
 function reviewQueueSnapshot(items: ReviewItem[], counts: ReviewCounts): string {
@@ -2987,7 +2998,7 @@ function ConfirmDialog({
   onClose: () => void;
   onConfirm: (reason?: string) => void;
 }) {
-  const item = intent?.item;
+  const item = intent && 'item' in intent ? intent.item : undefined;
   const deletingLibraryFolder = intent?.kind === 'delete_folder' && isMusicLibraryPath(item?.path);
   const wrongSourceNote = intent?.kind === 'delete_folder' ? wrongSourceEvidenceNote(item) : '';
   const isAttachConfirm = intent?.kind === 'attach_recording_confirm';
@@ -3004,6 +3015,10 @@ function ConfirmDialog({
         ? cleanupDestructive ? 'Permanently Delete Rejected Files' : 'Quarantine Rejected Files'
       : isAttachConfirm
         ? 'Confirm Recording ID (Review Required)'
+      : intent?.kind === 'revalidate'
+        ? 'Revalidate and Import Eligible Items'
+      : intent?.kind === 'clean_stale'
+        ? 'Clean Stale Review Entries'
         : 'Start Tagging Job';
   const detail = intent?.kind === 'dismiss'
     ? 'This removes the folder from Pending Review only. Audio files are not deleted.'
@@ -3017,6 +3032,10 @@ function ConfirmDialog({
           : 'These files will be moved to the import-review quarantine folder, not deleted. Other files in the folder stay in review.'
       : isAttachConfirm
         ? 'The backend flagged this candidate as needing human review before it can be attached. Confirming only attaches this Recording ID -- it does not authorize any other action.'
+      : intent?.kind === 'revalidate'
+        ? `This re-checks ${intent.ids.length} visible pending review item${intent.ids.length === 1 ? '' : 's'} and may start import jobs for items that now pass the safety checks. Those jobs can write tags and move files according to the configured path template. Items that still need review stay in the queue.`
+      : intent?.kind === 'clean_stale'
+        ? 'This removes Pending Review entries whose folder no longer exists or whose album is already in the library. Only review metadata changes; no audio files are deleted.'
         : 'This starts a backend Beets job that can write tags and move files according to the configured path template.';
 
   return (
@@ -3102,7 +3121,11 @@ function ConfirmDialog({
                 ? deleteFolderActionLabel(item)
                 : intent?.kind === 'cleanup_files'
                   ? `${cleanupDestructive ? 'Delete' : 'Quarantine'} ${intent.files.length} file${intent.files.length === 1 ? '' : 's'}`
-                  : 'Confirm'}
+                  : intent?.kind === 'revalidate'
+                    ? `Revalidate ${intent.ids.length} and import eligible`
+                    : intent?.kind === 'clean_stale'
+                      ? 'Clean stale entries'
+                      : 'Confirm'}
             </Button>
           </div>
         </DialogPanel>
@@ -3490,12 +3513,17 @@ export function ImportReviewPage({
   const activeItem = activeIndex >= 0 ? visibleItems[activeIndex] ?? null : null;
   const revalidatePendingCount = visibleItems.filter((item) => item.type === 'pending_ai').length;
 
-  const handleRevalidateQueue = useCallback(async () => {
+  const requestRevalidateQueue = useCallback(() => {
     const ids = visibleItems.filter((item) => item.type === 'pending_ai').map((item) => item.id);
     if (ids.length < 1) {
       setRevalidateMsg('No pending review items are visible to revalidate.');
       return;
     }
+    setConfirmIntent({ kind: 'revalidate', ids });
+  }, [visibleItems]);
+
+  // Runs only from the confirm dialog: auto_enqueue may start imports for eligible items.
+  const handleRevalidateQueue = useCallback(async (ids: string[]) => {
     setRevalidateBusy(true);
     setRevalidateMsg(`Revalidating ${ids.length} review item${ids.length === 1 ? '' : 's'}...`);
     try {
@@ -3538,7 +3566,7 @@ export function ImportReviewPage({
     } finally {
       setRevalidateBusy(false);
     }
-  }, [loadQueue, visibleItems]);
+  }, [loadQueue]);
 
   // Target path preview — only for the active item
   useEffect(() => {
@@ -4228,8 +4256,10 @@ export function ImportReviewPage({
     else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files, intent.destructive);
     else if (intent.kind === 'attach_recording_confirm') {
       void runConfirmedAttach(intent.item, intent.mbid, intent.candidate, reason || '');
-    } else void runDeleteFolder(intent.item);
-  }, [confirmIntent, runApply, runCleanupFiles, runConfirmedAttach, runDeleteFolder, runDismiss]);
+    } else if (intent.kind === 'revalidate') void handleRevalidateQueue(intent.ids);
+    else if (intent.kind === 'clean_stale') void handleCleanupStale();
+    else void runDeleteFolder(intent.item);
+  }, [confirmIntent, handleCleanupStale, handleRevalidateQueue, runApply, runCleanupFiles, runConfirmedAttach, runDeleteFolder, runDismiss]);
 
   const selectFilter = useCallback((nextFilter: QueueFilter) => {
     setFilter(nextFilter);
@@ -4433,7 +4463,7 @@ export function ImportReviewPage({
     // REV-15: the panel stays mounted while another Import tab is shown, so gate on `active`.
     if (!active) return;
     const handler = (e: KeyboardEvent) => {
-      if (confirmIntent || isEditableTarget(e.target) || hasModifierKey(e)) return;
+      if (confirmIntent || isEditableTarget(e.target) || isCommandChord(e)) return;
       if (e.key === '[') { e.preventDefault(); handlePrev(); }
       if (e.key === ']') { e.preventDefault(); handleNext(); }
       if (e.key.toLowerCase() === 'i') { e.preventDefault(); handleFocusManualEntry(); }
@@ -4472,12 +4502,13 @@ export function ImportReviewPage({
               disabled={revalidateBusy || loading || revalidatePendingCount < 1}
               size="small"
               variant="outlined"
-              onClick={() => void handleRevalidateQueue()}
+              onClick={requestRevalidateQueue}
+              title="Re-check visible pending items; eligible items may be imported after you confirm"
             >
-              {revalidateBusy ? 'Revalidating…' : 'Revalidate'}
+              {revalidateBusy ? 'Revalidating…' : 'Revalidate & Import…'}
             </Button>
-            <Button disabled={cleanupBusy || loading} size="small" variant="outlined" onClick={() => void handleCleanupStale()}>
-              {cleanupBusy ? 'Cleaning…' : 'Clean Stale'}
+            <Button disabled={cleanupBusy || loading} size="small" variant="outlined" onClick={() => setConfirmIntent({ kind: 'clean_stale' })}>
+              {cleanupBusy ? 'Cleaning…' : 'Clean Stale…'}
             </Button>
             <Button variant="contained" onClick={() => void loadQueue()} disabled={loading}>
               Refresh
