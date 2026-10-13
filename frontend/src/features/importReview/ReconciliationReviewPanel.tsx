@@ -50,6 +50,13 @@ export function ReconciliationReviewPanel() {
   }, [load]);
 
   const resolve = async (review: ReconciliationReview, choice: ReconciliationChoice) => {
+    // 0.5.1: keep_existing / keep_imported change library files -- ask first. keep_both changes nothing.
+    const prompt = choice === 'keep_existing'
+      ? 'Keep the existing track? The imported copy is removed from the library and moved to quarantine, only if its audio fingerprint proves it is the same recording.'
+      : choice === 'keep_imported'
+        ? 'Keep the imported track? Its file replaces the existing file for this track in the library, only if its audio fingerprint proves it is the same recording.'
+        : '';
+    if (prompt && !window.confirm(prompt)) return;
     setBusy(review.review_id);
     try {
       await resolveReconciliationReview(review.review_id, choice);

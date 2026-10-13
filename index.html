@@ -3630,7 +3630,7 @@ async function clearPendingReview() {
   const cnt = document.getElementById('pending-count');
   const n = cnt ? cnt.textContent.replace(/[()]/g,'').trim() : '';
   if(!confirm('Clear all pending review items' + (n?' ('+n+')':'') + '? This cannot be undone.')) return;
-  await api('/api/ai-pending-review', {method:'DELETE', headers:{'Content-Type':'application/json'}, body:'{}'});
+  await api('/api/ai-pending-review', {method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({all:true})});
   loadPendingReview();
   loadReviewQueue();
 }

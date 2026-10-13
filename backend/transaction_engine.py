@@ -23,7 +23,6 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-import urllib.parse
 
 LOG = logging.getLogger("beets_web.transaction_engine")
 
@@ -995,14 +994,11 @@ def execute_import_review_cleanup_plan(
     if not raw_path:
         return {"ok": False, "error": "Review path is required."}
 
-    # URL decoding budget & null-byte check
-    current_decode = raw_path
-    for _ in range(3):
-        decoded = urllib.parse.unquote(current_decode)
-        if decoded == current_decode:
-            break
-        current_decode = decoded
-    if "\x00" in current_decode or "%00" in raw_path or "\x00" in raw_path:
+    # N1: never URL-decode. Callers send the literal path in JSON, and the
+    # route authorized exactly that string (Pending Review match). Decoding
+    # here would plan the delete on a different folder ("Mix%20Tape" ->
+    # "Mix Tape") than the one that was authorized.
+    if "%00" in raw_path or "\x00" in raw_path:
         return {"ok": False, "error": "Path contains unsafe encoded characters."}
 
     action = str(payload.get("action") or "delete").strip().lower()
@@ -1010,7 +1006,7 @@ def execute_import_review_cleanup_plan(
     confirmed_wrong_library_folder = bool(
         payload.get("confirmed_wrong_library_folder") or payload.get("allow_library_delete")
     )
-    target_path = Path(current_decode)
+    target_path = Path(raw_path)
 
     if os.path.islink(raw_path) or os.path.islink(target_path) or target_path.is_symlink():
         return {"ok": False, "error": f"Symlinks are not permitted: {raw_path}"}
@@ -1078,66 +1074,49 @@ def execute_import_review_cleanup_plan(
                     skipped.append({"file": f_raw, "reason": "outside_review_folder"})
                     continue
 
-                # 1. Try literal path under resolved_target first
-                literal_fp = Path(f_raw)
-                if not literal_fp.is_absolute():
-                    literal_fp = resolved_target / literal_fp
-                
-                try:
-                    literal_resolved = literal_fp.resolve(strict=False)
-                except Exception:
-                    literal_resolved = None
+                # N1: act on the literal name only, never URL-decoded: the
+                # route authorized exactly these strings.
+                norm_f = f_raw.replace("\\", "/")
+                parts = [p for p in norm_f.split("/") if p]
+                if any(p in {".", ".."} for p in parts) or Path(f_raw).is_absolute():
+                    skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                    continue
 
-                fp_to_use = None
-                if literal_resolved and literal_resolved.exists() and literal_resolved.is_file() and not literal_fp.is_symlink() and not literal_resolved.is_symlink():
-                    if literal_resolved != resolved_target and resolved_target in literal_resolved.parents:
-                        fp_to_use = literal_resolved
+                # Textual normpath + prefix barrier on the exact value that
+                # reaches the probes below (CodeQL py/path-injection #1419-
+                # #1421, #696-#702). ".." and absolute names were refused
+                # above, so this is the same literal path; the component
+                # containment and symlink checks below still decide.
+                target_text = os.path.normpath(str(resolved_target))
+                fp_text = os.path.normpath(os.path.join(target_text, f_raw))
+                if not fp_text.startswith(target_text + os.sep):
+                    skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                    continue
+                fp = Path(fp_text)
+                fp_resolved = fp.resolve(strict=False)
 
-                if not fp_to_use:
-                    f_decode = f_raw
-                    for _ in range(3):
-                        dec = urllib.parse.unquote(f_decode)
-                        if dec == f_decode:
-                            break
-                        f_decode = dec
+                if fp_resolved == resolved_target or resolved_target not in fp_resolved.parents:
+                    skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                    continue
 
-                    if "\x00" in f_decode:
-                        skipped.append({"file": f_raw, "reason": "invalid_path"})
-                        continue
+                # Check for symlinks in path components
+                has_symlink = False
+                curr_check = fp
+                while curr_check != resolved_target and resolved_target in curr_check.parents:
+                    if curr_check.is_symlink() or os.path.islink(str(curr_check)):
+                        has_symlink = True
+                        break
+                    curr_check = curr_check.parent
 
-                    norm_f = f_decode.replace("\\", "/")
-                    parts = [p for p in norm_f.split("/") if p]
-                    if any(p in {".", ".."} for p in parts) or f_raw.startswith(("/", "\\")) or Path(f_decode).is_absolute():
-                        skipped.append({"file": f_raw, "reason": "outside_review_folder"})
-                        continue
+                if has_symlink or os.path.islink(fp) or os.path.islink(fp_resolved) or fp.is_symlink() or fp_resolved.is_symlink():
+                    skipped.append({"file": f_raw, "reason": "symlink"})
+                    continue
 
-                    fp = Path(f_decode)
-                    if not fp.is_absolute():
-                        fp = resolved_target / fp
-                    fp_resolved = fp.resolve(strict=False)
-
-                    if fp_resolved == resolved_target or resolved_target not in fp_resolved.parents:
-                        skipped.append({"file": f_raw, "reason": "outside_review_folder"})
-                        continue
-
-                    # Check for symlinks in path components
-                    has_symlink = False
-                    curr_check = fp
-                    while curr_check != resolved_target and resolved_target in curr_check.parents:
-                        if curr_check.is_symlink() or os.path.islink(str(curr_check)):
-                            has_symlink = True
-                            break
-                        curr_check = curr_check.parent
-
-                    if has_symlink or os.path.islink(fp) or os.path.islink(fp_resolved) or fp.is_symlink() or fp_resolved.is_symlink():
-                        skipped.append({"file": f_raw, "reason": "symlink"})
-                        continue
-
-                    if fp_resolved.exists() and fp_resolved.is_file():
-                        fp_to_use = fp_resolved
-                    else:
-                        skipped.append({"file": f_raw, "reason": "not_found"})
-                        continue
+                if fp_resolved.exists() and fp_resolved.is_file():
+                    fp_to_use = fp_resolved
+                else:
+                    skipped.append({"file": f_raw, "reason": "not_found"})
+                    continue
 
                 if fp_to_use:
                     st = os.lstat(str(fp_to_use))

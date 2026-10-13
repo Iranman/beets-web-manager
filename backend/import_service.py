@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
 from backend.ai_service import _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
-from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_if_already_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
+from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _library_album_ids_for_folder, _queue_folder_for_manual_review, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
@@ -2676,7 +2676,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 log.append(f"[import] Missing-track import job {child_job_id} started; waiting for completion…")
                 _wait_for_child_job(child_job_id, log, cancel_event, prefix="import", timeout=1200)
                 if not scan.get("unknown_files"):
-                    _delete_if_already_in_library(folder_path, "already in library", log)
+                    _delete_source_if_proven_in_library(folder_path, target_album_id, selected_releasegroupid, log)
                 log.append("[import] Existing album merge complete.")
                 return True
 
@@ -2688,7 +2688,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     )
                 else:
                     log.append("[import] Existing album is already complete for this MusicBrainz release.")
-                _delete_if_already_in_library(folder_path, "already in library", log)
+                _delete_source_if_proven_in_library(folder_path, target_album_id, selected_releasegroupid, log)
                 return True
 
             if selected_subset_import and not useful_files and scan.get("duplicate_files"):

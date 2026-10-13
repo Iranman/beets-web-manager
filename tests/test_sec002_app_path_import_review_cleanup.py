@@ -430,6 +430,9 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         self.assertEqual(music_response.status_code, 200, music_response.get_json())
         self.assertEqual(downloads_response.get_json()["audio_count"], 1)
         self.assertEqual(music_response.get_json()["audio_count"], 1)
+        # REV-04: the server, not the client, decides library membership.
+        self.assertIs(downloads_response.get_json()["is_library_path"], False)
+        self.assertIs(music_response.get_json()["is_library_path"], True)
         self.assertEqual(root_response.status_code, 400, root_response.get_json())
         self.assertIn("approved root", root_response.get_json()["error"])
 
@@ -596,6 +599,130 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         else:
             self.assertEqual(data["skipped_count"], 1)
             self.assertTrue(source.exists())
+
+    # N1: the engine must act on exactly the path the route authorized. A
+    # Pending Review folder named "Mix%20Tape" used to be URL-decoded and the
+    # delete planned on "Mix Tape", a different folder that was never reviewed.
+    def test_delete_review_folder_never_decodes_to_unreviewed_sibling(self):
+        reviewed = self.downloads / "Mix%20Tape"
+        victim = self.downloads / "Mix Tape"
+        reviewed_track = self._write_audio(reviewed / "a.flac")
+        victim_track = self._write_audio(victim / "keep.flac")
+        self._write_pending(reviewed)
+
+        response = self._post_delete_folder(reviewed)
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertTrue(victim_track.exists())
+        self.assertEqual(victim_track.read_bytes(), b"not-real-audio-but-extension-is-enough")
+        self.assertFalse(reviewed_track.exists())
+
+    def test_delete_review_folder_missing_encoded_folder_deletes_nothing(self):
+        reviewed = self.downloads / "Mix%20Tape"  # reviewed, gone from disk
+        victim = self.downloads / "Mix Tape"
+        victim_track = self._write_audio(victim / "keep.flac")
+        self._write_pending(reviewed)
+
+        response = self._post_delete_folder(reviewed)
+        data = response.get_json() or {}
+
+        self.assertEqual(data.get("files_removed", 0), 0, data)
+        self.assertTrue(victim_track.exists())
+
+    def test_cleanup_never_decodes_folder_or_file_names(self):
+        reviewed = self.downloads / "Mix%20Tape"
+        victim = self.downloads / "Mix Tape"
+        victim_track = self._write_audio(victim / "a b.flac")
+        self._write_audio(victim / "a%20b.flac")
+        sibling = self._write_audio(reviewed / "a b.flac")
+        self._write_pending(reviewed)
+
+        # "a%20b.flac" names no file in the reviewed folder (it holds
+        # "a b.flac"); the decoded folder/file pair lives only in the victim.
+        response = self._post_cleanup(reviewed, ["a%20b.flac"], action="delete_rejected", allow_delete=True)
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertEqual(data["deleted_count"], 0, data)
+        self.assertEqual(data["skipped_count"], 1, data)
+        self.assertTrue(victim_track.exists())
+        self.assertTrue((victim / "a%20b.flac").exists())
+        self.assertTrue(sibling.exists())
+
+    def test_cleanup_missing_encoded_folder_deletes_nothing(self):
+        reviewed = self.downloads / "Mix%20Tape"  # reviewed, gone from disk
+        victim = self.downloads / "Mix Tape"
+        victim_track = self._write_audio(victim / "keep.flac")
+        self._write_pending(reviewed)
+
+        response = self._post_cleanup(reviewed, ["keep.flac"], action="delete_rejected", allow_delete=True)
+        data = response.get_json()
+
+        self.assertEqual(data.get("deleted_count", 0), 0, data)
+        self.assertTrue(victim_track.exists())
+
+    # N2: a no-MB album id must not open its whole artist folder.
+    def _no_mb_album_patches(self, item_paths):
+        rows = [{"id": i + 1, "path": str(p), "disc": 1, "track": i + 1} for i, p in enumerate(item_paths)]
+        return [
+            mock.patch.object(app_module.composite_workflows, "get_album",
+                              return_value={"id": 7, "mb_albumid": ""}),
+            mock.patch.object(app_module.composite_workflows, "find_all_items_by_album_id",
+                              return_value=rows),
+        ]
+
+    def _start(self, patches):
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_no_mb_album_id_cannot_quarantine_artist_folder(self):
+        album_a = self._write_audio(self.music / "Artist" / "Album A" / "01.flac")
+        album_b = self._write_audio(self.music / "Artist" / "Album B" / "01.flac")
+        self._start(self._no_mb_album_patches([album_a]))
+
+        response = self.client.post("/api/import/review-folder/delete",
+                                    json={"path": str(self.music / "Artist"), "album_id": 7})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 400, data)
+        self.assertTrue(album_a.exists())
+        self.assertTrue(album_b.exists())
+        self.assertEqual(list(self.quarantine.rglob("*.flac")), [])
+
+    def test_no_mb_album_id_quarantines_only_its_own_folder(self):
+        album_a = self._write_audio(self.music / "Artist" / "Album A" / "01.flac")
+        album_b = self._write_audio(self.music / "Artist" / "Album B" / "01.flac")
+        self._start(self._no_mb_album_patches([album_a]))
+
+        response = self.client.post("/api/import/review-folder/delete",
+                                    json={"path": str(album_a.parent), "album_id": 7})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertFalse(album_a.exists())
+        self.assertTrue(album_b.exists())
+
+    def test_no_mb_album_folder_with_foreign_audio_is_refused(self):
+        album_a = self._write_audio(self.music / "Artist" / "Loose" / "01.flac")
+        stray = self._write_audio(self.music / "Artist" / "Loose" / "other-album.flac")
+        self._start(self._no_mb_album_patches([album_a]))
+
+        response = self.client.post("/api/import/review-folder/delete",
+                                    json={"path": str(album_a.parent), "album_id": 7})
+
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertTrue(album_a.exists())
+        self.assertTrue(stray.exists())
+
+    def test_no_mb_album_multi_disc_folder_matches(self):
+        from backend import library_service
+        d1 = self._write_audio(self.music / "Artist" / "Album" / "CD1" / "01.flac")
+        d2 = self._write_audio(self.music / "Artist" / "Album" / "CD2" / "01.flac")
+        self._start(self._no_mb_album_patches([d1, d2]))
+        self.assertTrue(library_service._library_no_mb_album_matches_folder(7, str(self.music / "Artist" / "Album")))
+        self.assertFalse(library_service._library_no_mb_album_matches_folder(7, str(self.music / "Artist")))
 
 
 if __name__ == "__main__":
