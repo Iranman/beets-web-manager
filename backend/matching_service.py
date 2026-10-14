@@ -107,12 +107,18 @@ IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
     "duplicate_track": True,             # two files, or a file and the album, hold the same recording
     "identity_conflict": True,           # the canonical evaluator found a conflict or refused the proof
 }
-_REFUSAL_CODE_RE = re.compile(r"\[reason_code=([a-z_]+)\]")
+# Anchored to the start of the fixed import_service message: peer-controlled
+# text (Soulseek filenames) can appear later in other import errors and must
+# not be able to inject a code.
+_REFUSAL_CODE_RE = re.compile(
+    r"(?:import job failed: )?(?:ERROR: )?"
+    r"Could not resolve a MusicBrainz release ID for import \[reason_code=([a-z_]+)\]"
+)
 
 
 def import_refusal_reason_code(message: Any) -> str:
     """The reason code in a refused import's error text ("" when none)."""
-    match = _REFUSAL_CODE_RE.search(_s(message))
+    match = _REFUSAL_CODE_RE.match(_s(message))
     return match.group(1) if match and match.group(1) in IMPORT_REFUSAL_REASONS else ""
 
 

@@ -13,6 +13,9 @@ The project uses Semantic Versioning.
 - An slskd album download no longer downloads one peer's copy after another when the import is refused for a reason that is not about the files (`missing_track_scope`, `local_scan_unavailable`, `acoustid_unavailable`). It cleans up that one candidate, logs one line naming the reason code, and goes on to the direct-source fallback as before. A refusal about the files themselves, or with no reason code, still tries the next peer.
 - Cancelling a failed slskd candidate's transfers always failed ("could not cancel N queued transfer(s)"): the request named the file, but slskd cancels by transfer id. It now looks the ids up first, so the transfers are cancelled and removed from slskd.
 - A file that could not be fingerprinted (corrupt, under 5 seconds, or `fpcalc` timed out) now refuses a missing-track import with `file_unfingerprintable`, which is specific to that download, instead of `acoustid_unavailable`. `acoustid_unavailable` now means only that AcoustID itself is not configured, rejected the key, is down or is rate limited, or that `fpcalc` is missing or cannot be run. Both still refuse the import.
+- If the downloads folder could not be checked (for example a stale network mount answering `Permission denied`), opening the Review Queue read it as empty and the next queued item overwrote the saved queue. A failed check now keeps every item.
+- A refusal reason code is now read only from the fixed import refusal message, so a Soulseek peer cannot stop the peer search by putting `[reason_code=...]` in a file name.
+- slskd transfer cancellation never sends a request for a `.` or `..` username or transfer id.
 - The Review Queue no longer lists an item whose downloads folder has been deleted (for example a failed download candidate that was cleaned up). The item is auto-resolved.
 
 ## v0.7.0 - 2026-10-14

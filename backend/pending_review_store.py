@@ -200,7 +200,13 @@ def _review_download_folder_is_gone(folder_path: str) -> bool:
     drops it. Limited to DOWNLOADS_ROOT, which this process can see; a missing
     downloads mount never prunes anything."""
     raw = _s(folder_path).strip()
-    if not raw or not DOWNLOADS_ROOT.is_dir() or not _path_is_under(Path(raw), DOWNLOADS_ROOT):
+    try:
+        # Path.is_dir() re-raises EACCES/EIO/ESTALE (stale mount); the caller
+        # would turn that into an empty queue and the next save would write it.
+        root_ok = DOWNLOADS_ROOT.is_dir()
+    except OSError:
+        return False
+    if not raw or not root_ok or not _path_is_under(Path(raw), DOWNLOADS_ROOT):
         return False
     # Only a definite "not there" counts; os.path.lexists also says False on
     # EACCES/EIO, which must keep the row (as the full prune does).
