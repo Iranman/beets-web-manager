@@ -89,6 +89,10 @@
       "CANONICAL_FINAL_DECISION",
       "Invokes build_album_matching_decision; ok requires canonical action_allowed, tracklist heuristics only narrow."
     ],
+    "backend/matching_service.py::_missing_track_recording_proof": [
+      "CANONICAL_FINAL_DECISION",
+      "Per-file AcoustID proof via canonical acoustid_evidence_from_hits; acceptance requires build_album_matching_decision action_allowed."
+    ],
     "app.py::_import_review_build_revalidated_match": [
       "COMPATIBILITY_WRAPPER",
       "is_importable vetoed by canonical matching_decision; confidence is display/narrowing."
