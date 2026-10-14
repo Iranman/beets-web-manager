@@ -40,6 +40,15 @@ type QueueAction = DownloadMethod | 'lidarr';
 type BatchMethod = DownloadMethod;
 
 export const PAGE_SIZE = 100;
+/** Rows per request when collecting a batch's failed rows across pages (the server's max limit). */
+export const RETRY_SCAN_PAGE = 500;
+
+function missingFirstOrder(a: AcquisitionQueueItem, b: AcquisitionQueueItem) {
+  const aMissing = a.sources.includes('beets') ? 0 : 1;
+  const bMissing = b.sources.includes('beets') ? 0 : 1;
+  if (aMissing !== bMissing) return aMissing - bMissing;
+  return (a.sort_key || '').localeCompare(b.sort_key || '');
+}
 export const REFRESH_POLL_MS = 3000;
 const SEARCH_DEBOUNCE_MS = 300;
 
@@ -520,15 +529,10 @@ export function AcquisitionPanel({
     () => visibleItems.filter((item) => Boolean(item.mbid && item.actions?.can_download)),
     [visibleItems],
   );
-  const orderedProcessableItems = useMemo(() => {
-    if (!batchMissingFirst) return processableItems;
-    return [...processableItems].sort((a, b) => {
-      const aMissing = a.sources.includes('beets') ? 0 : 1;
-      const bMissing = b.sources.includes('beets') ? 0 : 1;
-      if (aMissing !== bMissing) return aMissing - bMissing;
-      return (a.sort_key || '').localeCompare(b.sort_key || '');
-    });
-  }, [batchMissingFirst, processableItems]);
+  const orderedProcessableItems = useMemo(
+    () => (batchMissingFirst ? [...processableItems].sort(missingFirstOrder) : processableItems),
+    [batchMissingFirst, processableItems],
+  );
   const parsedBatchLimit = Math.max(1, Math.min(500, Number.parseInt(batchLimit, 10) || 25));
   const batchItems = orderedProcessableItems.slice(0, parsedBatchLimit);
   const batchHasDownloads = batchItems.some((item) => Boolean(item.actions?.can_download));
@@ -560,11 +564,48 @@ export function AcquisitionPanel({
     : batchNeedsAttention
       ? 'Previous batch needs attention'
       : 'Previous batch completed';
+  // Failed rows across every page of the current filter, not just this page.
+  const failedKeySig = currentFailures.map((failure) => failure.key).filter(Boolean).join('\n');
+  const queueItems = queue?.items;
+  const queueTotal = queue?.total;
+  const [failedRows, setFailedRows] = useState<typeof visibleItems>([]);
+  const [failedRowsError, setFailedRowsError] = useState('');
+  useEffect(() => {
+    setFailedRowsError('');
+    if (!failedKeySig || batchRunning || !queueItems) {
+      setFailedRows([]);
+      return;
+    }
+    const failedKeys = new Set(failedKeySig.split('\n'));
+    const pick = (items: typeof visibleItems) => items.filter((item) => failedKeys.has(item.key));
+    if (offset === 0 && queueItems.length >= (queueTotal ?? 0)) { // this page is the whole filtered list
+      setFailedRows(pick(queueItems));
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const found: typeof visibleItems = [];
+      // ponytail: walks the filtered list 500 rows a request; a server keys filter would make this one call.
+      for (let at = 0; ; at += RETRY_SCAN_PAGE) {
+        const page = await getAcquisitionQueue({
+          offset: at, limit: RETRY_SCAN_PAGE, search, source: sourceFilter,
+          album_type: albumType ? [albumType] : undefined, sort, include_unmonitored: showUnmonitored,
+        });
+        found.push(...pick(page.items ?? []));
+        if (found.length >= failedKeys.size || !page.items?.length || at + RETRY_SCAN_PAGE >= page.total) break;
+      }
+      if (!cancelled) setFailedRows(found);
+    })().catch((err) => {
+      if (cancelled) return;
+      setFailedRows([]);
+      setFailedRowsError(`The failed rows of the last batch could not be listed: ${errorMessage(err)}. Retry is unavailable until the list loads. Click Refresh list to try again.`);
+    });
+    return () => { cancelled = true; };
+  }, [albumType, batchRunning, failedKeySig, offset, queueItems, queueTotal, search, showUnmonitored, sort, sourceFilter]);
   const retryableFailedItems = useMemo(() => {
-    if (!currentFailures.length || batchRunning) return [];
-    const failedKeys = new Set(currentFailures.map((failure) => failure.key).filter(Boolean));
-    return orderedProcessableItems.filter((item) => failedKeys.has(item.key) && item.actions?.can_download);
-  }, [batchRunning, currentFailures, orderedProcessableItems]);
+    const rows = failedRows.filter((item) => Boolean(item.mbid && item.actions?.can_download));
+    return batchMissingFirst ? rows.sort(missingFirstOrder) : rows;
+  }, [batchMissingFirst, failedRows]);
   const canRetryFailedItems = Boolean(retryableFailedItems.length && !batchStarting && !batchRunning);
   const primaryBatchLabel = retryableFailedItems.length
     ? `Retry ${retryableFailedItems.length} failed with ${slskdActionLabel(ytdlpEnabled)}`
@@ -708,7 +749,7 @@ export function AcquisitionPanel({
             <Button
               disabled={loading || !canRetryFailedItems}
               size="small"
-              title={`${retryableFailedItems.length} failed row(s) still present in the visible queue`}
+              title={`${retryableFailedItems.length} failed row(s) still in the list for the current filters, across all pages`}
               variant="contained"
               onClick={() => void runDownloadAll(retryableFailedItems.map((item) => item.key), 'slskd')}
             >
@@ -753,6 +794,7 @@ export function AcquisitionPanel({
       {error ? <Alert severity="error">{error}</Alert> : null}
       {refreshError ? <Alert severity="error" onClose={() => setRefreshError('')}>{refreshError}</Alert> : null}
       {batchError && !batchRunning ? <Alert severity="error" onClose={() => setBatchError('')}>{batchError}</Alert> : null}
+      {failedRowsError ? <Alert severity="error">{failedRowsError}</Alert> : null}
       {sources && !sources.slskd_configured ? (
         <Alert severity="warning">
           SLSKD downloads cannot start: {sources.slskd_error || 'slskd is not configured'}. Set it in the container environment and recreate the container, or use a direct source button on a row.
