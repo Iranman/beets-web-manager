@@ -22,7 +22,7 @@ from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
-from backend.matching_service import _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
+from backend.matching_service import IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
 from backend.job_service import _wait_for_child_job
 from job_engine import DuplicateJobError
@@ -696,6 +696,16 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         _delete_staged_import_folder(import_dir, log)
                         if username or remote_dir:
                             slskd_skip_candidates.add(_skip_key(username, remote_dir))
+                        # #406: a refusal that is not about this copy (False in
+                        # IMPORT_REFUSAL_REASONS) fails every peer the same way.
+                        reason_code = import_refusal_reason_code(ex)
+                        if reason_code and not IMPORT_REFUSAL_REASONS[reason_code]:
+                            log.append(
+                                f"  [slskd] Not trying other Soulseek peers: import refused "
+                                f"for a reason that is not specific to this copy "
+                                f"({reason_code}); every peer's copy would be refused the same way."
+                            )
+                            break
                         if import_attempt < max_slskd_attempts:
                             log.append(
                                 "  [slskd] Trying the next peer/folder because the "
