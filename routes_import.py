@@ -294,7 +294,7 @@ def cleanup_import_review_files():
             try:
                 pending_review_removed = bool(_remove_pending_review_for_path(folder_path, log))
             except Exception as ex:
-                log.append(f"  Pending review removal warning: {ex}")
+                log.append(f"  Pending review removal warning: {type(ex).__name__}")
         else:
             try:
                 _mark_pending_review_status(folder_path, "files_cleaned_up", note=f"Remaining audio files: {remaining_audio}")

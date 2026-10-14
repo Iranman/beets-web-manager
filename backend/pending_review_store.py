@@ -368,7 +368,9 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
         updated = False
         for item in items:
             try:
-                _same_path = Path(item.get("path", "")).resolve() == Path(folder_path).resolve()
+                # Lexical compare only: no filesystem access on a request path.
+                _same_path = (os.path.normpath(os.path.abspath(_s(item.get("path", ""))))
+                              == os.path.normpath(os.path.abspath(_s(folder_path))))
             except Exception:
                 _same_path = item.get("path") == folder_path
             if _same_path:
