@@ -329,6 +329,47 @@ describe('Missing IDs batch: #399 faab2cf reasons, duplicate evidence, restart',
   });
 });
 
+describe('Missing IDs: Release Group fill (#401)', () => {
+  const RELEASE = '99999999-8888-7777-6666-555555555555';
+
+  it('names the Release Group fill refusals', () => {
+    expect(reasonLabel('release_group_not_resolved')).toBe("MusicBrainz did not return a release group for this album's release");
+    expect(reasonLabel('embedded_release_group_conflict')).toBe("A track's tags name a different release group");
+    expect(reasonLabel('item_release_id_conflict')).toBe("A track's tags name a different release");
+  });
+
+  it('labels a proven fill row as adding the release group, not a full match', async () => {
+    mocked.getJob.mockResolvedValue({ ok: true, job_id: 'pj1', status: 'success', result: {
+      ...PREVIEW,
+      rows: [
+        { ...PREVIEW.rows[0], write: { mb_releasegroupid: 'rg-1' }, evidence: { fill: 'release_group', release_id: RELEASE, release_group_from_release: 'rg-1' } },
+        PREVIEW.rows[1],
+        PREVIEW.rows[2],
+      ],
+    } } as never);
+    renderBatch();
+    await previewAll();
+    const preview = await screen.findByRole('list', { name: 'Preview results' });
+    expect(within(preview).getByText('Add release group (keeps release)')).toBeTruthy();
+    expect(within(preview).getAllByText('Proven')).toHaveLength(1);
+  });
+
+  it('shows a missing_release_group row as "Needs release group" with its Release ID; rows without the fields are unchanged', async () => {
+    mocked.getLibraryMissingMbIds.mockResolvedValue({ ok: true, items: [
+      { ...missing('album:12', 'Has Release'), status: 'Needs MB ID', status_key: 'needs_mb_id', missing_id_type: 'Release Group ID', missing_reason: 'missing_release_group', current_mb_albumid: RELEASE },
+      { ...missing('album:56', 'Old Row'), status: 'Needs MB ID', status_key: 'needs_mb_id' },
+    ], total: 2, offset: 0, limit: 100, counts: { all: 2, album: 2, item: 0 } } as never);
+    render(<MemoryRouter><ImportReviewPage active mode="missing_ids" /></MemoryRouter>);
+    expect(await screen.findByText('Needs release group')).toBeTruthy();
+    expect(screen.getByText(`Release ID: ${RELEASE}`)).toBeTruthy();
+    expect(screen.getByText('Albums (no Release or Release Group ID) (2)')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Next item' }));
+    expect(await screen.findByText('Needs MB ID')).toBeTruthy();
+    expect(screen.queryByText('Needs release group')).toBeNull();
+    expect(screen.queryByText(/^Release ID:/)).toBeNull();
+  });
+});
+
 // ── Import batch outcomes (#394) ─────────────────────────────────────────────
 
 describe('Import batch folder outcomes (#394)', () => {

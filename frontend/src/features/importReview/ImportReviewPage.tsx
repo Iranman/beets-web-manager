@@ -260,7 +260,7 @@ export type ReviewPageMode = 'queue' | 'missing_ids';
 
 const missingKindFilters: Array<{ id: LibraryMissingMbKind; label: string }> = [
   { id: 'all', label: 'All' },
-  { id: 'album', label: 'Albums (no Release ID)' },
+  { id: 'album', label: 'Albums (no Release or Release Group ID)' },
   { id: 'item', label: 'Tracks (no Recording ID)' },
 ];
 
@@ -2703,9 +2703,11 @@ export function ReviewCard({
     ? 'Import enqueueing'
     : item.status === 'format_policy_rejected'
       ? 'Format policy rejected'
-      : item.status && item.status !== 'Pending AI'
-        ? item.status.replace(/_/g, ' ')
-        : typeLabels[item.type];
+      : item.missing_reason === 'missing_release_group'
+        ? 'Needs release group'
+        : item.status && item.status !== 'Pending AI'
+          ? item.status.replace(/_/g, ' ')
+          : typeLabels[item.type];
   const lifecycleTone = queueingImport
     ? 'border-sky-200 bg-sky-50 text-sky-800'
     : item.status === 'format_policy_rejected'
@@ -2765,6 +2767,9 @@ export function ReviewCard({
               <span className={`rounded border px-2 py-1 text-xs font-semibold ${lifecycleTone}`}>
                 {lifecycleLabel}
               </span>
+              {item.missing_reason === 'missing_release_group' && item.current_mb_albumid ? (
+                <span className="break-all font-mono text-xs text-zinc-600">Release ID: {item.current_mb_albumid}</span>
+              ) : null}
               <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
                 {matchLabels[visibleMatchBucket]}
               </span>
@@ -4738,7 +4743,7 @@ export function ImportReviewPage({
           {activeJobHiddenCount ? <span className="text-zinc-700">{activeJobHiddenCount} active job hidden</span> : null}
           {missingIdsMode ? (
             <>
-              <span className="text-zinc-700">{kindCounts.album} album{kindCounts.album === 1 ? '' : 's'} without a Release ID</span>
+              <span className="text-zinc-700">{kindCounts.album} album{kindCounts.album === 1 ? '' : 's'} without a Release or Release Group ID</span>
               <span className="text-zinc-700">{kindCounts.item} track{kindCounts.item === 1 ? '' : 's'} without a Recording ID</span>
             </>
           ) : (
