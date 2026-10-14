@@ -1234,6 +1234,18 @@ class BeetsAdapter:
         """Compatibility helper returning all albums by MusicBrainz release group ID."""
         return self.get_albums(f"mb_releasegroupid:{rgid}")
 
+    def find_albums_by_releasegroupid_strict(self, rgid: str) -> List[Dict[str, Any]]:
+        """Albums in a release group for a safety gate: unlike get_albums, a
+        response that is not ``{"albums"|"results": [dict, ...]}`` raises
+        instead of reading as "no albums"."""
+        res = self._request("GET", self._build_query_path("album", f"mb_releasegroupid:{rgid}"))
+        rows = None
+        if isinstance(res, dict):
+            rows = res["albums"] if "albums" in res else res.get("results")
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise BeetsAdapterError("Beets returned a malformed album query response")
+        return self._rows(rows)
+
     def find_all_items_by_mbid(self, mbid: str) -> List[Dict[str, Any]]:
         """Compatibility helper returning all items by MusicBrainz track ID."""
         return self.get_items(f"mb_trackid:{mbid}")
