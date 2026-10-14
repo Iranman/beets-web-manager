@@ -10,6 +10,8 @@ The project uses Semantic Versioning.
 
 - A missing-track download into an existing album was refused and sent to Review whenever AcoustID returned no release-level hits for the album, even though every file fingerprinted to a requested recording. The import preflight now accepts per-track proof when all of these hold: the target is the existing album's own release and Release Group; every file's AcoustID lookup confirms a recording on that release (same confidence floor as before); each recording is a requested track; and no recording is held twice. Anything less still goes to Review.
 - A refused import now carries a stable reason code (`[reason_code=<code>]` in the job error, `refusal_reason_code` in the review evidence), such as `acoustid_unavailable`, `file_unverified` or `recording_not_on_release`.
+- An slskd album download no longer downloads one peer's copy after another when the import is refused for a reason that is not about the files (`missing_track_scope`, `local_scan_unavailable`, `acoustid_unavailable`). It cleans up that one candidate, logs that Review holds the item, and goes on to the direct-source fallback as before. A refusal about the files themselves, or with no reason code, still tries the next peer.
+- Cancelling a failed slskd candidate's transfers always failed ("could not cancel N queued transfer(s)"): the request named the file, but slskd cancels by transfer id. It now looks the ids up first, so the transfers are cancelled and removed from slskd.
 - The Review Queue no longer lists an item whose downloads folder has been deleted (for example a failed download candidate that was cleaned up). The item is auto-resolved.
 
 ## v0.7.0 - 2026-10-14

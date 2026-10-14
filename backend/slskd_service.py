@@ -682,15 +682,32 @@ def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list)
     """Best-effort cancellation for a failed candidate before retrying another peer."""
     if not username or not remote_files:
         return
+    user_path = f"transfers/downloads/{_up.quote(username, safe='')}"
+    # slskd cancels by transfer id, not filename: look the ids up first.
+    try:
+        result = _slskd_req("GET", user_path)
+    except Exception as ex:
+        log.append(f"  [slskd] WARN: could not list transfers to cancel: {ex}; continuing cleanup.")
+        return
+    users = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
+    ids: Dict[str, str] = {}
+    for user_obj in users:
+        if not isinstance(user_obj, dict):
+            continue
+        if _s(user_obj.get("username") or username).lower() != username.lower():
+            continue
+        for d in user_obj.get("directories") or []:
+            for f in (d or {}).get("files") or []:
+                if f.get("id") and f.get("filename"):
+                    ids[_s(f["filename"])] = _s(f["id"])
     cancelled = 0
     failed = 0
     for remote in remote_files:
+        transfer_id = ids.get(_s(remote))
+        if not transfer_id:
+            continue  # slskd no longer holds it: nothing to cancel
         try:
-            _slskd_req(
-                "DELETE",
-                f"transfers/downloads/{_up.quote(username, safe='')}/"
-                f"{_up.quote(_s(remote), safe='')}?remove=true",
-            )
+            _slskd_req("DELETE", f"{user_path}/{_up.quote(transfer_id, safe='')}?remove=true")
             cancelled += 1
         except Exception:
             failed += 1
