@@ -787,6 +787,9 @@ def acoustid_lookup_outcome(file_path: str):
         # so the exit code alone is not proof of failure; the JSON is.
         if r.returncode != 0:
             logging.getLogger("helpers_mb").debug("fpcalc exited %s for %s: %s", r.returncode, file_path, (r.stderr or "").strip()[:200])
+        if r.returncode in (126, 127) and not r.stdout.strip():
+            # Loader/exec failure (e.g. a missing shared library): the tool, not this file.
+            return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc could not be run")
         fp_data = json.loads(r.stdout) if r.stdout.strip() else {}
         if not isinstance(fp_data, dict):
             fp_data = {}
@@ -794,7 +797,11 @@ def acoustid_lookup_outcome(file_path: str):
         # This file, not AcoustID, failed: flag it so callers can tell the two apart.
         return ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out",
                               evidence={"fingerprintable": False})
-    except (OSError, ValueError):
+    except OSError:
+        # fpcalc itself could not be started (permissions, bad binary, no
+        # resources): every file would fail the same way, so not per-file.
+        return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc could not be run")
+    except ValueError:
         fp_data = {}
     try:
         duration = int(fp_data.get("duration") or 0)

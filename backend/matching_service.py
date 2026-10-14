@@ -545,6 +545,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     unfingerprintable: set = set()  # files fpcalc could not fingerprint (not an AcoustID failure)
 
     def _file_acoustid_hits(path: Path) -> Optional[List[Dict[str, Any]]]:
+        unfingerprintable.discard(str(path))  # only the latest outcome for a path counts
         try:
             outcome = _acoustid_lookup_cached_outcome(str(path))
         except Exception as ex:
