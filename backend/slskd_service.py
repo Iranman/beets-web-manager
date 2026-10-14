@@ -687,10 +687,13 @@ def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list)
     try:
         result = _slskd_req("GET", user_path)
     except Exception as ex:
-        log.append(f"  [slskd] WARN: could not list transfers to cancel: {ex}; continuing cleanup.")
+        if "HTTP 404" not in str(ex):  # 404: slskd holds no transfers from this user
+            log.append(f"  [slskd] WARN: could not list transfers to cancel: {ex}; continuing cleanup.")
         return
     users = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
-    ids: Dict[str, str] = {}
+    # One filename can hold several records (an earlier attempt from the same
+    # peer): cancel every one, not whichever the listing happened to put last.
+    ids: Dict[str, List[str]] = {}
     for user_obj in users:
         if not isinstance(user_obj, dict):
             continue
@@ -698,19 +701,18 @@ def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list)
             continue
         for d in user_obj.get("directories") or []:
             for f in (d or {}).get("files") or []:
-                if f.get("id") and f.get("filename"):
-                    ids[_s(f["filename"])] = _s(f["id"])
+                if isinstance(f, dict) and f.get("id") and f.get("filename"):
+                    ids.setdefault(_s(f["filename"]), []).append(_s(f["id"]))
     cancelled = 0
     failed = 0
     for remote in remote_files:
-        transfer_id = ids.get(_s(remote))
-        if not transfer_id:
-            continue  # slskd no longer holds it: nothing to cancel
-        try:
-            _slskd_req("DELETE", f"{user_path}/{_up.quote(transfer_id, safe='')}?remove=true")
-            cancelled += 1
-        except Exception:
-            failed += 1
+        # slskd no longer holding it means nothing to cancel.
+        for transfer_id in ids.get(_s(remote), []):
+            try:
+                _slskd_req("DELETE", f"{user_path}/{_up.quote(transfer_id, safe='')}?remove=true")
+                cancelled += 1
+            except Exception:
+                failed += 1
     if cancelled:
         log.append(f"  [slskd] Cancelled {cancelled} queued transfer(s) from failed candidate.")
     if failed:

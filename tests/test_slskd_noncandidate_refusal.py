@@ -71,7 +71,8 @@ class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
         stop = [line for line in log if "Not trying other Soulseek peers" in line]
         self.assertEqual(len(stop), 1, log)
         self.assertIn("acoustid_unavailable", stop[0])
-        self.assertIn("Review holds the item", stop[0])
+        self.assertIn("would be refused the same way", stop[0])
+        self.assertFalse([line for line in log if "Trying the next peer" in line], log)
 
     def test_candidate_specific_code_keeps_trying_peers(self):
         m, log = self._run(" [reason_code=file_unverified]")

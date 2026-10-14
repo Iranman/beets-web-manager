@@ -703,7 +703,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             log.append(
                                 f"  [slskd] Not trying other Soulseek peers: import refused "
                                 f"for a reason that is not specific to this copy "
-                                f"({reason_code}); Review holds the item."
+                                f"({reason_code}); every peer's copy would be refused the same way."
                             )
                             break
                         if import_attempt < max_slskd_attempts:
