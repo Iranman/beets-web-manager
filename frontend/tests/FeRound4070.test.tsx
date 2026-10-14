@@ -352,6 +352,10 @@ describe('Missing IDs: Release Group fill (#401)', () => {
     const preview = await screen.findByRole('list', { name: 'Preview results' });
     expect(within(preview).getByText('Add release group (keeps release)')).toBeTruthy();
     expect(within(preview).getAllByText('Proven')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply 2 proven rows…' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/keeps it and gets only its Release Group, written to its tags; its files are not moved\./)).toBeTruthy();
+    expect(within(dialog).getByText(/An album with no Release ID gets its Release Group and Release ID/)).toBeTruthy();
   });
 
   it('shows a missing_release_group row as "Needs release group" with its Release ID; rows without the fields are unchanged', async () => {
@@ -363,8 +367,13 @@ describe('Missing IDs: Release Group fill (#401)', () => {
     expect(await screen.findByText('Needs release group')).toBeTruthy();
     expect(screen.getByText(`Release ID: ${RELEASE}`)).toBeTruthy();
     expect(screen.getByText('Albums (no Release or Release Group ID) (2)')).toBeTruthy();
+    // The server refuses delete/quarantine for these rows: no folder action, only the hint.
+    expect(screen.queryByRole('button', { name: /Delete Folder|Delete Wrong Audio/ })).toBeNull();
+    expect(screen.getByText('Use Fix proven matches to add the release group.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Next item' }));
     expect(await screen.findByText('Needs MB ID')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete Folder' })).toBeTruthy();
+    expect(screen.queryByText('Use Fix proven matches to add the release group.')).toBeNull();
     expect(screen.queryByText('Needs release group')).toBeNull();
     expect(screen.queryByText(/^Release ID:/)).toBeNull();
   });

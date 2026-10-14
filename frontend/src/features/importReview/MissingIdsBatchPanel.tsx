@@ -405,9 +405,10 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
               Write MusicBrainz IDs to {plural(provenKinds.albums, 'album')} and {plural(provenKinds.tracks, 'track')}?
             </DialogTitle>
             <p className="mt-2 text-sm leading-6 text-zinc-400">
-              This changes your library. Each album gets its Release Group and Release ID, then its tags are written and its
-              files may be renamed or moved by your Beets path settings. An album that already has a Release ID keeps it
-              and gets only its Release Group. Each track gets its Recording ID. Every row is
+              This changes your library. An album with no Release ID gets its Release Group and Release ID, then its tags
+              are written and its files may be renamed or moved by your Beets path settings. An album that already has a
+              Release ID keeps it and gets only its Release Group, written to its tags; its files are not moved. Each track
+              gets its Recording ID. Every row is
               checked again first; a row whose evidence changed is skipped. The first failed write stops the batch. Rows
               that need review are not touched.
             </p>

@@ -1209,7 +1209,13 @@ function currentTargetPreviewState(
 }
 
 
+/** The album already has a Release ID; the server refuses folder delete/quarantine (#401). */
+function needsOnlyReleaseGroup(item: ReviewItem): boolean {
+  return item.missing_reason === 'missing_release_group';
+}
+
 function canDeleteFolder(item: ReviewItem): boolean {
+  if (needsOnlyReleaseGroup(item)) return false;
   return Boolean(item.path) && (item.type === 'pending_ai' || item.type === 'library_no_mb');
 }
 
@@ -2731,7 +2737,7 @@ export function ReviewCard({
     ? ''
     : selectedMatch?.preflight_reason || '';
   const cleanupFiles = selectedCleanupSourceFiles(selectedMatch, targetPreviewState?.preview);
-  const cleanupReady = cleanupFiles.length > 0;
+  const cleanupReady = cleanupFiles.length > 0 && !needsOnlyReleaseGroup(item);
   const openSubmissionPage = () => {
     const params = new URLSearchParams();
     params.set('review_item_id', item.id);
@@ -3050,6 +3056,8 @@ export function ReviewCard({
               >
                 {deleteFolderActionLabel(item)}
               </Button>
+            ) : needsOnlyReleaseGroup(item) ? (
+              <span className="self-center text-xs text-zinc-600">Use Fix proven matches to add the release group.</span>
             ) : null}
 
             {isLibraryNoMb ? (
