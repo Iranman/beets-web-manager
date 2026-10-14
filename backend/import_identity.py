@@ -13,6 +13,7 @@ evidence builder there). Only layer-5 workflows and routes may import it.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from pathlib import Path
@@ -33,7 +34,7 @@ from helpers_mb import _mb_release_search, _resolve_release_group_to_release
 #: MusicBrainz tracklist fetch and a preflight).
 MAX_RELEASES = 10
 
-# Directory entries the symlink-target audio probe may visit per folder (#381).
+# Directory entries the (diagnostic) symlink-target probe may visit per folder (#381).
 _LINKED_AUDIO_PROBE_MAX_ENTRIES = 20_000
 
 _EMBEDDED_KEYS = {
@@ -70,15 +71,21 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     cover nested files too. Like ``_build_folder_evidence``, a symlinked file
     (or one reached through a symlinked directory) is not evidence; the flag
     reports that one exists, because a pinned Beets import would still pick
-    it up unproven (``beets.util.sorted_walk`` follows symlinked directories)."""
+    it up unproven (``beets.util.sorted_walk`` follows symlinked directories).
+    Any linked file counts, whatever its name, and so does every linked or
+    junction directory, empty target included: Beets recognises audio by
+    content, and a target can be filled or re-pointed before Beets walks it
+    (QA394-B1, N8). What a linked target holds is only logged (debug).
+    A folder or subfolder that cannot be resolved or listed also sets the
+    flag (fail closed): what it holds cannot be verified."""
     def is_link(p: Path) -> bool:
         return p.is_symlink() or os.path.isjunction(p) or p.resolve() != p
 
     budget = [_LINKED_AUDIO_PROBE_MAX_ENTRIES]
 
     def has_audio(top: Path) -> bool:  # follows links; `seen` guards loops
-        # Fails closed: a link target too big to scan within the shared entry
-        # budget, or one that cannot be read, counts as linked audio (#381).
+        # Diagnostics only (N8): a target too big for the shared entry budget,
+        # or unreadable, reports as holding files (#381).
         seen = set()
 
         def _raise(exc: OSError) -> None:
@@ -94,32 +101,45 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
                 budget[0] -= 1 + len(dirnames) + len(filenames)
                 if budget[0] < 0:
                     return True
-                if any(Path(n).suffix.lower() in AUDIO_EXT for n in filenames):
+                # Any file at all (QA394-B1): Beets sniffs content, so a
+                # linked "cover.jpg" or extensionless file may be audio.
+                if filenames:
                     return True
         except OSError:
             return True
         return False
 
+    walk_failed = []
+
     try:
         root = Path(folder).resolve(strict=True)
         files, linked = [], False
-        for dirpath, dirnames, filenames in os.walk(root):  # never descends links
+        # Fails closed like has_audio (QA394-F4): a folder or subfolder this
+        # process cannot list may still hold a link Beets would follow.
+        for dirpath, dirnames, filenames in os.walk(root, onerror=walk_failed.append):  # never descends links
             here = Path(dirpath)
             for name in list(dirnames):
                 if is_link(here / name):
                     dirnames.remove(name)
-                    linked = linked or has_audio(here / name)
+                    linked = True  # whatever the target holds (N8)
+                    if _app_logger.isEnabledFor(logging.DEBUG):
+                        _app_logger.debug("Linked folder %s: target %s", here / name,
+                                          "holds files (or is too large or unreadable to list)"
+                                          if has_audio(here / name) else "is empty")
             for name in filenames:
                 p = here / name
-                if p.suffix.lower() not in AUDIO_EXT:
-                    continue
+                # Every linked file, before the extension filter (QA394-B1):
+                # Beets identifies audio by content, not by name.
                 if is_link(p):
                     linked = True
-                elif p.is_file():
+                    continue
+                if p.suffix.lower() not in AUDIO_EXT:
+                    continue
+                if p.is_file():
                     files.append(str(p))
-        return sorted(files, key=str.lower), linked
+        return sorted(files, key=str.lower), linked or bool(walk_failed)
     except OSError:
-        return [], False
+        return [], True
 
 
 def _acoustid_capability(statuses: Counter, files: int) -> str:

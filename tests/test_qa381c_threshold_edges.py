@@ -195,12 +195,13 @@ class SymlinkEdges(_FolderFixture):
         self.assertEqual((len(files), linked), (3, True))
         self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
 
-    def test_dangling_dir_symlink_does_not_block(self):
+    def test_dangling_dir_symlink_blocks(self):
+        # QA394-B1: every link blocks, whatever it points at (it can be
+        # re-pointed before Beets walks the folder).
         self._link(self.folder / "Gone", Path(self.tmp.name) / "missing_dir", is_dir=True)
         files, linked = ii._recursive_audio(str(self.folder))
-        self.assertEqual((len(files), linked), (3, False))
-        auto = self.identify()["auto_import"]
-        self.assertTrue(auto["eligible"], auto)
+        self.assertEqual((len(files), linked), (3, True))
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
 
     def test_link_back_into_folder_subdir_blocks_and_terminates(self):
         sub = self.folder / "CD2"
@@ -212,28 +213,36 @@ class SymlinkEdges(_FolderFixture):
         self.assertTrue(linked)
         self.assertEqual(len(files), 4)  # real files counted once, none via links
 
-    def test_symlinked_directory_without_audio_does_not_block(self):
+    def test_symlinked_directory_blocks_even_when_empty(self):
+        # N8 / sec I6: every linked directory blocks; an empty target can be
+        # filled or re-pointed before Beets walks it.
         outside = Path(self.tmp.name) / "art"
-        outside.mkdir()
-        (outside / "cover.jpg").write_bytes(b"synthetic")
+        (outside / "empty").mkdir(parents=True)
         self._link(self.folder / "Scans", outside, is_dir=True)
-        auto = self.identify()["auto_import"]
-        self.assertTrue(auto["eligible"], auto)
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
+        (outside / "cover.jpg").write_bytes(b"synthetic")
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
 
     def test_linked_dir_over_probe_budget_fails_closed(self):
         # #381 non-blocking: the link-target probe is bounded; too big to scan
         # counts as linked audio rather than walking without limit.
         outside = Path(self.tmp.name) / "big"
         outside.mkdir()
-        for i in range(12):
-            (outside / f"scan{i}.jpg").write_bytes(b"synthetic")
+        for i in range(12):  # empty folders: any file would block (QA394-B1)
+            (outside / f"scan{i}").mkdir()
         self._link(self.folder / "Scans", outside, is_dir=True)
+        # N8: the link blocks either way; the bounded probe only feeds the
+        # debug diagnostic.
         from unittest import mock
-        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", 5):
+        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", 5), \
+                self.assertLogs(ii._app_logger, "DEBUG") as logs:
             files, linked = ii._recursive_audio(str(self.folder))
         self.assertEqual((len(files), linked), (3, True))
-        files, linked = ii._recursive_audio(str(self.folder))  # default budget: no audio
-        self.assertEqual((len(files), linked), (3, False))
+        self.assertIn("too large", " ".join(logs.output))
+        with self.assertLogs(ii._app_logger, "DEBUG") as logs:  # default budget
+            files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, True))
+        self.assertIn("is empty", " ".join(logs.output))
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "needs a non-root POSIX user")
     def test_unreadable_dir_under_link_fails_closed(self):

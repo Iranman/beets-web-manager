@@ -1,9 +1,9 @@
 """QA for PR #383 (deterministic batch import, phase A; History, F9).
 
 Independent of the implementer's tests: these drive the real batch worker
-(_run_ai_batch_import -> real folder walk -> real per-folder suggestion with
-no AI key -> real decision loop) with only the providers (MusicBrainz,
-AcoustID, preflight) and the Beets import call stubbed, and pin the path
+(_run_ai_batch_import -> real folder walk -> real per-folder stages with
+no AI key) with only the providers (MusicBrainz, AcoustID, preflight) and
+the Beets import call stubbed, and pin the path
 safety of the new scan-root helper and walk.
 """
 import os
@@ -83,10 +83,11 @@ class NoAiBatchEndToEnd(_Roots):
         self.audio("Artist/Double/CD2/01.flac")
         imported = []
 
-        def fake_import(folder, mb_id, suggestion, log, cancel_event=None):
-            imported.append((folder, mb_id, suggestion.get("ai_available")))
-            return {"album_id": len(imported), "metadata_imported": True,
-                    "identity_verified": True, "artwork_status": "fetched"}
+        def fake_reimport(folder, opts, timeout):
+            # Phase B: Stage 1 is a Beets quiet import of exactly one folder.
+            imported.append((folder, opts.get("quiet_fallback")))
+            return {"ok": True, "albums_imported": 1, "imported_album_ids": [len(imported)],
+                    "skipped": [], "not_matched": [], "not_matched_known": True}
 
         def no_ai(provider, *a, **k):
             raise AssertionError(f"provider {provider!r} called during a no-AI batch")
@@ -106,7 +107,13 @@ class NoAiBatchEndToEnd(_Roots):
             mock.patch.object(ai, "_run_ai_release_preflight", return_value=pf),
             mock.patch.object(ai, "_folder_release_preflight", return_value=pf),
             mock.patch.object(ai, "_ai_batch_already_in_library", return_value=False),
-            mock.patch.object(ai, "_ai_import_folder", side_effect=fake_import),
+            mock.patch.object(ai, "_validate_import_source_audio"),
+            mock.patch.object(ai.composite_workflows, "reimport_source", side_effect=fake_reimport),
+            mock.patch.object(ai.composite_workflows, "get_album", return_value={"mb_releasegroupid": RG}),
+            mock.patch.object(ai, "_record_recent_import_for_album"),
+            mock.patch.object(ai.beets_adapter, "get_plugin_status",
+                              return_value={"capabilities": ["mbsubmit"], "fpcalc_available": True}),
+            mock.patch.object(ai, "_ai_import_folder", side_effect=AssertionError("Stage 2b not expected")),
             mock.patch.object(ai, "_invalidate_lib_cache"),
             mock.patch.object(ai, "_trigger_plex_refresh"),
             patch_app_family(APP, "_AI_PENDING_FILE", self.tmp / "pending.json"),
@@ -116,10 +123,11 @@ class NoAiBatchEndToEnd(_Roots):
             self.addCleanup(p.stop)
         log = []
         out = ai._run_ai_batch_import("qa383-b1", str(self.dl), log, None, None)
-        self.assertEqual(sorted(f for f, _, _ in imported),
+        self.assertEqual(sorted(f for f, _ in imported),
                          [str(self.dl / "Artist" / "Album"), str(self.dl / "Artist" / "Double")],
                          "\n".join(log))
-        self.assertTrue(all(mb == REL and ai_flag is False for _, mb, ai_flag in imported), imported)
+        self.assertTrue(all(q == "skip" for _, q in imported), imported)
+        self.assertEqual(sorted(f["status"] for f in out["folders"]), ["imported", "imported"])
         self.assertIs(out.get("ai_configured"), False)
 
 
@@ -178,12 +186,16 @@ class ScanRootPathSafety(_Roots):
                 self.refused(str(link))
                 self.refused(str(link / "Album"))
 
-    def test_symlinked_downloads_root_refused_not_followed(self):
-        # The configured root stays the trusted value; a link to it elsewhere
-        # is not a way in.
+    def test_symlink_to_downloads_root_scans_the_configured_root(self):
+        # N7 (#394): a link whose target is exactly a configured root is that
+        # root (NAS mount spelling). The configured value is returned, never the
+        # link, and nothing below or beside the root is widened.
         link = self.outside / "dl_link"
         self.symlink(link, self.dl)
-        self.refused(str(link))
+        path, err = ser._resolve_import_scan_root(str(link))
+        self.assertIsNone(err)
+        self.assertEqual(path, self.dl.resolve())
+        self.refused(str(link / "Album"))
 
     def test_toctou_folder_swapped_for_symlink_before_walk(self):
         album = self.dl / "Album"
