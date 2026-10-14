@@ -341,7 +341,9 @@ describe('Import batch folder outcomes (#394)', () => {
     expect(folderAttentionLabel(folder({ status: 'review_required', metadata_imported: true, review_item_id: 'r2' }))).toBe('Imported in part');
     expect(folderAttentionLabel(folder({ status: 'review_required', metadata_imported: true }))).toBe('Review required');
     expect(folderAttentionLabel(folder({ status: 'importing' }))).toBe('Importing');
-    expect(folderFailureText('symlinked_audio')).toMatch(/audio files are symlinks/);
+    expect(folderFailureText('symlinked_audio')).toMatch(/reached through a symlink.*part of the folder could not be read/);
+    expect(folderAttentionLabel(folder({ failure_reason: 'unverifiable_folder', review_item_id: 'r3' }))).toBe('No audio Web Manager can read');
+    expect(folderFailureText('unverifiable_folder')).toMatch(/no audio file it can read.*Check the folder permissions/);
     expect(folderFailureText('Beets imported part of this folder')).toBe('Beets imported part of this folder');
   });
 
@@ -356,11 +358,12 @@ describe('Import batch folder outcomes (#394)', () => {
     mocked.getAiBatchStatus.mockResolvedValue({
       state: {
         status: 'completed_with_warnings', job_id: 'job1', batch_job_id: 'job1', source_path: '/srv/dl',
-        total_folders_found: 2, folders_processed: 2, folders_queued: 0, folders_running: 0, folders_completed: 0,
+        total_folders_found: 3, folders_processed: 3, folders_queued: 0, folders_running: 0, folders_completed: 0,
         folders_failed: 0, folders_skipped: 0, folders_review: 2,
         warnings: ['Beets fingerprinting (chroma plugin with fpcalc) is not available: Beets matches on tags, titles and durations only.'],
         folders: [
           { folder_id: 'f1', batch_job_id: 'job1', source_folder: '/srv/dl/Linked', status: 'review_created', failure_reason: 'symlinked_audio', review_item_id: 'r1', stage: 'done' },
+          { folder_id: 'f3', batch_job_id: 'job1', source_folder: '/srv/dl/Unreadable', status: 'review_created', failure_reason: 'unverifiable_folder', review_item_id: 'r3', stage: 'done' },
           { folder_id: 'f2', batch_job_id: 'job1', source_folder: '/srv/dl/Partial', status: 'review_required', metadata_imported: true, review_item_id: 'r2', album_ids: [7],
             failure_reason: 'Beets imported part of this folder and skipped 1 path(s): /srv/dl/Partial/CD2', warnings: ['imported_without_fingerprint'] },
         ],
@@ -370,12 +373,14 @@ describe('Import batch folder outcomes (#394)', () => {
 
     expect(await screen.findByText(/fpcalc\) is not available/)).toBeTruthy();
     expect(screen.getByText('Symlinked audio')).toBeTruthy();
-    expect(screen.getByText(/audio files are symlinks/)).toBeTruthy();
+    expect(screen.getByText(/reached through a symlink/)).toBeTruthy();
+    expect(screen.getByText('No audio Web Manager can read')).toBeTruthy();
+    expect(screen.getByText(/no audio file it can read/)).toBeTruthy();
     expect(screen.getByText('Imported in part')).toBeTruthy();
     expect(screen.getByText(/skipped 1 path\(s\): \/srv\/dl\/Partial\/CD2/)).toBeTruthy();
     const links = screen.getAllByRole('button', { name: 'Open review item' });
-    expect(links).toHaveLength(2);
-    fireEvent.click(links[1]);
+    expect(links).toHaveLength(3);
+    fireEvent.click(links[2]);
     await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe(`/import?tab=review&q=${encodeURIComponent('/srv/dl/Partial')}`));
   });
 });
