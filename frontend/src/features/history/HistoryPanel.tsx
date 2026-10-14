@@ -117,7 +117,9 @@ function HistorySection({
 }
 
 export function HistoryPanel() {
-  const aiConfigured = useAiConfigured();
+  // AI history is fetched and shown only once setup status confirms an AI provider;
+  // while unknown or off, the section does not exist.
+  const aiOn = useAiConfigured() === true;
   const [recent, setRecent] = useState<RecentImport[]>([]);
   const [aiHistory, setAiHistory] = useState<RecentImport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -127,7 +129,10 @@ export function HistoryPanel() {
     setLoading(true);
     setError('');
     try {
-      const [r, h] = await Promise.all([getRecentImports(), getAiMatchHistory(50)]);
+      const [r, h] = await Promise.all([
+        getRecentImports(),
+        aiOn ? getAiMatchHistory(50) : Promise.resolve({ history: [] }),
+      ]);
       setRecent(r.imports ?? []);
       setAiHistory(h.history ?? []);
     } catch (err) {
@@ -135,7 +140,7 @@ export function HistoryPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [aiOn]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -169,13 +174,12 @@ export function HistoryPanel() {
             entries={recent}
             onClear={handleClearRecent}
           />
-          {/* No AI provider: hide the empty section; past AI imports stay visible. */}
-          {aiConfigured === false && !aiHistory.length ? null : (
+          {aiOn ? (
             <HistorySection
               title="AI-matched imports"
               entries={aiHistory}
             />
-          )}
+          ) : null}
         </div>
       )}
     </div>

@@ -312,6 +312,27 @@ describe('Find Music downloads', () => {
     expect(mocked.startAcquisitionDownloadAll.mock.calls[0][0]).toMatchObject({ keys: ['k3', 'k1'], limit: 2 });
   });
 
+  it('QA N3: Retry failed covers failed rows on every page of the current filter', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const failure = (key: string) => ({ key, artist: 'A', album: key, error: 'no result' });
+    mocked.getAcquisitionDownloadAllActive.mockResolvedValue({
+      active: false,
+      last_job: { job_id: 'b0', status: 'success', result: { total: 3, success: 0, failed: 3, failures: [failure('k1'), failure('k150'), failure('k999')] } },
+    } as never);
+    const all = Array.from({ length: 250 }, (_, i) => row(i + 1));
+    mocked.getAcquisitionQueue.mockImplementation(async (opts = {}) => {
+      const offset = opts.offset ?? 0;
+      const limit = opts.limit ?? PAGE_SIZE;
+      // The page shown holds one row; only the 500-row scan sees k150 on page 2.
+      return response({ items: limit === PAGE_SIZE ? [row(1)] : all.slice(offset, offset + limit), total: all.length, offset, limit });
+    });
+    renderPanel();
+    const retry = await screen.findByRole('button', { name: 'Retry 2 failed' }); // k999 is not in this filter
+    fireEvent.click(retry);
+    await waitFor(() => expect(mocked.startAcquisitionDownloadAll).toHaveBeenCalledTimes(1));
+    expect(mocked.startAcquisitionDownloadAll.mock.calls[0][0]).toMatchObject({ keys: ['k1', 'k150'], limit: 2 });
+  });
+
   it('Download next N still confirms; Cancel sends nothing', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderPanel();

@@ -2,7 +2,7 @@
 // filter changes replace it; the summary reads the Find Music cache without a rebuild.
 // History tab: the AI section is hidden when no AI provider is configured.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation, useNavigationType } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -75,14 +75,17 @@ describe('History AI section', () => {
     await waitFor(() => expect(screen.queryByText(/AI-matched imports/)).toBeNull());
   });
 
-  it('QA #390: kept when AI is not configured but past AI imports exist', async () => {
-    mocked.getRecentImports.mockResolvedValue({ imports: [] } as never);
+  it('QA N2: AI off hides past AI imports too, and never fetches them', async () => {
+    mocked.getRecentImports.mockResolvedValue({ imports: [entry] } as never);
     mocked.getAiMatchHistory.mockResolvedValue({ history: [{ ...entry, album: 'Past AI album' }] } as never);
     mocked.getSetupStatus.mockResolvedValue({ integrations: { ai: { configured: false, required: false } } } as never);
     render(withQuery(<HistoryPanel />));
     await waitFor(() => expect(mocked.getSetupStatus).toHaveBeenCalled());
-    expect(await screen.findByText(/AI-matched imports/)).toBeTruthy();
-    expect(await screen.findByText(/Past AI album/)).toBeTruthy();
+    await screen.findAllByText('Recently imported');
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(screen.queryByText(/AI-matched imports/)).toBeNull();
+    expect(screen.queryByText(/Past AI album/)).toBeNull();
+    expect(mocked.getAiMatchHistory).not.toHaveBeenCalled();
   });
 
   it('shown when AI is configured', async () => {
