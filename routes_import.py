@@ -16,7 +16,6 @@ import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
 from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _RECENT_IMPORTS_FILE, _record_recent_import_for_album, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _path_is_under, _redact_security_text, _s, jobs
-from backend.beets_plugins import _atomic_write_text
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
@@ -24,7 +23,7 @@ from backend.import_service import _cached_import_target_preview, _import_review
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import _AI_PENDING_FILE, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path
+from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
@@ -564,7 +563,7 @@ def import_cleanup_stale():
     kept = []
     try:
         with _ai_pending_lock:
-            items = _load_pending_reviews()
+            items = _load_pending_reviews(strict=True)
             for item in items:
                 path = _s((item or {}).get("path", "")).strip()
                 if path and not Path(path).exists():
@@ -579,7 +578,7 @@ def import_cleanup_stale():
                     continue
                 kept.append(item)
             if removed_folder_gone or removed_resolved:
-                _AI_PENDING_FILE.write_text(json.dumps(kept, indent=2))
+                _save_pending_reviews(kept)
     except Exception as ex:
         _app_logger.warning("Pending-review cleanup-stale failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not clean up pending review."}), 500
@@ -1049,6 +1048,10 @@ _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS = (
 _PENDING_REVIEW_CLIENT_TEXT_MAX = 500  # per client-supplied string (suggestion and origin)
 
 
+# SEC-006: fixed text, never the exception's.
+_REVIEW_QUEUE_UNREADABLE = ({"ok": False, "error": "Review Queue could not be read; nothing was changed."}, 503)
+
+
 @app.post("/api/ai-pending-review")
 def add_ai_pending_review():
     payload = request.get_json(silent=True)
@@ -1074,7 +1077,10 @@ def add_ai_pending_review():
     # folder is always the validated one (security LOW-1).
     origin = {k: _s(v)[:_PENDING_REVIEW_CLIENT_TEXT_MAX] for k, v in origin.items()}
     origin["source_folder"] = folder_path
-    added = _add_to_pending(folder_path, suggestion, allow_existing=allow_existing, origin=origin)
+    try:
+        added = _add_to_pending(folder_path, suggestion, allow_existing=allow_existing, origin=origin)
+    except PendingReviewLoadError:
+        return _REVIEW_QUEUE_UNREADABLE
     return jsonify({"ok": True, "added": bool(added), "skipped_existing": not bool(added)})
 
 
@@ -1090,15 +1096,17 @@ def clear_ai_pending_review():
         return jsonify({"ok": False, "error": "path required (or all: true to clear every item)"}), 400
     removed_items = []
     with _ai_pending_lock:
-        items = _load_pending_reviews()
+        try:
+            items = _load_pending_reviews(strict=True)
+        except PendingReviewLoadError:
+            return _REVIEW_QUEUE_UNREADABLE
         if folder_path:
             removed_items = [i for i in items if i.get("path") == folder_path]
             items = [i for i in items if i.get("path") != folder_path]
         else:
             removed_items = list(items)
             items = []
-        _AI_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(_AI_PENDING_FILE, json.dumps(items, indent=2))
+        _save_pending_reviews(items)
     for item in removed_items:
         _record_ai_review_decision(
             "cleared",

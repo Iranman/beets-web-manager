@@ -191,9 +191,9 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         app_source = app_family_source()
 
-        self.assertIn("def _load_pending_reviews(*, prune_resolved: bool = True) -> list:", app_source)
+        self.assertIn("def _load_pending_reviews(*, prune_resolved: bool = True, strict: bool = False) -> list:", app_source)
         self.assertIn("_load_pending_reviews(prune_resolved=False)", app_source)
-        self.assertIn("if prune_resolved:", app_source)
+        self.assertIn("if prune_resolved and not beets_down:", app_source)
         self.assertIn("def _import_skipped_items(limit: int = 500, *, deep_scan: bool = True,", app_source)
         self.assertIn('skipped_deep_scan = status_filter == "skipped"', app_source)
         self.assertIn("_import_skipped_items(skipped_limit, deep_scan=skipped_deep_scan, max_log_lines=skipped_max_log_lines)", app_source)

@@ -12,7 +12,7 @@ from backend.ai_service import _compact_track_ai_candidate, _run_ai_release_pref
 from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD, _IMPORT_REVIEW_IMPORTABLE_STATUSES, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_review_confidence_score, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import _album_folder_for_album_id, _folder_import_track_count, _target_preview_year
 from backend.ai_evidence_service import _enrich_track_ai_candidate
-from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _trusted_stored_review_path
+from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _save_pending_reviews, _trusted_stored_review_path
 from backend.ai_batch_state_service import _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _import_review_auto_job_for_key, _resolve_import_review_selected_audio_file, _review_paths_equal, _review_status_key
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _redact_security_text
@@ -1251,7 +1251,7 @@ def _update_pending_review_revalidation(
                 changed = True
                 break
             if changed:
-                _AI_PENDING_FILE.write_text(json.dumps(items, indent=2))
+                _save_pending_reviews(items)
             return changed
     except Exception:
         return False

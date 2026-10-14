@@ -151,6 +151,7 @@ _APP_STATE_VERIFIED_FUNCTIONS = frozenset({
     "_write_recorded_import_skips",
     "_record_recent_import",
     "_remove_pending_review_for_path",
+    "_save_pending_reviews",
     "_update_pending_review_revalidation",
     "_write_import_review_auto_state",
     "_persist_file_atomically",
