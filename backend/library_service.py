@@ -4561,13 +4561,17 @@ def _missing_mb_album_row(r: Dict[str, Any]) -> Dict[str, Any]:
     folder = _album_folder_from_item_path(r.get("first_item_path"))
     album = _s(r.get("album"))
     albumartist = _s(r.get("albumartist"))
+    # Has a Release ID but no Release Group (the canonical album identity).
+    release_id = _s(r.get("mb_albumid")).strip().lower()
     return {
         "id": f"album:{r['id']}",
         "type": "library_no_mb",
         "target_kind": "album",
         "status": "Needs MB ID",
         "status_key": "needs_mb_id",
-        "missing_id_type": "Release ID",
+        "missing_id_type": "Release Group ID" if release_id else "Release ID",
+        "missing_reason": "missing_release_group" if release_id else "missing_release_id",
+        "current_mb_albumid": release_id,
         "title": album or "(unknown album)",
         "artist": albumartist,
         "album": album,

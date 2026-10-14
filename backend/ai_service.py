@@ -1826,7 +1826,9 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
     """Album folders under a validated scan root (F1): every folder that holds
     audio, with a Disc N / CD N subfolder folded into its album folder. A
     local walk: Web Manager mounts the downloads root. Symlinks and hidden
-    folders are not followed. A folder the per-folder import checks refuse
+    folders are not followed; a folder holding a linked audio file or a linked
+    subfolder is still returned (Stage 1 refuses it as ``symlinked_audio``)
+    and each link is logged by name. A folder the per-folder import checks refuse
     (an approved root itself, e.g. loose files directly in Downloads) is
     logged and left in place, never imported. A folder the walk cannot read
     is logged and appended to ``unreadable``. An app-managed download folder
@@ -1857,7 +1859,15 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
                 continue
             kept.append(d)
         dirnames[:] = kept
-        if not any(Path(f).suffix.lower() in AUDIO_EXT and not (here / f).is_symlink() for f in filenames):
+        # Linked audio and linked subfolders are never followed or imported,
+        # but their folder is queued so Stage 1 refuses it as symlinked_audio
+        # with a review row, and each link is logged by name (QA-N4).
+        linked = [here / n for n in kept if (here / n).is_symlink() or os.path.isjunction(here / n)]
+        linked += [here / f for f in filenames if Path(f).suffix.lower() in AUDIO_EXT and (here / f).is_symlink()]
+        for p in linked:
+            if log is not None:
+                log.append(f"symlink not followed, never imported: {p}")
+        if not linked and not any(Path(f).suffix.lower() in AUDIO_EXT for f in filenames):
             continue
         if here != base and _AI_EVIDENCE_DISC_FOLDER_RE.match(here.name):
             here = here.parent

@@ -4578,7 +4578,7 @@ def get_unmatched_review_items(
     """Return albums, and optionally singleton items, missing a MusicBrainz
     identity, for the Import Review "Needs MB ID" queue.
 
-    Albums come from the `albums` table (missing mb_albumid), annotated
+    Albums come from the `albums` table (missing mb_albumid, or having it but\n    missing mb_releasegroupid), annotated
     with their first item's id/path and a track count -- beetsplug.web
     doesn't expose either directly, so this derives them from a single
     pass over all items rather than one lookup per album.
@@ -4602,7 +4602,9 @@ def get_unmatched_review_items(
 
     unmatched_albums: List[Dict[str, Any]] = []
     for a in ad.get_albums():
-        if a.get("mb_albumid"):
+        # An album with a Release ID but no Release Group is listed too:
+        # mb_releasegroupid is the canonical album identity (ADR-0002).
+        if _s(a.get("mb_albumid")).strip() and _s(a.get("mb_releasegroupid")).strip():
             continue
         aid = int(a["id"])
         album_items = sorted(

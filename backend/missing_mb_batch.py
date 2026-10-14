@@ -24,6 +24,11 @@ What "proven" means (no new thresholds; the identity code decides):
   proven by fingerprint or embedded Recording ID, no competing group, no
   hard conflict, no symlinked audio), the folder holds exactly the album's
   items, and the chosen release has as many tracks as the album;
+* album with a Release ID but no Release Group: MusicBrainz's own lookup of
+  that Release returns its Release Group, no item carries another Release ID
+  or Release Group, no item path is a link, and no other album holds that
+  Release Group. Only ``mb_releasegroupid`` is written (the ``Metadata
+  Update`` writer, which re-verifies the pairing against MusicBrainz);
 * track (singleton): AcoustID answered and confirms exactly one recording
   (``confirmed_recording``: score >= 80, no other within 3 points), and
   exactly one trusted candidate is ``attach_without_review`` with
@@ -151,13 +156,15 @@ def prove_album(album_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str
         return _proof("album", album_id, row_id, ["target_missing"], {}, {}, {})
     current = {"mb_albumid": _uuid(getattr(album, "mb_albumid", "")),
                "mb_releasegroupid": _uuid(getattr(album, "mb_releasegroupid", ""))}
-    if current["mb_albumid"]:
+    if current["mb_albumid"] and current["mb_releasegroupid"]:
         return _proof("album", album_id, row_id, ["already_has_release_id"], {}, {}, current)
     if row.get("in_import_review"):
         return _proof("album", album_id, row_id, ["in_import_review"], {}, {}, current)
 
     items = composite_workflows.find_all_items_by_album_id(int(album_id)) or []
     paths = [_album_item_abs_path(_s(it.get("path"))) for it in items]
+    if current["mb_albumid"]:
+        return _prove_release_group_fill(album_id, row_id, current, items, paths)
     folder = _s(row.get("path")).strip()
     reasons: List[str] = []
     if not items or not folder or not all(paths):
@@ -217,6 +224,43 @@ def prove_album(album_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str
             reasons.append("duplicate_release_group")
     write = {"mb_releasegroupid": rgid, "mb_albumid": release_id} if rgid and release_id else {}
     return _proof("album", album_id, row_id, reasons, write, evidence, current)
+
+
+def _prove_release_group_fill(album_id: int, row_id: str, current: Dict[str, str],
+                              items: List[Dict[str, Any]], paths: List[str]) -> Dict[str, Any]:
+    """An album with a Release ID but no Release Group: the Release Group is
+    proven only by MusicBrainz's own release -> release-group relationship
+    for that Release ID. Only ``mb_releasegroupid`` is written; the Release ID
+    is never changed. Any embedded ID that disagrees goes to review."""
+    release_id = current["mb_albumid"]
+    reasons: List[str] = []
+    if not items or not all(paths):
+        reasons.append("no_items")
+    elif any(_has_link_component(p) for p in paths):
+        reasons.append("symlinked_item_path")  # the writer writes tags through the path
+    if any(_uuid(it.get("mb_albumid")) not in ("", release_id) for it in items):
+        reasons.append("item_release_id_conflict")
+    if reasons:
+        return _proof("album", album_id, row_id, reasons, {}, {"album_items": len(items)}, current)
+    # None on any MusicBrainz failure: fails closed, never guessed.
+    rgid = _uuid(composite_workflows._release_group_for_release(release_id))
+    embedded = sorted({_uuid(it.get("mb_releasegroupid")) for it in items} - {""})
+    evidence: Dict[str, Any] = {"fill": "release_group", "release_id": release_id,
+                                "release_group_from_release": rgid, "embedded_release_groups": embedded,
+                                "album_items": len(items), "sources": ["musicbrainz_release_lookup"]}
+    if not rgid:
+        reasons.append("release_group_not_resolved")
+    elif any(e != rgid for e in embedded):
+        reasons.append("embedded_release_group_conflict")
+    else:
+        held = beets_adapter.find_albums_by_releasegroupid_strict(rgid)
+        others = sorted(int(a["id"]) for a in held
+                        if _uuid(a.get("mb_releasegroupid")) == rgid and int(a["id"]) != int(album_id))
+        evidence["release_group_held_by"] = others
+        if others:
+            reasons.append("duplicate_release_group")
+    return _proof("album", album_id, row_id, reasons, {"mb_releasegroupid": rgid} if rgid else {},
+                  evidence, current)
 
 
 def _mark_batch_duplicates(proofs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

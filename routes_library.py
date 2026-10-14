@@ -2614,7 +2614,21 @@ _BATCH_CHILD_TIMEOUT_SECONDS = 900
 
 
 def _batch_write_album(album_id: int, proof: Dict[str, Any], log) -> Dict[str, Any]:
-    """The batch's album writer is the Match album writer."""
+    """The batch's album writer is the Match album writer; a Release Group
+    fill (the album keeps its Release ID) is a rollback-capable Metadata
+    Update whose plan re-verifies the Release -> Release Group pairing."""
+    if "mb_albumid" not in proof["write"]:
+        plan = composite_workflows.plan_album_metadata(
+            {"album_id": album_id, "updates": {"mb_releasegroupid": proof["write"]["mb_releasegroupid"]}})
+        if not plan.get("ok") or not plan.get("operation_id"):
+            raise missing_mb_batch.NotWritten(f"release group fill refused: {plan.get('code') or plan.get('error')}")
+        applied = composite_workflows.apply_album_metadata(plan["operation_id"])
+        if not applied.get("ok") and applied.get("mutated") is False:
+            raise missing_mb_batch.NotWritten(f"release group fill refused: {applied.get('code')}")
+        if not applied.get("ok"):
+            raise RuntimeError(f"release group fill failed: {applied.get('code') or applied.get('error')}")
+        log.append(f"  album {album_id}: mb_releasegroupid set to {proof['write']['mb_releasegroupid']}")
+        return {"changed": True, "transaction_ids": [plan["operation_id"]]}
     try:
         operation_ids = _match_album_run(album_id, proof["write"]["mb_albumid"], log,
                                          release_selected_by_operator=False)
