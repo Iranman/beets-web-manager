@@ -61,6 +61,8 @@ class _Fixture(unittest.TestCase):
 
     def _lookup(self, path):
         hits = self.hits.get(str(path))
+        if isinstance(hits, ProviderResult):
+            return hits
         if hits is None:
             return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[])
         return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if hits else ProviderOutcome.NO_RESULT, data=hits)
@@ -135,6 +137,31 @@ class MissingTrackRecordingProofTests(_Fixture):
         self.hits[self.paths[4]] = None
         self.assertRefused(self.preflight(), "acoustid_unavailable")
 
+    def test_provider_failures_are_acoustid_unavailable(self):
+        # Not specific to this candidate: every peer's copy would be refused.
+        for outcome in (ProviderOutcome.NOT_CONFIGURED, ProviderOutcome.AUTHENTICATION_ERROR,
+                        ProviderOutcome.UNAVAILABLE, ProviderOutcome.RATE_LIMITED,
+                        ProviderOutcome.TRANSIENT_ERROR):
+            with self.subTest(outcome=outcome):
+                self.hits[self.paths[4]] = ProviderResult("acoustid", outcome, data=[])
+                self.assertRefused(self.preflight(), "acoustid_unavailable")
+                self.assertFalse(ms.IMPORT_REFUSAL_REASONS["acoustid_unavailable"])
+
+    def test_unfingerprintable_file_is_specific_to_the_candidate(self):
+        # No fingerprint / too short (UNAVAILABLE) and an fpcalc timeout (TRANSIENT_ERROR).
+        for outcome in (ProviderOutcome.UNAVAILABLE, ProviderOutcome.TRANSIENT_ERROR):
+            with self.subTest(outcome=outcome):
+                self.hits[self.paths[4]] = ProviderResult("acoustid", outcome, data=[],
+                                                          evidence={"fingerprintable": False})
+                self.assertRefused(self.preflight(), "file_unfingerprintable")
+                self.assertTrue(ms.IMPORT_REFUSAL_REASONS["file_unfingerprintable"])
+
+    def test_provider_failure_outranks_an_unfingerprintable_file(self):
+        self.hits[self.paths[2]] = ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[],
+                                                  evidence={"fingerprintable": False})
+        self.hits[self.paths[4]] = ProviderResult("acoustid", ProviderOutcome.RATE_LIMITED, data=[])
+        self.assertRefused(self.preflight(), "acoustid_unavailable")
+
     # (c)
     def test_recording_not_on_target_release_goes_to_review(self):
         self.hits[self.paths[5]] = [_hit(OTHER_REC)]
@@ -184,6 +211,35 @@ class RefusalReasonCodeTests(unittest.TestCase):
         self.assertTrue(ms.IMPORT_REFUSAL_REASONS["file_unverified"])
         self.assertEqual(ms.import_refusal_reason_code("[reason_code=made_up]"), "")
         self.assertEqual(ms.import_refusal_reason_code("no code"), "")
+        self.assertEqual(ms.import_refusal_reason_code("x [reason_code=file_unfingerprintable]"),
+                         "file_unfingerprintable")
+
+
+class FpcalcOutcomeTests(unittest.TestCase):
+    """helpers_mb flags per-file fpcalc failures; no network, no real fpcalc."""
+
+    def _outcome(self, run):
+        import helpers_mb
+        with mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "synthetic"}), \
+                mock.patch.object(helpers_mb.shutil, "which", return_value=__file__), \
+                mock.patch.object(helpers_mb.subprocess, "run", side_effect=run), \
+                mock.patch.object(helpers_mb.provider_boundary, "opened", side_effect=AssertionError("network")):
+            return helpers_mb.acoustid_lookup_outcome("/synthetic/a.flac")
+
+    def test_timeout_and_short_audio_are_unfingerprintable(self):
+        import subprocess
+
+        def timeout(*a, **k):
+            raise subprocess.TimeoutExpired("fpcalc", 30)
+
+        def short(*a, **k):
+            return subprocess.CompletedProcess(a, 0, stdout=json.dumps({"duration": 3, "fingerprint": "AQ"}), stderr="")
+
+        for run in (timeout, short):
+            with self.subTest(run=run.__name__):
+                outcome = self._outcome(run)
+                self.assertFalse(outcome.answered)
+                self.assertIs(outcome.evidence.get("fingerprintable"), False)
 
 
 # (e)

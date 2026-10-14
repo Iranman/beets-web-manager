@@ -791,7 +791,9 @@ def acoustid_lookup_outcome(file_path: str):
         if not isinstance(fp_data, dict):
             fp_data = {}
     except subprocess.TimeoutExpired:
-        return ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out")
+        # This file, not AcoustID, failed: flag it so callers can tell the two apart.
+        return ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out",
+                              evidence={"fingerprintable": False})
     except (OSError, ValueError):
         fp_data = {}
     try:
