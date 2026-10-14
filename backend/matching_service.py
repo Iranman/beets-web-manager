@@ -46,6 +46,10 @@ def _preflight_oversized_subset_complete(preflight: Dict[str, Any]) -> bool:
         return False
     if not bool(preflight.get("artist_ok", True)):
         return False
+    # A missing-track fill proven per recording is bound to the existing
+    # album's own release; never swap it for a source-sized edition.
+    if (preflight.get("missing_track_proof") or {}).get("ok"):
+        return False
     # SEC-002 Wave 14: this is an independent tracklist-ratio heuristic that
     # callers (_resolve_album_release_for_import's _source_accepts_release/
     # _same_group_source_sized_release) use to accept a release candidate
@@ -84,6 +88,109 @@ def _preflight_tracklist_gate_ok(matches: int, min_required: int,
     if not artist_gate or too_many_extras:
         return False
     return bool(oversized_subset) or int(matches or 0) >= int(min_required or 0)
+
+
+#: Stable machine-readable codes for an import the resolver refused. The value
+#: says whether the refusal is specific to the downloaded candidate (another
+#: peer's copy may pass) or not (every candidate would be refused the same
+#: way). Carried as ``[reason_code=<code>]`` in the job error, and as
+#: ``refusal_reason_code`` in the review evidence.
+IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
+    "release_unresolved": True,          # generic refusal, no missing-track proof applied
+    "missing_track_scope": False,        # not a missing-track fill of the existing album's own release
+    "local_scan_unavailable": False,     # the folder could not be read locally
+    "acoustid_unavailable": False,       # AcoustID not configured / not reachable for a file
+    "file_unverified": True,             # a file has no confirmed recording (no result, low score, ambiguous)
+    "recording_not_on_release": True,    # a file confirms a recording that is not on the target release
+    "track_not_requested": True,         # a file maps to a release track that was not requested
+    "duplicate_track": True,             # two files, or a file and the album, hold the same recording
+    "identity_conflict": True,           # the canonical evaluator found a conflict or refused the proof
+}
+_REFUSAL_CODE_RE = re.compile(r"\[reason_code=([a-z_]+)\]")
+
+
+def import_refusal_reason_code(message: Any) -> str:
+    """The reason code in a refused import's error text ("" when none)."""
+    match = _REFUSAL_CODE_RE.search(_s(message))
+    return match.group(1) if match and match.group(1) in IMPORT_REFUSAL_REASONS else ""
+
+
+def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict[str, Any]]]]], *,
+                                   mb_tracks: List[Dict[str, Any]],
+                                   wanted_tracks: List[Dict[str, Any]],
+                                   existing_recordings: set,
+                                   album_row: Optional[Dict[str, Any]],
+                                   release_id: str,
+                                   release_group_id: str,
+                                   release_title: str = "",
+                                   release_artist: str = "") -> Dict[str, Any]:
+    """Full per-track proof for a missing-track fill of an existing album.
+
+    Accepts only when the release is the existing album's own release (same
+    Release Group), every file's AcoustID lookup confirms one recording of
+    that release (canonical classifier and floor), that track was requested,
+    no recording is held twice, and the canonical evaluator authorizes the
+    files (VERIFIED_SUBSET). Release-level AcoustID hits are not needed.
+    Anything else returns ok=False with a code from IMPORT_REFUSAL_REASONS."""
+    from backend.matching import AcoustIDStatus as _Status, acoustid_evidence_from_hits
+    from backend.slskd_service import _wanted_track_key
+
+    out: Dict[str, Any] = {"ok": False, "reason_code": "", "files": [], "matching_decision": {}}
+
+    def _fail(code: str) -> Dict[str, Any]:
+        out["reason_code"] = code
+        return out
+
+    album_row = album_row or {}
+    album_rgid = _s(album_row.get("mb_releasegroupid")).strip().lower()
+    album_rid = _s(album_row.get("mb_albumid")).strip().lower()
+    rid = _s(release_id).strip().lower()
+    if not (album_rgid and album_rid and album_rid == rid
+            and album_rgid == _s(release_group_id).strip().lower() and wanted_tracks):
+        return _fail("missing_track_scope")
+    if not file_hits:
+        return _fail("local_scan_unavailable")
+    if any(hits is None for _path, hits in file_hits):
+        return _fail("acoustid_unavailable")
+
+    wanted_keys = {_wanted_track_key(t) for t in wanted_tracks}
+    used = set(existing_recordings)
+    rows: List[Dict[str, Any]] = []
+    for path, hits in file_hits:
+        statuses = [(t, acoustid_evidence_from_hits(hits, t.get("mb_trackid"))) for t in mb_tracks if t.get("mb_trackid")]
+        confirmed = [t for t, ev in statuses if ev.confirmed]
+        if not confirmed:
+            off_release = (not any(ev.status == _Status.AMBIGUOUS for _t, ev in statuses)
+                           and acoustid_evidence_from_hits(hits, "").status == _Status.CONFLICT)
+            return _fail("recording_not_on_release" if off_release else "file_unverified")
+        requested = [t for t in confirmed
+                     if ("mbid", t["mb_trackid"]) in wanted_keys
+                     or ("pos", int(t.get("disc") or 1), int(t.get("track") or 0)) in wanted_keys]
+        if not requested:
+            return _fail("track_not_requested")
+        track = requested[0]
+        if track["mb_trackid"] in used:
+            return _fail("duplicate_track")
+        used.add(track["mb_trackid"])
+        out["files"].append({"path": path, "recording_id": track["mb_trackid"],
+                             "disc": int(track.get("disc") or 1), "track": int(track.get("track") or 0)})
+        disc, num = _audio_position_from_path(path)
+        rows.append({"title": _slskd_title_guess_from_name(Path(path).name) or Path(path).stem,
+                     "path": path, "disc": disc, "track": num, "acoustid_hits": hits})
+
+    decision = build_album_matching_decision(
+        current={"album": _s(album_row.get("album")), "albumartist": _s(album_row.get("albumartist")),
+                 "mb_releasegroupid": album_rgid},
+        candidate={"mb_releasegroupid": release_group_id, "mb_albumid": rid,
+                   "album": release_title, "artist": release_artist},
+        items=rows,
+        mb_tracks=mb_tracks,
+    ).to_dict()
+    out["matching_decision"] = decision
+    if not decision.get("action_allowed"):
+        return _fail("identity_conflict")
+    out["ok"] = True
+    return out
 
 
 def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
@@ -232,8 +339,13 @@ def _is_configured_root(path: Path) -> bool:
 def _folder_release_preflight(folder_path: str, mb_albumid: str,
                               existing_album_id: int = 0,
                               log: Optional[list] = None, *,
-                              fingerprint_evidence: bool = False) -> Dict[str, Any]:
+                              fingerprint_evidence: bool = False,
+                              wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Check a folder/current album against an MB release before destructive repair.
+
+    `wanted_tracks` (missing-track fill of `existing_album_id`): when the
+    normal identity decision refuses, try `_missing_track_recording_proof`
+    on the folder's files; its result is kept as `missing_track_proof`.
 
     `fingerprint_evidence` (I-8, opt-in): give each locally scanned file's
     answered AcoustID hits to the canonical evaluator. Only the deterministic
@@ -459,6 +571,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 acoustid_hits=_file_acoustid_hits(fpath) if fingerprint_evidence else None,
             )
 
+    existing_recordings: set = set()
     if existing_album_id:
         try:
             rows = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
@@ -472,6 +585,8 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 ),
             )
             for row in sorted_rows:
+                if _s(row.get("mb_trackid")).strip():
+                    existing_recordings.add(_s(row.get("mb_trackid")).strip().lower())
                 _add_candidate(
                     _s(row.get("title")),
                     _s(row.get("path")),
@@ -562,6 +677,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     # one -- if the engine can't supply this evidence, local_album_title/
     # local_rgid simply stay unresolved and the decision below falls
     # through to review_required rather than silently reading local state.
+    album_row = None
     if existing_album_id:
         try:
             album_row = composite_workflows.get_album(existing_album_id)
@@ -616,6 +732,25 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     tracklist_ok = gate_ok
     if not decision_dict.get("action_allowed"):
         gate_ok = False
+        if existing_album_id and wanted_tracks and decision_dict.get("conflicts"):
+            # A conflict in the whole-album decision is evidence; never proven past.
+            result["missing_track_proof"] = {"ok": False, "reason_code": "identity_conflict", "files": []}
+        elif existing_album_id and wanted_tracks:
+            proof = _missing_track_recording_proof(
+                [(str(p), _file_acoustid_hits(p)) for p in audio_files],
+                mb_tracks=mb_tracks,
+                wanted_tracks=wanted_tracks,
+                existing_recordings=existing_recordings,
+                album_row=album_row,
+                release_id=mb_albumid,
+                release_group_id=_s(result.get("release_group")),
+                release_title=_s(result.get("release_title")),
+                release_artist=_s(result.get("release_artist")),
+            )
+            result["missing_track_proof"] = {k: v for k, v in proof.items() if k != "matching_decision"}
+            if proof["ok"]:
+                gate_ok = True
+                decision_dict = proof["matching_decision"]
 
     result.update({
         "ok": gate_ok,

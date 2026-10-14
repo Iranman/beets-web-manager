@@ -656,6 +656,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             existing_album_id=existing_album_id,
             allow_provided_release_override=manual_mbid_override,
             allow_oversized_partial=not strict_edition_guard,
+            wanted_tracks=wanted_tracks,
         )
         if not _resolved_mbid:
             review_reason = (
@@ -681,6 +682,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         rejected_mbid,
                         existing_album_id=existing_album_id,
                         log=None,
+                        wanted_tracks=wanted_tracks,
                     )
                 except Exception:
                     rejected_preflight = None
@@ -698,6 +700,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 wanted_tracks=wanted_tracks,
                 reason=review_reason,
             )
+            # Stable code the acquisition layer reads (IMPORT_REFUSAL_REASONS).
+            refusal_code = (_s(((rejected_preflight or {}).get("missing_track_proof") or {}).get("reason_code"))
+                            or "release_unresolved")
+            review_evidence["refusal_reason_code"] = refusal_code
             queued = _maybe_queue_review(
                 aldir,
                 review_suggestion,
@@ -706,10 +712,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 evidence=review_evidence,
             )
             raise RuntimeError(
-                "Could not resolve a MusicBrainz release ID for import; "
-                "queued for Review without changing library files."
-                if queued
-                else "Could not resolve a MusicBrainz release ID for import"
+                f"Could not resolve a MusicBrainz release ID for import [reason_code={refusal_code}]"
+                + ("; queued for Review without changing library files." if queued else "")
             )
         if _resolved_mbid != mb_albumid:
             log.append(f"  Using MusicBrainz release ID: {_resolved_mbid}")
