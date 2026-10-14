@@ -552,7 +552,9 @@ def run_apply(tx_id: str, *, apply_album: Callable[..., Dict[str, Any]], apply_i
                 written = writer(proof["target_id"], proof, log) or {}
                 tx_ids = list(written.get("transaction_ids") or [])
                 if not _verify_written(proof):
-                    raise RecoveryRequired(f"{label}: written IDs did not verify on re-read")
+                    unverified = RecoveryRequired(f"{label}: written IDs did not verify on re-read")
+                    unverified.transaction_ids = tx_ids  # the writer committed these (QA401-R1)
+                    raise unverified
                 results.append(_row_result(proof, "written" if written.get("changed", True) else "already_set",
                                            transaction_ids=tx_ids))
                 log.append(f"{label}: written and verified")
