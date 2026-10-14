@@ -8,9 +8,11 @@ A preserved torrent source is copied, never moved. A plugin refusal comes back
 as a clean ok=false and the transaction ends Failed, never a stray Preview.
 """
 import os
+import shutil
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import app as APP
@@ -413,6 +415,11 @@ class AiImportReleaseTests(unittest.TestCase):
     def test_ai_candidate_release_is_imported_unchanged(self):
         import backend.ai_service as ai
         planned = {}
+        # A real folder: one that cannot be checked for hardlinks is copied (#394 N10).
+        folder = Path(tempfile.mkdtemp()) / "Artist - Single"
+        folder.mkdir()
+        (folder / "01.flac").write_bytes(b"x")
+        self.addCleanup(shutil.rmtree, folder.parent, True)
 
         def plan(payload, *a, **k):
             planned.update(payload)
@@ -426,7 +433,7 @@ class AiImportReleaseTests(unittest.TestCase):
                 mock.patch.object(ai.composite_workflows, "apply_confirmed_import",
                                   return_value={"ok": False, "error": "stop here"}):
             with self.assertRaises(RuntimeError):
-                ai._ai_import_folder("/downloads/Artist - Single", REL, {}, [])
+                ai._ai_import_folder(str(folder), REL, {}, [])
         self.assertEqual(planned["mb_albumid"], REL)
         self.assertEqual(planned["mb_releasegroupid"], RG)
         self.assertIs(planned["use_move"], True)

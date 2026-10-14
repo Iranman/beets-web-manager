@@ -185,9 +185,12 @@ def _resolve_import_scan_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
         return None, error
     candidate = Path(_s(raw).strip())
     # These roots are contained (never "/", never overlapping the library)
-    # and resolved. Return the configured root, not the request value.
+    # and resolved. Return the configured root, not the request value. The
+    # symlinked spelling of a root (a NAS mount link) is that root (N7); only
+    # an exact root match is widened, not containment below it.
+    real_candidate = os.path.realpath(str(candidate))
     for root in _import_review_cleanup_roots(allow_music=False):
-        if candidate == root:
+        if candidate == root or real_candidate == os.path.realpath(str(root)):
             return root, None
     resolved, error = _resolve_import_review_source_path(
         raw, allow_music=True, expected_type="dir", require_exists=False)

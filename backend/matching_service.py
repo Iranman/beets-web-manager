@@ -897,11 +897,12 @@ def _album_preflight_folder(album, tracks: List[Any]) -> str:
 def _match_tracks_from_mb(mb_albumid: str, album_db_id, log: list,
                           zero_unmatched: bool = False,
                           target_tracks: Optional[List[Dict[str, Any]]] = None) -> int:
-    """Fetch the MB release and match each item in the album to a recording by title similarity.
-    Directly updates items.mb_trackid, items.track, items.disc, items.title in the beets SQLite DB.
-    If zero_unmatched=True, items that cannot be matched to any MB track have their track set to 0
-    so the caller's dedup logic will flag them for deletion.
-    Returns the number of items successfully matched."""
+    """Sync the album's tracks from the MB release through the
+    album_mb_track_repair_v1 engine transaction (Beets ``mbsync`` over the
+    adapter; never a direct database write, never a Recording ID from text or
+    position). See ``_match_tracks_from_mb_shared`` for the full contract,
+    including ``zero_unmatched`` and the return value (number of items
+    matched; negative on failure)."""
     return _match_tracks_from_mb_shared(
         mb_albumid,
         album_db_id,

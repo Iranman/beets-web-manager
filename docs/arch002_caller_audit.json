@@ -277,15 +277,23 @@
       "DISPLAY_ONLY",
       "Queue serialization."
     ],
-    "backend/library_service.py::library_missing_mb_payload": [
+    "backend/library_service.py::_missing_mb_rows": [
       "DISPLAY_ONLY",
       "Missing-MB-ID row serialization (copies stored suggestion confidence for display); decides nothing."
+    ],
+    "backend/missing_mb_batch.py::<module>": [
+      "CANONICAL_FINAL_DECISION",
+      "Missing IDs batch: consumes canonical auto_import.eligible, confirmed_recording and action_eligibility only; the hit is the docstring naming that gate. Adds no threshold."
     ],
     "app.py::import_review_revalidate": [
       "DISPLAY_ONLY",
       "Response plumbing; eligibility is evaluate_import_eligibility."
     ],
     "app.py::item_attach_recording": [
+      "CANONICAL_FINAL_DECISION",
+      "Consumes canonical action_eligibility/decision_version only."
+    ],
+    "routes_library.py::_item_attach_recording": [
       "CANONICAL_FINAL_DECISION",
       "Consumes canonical action_eligibility/decision_version only."
     ],
@@ -580,6 +588,10 @@
     "routes_submissions.py::_fetch_open_graph_metadata": [
       "DISPLAY_ONLY",
       "Per-field provenance labels."
+    ],
+    "backend/ai_service.py::_ai_batch_review_suggestion": [
+      "DISPLAY_ONLY",
+      "Review-row suggestion for a folder Beets skipped: a fixed confidence label of low; the deterministic decision travels in the evidence and gates nothing here."
     ],
     "backend/import_review_service.py::_run_import_review_revalidation": [
       "DISPLAY_ONLY",

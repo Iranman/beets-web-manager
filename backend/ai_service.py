@@ -4,22 +4,23 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import hashlib, json, os, re, threading, time, uuid
+import hashlib, json, os, re, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_BATCH_MEDIUM_RATIO, _AI_BATCH_MIN_CONF, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _s
+from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _s
 from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import _add_to_pending, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
-from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
+from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_QUEUED_FOLDER_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
 from backend.app_runtime import _path_is_under
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
-from helpers_mb import _mb_release_search, _fetch_mb_release_candidate
-from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
+from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
+from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
+from backend.import_identity import _recursive_audio, identify_import_folder
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
 from backend.artwork_service import _fetch_artwork_after_retag
@@ -27,7 +28,7 @@ from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_m
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
 from backend.app_runtime import jobs
 from backend.musicbrainz_service import _artist_folder_key, _discogs_release_fallback_candidate, _mb_release_search_by_folder_tracks
-from backend.serializers import _compact_mb_candidate, _resolve_import_review_source_path, _resolve_import_scan_root
+from backend.serializers import _compact_mb_candidate, _import_review_cleanup_roots, _resolve_import_review_source_path, _resolve_import_scan_root
 from backend.pending_review_store import _import_review_folder_signature, _pending_review_has_path, _pending_review_path_key, _pending_review_path_set
 from backend.plex_service import _trigger_plex_refresh
 
@@ -1917,163 +1918,377 @@ def _ai_batch_queue_pending_review(folder: str, suggestion: Dict[str, Any], evid
     return _ai_batch_folder_id(folder)
 
 
-def _ai_batch_build_evidence(folder: str, sug_result: Dict[str, Any], suggestion: Dict[str, Any], pf_result=None) -> Dict[str, Any]:
-    evidence = dict(sug_result.get("evidence") or suggestion.get("review_evidence") or {})
-    if not evidence:
-        cands = sug_result.get("mb_candidates") or []
-        selected = None
+# Beets' own skip reasons (plugin 1.10.0), most specific first: a folder Beets
+# split into several tasks reports the first of these that any task hit.
+_AI_BATCH_SKIP_REASON_ORDER = ("duplicate", "blank_identity", "no_strong_match", "no_candidates")
+
+
+def _ai_batch_evidence_capabilities() -> Dict[str, Any]:
+    """The evidence this batch can use (I-12), read once per run.
+    ``beets_fingerprinting``: Beets' chroma plugin with fpcalc, so Stage 1
+    can match by fingerprint (the mbsubmit capability implies chroma; plugin
+    1.6.0+ also reports fpcalc). ``acoustid_key``: Web Manager can prove
+    files by fingerprint in Stage 2. Unknown reads as unavailable."""
+    try:
+        st = beets_adapter.get_plugin_status() or {}
+        chroma = "mbsubmit" in (st.get("capabilities") or []) and st.get("fpcalc_available", True) is not False
+    except Exception:
+        chroma = False
+    return {"beets_fingerprinting": bool(chroma), "acoustid_key": bool(acoustid_api_key()),
+            "ai_configured": bool(_ai_api_key())}
+
+
+def _ai_batch_capability_warnings(caps: Dict[str, Any]) -> List[str]:
+    warnings = []
+    if not caps.get("beets_fingerprinting"):
+        warnings.append("Beets fingerprinting (chroma plugin with fpcalc) is not available: Beets matches "
+                        "on tags, titles and durations only. Its strong matches still import.")
+    if not caps.get("acoustid_key"):
+        warnings.append("No AcoustID API key: folders Beets skips cannot be proven by fingerprint, so they "
+                        "go to review and are never re-imported automatically.")
+    return warnings
+
+
+def _ai_batch_skip_reason(res: Dict[str, Any]) -> str:
+    reasons = {_s(r.get("reason")) for r in (res.get("skipped") or []) if isinstance(r, dict)}
+    return next((r for r in _AI_BATCH_SKIP_REASON_ORDER if r in reasons), "")
+
+
+def _ai_batch_albums_missing_release_group(album_ids: List[Any]) -> List[int]:
+    """ADR-0002: every album an import added must carry mb_releasegroupid.
+    An album that cannot be read back counts as missing (unverified)."""
+    missing = []
+    for aid in album_ids:
         try:
-            cand_idx = int(suggestion.get("candidate_index", -1))
+            row = composite_workflows.get_album(int(aid)) or {}
         except Exception:
-            cand_idx = -1
-        if 0 <= cand_idx < len(cands):
-            selected = cands[cand_idx]
-        evidence = _ai_match_evidence_packet(
-            "fresh_import",
-            folder_path=folder,
-            suggestion=suggestion,
-            selected_candidate=selected,
-            candidates=cands,
-        )
-    if pf_result:
-        evidence["preflight"] = _compact_preflight(pf_result)
-    evidence["thresholds"] = _ai_thresholds_for("fresh_import")
-    suggestion["review_evidence"] = evidence
-    return evidence
+            row = {}
+        if not _s(row.get("mb_releasegroupid")).strip():
+            missing.append(int(aid))
+    return missing
 
 
-def _ai_batch_run_suggestions(state: Dict[str, Any], log: list, cancel_event=None, update_state=None) -> str:
-    folders = state.get("folder_states") or {}
-    pending = [fid for fid, f in folders.items() if f.get("status") in {"queued", "ai_queued"} and not f.get("ai_result")]
-    active: Dict[str, Dict[str, Any]] = {}
-    last_heartbeat_log = 0.0
+def _ai_batch_review_suggestion(folder: str, reason: str, identity: Dict[str, Any]) -> Dict[str, Any]:
+    """The review row's suggestion: the best deterministic candidate (never
+    an AI pick). The full FolderIdentity goes in the evidence."""
+    top = (identity.get("candidates") or [{}])[0]
+    pf = (top.get("evidence") or {}).get("preflight") or {}
+    name = Path(folder).name
+    artist = _s(pf.get("release_artist")) or name
+    why = ", ".join((identity.get("auto_import") or {}).get("reasons") or []) or "not eligible"
+    return {
+        "artist": artist, "albumartist": artist, "album": _s(pf.get("release_title")) or name,
+        "mb_albumid": _s(top.get("representative_release_id")),
+        "mb_releasegroupid": _s(top.get("release_group_id")),
+        "confidence": "low",
+        "reason": f"Beets skipped this folder ({reason or 'not matched'}). "
+                  + (f"Best MusicBrainz candidate needs a decision ({why})." if top.get("release_group_id")
+                     else "No MusicBrainz candidate was found."),
+    }
 
-    def _launch(fid: str) -> None:
-        folder = folders[fid]
-        source = folder.get("source_folder", "")
-        holder: Dict[str, Any] = {"done": False, "started_at": time.time(), "source_folder": source}
 
-        def _target() -> None:
+def _ai_batch_preimport_check(folder: str):
+    """``(audio_files, conflict)`` for Stage 1; ``conflict`` is None or
+    ``{conflict, reason, paths}``. Beets never gets a folder with a conflict:
+
+    - ``symlinked_audio``: the folder, or a path component between it and the
+      configured root it lives under, is a link (swapped after discovery, or a
+      stored path on recovery; QA394-F5, I3), or a file or directory inside it
+      is a link Beets would follow (F3, B1). Links at or above the configured
+      root are the operator's own mount and are allowed (as in #399).
+    - ``unverifiable_folder``: not an absolute path, outside every configured root, a part of it
+      cannot be read (F4), or no audio Web Manager can read was found."""
+    def conflict(kind: str, why: str, paths: List[str]):
+        return [], {"conflict": kind, "reason": f"{kind}: {why}; import refused", "paths": paths}
+
+    # Discovery stores absolute, normalised paths; anything else is tampered
+    # state, and Beets would be handed the raw string (QA394 reverify3).
+    if not os.path.isabs(folder) or any(part in (".", "..") for part in Path(folder).parts):
+        return conflict("unverifiable_folder", "the folder path is not absolute", [])
+    path = Path(os.path.abspath(folder))
+    root = next((r for r in _import_review_cleanup_roots(allow_music=True) if r in path.parents), None)
+    if root is None:
+        return conflict("unverifiable_folder", "the folder is not under a configured import root", [])
+    below = [p for p in [path, *path.parents] if p != root and root in p.parents]
+    links = [str(p) for p in below if p.is_symlink() or os.path.isjunction(p)]
+    if links:
+        return conflict("symlinked_audio", "the folder path runs through a symlink", links)
+    audio_files, linked = _recursive_audio(folder)
+    if linked:
+        # The helper also fails closed on an unreadable part: name the links
+        # it could see, or report that part as unverifiable.
+        seen: List[str] = []
+        unreadable: List[str] = []
+        for dirpath, dirnames, filenames in os.walk(folder, onerror=lambda e: unreadable.append(str(e.filename))):
+            for name in dirnames + filenames:
+                p = Path(dirpath) / name
+                if p.is_symlink() or os.path.isjunction(p):
+                    seen.append(str(p))
+        if seen:
+            return conflict("symlinked_audio", "files are reached through a symlink", sorted(seen))
+        return conflict("unverifiable_folder", "part of the folder could not be read", sorted(unreadable))
+    if not audio_files:
+        return conflict("unverifiable_folder", "no audio file Web Manager can read was found", [])
+    return audio_files, None
+
+
+def _has_hardlinked_file(folder: str) -> bool:
+    """True when any regular file under ``folder`` (any name, not only audio)
+    shares its inode with another path, e.g. a seeding torrent or a Lidarr
+    hardlink: a move with tag writes would rewrite the other copy (QA394-L2,
+    N11). A file or folder that cannot be checked also counts: copy, never move."""
+    failed: List[OSError] = []
+    for dirpath, _dirnames, filenames in os.walk(folder, onerror=failed.append):
+        for name in filenames:
             try:
-                if _ai_batch_already_in_library(source):
-                    holder["result"] = {"ok": True, "already_in_library": True}
-                else:
-                    holder["result"] = _ai_suggest_folder_internal(source)
-            except Exception as ex:
-                holder["result"] = {"ok": False, "error": str(ex)}
-            finally:
-                holder["done"] = True
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                return True
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                return True
+    return bool(failed)
 
-        _ai_batch_mark_folder(
-            state,
-            fid,
-            status="ai_running",
-            current_step="AI suggestion running",
-            ai_suggest_status="running",
-            ai_suggest_started_at=holder["started_at"],
-            ai_suggest_error="",
-        )
-        log.append(f"AI suggestion started for folder: {source}")
-        thread = threading.Thread(target=_target, daemon=True)
-        holder["thread"] = thread
-        active[fid] = holder
-        thread.start()
 
-    while pending or active:
+def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_event=None,
+                             update_state=None) -> None:
+    """One folder through the deterministic import (#288, phase B):
+    Stage 1 Beets quiet import; Stage 2 Web Manager MB/AcoustID evidence and a
+    review row for a folder Beets skipped; Stage 2b a pinned re-import only
+    when ``auto_import.eligible`` (full fingerprint proof), verified against
+    its post-conditions. AI is never called. Nothing here deletes a source."""
+    folder_state = state["folder_states"][fid]
+    folder = _s(folder_state.get("source_folder"))
+    batch_id = _s(state.get("batch_job_id"))
+    caps = state.get("evidence_capabilities") or {}
+
+    def mark(**fields) -> None:
+        _ai_batch_mark_folder(state, fid, **fields)
+        _ai_batch_commit(state, update_state)
+
+    def interrupted() -> str:
+        # Checked between stages: a Beets import in progress cannot be cut off.
+        if cancel_event and cancel_event.is_set():
+            return "batch canceled"
+        control = _ai_batch_control(batch_id)
+        if control.get("skip_current") or fid in control["skip_folder_ids"]:
+            control["skip_current"] = False
+            control["skip_folder_ids"].discard(fid)
+            return "skipped by user"
+        return ""
+
+    def stop(why: str) -> bool:
+        if not why:
+            return False
+        log.append(f"folder skipped: {folder} — {why}")
+        mark(status="skipped", current_step="canceled" if why == "batch canceled" else why, failure_reason=why)
+        return True
+
+    def failed(err: str) -> None:
+        outcome = _ai_batch_import_failure_outcome(err)
+        log.append(f"  Import outcome: {outcome['reason']}")
+        mark(status=outcome["status"], current_step=outcome["current_step"], failure_reason=outcome["reason"])
+
+    def review(suggestion: Dict[str, Any], evidence: Dict[str, Any], status: str = "review_created",
+               current_step: str = "review item created", **fields) -> None:
+        review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=evidence, batch_job_id=batch_id)
+        log.append(f"review item created: {folder}")
+        mark(status=status, current_step=current_step, review_item_id=review_id, **fields)
+
+    def plain_suggestion(reason: str) -> Dict[str, Any]:
+        # No candidates: folder name only, empty IDs.
+        return dict(_ai_batch_review_suggestion(folder, "", {}), reason=reason)
+
+    log.append(f"\n{Path(folder).name}")
+    if stop(interrupted()):
+        return
+    if _ai_batch_already_in_library(folder):
+        log.append("  Already in library - skipped; no source folder deleted")
+        mark(status="skipped", current_step="already in library", failure_reason="already in library")
+        return
+    if not folder_state.get("review_item_id") and _pending_review_has_path(folder):
+        log.append("  Already in the Review Queue - skipped")
+        mark(status="review_created", current_step="review item already exists", review_item_id=fid)
+        return
+
+    # ── Stage 1: Beets quiet autotag import of this one folder ──────────────
+    preserve = _preserve_torrent_source_path(folder)
+    mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
+    try:
+        audio_files, conflict = _ai_batch_preimport_check(folder)
+        if conflict:
+            reason = conflict["reason"]
+            log.append(f"  {reason}")
+            review(plain_suggestion(reason),
+                   {"origin_step": "pre_import", "conflict": conflict["conflict"],
+                    # symlinked_paths: the links; unreadable_paths: folders it could not list.
+                    ("symlinked_paths" if conflict["conflict"] == "symlinked_audio" else "unreadable_paths"):
+                        conflict["paths"],
+                    "ai_rank": None, "batch_job_id": batch_id},
+                   failure_reason=conflict["conflict"], stage="done")
+            return
+        if not preserve and _has_hardlinked_file(folder):
+            # Lidarr hardlinks imports and a seeding torrent shares inodes: a
+            # move with write would rewrite the other copy's tags (QA394-L2).
+            preserve = True
+            log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
+        log.append(f"  Stage 1: Beets import ({'copy' if preserve else 'move'})")
+        _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
+        audio = len(audio_files)
+        # Same scale as import_service._beet_import_timeout_for_count (a higher layer).
+        res = composite_workflows.reimport_source(
+            folder, {"quiet_fallback": "skip", "copy": preserve, "move": not preserve, "write": True},
+            timeout=max(300, min(1200, 180 + 20 * audio)))
+    except Exception as ex:
+        failed(str(ex))
+        return
+    if not res.get("ok"):
+        failed(_s(res.get("error") or "Beets import failed."))
+        return
+    ids = res.get("imported_album_ids")
+    if ids is None and res.get("albums_imported"):
+        reason = ("Beets imported this folder, but the webmanager plugin did not report which albums; "
+                  "the Release Group could not be verified. Update the plugin.")
+        log.append(f"  {reason}")
+        mark(status="review_required", current_step="imported; not verified", failure_reason=reason)
+        return
+    if ids:
+        _invalidate_lib_cache()
+        for aid in ids:
+            _record_recent_import_for_album(aid, log)
+        _remove_pending_review_for_path(folder, log)
+        log.append(f"  Beets imported album_id {', '.join(str(i) for i in ids)}.")
+        warnings = [] if caps.get("beets_fingerprinting") else ["imported_without_fingerprint"]
+        if warnings:
+            log.append("  WARNING: imported on Beets' strong match without fingerprint evidence.")
+        missing = _ai_batch_albums_missing_release_group(ids)
+        partial = [r.get("path") for r in res.get("skipped") or [] if isinstance(r, dict)]
+        fields = {"album_ids": ids, "album_id": ids[0], "metadata_imported": True, "warnings": warnings,
+                  "stage": "done"}
+        if missing:
+            reason = (f"Imported without a MusicBrainz Release Group: album_id "
+                      f"{', '.join(str(i) for i in missing)}. Fix it in Library: missing IDs.")
+            log.append(f"  {reason}")
+            mark(status="review_required", current_step="imported; Release Group missing",
+                 failure_reason=reason, missing_release_group_album_ids=missing, **fields)
+        elif partial:
+            reason = f"Beets imported part of this folder and skipped {len(partial)} path(s): {', '.join(partial)}"
+            log.append(f"  {reason}")
+            # One review row so the skipped paths are visible (QA394-N1).
+            review(dict(plain_suggestion(reason), kept_album_ids=ids),
+                   {"origin_step": "beets_partial", "skipped_paths": partial, "kept_album_ids": ids,
+                    "beets_skip_reason": _ai_batch_skip_reason(res), "ai_rank": None, "batch_job_id": batch_id},
+                   status="review_required", current_step="imported in part", failure_reason=reason, **fields)
+        else:
+            mark(status="imported", current_step="imported", **fields)
+        return
+
+    # ── Stage 2: Web Manager MB/AcoustID evidence for a folder Beets skipped ─
+    reason = _ai_batch_skip_reason(res)
+    log.append(f"  Beets skipped it ({reason or 'not matched'}); gathering MusicBrainz/AcoustID evidence")
+    if stop(interrupted()):
+        return
+    mark(current_step="Stage 2: MusicBrainz/AcoustID evidence", stage="identify", beets_skip_reason=reason)
+    try:
+        identity = identify_import_folder(folder, reason)
+    except Exception as ex:
+        identity = {"folder": folder, "skip_reason": reason, "candidates": [], "error": _s(ex),
+                    "auto_import": {"eligible": False, "reasons": ["identify_failed"]}}
+    auto = identity.get("auto_import") or {}
+    suggestion = _ai_batch_review_suggestion(folder, reason, identity)
+    evidence = {"origin_step": "beets_skip", "beets_skip_reason": reason, "deterministic_decision": identity,
+                "ai_rank": None, "batch_job_id": batch_id}
+    found = {"auto_import": {"eligible": bool(auto.get("eligible")), "reasons": list(auto.get("reasons") or [])},
+             "warnings": list(identity.get("warnings") or []),
+             "suggested_release_group_id": suggestion["mb_releasegroupid"],
+             "detected_artist": suggestion["albumartist"], "detected_album": suggestion["album"]}
+    if not auto.get("eligible"):
+        log.append(f"  Not eligible for automatic import: {', '.join(found['auto_import']['reasons']) or 'no proof'}")
+        review(suggestion, evidence, **found)
+        return
+
+    # ── Stage 2b: pinned re-import, only with complete fingerprint proof ────
+    if stop(interrupted()):
+        return
+    release_id, release_group = _s(auto.get("release_id")), _s(auto.get("release_group_id")).lower()
+    mark(current_step="Stage 2b: pinned Beets import", stage="pinned_import", **found)
+    log.append(f"  Stage 2b: every file proven; Beets import pinned to release {release_id}")
+    try:
+        # Re-checks torrent and hardlinks itself right before planning (N10).
+        out = _ai_import_folder(folder, release_id, {}, log, cancel_event)
+        aid = int(out["album_id"])
+        # post_conditions: beets_strong_match (quiet_fallback skip in the
+        # Apply) and single_new_album_with_release_group (the Apply checks one
+        # new row; the Release Group is re-read against the one proven here).
+        got = _s((composite_workflows.get_album(aid) or {}).get("mb_releasegroupid")).strip().lower()
+        if got != release_group:
+            err = RuntimeError(f"Post-condition failed: album_id {aid} has Release Group {got or 'none'}, "
+                               f"expected {release_group}.")
+            err.kept_album_ids = [aid]  # type: ignore[attr-defined]
+            raise err
+    except Exception as ex:
+        outcome = _ai_batch_import_failure_outcome(str(ex))
+        if outcome["status"] == "policy_rejected":
+            failed(str(ex))
+            return
+        log.append(f"  Automatic import did not complete: {ex}")
+        suggestion["reason"] = f"Automatic import did not complete: {ex} " + suggestion["reason"]
+        kept = getattr(ex, "kept_album_ids", None)
+        if kept:
+            suggestion["kept_album_ids"] = kept
+        evidence["stage2b_error"] = _s(ex)
+        review(suggestion, evidence, failure_reason=_s(ex), stage="done")
+        return
+    mark(status="imported", current_step="imported (pinned release)", stage="done", album_id=aid, album_ids=[aid],
+         pinned_release_id=release_id, metadata_imported=True,
+         identity_verified=bool(out.get("identity_verified", False)),
+         artwork_status=_s(out.get("artwork_status") or "unknown"),
+         artwork_retryable=bool(out.get("artwork_retryable", False)))
+
+
+def _ai_batch_run_folders(state: Dict[str, Any], log: list, cancel_event=None, update_state=None) -> str:
+    """Process queued folders one at a time inside the batch job (F11: no
+    per-folder threads). Pause and Stop take effect between folders; Skip and
+    Stop also between a folder's stages."""
+    folders = state.get("folder_states") or {}
+    pending = sorted((fid for fid, f in folders.items() if f.get("status") in _AI_BATCH_QUEUED_FOLDER_STATUSES),
+                     key=lambda key: _s(folders[key].get("source_folder")))
+    for idx, fid in enumerate(pending):
         control = _ai_batch_control(state["batch_job_id"])
         if cancel_event and cancel_event.is_set():
-            for fid in list(active.keys()) + pending:
-                folder = folders.get(fid) or {}
-                _ai_batch_mark_folder(state, fid, status="skipped", current_step="canceled", failure_reason="batch canceled")
-                log.append(f"folder skipped: {folder.get('source_folder', fid)} — batch canceled")
-            state["status"] = "canceled"
-            state["current_step"] = "canceled by user"
-            state["completed_at"] = time.time()
+            for rest in pending[idx:]:
+                _ai_batch_mark_folder(state, rest, status="skipped", current_step="canceled",
+                                      failure_reason="batch canceled")
+                log.append(f"folder skipped: {folders[rest].get('source_folder', rest)} — batch canceled")
+            break
+        if fid in control["skip_folder_ids"]:
+            control["skip_folder_ids"].discard(fid)
+            _ai_batch_mark_folder(state, fid, status="skipped", current_step="skipped by user",
+                                  failure_reason="skipped by user")
+            log.append(f"folder skipped: {folders[fid].get('source_folder', fid)}")
             _ai_batch_commit(state, update_state)
-            return "canceled"
-
-        skip_ids = set(control.get("skip_folder_ids") or set())
-        if control.get("skip_current"):
-            skip_ids.update(active.keys())
-            control["skip_current"] = False
-        if skip_ids:
-            for fid in list(skip_ids):
-                if fid in active:
-                    folder = folders.get(fid) or {}
-                    _ai_batch_mark_folder(state, fid, status="skipped", current_step="skipped by user", failure_reason="skipped by user")
-                    active.pop(fid, None)
-                    log.append(f"folder skipped: {folder.get('source_folder', fid)}")
-                elif fid in pending:
-                    folder = folders.get(fid) or {}
-                    pending.remove(fid)
-                    _ai_batch_mark_folder(state, fid, status="skipped", current_step="skipped by user", failure_reason="skipped by user")
-                    log.append(f"folder skipped: {folder.get('source_folder', fid)}")
-            control["skip_folder_ids"] = set()
-            _ai_batch_commit(state, update_state)
-
-        paused = bool(control.get("pause"))
-        while pending and not paused and len(active) < _AI_BATCH_MAX_AI_WORKERS:
-            fid = pending.pop(0)
-            _ai_batch_mark_folder(state, fid, status="ai_queued", current_step="AI suggestion queued", ai_suggest_status="queued")
-            _launch(fid)
-            _ai_batch_commit(state, update_state)
-
-        now = time.time()
-        for fid, holder in list(active.items()):
-            folder = folders.get(fid) or {}
-            source = folder.get("source_folder", holder.get("source_folder", fid))
-            if holder.get("done"):
-                result = holder.get("result") or {"ok": False, "error": "no result"}
-                suggestion = result.get("suggestion") or {}
-                _ai_batch_mark_folder(
-                    state,
-                    fid,
-                    status="ai_completed" if result.get("ok") else "ai_failed",
-                    current_step="AI suggestion completed" if result.get("ok") else "AI suggestion failed",
-                    ai_suggest_status="completed" if result.get("ok") else "failed",
-                    ai_suggest_completed_at=now,
-                    ai_suggest_error="" if result.get("ok") else _s(result.get("error") or "AI suggestion failed"),
-                    detected_artist=_s(suggestion.get("albumartist") or suggestion.get("artist")),
-                    detected_album=_s(suggestion.get("album")),
-                    suggested_release_group_id=_s(suggestion.get("mb_releasegroupid")),
-                    failure_reason="" if result.get("ok") else _s(result.get("error") or "AI suggestion failed"),
-                    ai_result=result,
-                )
-                if result.get("ok"):
-                    log.append(f"AI suggestion completed for folder: {source}")
-                else:
-                    log.append(f"folder failed with reason: {source} — {_s(result.get('error') or 'AI suggestion failed')}")
-                active.pop(fid, None)
-                _ai_batch_commit(state, update_state)
-            elif now - float(holder.get("started_at") or now) > _AI_BATCH_AI_TIMEOUT:
-                reason = f"AI suggestion timed out after {_AI_BATCH_AI_TIMEOUT}s"
-                _ai_batch_mark_folder(
-                    state,
-                    fid,
-                    status="timed_out",
-                    current_step="AI suggestion timed out",
-                    ai_suggest_status="timed_out",
-                    ai_suggest_completed_at=now,
-                    ai_suggest_error=reason,
-                    failure_reason=reason,
-                )
-                log.append(f"AI suggestion timed out for folder: {source} — {reason}")
-                active.pop(fid, None)
-                _ai_batch_commit(state, update_state)
-
-        if paused and not active:
+            continue
+        if control.get("pause"):
             state["status"] = "paused"
             state["current_step"] = "paused"
             _ai_batch_commit(state, update_state)
             return "paused"
-
-        if now - last_heartbeat_log >= 30:
-            log.append("batch heartbeat updated")
-            last_heartbeat_log = now
-        state["current_step"] = "Gathering AI suggestions"
+        # "Skip current" means the folder running when it was pressed; one that
+        # finished (e.g. Beets imported it) must not pass it on (QA394-F1).
+        control["skip_current"] = False
+        state["current_step"] = f"Importing {Path(_s(folders[fid].get('source_folder'))).name}"
+        try:
+            _ai_batch_process_folder(state, fid, log, cancel_event, update_state)
+        except Exception as ex:  # one folder never stops the batch
+            log.append(f"folder failed with reason: {folders[fid].get('source_folder', fid)} — {ex}")
+            _ai_batch_mark_folder(state, fid, status="import_failed", current_step="import failed",
+                                  failure_reason=_s(ex) or "Import failed")
         _ai_batch_commit(state, update_state)
-        time.sleep(0.5)
-
+    if cancel_event and cancel_event.is_set():
+        state["status"] = "canceled"
+        state["current_step"] = "canceled by user"
+        state["completed_at"] = time.time()
+        _ai_batch_commit(state, update_state)
+        return "canceled"
     return "done"
 
 
@@ -2093,9 +2308,12 @@ def _ai_batch_import_failure_outcome(error_text: str) -> Dict[str, str]:
 
 
 def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=None, update_state=None) -> Dict[str, int]:
+    """Final pass over the batch: count outcomes and give each folder that was
+    skipped by the user or failed one review row (a canceled or
+    already-imported folder gets none)."""
     imported = already_cnt = queued = errors = skipped = warnings = replacements = 0
     folders = state.get("folder_states") or {}
-    total = len(folders)
+    batch_id = state.get("batch_job_id", "")
     last_commit_at = 0.0
 
     def _commit(force: bool = False) -> None:
@@ -2105,193 +2323,47 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
             _ai_batch_commit(state, update_state)
             last_commit_at = now
 
-    for idx, fid in enumerate(sorted(folders, key=lambda key: _s(folders[key].get("source_folder"))), start=1):
+    def _queue(folder_state: Dict[str, Any], folder: str, reason: str, status: str, key: str) -> None:
+        if folder_state.get("review_item_id") or not folder or _pending_review_has_path(folder):
+            return
+        name = Path(folder).name
+        suggestion = {
+            "artist": folder_state.get("detected_artist") or name,
+            "album": folder_state.get("detected_album") or name,
+            "albumartist": folder_state.get("detected_artist") or name,
+            "confidence": "low",
+            "reason": reason,
+        }
+        folder_state["review_item_id"] = _ai_batch_queue_pending_review(
+            folder, suggestion, evidence={key: reason, "status": status, "batch_job_id": batch_id},
+            batch_job_id=batch_id)
+        log.append(f"review item created: {folder}")
+        _commit()
+
+    for fid in sorted(folders, key=lambda key: _s(folders[key].get("source_folder"))):
         folder_state = folders[fid]
         folder = folder_state.get("source_folder", "")
-        fname = Path(folder).name
-        if cancel_event and cancel_event.is_set():
-            state["status"] = "canceled"
-            state["current_step"] = "canceled by user"
-            state["completed_at"] = time.time()
-            _commit(True)
-            break
         status = _ai_batch_effective_folder_status(folder_state)
-        if status in (_AI_BATCH_IMPORTED_FOLDER_STATUSES | _AI_BATCH_SKIPPED_FOLDER_STATUSES | _AI_BATCH_FAILED_FOLDER_STATUSES | _AI_BATCH_REVIEW_FOLDER_STATUSES | _AI_BATCH_POLICY_WARNING_STATUSES | _AI_BATCH_REPLACEMENT_FOLDER_STATUSES):
-            if status in _AI_BATCH_SKIPPED_FOLDER_STATUSES:
-                skipped += 1
-                reason = folder_state.get("failure_reason") or "skipped by user"
-                if reason != "batch canceled" and not folder_state.get("review_item_id") and not _pending_review_has_path(folder):
-                    suggestion = {
-                        "artist": folder_state.get("detected_artist") or Path(folder).name,
-                        "album": folder_state.get("detected_album") or Path(folder).name,
-                        "albumartist": folder_state.get("detected_artist") or Path(folder).name,
-                        "confidence": "low",
-                        "reason": reason,
-                    }
-                    review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence={"ai_batch_skip": reason, "status": status, "batch_job_id": state.get("batch_job_id", "")}, batch_job_id=state.get("batch_job_id", ""))
-                    folder_state["review_item_id"] = review_id
-                    log.append(f"review item created: {folder}")
-                    _commit()
-            elif status in _AI_BATCH_FAILED_FOLDER_STATUSES:
-                errors += 1
-                if not folder_state.get("review_item_id") and not _pending_review_has_path(folder):
-                    reason = folder_state.get("failure_reason") or folder_state.get("ai_suggest_error") or "AI suggestion failed"
-                    suggestion = {
-                        "artist": folder_state.get("detected_artist") or Path(folder).name,
-                        "album": folder_state.get("detected_album") or Path(folder).name,
-                        "albumartist": folder_state.get("detected_artist") or Path(folder).name,
-                        "confidence": "low",
-                        "reason": reason,
-                    }
-                    review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence={"ai_batch_failure": reason, "status": status, "batch_job_id": state.get("batch_job_id", "")}, batch_job_id=state.get("batch_job_id", ""))
-                    folder_state["review_item_id"] = review_id
-                    log.append(f"review item created: {folder}")
-                    _commit()
-            elif status in _AI_BATCH_IMPORTED_FOLDER_STATUSES:
-                imported += 1
-            elif status in _AI_BATCH_REVIEW_FOLDER_STATUSES:
-                queued += 1
-            elif status in _AI_BATCH_REPLACEMENT_FOLDER_STATUSES:
-                replacements += 1
-            else:
-                warnings += 1
-            continue
-        result = folder_state.get("ai_result") or {}
-        if not result:
-            continue
-        state["current_step"] = f"Processing {fname}"
-        _ai_batch_mark_folder(state, fid, current_step="processing decision")
-        _commit()
-        log.append(f"\n[{idx}/{total}] {fname}")
-
-        if result.get("already_in_library"):
-            log.append("  Already in library - skipped; no source folder deleted")
-            _ai_batch_mark_folder(state, fid, status="skipped", current_step="already in library", failure_reason="already in library")
-            already_cnt += 1
-            _commit()
-            continue
-
-        if not result.get("ok"):
-            err = _s(result.get("error") or "AI suggestion failed")
-            log.append(f"  AI failed: {err}")
-            review_id = _ai_batch_queue_pending_review(folder, {"confidence": "low", "reason": f"AI failed: {err}"}, evidence=result.get("evidence") or None, batch_job_id=state.get("batch_job_id", ""))
-            _ai_batch_mark_folder(state, fid, status="ai_failed", current_step="AI failed; queued for review", review_item_id=review_id, failure_reason=err)
-            queued += 1
+        if status in _AI_BATCH_SKIPPED_FOLDER_STATUSES:
+            reason = folder_state.get("failure_reason") or "skipped by user"
+            if reason == "already in library":
+                already_cnt += 1
+                continue
+            skipped += 1
+            if reason != "batch canceled":
+                _queue(folder_state, folder, reason, status, "ai_batch_skip")
+        elif status in _AI_BATCH_FAILED_FOLDER_STATUSES:
             errors += 1
-            _commit()
-            continue
-
-        suggestion = result.get("suggestion") or {}
-        conf = _s(suggestion.get("confidence", "low")).lower() or "low"
-        mb_id = _s(suggestion.get("mb_albumid") or "").strip()
-        mb_valid = suggestion.get("mb_valid", False)
-        log.append(f"  {suggestion.get('albumartist','')} - {suggestion.get('album','')} ({suggestion.get('year','')})")
-        log.append(f"  Confidence: {conf}" + (f"  MB: {mb_id[:8]}..." if mb_id else ""))
-        if suggestion.get("mb_url"):
-            log.append(f"  {suggestion['mb_url']}")
-
-        if _ai_conf_at_least(conf, "medium") and mb_valid and mb_id:
-            pf = _folder_release_preflight(folder, mb_id)
-            match_ratio = _preflight_match_ratio(pf)
-            auto_ok = _ai_auto_import_allowed("fresh_import", conf, pf, mb_valid, mb_id)
-            if auto_ok:
-                log.append(
-                    f"  Preflight ok ({pf.get('matches',0)}/{pf.get('expected',0)} tracks, conf={conf}) - importing..."
-                )
-                try:
-                    import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)
-                    if not import_result:
-                        # Every real return path from _ai_import_folder returns
-                        # a populated dict; a falsy result here means it
-                        # returned without raising but without confirming
-                        # anything, which is itself a failure -- raise so the
-                        # existing except-branch below handles it (queued for
-                        # review), instead of defaulting to false/unknown
-                        # fields while still marking this folder "imported".
-                        raise RuntimeError("Import completed without a verifiable result")
-                    imported += 1
-                    _ai_batch_mark_folder(
-                        state, fid, status="imported", current_step="imported",
-                        metadata_imported=bool(import_result.get("metadata_imported", False)),
-                        identity_verified=bool(import_result.get("identity_verified", False)),
-                        artwork_status=_s(import_result.get("artwork_status") or "unknown"),
-                        artwork_retryable=bool(import_result.get("artwork_retryable", False)),
-                        album_id=import_result.get("album_id"),
-                    )
-                except Exception as ex:
-                    outcome = _ai_batch_import_failure_outcome(str(ex))
-                    log.append(f"  Import outcome: {outcome['reason']}")
-                    if outcome["status"] == "policy_rejected":
-                        warnings += 1
-                        _ai_batch_mark_folder(
-                            state,
-                            fid,
-                            status=outcome["status"],
-                            current_step=outcome["current_step"],
-                            failure_reason=outcome["reason"],
-                        )
-                    else:
-                        kept_ids = getattr(ex, "kept_album_ids", None)
-                        review_sug = {**suggestion, "kept_album_ids": kept_ids} if kept_ids else suggestion
-                        review_id = _ai_batch_queue_pending_review(folder, review_sug, evidence=_ai_batch_build_evidence(folder, result, suggestion, pf), batch_job_id=state.get("batch_job_id", ""))
-                        _ai_batch_mark_folder(
-                            state,
-                            fid,
-                            status=outcome["status"],
-                            current_step=outcome["current_step"],
-                            review_item_id=review_id,
-                            failure_reason=outcome["reason"],
-                        )
-                        queued += 1
-                        errors += 1
-            elif pf.get("scan_unavailable"):
-                # Wave 26 Docker acceptance round: this is NOT "the AI's
-                # evidence is ambiguous, a human should decide" -- it is
-                # "we could not even reach the engine to gather evidence",
-                # an infrastructure/connectivity failure. Routing it
-                # through the same terminal "review_created" status as a
-                # genuine low-confidence match permanently stranded the
-                # folder with no automated retry path (found live: after
-                # the engine came back online, /api/ai-batch-import/recover
-                # with retry_failed=true never re-attempted this folder at
-                # all, because "review_created" is not in
-                # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- confirmed via a
-                # real folder_states dump on 4 consecutive real CI runs,
-                # not a guess). Marked retryable instead, matching the
-                # existing _ai_batch_import_failure_outcome default-branch
-                # contract used elsewhere in this same function.
-                pf_note = pf.get("error") or "Could not scan source folder."
-                log.append(f"  Scan unavailable, marked retryable: {pf_note}")
-                _ai_batch_mark_folder(
-                    state, fid, status="import_failed",
-                    current_step="scan unavailable; queued for retry",
-                    failure_reason=pf_note,
-                )
-                queued += 1
-                errors += 1
-            else:
-                if pf.get("ok"):
-                    pf_note = (
-                        f"{conf} confidence with {pf.get('matches',0)}/{pf.get('expected',0)} tracks matched "
-                        f"({match_ratio:.0%}; {_AI_BATCH_MEDIUM_RATIO:.0%} required for medium auto-import)"
-                    )
-                else:
-                    pf_note = pf.get("error") or f"preflight: {pf.get('matches',0)}/{pf.get('expected',0)} tracks matched"
-                    if conf == _AI_BATCH_MIN_CONF:
-                        suggestion["confidence"] = "medium"
-                log.append(f"  Queued for review: {pf_note}")
-                suggestion["reason"] = f"[{pf_note}] " + (suggestion.get("reason") or "")
-                review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=_ai_batch_build_evidence(folder, result, suggestion, pf), batch_job_id=state.get("batch_job_id", ""))
-                _ai_batch_mark_folder(state, fid, status="review_created", current_step="review item created", review_item_id=review_id)
-                log.append(f"review item created: {folder}")
-                queued += 1
-        else:
-            log.append(f"  {conf.capitalize()} confidence - queued for review")
-            review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=_ai_batch_build_evidence(folder, result, suggestion), batch_job_id=state.get("batch_job_id", ""))
-            _ai_batch_mark_folder(state, fid, status="review_created", current_step="review item created", review_item_id=review_id)
-            log.append(f"review item created: {folder}")
+            _queue(folder_state, folder, folder_state.get("failure_reason") or "Import failed", status,
+                   "ai_batch_failure")
+        elif status in _AI_BATCH_IMPORTED_FOLDER_STATUSES:
+            imported += 1
+        elif status in _AI_BATCH_REVIEW_FOLDER_STATUSES:
             queued += 1
-        _commit()
+        elif status in _AI_BATCH_REPLACEMENT_FOLDER_STATUSES:
+            replacements += 1
+        elif status in _AI_BATCH_POLICY_WARNING_STATUSES:
+            warnings += 1
     _commit(True)
     return {"imported": imported, "already": already_cnt, "queued": queued, "errors": errors, "skipped": skipped, "warnings": warnings, "replacements": replacements}
 
@@ -2315,8 +2387,13 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
     state["status"] = "running"
     state["current_step"] = "source scan started"
     state["last_error"] = ""
-    # #288: the batch never needs AI; this only labels the run for the UI.
-    state["ai_configured"] = bool(_ai_api_key())
+    # #288: the batch never calls AI; ai_configured only labels the run.
+    caps = _ai_batch_evidence_capabilities()
+    state["evidence_capabilities"] = caps
+    state["ai_configured"] = caps["ai_configured"]
+    state["warnings"] = _ai_batch_capability_warnings(caps)
+    for warning in state["warnings"]:
+        log.append(f"WARNING: {warning}")
     if recover:
         state["retry_count"] = int(state.get("retry_count") or 0) + 1
     log.append("batch created" if not recover else ("batch retry started" if retry_failed else "batch recovery started"))
@@ -2345,7 +2422,6 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         pending_review_paths = _pending_review_path_set()
         requeued = 0
         terminal = 0
-        decision_ready = 0
         for fid, folder in list(folder_states.items()):
             src = folder.get("source_folder", "")
             status = _ai_batch_effective_folder_status(folder)
@@ -2385,32 +2461,34 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
                 _ai_batch_mark_folder(state, fid, status="review_created", current_step="review item already exists", review_item_id=fid)
                 terminal += 1
                 continue
-            if status == "ai_completed" and folder.get("ai_result"):
-                decision_ready += 1
-                continue
-            if status == "ai_running":
-                reason = "stale AI-running folder recovered"
-                _ai_batch_mark_folder(state, fid, status="timed_out", current_step="stale AI suggestion timed out", ai_suggest_status="timed_out", ai_suggest_error=reason, failure_reason=reason)
-                terminal += 1
-            elif status in {"scanning", "queued", "ai_queued"}:
-                folder.update({"status": "ai_queued", "current_step": "requeued by recovery", "ai_suggest_status": "queued"})
+            # A legacy "ai_running" folder was already timed out by
+            # _ai_batch_reconcile_state (_ai_batch_mark_stale_ai_running_folders).
+            if status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES:
+                # Queued, interrupted mid-import, or a cached AI decision from
+                # before phase B: run the deterministic stages again. A folder
+                # Beets already imported is caught by the library check.
+                folder.pop("ai_result", None)
+                folder.update({"status": "ai_queued", "current_step": "requeued by recovery"})
                 requeued += 1
             else:
                 terminal += 1
-        log.append(f"Reconciled state: {terminal} terminal, {requeued} requeued, {decision_ready} cached decision(s) ready")
+        log.append(f"Reconciled state: {terminal} terminal, {requeued} requeued")
     _ai_batch_commit(state, update_state)
     if state.get("status") in _AI_BATCH_TERMINAL_STATUSES:
         log.append("No unfinished folder work remains; batch is terminal.")
         return _ai_batch_public_state(state)
 
-    ai_status = _ai_batch_run_suggestions(state, log, cancel_event, update_state)
-    if ai_status in {"canceled", "paused"}:
+    run_status = _ai_batch_run_folders(state, log, cancel_event, update_state)
+    if run_status in {"canceled", "paused"}:
+        _invalidate_lib_cache()
         return _ai_batch_public_state(state)
 
-    state["current_step"] = "processing AI decisions"
+    state["current_step"] = "finishing batch"
     _ai_batch_commit(state, update_state)
     summary = _ai_batch_process_decisions(state, log, cancel_event, update_state)
     _invalidate_lib_cache()
+    if summary.get("imported"):
+        _trigger_plex_refresh(log, workflow="batch")
 
     if state.get("status") not in {"canceled", "paused"}:
         _ai_batch_recalculate_batch_state(state, log)
@@ -2487,15 +2565,18 @@ def _record_recent_import_for_album(album_id: Any, log: List[str], *, mb_albumid
 
 
 def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
-                      log: list, cancel_event=None):
+                      log: list, cancel_event=None, *, copy_source: bool = False):
     """Import a folder as a specific MB release through Beets' own importer
     (confirmed import), which tags, writes and places the files. Web Manager
     does not retag the result (ARCH-024). A preserved torrent source is
-    copied, never moved. Runs directly -- safe for background threads."""
-    preserve_torrent_source = _preserve_torrent_source_path(folder_path)
-    if preserve_torrent_source:
+    copied, never moved, and so is a folder holding a hardlinked file (checked
+    right before planning, N10); ``copy_source`` forces a copy too.
+    Runs directly -- safe for background threads."""
+    torrent_source = _preserve_torrent_source_path(folder_path)
+    if torrent_source:
         log.append("  [torrent] Protected source detected; Beets copies it, "
                    "leaving the qBittorrent source in place.")
+    preserve_torrent_source = copy_source or torrent_source
 
     # ── Step 1: confirmed_import_v1 (Plan -> Apply) with the AI-reviewed,
     # human/AI-approved release ──────────────────────────────────────────
@@ -2541,6 +2622,9 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
                            "import could not be verified. Import was not started.")
     log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
 
+    if not preserve_torrent_source and _has_hardlinked_file(folder_path):
+        preserve_torrent_source = True
+        log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
     plan_res = composite_workflows.plan_confirmed_import({
         "source_folder": folder_path,
         "mb_albumid": mb_albumid,

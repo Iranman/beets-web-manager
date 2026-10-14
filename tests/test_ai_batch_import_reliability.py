@@ -63,36 +63,18 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
             self.assertIn(field, APP)
         self.assertIn('folder_states[fid] = _ai_batch_folder_state(batch_job_id, folder)', APP)
 
-    def test_max_three_ai_suggestions_run_in_parallel_without_as_completed_wait(self):
-        route = section(APP, '@app.post("/api/ai-batch-import")', '# ── Library scan')
-        self.assertIn('_AI_BATCH_MAX_AI_WORKERS =', APP)
-        self.assertIn('len(active) < _AI_BATCH_MAX_AI_WORKERS', APP)
-        self.assertNotIn('ThreadPoolExecutor', route)
-        self.assertNotIn('as_completed', route)
-
-    def test_one_ai_suggestion_timeout_does_not_block_batch(self):
-        self.assertIn('_AI_BATCH_AI_TIMEOUT =', APP)
-        self.assertIn('AI suggestion timed out after', APP)
-        self.assertIn('status="timed_out"', APP)
-        self.assertIn('active.pop(fid, None)', APP)
-        self.assertIn('while pending or active:', APP)
-        self.assertIn('return "done"', APP)
+    def test_folders_run_serially_inside_the_job(self):
+        # Phase B (F11): no per-folder threads; tests/test_import_batch_phase_b.py
+        # covers the behavior.
+        run_fn = section(APP, 'def _ai_batch_run_folders', 'def _ai_batch_import_failure_outcome')
+        self.assertNotIn('Thread(', run_fn)
+        self.assertNotIn('ThreadPoolExecutor', run_fn)
+        self.assertIn('return "done"', run_fn)
 
     def test_failed_folder_is_marked_failed_and_batch_continues(self):
         self.assertIn('status="failed"', APP)
         self.assertIn('folder failed with reason:', APP)
-        self.assertIn('AI failed; queued for review', APP)
         self.assertIn('import failed; queued for review', APP)
-        self.assertIn('continue', section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import'))
-
-    def test_empty_import_result_raises_instead_of_defaulting_to_imported(self):
-        # A falsy _ai_import_folder() result must never be papered over with
-        # a default {} while still counting as an "imported" folder -- it
-        # must raise so the existing except-branch (queued for review) runs.
-        call_site = section(APP, 'import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)', 'except Exception as ex:')
-        self.assertIn('raise RuntimeError', call_site)
-        self.assertNotIn('import_result = {}', call_site)
-        self.assertNotIn('WARN: import completed but returned no result details', call_site)
 
     def test_refresh_reconnects_to_running_batch_state(self):
         self.assertIn('@app.get("/api/ai-batch-import/status")', APP)
@@ -126,7 +108,7 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
 
     def test_duplicate_review_items_are_not_created_on_recovery(self):
         self.assertIn('_pending_review_path_key(src) in pending_review_paths', APP)
-        self.assertIn('not _pending_review_has_path(folder)', APP)
+        self.assertIn('or _pending_review_has_path(folder):', APP)
         self.assertIn('def _ai_batch_queue_pending_review', APP)
         self.assertIn('_add_to_pending(folder, suggestion, evidence=evidence, origin=origin)', APP)
 
@@ -140,7 +122,7 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
     def test_pause_stops_new_folder_claims(self):
         self.assertIn('@app.post("/api/ai-batch-pause")', APP)
         self.assertIn('control["pause"] = True', APP)
-        self.assertIn('while pending and not paused and len(active) < _AI_BATCH_MAX_AI_WORKERS', APP)
+        self.assertIn('if control.get("pause"):', section(APP, 'def _ai_batch_run_folders', 'def _ai_batch_import_failure_outcome'))
         self.assertIn('Pause requested. Active folder work can finish or time out.', INTAKE)
 
     def test_stop_cancels_batch_safely(self):
@@ -196,9 +178,7 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('const done = batchDone || missing || jobEndedWithoutState;', INTAKE)
         self.assertIn("Batch job no longer exists for this ID.", INTAKE)
 
-    def test_completed_ai_suggestions_are_cached(self):
-        self.assertIn('and not f.get("ai_result")', APP)
-        self.assertIn('ai_result=result', APP)
+    def test_public_state_never_exposes_cached_ai_results(self):
         self.assertIn('item.pop("ai_result", None)', APP)
         self.assertIn('state?: AiBatchState', TYPES)
         self.assertIn('getAiBatchStatus', CLIENT)
@@ -242,17 +222,21 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- permanently stranding the
         # folder with no automated retry path even after the engine came
         # back online.
-        process_fn = section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import')
-        self.assertIn('elif pf.get("scan_unavailable"):', process_fn)
-        self.assertIn('status="import_failed"', process_fn)
-        self.assertIn('current_step="scan unavailable; queued for retry"', process_fn)
+        # Phase B: an engine failure in any stage ends import_failed (retryable).
+        run_fn = section(APP, 'def _ai_batch_run_folders', 'def _ai_batch_import_failure_outcome')
+        self.assertIn('status="import_failed"', run_fn)
+        self.assertIn('"status": "import_failed"', APP)
 
     def test_recovery_requeues_only_retryable_outcomes(self):
         self.assertIn('_AI_BATCH_RETRYABLE_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "replacement_unavailable"}', APP)
         self.assertIn('retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES', APP)
         self.assertNotIn('retry_failed and status in _AI_BATCH_POLICY_WARNING_STATUSES', APP)
         self.assertIn('retryable failure requeued', APP)
-        self.assertIn('if status in (_AI_BATCH_IMPORTED_FOLDER_STATUSES | _AI_BATCH_SKIPPED_FOLDER_STATUSES', APP)
+        # Phase B: the final tally classifies only terminal outcome sets.
+        tally = section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import(')
+        for name in ("_AI_BATCH_SKIPPED_FOLDER_STATUSES", "_AI_BATCH_FAILED_FOLDER_STATUSES",
+                     "_AI_BATCH_IMPORTED_FOLDER_STATUSES", "_AI_BATCH_REVIEW_FOLDER_STATUSES"):
+            self.assertIn(f"status in {name}:", tally)
 
     def test_stale_cached_ai_completed_finalizes_as_review_required(self):
         self.assertIn('def _ai_batch_mark_orphaned_ai_completed_for_review', APP)
@@ -267,7 +251,6 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('pending_review_paths = _pending_review_path_set()', run_fn)
         self.assertIn('_pending_review_path_key(src) in pending_review_paths', run_fn)
         self.assertNotIn('_pending_review_has_path(src)', run_fn)
-        self.assertIn('cached decision(s) ready', run_fn)
 
     def test_cached_decision_processing_throttles_large_state_commits(self):
         process_fn = section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import')
