@@ -13,7 +13,7 @@ from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOL
 from backend.library_service import _album_folder_for_album_id, _folder_import_track_count, _target_preview_year
 from backend.ai_evidence_service import _enrich_track_ai_candidate
 from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _trusted_stored_review_path
-from backend.ai_batch_state_service import _is_music_format_policy_handled_error
+from backend.ai_batch_state_service import _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _import_review_auto_job_for_key, _resolve_import_review_selected_audio_file, _review_paths_equal, _review_status_key
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _redact_security_text
 from helpers_mb import _fetch_mb_recording_details, _resolve_release_group_to_release, _mb_release_group_candidates
@@ -1013,7 +1013,9 @@ def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
                         "queued": False,
                         "handled": True,
                         "status": outcome.get("status"),
-                        "note": outcome.get("note"),
+                        # Fixed text, never the exception's (CodeQL #1423); the
+                        # stored review note keeps the per-file counts.
+                        "note": _MUSIC_FORMAT_POLICY_REVIEW_NOTE,
                     })
                     if log is not None:
                         log.append(f"Handled format-policy rejection for {Path(path).name or path}: {outcome.get('note')}")

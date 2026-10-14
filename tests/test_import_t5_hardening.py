@@ -254,6 +254,25 @@ class StoredPendingPathRevalidationTests(_Base):
         self.assertEqual((out["queued_count"], out["skipped_count"], out["failed_count"]), (0, 1, 0))
         self.assertEqual(out["items"][0]["reason"], irs._UNTRUSTED_STORED_REVIEW_PATH)
 
+    def test_format_policy_rejection_response_never_echoes_exception_text(self):
+        # CodeQL #1423: the handled-rejection row returns fixed text, not the
+        # exception message (which only the stored review note keeps).
+        self._store(self.album)
+        leaked = "Downloaded audio does not match Music Format Preferences. Traceback /secret/path"
+        with mock.patch.object(irs, "_load_pending_reviews", return_value=json.loads(self.pending_file.read_text())), \
+             mock.patch.object(irs, "_pending_item_is_ready_for_backend_auto_import", return_value=True), \
+             mock.patch.object(irs, "_import_review_payload_from_pending_item", return_value={}), \
+             mock.patch.object(irs, "evaluate_import_eligibility", return_value={"eligible": True}), \
+             mock.patch.object(irs, "_import_review_start_auto_import", side_effect=RuntimeError(leaked)), \
+             mock.patch.object(irs, "_finalize_pending_review_format_policy_rejection",
+                               return_value={"status": "needs_review", "note": leaked}):
+            out = irs._run_import_review_auto_enqueue_ready_batch(5)
+        row = out["items"][0]
+        self.assertTrue(row["handled"])
+        from backend.ai_batch_state_service import _MUSIC_FORMAT_POLICY_REVIEW_NOTE
+        self.assertEqual(row["note"], _MUSIC_FORMAT_POLICY_REVIEW_NOTE)
+        self.assertNotIn("secret", json.dumps(out))
+
     def test_symlink_from_downloads_into_music_never_matches(self):
         # Security LOW-5: the music library is an approved root, but a stored
         # downloads path may not reach it through a symlink.

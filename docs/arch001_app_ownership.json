@@ -29257,10 +29257,10 @@
    "module": "backend/import_review_service.py",
    "lines": [
     955,
-    1039
+    1041
    ],
-   "size": 85,
-   "body_lines": 82,
+   "size": 87,
+   "body_lines": 84,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_REVIEW",
@@ -29288,8 +29288,8 @@
    "name": "_import_review_revalidation_confidence_score",
    "module": "backend/import_review_service.py",
    "lines": [
-    1042,
-    1055
+    1044,
+    1057
    ],
    "size": 14,
    "body_lines": 9,
@@ -29312,8 +29312,8 @@
    "name": "_import_review_confidence_level",
    "module": "backend/import_review_service.py",
    "lines": [
-    1058,
-    1067
+    1060,
+    1069
    ],
    "size": 10,
    "body_lines": 9,
@@ -29332,8 +29332,8 @@
    "name": "_import_review_revalidation_preflight",
    "module": "backend/import_review_service.py",
    "lines": [
-    1070,
-    1094
+    1072,
+    1096
    ],
    "size": 25,
    "body_lines": 21,
@@ -29355,8 +29355,8 @@
    "name": "_import_review_build_revalidated_match",
    "module": "backend/import_review_service.py",
    "lines": [
-    1097,
-    1189
+    1099,
+    1191
    ],
    "size": 93,
    "body_lines": 88,
@@ -29382,8 +29382,8 @@
    "name": "_update_pending_review_revalidation",
    "module": "backend/import_review_service.py",
    "lines": [
-    1192,
-    1255
+    1194,
+    1257
    ],
    "size": 64,
    "body_lines": 58,
@@ -29406,8 +29406,8 @@
    "name": "_redact_unmatched_draft_tracks",
    "module": "backend/import_review_service.py",
    "lines": [
-    1261,
-    1282
+    1263,
+    1284
    ],
    "size": 22,
    "body_lines": 11,
@@ -29428,8 +29428,8 @@
    "name": "_run_import_review_revalidation",
    "module": "backend/import_review_service.py",
    "lines": [
-    1291,
-    1424
+    1293,
+    1426
    ],
    "size": 134,
    "body_lines": 127,
@@ -29459,8 +29459,8 @@
    "name": "_compact_revalidation_summary",
    "module": "backend/import_review_service.py",
    "lines": [
-    1430,
-    1450
+    1432,
+    1452
    ],
    "size": 21,
    "body_lines": 17,

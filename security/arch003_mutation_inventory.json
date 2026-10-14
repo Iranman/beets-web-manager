@@ -1794,7 +1794,7 @@
       "key": "backend/import_review_service.py:_update_pending_review_revalidation:ad62e72e5db5",
       "file": "backend/import_review_service.py",
       "function": "_update_pending_review_revalidation",
-      "line": 1252,
+      "line": 1254,
       "kind": "filesystem",
       "call_text": "_AI_PENDING_FILE.write_text(json.dumps(items, indent=2))",
       "classification": "APP_STATE",
