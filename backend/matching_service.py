@@ -99,7 +99,8 @@ IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
     "release_unresolved": True,          # generic refusal, no missing-track proof applied
     "missing_track_scope": False,        # not a missing-track fill of the existing album's own release
     "local_scan_unavailable": False,     # the folder could not be read locally
-    "acoustid_unavailable": False,       # AcoustID not configured / not reachable for a file
+    "acoustid_unavailable": False,       # AcoustID not configured, key rejected, down, rate limited, fpcalc missing
+    "file_unfingerprintable": True,      # a file could not be fingerprinted (corrupt, too short, fpcalc timed out)
     "file_unverified": True,             # a file has no confirmed recording (no result, low score, ambiguous)
     "recording_not_on_release": True,    # a file confirms a recording that is not on the target release
     "track_not_requested": True,         # a file maps to a release track that was not requested
@@ -123,7 +124,8 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                                    release_id: str,
                                    release_group_id: str,
                                    release_title: str = "",
-                                   release_artist: str = "") -> Dict[str, Any]:
+                                   release_artist: str = "",
+                                   unfingerprintable: Optional[set] = None) -> Dict[str, Any]:
     """Full per-track proof for a missing-track fill of an existing album.
 
     Accepts only when the release is the existing album's own release (same
@@ -150,8 +152,13 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         return _fail("missing_track_scope")
     if not file_hits:
         return _fail("local_scan_unavailable")
-    if any(hits is None for _path, hits in file_hits):
-        return _fail("acoustid_unavailable")
+    unanswered = [path for path, hits in file_hits if hits is None]
+    if unanswered:
+        # A provider-side failure (any file) outranks a per-file one: it would
+        # refuse every candidate the same way.
+        per_file = set(unfingerprintable or ())
+        return _fail("file_unfingerprintable" if all(p in per_file for p in unanswered)
+                     else "acoustid_unavailable")
 
     wanted_keys = {_wanted_track_key(t) for t in wanted_tracks}
     used = set(existing_recordings)
@@ -535,14 +542,21 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             row["acoustid_hits"] = acoustid_hits
         candidates.append(row)
 
+    unfingerprintable: set = set()  # files fpcalc could not fingerprint (not an AcoustID failure)
+
     def _file_acoustid_hits(path: Path) -> Optional[List[Dict[str, Any]]]:
+        unfingerprintable.discard(str(path))  # only the latest outcome for a path counts
         try:
             outcome = _acoustid_lookup_cached_outcome(str(path))
         except Exception as ex:
             if log is not None:
                 log.append(f"  [preflight] AcoustID lookup warning: {type(ex).__name__}")
             return None
-        return list(outcome.data or []) if outcome.answered else None
+        if outcome.answered:
+            return list(outcome.data or [])
+        if (outcome.evidence or {}).get("fingerprintable") is False:
+            unfingerprintable.add(str(path))
+        return None
 
     if inspect_evidence:
         for entry in inspect_evidence.get("audio_files") or []:
@@ -746,6 +760,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 release_group_id=_s(result.get("release_group")),
                 release_title=_s(result.get("release_title")),
                 release_artist=_s(result.get("release_artist")),
+                unfingerprintable=unfingerprintable,
             )
             result["missing_track_proof"] = {k: v for k, v in proof.items() if k != "matching_decision"}
             if proof["ok"]:

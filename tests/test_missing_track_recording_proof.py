@@ -61,6 +61,8 @@ class _Fixture(unittest.TestCase):
 
     def _lookup(self, path):
         hits = self.hits.get(str(path))
+        if isinstance(hits, ProviderResult):
+            return hits
         if hits is None:
             return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[])
         return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if hits else ProviderOutcome.NO_RESULT, data=hits)
@@ -135,6 +137,31 @@ class MissingTrackRecordingProofTests(_Fixture):
         self.hits[self.paths[4]] = None
         self.assertRefused(self.preflight(), "acoustid_unavailable")
 
+    def test_provider_failures_are_acoustid_unavailable(self):
+        # Not specific to this candidate: every peer's copy would be refused.
+        for outcome in (ProviderOutcome.NOT_CONFIGURED, ProviderOutcome.AUTHENTICATION_ERROR,
+                        ProviderOutcome.UNAVAILABLE, ProviderOutcome.RATE_LIMITED,
+                        ProviderOutcome.TRANSIENT_ERROR):
+            with self.subTest(outcome=outcome):
+                self.hits[self.paths[4]] = ProviderResult("acoustid", outcome, data=[])
+                self.assertRefused(self.preflight(), "acoustid_unavailable")
+                self.assertFalse(ms.IMPORT_REFUSAL_REASONS["acoustid_unavailable"])
+
+    def test_unfingerprintable_file_is_specific_to_the_candidate(self):
+        # No fingerprint / too short (UNAVAILABLE) and an fpcalc timeout (TRANSIENT_ERROR).
+        for outcome in (ProviderOutcome.UNAVAILABLE, ProviderOutcome.TRANSIENT_ERROR):
+            with self.subTest(outcome=outcome):
+                self.hits[self.paths[4]] = ProviderResult("acoustid", outcome, data=[],
+                                                          evidence={"fingerprintable": False})
+                self.assertRefused(self.preflight(), "file_unfingerprintable")
+                self.assertTrue(ms.IMPORT_REFUSAL_REASONS["file_unfingerprintable"])
+
+    def test_provider_failure_outranks_an_unfingerprintable_file(self):
+        self.hits[self.paths[2]] = ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[],
+                                                  evidence={"fingerprintable": False})
+        self.hits[self.paths[4]] = ProviderResult("acoustid", ProviderOutcome.RATE_LIMITED, data=[])
+        self.assertRefused(self.preflight(), "acoustid_unavailable")
+
     # (c)
     def test_recording_not_on_target_release_goes_to_review(self):
         self.hits[self.paths[5]] = [_hit(OTHER_REC)]
@@ -184,6 +211,132 @@ class RefusalReasonCodeTests(unittest.TestCase):
         self.assertTrue(ms.IMPORT_REFUSAL_REASONS["file_unverified"])
         self.assertEqual(ms.import_refusal_reason_code("[reason_code=made_up]"), "")
         self.assertEqual(ms.import_refusal_reason_code("no code"), "")
+        self.assertEqual(ms.import_refusal_reason_code("x [reason_code=file_unfingerprintable]"),
+                         "file_unfingerprintable")
+
+
+class FpcalcOutcomeTests(unittest.TestCase):
+    """helpers_mb flags per-file fpcalc failures; no network, no real fpcalc."""
+
+    def _fpcalc_lookup(self, run):
+        import helpers_mb
+        with mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "synthetic"}), \
+                mock.patch.object(helpers_mb.shutil, "which", return_value=__file__), \
+                mock.patch.object(helpers_mb.subprocess, "run", side_effect=run), \
+                mock.patch.object(helpers_mb.provider_boundary, "opened", side_effect=AssertionError("network")):
+            return helpers_mb.acoustid_lookup_outcome("/synthetic/a.flac")
+
+    def test_timeout_and_short_audio_are_unfingerprintable(self):
+        import subprocess
+
+        def timeout(*a, **k):
+            raise subprocess.TimeoutExpired("fpcalc", 30)
+
+        def short(*a, **k):
+            return subprocess.CompletedProcess(a, 0, stdout=json.dumps({"duration": 3, "fingerprint": "AQ"}), stderr="")
+
+        def corrupt(*a, **k):
+            return subprocess.CompletedProcess(a, 2, stdout="", stderr="ERROR: Error decoding audio frame")
+
+        for run in (timeout, short, corrupt):
+            with self.subTest(run=run.__name__):
+                outcome = self._fpcalc_lookup(run)
+                self.assertFalse(outcome.answered)
+                self.assertIs(outcome.evidence.get("fingerprintable"), False)
+
+    # QA #408: an AcoustID/fpcalc failure that would hit every file is never flagged per-file.
+    def test_provider_and_fpcalc_environment_failures_are_not_flagged(self):
+        import io
+        import subprocess
+        import urllib.error
+        import helpers_mb
+
+        def good(*a, **k):
+            return subprocess.CompletedProcess(a, 0, stdout=json.dumps({"duration": 200, "fingerprint": "AQ"}), stderr="")
+
+        def cannot_exec(*a, **k):
+            raise PermissionError(13, "Permission denied")
+
+        def missing_library(*a, **k):
+            return subprocess.CompletedProcess(a, 127, stdout="", stderr="fpcalc: error while loading shared libraries")
+
+        def auth_error(*a, **k):
+            raise urllib.error.HTTPError("https://api.acoustid.org/v2/lookup", 400, "bad", {},
+                                         io.BytesIO(b'{"status":"error","error":{"code":4}}'))
+
+        def down(*a, **k):
+            raise urllib.error.URLError("connection refused")
+
+        cases = {"fpcalc_cannot_exec": (cannot_exec, None), "fpcalc_missing_library": (missing_library, None),
+                 "auth": (good, auth_error),
+                 "network": (good, down), "lookup_exception": (good, AssertionError("boom"))}
+        for name, (run, opened) in cases.items():
+            with self.subTest(case=name), \
+                    mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "synthetic"}), \
+                    mock.patch.object(helpers_mb, "_ACOUSTID_NEXT_LOOKUP_AT", 0.0), \
+                    mock.patch.object(helpers_mb.shutil, "which", return_value=__file__), \
+                    mock.patch.object(helpers_mb.subprocess, "run", side_effect=run), \
+                    mock.patch.object(helpers_mb.provider_boundary, "opened",
+                                      side_effect=opened or AssertionError("network")):
+                outcome = helpers_mb.acoustid_lookup_outcome("/synthetic/a.flac")
+                self.assertFalse(outcome.answered, name)
+                self.assertNotEqual((outcome.evidence or {}).get("fingerprintable"), False, name)
+        with mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "", "ACOUSTID_KEY": ""}):
+            self.assertFalse((helpers_mb.acoustid_lookup_outcome("/synthetic/a.flac").evidence or {}))
+        with mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "synthetic"}), \
+                mock.patch.object(helpers_mb.shutil, "which", return_value=None), \
+                mock.patch.object(helpers_mb, "Path", return_value=mock.Mock(exists=mock.Mock(return_value=False))):
+            self.assertFalse((helpers_mb.acoustid_lookup_outcome("/synthetic/a.flac").evidence or {}))
+
+    def test_fpcalc_timeout_is_never_cached(self):
+        import backend.acoustid_service as aid
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        audio = Path(tmp.name) / "a.flac"
+        audio.write_bytes(b"synthetic")
+        timeout = ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out",
+                                 evidence={"fingerprintable": False})
+        with mock.patch.object(aid, "_ACOUSTID_FILE_CACHE_DIR", Path(tmp.name) / "cache"), \
+                mock.patch.object(aid, "acoustid_lookup_outcome", return_value=timeout) as lookup:
+            for _ in range(2):
+                self.assertIs(aid._acoustid_lookup_cached_outcome(str(audio)).evidence.get("fingerprintable"), False)
+        self.assertEqual(lookup.call_count, 2)
+        self.assertFalse((Path(tmp.name) / "cache").exists())
+
+
+class UnfingerprintableSetIsPerCallTests(_Fixture):
+    """QA #408: a path flagged by an earlier lookup must not keep the flag when
+    the later lookup (the one the proof uses) failed at the provider."""
+
+    def test_later_provider_failure_wins_over_earlier_timeout(self):
+        timeout = ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[],
+                                 evidence={"fingerprintable": False})
+        throttled = ProviderResult("acoustid", ProviderOutcome.RATE_LIMITED, data=[])
+        seq = {self.paths[4]: iter([timeout, throttled])}
+        base = self._lookup
+        self._lookup = lambda p: next(seq[str(p)]) if str(p) in seq else base(p)
+        pre = self._run(ms._folder_release_preflight, str(self.folder), REL, existing_album_id=ALBUM_ID,
+                        log=None, fingerprint_evidence=True, wanted_tracks=_wanted(2, 4, 5))
+        self.assertRefused(pre, "acoustid_unavailable")
+
+
+class PreflightCodeDrivesPeerLoopTests(_Fixture):
+    """QA #408: the code the real preflight produces decides the slskd peer loop."""
+
+    def test_stop_on_provider_failure_continue_on_unfingerprintable_file(self):
+        from tests.test_slskd_noncandidate_refusal import NonCandidateRefusalStopsPeerLoop as Loop
+        cases = [
+            (ProviderResult("acoustid", ProviderOutcome.RATE_LIMITED, data=[]), "acoustid_unavailable", 1),
+            (ProviderResult("acoustid", ProviderOutcome.TRANSIENT_ERROR, data=[],
+                            evidence={"fingerprintable": False}), "file_unfingerprintable", 12),
+        ]
+        for outcome, code, peers in cases:
+            with self.subTest(code=code):
+                self.hits[self.paths[4]] = outcome
+                proof_code = self.preflight()["missing_track_proof"]["reason_code"]
+                self.assertEqual(proof_code, code)
+                m, _log = Loop._run(self, f" [reason_code={proof_code}]")
+                self.assertEqual(m["_slskd_search_and_queue"].call_count, peers)
 
 
 # (e)
