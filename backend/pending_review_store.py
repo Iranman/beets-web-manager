@@ -200,7 +200,13 @@ def _review_download_folder_is_gone(folder_path: str) -> bool:
     drops it. Limited to DOWNLOADS_ROOT, which this process can see; a missing
     downloads mount never prunes anything."""
     raw = _s(folder_path).strip()
-    if not raw or not DOWNLOADS_ROOT.is_dir() or not _path_is_under(Path(raw), DOWNLOADS_ROOT):
+    try:
+        # Path.is_dir() re-raises EACCES/EIO/ESTALE (stale mount); the caller
+        # would turn that into an empty queue and the next save would write it.
+        root_ok = DOWNLOADS_ROOT.is_dir()
+    except OSError:
+        return False
+    if not raw or not root_ok or not _path_is_under(Path(raw), DOWNLOADS_ROOT):
         return False
     # Only a definite "not there" counts; os.path.lexists also says False on
     # EACCES/EIO, which must keep the row (as the full prune does).
@@ -362,7 +368,9 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
         updated = False
         for item in items:
             try:
-                _same_path = Path(item.get("path", "")).resolve() == Path(folder_path).resolve()
+                # Lexical compare only: no filesystem access on a request path.
+                _same_path = (os.path.normpath(os.path.abspath(_s(item.get("path", ""))))
+                              == os.path.normpath(os.path.abspath(_s(folder_path))))
             except Exception:
                 _same_path = item.get("path") == folder_path
             if _same_path:
@@ -530,7 +538,8 @@ def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] =
         return True
     except Exception as ex:
         if log is not None:
-            log.append(f"  Pending Review cleanup warning: {ex}")
+            # Type name only: the cleanup route returns this log (CodeQL #1425 class).
+            log.append(f"  Pending Review cleanup warning: {type(ex).__name__}")
     return False
 
 

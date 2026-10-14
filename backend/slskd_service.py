@@ -680,7 +680,8 @@ def _slskd_download_candidate_roots(username: str, remote_files: list) -> List[P
 
 def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list) -> None:
     """Best-effort cancellation for a failed candidate before retrying another peer."""
-    if not username or not remote_files:
+    # quote() leaves dot segments intact; '.'/'..' would re-route the request.
+    if not username or username in ('.', '..') or not remote_files:
         return
     user_path = f"transfers/downloads/{_up.quote(username, safe='')}"
     # slskd cancels by transfer id, not filename: look the ids up first.
@@ -701,7 +702,8 @@ def _slskd_cancel_queued_downloads(username: str, remote_files: list, log: list)
             continue
         for d in user_obj.get("directories") or []:
             for f in (d or {}).get("files") or []:
-                if isinstance(f, dict) and f.get("id") and f.get("filename"):
+                if (isinstance(f, dict) and f.get("id") and f.get("filename")
+                        and _s(f["id"]) not in ('.', '..')):
                     ids.setdefault(_s(f["filename"]), []).append(_s(f["id"]))
     cancelled = 0
     failed = 0

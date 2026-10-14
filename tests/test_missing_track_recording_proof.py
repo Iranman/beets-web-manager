@@ -211,8 +211,11 @@ class RefusalReasonCodeTests(unittest.TestCase):
         self.assertTrue(ms.IMPORT_REFUSAL_REASONS["file_unverified"])
         self.assertEqual(ms.import_refusal_reason_code("[reason_code=made_up]"), "")
         self.assertEqual(ms.import_refusal_reason_code("no code"), "")
-        self.assertEqual(ms.import_refusal_reason_code("x [reason_code=file_unfingerprintable]"),
-                         "file_unfingerprintable")
+        self.assertEqual(ms.import_refusal_reason_code(
+            "Could not resolve a MusicBrainz release ID for import [reason_code=file_unfingerprintable]"),
+            "file_unfingerprintable")
+        # Only the fixed refusal message carries a code (v0.7.1 security F2).
+        self.assertEqual(ms.import_refusal_reason_code("x [reason_code=file_unfingerprintable]"), "")
 
 
 class FpcalcOutcomeTests(unittest.TestCase):

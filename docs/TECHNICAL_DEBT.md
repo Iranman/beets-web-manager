@@ -302,6 +302,10 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Fix: the plugin walks the import source (no link following, fail closed on errors) right before it starts the import session, and refuses a source with any link below the source root. This changes plugin behaviour, so it needs a `PLUGIN_VERSION` bump and a Beets restart (a MINOR release under the versioning policy).
 - Status: Open. Not a release blocker for 0.7.0.
 
+## SEC-006 Review Queue Writes After A Failed Load (0.7.1 security review)
+
+`_load_pending_reviews` returns `[]` on any exception, and load-modify-write callers such as `_add_to_pending` then save that list, overwriting the persisted queue. 0.7.1 removed one trigger (an unstatable `DOWNLOADS_ROOT`). Others remain: `BeetsUnavailableError` from `_library_album_ids_for_folder`/`_review_album_is_resolved` during the prune (Beets times out mid-load; reproduced in QA #409, `_add_to_pending` then saved only the new row), a read error on the queue file, and a torn file from the non-atomic `write_text` saves. Affected writers: `_add_to_pending` and `DELETE /api/ai-pending-review` with a `path` (it saves `[]`). A write should be refused whenever the preceding load failed. Owner: backend.
+
 ## SEC-005 Request Text Reaches The qBittorrent Scan Log Unescaped (0.7.0 security review F1, pre-existing)
 
 - Scope: `backend/acquisition_service.py`, the `qBittorrent scan: ...` job log line (`category`, `filter`, `search` from the request).
