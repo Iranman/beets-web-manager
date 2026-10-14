@@ -156,6 +156,54 @@ class SymlinkEdgeTests(_Batch):
         self.assertNotIn(self.folders[0], self._beets_folders())
 
 
+class SymlinkRootProbeTests(_Batch):
+    """Re-verify at e2f53c6: probes (a) and (b) from the coordinator."""
+
+    def _beets_folders(self):
+        return [c.args[0] for c in self.stubs["reimport_source"].call_args_list]
+
+    def _unreadable(self, path: Path):
+        if os.geteuid() == 0:
+            self.skipTest("root reads everything")
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o755)
+
+    @unittest.expectedFailure  # QA394-F5: Stage 1 must refuse a folder that is (now) a symlink
+    def test_folder_swapped_for_a_symlink_after_discovery(self):
+        # (a) Discovery never yields a symlinked folder; this is the window
+        # between discovery and Stage 1 (or a stored folder path on recovery).
+        real = self.tmp / "real_album"
+        Path(self.folders[0]).rename(real)
+        try:
+            Path(self.folders[0]).symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        _, folders = self.run_batch()
+        self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
+
+    @unittest.expectedFailure  # QA394-F4: an unlistable folder must fail closed, never reach Beets
+    def test_unreadable_folder_root(self):
+        # (b) Web Manager cannot list the folder; Beets (another uid) may.
+        self._unreadable(Path(self.folders[0]))
+        _, folders = self.run_batch()
+        self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
+
+    @unittest.expectedFailure  # QA394-F4: an unlistable subfolder must fail closed
+    def test_symlink_inside_an_unreadable_subfolder(self):
+        sub = Path(self.folders[0]) / "CD2"
+        sub.mkdir()
+        disc = self.tmp / "elsewhere_disc2"
+        disc.mkdir()
+        (disc / "02.flac").write_bytes(b"x")
+        try:
+            (sub / "linked").symlink_to(disc, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self._unreadable(sub)
+        _, folders = self.run_batch()
+        self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
+
+
 class LegacyAiRunningTests(RecoveryTests):
     """N6 re-verify: a pre-phase-B "ai_running" folder is never stranded."""
 
