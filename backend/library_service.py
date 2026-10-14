@@ -4652,16 +4652,9 @@ _MISSING_MB_SORT_KEYS = {
 }
 
 
-def library_missing_mb_payload(*, kind: str = "all", search: str = "", offset: int = 0,
-                               limit: int = 100, sort: str = "added_desc") -> Dict[str, Any]:
-    """Library albums (no Release ID) and singleton items (no Recording ID)
-    under MUSIC_ROOT, as review rows. One full ``get_items`` + ``get_albums``
-    read per call; no per-album Beets calls (F6). The whole list is built and
-    sorted before the page is sliced, so ``total``/``counts`` are real (F5).
-
-    ``counts`` are per kind after the search filter; ``total`` is the row
-    count after search and kind. Beets errors propagate to the route.
-    """
+def _missing_mb_rows(search: str = "") -> List[Dict[str, Any]]:
+    """Every Missing-IDs row under MUSIC_ROOT matching ``search``, unsorted.
+    One full ``get_items`` + ``get_albums`` read; Beets errors propagate."""
     unmatched = composite_workflows.get_unmatched_review_items(limit=0, offset=0, include_singletons=True)
 
     claimed: set = set()
@@ -4704,7 +4697,20 @@ def library_missing_mb_payload(*, kind: str = "all", search: str = "", offset: i
     if needle:
         rows = [r for r in rows if needle in " ".join(
             _s(r.get(f)) for f in ("title", "artist", "album", "path")).casefold()]
+    return rows
 
+
+def library_missing_mb_payload(*, kind: str = "all", search: str = "", offset: int = 0,
+                               limit: int = 100, sort: str = "added_desc") -> Dict[str, Any]:
+    """Library albums (no Release ID) and singleton items (no Recording ID)
+    under MUSIC_ROOT, as review rows. One full ``get_items`` + ``get_albums``
+    read per call; no per-album Beets calls (F6). The whole list is built and
+    sorted before the page is sliced, so ``total``/``counts`` are real (F5).
+
+    ``counts`` are per kind after the search filter; ``total`` is the row
+    count after search and kind. Beets errors propagate to the route.
+    """
+    rows = _missing_mb_rows(search)
     counts = Counter(r["target_kind"] for r in rows)
     counts_out = {"all": len(rows), "album": counts.get("album", 0), "item": counts.get("item", 0)}
     if kind != "all":

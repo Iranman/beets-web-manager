@@ -280,6 +280,8 @@ class ApiContractTests(unittest.TestCase):
             ("/api/setup/plugins/recommended/apply", "setup_plugins_recommended_apply"),
             ("/api/acquisition/queue/refresh", "acquisition_queue_refresh"),
             ("/api/library/missing-mb-ids", "library_missing_mb_ids"),
+            ("/api/library/missing-mb-ids/batch/preview", "library_missing_mb_ids_batch_preview"),
+            ("/api/library/missing-mb-ids/batch/apply", "library_missing_mb_ids_batch_apply"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)
