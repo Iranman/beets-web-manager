@@ -372,6 +372,12 @@ export interface MissingMbPreviewRow {
   write: MissingMbWrite;
   /** Fixed user-facing text from the server. */
   message: string;
+  evidence?: {
+    /** Album ids that already hold the proposed release group. */
+    release_group_held_by?: number[];
+    /** Another selected album proves the same release group. */
+    duplicate_in_batch?: boolean;
+  } & Record<string, unknown>;
 }
 
 export interface MissingMbPreviewResult {

@@ -281,6 +281,54 @@ describe('Missing IDs batch fix (#399)', () => {
   });
 });
 
+describe('Missing IDs batch: #399 faab2cf reasons, duplicate evidence, restart', () => {
+  it('names the new reasons and keeps unknown codes readable', () => {
+    expect(reasonLabel('existing_release_group_differs')).toBe('already has a different release group; not changed');
+    expect(reasonLabel('duplicate_release_group')).toBe('another album already has this release group; use dedup review');
+    expect(reasonLabel('symlinked_item_path')).toBe("a track's file is a symlink");
+    expect(reasonLabel('symlinked_audio_in_folder')).toBe('the album folder holds symlinked audio');
+    expect(reasonLabel('folder_files_mismatch:11/12')).toBe("the folder's audio files do not match the album's tracks (11/12)");
+    expect(reasonLabel('brand_new_reason')).toBe('brand new reason');
+  });
+
+  it('shows who holds the release group and duplicates within the batch', async () => {
+    mocked.getJob.mockResolvedValue({ ok: true, job_id: 'pj1', status: 'success', result: {
+      ok: true, transaction_id: null, confirm_token: null, counts: { rows: 2, proven: 0, needs_review: 2 },
+      rows: [
+        { ...PREVIEW.rows[2], row_id: 'album:12', reasons: ['duplicate_release_group'], evidence: { release_group_held_by: [7, 9] } },
+        { ...PREVIEW.rows[2], row_id: 'album:56', reasons: ['duplicate_release_group'], evidence: { duplicate_in_batch: true } },
+      ],
+    } } as never);
+    renderBatch();
+    await previewAll();
+    const preview = await screen.findByRole('list', { name: 'Preview results' });
+    expect(within(preview).getByText(/already on album 7, 9/)).toBeTruthy();
+    expect(within(preview).getByRole('link', { name: /Review duplicates/ }).getAttribute('href')).toBe('/jobs');
+    expect(within(preview).getByText(/Two selected albums share this release group/)).toBeTruthy();
+    expect(within(preview).getAllByText(/use dedup review/)).toHaveLength(2);
+  });
+
+  it.each([['[REDACTED]'], [null], ['']])('a resumed preview with token %j hides Apply and asks to preview again', async (token) => {
+    localStorage.setItem(MISSING_IDS_BATCH_STORAGE_KEY, JSON.stringify({ kind: 'preview', job_id: 'pj9' }));
+    mocked.getJob.mockResolvedValue({ ok: true, job_id: 'pj9', status: 'success', result: { ...PREVIEW, confirm_token: token } } as never);
+    renderBatch();
+    expect(await screen.findByText('Preview again: the preview was interrupted by a restart.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Apply/ })).toBeNull();
+    expect(document.body.textContent).not.toContain('[REDACTED]');
+    expect(mocked.applyMissingMbBatch).not.toHaveBeenCalled();
+  });
+
+  it('confirm_token_mismatch tells the user to preview again', async () => {
+    mocked.getJob.mockResolvedValue({ ok: true, job_id: 'pj1', status: 'success', result: PREVIEW } as never);
+    mocked.applyMissingMbBatch.mockRejectedValue(apiError(409, { ok: false, code: 'confirm_token_mismatch', error: 'mismatch' }));
+    renderBatch();
+    await previewAll();
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply 2 proven rows…' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Write 2 rows' }));
+    expect(await screen.findByText(/Nothing was written: the confirmation does not match this preview.*Preview again, then apply the new preview\./)).toBeTruthy();
+  });
+});
+
 // ── Import batch outcomes (#394) ─────────────────────────────────────────────
 
 describe('Import batch folder outcomes (#394)', () => {

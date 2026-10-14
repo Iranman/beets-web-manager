@@ -59,7 +59,16 @@ const REASON_LABELS: Record<string, string> = {
   not_in_missing_list: 'not in the Missing IDs list any more',
   evidence_unavailable: 'evidence could not be gathered',
   not_proven: 'not proven',
+  existing_release_group_differs: 'already has a different release group; not changed',
+  duplicate_release_group: 'another album already has this release group; use dedup review',
+  symlinked_item_path: "a track's file is a symlink",
+  symlinked_audio_in_folder: 'the album folder holds symlinked audio',
+  folder_files_mismatch: "the folder's audio files do not match the album's tracks",
 };
+
+/** The persisted job record redacts the token; such a preview cannot be applied. */
+const REDACTED_TOKEN = '[REDACTED]';
+export const PREVIEW_INTERRUPTED_MESSAGE = 'Preview again: the preview was interrupted by a restart.';
 
 /** Display text for a server reason code; codes like "x:1/2" keep their detail. */
 export function reasonLabel(code: string) {
@@ -99,7 +108,9 @@ export function previewErrorMessage(err: unknown) {
 
 /** Error text for a refused apply (start refusal or the job's own not_preview answer). */
 export function applyErrorMessage(code: string, detail: string) {
-  if (code === 'confirm_token_mismatch') return 'Nothing was written: the confirmation does not match this preview. Preview again.';
+  if (code === 'confirm_token_mismatch') {
+    return 'Nothing was written: the confirmation does not match this preview (for example after a restart). Preview again, then apply the new preview.';
+  }
   if (code === 'not_preview') return 'Nothing was written: this preview was already applied or used. Preview again to see the current state.';
   if (code === 'not_found' || code === 'wrong_transaction' || code === 'confirm_token_required') {
     return 'Nothing was written: this preview is not valid any more. Preview again.';
@@ -136,6 +147,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
   const [job, setJob] = useState<BatchJob | null>(() => readStoredJob());
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [preview, setPreview] = useState<Omit<MissingMbPreviewResult, 'confirm_token'> | null>(null);
+  const [previewInterrupted, setPreviewInterrupted] = useState(false);
   const [applied, setApplied] = useState<MissingMbApplyResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -175,8 +187,10 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         if (job.kind === 'preview') {
           if (status.status === 'success' && result && Array.isArray(result.rows)) {
             const { confirm_token: token, ...shown } = result;
-            confirmTokenRef.current = token ?? null;
+            const usable = typeof token === 'string' && token !== '' && token !== REDACTED_TOKEN;
+            confirmTokenRef.current = usable ? token : null;
             setPreview(shown);
+            setPreviewInterrupted(Boolean(shown.transaction_id) && !usable);
             setMessage(
               `Preview finished: ${shown.counts.proven} of ${shown.counts.rows} row${shown.counts.rows === 1 ? '' : 's'} proven; `
               + `${shown.counts.needs_review} need review. Nothing has been written.`,
@@ -243,6 +257,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
     setBusy(true);
     setError('');
     setPreview(null);
+    setPreviewInterrupted(false);
     setApplied(null);
     confirmTokenRef.current = null;
     setLabels((current) => {
@@ -359,7 +374,9 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
             {preview.counts.proven} proven · {preview.counts.needs_review} need review
           </div>
           <PreviewRows rows={preview.rows} label={label} />
-          {preview.transaction_id ? (
+          {preview.transaction_id && previewInterrupted ? (
+            <Alert className="mt-2" severity="warning">{PREVIEW_INTERRUPTED_MESSAGE}</Alert>
+          ) : preview.transaction_id ? (
             <Button className="mt-2" variant="contained" color="warning" disabled={busy || Boolean(job)} onClick={() => setConfirmOpen(true)}>
               Apply {plural(proven.length, 'proven row')}…
             </Button>
@@ -411,6 +428,15 @@ function PreviewRows({ rows, label }: { rows: MissingMbPreviewRow[]; label: (id:
             <div className="font-mono text-[0.7rem] text-zinc-300">Will write: {writeText(row.write)}</div>
           ) : row.reasons.length ? (
             <div className="text-xs text-zinc-400">Why: {row.reasons.map(reasonLabel).join('; ')}</div>
+          ) : null}
+          {row.evidence?.release_group_held_by?.length ? (
+            <div className="text-xs text-amber-300">
+              This release group is already on album {row.evidence.release_group_held_by.join(', ')}.{' '}
+              <Link className="text-sky-400 underline" to="/jobs">Review duplicates in Duplicate Checks on the Jobs page</Link>
+            </div>
+          ) : null}
+          {row.evidence?.duplicate_in_batch ? (
+            <div className="text-xs text-amber-300">Two selected albums share this release group; neither is written. Review them by hand.</div>
           ) : null}
         </li>
       ))}
