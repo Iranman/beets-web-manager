@@ -200,8 +200,8 @@ export function folderWarningLabel(code: string) {
 /** Chip label for a folder that needs attention: names the specific outcome
  * where the status alone would be vague (backend/ai_service.py, #394). */
 export function folderAttentionLabel(folder: AiBatchFolderState) {
-  if (folder.failure_reason === 'symlinked_audio') return 'Symlinked audio';
-  if (folder.failure_reason === 'unverifiable_folder') return 'No audio Web Manager can read';
+  if (folder.failure_reason === 'symlinked_audio') return 'Contains a linked file or folder';
+  if (folder.failure_reason === 'unverifiable_folder') return 'Folder could not be checked';
   // A partial Beets import: some albums were kept, the skipped paths have a review row.
   if (folder.status === 'review_required' && folder.metadata_imported && folder.review_item_id) return 'Imported in part';
   return folderStatusLabel(folder.status);
@@ -210,12 +210,18 @@ export function folderAttentionLabel(folder: AiBatchFolderState) {
 /** Readable text for failure_reason codes; sentences from the server pass through. */
 export function folderFailureText(reason?: string) {
   if (reason === 'symlinked_audio') {
-    return 'Import refused: the folder or some of its audio is reached through a symlink, which could point anywhere (even into the library), or part of the folder could not be read to rule that out. Replace symlinks with the real files and check the folder permissions, then decide in the Review Queue.';
+    return 'Import refused: the folder contains a linked file or folder (a symlink or junction, even an empty one), or its path runs through one. A link could point anywhere, even into the library. Replace the links with the real files, then decide in the Review Queue.';
   }
   if (reason === 'unverifiable_folder') {
-    return 'Import refused: Web Manager found no audio file it can read in this folder. Check the folder permissions and that it holds audio files, then decide in the Review Queue.';
+    return 'Import refused: Web Manager could not check this folder. It is outside the configured import folders, part of it could not be read, or it holds no audio Web Manager can read. Check the folder location and permissions, then decide in the Review Queue.';
   }
-  return reason || '';
+  return codeLabel(reason);
+}
+
+/** A bare snake_case code from the server reads as words; sentences pass through. */
+export function codeLabel(value?: string) {
+  if (!value) return '';
+  return /^[a-z0-9]+(_[a-z0-9]+)+$/.test(value) ? value.replace(/_/g, ' ') : value;
 }
 
 export function folderStageLabel(stage?: string) {
@@ -759,7 +765,7 @@ function JobLog({
                       </div>
                       {folder.auto_import && !folder.auto_import.eligible && folder.auto_import.reasons.length ? (
                         <div className="truncate text-xs text-zinc-500">
-                          Not auto-imported: {folder.auto_import.reasons.join('; ')}
+                          Not auto-imported: {folder.auto_import.reasons.map(codeLabel).join('; ')}
                         </div>
                       ) : null}
                       {folder.warnings?.length ? (

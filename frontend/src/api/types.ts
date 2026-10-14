@@ -216,6 +216,16 @@ export interface ReviewPreflight {
 }
 
 export interface ReviewEvidence {
+  /** Batch import review rows (#394): where the folder stopped. */
+  origin_step?: 'pre_import' | 'beets_partial' | 'beets_skip' | string;
+  /** pre_import: symlinked_audio or unverifiable_folder. */
+  conflict?: string;
+  /** symlinked_audio: the links found. */
+  symlinked_paths?: string[];
+  /** unverifiable_folder: folders that could not be listed (may be empty). */
+  unreadable_paths?: string[];
+  /** beets_partial: paths Beets skipped while importing the rest. */
+  skipped_paths?: string[];
   top_candidates?: ReviewCandidate[];
   current?: RecordingLocalEvidence;
   recording_candidates?: ReviewRecordingCandidate[];

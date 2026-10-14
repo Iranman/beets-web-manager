@@ -33,7 +33,7 @@ vi.mock('../src/lib/api', async (importOriginal) => {
 import * as client from '../src/api/client';
 import * as libApi from '../src/lib/api';
 import { AcquisitionPanel } from '../src/features/acquisition/AcquisitionPanel';
-import { ImportReviewPage } from '../src/features/importReview/ImportReviewPage';
+import { BatchStopEvidence, ImportReviewPage } from '../src/features/importReview/ImportReviewPage';
 import {
   MISSING_IDS_BATCH_STORAGE_KEY,
   MissingIdsBatchPanel,
@@ -41,7 +41,7 @@ import {
   previewErrorMessage,
   reasonLabel,
 } from '../src/features/importReview/MissingIdsBatchPanel';
-import { IntakePanel, folderAttentionLabel, folderFailureText } from '../src/features/intake/IntakePanel';
+import { IntakePanel, codeLabel, folderAttentionLabel, folderFailureText } from '../src/features/intake/IntakePanel';
 
 const mocked = vi.mocked(client);
 const TOKEN = 'secret-confirm-token-value';
@@ -337,14 +337,51 @@ describe('Import batch folder outcomes (#394)', () => {
   });
 
   it('labels symlinked audio and partial imports', () => {
-    expect(folderAttentionLabel(folder({ failure_reason: 'symlinked_audio', review_item_id: 'r1' }))).toBe('Symlinked audio');
+    expect(folderAttentionLabel(folder({ failure_reason: 'symlinked_audio', review_item_id: 'r1' }))).toBe('Contains a linked file or folder');
     expect(folderAttentionLabel(folder({ status: 'review_required', metadata_imported: true, review_item_id: 'r2' }))).toBe('Imported in part');
     expect(folderAttentionLabel(folder({ status: 'review_required', metadata_imported: true }))).toBe('Review required');
     expect(folderAttentionLabel(folder({ status: 'importing' }))).toBe('Importing');
-    expect(folderFailureText('symlinked_audio')).toMatch(/reached through a symlink.*part of the folder could not be read/);
-    expect(folderAttentionLabel(folder({ failure_reason: 'unverifiable_folder', review_item_id: 'r3' }))).toBe('No audio Web Manager can read');
-    expect(folderFailureText('unverifiable_folder')).toMatch(/no audio file it can read.*Check the folder permissions/);
+    expect(folderFailureText('symlinked_audio')).toMatch(/contains a linked file or folder.*even an empty one.*path runs through one/);
+    expect(folderAttentionLabel(folder({ failure_reason: 'unverifiable_folder', review_item_id: 'r3' }))).toBe('Folder could not be checked');
+    expect(folderFailureText('unverifiable_folder')).toMatch(/outside the configured import folders, part of it could not be read, or it holds no audio.*Check the folder location and permissions/);
     expect(folderFailureText('Beets imported part of this folder')).toBe('Beets imported part of this folder');
+  });
+
+  it('labels unknown server codes in plain words and keeps sentences', () => {
+    expect(folderFailureText('duplicate_release_group')).toBe('duplicate release group');
+    expect(folderFailureText('already in library')).toBe('already in library');
+    expect(codeLabel('identify_failed')).toBe('identify failed');
+    expect(codeLabel('')).toBe('');
+  });
+
+  it('review evidence names unreadable paths as text, capped at five', () => {
+    const paths = Array.from({ length: 8 }, (_, i) => `/srv/dl/U/<b>d${i}</b>`);
+    render(<BatchStopEvidence evidence={{ origin_step: 'pre_import', conflict: 'unverifiable_folder', unreadable_paths: paths }} />);
+    expect(screen.getByText(/could not check this folder/)).toBeTruthy();
+    expect(screen.getByText('Could not be read')).toBeTruthy();
+    expect(screen.getByText('/srv/dl/U/<b>d0</b>')).toBeTruthy();
+    expect(screen.getByText('/srv/dl/U/<b>d4</b>')).toBeTruthy();
+    expect(screen.queryByText('/srv/dl/U/<b>d5</b>')).toBeNull();
+    expect(screen.getByText('and 3 more')).toBeTruthy();
+    expect(document.querySelector('b')).toBeNull();
+  });
+
+  it('review evidence covers links, partial imports, unknown steps, and empty path lists', () => {
+    const { rerender } = render(<BatchStopEvidence evidence={{ origin_step: 'pre_import', conflict: 'symlinked_audio', symlinked_paths: ['/srv/dl/L/empty-link'] }} />);
+    expect(screen.getByText(/contains a linked file or folder/)).toBeTruthy();
+    expect(screen.getByText('Links found')).toBeTruthy();
+    expect(screen.getByText('/srv/dl/L/empty-link')).toBeTruthy();
+    rerender(<BatchStopEvidence evidence={{ origin_step: 'beets_partial', skipped_paths: ['/srv/dl/P/CD2'] }} />);
+    expect(screen.getByText(/imported part of this folder/)).toBeTruthy();
+    expect(screen.getByText('Skipped by Beets')).toBeTruthy();
+    rerender(<BatchStopEvidence evidence={{ origin_step: 'some_new_step' }} />);
+    expect(screen.getByText('Batch import stopped: some new step.')).toBeTruthy();
+    expect(screen.queryByRole('list')).toBeNull();
+    rerender(<BatchStopEvidence evidence={{ origin_step: 'pre_import', conflict: 'unverifiable_folder', unreadable_paths: [] }} />);
+    expect(screen.getByText(/could not check this folder/)).toBeTruthy();
+    expect(screen.queryByText('and 0 more')).toBeNull();
+    rerender(<BatchStopEvidence evidence={{}} />);
+    expect(screen.queryByText(/Import refused|Batch import/)).toBeNull();
   });
 
   function Probe() {
@@ -372,10 +409,10 @@ describe('Import batch folder outcomes (#394)', () => {
     render(<QueryClientProvider client={new QueryClient()}><MemoryRouter><IntakePanel /><Probe /></MemoryRouter></QueryClientProvider>);
 
     expect(await screen.findByText(/fpcalc\) is not available/)).toBeTruthy();
-    expect(screen.getByText('Symlinked audio')).toBeTruthy();
-    expect(screen.getByText(/reached through a symlink/)).toBeTruthy();
-    expect(screen.getByText('No audio Web Manager can read')).toBeTruthy();
-    expect(screen.getByText(/no audio file it can read/)).toBeTruthy();
+    expect(screen.getByText('Contains a linked file or folder')).toBeTruthy();
+    expect(screen.getByText(/contains a linked file or folder \(a symlink/)).toBeTruthy();
+    expect(screen.getByText('Folder could not be checked')).toBeTruthy();
+    expect(screen.getByText(/Web Manager could not check this folder/)).toBeTruthy();
     expect(screen.getByText('Imported in part')).toBeTruthy();
     expect(screen.getByText(/skipped 1 path\(s\): \/srv\/dl\/Partial\/CD2/)).toBeTruthy();
     const links = screen.getAllByRole('button', { name: 'Open review item' });
