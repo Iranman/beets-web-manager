@@ -3275,10 +3275,10 @@
    "module": "backend/serializers.py",
    "lines": [
     175,
-    200
+    203
    ],
-   "size": 26,
-   "body_lines": 18,
+   "size": 29,
+   "body_lines": 21,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT",
@@ -3301,8 +3301,8 @@
    "name": "_normalize_review_origin_type",
    "module": "backend/serializers.py",
    "lines": [
-    237,
-    262
+    240,
+    265
    ],
    "size": 26,
    "body_lines": 25,
@@ -3327,8 +3327,8 @@
    "name": "_path_origin_hint",
    "module": "backend/serializers.py",
    "lines": [
-    265,
-    302
+    268,
+    305
    ],
    "size": 38,
    "body_lines": 37,
@@ -3351,8 +3351,8 @@
    "name": "_review_origin_payload",
    "module": "backend/serializers.py",
    "lines": [
-    305,
-    365
+    308,
+    368
    ],
    "size": 61,
    "body_lines": 57,
@@ -3378,8 +3378,8 @@
    "name": "_compact_mb_candidate",
    "module": "backend/serializers.py",
    "lines": [
-    368,
-    399
+    371,
+    402
    ],
    "size": 32,
    "body_lines": 31,
@@ -3398,8 +3398,8 @@
    "name": "_leaked_db_paths_summary",
    "module": "backend/serializers.py",
    "lines": [
-    402,
-    420
+    405,
+    423
    ],
    "size": 19,
    "body_lines": 16,
@@ -3419,8 +3419,8 @@
    "name": "query_int_arg",
    "module": "backend/serializers.py",
    "lines": [
-    423,
-    434
+    426,
+    437
    ],
    "size": 12,
    "body_lines": 10,
@@ -3441,8 +3441,8 @@
    "name": "json_route_result",
    "module": "backend/serializers.py",
    "lines": [
-    437,
-    443
+    440,
+    446
    ],
    "size": 7,
    "body_lines": 2,
@@ -3469,8 +3469,8 @@
    "name": "_config_error_response",
    "module": "backend/serializers.py",
    "lines": [
-    474,
-    476
+    477,
+    479
    ],
    "size": 3,
    "body_lines": 2,
@@ -24809,10 +24809,10 @@
    "module": "backend/ai_service.py",
    "lines": [
     1990,
-    2027
+    2032
    ],
-   "size": 38,
-   "body_lines": 27,
+   "size": 43,
+   "body_lines": 32,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -24830,8 +24830,8 @@
    "name": "_ai_batch_has_hardlinked_audio",
    "module": "backend/ai_service.py",
    "lines": [
-    2030,
-    2037
+    2035,
+    2042
    ],
    "size": 8,
    "body_lines": 7,
@@ -24850,11 +24850,11 @@
    "name": "_ai_batch_process_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2040,
-    2229
+    2045,
+    2237
    ],
-   "size": 190,
-   "body_lines": 183,
+   "size": 193,
+   "body_lines": 186,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -24890,8 +24890,8 @@
    "name": "_ai_batch_run_folders",
    "module": "backend/ai_service.py",
    "lines": [
-    2232,
-    2276
+    2240,
+    2284
    ],
    "size": 45,
    "body_lines": 41,
@@ -24916,8 +24916,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2279,
-    2291
+    2287,
+    2299
    ],
    "size": 13,
    "body_lines": 12,
@@ -24940,8 +24940,8 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2294,
-    2352
+    2302,
+    2360
    ],
    "size": 59,
    "body_lines": 55,
@@ -24966,8 +24966,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2355,
-    2492
+    2363,
+    2500
    ],
    "size": 138,
    "body_lines": 137,
@@ -25006,8 +25006,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2505,
-    2523
+    2513,
+    2531
    ],
    "size": 19,
    "body_lines": 16,
@@ -25026,8 +25026,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2526,
-    2548
+    2534,
+    2556
    ],
    "size": 23,
    "body_lines": 19,
@@ -25054,8 +25054,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2551,
-    2679
+    2559,
+    2687
    ],
    "size": 129,
    "body_lines": 122,
@@ -25086,8 +25086,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2682,
-    2716
+    2690,
+    2724
    ],
    "size": 35,
    "body_lines": 25,

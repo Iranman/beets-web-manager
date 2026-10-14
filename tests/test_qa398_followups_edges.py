@@ -27,8 +27,8 @@ class LinkProbeBudget(_FolderFixture):
     def _linked_dir(self, name, files):
         outside = Path(self.tmp.name) / name
         outside.mkdir()
-        for i in range(files):
-            (outside / f"scan{i}.jpg").write_bytes(b"synthetic")
+        for i in range(files):  # empty folders: any file would block (QA394-B1)
+            (outside / f"scan{i}").mkdir()
         try:
             os.symlink(outside, self.folder / name, target_is_directory=True)
         except (OSError, NotImplementedError):
@@ -39,15 +39,15 @@ class LinkProbeBudget(_FolderFixture):
             return ii._recursive_audio(str(self.folder))[1]
 
     def test_budget_boundary_is_exact(self):
-        self._linked_dir("Scans", 12)  # one folder + 12 entries = 13
+        self._linked_dir("Scans", 6)  # top: 1 + 6 entries, then 6 x 1 = 13
         self.assertFalse(self._linked(13))
         self.assertTrue(self._linked(12))
 
     def test_budget_is_shared_by_every_link_in_the_folder(self):
-        self._linked_dir("A", 6)  # 7 each
+        self._linked_dir("A", 6)  # 13 each
         self._linked_dir("B", 6)
-        self.assertFalse(self._linked(14))
-        self.assertTrue(self._linked(13))
+        self.assertFalse(self._linked(26))
+        self.assertTrue(self._linked(25))
 
     def test_link_loop_terminates_without_audio(self):
         outside = Path(self.tmp.name) / "loop"

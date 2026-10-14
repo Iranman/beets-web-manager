@@ -186,12 +186,16 @@ class ScanRootPathSafety(_Roots):
                 self.refused(str(link))
                 self.refused(str(link / "Album"))
 
-    def test_symlinked_downloads_root_refused_not_followed(self):
-        # The configured root stays the trusted value; a link to it elsewhere
-        # is not a way in.
+    def test_symlink_to_downloads_root_scans_the_configured_root(self):
+        # N7 (#394): a link whose target is exactly a configured root is that
+        # root (NAS mount spelling). The configured value is returned, never the
+        # link, and nothing below or beside the root is widened.
         link = self.outside / "dl_link"
         self.symlink(link, self.dl)
-        self.refused(str(link))
+        path, err = ser._resolve_import_scan_root(str(link))
+        self.assertIsNone(err)
+        self.assertEqual(path, self.dl.resolve())
+        self.refused(str(link / "Album"))
 
     def test_toctou_folder_swapped_for_symlink_before_walk(self):
         album = self.dl / "Album"

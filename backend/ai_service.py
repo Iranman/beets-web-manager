@@ -1996,15 +1996,19 @@ def _ai_batch_preimport_check(folder: str):
       stored path on recovery; QA394-F5, I3), or a file or directory inside it
       is a link Beets would follow (F3, B1). Links at or above the configured
       root are the operator's own mount and are allowed (as in #399).
-    - ``unverifiable_folder``: outside every configured root, a part of it
+    - ``unverifiable_folder``: not an absolute path, outside every configured root, a part of it
       cannot be read (F4), or no audio Web Manager can read was found."""
     def conflict(kind: str, why: str, paths: List[str]):
         return [], {"conflict": kind, "reason": f"{kind}: {why}; import refused", "paths": paths}
 
+    # Discovery stores absolute, normalised paths; anything else is tampered
+    # state, and Beets would be handed the raw string (QA394 reverify3).
+    if not os.path.isabs(folder) or any(part in (".", "..") for part in Path(folder).parts):
+        return conflict("unverifiable_folder", "the folder path is not absolute", [])
     path = Path(os.path.abspath(folder))
     root = next((r for r in _import_review_cleanup_roots(allow_music=True) if r in path.parents), None)
     if root is None:
-        return conflict("unverifiable_folder", "the folder is not under a configured import root", [folder])
+        return conflict("unverifiable_folder", "the folder is not under a configured import root", [])
     below = [p for p in [path, *path.parents] if p != root and root in p.parents]
     links = [str(p) for p in below if p.is_symlink() or os.path.isjunction(p)]
     if links:
@@ -2014,14 +2018,15 @@ def _ai_batch_preimport_check(folder: str):
         # The helper also fails closed on an unreadable part: name the links
         # it could see, or report that part as unverifiable.
         seen: List[str] = []
-        for dirpath, dirnames, filenames in os.walk(folder, onerror=lambda _e: None):
+        unreadable: List[str] = []
+        for dirpath, dirnames, filenames in os.walk(folder, onerror=lambda e: unreadable.append(str(e.filename))):
             for name in dirnames + filenames:
                 p = Path(dirpath) / name
                 if p.is_symlink() or os.path.isjunction(p):
                     seen.append(str(p))
         if seen:
             return conflict("symlinked_audio", "files are reached through a symlink", sorted(seen))
-        return conflict("unverifiable_folder", "part of the folder could not be read", [])
+        return conflict("unverifiable_folder", "part of the folder could not be read", sorted(unreadable))
     if not audio_files:
         return conflict("unverifiable_folder", "no audio file Web Manager can read was found", [])
     return audio_files, None
@@ -2108,7 +2113,10 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             log.append(f"  {reason}")
             review(plain_suggestion(reason),
                    {"origin_step": "pre_import", "conflict": conflict["conflict"],
-                    "symlinked_paths": conflict["paths"], "ai_rank": None, "batch_job_id": batch_id},
+                    # symlinked_paths: the links; unreadable_paths: folders it could not list.
+                    ("symlinked_paths" if conflict["conflict"] == "symlinked_audio" else "unreadable_paths"):
+                        conflict["paths"],
+                    "ai_rank": None, "batch_job_id": batch_id},
                    failure_reason=conflict["conflict"], stage="done")
             return
         if not preserve and _ai_batch_has_hardlinked_audio(audio_files):

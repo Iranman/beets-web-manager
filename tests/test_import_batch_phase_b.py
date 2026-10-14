@@ -315,6 +315,33 @@ class PreImportCheckTests(_Batch):
         _, folders = self.run_batch()
         self.assertEqual(folders[self.folders[0]]["failure_reason"], "unverifiable_folder")
         self.assertEqual(self.beets_folders(), [self.folders[1]])
+        self.assertEqual(self.evidence(self.queued.call_args)["unreadable_paths"], [str(sub)])
+
+
+class ScanRootSymlinkSpellingTests(unittest.TestCase):
+    """N7: the symlinked mount spelling of a configured root is that root;
+    containment below a root is unchanged."""
+
+    def test_symlinked_spelling_of_a_root_scans_the_root(self):
+        from backend import serializers as s
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real, other = tmp / "downloads", tmp / "other"
+        (real / "Album").mkdir(parents=True)
+        other.mkdir()
+        try:
+            os.symlink(real, tmp / "mount", target_is_directory=True)
+            os.symlink(other, tmp / "elsewhere", target_is_directory=True)
+            os.symlink(real / "Album", tmp / "album_link", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported here")
+        root = real.resolve()
+        with mock.patch.object(s, "_import_review_cleanup_roots", side_effect=lambda **k: [root]):
+            self.assertEqual(s._resolve_import_scan_root(str(tmp / "mount")), (root, None))
+            for refused in ("elsewhere", "album_link"):
+                path, err = s._resolve_import_scan_root(str(tmp / refused))
+                self.assertIsNone(path, refused)
+                self.assertIn("outside the allowed roots", err)
 
 
 class TorrentSourceTests(_Batch):
