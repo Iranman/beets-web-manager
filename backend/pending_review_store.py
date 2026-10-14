@@ -9,7 +9,7 @@ from __future__ import annotations
 import json, os, threading, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _app_logger, _s
+from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _app_logger, _path_is_under, _s
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.import_reconciliation_service import _reconcile_pending_review_enqueue_item
 from backend.beets_adapter import BeetsUnavailableError
@@ -19,7 +19,7 @@ import hashlib
 from backend.serializers import _resolve_import_review_source_path
 import backend.serializers as _serializers
 from backend.ai_batch_state_service import _music_format_policy_review_note
-from backend.import_reconciliation_service import _MUSIC_FORMAT_POLICY_REVIEW_STATUS, _remaining_audio_files, _review_paths_equal
+from backend.import_reconciliation_service import _MUSIC_FORMAT_POLICY_REVIEW_STATUS, _remaining_audio_files, _review_paths_equal, _review_status_key
 
 # ── ARCH-001 extracted code ──
 
@@ -191,6 +191,20 @@ def _pending_review_item_is_resolved(item: Dict[str, Any]) -> bool:
     return _review_path_is_resolved(path, existing_ids, no_audio_resolves=not keep)
 
 
+def _review_download_folder_is_gone(folder_path: str) -> bool:
+    """A queued downloads-side folder that no longer exists at all.
+
+    Same outcome as the full prune (a missing folder has no audio, and the
+    #401 symlinked_audio/unverifiable_folder rows are only kept while their
+    path exists), but local and cheap, so the lightweight queue listing also
+    drops it. Limited to DOWNLOADS_ROOT, which this process can see; a missing
+    downloads mount never prunes anything."""
+    raw = _s(folder_path).strip()
+    if not raw or not DOWNLOADS_ROOT.is_dir() or not _path_is_under(Path(raw), DOWNLOADS_ROOT):
+        return False
+    return not os.path.lexists(raw)
+
+
 def _apply_review_origin(target: Dict[str, Any], origin: Dict[str, Any]) -> None:
     for field in REVIEW_ORIGIN_FIELDS:
         value = origin.get(field)
@@ -291,6 +305,13 @@ def _load_pending_reviews(*, prune_resolved: bool = True) -> list:
                     _apply_review_origin(suggestion, origin_info)
                     item["suggestion"] = suggestion
                     changed = True
+                # An active import may have moved the folder itself; only its
+                # reconciliation (above) decides that row.
+                if (_review_status_key(item.get("status")) not in {"import_enqueueing", "import_queued"}
+                        and _review_download_folder_is_gone(path)):
+                    changed = True
+                    resolved_items.append(item)
+                    continue
                 if prune_resolved:
                     if path and _library_album_ids_for_folder(path) and not suggestion.get("allow_existing_review"):
                         changed = True

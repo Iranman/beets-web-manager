@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- A missing-track download into an existing album was refused and sent to Review whenever AcoustID returned no release-level hits for the album, even though every file fingerprinted to a requested recording. The import preflight now accepts per-track proof when all of these hold: the target is the existing album's own release and Release Group; every file's AcoustID lookup confirms a recording on that release (same confidence floor as before); each recording is a requested track; and no recording is held twice. Anything less still goes to Review.
+- A refused import now carries a stable reason code (`[reason_code=<code>]` in the job error, `refusal_reason_code` in the review evidence), such as `acoustid_unavailable`, `file_unverified` or `recording_not_on_release`.
+- The Review Queue no longer lists an item whose downloads folder has been deleted (for example a failed download candidate that was cleaned up). The item is auto-resolved.
+
 ## v0.7.0 - 2026-10-14
 
 ### Upgrade Notes

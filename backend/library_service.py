@@ -306,8 +306,12 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                                       source_folder: str = "",
                                       existing_album_id: int = 0,
                                       allow_provided_release_override: bool = False,
-                                      allow_oversized_partial: bool = True) -> str:
-    """Resolve or discover a concrete MB release UUID suitable for beet import."""
+                                      allow_oversized_partial: bool = True,
+                                      wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Resolve or discover a concrete MB release UUID suitable for beet import.
+
+    `wanted_tracks` marks a missing-track fill of `existing_album_id`: the
+    folder preflight may then accept per-track AcoustID recording proof."""
     mb_input = (mb_input or "").strip()
     source_track_count = (
         _folder_import_track_count(source_folder, existing_album_id)
@@ -339,6 +343,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             replacement,
             existing_album_id=existing_album_id,
             log=None,
+            wanted_tracks=wanted_tracks,
         )
         if replacement_pre.get("ok"):
             log.append(
@@ -361,6 +366,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             rel_id,
             existing_album_id=existing_album_id,
             log=None,
+            wanted_tracks=wanted_tracks,
         )
         replacement = _same_group_source_sized_release(pre, label)
         if replacement:
@@ -527,6 +533,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
                     cand_mbid,
                     existing_album_id=existing_album_id,
                     log=None,
+                    wanted_tracks=wanted_tracks,
                 )
                 matches = int(pre.get("matches") or 0)
                 expected = int(pre.get("expected") or cand.get("tracks") or 0)
