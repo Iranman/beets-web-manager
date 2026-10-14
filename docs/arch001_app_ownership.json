@@ -20685,10 +20685,10 @@
    "module": "backend/pending_review_store.py",
    "lines": [
     194,
-    205
+    213
    ],
-   "size": 12,
-   "body_lines": 4,
+   "size": 20,
+   "body_lines": 12,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -20707,8 +20707,8 @@
    "name": "_apply_review_origin",
    "module": "backend/pending_review_store.py",
    "lines": [
-    208,
-    216
+    216,
+    224
    ],
    "size": 9,
    "body_lines": 8,
@@ -20730,8 +20730,8 @@
    "name": "_record_ai_review_decision",
    "module": "backend/pending_review_store.py",
    "lines": [
-    246,
-    273
+    254,
+    281
    ],
    "size": 28,
    "body_lines": 23,
@@ -20757,8 +20757,8 @@
    "name": "_load_pending_reviews",
    "module": "backend/pending_review_store.py",
    "lines": [
-    276,
-    338
+    284,
+    346
    ],
    "size": 63,
    "body_lines": 62,
@@ -20799,8 +20799,8 @@
    "name": "_add_to_pending",
    "module": "backend/pending_review_store.py",
    "lines": [
-    341,
-    402
+    349,
+    410
    ],
    "size": 62,
    "body_lines": 59,
@@ -20829,8 +20829,8 @@
    "name": "_load_recorded_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    415,
-    422
+    423,
+    430
    ],
    "size": 8,
    "body_lines": 7,
@@ -20851,8 +20851,8 @@
    "name": "_write_recorded_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    425,
-    430
+    433,
+    438
    ],
    "size": 6,
    "body_lines": 4,
@@ -20872,8 +20872,8 @@
    "name": "_record_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    433,
-    451
+    441,
+    459
    ],
    "size": 19,
    "body_lines": 15,
@@ -20896,8 +20896,8 @@
    "name": "_forget_import_skip",
    "module": "backend/pending_review_store.py",
    "lines": [
-    454,
-    472
+    462,
+    480
    ],
    "size": 19,
    "body_lines": 15,
@@ -20920,8 +20920,8 @@
    "name": "_remove_pending_review_for_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    475,
-    526
+    483,
+    534
    ],
    "size": 52,
    "body_lines": 49,
@@ -20951,8 +20951,8 @@
    "name": "_pending_review_has_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    529,
-    536
+    537,
+    544
    ],
    "size": 8,
    "body_lines": 7,
@@ -20975,8 +20975,8 @@
    "name": "_pending_review_path_key",
    "module": "backend/pending_review_store.py",
    "lines": [
-    539,
-    546
+    547,
+    554
    ],
    "size": 8,
    "body_lines": 7,
@@ -20999,8 +20999,8 @@
    "name": "_pending_review_path_set",
    "module": "backend/pending_review_store.py",
    "lines": [
-    549,
-    555
+    557,
+    563
    ],
    "size": 7,
    "body_lines": 6,
@@ -21025,8 +21025,8 @@
    "name": "_import_review_folder_signature",
    "module": "backend/pending_review_store.py",
    "lines": [
-    558,
-    576
+    566,
+    584
    ],
    "size": 19,
    "body_lines": 15,
@@ -21048,8 +21048,8 @@
    "name": "_review_id_matches_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    579,
-    588
+    587,
+    596
    ],
    "size": 10,
    "body_lines": 9,
@@ -21071,8 +21071,8 @@
    "name": "_trusted_stored_review_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    591,
-    623
+    599,
+    631
    ],
    "size": 33,
    "body_lines": 24,
@@ -21094,8 +21094,8 @@
    "name": "_pending_review_matches",
    "module": "backend/pending_review_store.py",
    "lines": [
-    626,
-    640
+    634,
+    648
    ],
    "size": 15,
    "body_lines": 14,
@@ -21122,8 +21122,8 @@
    "name": "_finalize_pending_review_format_policy_rejection",
    "module": "backend/pending_review_store.py",
    "lines": [
-    643,
-    676
+    651,
+    684
    ],
    "size": 34,
    "body_lines": 30,
@@ -21151,8 +21151,8 @@
    "name": "_mark_pending_review_status",
    "module": "backend/pending_review_store.py",
    "lines": [
-    679,
-    723
+    687,
+    731
    ],
    "size": 45,
    "body_lines": 43,

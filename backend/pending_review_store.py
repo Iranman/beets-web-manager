@@ -202,7 +202,15 @@ def _review_download_folder_is_gone(folder_path: str) -> bool:
     raw = _s(folder_path).strip()
     if not raw or not DOWNLOADS_ROOT.is_dir() or not _path_is_under(Path(raw), DOWNLOADS_ROOT):
         return False
-    return not os.path.lexists(raw)
+    # Only a definite "not there" counts; os.path.lexists also says False on
+    # EACCES/EIO, which must keep the row (as the full prune does).
+    try:
+        os.lstat(raw)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _apply_review_origin(target: Dict[str, Any], origin: Dict[str, Any]) -> None:
