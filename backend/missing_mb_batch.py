@@ -101,7 +101,8 @@ def _has_link_component(path: str) -> bool:
         expected = absolute
     else:
         expected = os.path.join(os.path.realpath(root), rel)
-    return os.path.normcase(os.path.realpath(absolute)) != os.path.normcase(os.path.normpath(expected))
+    # realpath(path), not realpath(absolute): abspath folds "L/.." before the link L is seen.
+    return os.path.normcase(os.path.realpath(path)) != os.path.normcase(os.path.normpath(expected))
 
 
 def _norm_path(path: str) -> str:
@@ -207,8 +208,10 @@ def prove_album(album_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str
         # Never move canonical identity in a batch; that is an operator decision.
         reasons.append("existing_release_group_differs")
     if rgid:
-        others = sorted(int(a.get("id") or 0) for a in composite_workflows.find_all_albums_by_releasegroupid(rgid) or []
-                        if _uuid(a.get("mb_releasegroupid")) == rgid and int(a.get("id") or 0) != int(album_id))
+        # Strict lookup: a malformed response raises (evidence_unavailable), never "no duplicates".
+        held = beets_adapter.find_albums_by_releasegroupid_strict(rgid)
+        others = sorted(int(a["id"]) for a in held
+                        if _uuid(a.get("mb_releasegroupid")) == rgid and int(a["id"]) != int(album_id))
         evidence["release_group_held_by"] = others
         if others:  # a duplicate goes to the gated dedup flow, never stamped here
             reasons.append("duplicate_release_group")

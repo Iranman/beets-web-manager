@@ -74,9 +74,12 @@ class _World:
         p("backend.missing_mb_batch.composite_workflows.find_all_items_by_album_id",
           side_effect=lambda aid: self.album_items.get(aid, []))
         p("backend.missing_mb_batch.identify_import_folder", side_effect=lambda folder: self.idents[folder])
-        p("backend.missing_mb_batch.composite_workflows.find_all_albums_by_releasegroupid",
-          side_effect=lambda rg: [{"id": aid, "mb_releasegroupid": a.mb_releasegroupid}
-                                  for aid, a in self.albums.items() if a.mb_releasegroupid == rg])
+        held = lambda rg: [{"id": aid, "mb_releasegroupid": a.mb_releasegroupid}  # noqa: E731
+                           for aid, a in self.albums.items() if a.mb_releasegroupid == rg]
+        self.rg_lookup = p("backend.missing_mb_batch.beets_adapter.find_albums_by_releasegroupid_strict",
+                           side_effect=held, create=True)
+        self.rg_lookup_compat = p("backend.missing_mb_batch.composite_workflows.find_all_albums_by_releasegroupid",
+                                  side_effect=held)
         p("backend.missing_mb_batch._missing_mb_rows", side_effect=lambda search="": list(self.rows))
         self.real_folders = set()
         real_scan = mb._recursive_audio
@@ -229,6 +232,35 @@ class ProofTests(_Case):
         self._link(root / "A" / "B", root / "A" / "L", target_is_directory=True)
         proof = mb.prove_row(self.w.add_real_album(2, folder, [folder / "x.flac", root / "M" / "L" / "y.flac"]))
         self.assertEqual(proof["reasons"], ["symlinked_item_path"])
+
+    def test_link_hidden_behind_dotdot_is_refused(self):
+        # MUSIC_ROOT/L -> MUSIC_ROOT/B/deep, so MUSIC_ROOT/L/../x.flac is B/x.flac
+        # through a link; abspath alone folds "L/.." and never sees L. POSIX only:
+        # Windows itself folds ".." lexically, so there the path is just outside B.
+        if os.name == "nt":
+            self.skipTest("POSIX path semantics")
+        root = self._tree()
+        (root / "B" / "deep").mkdir()
+        for n in ("x", "y"):
+            (root / "B" / f"{n}.flac").write_bytes(b"a")
+        self._link(root / "B" / "deep", root / "L", target_is_directory=True)
+        self.patch("backend.missing_mb_batch.MUSIC_ROOT", new=root)
+        item = os.path.join(str(root), "L", "..", "x.flac")
+        proof = mb.prove_row(self.w.add_real_album(1, root / "B", [item, root / "B" / "y.flac"]))
+        self.assertEqual((proof["proven"], proof["reasons"]), (False, ["symlinked_item_path"]))
+
+    def test_malformed_group_lookup_is_evidence_unavailable(self):
+        # Real lookups down to the adapter's HTTP call; only the response is faked.
+        adapter = mb.beets_adapter
+        strict = getattr(type(adapter), "find_albums_by_releasegroupid_strict", None)
+        self.w.rg_lookup.side_effect = (lambda rg: strict(adapter, rg)) if strict else None
+        self.w.rg_lookup_compat.side_effect = lambda rg: type(adapter).find_all_albums_by_releasegroupid(adapter, rg)
+        row = self.w.add_album(1)
+        for bad in ([], "x", None, {}, {"albums": "x"}, {"albums": [1]}, {"results": [None]}):
+            with mock.patch.object(adapter, "_request", return_value=bad):
+                self.assertEqual(mb.prove_row(row)["reasons"], ["evidence_unavailable"], bad)
+        with mock.patch.object(adapter, "_request", return_value={"albums": []}):
+            self.assertTrue(mb.prove_row(row)["proven"])
 
     def test_existing_other_release_group_is_never_replaced(self):
         row = self.w.add_album(1)
