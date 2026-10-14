@@ -71,6 +71,7 @@ class _Batch(unittest.TestCase):
             (self.tmp / name).mkdir()
             (self.tmp / name / "01.flac").write_bytes(b"x")
             self.folders.append(str(self.tmp / name))
+        self.roots = [self.tmp]  # the configured import roots (resolved)
         self.batch_id = f"phase-b-{id(self)}"
         self.cancel = threading.Event()
         self.reimport = {}   # folder -> result (default: imported([7]))
@@ -92,6 +93,7 @@ class _Batch(unittest.TestCase):
             mock.patch.object(ai, "_ai_batch_already_in_library", return_value=False),
             mock.patch.object(ai, "_pending_review_has_path", return_value=False),
             mock.patch.object(ai, "_preserve_torrent_source_path", return_value=self.torrent),
+            mock.patch.object(ai, "_import_review_cleanup_roots", side_effect=lambda **k: list(self.roots)),
             mock.patch.object(ai, "_validate_import_source_audio"),
             mock.patch.object(ai.composite_workflows, "reimport_source", self.stubs["reimport_source"]),
             mock.patch.object(ai.composite_workflows, "get_album",
@@ -217,6 +219,102 @@ class Stage1Tests(_Batch):
         _, folders = self.run_batch()
         self.assertEqual(folders[self.folders[0]]["status"], "review_required")
         self.assertEqual(self.history.call_count, 1)  # only folder B's album
+
+
+class PreImportCheckTests(_Batch):
+    """Security review of #394 at cce1711: B1, L2, I3."""
+
+    def beets_folders(self):
+        return [c.args[0] for c in self.stubs["reimport_source"].call_args_list]
+
+    def link(self, link, target, is_dir=False):
+        try:
+            link.symlink_to(target, target_is_directory=is_dir)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+
+    def test_link_with_a_non_audio_name_to_audio_is_refused(self):
+        target = self.tmp / "elsewhere.flac"
+        target.write_bytes(b"x")
+        self.link(Path(self.folders[0]) / "notes.txt", target)  # Beets sniffs content
+        _, folders = self.run_batch()
+        a = folders[self.folders[0]]
+        self.assertEqual(a["failure_reason"], "symlinked_audio")
+        self.assertEqual(self.beets_folders(), [self.folders[1]])
+        self.assertEqual(self.evidence(self.queued.call_args)["symlinked_paths"],
+                         [str(Path(self.folders[0]) / "notes.txt")])
+
+    def test_linked_directory_holding_any_file_is_refused(self):
+        other = self.tmp / "elsewhere"
+        other.mkdir()
+        (other / "track").write_bytes(b"x")  # no extension
+        self.link(Path(self.folders[0]) / "extra", other, is_dir=True)
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
+        self.assertEqual(self.beets_folders(), [self.folders[1]])
+
+    def test_hardlinked_audio_is_copied_not_moved(self):
+        try:
+            os.link(Path(self.folders[0]) / "01.flac", self.tmp / "seeding.flac")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create hardlinks here")
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["status"], "imported")
+        opts = {c.args[0]: c.args[1] for c in self.stubs["reimport_source"].call_args_list}
+        self.assertEqual((opts[self.folders[0]]["copy"], opts[self.folders[0]]["move"]), (True, False))
+        self.assertEqual((opts[self.folders[1]]["copy"], opts[self.folders[1]]["move"]), (False, True))
+        self.assertTrue(any("Hardlinked audio" in line for line in self.log))
+
+    def test_hardlinked_audio_is_copied_in_the_pinned_import_too(self):
+        try:
+            os.link(Path(self.folders[0]) / "01.flac", self.tmp / "seeding.flac")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create hardlinks here")
+        self.reimport[self.folders[0]] = skipped(self.folders[0])
+        self.ident = identity(True)
+        self.run_batch()
+        self.assertIs(self.stubs["plan"].call_args.args[0]["use_move"], False)
+
+    def test_symlinked_import_root_with_normal_folders_imports(self):
+        real = self.tmp / "real_downloads"
+        (real / "Album").mkdir(parents=True)
+        (real / "Album" / "01.flac").write_bytes(b"x")
+        mount = self.tmp / "downloads"
+        self.link(mount, real, is_dir=True)  # the operator's own mount
+        self.roots = [mount]
+        self.folders = [str(mount / "Album")]
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["status"], "imported", self.log)
+
+    def test_link_below_the_import_root_is_refused(self):
+        real = self.tmp / "real_sub"
+        (real / "Album").mkdir(parents=True)
+        (real / "Album" / "01.flac").write_bytes(b"x")
+        self.link(self.tmp / "sub", real, is_dir=True)
+        self.folders = [str(self.tmp / "sub" / "Album")]
+        _, folders = self.run_batch()
+        a = folders[self.folders[0]]
+        self.assertEqual(a["failure_reason"], "symlinked_audio")
+        self.assertEqual(self.evidence(self.queued.call_args)["symlinked_paths"], [str(self.tmp / "sub")])
+        self.assertEqual(self.beets_folders(), [])
+
+    def test_folder_outside_every_configured_root_is_refused(self):
+        self.roots = [self.tmp / "nowhere"]
+        _, folders = self.run_batch()
+        self.assertEqual({f["failure_reason"] for f in folders.values()}, {"unverifiable_folder"})
+        self.assertEqual(self.beets_folders(), [])
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX permissions")
+    def test_unreadable_part_is_unverifiable_not_symlinked(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads everything")
+        sub = Path(self.folders[0]) / "CD2"
+        sub.mkdir()
+        sub.chmod(0)
+        self.addCleanup(sub.chmod, 0o755)
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "unverifiable_folder")
+        self.assertEqual(self.beets_folders(), [self.folders[1]])
 
 
 class TorrentSourceTests(_Batch):

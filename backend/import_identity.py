@@ -71,6 +71,8 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     (or one reached through a symlinked directory) is not evidence; the flag
     reports that one exists, because a pinned Beets import would still pick
     it up unproven (``beets.util.sorted_walk`` follows symlinked directories).
+    Any linked file counts, whatever its name, and so does a linked directory
+    holding any file: Beets recognises audio by content, not extension.
     A folder or subfolder that cannot be resolved or listed also sets the
     flag (fail closed): what it holds cannot be verified."""
     def is_link(p: Path) -> bool:
@@ -96,7 +98,9 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
                 budget[0] -= 1 + len(dirnames) + len(filenames)
                 if budget[0] < 0:
                     return True
-                if any(Path(n).suffix.lower() in AUDIO_EXT for n in filenames):
+                # Any file at all (QA394-B1): Beets sniffs content, so a
+                # linked "cover.jpg" or extensionless file may be audio.
+                if filenames:
                     return True
         except OSError:
             return True
@@ -117,11 +121,14 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
                     linked = linked or has_audio(here / name)
             for name in filenames:
                 p = here / name
-                if p.suffix.lower() not in AUDIO_EXT:
-                    continue
+                # Every linked file, before the extension filter (QA394-B1):
+                # Beets identifies audio by content, not by name.
                 if is_link(p):
                     linked = True
-                elif p.is_file():
+                    continue
+                if p.suffix.lower() not in AUDIO_EXT:
+                    continue
+                if p.is_file():
                     files.append(str(p))
         return sorted(files, key=str.lower), linked or bool(walk_failed)
     except OSError:

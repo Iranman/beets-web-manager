@@ -285,6 +285,14 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - The #18 dismissal is superseded. Future alerts on these sinks must be checked against this policy, not against `validate_outbound_url()`.
 - Status: Closed on the fix branch, pending CodeQL confirmation on the PR.
 
+## SEC-004 Batch Import Link Check Runs Before Beets, Not In It (0.7.0, #394)
+
+- Scope: the batch import's Stage 1 (`backend/ai_service.py` `_ai_batch_preimport_check`) and the webmanager plugin's `run_import`.
+- Risk: Web Manager checks the folder for symlinks, unreadable parts and its path below the configured root, and then asks Beets to import it. Between the check and the import (a time-of-check/time-of-use window), a process with write access to the downloads folder could swap a file or directory for a link. Beets' `sorted_walk` follows symlinked directories and reads audio by content, so a link planted in that window would be imported, moved or copied, and have tags written through it.
+- Mitigations today: the window is one folder's check-then-import; discovery, the check and Stage 2b's pinned import all refuse links; downloads roots are operator-controlled.
+- Fix: the plugin walks the import source (no link following, fail closed on errors) right before it starts the import session, and refuses a source with any link below the source root. This changes plugin behaviour, so it needs a `PLUGIN_VERSION` bump and a Beets restart (a MINOR release under the versioning policy).
+- Status: Open. Not a release blocker for 0.7.0.
+
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 
 - Scope: `PLEX_TOKEN`, used only by `beets-web-manager`.

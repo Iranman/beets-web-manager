@@ -142,12 +142,15 @@ class SymlinkEdgeTests(_Batch):
         self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
         self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
 
-    def test_symlink_to_non_audio_does_not_block(self):
+    def test_symlink_to_non_audio_also_blocks(self):
+        # Security review of #394 (B1): Beets identifies audio by content, so
+        # any linked file fails closed, a linked cover.jpg included.
         art = self.tmp / "cover_src.jpg"
         art.write_bytes(b"x")
         self._link(Path(self.folders[0]) / "cover.jpg", art)
         _, folders = self.run_batch()
-        self.assertEqual(folders[self.folders[0]]["status"], "imported")
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
+        self.assertNotIn(self.folders[0], self._beets_folders())
 
     def test_broken_audio_symlink_is_refused(self):
         self._link(Path(self.folders[0]) / "03.flac", self.tmp / "missing.flac")
@@ -180,12 +183,14 @@ class SymlinkRootProbeTests(_Batch):
         _, folders = self.run_batch()
         self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
 
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX permissions")
     def test_unreadable_folder_root(self):
         # (b) Web Manager cannot list the folder; Beets (another uid) may.
         self._unreadable(Path(self.folders[0]))
         _, folders = self.run_batch()
         self.assertNotIn(self.folders[0], self._beets_folders(), self.log)
 
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX permissions")
     def test_symlink_inside_an_unreadable_subfolder(self):
         sub = Path(self.folders[0]) / "CD2"
         sub.mkdir()

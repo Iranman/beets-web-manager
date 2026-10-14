@@ -28,7 +28,7 @@ from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_m
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
 from backend.app_runtime import jobs
 from backend.musicbrainz_service import _artist_folder_key, _discogs_release_fallback_candidate, _mb_release_search_by_folder_tracks
-from backend.serializers import _compact_mb_candidate, _resolve_import_review_source_path, _resolve_import_scan_root
+from backend.serializers import _compact_mb_candidate, _import_review_cleanup_roots, _resolve_import_review_source_path, _resolve_import_scan_root
 from backend.pending_review_store import _import_review_folder_signature, _pending_review_has_path, _pending_review_path_key, _pending_review_path_set
 from backend.plex_service import _trigger_plex_refresh
 
@@ -1987,6 +1987,56 @@ def _ai_batch_review_suggestion(folder: str, reason: str, identity: Dict[str, An
     }
 
 
+def _ai_batch_preimport_check(folder: str):
+    """``(audio_files, conflict)`` for Stage 1; ``conflict`` is None or
+    ``{conflict, reason, paths}``. Beets never gets a folder with a conflict:
+
+    - ``symlinked_audio``: the folder, or a path component between it and the
+      configured root it lives under, is a link (swapped after discovery, or a
+      stored path on recovery; QA394-F5, I3), or a file or directory inside it
+      is a link Beets would follow (F3, B1). Links at or above the configured
+      root are the operator's own mount and are allowed (as in #399).
+    - ``unverifiable_folder``: outside every configured root, a part of it
+      cannot be read (F4), or no audio Web Manager can read was found."""
+    def conflict(kind: str, why: str, paths: List[str]):
+        return [], {"conflict": kind, "reason": f"{kind}: {why}; import refused", "paths": paths}
+
+    path = Path(os.path.abspath(folder))
+    root = next((r for r in _import_review_cleanup_roots(allow_music=True) if r in path.parents), None)
+    if root is None:
+        return conflict("unverifiable_folder", "the folder is not under a configured import root", [folder])
+    below = [p for p in [path, *path.parents] if p != root and root in p.parents]
+    links = [str(p) for p in below if p.is_symlink() or os.path.isjunction(p)]
+    if links:
+        return conflict("symlinked_audio", "the folder path runs through a symlink", links)
+    audio_files, linked = _recursive_audio(folder)
+    if linked:
+        # The helper also fails closed on an unreadable part: name the links
+        # it could see, or report that part as unverifiable.
+        seen: List[str] = []
+        for dirpath, dirnames, filenames in os.walk(folder, onerror=lambda _e: None):
+            for name in dirnames + filenames:
+                p = Path(dirpath) / name
+                if p.is_symlink() or os.path.isjunction(p):
+                    seen.append(str(p))
+        if seen:
+            return conflict("symlinked_audio", "files are reached through a symlink", sorted(seen))
+        return conflict("unverifiable_folder", "part of the folder could not be read", [])
+    if not audio_files:
+        return conflict("unverifiable_folder", "no audio file Web Manager can read was found", [])
+    return audio_files, None
+
+
+def _ai_batch_has_hardlinked_audio(audio_files: List[str]) -> bool:
+    for f in audio_files:
+        try:
+            if os.stat(f).st_nlink > 1:
+                return True
+        except OSError:
+            return True  # cannot tell: copy, never move
+    return False
+
+
 def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_event=None,
                              update_state=None) -> None:
     """One folder through the deterministic import (#288, phase B):
@@ -2051,40 +2101,22 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     # ── Stage 1: Beets quiet autotag import of this one folder ──────────────
     preserve = _preserve_torrent_source_path(folder)
     mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
-    log.append(f"  Stage 1: Beets import ({'copy, torrent source' if preserve else 'move'})")
     try:
-        # Symlinked audio is a hard identity conflict (it may point anywhere,
-        # even into the library): Beets never gets the folder. The identity
-        # engine's walk also catches audio behind a symlinked directory, which
-        # beets.util.sorted_walk follows (QA394-F3).
-        # A folder path that is (now) a symlink or runs through one -- swapped
-        # after discovery, or a stored path on recovery -- is refused the same
-        # way (QA394-F5). An unlistable folder or subfolder counts as linked
-        # (fail closed, QA394-F4).
-        def refuse(conflict: str, reason: str, paths: List[str]) -> None:
+        audio_files, conflict = _ai_batch_preimport_check(folder)
+        if conflict:
+            reason = conflict["reason"]
             log.append(f"  {reason}")
             review(plain_suggestion(reason),
-                   {"origin_step": "pre_import", "conflict": conflict, "symlinked_paths": paths,
-                    "ai_rank": None, "batch_job_id": batch_id},
-                   failure_reason=conflict, stage="done")
-
-        if composite_workflows._has_symlink_component(folder) or Path(folder).resolve() != Path(folder):
-            refuse("symlinked_audio", "symlinked_audio: the folder path is or runs through a symlink; "
-                   "import refused", [folder])
+                   {"origin_step": "pre_import", "conflict": conflict["conflict"],
+                    "symlinked_paths": conflict["paths"], "ai_rank": None, "batch_job_id": batch_id},
+                   failure_reason=conflict["conflict"], stage="done")
             return
-        audio_files, has_linked_audio = _recursive_audio(folder)
-        if has_linked_audio:
-            try:  # the link entries themselves (not descended), for the reviewer
-                linked = sorted(str(p) for p in Path(folder).rglob("*") if p.is_symlink())
-            except OSError:
-                linked = []
-            refuse("symlinked_audio", "symlinked_audio: audio is reached through a symlink, or part of "
-                   "the folder could not be read to rule that out; import refused", linked)
-            return
-        if not audio_files:
-            refuse("unverifiable_folder", "unverifiable_folder: no audio file Web Manager can read was found "
-                   "in this folder; import refused", [])
-            return
+        if not preserve and _ai_batch_has_hardlinked_audio(audio_files):
+            # Lidarr hardlinks imports and a seeding torrent shares inodes: a
+            # move with write would rewrite the other copy's tags (QA394-L2).
+            preserve = True
+            log.append("  Hardlinked audio (another copy shares these files): Beets copies instead of moving.")
+        log.append(f"  Stage 1: Beets import ({'copy' if preserve else 'move'})")
         _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
         audio = len(audio_files)
         # Same scale as import_service._beet_import_timeout_for_count (a higher layer).
@@ -2166,7 +2198,7 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     mark(current_step="Stage 2b: pinned Beets import", stage="pinned_import", **found)
     log.append(f"  Stage 2b: every file proven; Beets import pinned to release {release_id}")
     try:
-        out = _ai_import_folder(folder, release_id, {}, log, cancel_event)
+        out = _ai_import_folder(folder, release_id, {}, log, cancel_event, copy_source=preserve)
         aid = int(out["album_id"])
         # post_conditions: beets_strong_match (quiet_fallback skip in the
         # Apply) and single_new_album_with_release_group (the Apply checks one
@@ -2517,12 +2549,13 @@ def _record_recent_import_for_album(album_id: Any, log: List[str], *, mb_albumid
 
 
 def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
-                      log: list, cancel_event=None):
+                      log: list, cancel_event=None, *, copy_source: bool = False):
     """Import a folder as a specific MB release through Beets' own importer
     (confirmed import), which tags, writes and places the files. Web Manager
     does not retag the result (ARCH-024). A preserved torrent source is
-    copied, never moved. Runs directly -- safe for background threads."""
-    preserve_torrent_source = _preserve_torrent_source_path(folder_path)
+    copied, never moved; ``copy_source`` forces a copy too (hardlinked audio).
+    Runs directly -- safe for background threads."""
+    preserve_torrent_source = copy_source or _preserve_torrent_source_path(folder_path)
     if preserve_torrent_source:
         log.append("  [torrent] Protected source detected; Beets copies it, "
                    "leaving the qBittorrent source in place.")
