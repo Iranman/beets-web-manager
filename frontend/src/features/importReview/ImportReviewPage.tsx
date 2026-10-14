@@ -46,6 +46,7 @@ import {
   validateManualMusicBrainzId,
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
+import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -1219,19 +1220,60 @@ function actionTone(state?: ActionState): 'info' | 'success' | 'warning' | 'erro
   return 'info';
 }
 
+const BATCH_PATHS_SHOWN = 5;
+
+const BATCH_STOP_TEXT: Record<string, string> = {
+  symlinked_audio: 'Import refused: the folder contains a linked file or folder (symlink or junction), or its path runs through one.',
+  unverifiable_folder: 'Import refused: Web Manager could not check this folder (outside the import folders, unreadable in part, or no readable audio).',
+  beets_partial: 'Beets imported part of this folder and skipped the paths below.',
+  beets_skip: 'Beets skipped this folder; the evidence below is from Web Manager.',
+};
+
+/** Why a batch import stopped on this folder (#394), with the paths the server
+ * named. Paths are plain text; the list is capped so a huge folder stays readable. */
+export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
+  if (!evidence?.origin_step) return null;
+  const code = evidence.origin_step === 'pre_import' ? evidence.conflict || '' : evidence.origin_step;
+  const text = BATCH_STOP_TEXT[code] || `Batch import stopped: ${code.replace(/_/g, ' ')}.`;
+  const [title, paths] = evidence.symlinked_paths?.length
+    ? ['Links found', evidence.symlinked_paths]
+    : evidence.unreadable_paths?.length
+      ? ['Could not be read', evidence.unreadable_paths]
+      : evidence.skipped_paths?.length
+        ? ['Skipped by Beets', evidence.skipped_paths]
+        : ['', []];
+  const more = paths.length - BATCH_PATHS_SHOWN;
+  return (
+    <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
+      <div>{text}</div>
+      {paths.length ? (
+        <>
+          <div className="mt-1 font-semibold">{title}</div>
+          <ul className="space-y-0.5 break-all font-mono text-[11px]">
+            {paths.slice(0, BATCH_PATHS_SHOWN).map((path) => <li key={path}>{path}</li>)}
+          </ul>
+          {more > 0 ? <div>and {more} more</div> : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewItem; evidence?: ReviewEvidence }) {
   const evidence = evidenceOverride ?? item?.evidence;
   const top = evidence?.top_candidates ?? [];
   const preflight = evidence?.preflight;
   const best = top[0];
   const examples = preflight?.examples ?? [];
+  const batchStop = <BatchStopEvidence evidence={evidence} />;
 
   if (!best && !preflight) {
-    return null;
+    return evidence?.origin_step ? <div className="mt-3 text-xs text-zinc-600">{batchStop}</div> : null;
   }
 
   return (
     <div className="mt-3 space-y-2 text-xs text-zinc-600">
+      {batchStop}
       <div className="flex flex-wrap items-center gap-2">
         {best ? (
           <span>
@@ -4871,6 +4913,8 @@ export function ImportReviewPage({
           {error}. {missingIdsMode ? 'This list is read from Beets; check the Beets status on the System page, then click Refresh.' : 'Click Refresh to try again.'}
         </Alert>
       ) : null}
+
+      {missingIdsMode ? <MissingIdsBatchPanel rows={items} onWritten={() => void loadQueue(true)} /> : null}
 
       {/* Background import status strip */}
       {Object.keys(backgroundJobs).length > 0 ? (
