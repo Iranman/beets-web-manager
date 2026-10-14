@@ -374,6 +374,12 @@ def select_rows(payload: Dict[str, Any]) -> tuple:
 
 # ── preview ──────────────────────────────────────────────────────────────────
 
+def _change_reason(proof: Dict[str, Any]) -> str:
+    if (proof.get("evidence") or {}).get("fill") == "release_group":
+        return "Release Group taken from MusicBrainz's lookup of the album's existing Release ID."
+    return "Proven by fingerprint/identity evidence."
+
+
 def run_preview(rows: List[Dict[str, Any]], log: List[str], cancel_event=None, update_state=None,
                 store=None, user: Optional[str] = None) -> Dict[str, Any]:
     store = store or transactions
@@ -402,7 +408,7 @@ def run_preview(rows: List[Dict[str, Any]], log: List[str], cancel_event=None, u
         "id": p["row_id"], "operation": "MusicBrainz Match", "source": SOURCE,
         "current_metadata": p["current"], "new_metadata": p["write"],
         "metadata_diff": metadata_diff(p["current"], p["write"]),
-        "reason": "Proven by fingerprint/identity evidence.", "metadata": {"evidence": p["evidence"]},
+        "reason": _change_reason(p), "metadata": {"evidence": p["evidence"]},
     } for p in proven]
     tx = store.create(
         operation_type="MusicBrainz Match", status="Preview", dry_run=True, source=SOURCE, initiating_user=user,

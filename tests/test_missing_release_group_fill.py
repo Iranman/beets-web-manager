@@ -104,6 +104,9 @@ class ApplyTests(_FillCase):
         self.album()
         preview = mb.run_preview(list(self.w.rows), [], store=self.store)
         self.assertEqual(preview["counts"]["proven"], 1)
+        change = self.store.get(preview["transaction_id"])["changes"][0]
+        self.assertEqual(change["reason"],
+                         "Release Group taken from MusicBrainz's lookup of the album's existing Release ID.")
         err, _ = mb.check_apply_request(preview["transaction_id"], "wrong", store=self.store)
         self.assertEqual(err["code"], "confirm_token_mismatch")
         res = mb.run_apply(preview["transaction_id"], apply_album=self.write, apply_item=None, log=[],
