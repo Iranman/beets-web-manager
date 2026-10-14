@@ -94,6 +94,25 @@ class Qa410WriterTests(unittest.TestCase):
         self.assertFalse(any("LEAK_MARKER" in line for line in log))
         self.assertEqual(self.store.read_text(), self.original)
 
+    def test_add_refuses_when_prune_save_fails(self):
+        # A is resolved, so the load prunes and saves; that save fails.
+        self._patches(library_ids={"side_effect": lambda p: [7] if p == self.a else []})
+        real_save = prs._save_pending_reviews
+        calls = {"n": 0}
+
+        def save(items):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(28, "No space left on device")
+            real_save(items)
+        with mock.patch.object(prs, "_save_pending_reviews", side_effect=save):
+            with self.assertRaises(prs.PendingReviewLoadError):
+                prs._add_to_pending(self.c, {"album": "X"})
+            self.assertEqual(self.store.read_text(), self.original)
+            # A list-only reader still gets the pruned view.
+            calls["n"] = 0
+            self.assertEqual([i["path"] for i in prs._load_pending_reviews()], [self.b])
+
     def test_batch_final_pass_survives_unreadable_queue(self):
         import backend.ai_service as ai
         state = {"batch_job_id": "b1", "folder_states": {

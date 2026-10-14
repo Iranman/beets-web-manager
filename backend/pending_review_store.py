@@ -367,6 +367,9 @@ def _load_pending_reviews(*, prune_resolved: bool = True, strict: bool = False) 
                 _save_pending_reviews(filtered)
             except OSError as ex:
                 _app_logger.warning("Review Queue prune not saved: %s", type(ex).__name__)
+                if strict:
+                    # A writer would save the pruned rows without their audit records.
+                    raise PendingReviewLoadError("Review Queue prune could not be saved.") from ex
                 return filtered
             for item in resolved_items:
                 _record_ai_review_decision(
