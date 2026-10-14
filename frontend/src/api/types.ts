@@ -290,6 +290,10 @@ export interface ReviewItem {
   mb_url?: string;
   mb_valid?: boolean;
   missing_id_type?: string;
+  /** Missing IDs album rows: "missing_release_group" when the album has a Release ID but no Release Group. */
+  missing_reason?: 'missing_release_group' | 'missing_release_id' | string;
+  /** Missing IDs album rows: the album's current Release ID (may be empty). */
+  current_mb_albumid?: string;
   existing_album_ids?: number[];
   existing_album_id?: number;
   sort_ts?: number;
@@ -343,7 +347,7 @@ export interface LibraryMissingMbParams {
   sort?: 'added_desc' | 'added_asc' | 'artist' | 'title';
 }
 
-/** GET /api/library/missing-mb-ids: library albums with no Release ID and
+/** GET /api/library/missing-mb-ids: library albums with no Release ID or no Release Group and
  * singleton tracks with no Recording ID (rows of type "library_no_mb"). */
 export interface LibraryMissingMbResponse {
   ok: true;
@@ -387,6 +391,10 @@ export interface MissingMbPreviewRow {
     release_group_held_by?: number[];
     /** Another selected album proves the same release group. */
     duplicate_in_batch?: boolean;
+    /** "release_group": only the Release Group is filled; the Release ID is kept. */
+    fill?: string;
+    release_id?: string;
+    release_group_from_release?: string;
   } & Record<string, unknown>;
 }
 
