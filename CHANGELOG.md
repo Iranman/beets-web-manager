@@ -4,9 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.7.0 - 2026-10-14
 
 ### Upgrade Notes
+
+- The image now ships Deno (`/usr/local/bin/deno`, `DENO_DIR=/tmp/deno`), so YouTube downloads need no extra JavaScript runtime setup. The image is about 96 MB larger uncompressed. Nothing to change if you use the hardened Compose settings (`/tmp` tmpfs).
+- `YTDLP_REMOTE_COMPONENTS` is now operator-only: set it in the Compose environment. The Settings page no longer saves it, so a value saved there before is no longer applied.
+- The Import page's batch import (`POST /api/ai-batch-import`) is now the deterministic import: Beets imports strong matches, MusicBrainz and AcoustID identify the rest, and AI is never called. It no longer needs an AI provider. Anything it cannot prove goes to the Review Queue.
+- The batch import now refuses, and sends to review, a folder holding any symlink or junction (`symlinked_audio`) and a folder it cannot verify: outside every import root, partly unreadable, or with no readable audio (`unverifiable_folder`). Replace such links with real folders to import them.
+- A source folder holding any hardlinked file (for example a seeding torrent or a Lidarr hardlink), or a file that cannot be checked, is now copied into the library instead of moved, so its folder stays in Downloads.
 
 - `YTDLP_PO_PROVIDER_URL` is now blank by default, so the bgutil PO token provider is used only when you set it (`docker-compose.full.yml` still sets it for its sidecar).
 - SpotiFLAC is no longer in the default slskd fallback chain (now `ytdlp,soundcloud`), and a download request (Find Music, Download All, track replacement) can no longer add or reorder sources: the chain comes only from `SLSKD_FALLBACK_METHODS`. yt-dlp (YouTube) is always in it: a list that leaves `ytdlp` out gets it added before `soundcloud`, or at the end. To keep using SpotiFLAC, list `spotiflac` there and install its CLI. Track replacement now uses a direct-source fallback only when its "try an alternate source" setting is on.
@@ -21,6 +27,12 @@ The project uses Semantic Versioning.
 ### Known Limitations
 
 - A symlink directly in the batch import scan root (for example a linked album folder in Downloads) is only logged ("symlink not followed, never imported"); it gets no review row.
+- Cancelling a batch import while a folder is in its pinned import (Stage 2b) leaves no History row for that folder (N2).
+- A crash during a Stage 1 Beets import move leaves no History row for that folder (N3).
+- Re-running the batch import over a torrent source that was already copied creates a duplicate Review Queue row (N5).
+- Skip pressed between two folders of a batch import is ignored; it applies only while a folder is being processed.
+- A folder whose `cover.jpg` is a symlink is sent to review like any other folder holding a link.
+- Library > Missing IDs batch: only one preview and one apply can run at a time; rows cannot be deselected in the preview; each row's child transaction records the system actor rather than the user; the one-time `confirm_token` is visible in the running preview job's result.
 
 ### Fixed
 

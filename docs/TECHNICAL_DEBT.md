@@ -302,6 +302,13 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Fix: the plugin walks the import source (no link following, fail closed on errors) right before it starts the import session, and refuses a source with any link below the source root. This changes plugin behaviour, so it needs a `PLUGIN_VERSION` bump and a Beets restart (a MINOR release under the versioning policy).
 - Status: Open. Not a release blocker for 0.7.0.
 
+## SEC-005 Request Text Reaches The qBittorrent Scan Log Unescaped (0.7.0 security review F1, pre-existing)
+
+- Scope: `backend/acquisition_service.py`, the `qBittorrent scan: ...` job log line (`category`, `filter`, `search` from the request).
+- Risk (low): control characters in those request fields (newlines, ANSI escapes) are written to the job log as-is, so a caller can forge extra log lines or garble the Jobs page log view. No secret is logged and nothing executes.
+- Fix: strip or escape control characters from request text before it goes into job log lines (one shared helper for log formatting).
+- Status: Open. Not a release blocker for 0.7.0.
+
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 
 - Scope: `PLEX_TOKEN`, used only by `beets-web-manager`.
