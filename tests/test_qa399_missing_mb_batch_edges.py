@@ -3,8 +3,10 @@
 Reuses the fake world from tests/test_missing_mb_batch.py. Tests named
 ``test_defect_*`` assert the required behavior and fail on 52bb70f.
 """
+import os
 import threading
 import time
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -272,6 +274,142 @@ class RouteEdgeTests(base.RouteTests):
         self.assertEqual(self.w.albums[1].mb_albumid, REL)
         self.relocate.assert_called_once()
         self.rollback.assert_not_called()
+
+    def test_single_match_route_keeps_operator_release_group_move(self):
+        """Re-QA (3): the operator's own Match still passes release_selected_by_operator=True."""
+        self.patch_match_writer()
+        self.w.add_album(1)
+        seen = []
+        orig = self.routes.composite_workflows.update_album_metadata.side_effect
+
+        def spy(aid, fields, **kw):
+            if "mb_albumid" in fields:
+                seen.append(kw.get("release_selected_by_operator"))
+            return orig(aid, fields, **kw)
+        self.routes.composite_workflows.update_album_metadata.side_effect = spy
+        job = self.wait(self.client.post("/api/albums/1/match", json={"mb_id": REL}).get_json()["job_id"])
+        self.assertEqual(job.status, "success", job.log)
+        self.assertEqual(seen, [True])
+
+    def test_batch_writer_is_not_operator_selected(self):
+        self.patch_match_writer()
+        seen = []
+        orig = self.routes.composite_workflows.update_album_metadata.side_effect
+
+        def spy(aid, fields, **kw):
+            if "mb_albumid" in fields:
+                seen.append(kw.get("release_selected_by_operator"))
+            return orig(aid, fields, **kw)
+        self.routes.composite_workflows.update_album_metadata.side_effect = spy
+        pre = self.preview([self.w.add_album(1)["id"]])
+        job = self.wait(self.apply(pre).get_json()["job_id"])
+        self.assertEqual(job.status, "success", job.log)
+        self.assertEqual(seen, [False])
+
+
+class ReQAIdentityGuardTests(_Case):
+    """Re-QA at faab2cf: the real identity guard, the duplicate lookup, links."""
+
+    def test_guard_refuses_rg_move_without_operator_flag(self):
+        import backend.composite_workflows as cw
+        with mock.patch("backend.identity_contract.verify_album_identity",
+                        return_value=mock.Mock(ok=True, release_id=REL, release_group_id=RG)):
+            refused = cw._verified_album_identity({"mb_releasegroupid": "5" * 8 + "-5555-5555-5555-" + "5" * 12},
+                                                  REL, "", allow_establish=True, rg_explicit=False)
+            established = cw._verified_album_identity({"mb_releasegroupid": ""}, REL, "",
+                                                      allow_establish=True, rg_explicit=False)
+        self.assertEqual(refused["code"], "repair_identity_mismatch")
+        self.assertTrue(established["ok"])
+
+    def _world(self):
+        w = _World(self)
+        return w
+
+    def test_duplicate_lookup_is_exact_and_excludes_self(self):
+        w = self._world()
+        row = w.add_album(1)
+        near = RG[:-1] + "2"
+        with mock.patch("backend.missing_mb_batch.composite_workflows.find_all_albums_by_releasegroupid",
+                        return_value=[{"id": 1, "mb_releasegroupid": RG}, {"id": 9, "mb_releasegroupid": near},
+                                      {"id": 8, "mb_releasegroupid": RG + "x"}]):
+            self.assertTrue(mb.prove_row(row)["proven"], mb.prove_row(row)["reasons"])
+        with mock.patch("backend.missing_mb_batch.composite_workflows.find_all_albums_by_releasegroupid",
+                        return_value=[{"id": 7, "mb_releasegroupid": RG.upper()}]):
+            self.assertIn("duplicate_release_group", mb.prove_row(row)["reasons"])
+
+    def test_duplicate_lookup_failure_fails_closed(self):
+        from backend.beets_adapter import BeetsUnavailableError
+        w = self._world()
+        row = w.add_album(1)
+        with mock.patch("backend.missing_mb_batch.composite_workflows.find_all_albums_by_releasegroupid",
+                        side_effect=BeetsUnavailableError("down")):
+            proof = mb.prove_row(row)
+        self.assertFalse(proof["proven"])
+        self.assertEqual(proof["reasons"], ["evidence_unavailable"])
+
+
+@unittest.skipIf(os.name == "nt", "symlink probes run in the Linux test image")
+class ReQALinkTests(unittest.TestCase):
+    """Re-QA (1): F4 must not reopen B1."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="qa399_links_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.real = self.tmp / "real"
+        (self.real / "Artist" / "Album").mkdir(parents=True)
+        (self.real / "Artist" / "Album" / "01.flac").write_bytes(b"a")
+        self.other = self.tmp / "other"
+        self.other.mkdir()
+        (self.other / "x.flac").write_bytes(b"b")
+
+    def check(self, root, path):
+        with mock.patch("backend.missing_mb_batch.MUSIC_ROOT", Path(root)):
+            return mb._has_link_component(str(path))
+
+    def test_plain_path_under_root_is_fine(self):
+        self.assertFalse(self.check(self.real, self.real / "Artist" / "Album" / "01.flac"))
+
+    def test_linked_music_root_mount_is_allowed(self):
+        mount = self.tmp / "mount"
+        os.symlink(self.real, mount)
+        self.assertFalse(self.check(mount, mount / "Artist" / "Album" / "01.flac"))
+
+    def test_link_at_album_folder_level_is_refused(self):
+        os.symlink(self.other, self.real / "Artist" / "Linked")
+        self.assertTrue(self.check(self.real, self.real / "Artist" / "Linked" / "x.flac"))
+
+    def test_link_at_album_level_under_linked_root_is_refused(self):
+        mount = self.tmp / "mount"
+        os.symlink(self.real, mount)
+        os.symlink(self.other, self.real / "Artist" / "Linked")
+        self.assertTrue(self.check(mount, mount / "Artist" / "Linked" / "x.flac"))
+
+    def test_linked_file_under_root_is_refused(self):
+        os.symlink(self.other / "x.flac", self.real / "Artist" / "Album" / "02.flac")
+        self.assertTrue(self.check(self.real, self.real / "Artist" / "Album" / "02.flac"))
+
+    def test_item_outside_root_with_link_is_refused_and_plain_is_not(self):
+        os.symlink(self.other, self.tmp / "outlink")
+        self.assertTrue(self.check(self.real, self.tmp / "outlink" / "x.flac"))
+        self.assertFalse(self.check(self.real, self.other / "x.flac"))
+
+    def test_root_slash_checks_every_component(self):
+        os.symlink(self.other, self.real / "Artist" / "Linked")
+        self.assertTrue(self.check("/", self.real / "Artist" / "Linked" / "x.flac"))
+        self.assertFalse(self.check("/", self.real / "Artist" / "Album" / "01.flac"))
+
+    def test_music_root_empty_is_strict(self):
+        os.symlink(self.other, self.real / "Artist" / "Linked")
+        self.assertTrue(self.check("", self.real / "Artist" / "Linked" / "x.flac"))
+
+    def test_root_itself_is_link_target_path_given_resolved(self):
+        """Item path stored in resolved form while MUSIC_ROOT is the link: outside the
+        root textually, no link in it -> allowed (B1 not reopened: it is the real file)."""
+        mount = self.tmp / "mount"
+        os.symlink(self.real, mount)
+        self.assertFalse(self.check(mount, self.real / "Artist" / "Album" / "01.flac"))
 
 
 # The inherited RouteTests cases already run in test_missing_mb_batch.
