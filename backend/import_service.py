@@ -9,10 +9,10 @@ from backend.matching import verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
-from backend.pending_review_store import _library_album_ids_for_folder, _queue_folder_for_manual_review, _remove_pending_review_for_path
+from backend.pending_review_store import _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
@@ -379,34 +379,7 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
     return False
 
 
-# ── Recent imports tracking ───────────────────────────────────────────────────
-
-_RECENT_IMPORTS_FILE = Path("/config/recent_imports.json")
-
-
-_recent_imports_lock = threading.Lock()
-
-
-def _record_recent_import(artist: str, album: str, year: int,
-                          track_count: int, mb_albumid: str, aldir: str):
-    """Append an album-level entry to the recent imports log."""
-    entry = {
-        "artist": artist,
-        "album": album,
-        "year": year,
-        "tracks": track_count,
-        "mb_albumid": mb_albumid,
-        "aldir": aldir,
-        "imported_at": int(time.time()),
-    }
-    with _recent_imports_lock:
-        try:
-            existing = json.loads(_RECENT_IMPORTS_FILE.read_text()) if _RECENT_IMPORTS_FILE.exists() else []
-        except Exception:
-            existing = []
-        existing.insert(0, entry)
-        _RECENT_IMPORTS_FILE.write_text(json.dumps(existing[:100], indent=2))
-
+# Recent imports (History) live in ai_service, the lowest layer that records them.
 
 _IMPORT_JOB_LOCK = threading.Lock()
 
@@ -1267,26 +1240,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except Exception as _ae:
                 log.append(f"  [artwork] Warning: {_ae}")
 
-        # ── Record recent import ───────────────────────────────────────────────
-        try:
-            _ri_artist, _ri_album, _ri_year, _ri_tracks = "", Path(aldir).name, 0, 0
-            _aid_for_rec = album_ids[0] if album_ids else None
-            if _aid_for_rec:
-                try:
-                    _rrow = composite_workflows.get_album(_aid_for_rec)
-                    _ri_items = composite_workflows.find_all_items_by_album_id(_aid_for_rec)
-                    _ri_tracks = len(_ri_items)
-                except Exception:
-                    _rrow = None
-                    _ri_tracks = 0
-                if _rrow:
-                    _ri_artist = _rrow.get("albumartist") or ""
-                    _ri_album  = _rrow.get("album") or Path(aldir).name
-                    _ri_year   = int(_rrow.get("year") or 0)
-            _record_recent_import(_ri_artist, _ri_album, _ri_year,
-                                  _ri_tracks, mb_albumid, aldir)
-        except Exception as _rce:
-            log.append(f"  [recent] Warning: {_rce}")
+        _record_recent_import_for_album(album_ids[0] if album_ids else None, log,
+                                        mb_albumid=mb_albumid, aldir=aldir)
 
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
@@ -1615,55 +1570,26 @@ def _resolve_import_review_db_music_path(
     )
 
 
-# Folders Beets skipped during a Web Manager import. /webmanager/import runs
-# Beets' importer without an import log, so beet.log never names them.
-_IMPORT_SKIPPED_FILE = Path(os.environ["WEB_MANAGER_DATA_DIR"]) / "import_skipped.json"
+_IMPORT_LOG_TAIL_BYTES = 8 * 1024 * 1024
 
 
-_import_skipped_lock = threading.Lock()
-
-
-def _load_recorded_import_skips() -> List[Dict[str, Any]]:
+def _read_log_tail(path: Any, max_bytes: int = _IMPORT_LOG_TAIL_BYTES) -> List[str]:
+    """The lines in the last ``max_bytes`` of a log, without reading the rest (F18)."""
     try:
-        rows = json.loads(_IMPORT_SKIPPED_FILE.read_text())
-    except (OSError, ValueError):
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - max_bytes))
+            data = fh.read()
+    except FileNotFoundError:
         return []
-    if not isinstance(rows, list):
-        return []
-    return [r for r in rows if isinstance(r, dict) and _s(r.get("path"))]
-
-
-def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:
-    """Replace the recorded skips under ``source`` with this import's skips:
-    one entry per folder, so a re-import never duplicates one and a folder
-    that has since imported drops out."""
-    src = _s(source)
-    now = int(time.time())
-    fresh: Dict[str, Dict[str, Any]] = {}
-    for r in skipped:
-        path = _s(r.get("path"))
-        if path:
-            fresh[path] = {"path": path, "reason": _s(r.get("reason")) or "not_matched",
-                           "source": src, "skipped_at": now}
-    with _import_skipped_lock:
-        kept = [r for r in _load_recorded_import_skips()
-                if r["path"] not in fresh and not Path(r["path"]).is_relative_to(src)]
-        rows = (list(fresh.values()) + kept)[:1000]
-        try:
-            _IMPORT_SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _IMPORT_SKIPPED_FILE.with_name(_IMPORT_SKIPPED_FILE.name + ".tmp")
-            tmp.write_text(json.dumps(rows, indent=2))
-            os.replace(tmp, _IMPORT_SKIPPED_FILE)
-        except OSError as ex:
-            raise RuntimeError(f"Could not record skipped import folders ({type(ex).__name__}).") from ex
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    return lines[1:] if size > max_bytes else lines  # first line may be cut
 
 
 def _import_skipped_items(limit: int = 500, *, deep_scan: bool = True,
                           max_log_lines: int = 0) -> List[Dict[str, Any]]:
-    try:
-        lines = Path(LOG_FILE).read_text(errors="replace").splitlines()
-    except FileNotFoundError:
-        lines = []
+    # ponytail: only the last 8 MB of beet.log is scanned; older skips drop off.
+    lines = _read_log_tail(LOG_FILE)
     if max_log_lines > 0:
         lines = lines[-max_log_lines:]
 
@@ -2872,6 +2798,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         album_ids = [int(apply_res["album_id"])]
         log.append(f"[2/2] Beets imported album_id {album_ids[0]} as release {mb_albumid} "
                    f"(Release Group {apply_res.get('mb_releasegroupid') or '?'}, verified).")
+        # History (F9). The existing-album handoff above records through
+        # start_reimport_disk instead, so each import adds exactly one row.
+        _record_recent_import_for_album(album_ids[0], log, mb_albumid=mb_albumid)
 
         partial_remaining_audio: List[Path] = []
         if selected_subset_import:
@@ -3171,3 +3100,8 @@ def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]
     ):
         return None, "Path is outside the allowed import source roots"
     return resolved, None
+
+
+# The batch import's scan-root rule (F3/F4) is _resolve_import_scan_root in
+# backend/serializers.py, next to the Import Review validator it extends, so
+# the batch walk in ai_service can re-check it too.

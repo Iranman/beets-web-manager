@@ -59,7 +59,9 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("function matchReviewNote(item: ReviewItem)", review_source)
         self.assertIn("AcoustID fingerprint mismatch: selected release", review_source)
         self.assertIn("Delete Wrong Audio", review_source)
-        self.assertIn("folderEvidence?.guessed_artist", review_source)
+        # Search runs on the server (title/artist/album/path fields), so paging and totals cover the whole queue.
+        self.assertIn("search: debouncedQuery", review_source)
+        self.assertNotIn("function searchText(", review_source)
         self.assertIn("if (!shouldShowReadyBucket(item, candidateMbid, selectedMatch, previewState)) return false", review_source)
         self.assertIn("if (!shouldShowBlockedBucket(item, candidateMbid, selectedMatch, previewState)) return false", review_source)
         self.assertIn("if (itemMatchBucket(item) !== filter) return false", review_source)
@@ -103,7 +105,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("function normalizedScoreValue(value: number | string | undefined): number | null", review_source)
         self.assertIn("if (score >= 0.90) return 'high'", review_source)
         self.assertIn("const AUTO_IMPORT_CONFIDENCE_THRESHOLD = 0.60", review_source)
-        self.assertIn("const REVIEW_QUEUE_LIMIT = 5000", review_source)
+        self.assertIn("export const REVIEW_PAGE_SIZE = 100", review_source)
         self.assertIn("if (score >= AUTO_IMPORT_CONFIDENCE_THRESHOLD) return 'medium'", review_source)
         self.assertIn("const autoFixEligible = isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD", review_source)
         self.assertIn("Review required because this match is below the 60% auto-import threshold.", review_source)
@@ -140,7 +142,8 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("Track matches ({trackData.matched_count}/{trackData.mb_track_count})", review_source)
         self.assertIn("Save ID only", review_source)
         self.assertNotIn("Save Release Group ID", review_source)
-        self.assertIn("getReviewQueue({ limit: REVIEW_QUEUE_LIMIT, origin_type: sourceFilter })", review_source)
+        self.assertIn("getReviewQueue({ ...params, limit: REVIEW_PAGE_SIZE, offset, status: serverStatus })", review_source)
+        self.assertIn("const params = { origin_type: sourceFilter, search: debouncedQuery, evidence_only: evidenceOnly }", review_source)
         self.assertNotIn("if (!selectedMatch || selectedMatch.source === 'manual') return '';", review_source)
         self.assertNotIn("if (!importLike || !selectedMatch || selectedMatch.source === 'manual') return '';", review_source)
 
@@ -189,7 +192,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         app_source = app_family_source()
 
         self.assertIn("def _load_pending_reviews(*, prune_resolved: bool = True) -> list:", app_source)
-        self.assertIn("pending_reviews = _load_pending_reviews(prune_resolved=False)", app_source)
+        self.assertIn("_load_pending_reviews(prune_resolved=False)", app_source)
         self.assertIn("if prune_resolved:", app_source)
         self.assertIn("def _import_skipped_items(limit: int = 500, *, deep_scan: bool = True,", app_source)
         self.assertIn('skipped_deep_scan = status_filter == "skipped"', app_source)
@@ -242,9 +245,9 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("Remove {cleanupFiles.length} rejected file{cleanupFiles.length === 1 ? '' : 's'}…", review_source)
         self.assertIn("const runCleanupFiles = useCallback", review_source)
         self.assertIn("cleanupReviewFiles({", review_source)
-        self.assertIn("action: cleanupAction", review_source)
+        self.assertIn("action: 'quarantine_rejected'", review_source)
         self.assertIn("pending_review_removed || result.remaining_audio_count === 0", review_source)
-        self.assertIn("shown · {filterCounts[filter]} in filter · {items.length} loaded of {filterCounts.all} total", review_source)
+        self.assertIn("shown · items {pageStart}–{pageEnd} of {total}", review_source)
 
         self.assertIn("export function cleanupReviewFiles", client_source)
         self.assertIn("'/api/import/review-files/cleanup'", client_source)
@@ -260,7 +263,8 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("outside_review_folder", app_source)
         self.assertIn("resolved.suffix.lower() not in AUDIO_EXT", app_source)
         self.assertIn("IMPORT_REVIEW_QUARANTINE_DIR", app_source)
-        self.assertIn("allow_delete is passed through for the audit record only; it gates", app_source)
+        # #380 F3: a client-claimed delete_* is downgraded to restorable quarantine.
+        self.assertIn('action = "quarantine_" + action[len("delete_"):]', app_source)
         self.assertIn("_remove_pending_review_for_path(folder_path, log)", app_source)
         self.assertIn("_mark_pending_review_status(", app_source)
         self.assertIn("_record_ai_review_decision(", app_source)
@@ -284,16 +288,19 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("onCleanupFiles={() => requestCleanupFiles(activeItem)}", review_source)
         request = review_source[review_source.index("const requestCleanupFiles = useCallback"):review_source.index("const runCleanupFiles = useCallback")]
         self.assertIn("selectedCleanupSourceFiles(sm, preview)", request)
-        self.assertIn("setConfirmIntent({ kind: 'cleanup_files', item, files, destructive: hasDestructiveCleanupMismatch(sm, preview) })", request)
+        self.assertIn("setConfirmIntent({ kind: 'cleanup_files', item, files, wrongAudio: hasWrongAudioCleanupMismatch(sm, preview) })", request)
         self.assertNotIn("cleanupReviewFiles(", request)
-        self.assertIn("else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files, intent.destructive)", review_source)
+        self.assertIn("else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files)", review_source)
         self.assertIn("{intent.files.map((file) => (", review_source)
-        self.assertIn("'Permanently Delete Rejected Files' : 'Quarantine Rejected Files'", review_source)
-        # The confirmed request still carries the backend-enforced delete gate.
+        self.assertIn("'Quarantine Rejected Files'", review_source)
+        # #392: this path only quarantines (restorable); it never asks to delete.
+        self.assertNotIn("Permanently Delete Rejected Files", review_source)
+        self.assertNotIn("'delete_rejected'", review_source)
         run = review_source[review_source.index("const runCleanupFiles = useCallback"):review_source.index("const runDeleteFolder = useCallback")]
-        self.assertIn("const cleanupAction = destructive ? 'delete_rejected' : 'quarantine_rejected'", run)
-        self.assertIn("allow_delete: destructive", run)
-        self.assertIn("action: cleanupAction", run)
+        self.assertIn("action: 'quarantine_rejected'", run)
+        self.assertIn("allow_delete: false", run)
+        self.assertNotIn("allow_delete: true", run)
+        self.assertIn("cleanupResultMessage(result)", run)
         self.assertIn("pending_review_removed || result.remaining_audio_count === 0", run)
     def test_saved_revalidated_track_mapping_hydrates_selected_match(self):
         root = Path(__file__).resolve().parents[1]

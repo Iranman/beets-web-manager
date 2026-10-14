@@ -135,39 +135,99 @@ describe('Import Review: Revalidate & Import and Clean Stale confirm first', () 
 });
 
 describe('Intake: retry and recover actions confirm first', () => {
-  it('Retry failed imports: no call on cancel, call after confirm', async () => {
-    mocked.getAiBatchStatus.mockResolvedValue({ state: { status: 'idle' } } as never);
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  it('Retry failed imports: lists the batch failures, no call on cancel, recoverAiBatch(batch, true) after confirm, then tracks the job', async () => {
+    mocked.getAiBatchStatus.mockResolvedValue({
+      state: {
+        status: 'completed_with_warnings',
+        batch_job_id: 'batch1',
+        job_id: 'job0',
+        source_path: '/srv/dl',
+        folders_retryable: 1,
+        folders: [
+          { folder_id: 'f1', batch_job_id: 'batch1', source_folder: '/srv/dl/Artist - Broken', status: 'import_failed' },
+          { folder_id: 'f2', batch_job_id: 'batch1', source_folder: '/srv/dl/Artist - Exhausted', status: 'failed', retry_exhausted: true },
+          { folder_id: 'f3', batch_job_id: 'batch1', source_folder: '/srv/dl/Artist - Fine', status: 'imported' },
+        ],
+      },
+    } as never);
+    mocked.recoverAiBatch.mockResolvedValue({ ok: true, job_id: 'job2', state: { status: 'running', job_id: 'job2', batch_job_id: 'batch1' } } as never);
+    const confirmSpy = vi.spyOn(window, 'confirm');
     wrap(<IntakePanel />);
     const button = await screen.findByRole('button', { name: 'Retry failed imports' });
 
     fireEvent.click(button);
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/starts an import job/));
+    let dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/retries 1 failed folder from the last batch import/)).toBeTruthy();
+    expect(within(dialog).getByText(/Artist - Broken/)).toBeTruthy();
+    expect(within(dialog).queryByText(/Artist - Exhausted/)).toBeNull();
+    expect(within(dialog).queryByText(/Artist - Fine/)).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await settle();
+    expect(mocked.recoverAiBatch).not.toHaveBeenCalled();
     expect(mocked.retryLibraryImportAllFailed).not.toHaveBeenCalled();
 
-    confirmSpy.mockReturnValue(true);
     fireEvent.click(button);
-    await waitFor(() => expect(mocked.retryLibraryImportAllFailed).toHaveBeenCalledTimes(1));
+    dialog = await screen.findByRole('dialog');
+    const retryButton = await within(dialog).findByRole('button', { name: 'Retry 1 folder' });
+    // After the retry starts, the status endpoint reports the new job.
+    mocked.getAiBatchStatus.mockResolvedValue({ state: { status: 'running', job_id: 'job2', batch_job_id: 'batch1', folders: [] } } as never);
+    fireEvent.click(retryButton);
+    await waitFor(() => expect(mocked.recoverAiBatch).toHaveBeenCalledWith('batch1', true));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mocked.retryLibraryImportAllFailed).not.toHaveBeenCalled();
+    await waitFor(() => expect(localStorage.getItem(JOB_KEY)).toBe('job2'));
+    expect(await screen.findByText(/Retry started for \d+ failed folders?\. Progress shows below\./)).toBeTruthy();
   });
 
-  it('Retry eligible failures: no call on cancel, recoverAiBatch(job, true) after confirm', async () => {
+  it('Retry failed imports: nothing to retry keeps the confirm button disabled', async () => {
+    mocked.getAiBatchStatus.mockResolvedValue({
+      state: { status: 'completed', batch_job_id: 'batch1', source_path: '/srv/dl', folders_retryable: 0, folders: [] },
+    } as never);
+    wrap(<IntakePanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry failed imports' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/has no failed folders that can be retried/)).toBeTruthy();
+    expect((within(dialog).getByRole('button', { name: 'Retry 0 folders' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('Retry failed imports: a status error is shown and nothing is retried', async () => {
+    mocked.getAiBatchStatus.mockRejectedValue(new Error('HTTP 503'));
+    wrap(<IntakePanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry failed imports' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/Could not load the last batch import: HTTP 503\. Nothing was retried/)).toBeTruthy();
+    expect(mocked.recoverAiBatch).not.toHaveBeenCalled();
+  });
+
+  it('Retry eligible failures: confirm dialog first, no call on cancel, recoverAiBatch(job, true) after confirm', async () => {
     localStorage.setItem(JOB_KEY, 'job1');
-    mocked.getAiBatchStatus.mockResolvedValue({ state: { status: 'completed_with_warnings', job_id: 'job1', folders_retryable: 2 } } as never);
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mocked.getAiBatchStatus.mockResolvedValue({
+      state: {
+        status: 'completed_with_warnings',
+        job_id: 'job1',
+        batch_job_id: 'job1',
+        folders_retryable: 2,
+        folders: [
+          { folder_id: 'a', batch_job_id: 'job1', source_folder: '/srv/dl/One', status: 'timed_out' },
+          { folder_id: 'b', batch_job_id: 'job1', source_folder: '/srv/dl/Two', status: 'ai_failed' },
+        ],
+      },
+    } as never);
     wrap(<IntakePanel />);
     const button = await screen.findByRole('button', { name: 'Retry eligible failures' });
 
     fireEvent.click(button);
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/starts imports again/));
+    let dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/retries 2 failed folders/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await settle();
     expect(mocked.recoverAiBatch).not.toHaveBeenCalled();
 
-    confirmSpy.mockReturnValue(true);
     fireEvent.click(button);
+    dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry 2 folders' }));
     await waitFor(() => expect(mocked.recoverAiBatch).toHaveBeenCalledWith('job1', true));
   });
-
   it('Recover batch: no call on cancel, recoverAiBatch(job, false) after confirm', async () => {
     localStorage.setItem(JOB_KEY, 'job1');
     mocked.getAiBatchStatus.mockResolvedValue({ state: { status: 'paused', job_id: 'job1' } } as never);

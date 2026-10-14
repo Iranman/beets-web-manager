@@ -425,7 +425,6 @@ class AdHocThreadInventoryTests(unittest.TestCase):
         "backend/job_contract.py": 1,          # lock heartbeat inside a running job, joined
         "backend/resource_locks.py": 1,        # lock heartbeat, joined
         "backend/transaction_recovery.py": 1,  # startup recovery sweep (library-transaction)
-        "backend/ai_service.py": 1,            # per-folder AI calls inside an AI batch job
         "backend/playlist_service.py": 2,      # auto-sync worker + index warm (integrations)
         "routes_maintenance.py": 1,            # /api/restart: re-exec after the response
         "app.py": 1,                           # yt-dlp availability probe at boot (security)

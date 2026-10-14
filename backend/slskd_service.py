@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import difflib, json, math, os, re, time, uuid
+import difflib, json, math, os, re, socket, time, uuid
 import urllib.error
 from backend.matching import strip_track_filename_id_suffix as _canonical_strip_track_filename_id_suffix
 from backend.title_normalize import split_ws_led, strip_bracket_credits
@@ -29,15 +29,20 @@ def _slskd_api_key_from_file() -> str:
 
 SLSKD_API_KEY = os.environ.get("SLSKD_API_KEY", "").strip() or _slskd_api_key_from_file()
 
+#: Fixed text for a slskd acquisition started without an API key (ACQ-1).
+SLSKD_NOT_CONFIGURED = "slskd is not configured (SLSKD_API_KEY)"
+
+
+def slskd_configured() -> bool:
+    return bool(SLSKD_API_KEY)
+
 
 # ── slskd + yt-dlp Album Download ─────────────────────────────────────────────
 
 def _slskd_req(method: str, path: str, body=None) -> Any:
     """Thin wrapper for slskd REST API using the API key."""
     if not SLSKD_API_KEY:
-        raise RuntimeError(
-            "slskd API key is not configured; set SLSKD_API_KEY or /config/slskd_api_key"
-        )
+        raise RuntimeError(SLSKD_NOT_CONFIGURED)
     url  = f"{SLSKD_URL}/api/v0/{path.lstrip('/')}"
     hdrs = {"X-API-Key": SLSKD_API_KEY, "Accept": "application/json"}
     data = None
@@ -51,14 +56,23 @@ def _slskd_req(method: str, path: str, body=None) -> Any:
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         # Never echo the provider body: it can carry tokens, paths or peer data.
-        hint = " (slskd rejected the API key; check SLSKD_API_KEY)" if e.code in (401, 403) else ""
+        hint = {401: " (slskd rejected the API key; check SLSKD_API_KEY)",
+                403: " (slskd rejected the API key; check SLSKD_API_KEY)",
+                429: " (slskd is rate limiting requests)"}.get(e.code, "")
         raise RuntimeError(f"slskd {method} /{path} → HTTP {e.code}{hint}") from None
     except Exception as e:
         block = provider_boundary.outbound_block(e, "slskd")
         if block:
             # Fixed text naming the allowlist entry, wherever slskd errors show.
             raise RuntimeError(block["error"]) from None
-        raise
+        # ACQ-2: fixed text only -- this reaches the job log and final error.
+        if isinstance(e, ValueError):
+            reason = "returned an unexpected response"
+        elif isinstance(e, (TimeoutError, socket.timeout)):
+            reason = "timed out"
+        else:
+            reason = "is unreachable"
+        raise RuntimeError(f"slskd {method} /{path} {reason}") from None
 
 
 def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:
@@ -96,12 +110,19 @@ def _normalise_wanted_tracks(raw) -> List[Dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-        tracks.append({
+        row = {
             "disc": max(disc, 1),
             "track": max(track, 0),
             "title": title,
             "mb_trackid": mb_trackid,
-        })
+        }
+        try:
+            duration_ms = int(item.get("duration_ms") or 0)
+        except (TypeError, ValueError):
+            duration_ms = 0
+        if duration_ms > 0:  # MusicBrainz length, for the SoundCloud length filter (ACQ-6)
+            row["duration_ms"] = duration_ms
+        tracks.append(row)
     tracks.sort(key=lambda t: (int(t.get("disc") or 1), int(t.get("track") or 0), t.get("title", "")))
     return tracks
 
@@ -1179,7 +1200,9 @@ _DOWNLOAD_METHOD_ALIASES = {
 }
 
 
-_SLSKD_FALLBACK_METHODS = os.environ.get("SLSKD_FALLBACK_METHODS", "spotiflac,ytdlp,soundcloud")
+# SpotiFLAC is opt-in (SLSKD_FALLBACK_METHODS / a requested fallback, and
+# only when its CLI is installed); the default chain is yt-dlp sources only.
+_SLSKD_FALLBACK_METHODS = os.environ.get("SLSKD_FALLBACK_METHODS", "ytdlp,soundcloud")
 
 
 def _normalise_download_method(value: Any, default: str = "slskd") -> str:
@@ -1197,16 +1220,19 @@ def _download_method_list(value: str) -> List[str]:
     return methods
 
 
-def _slskd_fallback_methods(requested: str = "") -> List[str]:
+def _slskd_fallback_methods() -> List[str]:
+    """The direct-source chain is operator configuration (SLSKD_FALLBACK_METHODS)
+    only. A request may turn the fallback on, never add or reorder sources
+    (SpotiFLAC stays opt-in, ACQ-12)."""
     methods: List[str] = []
-    for method in [requested] + _download_method_list(_SLSKD_FALLBACK_METHODS):
+    for method in _download_method_list(_SLSKD_FALLBACK_METHODS):
         method = _normalise_download_method(method, "")
         if method in {"spotiflac", "ytdlp", "soundcloud"} and method not in methods:
             methods.append(method)
     if methods and "ytdlp" not in methods:
         insert_at = methods.index("soundcloud") if "soundcloud" in methods else len(methods)
         methods.insert(insert_at, "ytdlp")
-    return methods or ["spotiflac", "ytdlp", "soundcloud"]
+    return methods or ["ytdlp", "soundcloud"]
 
 
 def _strip_track_filename_id_suffix(value: Any) -> str:

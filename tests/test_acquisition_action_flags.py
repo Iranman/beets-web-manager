@@ -65,14 +65,17 @@ class AcquisitionActionFlagTests(unittest.TestCase):
         self.assertNotIn("is_local_repair and try_source_fallback", app_source)
         self.assertIn("fallback_scope = (", app_source)
         self.assertIn('"the full album"', app_source)
-        self.assertIn("SLSKD download failed; direct-source fallback also failed", app_source)
+        self.assertIn('f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "', app_source)
         self.assertNotIn("SLSKD missing-track download failed; direct-source fallback", app_source)
 
         self.assertIn("const sourceFallback = method === 'slskd' && ytdlpEnabled;", ui_source)
         self.assertNotIn("method === 'slskd' && isLocalRepair && ytdlpEnabled", ui_source)
         self.assertIn("function slskdActionLabel", ui_source)
         self.assertIn("return ytdlpEnabled ? 'SLSKD + sources' : 'SLSKD'", ui_source)
-        self.assertIn("Fallback: SpotiFLAC -> YouTube -> SoundCloud", ui_source)
+        # 0.7.0: the label is the server's configured chain, never a hardcoded SpotiFLAC chain.
+        self.assertNotIn("SpotiFLAC -> YouTube", ui_source)
+        self.assertIn("sources?.fallback_chain", ui_source)
+        self.assertNotIn("fallback_method: sourceFallback ? 'spotiflac'", ui_source)
 
 
 if __name__ == "__main__":

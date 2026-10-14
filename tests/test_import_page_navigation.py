@@ -32,18 +32,18 @@ class ImportPageNavigationTests(unittest.TestCase):
         self.assertIn("function syncReviewFilter(nextFilter: QueueFilter)", self.import_source)
         self.assertIn("nextParams.set('filter', nextFilter)", self.import_source)
         self.assertIn("{ id: 'intake', label: 'Import Source' }", self.import_source)
-        self.assertIn("<IntakePanel onJobStarted={() => loadSummary(false, true)} />", self.import_source)
+        self.assertIn("<IntakePanel onJobStarted={() => loadSummary(true)} />", self.import_source)
         self.assertIn(
             "<AcquisitionPanel initialSourceFilter={sourceParam} onSourceFilterChange={syncAcquireSource} />",
             self.import_source,
         )
         self.assertIn(
-            "<ImportReviewPage active={TABS[selectedIndex]?.id === 'review'} initialFilter={filterParam} onFilterChange={syncReviewFilter} />",
+            "<ImportReviewPage active={TABS[selectedIndex]?.id === 'review'} initialFilter={filterParam} initialQuery={queryParam} onFilterChange={syncReviewFilter} />",
             self.import_source,
         )
 
     def test_mounted_import_panels_sync_when_url_focus_changes(self):
-        self.assertIn("export type SourceFilter = 'all' | QueueSource", self.acquire_source)
+        self.assertIn("export type SourceFilter = AcquisitionQueueSourceFilter", self.acquire_source)
         self.assertIn("initialSourceFilter = 'all'", self.acquire_source)
         self.assertIn("setSourceFilter(initialSourceFilter)", self.acquire_source)
         self.assertIn("}, [initialSourceFilter]);", self.acquire_source)
@@ -57,7 +57,15 @@ class ImportPageNavigationTests(unittest.TestCase):
         self.assertIn("Unsafe matches stay in Review", self.intake_source)
         self.assertNotIn("Import Job Actions", self.import_source)
         self.assertIn("Retry failed imports", self.intake_source)
-        self.assertIn("retryLibraryImportAllFailed", self.intake_source)
+        # The retry targets this tab's batch import (recover with retry_failed),
+        # never the legacy Import All retry, and it confirms first in a dialog
+        # that lists the folders.
+        self.assertNotIn("retryLibraryImportAllFailed", self.intake_source)
+        self.assertIn("onClick={() => void openRetryDialog()}", self.intake_source)
+        self.assertIn("recoverAiBatch(retryState.batch_job_id || retryState.job_id, true)", self.intake_source)
+        self.assertIn("function RetryFailuresDialog(", self.intake_source)
+        self.assertIn("onConfirm={() => void retryFailedImports()}", self.intake_source)
+        self.assertIn("rememberJobId(nextJobId)", self.intake_source)
         self.assertNotIn("Retry failed imports", self.import_source)
         self.assertNotIn("Place playlist imports", self.import_source)
         self.assertNotIn("cleanupPlaylistQuality", self.import_source)

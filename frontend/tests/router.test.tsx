@@ -29,6 +29,7 @@ vi.mock('../src/api/client', () => ({
 // manual browser smoke testing).
 vi.mock('../src/views/Library', () => ({ default: () => <div>LIBRARY_PAGE</div> }));
 vi.mock('../src/views/LibraryChanges', () => ({ default: () => <div>CHANGES_PAGE</div> }));
+vi.mock('../src/views/LibraryMissingIds', () => ({ default: () => <div>MISSING_IDS_PAGE</div> }));
 function MockImportPage() {
   const [params] = useSearchParams();
   return (
@@ -85,6 +86,7 @@ describe('AppRoutes (react-router v8)', () => {
   it.each([
     ['/library', 'LIBRARY_PAGE'],
     ['/changes', 'CHANGES_PAGE'],
+    ['/library/missing-ids', 'MISSING_IDS_PAGE'],
     ['/import', 'IMPORT_PAGE tab= filter= source='],
     ['/playlists', 'PLAYLISTS_PAGE'],
     ['/jobs', 'JOBS_PAGE'],

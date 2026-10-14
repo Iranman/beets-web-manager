@@ -224,7 +224,7 @@ class RunAiBatchImportReconciliationCommitOrderTests(unittest.TestCase):
             self.fn.index("if not recover or not folder_states:"):self.fn.index("else:")
         ]
         self.assertIn("_ai_batch_commit(state, update_state)", fresh_branch)
-        walk_pos = fresh_branch.index("_ai_batch_find_audio_dirs(scan_path)")
+        walk_pos = fresh_branch.index("_ai_batch_find_audio_dirs(scan_path")
         commit_pos = fresh_branch.index("_ai_batch_commit(state, update_state)")
         self.assertLess(commit_pos, walk_pos)
 
@@ -1832,7 +1832,7 @@ class RetryReconciliationRegressionTests(BehavioralTestCase):
 
     def setUp(self):
         super().setUp()
-        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_suggestions", return_value="done",
+        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_folders", return_value="done",
         )
         self._decisions_patcher = patch_app_family(APP, "_ai_batch_process_decisions", return_value={},
         )
@@ -1880,7 +1880,7 @@ class RetryReconciliationRegressionTests(BehavioralTestCase):
             recover=True, retry_failed=True, job_id="test-job",
         )
 
-        self.assertTrue(APP._ai_batch_run_suggestions.called)
+        self.assertTrue(APP._ai_batch_run_folders.called)
         self.assertTrue(APP._ai_batch_process_decisions.called)
 
 
@@ -1922,7 +1922,7 @@ class ContradictoryTerminalStateHealingTests(BehavioralTestCase):
 class RetryExhaustionStateTransitionTests(BehavioralTestCase):
     def setUp(self):
         super().setUp()
-        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_suggestions", return_value="done")
+        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_folders", return_value="done")
         self._decisions_patcher = patch_app_family(APP, "_ai_batch_process_decisions", return_value={})
         self._suggestions_patcher.start()
         self._decisions_patcher.start()

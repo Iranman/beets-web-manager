@@ -107,8 +107,8 @@ class ImportReviewRefreshUxTests(unittest.TestCase):
             "const id = window.setInterval(() => {",
             "return () => window.clearInterval(id);",
         )
-        self.assertIn("getReviewQueue({ limit: REVIEW_QUEUE_LIMIT, origin_type: sourceFilter })", effect)
-        self.assertIn("reviewQueueSnapshot(response.items ?? [], response.counts ?? {})", effect)
+        self.assertIn("void fetchPage()", effect)
+        self.assertIn("reviewQueueSnapshot(response.items, response.counts)", effect)
         self.assertIn("setQueueUpdatesAvailable(true)", effect)
         self.assertNotIn("setItems(", effect)
         self.assertNotIn("setMbids(", effect)

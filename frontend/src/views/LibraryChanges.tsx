@@ -279,7 +279,9 @@ export default function LibraryChanges() {
   const [status, setStatus] = useState('all');
   const [operation, setOperation] = useState('all');
   const [query, setQuery] = useState('');
-  const [selectedId, setSelectedId] = useState('');
+  // ?tx=<id> opens that transaction (links from Recovery Required results).
+  // Read once on mount from the real URL (BrowserRouter); no router hook, so the page renders standalone.
+  const [selectedId, setSelectedId] = useState(() => new URLSearchParams(window.location.search).get('tx') || '');
   const [detail, setDetail] = useState<TransactionDetail | null>(null);
   const [settings, setSettings] = useState<TransactionSettings | null>(null);
   const [loading, setLoading] = useState(false);

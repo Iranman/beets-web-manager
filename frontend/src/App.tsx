@@ -10,6 +10,7 @@ import Import from './views/Import';
 import Jobs from './views/Jobs';
 import Library from './views/Library';
 import LibraryChanges from './views/LibraryChanges';
+import LibraryMissingIds from './views/LibraryMissingIds';
 import Login from './views/Login';
 import Playlists from './views/Playlists';
 import Submissions from './views/Submissions';
@@ -72,6 +73,7 @@ export function AppRoutes({
       >
         <Route index element={<Navigate to="/library" replace />} />
         <Route path="library" element={<Library />} />
+        <Route path="library/missing-ids" element={<LibraryMissingIds />} />
         <Route path="changes" element={<LibraryChanges />} />
         <Route path="import" element={<Import />} />
         <Route path="clean" element={<Navigate to="/jobs" replace />} />

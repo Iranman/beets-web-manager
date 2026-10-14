@@ -164,7 +164,7 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         for name in AUDIO_NAMES_WITH_LITERAL_PERCENT:
             self.assertFalse((folder / name).exists())
 
-    def test_delete_rejected_removes_only_file_under_review_folder(self):
+    def test_delete_rejected_quarantines_only_file_under_review_folder(self):
         folder = self.downloads / "delete-one-review"
         track = self._write_audio(folder / "track.flac")
         sentinel = self._write_audio(self.outside / "sentinel.flac")
@@ -180,7 +180,9 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, data)
         self.assertTrue(data["ok"])
-        self.assertEqual(data["deleted_count"], 1)
+        # #380 F3: delete_rejected is downgraded to a restorable quarantine.
+        self.assertEqual(data["deleted_count"], 0)
+        self.assertEqual(data["quarantined_count"], 1)
         self.assertFalse(track.exists())
         self.assertTrue(sentinel.exists())
         self.assertEqual(sentinel.read_bytes(), b"not-real-audio-but-extension-is-enough")
@@ -200,7 +202,8 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400, data)
         self.assertFalse(data["ok"])
-        self.assertIn("outside", data["error"])
+        # #396 LOW-4: an out-of-root stored path never matches Pending Review.
+        self.assertEqual(data["error"], "Review item does not match the source folder.")
         self.assertTrue(sentinel.exists())
         self.assertNotIn(str(sentinel), data["error"])
 
@@ -237,7 +240,8 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400, data)
         self.assertFalse(data["ok"])
-        self.assertIn("approved root", data["error"])
+        # #396 LOW-4: a stored path equal to an approved root never matches.
+        self.assertEqual(data["error"], "Review item does not match the source folder.")
         self.assertTrue(root_track.exists())
         self.assertTrue(self.downloads.exists())
 

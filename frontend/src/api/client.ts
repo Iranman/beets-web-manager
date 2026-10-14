@@ -7,6 +7,8 @@ import type {
   AcquisitionDownloadAllActiveResponse,
   AcquisitionDownloadAllPayload,
   AcquisitionDownloadAllStartResponse,
+  AcquisitionQueueParams,
+  AcquisitionQueueRefreshResponse,
   AcquisitionQueueResponse,
   AiMatchHistoryResponse,
   AutoEnqueueImportPayload,
@@ -81,6 +83,10 @@ import type {
   ReimportDiskPayload,
   ReviewQueueParams,
   ReviewQueueResponse,
+  LibraryMissingMbParams,
+  LibraryMissingMbResponse,
+  MissingMbBatchPreviewPayload,
+  MissingMbBatchStartResponse,
   RgidGroupDetailResponse,
   FolderPlaceholderReview,
   FolderPlaceholderMergePreview,
@@ -253,6 +259,7 @@ export function getReviewQueue(options: number | ReviewQueueParams = 500): Promi
     params.set('limit', String(options));
   } else {
     params.set('limit', String(options.limit ?? 500));
+    if (options.offset) params.set('offset', String(options.offset));
     if (options.status && options.status !== 'all') params.set('status', options.status);
     if (options.origin_type && options.origin_type !== 'all') params.set('origin_type', options.origin_type);
     if (options.search?.trim()) params.set('search', options.search.trim());
@@ -261,10 +268,34 @@ export function getReviewQueue(options: number | ReviewQueueParams = 500): Promi
   return apiJson<ReviewQueueResponse>(`/api/import/review-queue?${params.toString()}`);
 }
 
+export function getLibraryMissingMbIds(options: LibraryMissingMbParams = {}): Promise<LibraryMissingMbResponse> {
+  const params = new URLSearchParams();
+  params.set('limit', String(options.limit ?? 100));
+  if (options.offset) params.set('offset', String(options.offset));
+  if (options.kind && options.kind !== 'all') params.set('kind', options.kind);
+  if (options.search?.trim()) params.set('search', options.search.trim());
+  if (options.sort) params.set('sort', options.sort);
+  return apiJson<LibraryMissingMbResponse>(`/api/library/missing-mb-ids?${params.toString()}`);
+}
+
+/** Start the read-only proof job for up to 50 Missing IDs rows. */
+export function previewMissingMbBatch(payload: MissingMbBatchPreviewPayload): Promise<MissingMbBatchStartResponse> {
+  return apiJson<MissingMbBatchStartResponse>('/api/library/missing-mb-ids/batch/preview', jsonRequest('POST', payload));
+}
+
+/** Start writing the proven rows of one preview. confirm_token goes only here. */
+export function applyMissingMbBatch(transactionId: string, confirmToken: string): Promise<MissingMbBatchStartResponse> {
+  return apiJson<MissingMbBatchStartResponse>(
+    '/api/library/missing-mb-ids/batch/apply',
+    jsonRequest('POST', { transaction_id: transactionId, confirm_token: confirmToken }),
+  );
+}
+
 export interface CleanupStaleResponse {
   ok: boolean;
   removed_folder_gone: number;
-  removed_mb_in_library: number;
+  /** Entries whose album is already resolved in Beets. */
+  removed_resolved: number;
   removed_total: number;
   remaining: number;
 }
@@ -984,8 +1015,31 @@ export function getWantedLidarr(): Promise<WantedResponse> {
   return apiJson<WantedResponse>('/api/wanted/lidarr');
 }
 
-export function getAcquisitionQueue(refresh = false): Promise<AcquisitionQueueResponse> {
-  return apiJson<AcquisitionQueueResponse>(`/api/acquisition/queue${refresh ? '?refresh=1' : ''}`);
+/** One page of the cached Find Music list. Never asks the server to rebuild it. */
+export function getAcquisitionQueue(options: AcquisitionQueueParams = {}): Promise<AcquisitionQueueResponse> {
+  const params = new URLSearchParams();
+  if (options.offset) params.set('offset', String(options.offset));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.search?.trim()) params.set('search', options.search.trim());
+  if (options.source && options.source !== 'all') params.set('source', options.source);
+  if (options.album_type?.length) params.set('album_type', options.album_type.join(','));
+  if (options.sort && options.sort !== 'sort_key') params.set('sort', options.sort);
+  if (options.include_unmonitored) params.set('include_unmonitored', '1');
+  const query = params.toString();
+  return apiJson<AcquisitionQueueResponse>(`/api/acquisition/queue${query ? `?${query}` : ''}`);
+}
+
+/** Start (or join) the background Find Music list build. */
+export function refreshAcquisitionQueue(includeUnmonitored = false, afterDownload = false): Promise<AcquisitionQueueRefreshResponse> {
+  // after_download lets the server reuse a list that is still current; only the automatic
+  // refresh after a finished download sends it, never the user's Refresh button.
+  return apiJson<AcquisitionQueueRefreshResponse>(
+    '/api/acquisition/queue/refresh',
+    jsonRequest('POST', {
+      ...(includeUnmonitored ? { include_unmonitored: true } : {}),
+      ...(afterDownload ? { after_download: true } : {}),
+    }),
+  );
 }
 
 export function startAcquisitionDownloadAll(

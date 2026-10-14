@@ -9,6 +9,7 @@ import {
   getAcquisitionDownloadAllActive,
   getAcquisitionQueue,
   getYtdlpStatus,
+  refreshAcquisitionQueue,
   runLidarrAlbumSearch,
   startAcquisitionDownloadAll,
   startAlbumDownload,
@@ -16,8 +17,11 @@ import {
 import type {
   AcquisitionDownloadAllLastJob,
   AcquisitionDownloadAllResult,
+  AcquisitionQueueCache,
   AcquisitionQueueItem,
   AcquisitionQueueResponse,
+  AcquisitionQueueSort,
+  AcquisitionQueueSourceFilter,
   DownloadMethod,
   DownloadAlbumPayload,
   YtdlpStatusResponse,
@@ -31,16 +35,79 @@ import {
 } from '../../lib/downloadMethods';
 import { useJobPoll } from '../../lib/hooks';
 
-type QueueSource = 'beets' | 'lidarr';
-export type SourceFilter = 'all' | QueueSource;
+export type SourceFilter = AcquisitionQueueSourceFilter;
 type QueueAction = DownloadMethod | 'lidarr';
 type BatchMethod = DownloadMethod;
+
+export const PAGE_SIZE = 100;
+/** Rows per request when collecting a batch's failed rows across pages (the server's max limit). */
+export const RETRY_SCAN_PAGE = 500;
+
+function missingFirstOrder(a: AcquisitionQueueItem, b: AcquisitionQueueItem) {
+  const aMissing = a.sources.includes('beets') ? 0 : 1;
+  const bMissing = b.sources.includes('beets') ? 0 : 1;
+  if (aMissing !== bMissing) return aMissing - bMissing;
+  return (a.sort_key || '').localeCompare(b.sort_key || '');
+}
+export const REFRESH_POLL_MS = 3000;
+const SEARCH_DEBOUNCE_MS = 300;
 
 const SOURCE_OPTIONS: Array<{ value: SourceFilter; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'beets', label: 'Missing' },
   { value: 'lidarr', label: 'Wanted' },
+  { value: 'merged', label: 'In both' },
+  { value: 'unmonitored', label: 'Unmonitored' },
 ];
+
+const SORT_OPTIONS: Array<{ value: AcquisitionQueueSort; label: string }> = [
+  { value: 'sort_key', label: 'Artist A-Z' },
+  { value: 'year_desc', label: 'Newest first' },
+];
+
+/** "just now", "12 min ago", "3 h ago", "2 d ago". */
+export function formatAge(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return '';
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+  return `${Math.floor(seconds / 86400)} d ago`;
+}
+
+function errorMessage(err: unknown) {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function errorCode(err: unknown) {
+  return (err as { body?: { code?: string; error_code?: string } } | null)?.body?.code
+    || (err as { body?: { error_code?: string } } | null)?.body?.error_code
+    || '';
+}
+
+/** What the list status line says; `severity` picks the Alert colour. */
+function cacheStatus(cache: AcquisitionQueueCache | undefined) {
+  if (!cache) return null;
+  const age = formatAge(cache.age_seconds);
+  const updating = cache.refreshing ? ' Updating in the background...' : '';
+  if (cache.state === 'building') {
+    return { severity: 'info' as const, text: 'Building the Find Music list in the background. For a large library this can take a few minutes; the list appears here when it is ready.' };
+  }
+  if (cache.state === 'empty') {
+    return { severity: 'info' as const, text: 'The Find Music list has not been built yet. Click Refresh list to build it.' };
+  }
+  if (cache.state === 'failed') {
+    const errorAge = cache.last_error_at ? formatAge(Date.now() / 1000 - cache.last_error_at) : '';
+    const reason = cache.last_error || 'unknown error';
+    if (!cache.built_at) {
+      return { severity: 'error' as const, text: `The Find Music list could not be built${errorAge ? ` (${errorAge})` : ''}: ${reason}. No earlier list exists, so nothing is shown. Check the Beets and Lidarr status on the System page, then click Refresh list.${updating}` };
+    }
+    return { severity: 'warning' as const, text: `The last list update failed${errorAge ? ` (${errorAge})` : ''}: ${reason}. The list below is the previous one, built ${age}, and may be out of date. Click Refresh list to try again.${updating}` };
+  }
+  if (cache.state === 'stale') {
+    return { severity: 'warning' as const, text: `This list was built ${age} and may be out of date.${updating || ' Click Refresh list to update it.'}` };
+  }
+  return { severity: null, text: `List updated ${age}.${updating}` };
+}
 
 function lastLogLine(log?: string[]) {
   return (log ?? []).filter(Boolean).slice(-1)[0] ?? '';
@@ -148,7 +215,6 @@ function AcquisitionRow({
         existing_album_id: local?.album_id,
         method,
         auto_import: true,
-        fallback_method: sourceFallback ? 'spotiflac' : undefined,
         try_ytdlp_fallback: sourceFallback,
         try_source_fallback: sourceFallback,
       };
@@ -286,8 +352,17 @@ export function AcquisitionPanel({
   const [error, setError] = useState('');
   const [wantedError, setWantedError] = useState('');
   const [query, setQuery] = useState('');
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [search, setSearch] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(initialSourceFilter);
+  const [albumType, setAlbumType] = useState('');
+  const [sort, setSort] = useState<AcquisitionQueueSort>('sort_key');
+  const [offset, setOffset] = useState(0);
   const [showUnmonitored, setShowUnmonitored] = useState(false);
+  const [refreshStarting, setRefreshStarting] = useState(false);
+  const [refreshError, setRefreshError] = useState('');
+  const requestRef = useRef(0);
+  const searchRef = useRef('');
+  const listTopRef = useRef<HTMLHeadingElement>(null);
   const [batchJobId, setBatchJobId] = useState<string | null>(null);
   const [batchStarting, setBatchStarting] = useState(false);
   const [batchError, setBatchError] = useState('');
@@ -301,26 +376,93 @@ export function AcquisitionPanel({
 
   useEffect(() => {
     setSourceFilter(initialSourceFilter);
+    setOffset(0);
   }, [initialSourceFilter]);
 
-  const load = useCallback(async (refresh = false) => {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = query.trim();
+      if (next === searchRef.current) return;
+      searchRef.current = next;
+      setSearch(next);
+      setOffset(0);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  // Reads one page of the server's cached list; never asks for a rebuild.
+  const load = useCallback(async () => {
+    const requestId = ++requestRef.current;
     setLoading(true);
-    setError('');
-    setWantedError('');
     try {
-      const next = await getAcquisitionQueue(refresh);
+      const next = await getAcquisitionQueue({
+        offset,
+        limit: PAGE_SIZE,
+        search,
+        source: sourceFilter,
+        album_type: albumType ? [albumType] : undefined,
+        sort,
+        include_unmonitored: showUnmonitored,
+      });
+      if (requestId !== requestRef.current) return;
       setQueue(next);
-      setError(next.library_error || '');
+      setError(next.library_error ? `Beets library could not be loaded: ${next.library_error}` : '');
       setWantedError(next.wanted_error || '');
     } catch (err) {
+      if (requestId !== requestRef.current) return;
       setQueue(null);
-      setError(err instanceof Error ? err.message : String(err));
+      setWantedError('');
+      setError(`The Find Music list could not be loaded: ${errorMessage(err)}. Nothing is shown. Reload the page to try again.`);
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) setLoading(false);
     }
-  }, []);
+  }, [albumType, offset, search, showUnmonitored, sort, sourceFilter]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const cacheRefreshing = Boolean(queue?.cache?.refreshing);
+  // While the server rebuilds the list, poll its status cheaply (limit=0) and reload the page once it is done.
+  useEffect(() => {
+    if (!cacheRefreshing) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void getAcquisitionQueue({ limit: 0, include_unmonitored: showUnmonitored })
+        .then((status) => {
+          if (cancelled) return;
+          if (status.cache?.refreshing) {
+            setQueue((current) => (current ? { ...current, cache: status.cache } : current));
+          } else {
+            void load();
+          }
+        })
+        .catch(() => undefined); // ponytail: a failed poll just waits for the next tick
+    }, REFRESH_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [cacheRefreshing, load, showUnmonitored]);
+
+  // A refresh or filter change can shrink the list under the current page.
+  const total = queue?.total ?? 0;
+  useEffect(() => {
+    if (queue && offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor((total - 1) / PAGE_SIZE) * PAGE_SIZE));
+  }, [offset, queue, total]);
+
+  const refreshList = useCallback(async (afterDownload = false) => {
+    setRefreshStarting(true);
+    setRefreshError('');
+    try {
+      // reused: true means the list was still current and no job started; the reload below
+      // shows it as is. Otherwise the reload sees cache.refreshing and the status poll follows the build.
+      await refreshAcquisitionQueue(showUnmonitored, afterDownload);
+      await load();
+    } catch (err) {
+      setRefreshError(`The list refresh could not be started: ${errorMessage(err)}. The list shown is unchanged. Try again, or check the Jobs page.`);
+    } finally {
+      setRefreshStarting(false);
+    }
+  }, [load, showUnmonitored]);
 
   useEffect(() => {
     let cancelled = false;
@@ -355,21 +497,25 @@ export function AcquisitionPanel({
       });
   }, []);
 
-  const items = queue?.items ?? [];
-  const visibleItems = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return items.filter((item) => {
-      if (sourceFilter !== 'all' && !item.sources.includes(sourceFilter)) return false;
-      if (!showUnmonitored && item.wanted && !item.wanted.monitored && !item.local) return false;
-      if (!needle) return true;
-      return (
-        item.artist.toLowerCase().includes(needle) ||
-        item.album.toLowerCase().includes(needle) ||
-        item.year.includes(needle) ||
-        item.mbid.toLowerCase().includes(needle)
-      );
-    });
-  }, [items, query, showUnmonitored, sourceFilter]);
+  // The server filters and pages; this page is what is visible.
+  const visibleItems = useMemo(() => queue?.items ?? [], [queue]);
+  const cache = queue?.cache;
+  const cacheState = cache?.state ?? 'ready';
+  const hasList = Boolean(queue && (!cache || cache.built_at));
+  const status = cacheStatus(cache);
+  const filtersActive = Boolean(search || sourceFilter !== 'all' || albumType);
+  const albumTypeOptions = Object.entries(queue?.album_types ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  if (albumType && !albumTypeOptions.some(([kind]) => kind === albumType)) albumTypeOptions.push([albumType, 0]);
+  const sources = queue?.download_sources;
+  const fallbackChain = (sources?.fallback_chain ?? []).map((method) => {
+    const label = downloadMethodLabel(method as DownloadMethod);
+    return sources?.fallbacks?.[method]?.available === false ? `${label} (unavailable)` : label;
+  });
+  const fallbackReasons = (sources?.fallback_chain ?? [])
+    .map((method) => sources?.fallbacks?.[method]?.reason || '')
+    .filter((reason, index) => reason && sources?.fallbacks?.[sources.fallback_chain[index]]?.available === false)
+    .join('; ');
+  const fallbackLabel = fallbackChain.length ? `Fallback: ${fallbackChain.join(' -> ')}` : 'Fallback: configured sources';
 
   const beetsCount = queue?.counts?.beets ?? 0;
   const lidarrCount = queue?.counts?.lidarr ?? 0;
@@ -383,15 +529,10 @@ export function AcquisitionPanel({
     () => visibleItems.filter((item) => Boolean(item.mbid && item.actions?.can_download)),
     [visibleItems],
   );
-  const orderedProcessableItems = useMemo(() => {
-    if (!batchMissingFirst) return processableItems;
-    return [...processableItems].sort((a, b) => {
-      const aMissing = a.sources.includes('beets') ? 0 : 1;
-      const bMissing = b.sources.includes('beets') ? 0 : 1;
-      if (aMissing !== bMissing) return aMissing - bMissing;
-      return (a.sort_key || '').localeCompare(b.sort_key || '');
-    });
-  }, [batchMissingFirst, processableItems]);
+  const orderedProcessableItems = useMemo(
+    () => (batchMissingFirst ? [...processableItems].sort(missingFirstOrder) : processableItems),
+    [batchMissingFirst, processableItems],
+  );
   const parsedBatchLimit = Math.max(1, Math.min(500, Number.parseInt(batchLimit, 10) || 25));
   const batchItems = orderedProcessableItems.slice(0, parsedBatchLimit);
   const batchHasDownloads = batchItems.some((item) => Boolean(item.actions?.can_download));
@@ -423,11 +564,48 @@ export function AcquisitionPanel({
     : batchNeedsAttention
       ? 'Previous batch needs attention'
       : 'Previous batch completed';
+  // Failed rows across every page of the current filter, not just this page.
+  const failedKeySig = currentFailures.map((failure) => failure.key).filter(Boolean).join('\n');
+  const queueItems = queue?.items;
+  const queueTotal = queue?.total;
+  const [failedRows, setFailedRows] = useState<typeof visibleItems>([]);
+  const [failedRowsError, setFailedRowsError] = useState('');
+  useEffect(() => {
+    setFailedRowsError('');
+    if (!failedKeySig || batchRunning || !queueItems) {
+      setFailedRows([]);
+      return;
+    }
+    const failedKeys = new Set(failedKeySig.split('\n'));
+    const pick = (items: typeof visibleItems) => items.filter((item) => failedKeys.has(item.key));
+    if (offset === 0 && queueItems.length >= (queueTotal ?? 0)) { // this page is the whole filtered list
+      setFailedRows(pick(queueItems));
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const found: typeof visibleItems = [];
+      // ponytail: walks the filtered list 500 rows a request; a server keys filter would make this one call.
+      for (let at = 0; ; at += RETRY_SCAN_PAGE) {
+        const page = await getAcquisitionQueue({
+          offset: at, limit: RETRY_SCAN_PAGE, search, source: sourceFilter,
+          album_type: albumType ? [albumType] : undefined, sort, include_unmonitored: showUnmonitored,
+        });
+        found.push(...pick(page.items ?? []));
+        if (found.length >= failedKeys.size || !page.items?.length || at + RETRY_SCAN_PAGE >= page.total) break;
+      }
+      if (!cancelled) setFailedRows(found);
+    })().catch((err) => {
+      if (cancelled) return;
+      setFailedRows([]);
+      setFailedRowsError(`The failed rows of the last batch could not be listed: ${errorMessage(err)}. Retry is unavailable until the list loads. Click Refresh list to try again.`);
+    });
+    return () => { cancelled = true; };
+  }, [albumType, batchRunning, failedKeySig, offset, queueItems, queueTotal, search, showUnmonitored, sort, sourceFilter]);
   const retryableFailedItems = useMemo(() => {
-    if (!currentFailures.length || batchRunning) return [];
-    const failedKeys = new Set(currentFailures.map((failure) => failure.key).filter(Boolean));
-    return orderedProcessableItems.filter((item) => failedKeys.has(item.key) && item.actions?.can_download);
-  }, [batchRunning, currentFailures, orderedProcessableItems]);
+    const rows = failedRows.filter((item) => Boolean(item.mbid && item.actions?.can_download));
+    return batchMissingFirst ? rows.sort(missingFirstOrder) : rows;
+  }, [batchMissingFirst, failedRows]);
   const canRetryFailedItems = Boolean(retryableFailedItems.length && !batchStarting && !batchRunning);
   const primaryBatchLabel = retryableFailedItems.length
     ? `Retry ${retryableFailedItems.length} failed with ${slskdActionLabel(ytdlpEnabled)}`
@@ -438,8 +616,8 @@ export function AcquisitionPanel({
   useEffect(() => {
     if (batchJob?.status !== 'success' || batchSuccessHandledRef.current) return;
     batchSuccessHandledRef.current = true;
-    void load(true);
-  }, [batchJob?.status, load]);
+    void refreshList(true);
+  }, [batchJob?.status, refreshList]);
 
   useEffect(() => {
     if (!batchJob || batchJob.status === 'running') return;
@@ -456,7 +634,9 @@ export function AcquisitionPanel({
     const effectiveMethod = methodOverride ?? batchMethod;
     const selectedKeys = keysOverride?.length
       ? keysOverride
-      : orderedProcessableItems.map((item) => item.key);
+      // Exactly the rows shown and confirmed: the server orders its snapshot by sort_key
+      // before applying `limit`, so sending more keys could download different albums.
+      : batchItems.map((item) => item.key);
     const count = retryMode ? selectedKeys.length : batchItems.length;
     const methodAllowed = effectiveMethod === 'slskd' || directDownloadMethodEnabled(effectiveMethod, ytdlpStatus);
     if ((!retryMode && !batchCanStart) || (retryMode && !methodAllowed) || !count) return;
@@ -480,7 +660,12 @@ export function AcquisitionPanel({
       });
       setBatchJobId(started.job_id);
     } catch (err) {
-      setBatchError(err instanceof Error ? err.message : String(err));
+      if (errorCode(err) === 'queue_not_ready') {
+        setBatchError('Nothing was started: the Find Music list is still building. Wait until the list status above says it is ready, then start the download again.');
+        void load();
+      } else {
+        setBatchError(`The batch download could not be started: ${errorMessage(err)}. Nothing was downloaded. Try again, or check the Jobs page.`);
+      }
     } finally {
       setBatchStarting(false);
     }
@@ -488,15 +673,24 @@ export function AcquisitionPanel({
 
   function selectSourceFilter(nextFilter: SourceFilter) {
     setSourceFilter(nextFilter);
+    setOffset(0);
     onSourceFilterChange?.(nextFilter);
   }
+
+  function goToPage(nextOffset: number) {
+    setOffset(nextOffset);
+    listTopRef.current?.focus();
+  }
+
+  const pageStart = visibleItems.length ? offset + 1 : 0;
+  const pageEnd = offset + visibleItems.length;
 
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 className="text-base font-medium text-zinc-200">Music downloads</h2>
-          {!loading && !error ? (
+          {hasList ? (
             <div className="mt-1 flex flex-wrap gap-2">
               <Chip label={`${beetsCount} missing music`} size="small" variant="outlined" />
               <Chip label={`${lidarrCount} wanted music`} size="small" variant="outlined" />
@@ -542,10 +736,10 @@ export function AcquisitionPanel({
               className="accent-red-500"
               disabled={batchMethod !== 'slskd' || !ytdlpEnabled}
               type="checkbox"
-              title={batchYtdlpFallbackBlocked ? ytdlpMessage : undefined}
+              title={batchYtdlpFallbackBlocked ? ytdlpMessage : fallbackReasons || undefined}
               onChange={(event) => setBatchYtdlpFallback(event.target.checked)}
             />
-            {batchYtdlpFallbackBlocked ? `Fallback unavailable: ${ytdlpMessage}` : 'Fallback: SpotiFLAC -> YouTube -> SoundCloud'}
+            {batchYtdlpFallbackBlocked ? `Fallback unavailable: ${ytdlpMessage}` : fallbackLabel}
           </label>
           {batchRunning ? (
             <span className="rounded border border-sky-700/70 px-3 py-1.5 text-sm font-medium text-sky-200">
@@ -555,7 +749,7 @@ export function AcquisitionPanel({
             <Button
               disabled={loading || !canRetryFailedItems}
               size="small"
-              title={`${retryableFailedItems.length} failed row(s) still present in the visible queue`}
+              title={`${retryableFailedItems.length} failed row(s) still in the list for the current filters, across all pages`}
               variant="contained"
               onClick={() => void runDownloadAll(retryableFailedItems.map((item) => item.key), 'slskd')}
             >
@@ -565,7 +759,7 @@ export function AcquisitionPanel({
             <Button
               disabled={loading || !batchCanStart}
               size="small"
-              title={`${processableItems.length} visible processable row(s)`}
+              title={`${processableItems.length} downloadable row(s) on this page`}
               variant="contained"
               onClick={() => void runDownloadAll()}
             >
@@ -576,14 +770,36 @@ export function AcquisitionPanel({
               No downloadable rows
             </span>
           )}
-          <Button disabled={loading} size="small" variant="outlined" onClick={() => void load(true)}>
-            Refresh
+          <Button
+            disabled={refreshStarting || cacheRefreshing}
+            size="small"
+            title="Rebuild the list from Beets and Lidarr in the background"
+            variant="outlined"
+            onClick={() => void refreshList()}
+          >
+            {refreshStarting ? 'Starting...' : cacheRefreshing ? 'Updating...' : 'Refresh list'}
           </Button>
         </div>
       </div>
 
-      {loading ? <LinearProgress sx={{ borderRadius: 1 }} /> : null}
-      {error ? <Alert severity="error">Beets library could not be loaded: {error}</Alert> : null}
+      {loading ? <LinearProgress aria-label="Loading the Find Music list" sx={{ borderRadius: 1 }} /> : null}
+      {/* Polite live region: building / refreshing / age changes are announced. */}
+      <div aria-live="polite" role="status">
+        {status && status.severity ? (
+          <Alert role="presentation" severity={status.severity}>{status.text}</Alert>
+        ) : status ? (
+          <p className="text-xs text-zinc-500">{status.text}</p>
+        ) : null}
+      </div>
+      {error ? <Alert severity="error">{error}</Alert> : null}
+      {refreshError ? <Alert severity="error" onClose={() => setRefreshError('')}>{refreshError}</Alert> : null}
+      {batchError && !batchRunning ? <Alert severity="error" onClose={() => setBatchError('')}>{batchError}</Alert> : null}
+      {failedRowsError ? <Alert severity="error">{failedRowsError}</Alert> : null}
+      {sources && !sources.slskd_configured ? (
+        <Alert severity="warning">
+          SLSKD downloads cannot start: {sources.slskd_error || 'slskd is not configured'}. Set it in the container environment and recreate the container, or use a direct source button on a row.
+        </Alert>
+      ) : null}
       {batchYtdlpFallbackBlocked ? (
         <Alert severity="warning">
           Download All will run SLSKD only. Fallback unavailable: {ytdlpMessage}
@@ -613,7 +829,7 @@ export function AcquisitionPanel({
           {batchJobError ? <div className="mt-2 text-xs text-red-300">{batchJobError}</div> : null}
           {batchLatest ? <div className="mt-2 text-xs text-zinc-400">Current step: {batchLatest}</div> : null}
         </div>
-      ) : lastBatch || batchError || batchJobError ? (
+      ) : lastBatch || batchJobError ? (
         <details className="rounded border border-graphite-800 bg-graphite-950/45">
           <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-zinc-100">
             <span className="font-medium text-zinc-300">{batchTitle}</span>
@@ -638,7 +854,6 @@ export function AcquisitionPanel({
           <div className="border-t border-graphite-800 px-3 py-2">
             {batchLatest ? <div className="mb-2 text-xs text-zinc-400">Last update: {batchLatest}</div> : null}
             {batchId ? <div className="mb-2 text-xs text-zinc-600">Job ID: <span className="font-mono">{batchId}</span></div> : null}
-            {batchError ? <div className="text-xs text-red-300">{batchError}</div> : null}
             {batchJobError ? <div className="text-xs text-red-300">{batchJobError}</div> : null}
             {currentFailures.length ? (
               <div className="space-y-1 text-xs text-zinc-400">
@@ -659,28 +874,29 @@ export function AcquisitionPanel({
                 ))}
               </div>
             ) : null}
-            {!currentFailures.length && !(lastBatch?.log ?? []).length && !batchError && !batchJobError ? (
+            {!currentFailures.length && !(lastBatch?.log ?? []).length && !batchJobError ? (
               <div className="text-xs text-zinc-500">No detailed batch output recorded.</div>
             ) : null}
           </div>
         </details>
       ) : null}
 
-      {!loading ? (
+      {hasList ? (
         <>
           <div className="flex flex-wrap gap-3">
             <TextField
-              label="Filter"
+              label="Search"
               placeholder="artist, album, year, or MBID"
               size="small"
               value={query}
               sx={{ minWidth: '18rem' }}
               onChange={(event) => setQuery(event.target.value)}
             />
-            <div className="flex overflow-hidden rounded border border-graphite-700">
+            <div aria-label="Show rows from" className="flex overflow-hidden rounded border border-graphite-700" role="group">
               {SOURCE_OPTIONS.map((option) => (
                 <button
                   key={option.value}
+                  aria-pressed={sourceFilter === option.value}
                   className={[
                     'px-3 py-2 text-sm transition-colors',
                     sourceFilter === option.value
@@ -694,28 +910,61 @@ export function AcquisitionPanel({
                 </button>
               ))}
             </div>
+            <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 text-sm text-zinc-400">
+              <span>Album type</span>
+              <select
+                className="rounded border border-graphite-700 bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+                value={albumType}
+                onChange={(event) => { setAlbumType(event.target.value); setOffset(0); }}
+              >
+                <option value="">All types</option>
+                {albumTypeOptions.map(([kind, count]) => (
+                  <option key={kind} value={kind}>{`${kind} (${count})`}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 text-sm text-zinc-400">
+              <span>Sort</span>
+              <select
+                className="rounded border border-graphite-700 bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+                value={sort}
+                onChange={(event) => { setSort(event.target.value as AcquisitionQueueSort); setOffset(0); }}
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
             <label className="flex cursor-pointer items-center gap-2 rounded border border-graphite-700 px-3 text-sm text-zinc-400">
               <input
                 checked={showUnmonitored}
                 className="accent-red-500"
                 type="checkbox"
-                onChange={(event) => setShowUnmonitored(event.target.checked)}
+                onChange={(event) => { setShowUnmonitored(event.target.checked); setOffset(0); }}
               />
               Show unmonitored
             </label>
           </div>
 
-          {!items.length ? (
-            <Alert severity="success">No missing library music or monitored Lidarr wanted albums need download.</Alert>
-          ) : !visibleItems.length ? (
-            <p className="text-sm text-zinc-500">No queue items match the filter.</p>
+          <h3 ref={listTopRef} className="text-sm text-zinc-400 outline-none" tabIndex={-1}>
+            {total ? `Showing ${pageStart}-${pageEnd} of ${total}` : 'No rows'}
+          </h3>
+
+          {!visibleItems.length ? (
+            filtersActive ? (
+              <p className="text-sm text-zinc-500">No rows match these filters.</p>
+            ) : cacheState === 'ready' || cacheState === 'stale' ? (
+              <Alert severity="success">No missing library music or monitored Lidarr wanted albums need download.</Alert>
+            ) : (
+              <p className="text-sm text-zinc-500">The previous list had no rows. It may be out of date; see the status above.</p>
+            )
           ) : (
             <div className="overflow-hidden rounded border border-graphite-800 bg-graphite-950">
               {visibleItems.map((item) => (
                 <AcquisitionRow
                   key={item.key}
                   item={item}
-                  onChanged={() => void load(true)}
+                  onChanged={() => void refreshList(true)}
                   ytdlpEnabled={ytdlpEnabled}
                   ytdlpMessage={ytdlpMessage}
                   ytdlpStatus={ytdlpStatus}
@@ -723,6 +972,20 @@ export function AcquisitionPanel({
               ))}
             </div>
           )}
+
+          {total > PAGE_SIZE ? (
+            <nav aria-label="Find Music pages" className="flex flex-wrap items-center gap-2">
+              <Button disabled={loading || offset === 0} size="small" variant="outlined" onClick={() => goToPage(Math.max(0, offset - PAGE_SIZE))}>
+                Previous page
+              </Button>
+              <span className="text-sm text-zinc-400">
+                Page {Math.floor(offset / PAGE_SIZE) + 1} of {Math.ceil(total / PAGE_SIZE)}
+              </span>
+              <Button disabled={loading || offset + PAGE_SIZE >= total} size="small" variant="outlined" onClick={() => goToPage(offset + PAGE_SIZE)}>
+                Next page
+              </Button>
+            </nav>
+          ) : null}
         </>
       ) : null}
     </div>

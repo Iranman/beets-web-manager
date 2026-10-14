@@ -6,26 +6,26 @@ from __future__ import annotations
 import json, os, re, threading, time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from flask import jsonify, request
 import backend.job_contract as job_contract
-from backend.beets_adapter import BeetsError, BeetsUnavailableError, BeetsAuthError
+from backend.beets_adapter import BeetsError, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
 import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
-from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
+from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _RECENT_IMPORTS_FILE, _record_recent_import_for_album, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _path_is_under, _redact_security_text, _s, jobs
 from backend.beets_plugins import _atomic_write_text
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
-from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _update_pending_review_revalidation
-from backend.import_service import _RECENT_IMPORTS_FILE, _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
-from backend.library_service import _album_folder_for_album_id, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
-from backend.matching_service import _ai_api_key, _invalidate_lib_cache, _load_album_mb_suggestions
+from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
+from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
+from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
+from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import _AI_PENDING_FILE, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _is_music_root_path, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path, _review_path_is_resolved
-from backend.serializers import _format_duration, _normalize_review_origin_type, _resolve_import_review_source_path, _review_origin_payload, json_route_result
+from backend.pending_review_store import _AI_PENDING_FILE, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path
+from backend.serializers import _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
 from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
@@ -33,12 +33,24 @@ from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_b
 # ── ARCH-001 extracted code ──
 
 
+def _invalid_param(error: str):
+    return jsonify({"ok": False, "error": error, "error_code": "INVALID_PARAM"}), 400
+
+
+def _limit_arg(source: Any, default: int, cap: int) -> Tuple[int, str]:
+    """F13: a non-integer ``limit`` is a 400, not a 500; large values clamp to ``cap``."""
+    value, error = query_int_arg(source, "limit", default, 10**9)
+    return min(value, cap), error
+
+
 @app.get("/api/unmatched-tracks")
 def unmatched_tracks():
     """Tracks with no mb_trackid whose album also has no mb_albumid.
     Albums that have already been matched to MusicBrainz (mb_albumid set) are excluded
     even if individual track IDs weren't stored."""
-    limit = min(int(request.args.get("limit", 300)), 2000)
+    limit, err = _limit_arg(request.args, 300, 2000)
+    if err:
+        return _invalid_param(err)
 
     try:
         review_data = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
@@ -52,6 +64,8 @@ def unmatched_tracks():
 
     tracks = []
     for a in review_data.get("albums", []):
+        if _s(a.get("mb_albumid")).strip():
+            continue  # has a Release ID, missing only its Release Group: not unmatched
         aid = int(a["id"])
         items = composite_workflows.find_all_items_by_album_id(aid)
         for item in items:
@@ -222,9 +236,15 @@ def cleanup_import_review_files():
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     allow_delete = bool(payload.get("allow_delete"))
-    # allow_delete is passed through for the audit record only; it gates
-    # nothing. A delete_* action is authorized by the Pending Review match
-    # above, and library paths are always quarantined instead (S1).
+    # #380 F3: "rejected"/"duplicate" is the client's claim; the backend
+    # holds no per-file proof that a file is rejected and not in the
+    # library. A delete_* request is therefore downgraded to the matching
+    # quarantine (restorable through rollback), never a permanent delete.
+    # allow_delete is kept for the audit record only.
+    requested_action = action
+    if action.startswith("delete_"):
+        action = "quarantine_" + action[len("delete_"):]
+        log.append("Permanent delete downgraded to quarantine: the server cannot prove these files are rejected.")
     plan_req = {
         "path": folder_path,
         "files": raw_files,
@@ -269,9 +289,10 @@ def cleanup_import_review_files():
             except Exception:
                 pass
 
+        pending_review_removed = False
         if remaining_audio == 0:
             try:
-                _remove_pending_review_for_path(folder_path, log)
+                pending_review_removed = bool(_remove_pending_review_for_path(folder_path, log))
             except Exception as ex:
                 log.append(f"  Pending review removal warning: {ex}")
         else:
@@ -289,12 +310,16 @@ def cleanup_import_review_files():
             "ok": True,
             "operation_id": op_id,
             "action": action,
+            "requested_action": requested_action,
+            "downgraded_to_quarantine": requested_action != action,
             "quarantined": moved,
             "deleted": deleted,
             "skipped": skipped,
             "quarantined_count": len(moved),
             "deleted_count": len(deleted),
             "skipped_count": len(skipped),
+            "remaining_audio_count": remaining_audio,
+            "pending_review_removed": pending_review_removed,
             "log": log,
         })
     except BeetsError as ex:
@@ -324,7 +349,9 @@ def get_recent_imports():
 
 @app.get("/api/ai-match-history")
 def get_ai_match_history():
-    limit = min(int(request.args.get("limit", 50)), 200)
+    limit, err = _limit_arg(request.args, 50, 200)
+    if err:
+        return _invalid_param(err)
     try:
         data = json.loads(_AI_MATCH_HISTORY_FILE.read_text()) \
                if _AI_MATCH_HISTORY_FILE.exists() else []
@@ -344,12 +371,12 @@ def clear_recent_imports():
 
 @app.get("/api/import-log")
 def import_log():
-    limit = min(int(request.args.get("limit", 300)), 1000)
-    try:
-        lines = Path(LOG_FILE).read_text(errors="replace").splitlines()
-        return jsonify({"ok": True, "lines": lines[-limit:], "total": len(lines)})
-    except FileNotFoundError:
-        return jsonify({"ok": True, "lines": [], "total": 0})
+    limit, err = _limit_arg(request.args, 300, 1000)
+    if err:
+        return _invalid_param(err)
+    # Only the last 8 MB of beet.log is read; ``total`` counts the lines in it.
+    lines = _read_log_tail(LOG_FILE)
+    return jsonify({"ok": True, "lines": lines[-limit:] if limit else [], "total": len(lines)})
 
 
 @app.get("/api/import-skipped")
@@ -358,7 +385,9 @@ def import_skipped():
     The beet log format for skips is:  skip /path/to/folder
     Multiple folders can appear on one line separated by '; '.
     """
-    limit = min(int(request.args.get("limit", 500)), 2000)
+    limit, err = _limit_arg(request.args, 500, 2000)
+    if err:
+        return _invalid_param(err)
     skipped = _import_skipped_items(limit)
     return jsonify({"ok": True, "skipped": skipped, "total": len(skipped)})
 
@@ -369,8 +398,19 @@ def _review_row_search_text(row: Dict[str, Any]) -> str:
         row.get("folder"), row.get("folder_name"), row.get("reason"), row.get("status"),
         row.get("status_key"), row.get("origin_label"), row.get("source_playlist_name"),
         row.get("source_batch_id"), row.get("created_by_workflow"), row.get("mb_albumid"),
-        row.get("mb_releasegroupid"),
+        row.get("mb_releasegroupid"), row.get("year"), row.get("confidence"),
+        row.get("blocked_reason"), row.get("blocked_next_action"),
     ]
+    # #395 QA: the fields the client-side search used to match on.
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    folder = evidence.get("folder") if isinstance(evidence.get("folder"), dict) else {}
+    values += [folder.get("guessed_artist"), folder.get("guessed_album"), folder.get("guessed_year")]
+    preflight = evidence.get("preflight") if isinstance(evidence.get("preflight"), dict) else {}
+    if preflight.get("acoustid_mismatch"):
+        top = preflight.get("acoustid_top_release")
+        values.append(
+            f"AcoustID fingerprint mismatch: selected release {preflight.get('acoustid_target_hits') or 0} hit(s), "
+            f"strongest alternate {preflight.get('acoustid_top_hits') or 0} hit(s)." + (f" Top release: {top}." if top else ""))
     return " ".join(_s(v) for v in values if v).casefold()
 
 
@@ -379,205 +419,33 @@ def _review_row_has_evidence(row: Dict[str, Any]) -> bool:
     return bool(evidence.get("top_candidates") or evidence.get("preflight"))
 
 
+_SKIPPED_SCAN_CAP = 2000  # same ceiling as /api/import-skipped
+
+
 @app.get("/api/import/review-queue")
 def import_review_queue():
-    limit = min(int(request.args.get("limit", 500)), 5000)
+    """Import decisions only: pending-review folders and skipped imports.
+    No Beets reads, so it answers while Beets is down. Library albums and
+    tracks missing MusicBrainz IDs are served by /api/library/missing-mb-ids."""
+    limit, err = query_int_arg(request.args, "limit", 500, 10**9)
+    limit = min(limit, 5000)
+    offset, offset_err = query_int_arg(request.args, "offset", 0, 10**9)
+    if err or offset_err:
+        return jsonify({"ok": False, "error": err or offset_err, "error_code": "INVALID_PARAM"}), 400
     origin_filter = _normalize_review_origin_type(request.args.get("origin_type"), allow_all=True)
     status_filter = _review_status_key(request.args.get("status") or "all")
     search_filter = _s(request.args.get("search") or "").strip().casefold()
     evidence_only = _s(request.args.get("evidence_only") or "").strip().casefold() in {"1", "true", "yes"}
+
+    if status_filter == "library_no_mb":
+        # Back-compat for one minor release: the status moved to the Library view.
+        return jsonify({"ok": True, "items": [], "total": 0, "offset": offset, "limit": limit,
+                        "counts": {"all": 0, "pending_ai": 0, "skipped": 0},
+                        "origin_counts": {"all": 0}, "moved_to": MISSING_MB_MOVED_TO})
+
     rows: List[Dict[str, Any]] = []
-
-    # Collect album IDs already claimed by pending items so library_no_mb rows
-    # don't duplicate an album that is also shown as pending_ai.
-    pending_reviews = _load_pending_reviews(prune_resolved=False)
-    _pending_existing_ids: set = set()
-    for _pitem in pending_reviews:
-        for _aid in ((_pitem.get("suggestion") or {}).get("existing_album_ids") or []):
-            try:
-                _pending_existing_ids.add(int(_aid))
-            except (TypeError, ValueError):
-                pass
-
     try:
-        unmatched_data = composite_workflows.get_unmatched_review_items(limit=limit, offset=0, include_singletons=True)
-    except BeetsUnavailableError as ex:
-        _app_logger.warning("import_review_queue: Beets engine unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine unavailable",
-            "error_code": "ENGINE_UNAVAILABLE",
-        }), 503
-    except BeetsAuthError as ex:
-        _app_logger.warning("import_review_queue: Beets engine auth failed: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine auth failed",
-            "error_code": "ENGINE_AUTH_ERROR",
-        }), 502
-    except BeetsError as ex:
-        _app_logger.warning("import_review_queue: Beets engine error: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine error",
-            "error_code": "ENGINE_ERROR",
-        }), 502
-    except Exception as ex:
-        _app_logger.error("Unexpected error in import_review_queue: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Internal error loading review queue",
-            "error_code": "INTERNAL_ERROR",
-        }), 500
-
-    album_rows = unmatched_data.get("albums", [])
-    for r in album_rows:
-        if not _is_music_root_path(r.get("first_item_path") or ""):
-            continue
-        if int(r["id"]) in _pending_existing_ids:
-            continue  # already shown as a pending_ai row
-        album_folder = _album_folder_for_album_id(int(r["id"] or 0))
-        artist = _s(r.get("albumartist"))
-        album = _s(r.get("album"))
-        rows.append({
-            "id": f"album:{r['id']}",
-            "type": "library_no_mb",
-            "status": "Needs MB ID",
-            "status_key": "needs_mb_id",
-            "title": album or "(unknown album)",
-            "artist": artist,
-            "album": album,
-            "year": int(r.get("year") or 0),
-            "album_id": int(r["id"]),
-            "first_item_id": int(r.get("first_item_id") or 0),
-            "tracks": int(r.get("tracks") or 0),
-            "path": album_folder,
-            "folder": str(Path(album_folder).parent) if album_folder else "",
-            "folder_name": Path(album_folder).name if album_folder else "",
-            "sort_ts": float(r.get("added") or 0),
-        })
-
-    # Inject stored batch-AI suggestions into library_no_mb rows
-    _suggestions = _load_album_mb_suggestions()
-    if _suggestions:
-        for row in rows:
-            if row.get("type") != "library_no_mb":
-                continue
-            stored = _suggestions.get(str(row.get("album_id") or ""))
-            if not stored:
-                continue
-            row["mb_albumid"]        = stored.get("mb_albumid", "")
-            row["mb_releasegroupid"] = stored.get("mb_releasegroupid", "")
-            row["mb_releasegroupurl"] = stored.get("mb_releasegroupurl", "")
-            row["confidence"]     = stored.get("confidence", "")
-            row["reason"]         = stored.get("reason", "")
-            row["mb_valid"]       = bool(stored.get("mb_valid"))
-            row["mb_url"]         = stored.get("mb_url", "")
-            row["top_candidates"] = stored.get("top_candidates") or []
-            row["preflight"]      = stored.get("preflight")
-
-    # Singleton items (already imported, but never grouped into an albums
-    # row -- album_id is NULL) lacking a MusicBrainz recording ID. /api/library
-    # surfaces these as synthetic one-track "albums" via disk-folder grouping
-    # and flags them "Missing MusicBrainz ID", but the album-level query
-    # above only scans the `albums` table, which structurally can never
-    # contain a singleton -- leaving them permanently invisible here even
-    # though Library correctly identifies them as needing review. Reuses
-    # the same "library_no_mb" type so existing counts/filters/UI already
-    # pick these up; target_kind="item" distinguishes the identification
-    # target (a recording, not a release) for correct labeling/actions.
-    singleton_rows = unmatched_data.get("singletons", [])
-    for r in singleton_rows:
-        item_path = _s(r.get("path"))
-        if not _is_music_root_path(item_path):
-            continue
-        abs_path = item_path if item_path.startswith("/") else str(MUSIC_ROOT / item_path)
-        title = _s(r.get("title"))
-        artist = _s(r.get("artist"))
-        albumartist = _s(r.get("albumartist"))
-        album = _s(r.get("album"))
-        year = int(r.get("year") or 0)
-        track_number = int(r.get("track") or 0)
-        duration_seconds = float(r.get("length") or 0)
-        current_ids = {
-            "mb_trackid": _s(r.get("mb_trackid")),
-            "mb_albumid": _s(r.get("mb_albumid")),
-        }
-        local_current = {
-            "filename": Path(abs_path).name if abs_path else "",
-            "source_path": abs_path,
-            "title": title,
-            "artist": artist,
-            "album": album,
-            "albumartist": albumartist,
-            "year": str(year) if year else "",
-            "track": track_number or "",
-            "disc": int(r.get("disc") or 0) or "",
-            "duration_seconds": duration_seconds,
-            "duration": _format_duration(duration_seconds),
-            "mb_trackid": current_ids["mb_trackid"],
-            "mb_albumid": current_ids["mb_albumid"],
-        }
-        rows.append({
-            "id": f"item:{int(r['id'])}",
-            "type": "library_no_mb",
-            "target_kind": "item",
-            "status": "Needs recording ID",
-            "status_key": "needs_mb_id",
-            "missing_id_type": "Recording ID",
-            "title": title or Path(abs_path).stem or "(unknown title)",
-            "artist": artist,
-            "album": album,
-            "albumartist": albumartist,
-            "year": year,
-            "track": track_number or "",
-            "duration": _format_duration(duration_seconds),
-            "duration_seconds": duration_seconds,
-            "mb_trackid": current_ids["mb_trackid"],
-            "mb_albumid": current_ids["mb_albumid"],
-            "album_id": 0,
-            "item_id": int(r["id"]),
-            "first_item_id": int(r["id"]),
-            "tracks": 1,
-            "path": abs_path,
-            "folder": str(Path(abs_path).parent) if abs_path else "",
-            "folder_name": Path(abs_path).parent.name if abs_path else "",
-            "sort_ts": float(r.get("added") or 0),
-            "evidence": {
-                "missing_id_type": "Recording ID",
-                "current": local_current,
-                "fingerprint": {"status": "not_checked", "acoustid_status": "not_checked"},
-                "recording_candidates": [],
-            },
-        })
-
-    try:
-        skipped_deep_scan = status_filter == "skipped"
-        skipped_limit = limit if skipped_deep_scan else min(limit, 100)
-        skipped_max_log_lines = 0 if skipped_deep_scan else 2000
-        for s in _import_skipped_items(skipped_limit, deep_scan=skipped_deep_scan, max_log_lines=skipped_max_log_lines):
-            if skipped_deep_scan and _review_path_is_resolved(s.get("path", "")):
-                continue
-            rows.append({
-                "id": "skipped:" + s["path"],
-                "type": "skipped",
-                "status": "Skipped",
-                "status_key": "skipped",
-                "title": s.get("filename") or Path(s.get("path", "")).name,
-                "artist": "",
-                "album": "",
-                "year": 0,
-                "path": s.get("path", ""),
-                "folder": s.get("folder", ""),
-                "reason": s.get("reason", ""),
-                "tracks": 0,
-                "sort_ts": 0,
-            })
-    except Exception:
-        pass
-
-    try:
-        for item in pending_reviews:
+        for item in _load_pending_reviews(prune_resolved=False):
             item_status = _s(item.get("status") or "Pending AI").strip() or "Pending AI"
             item_status_key = _review_status_key(item_status)
             if item_status_key in {"import_enqueueing", "import_queued"}:
@@ -619,7 +487,34 @@ def import_review_queue():
                 **origin_info,
             })
     except Exception:
-        pass
+        _app_logger.exception("import_review_queue: could not load pending review items")
+
+    # F18: a folder already in Pending Review is not listed again as skipped.
+    pending_paths = {os.path.normpath(r["path"]) for r in rows if r.get("path")}
+    try:
+        skipped_deep_scan = status_filter == "skipped"
+        skipped_limit = _SKIPPED_SCAN_CAP
+        skipped_max_log_lines = 0 if skipped_deep_scan else 2000
+        for s in _import_skipped_items(skipped_limit, deep_scan=skipped_deep_scan, max_log_lines=skipped_max_log_lines):
+            if os.path.normpath(s.get("path", "")) in pending_paths:
+                continue
+            rows.append({
+                "id": "skipped:" + s["path"],
+                "type": "skipped",
+                "status": "Skipped",
+                "status_key": "skipped",
+                "title": s.get("filename") or Path(s.get("path", "")).name,
+                "artist": "",
+                "album": "",
+                "year": 0,
+                "path": s.get("path", ""),
+                "folder": s.get("folder", ""),
+                "reason": s.get("reason", ""),
+                "tracks": 0,
+                "sort_ts": 0,
+            })
+    except Exception:
+        _app_logger.exception("import_review_queue: could not load skipped imports")
 
     for row in rows:
         if not row.get("origin_type"):
@@ -633,11 +528,9 @@ def import_review_queue():
                 ),
             )
 
-    rows.sort(key=lambda r: (
-        {"pending_ai": 0, "skipped": 1, "library_no_mb": 2}.get(r["type"], 9),
-        -float(r.get("sort_ts") or 0),
-        str(r.get("title") or "").casefold(),
-    ))
+    # Pending before skipped, newest first within each; skipped rows keep the
+    # loader's newest-first order (stable sort). Sorted in full, then sliced (F5).
+    rows.sort(key=lambda r: ({"pending_ai": 0, "skipped": 1}.get(r["type"], 9), -float(r.get("sort_ts") or 0)))
 
     status_rows = [r for r in rows if _review_queue_status_matches(r, status_filter)]
     if evidence_only:
@@ -652,12 +545,13 @@ def import_review_queue():
         filtered_rows = [r for r in status_rows if _review_item_origin_type(r) == origin_filter]
 
     counts = Counter(r["type"] for r in filtered_rows)
-    counts["all"] = len(filtered_rows)
     return jsonify({
         "ok": True,
-        "items": filtered_rows[:limit],
+        "items": filtered_rows[offset:offset + limit],
         "total": len(filtered_rows),
-        "counts": dict(counts),
+        "offset": offset,
+        "limit": limit,
+        "counts": {"all": len(filtered_rows), "pending_ai": counts["pending_ai"], "skipped": counts["skipped"]},
         "origin_counts": dict(origin_counts),
     })
 
@@ -763,26 +657,28 @@ def import_review_decision():
 @app.post("/api/import-review/auto-enqueue-ready")
 def import_review_auto_enqueue_ready():
     payload = request.get_json(silent=True) or {}
-    try:
-        limit = int(payload.get("limit") or 5)
-    except Exception:
-        limit = 5
-    return jsonify(_run_import_review_auto_enqueue_ready_batch(limit))
+    limit, err = _limit_arg(payload, 5, 25)
+    if err:
+        return _invalid_param(err)
+    return jsonify(_run_import_review_auto_enqueue_ready_batch(limit or 5))
 
 
 @app.post("/api/import-review/auto-enqueue-ready/job")
 def import_review_auto_enqueue_ready_job():
     payload = request.get_json(silent=True) or {}
-    try:
-        limit = int(payload.get("limit") or 5)
-    except Exception:
-        limit = 5
+    limit, err = _limit_arg(payload, 5, 25)
+    if err:
+        return _invalid_param(err)
+    limit = limit or 5
 
     def _do(log, cancel_event=None):
-        _run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)
+        return _run_import_review_auto_enqueue_ready_batch(limit, log, cancel_event)
 
-    job = jobs.start_python(_do, label="Auto-import ready review items")
-    return jsonify({"ok": True, "job_id": job.job_id, "limit": max(1, min(limit, 25))})
+    # F10: typed and deduplicated, so two ready-batches never run at once.
+    job = jobs.start_python(_do, label="Auto-import ready review items", metadata={
+        "type": "import-review-auto-enqueue-ready", "category": "import", "mutating": True,
+        "dedupe_key": "import-review-auto-enqueue-ready", "limit": limit})
+    return jsonify({"ok": True, "job_id": job.job_id, "limit": limit})
 
 
 @app.get("/api/import-reconciliation/reviews")
@@ -1059,10 +955,15 @@ def import_review_revalidate():
     raw_ids = payload.get("review_item_ids") or ([] if not payload.get("review_item_id") else [payload.get("review_item_id")])
     if isinstance(raw_ids, str):
         raw_ids = [raw_ids]
+    if not isinstance(raw_ids, list):
+        raw_ids = []
     review_ids = {_s(value).strip() for value in raw_ids if _s(value).strip()}
     explicit_all = payload.get("all") is True or payload.get("review_all") is True
     auto_enqueue = payload.get("auto_enqueue") is True
-    limit = min(int(payload.get("limit") or 2000), 2000)
+    limit, err = _limit_arg(payload, 2000, 2000)
+    if err:
+        return _invalid_param(err)
+    limit = limit or 2000
     if not review_ids and not explicit_all:
         return jsonify({
             "ok": False,
@@ -1073,108 +974,26 @@ def import_review_revalidate():
             "failed_count": 0,
             "items": [],
         }), 400
-    pending = _load_pending_reviews()
-    results: List[Dict[str, Any]] = []
-    reviewed = updated = queued = failed = 0
+    if explicit_all:
+        review_ids = set()
+    if explicit_all or len(review_ids) > IMPORT_REVIEW_REVALIDATE_SYNC_MAX:
+        # F10: a large revalidation is one tracked job; a second start while
+        # it runs answers 409 job_already_running (DuplicateJobError handler).
+        def _do(log, cancel_event=None):
+            return _compact_revalidation_summary(_run_import_review_revalidation(
+                review_ids, auto_enqueue=auto_enqueue, limit=limit, log=log, cancel_event=cancel_event))
 
-    for item in pending:
-        if reviewed >= limit:
-            break
-        item = item if isinstance(item, dict) else {}
-        path = _s(item.get("path")).strip()
-        review_item_id = f"pending:{path}" if path else ""
-        if review_ids and review_item_id not in review_ids and path not in review_ids:
-            continue
-        reviewed += 1
-        suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
-        release_group_id = _extract_mb_uuid(
-            _s(suggestion.get("mb_releasegroupid") or item.get("mb_releasegroupid"))
-        )
-        representative_release_id = _extract_mb_uuid(
-            _s(suggestion.get("representative_mb_albumid") or suggestion.get("mb_albumid"))
-        )
-        if not path or (not representative_release_id and not release_group_id):
-            failed += 1
-            results.append({
-                "ok": False,
-                "review_item_id": review_item_id,
-                "path": path,
-                "error": "Review item has no source path or MusicBrainz Release Group ID.",
-            })
-            continue
-        comparison = _candidate_track_comparison_payload(
-            representative_release_id,
-            path,
-            release_group_id=release_group_id,
-        )
-        if not comparison.get("ok"):
-            failed += 1
-            results.append({
-                "ok": False,
-                "review_item_id": review_item_id,
-                "path": path,
-                "error": comparison.get("error") or "Track comparison failed.",
-            })
-            continue
-        representative_release_id = _extract_mb_uuid(
-            _s(comparison.get("representative_release_id") or comparison.get("mb_albumid") or representative_release_id)
-        )
-        acoustic_preflight = _run_ai_release_preflight(
-            path,
-            representative_release_id,
-            existing_album_id=int((suggestion.get("existing_album_ids") or [0])[0] or 0),
-        ) if representative_release_id else None
-        preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
-        selected_match = _import_review_build_revalidated_match(item, comparison, preflight)
-        note = selected_match.get("preflight_reason", "")
-        if _update_pending_review_revalidation(path, selected_match, preflight, note):
-            updated += 1
-        auto_payload = {
-            "path": path,
-            "review_item_id": review_item_id,
-            "mb_albumid": selected_match.get("representative_release_id", ""),
-            "mb_releasegroupid": selected_match.get("release_group_id", ""),
-            "artist": selected_match.get("artist", ""),
-            "album": selected_match.get("album", ""),
-            "year": selected_match.get("year", ""),
-            "existing_album_id": int((suggestion.get("existing_album_ids") or [0])[0] or 0),
-            "track_mapping": selected_match.get("track_mapping") or [],
-            "selected_match": selected_match,
-            "confidence_score": selected_match.get("confidence_score"),
-            "ai_suggestion": suggestion,
-        }
-        eligibility = evaluate_import_eligibility(auto_payload)
-        result = {
-            "ok": True,
-            "review_item_id": review_item_id,
-            "path": path,
-            "selected_match": selected_match,
-            "eligibility": eligibility,
-            "queued": False,
-        }
-        if auto_enqueue and eligibility.get("eligible"):
-            try:
-                with _import_review_auto_lock:
-                    queue_result = _import_review_start_auto_import(auto_payload, eligibility)
-                result.update({
-                    "queued": bool(queue_result.get("queued")),
-                    "job_id": queue_result.get("job_id", ""),
-                    "existing_job": bool(queue_result.get("existing_job")),
-                })
-                queued += 1 if result.get("queued") else 0
-            except Exception as ex:
-                failed += 1
-                result.update({"ok": False, "error": str(ex), "queued": False})
-        results.append(result)
-
-    return jsonify({
-        "ok": True,
-        "reviewed_count": reviewed,
-        "updated_count": updated,
-        "queued_count": queued,
-        "failed_count": failed,
-        "items": results,
-    })
+        job = jobs.start_python(_do, label="Revalidate Import Review items", metadata={
+            "type": IMPORT_REVIEW_REVALIDATE_JOB_TYPE,
+            "category": "import",
+            "mutating": auto_enqueue,
+            "dedupe_key": IMPORT_REVIEW_REVALIDATE_JOB_TYPE,
+            "auto_enqueue": auto_enqueue,
+            "all": explicit_all,
+            "item_count": len(review_ids),
+        })
+        return jsonify({"ok": True, "job_id": job.job_id, "mode": "job"}), 202
+    return jsonify(_run_import_review_revalidation(review_ids, auto_enqueue=auto_enqueue, limit=limit))
 
 
 @app.post("/api/folders/ai-suggest")
@@ -1205,7 +1024,9 @@ def get_ai_pending_review():
 
 @app.get("/api/ai-review-decisions")
 def get_ai_review_decisions():
-    limit = min(int(request.args.get("limit", 100)), 500)
+    limit, err = _limit_arg(request.args, 100, 500)
+    if err:
+        return _invalid_param(err)
     try:
         data = (
             json.loads(_AI_REVIEW_DECISIONS_FILE.read_text())
@@ -1218,22 +1039,41 @@ def get_ai_review_decisions():
     return jsonify({"ok": True, "items": data[:limit]})
 
 
+# F16: a client may propose an identity, never evidence. Everything the
+# server computes (mb_valid, confidence, preflight, track_mapping, status,
+# review_evidence, ...) is dropped; revalidation recomputes it.
+_PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS = (
+    "mb_albumid", "mb_releasegroupid", "representative_mb_albumid", "album", "albumartist",
+    "artist", "year", "label", "country", "reason",
+)
+_PENDING_REVIEW_CLIENT_TEXT_MAX = 500  # per client-supplied string (suggestion and origin)
+
+
 @app.post("/api/ai-pending-review")
 def add_ai_pending_review():
-    payload = request.get_json(silent=True) or {}
-    folder_path = payload.get("path", "").strip()
-    if not folder_path:
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    if not _s(payload.get("path")).strip():
         return jsonify({"ok": False, "error": "path required"}), 400
-    suggestion = payload.get("suggestion") or {}
-    allow_existing = bool(payload.get("allow_existing") or suggestion.get("allow_existing_review"))
-    origin = _review_origin_payload(
-        folder_path,
-        suggestion,
-        origin=payload or {"origin_type": "manual_import"},
-        evidence=payload.get("evidence") or payload.get("review_evidence") or None,
-    )
+    # Same roots as an Import Review source folder; never the library or a root itself.
+    folder, path_error = _resolve_import_review_source_path(
+        payload.get("path"), allow_music=False, expected_type="dir")
+    if path_error or folder is None:
+        return jsonify({"ok": False, "error": path_error or "Source path is not allowed."}), 400
+    folder_path = str(folder)
+    raw_suggestion = payload.get("suggestion") if isinstance(payload.get("suggestion"), dict) else {}
+    suggestion = {k: (v[:_PENDING_REVIEW_CLIENT_TEXT_MAX] if isinstance(v, str) else v)
+                  for k in _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS
+                  for v in (raw_suggestion.get(k),)
+                  if isinstance(v, (str, int)) and not isinstance(v, bool)}
+    allow_existing = payload.get("allow_existing") is True
+    origin = _review_origin_payload(folder_path, suggestion, origin=payload)
     if _normalize_review_origin_type(origin.get("origin_type")) == "unknown":
         origin = {**origin, "origin_type": "manual_import", "origin_label": "Manual", "created_by_workflow": "manual_import"}
+    # Origin is display-only client text: plain strings, bounded, and the
+    # folder is always the validated one (security LOW-1).
+    origin = {k: _s(v)[:_PENDING_REVIEW_CLIENT_TEXT_MAX] for k, v in origin.items()}
+    origin["source_folder"] = folder_path
     added = _add_to_pending(folder_path, suggestion, allow_existing=allow_existing, origin=origin)
     return jsonify({"ok": True, "added": bool(added), "skipped_existing": not bool(added)})
 
@@ -1522,29 +1362,12 @@ def start_ai_batch_import():
 
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
-    # scan_path feeds _ai_batch_find_audio_dirs(), which now discovers
-    # candidate folders via the real engine (composite_workflows.discover_import_sources()),
-    # not a local os.walk() -- it must still be confined to the same
-    # trusted import-source roots as the rest of the import-review/AI-suggest
-    # flow (a fast, local, pure-string root-containment check), but
-    # require_exists=False for the same reason import_folder_with_id() was
-    # already fixed to pass it (Wave 25 Docker acceptance round, found by
-    # actually exercising the real two-service deployment): this process
-    # (beets-web-manager) has no filesystem mount for the downloads root or
-    # the library at all -- only the engine container does. A local
-    # existence check here made every real /api/ai-batch-import call fail
-    # with "Source path does not exist" regardless of whether the folder
-    # was genuinely there. The engine's own discover_import_sources() call
-    # (inside _ai_batch_find_audio_dirs) is the real, disk-backed
-    # existence check.
-    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
-        scan_path, allow_music=True, expected_type="dir", require_exists=False,
-    )
+    # Deterministic import (#288): no AI key needed. The scan root may be a
+    # download root itself (F3); _start_ai_batch_job re-checks it.
+    trusted_scan_path, scan_path_error = _resolve_import_scan_root(scan_path)
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
     scan_path = str(trusted_scan_path)
-    if not _ai_api_key():
-        return jsonify({"ok": False, "error": "AI is not configured (set OPENAI_API_KEY, OPENROUTER_API_KEY, or AI_API_KEY)"}), 400
 
     if not recover_batch_job_id:
         latest = _ai_batch_latest_state()
@@ -1628,6 +1451,10 @@ def start_import():
         res = composite_workflows.reimport_source(path, beets_options=beets_options, timeout=300.0)
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "Beets import failed.")
+        # History (F9). An older plugin does not report the album IDs; those
+        # imports stay out of History.
+        for album_id in res.get("imported_album_ids") or []:
+            _record_recent_import_for_album(album_id, log)
         _invalidate_lib_cache()
         not_matched = [{"path": r["path"], "status": IMPORT_NOT_MATCHED_STATUS, "reason": r["reason"]}
                        for r in res.get("skipped")
@@ -1848,15 +1675,8 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     # /api/ai-batch-import/recover, which can source scan_path from a
     # stored job-state file rather than the current request) must go
     # through this check -- stored state is untrusted at execution time
-    # just like a fresh request body. require_exists=False for the same
-    # reason as the sibling check in start_ai_batch_import() above: this
-    # process has no local mount for the downloads root or the library,
-    # so a local existence check here always fails regardless of whether
-    # the path is genuinely valid -- the engine-side discovery call is the
-    # real, disk-backed check.
-    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
-        scan_path, allow_music=True, expected_type="dir", require_exists=False,
-    )
+    # just like a fresh request body. The scan itself checks existence.
+    trusted_scan_path, scan_path_error = _resolve_import_scan_root(scan_path)
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
     scan_path = str(trusted_scan_path)
@@ -1935,8 +1755,9 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # job_id for longer than necessary.
         job = jobs.start_python(
             _do,
-            label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
-            metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
+            label=f"Import: {Path(scan_path).name or scan_path}" + (" retry" if retry_failed else ""),
+            metadata={"type": "ai-batch-import", "workflow": "import-batch",
+                      "batch_job_id": batch_job_id, "source_path": scan_path},
         )
         # From this point on, a worker thread exists and is blocked waiting
         # for handoff_ready. Cleanup responsibility transfers to it

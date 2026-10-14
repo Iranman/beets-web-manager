@@ -15,6 +15,7 @@ export type ReviewOriginCounts = Partial<Record<ReviewOriginType, number>>;
 
 export interface ReviewQueueParams {
   limit?: number;
+  offset?: number;
   status?: string;
   origin_type?: ReviewOriginType;
   search?: string;
@@ -215,6 +216,16 @@ export interface ReviewPreflight {
 }
 
 export interface ReviewEvidence {
+  /** Batch import review rows (#394): where the folder stopped. */
+  origin_step?: 'pre_import' | 'beets_partial' | 'beets_skip' | string;
+  /** pre_import: symlinked_audio or unverifiable_folder. */
+  conflict?: string;
+  /** symlinked_audio: the links found. */
+  symlinked_paths?: string[];
+  /** unverifiable_folder: folders that could not be listed (may be empty). */
+  unreadable_paths?: string[];
+  /** beets_partial: paths Beets skipped while importing the rest. */
+  skipped_paths?: string[];
   top_candidates?: ReviewCandidate[];
   current?: RecordingLocalEvidence;
   recording_candidates?: ReviewRecordingCandidate[];
@@ -279,6 +290,10 @@ export interface ReviewItem {
   mb_url?: string;
   mb_valid?: boolean;
   missing_id_type?: string;
+  /** Missing IDs album rows: "missing_release_group" when the album has a Release ID but no Release Group. */
+  missing_reason?: 'missing_release_group' | 'missing_release_id' | string;
+  /** Missing IDs album rows: the album's current Release ID (may be empty). */
+  current_mb_albumid?: string;
   existing_album_ids?: number[];
   existing_album_id?: number;
   sort_ts?: number;
@@ -304,14 +319,117 @@ export interface ReviewItem {
   source_batch_id?: string;
   source_folder?: string;
   created_by_workflow?: string;
+  /** Missing-IDs rows: a Pending Review folder already claims this album. */
+  in_import_review?: boolean;
 }
 
 export interface ReviewQueueResponse {
   ok: true;
   items: ReviewItem[];
+  /** Rows matching every filter (the whole filtered list, not this page). */
   total: number;
+  offset?: number;
+  limit?: number;
   counts: ReviewCounts;
   origin_counts?: ReviewOriginCounts;
+  /** Set when the requested status moved elsewhere (status=library_no_mb). */
+  moved_to?: string;
+}
+
+export type LibraryMissingMbKind = 'all' | 'album' | 'item';
+
+export interface LibraryMissingMbParams {
+  kind?: LibraryMissingMbKind;
+  search?: string;
+  offset?: number;
+  /** Server maximum is 500. */
+  limit?: number;
+  sort?: 'added_desc' | 'added_asc' | 'artist' | 'title';
+}
+
+/** GET /api/library/missing-mb-ids: library albums with no Release ID or no Release Group and
+ * singleton tracks with no Recording ID (rows of type "library_no_mb"). */
+export interface LibraryMissingMbResponse {
+  ok: true;
+  items: ReviewItem[];
+  /** Rows after search and kind (the whole list, not this page). */
+  total: number;
+  offset: number;
+  limit: number;
+  /** Per kind, after the search filter. */
+  counts: { all: number; album: number; item: number };
+}
+
+/** Missing IDs batch fix (#399). The server proves each row; the UI only shows its decision. */
+export type MissingMbBatchPreviewPayload =
+  | { ids: string[] }
+  | { kind: LibraryMissingMbKind; search?: string; limit: number };
+
+export interface MissingMbBatchStartResponse extends ApiOkResponse {
+  job_id: string;
+  /** Preview: number of rows selected. */
+  rows?: number;
+  transaction_id?: string;
+  /** Set when the start was followed to a job that was already running (409). */
+  already_running?: boolean;
+}
+
+export type MissingMbWrite = { mb_releasegroupid?: string; mb_albumid?: string; mb_trackid?: string };
+
+export interface MissingMbPreviewRow {
+  row_id: string;
+  kind: 'album' | 'item' | '';
+  target_id: number;
+  proven: boolean;
+  status: 'proven' | 'needs_review';
+  reasons: string[];
+  write: MissingMbWrite;
+  /** Fixed user-facing text from the server. */
+  message: string;
+  evidence?: {
+    /** Album ids that already hold the proposed release group. */
+    release_group_held_by?: number[];
+    /** Another selected album proves the same release group. */
+    duplicate_in_batch?: boolean;
+    /** "release_group": only the Release Group is filled; the Release ID is kept. */
+    fill?: string;
+    release_id?: string;
+    release_group_from_release?: string;
+  } & Record<string, unknown>;
+}
+
+export interface MissingMbPreviewResult {
+  ok: boolean;
+  /** null when no row was proven: there is nothing to apply. */
+  transaction_id: string | null;
+  confirm_token: string | null;
+  counts: { rows: number; proven: number; needs_review: number };
+  rows: MissingMbPreviewRow[];
+}
+
+export type MissingMbApplyRowStatus =
+  | 'written' | 'already_set' | 'evidence_changed' | 'no_longer_proven' | 'evidence_unavailable'
+  | 'write_failed' | 'recovery_required' | 'cancelled' | 'not_attempted';
+
+export interface MissingMbApplyRow {
+  row_id: string;
+  kind: 'album' | 'item' | '';
+  target_id: number;
+  status: MissingMbApplyRowStatus | string;
+  message: string;
+  write: MissingMbWrite;
+  transaction_ids?: string[];
+  reasons?: string[];
+}
+
+export interface MissingMbApplyResult {
+  ok: boolean;
+  transaction_id: string;
+  status: 'Completed' | 'Failed' | 'Recovery Required' | 'Cancelled' | string;
+  counts: Record<string, number>;
+  rows: MissingMbApplyRow[];
+  code?: string;
+  error?: string;
 }
 
 export interface ApiOkResponse {
@@ -1045,9 +1163,27 @@ export interface AiBatchFolderState {
   artwork_status?: string;
   artwork_retryable?: boolean;
   album_id?: number | null;
+  album_ids?: number[];
+  /** Deterministic import (#288 phase B). */
+  stage?: 'beets_import' | 'identify' | 'pinned_import' | 'done' | string;
+  /** Why Beets skipped the folder (duplicate, blank_identity, no_strong_match, no_candidates). */
+  beets_skip_reason?: string;
+  /** Codes, e.g. imported_without_fingerprint. */
+  warnings?: string[];
+  auto_import?: { eligible: boolean; reasons: string[] };
+  missing_release_group_album_ids?: number[];
+}
+
+export interface AiBatchEvidenceCapabilities {
+  beets_fingerprinting: boolean;
+  acoustid_key: boolean;
+  ai_configured: boolean;
 }
 
 export interface AiBatchState {
+  evidence_capabilities?: AiBatchEvidenceCapabilities;
+  /** Batch-level warnings, as full sentences. */
+  warnings?: string[];
   batch_job_id: string;
   job_id?: string;
   source_path: string;
@@ -1165,6 +1301,8 @@ export interface JobResponse extends ApiOkResponse {
   log?: string[];
   // PythonJob return value — present only when status === 'success'
   result?: Record<string, unknown>;
+  /** Structured progress a Python job publishes (job_engine update_state). */
+  state?: { progress?: { done?: number; total?: number } } & Record<string, unknown>;
 }
 
 export interface AlbumArtCandidate {
@@ -1927,18 +2065,67 @@ export interface AcquisitionQueueItem {
   actions: AcquisitionQueueActions;
 }
 
+export type AcquisitionQueueSourceFilter = 'all' | 'beets' | 'lidarr' | 'merged' | 'unmonitored';
+export type AcquisitionQueueSort = 'sort_key' | 'year_desc';
+
+export interface AcquisitionQueueParams {
+  offset?: number;
+  limit?: number;
+  search?: string;
+  source?: AcquisitionQueueSourceFilter;
+  album_type?: string[];
+  sort?: AcquisitionQueueSort;
+  include_unmonitored?: boolean;
+}
+
+/** State of the server-side Find Music snapshot (GET /api/acquisition/queue `cache`). */
+export interface AcquisitionQueueCache {
+  state: 'ready' | 'stale' | 'building' | 'empty' | 'failed';
+  built_at: number | null;
+  age_seconds: number | null;
+  build_seconds: number | null;
+  max_age_seconds: number;
+  job_id: string | null;
+  refreshing: boolean;
+  last_error: string;
+  last_error_at: number | null;
+  include_unmonitored: boolean;
+}
+
+export interface AcquisitionDownloadSources {
+  slskd_configured: boolean;
+  slskd_error: string;
+  fallback_chain: string[];
+  fallbacks: Record<string, { available: boolean; reason: string }>;
+}
+
 export interface AcquisitionQueueResponse extends ApiOkResponse {
   items: AcquisitionQueueItem[];
+  /** Rows matching the filters (the whole filtered list, not this page). */
   total: number;
+  offset?: number;
+  limit?: number | null;
+  /** Whole-snapshot counts, independent of the filters. */
   counts: {
+    all?: number;
     beets: number;
     lidarr: number;
     merged: number;
-    unmonitored: number;
+    unmonitored?: number;
   };
+  album_types?: Record<string, number>;
+  cache?: AcquisitionQueueCache;
+  download_sources?: AcquisitionDownloadSources;
   library_error?: string;
   wanted_error?: string;
   library_version?: number;
+}
+
+export interface AcquisitionQueueRefreshResponse extends ApiOkResponse {
+  /** null when the server reused a still-current list (reused: true); there is no job to follow. */
+  job_id: string | null;
+  already_running: boolean;
+  reused: boolean;
 }
 
 export type DownloadMethod = 'slskd' | 'spotiflac' | 'ytdlp' | 'soundcloud';
@@ -2461,13 +2648,28 @@ export interface ImportReviewRevalidateItem {
   error?: string;
 }
 
-export interface ImportReviewRevalidateResponse extends ApiOkResponse {
+/** Counts and rows of a finished revalidation: the synchronous answer for up
+ * to 25 items, and the job result of a larger one (#396). */
+export interface ImportReviewRevalidateResult extends ApiOkResponse {
   reviewed_count: number;
   updated_count: number;
   queued_count: number;
   failed_count: number;
   items: ImportReviewRevalidateItem[];
 }
+
+/** More than 25 items (or all): 202 {ok, job_id, mode: 'job'} with no counts.
+ * A second start while it runs is a 409 job_already_running that apiJson
+ * turns into {ok, job_id, already_running}. */
+export interface ImportReviewRevalidateJobStart extends ApiOkResponse {
+  job_id: string;
+  mode?: 'job';
+  already_running?: boolean;
+  replay?: boolean;
+  job_status?: string;
+}
+
+export type ImportReviewRevalidateResponse = ImportReviewRevalidateResult | ImportReviewRevalidateJobStart;
 export interface ImportTargetPreviewTrack {
   track: number;
   status: string;
@@ -2577,7 +2779,11 @@ export interface ImportReviewFileCleanupPayload {
 }
 
 export interface ImportReviewFileCleanupResponse extends ApiOkResponse {
+  /** What ran. A delete_* request is downgraded to quarantine_* (#392). */
   action: ImportReviewFileCleanupAction;
+  requested_action?: ImportReviewFileCleanupAction;
+  downgraded_to_quarantine?: boolean;
+  operation_id?: string;
   quarantined: Array<{ source: string; quarantined: string }>;
   deleted: string[];
   skipped: Array<{ path: string; reason: string }>;

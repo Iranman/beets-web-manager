@@ -283,9 +283,11 @@ def _ai_batch_recompute_counts(state: Dict[str, Any]) -> None:
 
 
 def _ai_batch_terminal_summary(state: Dict[str, Any]) -> str:
+    unreadable = int(state.get("folders_unreadable") or 0)
     return (
         f"{int(state.get('folders_processed') or 0)} folder(s) processed; "
         f"{int(state.get('folders_attention') or 0)} need attention."
+        + (f" {unreadable} unreadable folder(s) skipped." if unreadable else "")
     )
 
 

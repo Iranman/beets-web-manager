@@ -292,7 +292,8 @@ PLAYLIST_MIN_DOWNLOAD_SECONDS = max(0, int(os.environ.get("PLAYLIST_MIN_DOWNLOAD
 PLAYLIST_DOWNLOAD_BATCH_SIZE = _env_int("PLAYLIST_DOWNLOAD_BATCH_SIZE", 0, minimum=0)
 
 
-PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,spotiflac,ytdlp,soundcloud")
+# SpotiFLAC is opt-in (list it in PLAYLIST_DOWNLOAD_METHODS), as for Find Music.
+PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,ytdlp,soundcloud")
 
 
 # Absolute only (config_layers.container_path): an empty or relative value
@@ -412,9 +413,8 @@ YTDLP_REQUIRE_YOUTUBE_AUTH = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
-YTDLP_PO_PROVIDER_URL = os.environ.get(
-    "YTDLP_PO_PROVIDER_URL", "http://bgutil-provider:4416"
-).strip().rstrip("/")
+# Blank by default: the bgutil PO token sidecar is opt-in (ACQ-13).
+YTDLP_PO_PROVIDER_URL = os.environ.get("YTDLP_PO_PROVIDER_URL", "").strip().rstrip("/")
 
 
 YTDLP_ALLOW_BROWSER_COOKIES = os.environ.get(

@@ -172,6 +172,37 @@ def _resolve_import_review_source_path(
     return resolved, None
 
 
+def _resolve_import_scan_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """The folder a batch import scans (F3/F4). The same checks as an Import
+    Review source folder (no symlinks, no encoded tricks, under an approved
+    root), except that a download root itself is allowed, so "import
+    everything in Downloads" works. The music library root itself stays
+    refused (the batch moves files); a library subfolder is allowed on
+    purpose, for untracked albums already in the library. Existence is not
+    checked here; the scan does that."""
+    error = _import_review_path_text_error(raw, allow_relative=False)
+    if error:
+        return None, error
+    candidate = Path(_s(raw).strip())
+    # These roots are contained (never "/", never overlapping the library)
+    # and resolved. Return the configured root, not the request value. The
+    # symlinked spelling of a root (a NAS mount link) is that root (N7); only
+    # an exact root match is widened, not containment below it.
+    real_candidate = os.path.realpath(str(candidate))
+    for root in _import_review_cleanup_roots(allow_music=False):
+        if candidate == root or real_candidate == os.path.realpath(str(root)):
+            return root, None
+    resolved, error = _resolve_import_review_source_path(
+        raw, allow_music=True, expected_type="dir", require_exists=False)
+    if error or resolved is None:
+        return None, error or "Invalid source path."
+    real = os.path.realpath(str(resolved))
+    for root in _import_review_cleanup_roots(allow_music=True):
+        if real.startswith(os.path.realpath(str(root)) + os.sep):
+            return Path(real), None
+    return None, "Source path is outside the allowed roots."
+
+
 REVIEW_ORIGIN_TYPES = {
     "playlist",
     "batch_import",
@@ -390,6 +421,20 @@ def _leaked_db_paths_summary(rows: List[Dict[str, Any]],
         "target_exists": len(target_exists),
         "skipped_unsafe": len(unsafe),
     }
+
+
+def query_int_arg(args: Any, name: str, default: int, hi: int) -> Tuple[int, str]:
+    """``(value, error)`` for a bounded non-negative integer query arg."""
+    raw = args.get(name)
+    if raw is None or raw == "":
+        return default, ""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default, f"{name} must be an integer"
+    if value < 0 or value > hi:
+        return default, f"{name} must be between 0 and {hi}"
+    return value, ""
 
 
 def json_route_result(body: Any, status: int = 200):

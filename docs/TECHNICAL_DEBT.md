@@ -9,10 +9,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 ## ARCH-001 Route Handlers Still Orchestrate Workflows
 
 - Affected area: route modules `routes_library.py`, `routes_cleanup.py`, `routes_import.py`, `routes_maintenance.py`, `routes_playlist.py`, `routes_acquisition.py`.
-- Evidence: v0.1.31 decomposed `app.py` (52,665 -> ~570 lines of application glue) into layered owned services with CI guards (see `docs/arch001_service_decomposition.md`; inventory `docs/arch001_app_ownership.json`). What remains (re-measured for v0.1.42: still 26): 26 route handlers over 100 lines still orchestrate inline (largest: `start_maintenance_runner` 494, `dedup_ai_review` 430, `item_attach_recording` 396, `ai_suggest` 338, `import_review_queue` 279, `apply_album_duplicate_resolver` 256), and 155 helpers live in a lower-layer module than their domain (`EXTRACTED_SHARED`).
+- Evidence: v0.1.31 decomposed `app.py` (52,665 -> ~570 lines of application glue) into layered owned services with CI guards (see `docs/arch001_service_decomposition.md`; inventory `docs/arch001_app_ownership.json`). What remains (re-measured for v0.1.42: still 26): 26 route handlers over 100 lines still orchestrate inline (largest: `start_maintenance_runner` 494, `dedup_ai_review` 430, `item_attach_recording` 396, `ai_suggest` 338, `apply_album_duplicate_resolver` 256), and 155 helpers live in a lower-layer module than their domain (`EXTRACTED_SHARED`).
 - Current risk: Workflow logic inside a handler is only reachable through HTTP and is harder to reuse or test directly; shared helpers sit in a neighbor domain's module.
 - Desired state: Every handler parses input, calls one service, and shapes the response. Owners: library/artwork -> `library_service`/`artwork_service`; cleanup/dedup -> `cleanup_service`/`dedup_service`; import/review/AI -> `import_service`/`import_review_service`/`ai_service`; maintenance/transactions -> `maintenance_service`/`transaction_service`; playlist -> `playlist_service`; acquisition -> `acquisition_service`.
 - Safe migration approach: Move one handler body at a time into its service as a request-free function returning `(json_body, status)` (the pattern used for the in-process route calls in v0.1.31); keep the route shape via `serializers.json_route_result`; `tests/test_arch001_architecture.py` keeps layering intact.
+- 0.7.0 progress: `import_review_queue` (was 279 lines) no longer builds the library missing-ID rows; they moved to `library_service.library_missing_mb_payload` behind `GET /api/library/missing-mb-ids`. The handler still assembles the pending/skipped rows inline (about 130 lines).
 - Priority: P2. Status: Open.
 
 ## ARCH-004 Job Persistence And Idempotency Are Uneven
@@ -35,9 +36,10 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - Job rows say `interrupted: true` (with `recovery`) when a restart cut them off.
   - Persisted `log_tail` and `result` are redacted centrally (`job_engine.redact_for_persistence`, #272).
   - `JobStore.every(name, interval, tick)` is the scheduler hook for recurring work (store-owned, stopped by `close()`, skips a tick while the job the previous tick returned still runs); `PythonJob.add_done_callback` replaces poll-until-finished watcher threads. The legacy auto-scan and the library-scan watchers use them. `tests/test_job_reliability.py` pins the remaining raw `threading.Thread` sites.
+  - 0.7.0 (IMPLEMENTED, CI pending; not live verified): the batch import no longer starts a raw thread per folder for AI suggestions (F11). Its folders run one after another inside the batch's `job_engine` job, so `backend/ai_service.py` has no `threading.Thread` site left and was removed from that pin list. A restart requeues every unfinished folder (`requeued by recovery`), so recovery never trusts a cached per-folder decision.
 - Remaining (why this is not Closed):
   - Resume is still each workflow's own: Clean All and playlist download resume from their own checkpoint files, AI batch from its state store. The contract makes the position visible in the job record; it does not resume a job. A restart still leaves the job `recovery_required` for the operator.
-  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, folder and root repairs, Release-Group relinks, resolver jobs). They now have the request-level guard above, but no per-resource lock: two *different* requests that touch the same album (e.g. rename, then fix-metadata) can still run together, serialized only by the webmanager plugin's global `mutation_lock`. Specific guards on top of the request guard: Move All / MBSync All `dedupe_key`; Clean All `dedupe_key: workflow:maintenance-runner` (atomic start, D1) plus the `workflow:` lock at run time; duplicate maintenance `dedupe_key: workflow:maintenance-duplicates`; `POST /api/import` `dedupe_key: import-source:<path>` (D2); dedup scan/cleanup still only `_running_job_of_type` across types. Import `albums_imported` is the library album-count delta, so imports of *different* folders running together can still over-count each other (composite_workflows.reimport_source; needs a per-import count from the plugin). Across processes, all of them rely on `recovery_required`.
+  - Not yet under the contract: the roughly 25 shorter mutating jobs (artwork, genre, folder and root repairs, Release-Group relinks, resolver jobs). They now have the request-level guard above, but no per-resource lock: two *different* requests that touch the same album (e.g. rename, then fix-metadata) can still run together, serialized only by the webmanager plugin's global `mutation_lock`. Specific guards on top of the request guard: Move All / MBSync All `dedupe_key`; Clean All `dedupe_key: workflow:maintenance-runner` (atomic start, D1) plus the `workflow:` lock at run time; duplicate maintenance `dedupe_key: workflow:maintenance-duplicates`; `POST /api/import` `dedupe_key: import-source:<path>` (D2); Import Review revalidate-all (`import-review-revalidate`, also for more than 25 ids; it used to run up to 2000 items on the request thread) and the ready-items auto-import job (`import-review-auto-enqueue-ready`) each carry a `type` and a `dedupe_key` (0.7.0 F10); dedup scan/cleanup still only `_running_job_of_type` across types. Import `albums_imported` is the library album-count delta, so imports of *different* folders running together can still over-count each other (composite_workflows.reimport_source; needs a per-import count from the plugin). Across processes, all of them rely on `recovery_required`.
   - The frontend does not send `Idempotency-Key` yet, so a retry after a job *finished* starts it again; a retry while it runs is refused.
   - Jobs are durable only when `WEB_MANAGER_DATA_DIR` is set explicitly (every shipped Compose file does) or `BEETS_WEB_DURABLE_JOBS=1`.
   - A hook-created transaction whose job ends `recovery_required` is synced to `Failed`, not `Recovery Required` (`TransactionStore.update_from_job`). This is library-transaction work. (A Running transaction no recovery family covers is moved to Recovery Required by the startup sweep since 0.4.1, #266 item 3.)
@@ -81,6 +83,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - yt-dlp and SLSKD downloads run as subprocesses or long-polls outside this boundary.
   - `routes_submissions._extract_ytdlp_info` runs yt-dlp metadata extraction on the request thread (wave 5 removed its helper thread) with no overall deadline; only yt-dlp's own socket timeouts bound it. Add a total deadline when yt-dlp extraction moves behind the provider boundary.
   - The AI provider is never retried (every call is a POST).
+  - 0.6.0 (ACQ-3): the PO token provider URL (`YTDLP_PO_PROVIDER_URL`) is validated with its implicit configured-URL trust and probed through the boundary. A blocked or unreachable provider is dropped, and the result is cached for 300 s. The bgutil yt-dlp plugin then connects to it with its own HTTP stack, outside `secure_urlopen`. With a hostname value that leaves a DNS-rebinding or redirect window within the private floor; loopback and metadata are still refused at validation. Closing it needs address pinning in the plugin.
 - Priority: P2. Status: Open (narrowed).
 
 ## ARCH-010 Composite Mutation Workflows Still Call The Retired `backend/beets_client.py`
@@ -172,6 +175,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - (RESOLVED, 0.4.1, #317) `_wait_for_child_job` no longer abandons a mutating child on cancel or timeout: it asks the child to stop and waits up to `CHILD_SETTLE_SECONDS` (300 s) for its real outcome, and reports it to the parent's job wrapper through `job_service.note_job_progress` (Failed partially applied, or Recovery Required while the child still runs). Remaining: a parent that is not transaction-wrapped records nothing at its own level (the child's transaction is still truthful), and a generic child that changed the library without publishing `mutation_started` and then failed is not reported as a change.
   - `routes_maintenance`'s generic rollback cannot reach the composite metadata and MusicBrainz rollbacks: they record no `rollback.operations`.
   - `update_album_metadata(aid, {}, force_write_tags=True)` plans nothing, so it writes no tags.
+  - Match album (`routes_library._match_album_run`, shared by `POST /api/albums/<aid>/match` and the Missing IDs batch): when a stage after step 3 (track sync, tag write, relocation) fails, only the step-2 metadata operation is rolled back. The `album_mb_track_repair_v1` operation from step 3 stays applied (whatever `mbsync` changed on the tracks) and needs a manual check (QA #399 F3). Fix: record the repair operation id and roll it back before the metadata operation.
   - The frontend relink caller must send `mbAlbumId` or `mbReleaseGroupId`. Without one, the endpoint now refuses with `relink_identity_required`.
   - (RESOLVED, 0.4.0) Every engine-family step passed `logs=[...]` to `TransactionStore.update`/`transition`, which replaces the whole log, so a later step (a refusal, the restart sweep, the finish) erased the apply history. Steps now pass `append_logs=[...]`; `logs=` keeps replace semantics for job wrappers that pass the job's full log. Playlist media cleanup still uses `logs=` (playlist code was out of scope).
   - `_restore_rows` restores with `move=True` even when the apply did not move files. This must be fixed before composite rollback is advertised broadly (QA #243 F-5).
@@ -235,6 +239,50 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
   - `TransactionSettings.automatic_approval_threshold` is stored and validated but nothing reads it.
 - Priority: P3. Status: Open.
 
+## ARCH-028 Find Music Snapshot Freshness (0.6.0 T2)
+
+- Affected area: `backend/acquisition_service.py` (Find Music list snapshot, `fetch_lidarr_wanted`).
+- Evidence: the list is now a snapshot built by the `acquisition-queue-build` job and rebuilt only by age (6 h) or Refresh (F7/F8). Lidarr's wanted list is read page by page; a page short of `totalRecords`, or fewer distinct albums in all than the last page's `totalRecords`, fails the build (QA #379 N3).
+- Narrowed in 0.7.0:
+  - A Find Music download (row or Download All) whose import put the album into the library (`album_ids` from the reimport job; not Pending Review, an in-place repair or an already-complete album) now drops its row from the snapshot at once (`acquisition_queue_mark_done`, matched by key, the row's MBID or local album id). A build already running when the download finished drops it too. The first `POST /api/acquisition/queue/refresh` with `after_download: true` within 120 s of such a patch reuses the patched snapshot (`reused: true`), so the UI's refresh after each download no longer walks every Lidarr page (F2). A Refresh without that flag (a user's click) always rebuilds.
+  - The paging gap (QA #385 N2) is closed for the common case: a pass during which `totalRecords` moved is read once more, and only a second moving pass falls back to the count check.
+- Current risk:
+  - Downloads and imports started outside Find Music (Discography, Wanted, Import page) patch the snapshot only when their payload names a listed row's MBID or album id; Lidarr's own imports are not patched. Those rows stay listed until the next build (6 h at most, or Refresh).
+  - A download that imports only part of an album also drops the row; the next build lists it again.
+  - An import that repaired an existing album in place or found it already complete leaves its row listed until the next build.
+  - If Lidarr removes one album and adds another between two page reads, `totalRecords` does not move and a row can still be missed until the next build.
+- Desired state: Lidarr `history/since` to drop rows Lidarr imported itself, if still needed.
+- Priority: P3. Status: Open (narrowed).
+
+## ARCH-031 Cold `/api/library` Build Cost
+
+- Affected area: `backend/library_service.py` `_build_library_payload` (cold `GET /api/library`, the 2-minute cache warmer, and the Find Music build's library read), `backend/beets_adapter.py` `get_items`/`get_albums`.
+- Evidence: the live instance took about 98 s for a cold `GET /api/library` on 0.5.0 and 0.6.0. In code, the builder did one `stat` per Beets item (`Path.exists`), one per walked entry (`is_dir`/`is_file` after `iterdir`), and up to six cover-art `exists` probes per album folder, and it matched missing-file buckets by scanning every bucket for every album folder and every artist (quadratic).
+- Measured on a local synthetic fixture (`python:3.13-slim` container, fixture in the container's own /tmp, Beets faked, so the Beets HTTP fetch is not included):
+
+  | Fixture | Before | After | `stat` calls before / after |
+  |---|---|---|---|
+  | 1,000 artists, 5,000 albums, 60,000 items, 0 missing | 5.8 s | 3.6 s | 161,001 / 1 |
+  | 1,000 artists, 5,000 albums, 64,000 items, 4,000 missing albums | 10.0 s | 4.4 s | 165,001 / 4,001 |
+  | 2,000 artists, 10,000 albums, 128,000 items, 8,000 missing albums | 27.3 s | 9.0 s | 330,001 / 8,001 |
+
+  The payload is byte-identical before and after on a fixture with cover art, disc sub-folders, loose files, not-imported extras and missing tracks in present folders.
+- Fixed in 0.7.0: each folder is listed once with `os.scandir` and that listing answers both the item existence check and the walk (only items not found in their folder's listing are `stat`-ed). Missing buckets are indexed by artist.
+- Current risk:
+  - On a cold page cache each `stat` reaches the disk, so the remaining cost on a NAS is about one directory read per folder plus one `stat` per missing item. It was not measured on the live instance.
+  - The two full Beets reads (`GET /item/` and `GET /album/` through the webmanager plugin) serialise every item and album on each build. They were not measurable locally and are likely a large part of the remaining time on a big library. A fields-limited plugin endpoint would cut that (owner beets-integration-engineer).
+  - The build still runs on the request thread whenever the cache is older than `_LIB_CACHE_TTL` (180 s). The 2-minute warmer (`maintenance_service._auto_scan_tick`) runs only with `BEETS_ENABLE_LEGACY_LOCAL_SCAN`, which is off by default, so with default settings the first `GET /api/library` after any 3-minute gap pays the whole build, not only the first one after a restart.
+- Desired state: stale-while-revalidate as for the Find Music list (serve the last payload, rebuild in a `job_engine` job), and Beets reads that fetch only the fields the builder uses.
+- Priority: P2. Status: Open (narrowed).
+
+## ARCH-032 Release Group Fill Rollback Blanks Embedded Tags (0.7.0, QA #401 N-d)
+
+- Affected area: `backend/missing_mb_batch.py` (Release Group fill), `backend/composite_workflows.py` `rollback_album_metadata`.
+- Evidence: the Missing IDs batch fills `mb_releasegroupid` on an album that has a Release ID but no Release Group through a Metadata Update with tag writes. Rolling that update back restores the album's captured value (empty) and rewrites tags, so an item whose file tag already carried the same Release Group loses it.
+- Current risk: low. The fill is refused when any item carries a different Release Group, so only an identical embedded value can be blanked, and only by an explicit rollback.
+- Desired state: rollback restores each item's own captured value instead of the album's.
+- Priority: P3. Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
@@ -245,6 +293,21 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Resolution: `backend.security.open_public_url()`/`resolve_public_target()`. Public addresses only, allowlist ignored, socket pinned to the validated address, TLS verified against the original hostname, every redirect hop re-validated. Callers use the dedicated entry point `provider_boundary.opened_public(provider, url, ...)`, which has no path to `urlopen`. A first version passed an `opener=` hook into `opened()`, and CodeQL flagged it as #1351/#1352 because the same parameter could be `urlopen`. Regression tests: `tests/test_reference_url_ssrf.py`, `tests/test_artwork_url_ssrf.py`.
 - The #18 dismissal is superseded. Future alerts on these sinks must be checked against this policy, not against `validate_outbound_url()`.
 - Status: Closed on the fix branch, pending CodeQL confirmation on the PR.
+
+## SEC-004 Batch Import Link Check Runs Before Beets, Not In It (0.7.0, #394)
+
+- Scope: the batch import's Stage 1 (`backend/ai_service.py` `_ai_batch_preimport_check`) and the webmanager plugin's `run_import`.
+- Risk: Web Manager checks the folder for symlinks, unreadable parts and its path below the configured root, and then asks Beets to import it. Between the check and the import (a time-of-check/time-of-use window), a process with write access to the downloads folder could swap a file or directory for a link. Beets' `sorted_walk` follows symlinked directories and reads audio by content, so a link planted in that window would be imported, moved or copied, and have tags written through it.
+- Mitigations today: the window is one folder's check-then-import; discovery, the check and Stage 2b's pinned import all refuse links; downloads roots are operator-controlled.
+- Fix: the plugin walks the import source (no link following, fail closed on errors) right before it starts the import session, and refuses a source with any link below the source root. This changes plugin behaviour, so it needs a `PLUGIN_VERSION` bump and a Beets restart (a MINOR release under the versioning policy).
+- Status: Open. Not a release blocker for 0.7.0.
+
+## SEC-005 Request Text Reaches The qBittorrent Scan Log Unescaped (0.7.0 security review F1, pre-existing)
+
+- Scope: `backend/acquisition_service.py`, the `qBittorrent scan: ...` job log line (`category`, `filter`, `search` from the request).
+- Risk (low): control characters in those request fields (newlines, ANSI escapes) are written to the job log as-is, so a caller can forge extra log lines or garble the Jobs page log view. No secret is logged and nothing executes.
+- Fix: strip or escape control characters from request text before it goes into job log lines (one shared helper for log formatting).
+- Status: Open. Not a release blocker for 0.7.0.
 
 ## SEC-001 Retained Plex Credential After Diagnostic Exposure
 

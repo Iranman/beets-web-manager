@@ -9,7 +9,7 @@ from __future__ import annotations
 import json, os, threading, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _s
+from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _app_logger, _s
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.import_reconciliation_service import _reconcile_pending_review_enqueue_item
 from backend.beets_adapter import BeetsUnavailableError
@@ -17,6 +17,7 @@ import backend.composite_workflows as composite_workflows
 from backend.serializers import REVIEW_ORIGIN_FIELDS, REVIEW_ORIGIN_LABELS, _normalize_review_origin_type, _review_origin_payload
 import hashlib
 from backend.serializers import _resolve_import_review_source_path
+import backend.serializers as _serializers
 from backend.ai_batch_state_service import _music_format_policy_review_note
 from backend.import_reconciliation_service import _MUSIC_FORMAT_POLICY_REVIEW_STATUS, _remaining_audio_files, _review_paths_equal
 
@@ -133,6 +134,9 @@ def _review_album_is_resolved(album_id: int) -> bool:
         return False
 
 
+_NO_AUDIO_NOT_RESOLVED = frozenset({"symlinked_audio", "unverifiable_folder"})
+
+
 def _review_folder_has_audio(folder_path: str) -> bool:
     raw = _s(folder_path).strip()
     if not raw:
@@ -152,7 +156,8 @@ def _review_folder_has_audio(folder_path: str) -> bool:
 
 
 def _review_path_is_resolved(folder_path: str,
-                             existing_album_ids: Optional[Iterable[Any]] = None) -> bool:
+                             existing_album_ids: Optional[Iterable[Any]] = None,
+                             *, no_audio_resolves: bool = True) -> bool:
     raw = _s(folder_path).strip()
     album_ids = []
     for value in existing_album_ids or []:
@@ -169,7 +174,7 @@ def _review_path_is_resolved(folder_path: str,
     if unique_ids and all(_review_album_is_resolved(aid) for aid in unique_ids):
         return True
 
-    if raw and not _review_folder_has_audio(raw):
+    if no_audio_resolves and raw and not _review_folder_has_audio(raw):
         return True
     return False
 
@@ -177,7 +182,13 @@ def _review_path_is_resolved(folder_path: str,
 def _pending_review_item_is_resolved(item: Dict[str, Any]) -> bool:
     suggestion = (item or {}).get("suggestion") or {}
     existing_ids = suggestion.get("existing_album_ids") or []
-    return _review_path_is_resolved(_s((item or {}).get("path", "")), existing_ids)
+    path = _s((item or {}).get("path", ""))
+    # A folder refused for linked or unreadable content has no audio pathlib
+    # can see (links are never followed); while it exists, "no audio" does
+    # not resolve its row (QA401-F1).
+    refused = _s(((item or {}).get("evidence") or {}).get("conflict")) in _NO_AUDIO_NOT_RESOLVED
+    keep = refused and bool(path.strip()) and os.path.lexists(path.strip())
+    return _review_path_is_resolved(path, existing_ids, no_audio_resolves=not keep)
 
 
 def _apply_review_origin(target: Dict[str, Any], origin: Dict[str, Any]) -> None:
@@ -370,12 +381,83 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
     return True
 
 
+# Folders Beets skipped during a Web Manager import. /webmanager/import runs
+# Beets' importer without an import log, so beet.log never names them. The
+# ledger lives here, beside the Pending Review store, so the one "folder is
+# done" hook (_remove_pending_review_for_path) can drop a folder from both.
+_IMPORT_SKIPPED_FILE = Path(os.environ["WEB_MANAGER_DATA_DIR"]) / "import_skipped.json"
+
+
+_import_skipped_lock = threading.Lock()
+
+
+def _load_recorded_import_skips() -> List[Dict[str, Any]]:
+    try:
+        rows = json.loads(_IMPORT_SKIPPED_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str) and r["path"].strip()]
+
+
+def _write_recorded_import_skips(rows: List[Dict[str, Any]]) -> None:
+    """Atomic write; the caller holds _import_skipped_lock."""
+    _IMPORT_SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _IMPORT_SKIPPED_FILE.with_name(_IMPORT_SKIPPED_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(rows, indent=2))
+    os.replace(tmp, _IMPORT_SKIPPED_FILE)
+
+
+def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:
+    """Replace the recorded skips under ``source`` with this import's skips:
+    one entry per folder, so a re-import never duplicates one and a folder
+    that has since imported drops out."""
+    src = _s(source)
+    now = int(time.time())
+    fresh: Dict[str, Dict[str, Any]] = {}
+    for r in skipped:
+        path = _s(r.get("path"))
+        if path:
+            fresh[path] = {"path": path, "reason": _s(r.get("reason")) or "not_matched",
+                           "source": src, "skipped_at": now}
+    with _import_skipped_lock:
+        kept = [r for r in _load_recorded_import_skips()
+                if r["path"] not in fresh and not Path(r["path"]).is_relative_to(src)]
+        try:
+            _write_recorded_import_skips((list(fresh.values()) + kept)[:1000])
+        except OSError as ex:
+            raise RuntimeError(f"Could not record skipped import folders ({type(ex).__name__}).") from ex
+
+
+def _forget_import_skip(folder_path: str) -> bool:
+    """Drop ``folder_path`` (and anything under it) from the skip ledger once
+    the folder is imported or resolved (QA #391 N1). File-only, no Beets
+    read; never raises, so it cannot fail the import that called it."""
+    raw = _s(folder_path).strip()
+    if not raw:
+        return False
+    target = Path(os.path.normpath(raw))
+    try:
+        with _import_skipped_lock:
+            rows = _load_recorded_import_skips()
+            kept = [r for r in rows if not Path(os.path.normpath(r["path"])).is_relative_to(target)]
+            if len(kept) == len(rows):
+                return False
+            _write_recorded_import_skips(kept)
+        return True
+    except Exception as ex:  # QA N1: never fail the import that called it
+        _app_logger.warning("could not update the import skip ledger: %s", type(ex).__name__)
+        return False
+
+
 def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] = None,
                                     *, decision_note: str = "removed after import or repair",
                                     log_note: str = "repaired/imported folder") -> bool:
     raw = _s(folder_path).strip()
     if not raw:
         return False
+    _forget_import_skip(raw)
 
     def _same_path(a: str, b: str) -> bool:
         if a == b:
@@ -485,6 +567,41 @@ def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
     return False
 
 
+def _trusted_stored_review_path(raw: Any) -> Optional[str]:
+    """A stored Pending Review path, normalized, when it is still inside an
+    approved Import Review root (or the library), is not a root itself, and
+    no symlink moves it outside every approved root or into the music
+    library from outside it; else None. The path is taken
+    literally (never URL-decoded, #387), so folder names with ``%``, ``+``
+    or backslashes keep working. Entries stored before POST /api/ai-pending-review
+    validated paths are re-checked here wherever an entry authorizes an
+    action, with no raw-text shortcut (security LOW-4)."""
+    text = _s(raw).strip()
+    if not text or chr(0) in text or not os.path.isabs(text):
+        return None
+    lexical = os.path.normpath(text)
+    try:
+        real = os.path.realpath(lexical)
+    except (OSError, ValueError):
+        return None
+    roots = [os.path.normpath(str(r)) for r in _serializers._import_review_cleanup_roots(allow_music=True)]
+
+    def _strictly_under(path: str, bases: List[str]) -> bool:
+        return any(path.startswith(b.rstrip(os.sep) + os.sep) for b in bases)
+
+    if lexical in roots or not _strictly_under(lexical, roots):
+        return None
+    # A symlink may move the folder to another approved root (#392 keeps that
+    # working); it must never move it outside every root or onto one.
+    real_roots = [os.path.realpath(r) for r in roots]
+    if real in real_roots or not _strictly_under(real, real_roots):
+        return None
+    # Security LOW-5: never into the music library from outside it.
+    music = os.path.normpath(str(MUSIC_ROOT))
+    into_music = _strictly_under(real, [os.path.realpath(music)]) and not _strictly_under(lexical, [music])
+    return None if into_music else lexical
+
+
 def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:
     folder_path = _s(folder_path).strip()
     if not folder_path or not _review_id_matches_path(review_item_id, folder_path):
@@ -495,7 +612,9 @@ def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:
         items = json.loads(_AI_PENDING_FILE.read_text())
         if not isinstance(items, list):
             return False
-        return any(_review_paths_equal(_s((item or {}).get("path", "")), folder_path) for item in items)
+        target = _trusted_stored_review_path(folder_path)
+        return target is not None and any(
+            _trusted_stored_review_path(_s((item or {}).get("path", ""))) == target for item in items)
     except Exception:
         return False
 

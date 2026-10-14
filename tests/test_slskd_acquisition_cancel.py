@@ -55,6 +55,8 @@ class AcquisitionCancelDuringSlskd(unittest.TestCase):
             mock.patch.object(acq, "_slskd_cleanup_failed_candidate_files"),
             # Any direct-source fallback fails fast instead of reaching the network.
             mock.patch.object(acq, "_slskd_fallback_methods", return_value=["ytdlp"]),
+            mock.patch.object(acq, "slskd_configured", return_value=True),
+            mock.patch.object(acq, "_direct_source_unavailable_reason", return_value=""),
             mock.patch.object(acq, "_ytdlp_album_download", side_effect=RuntimeError("fell back")),
         ]
         if stage == "search":

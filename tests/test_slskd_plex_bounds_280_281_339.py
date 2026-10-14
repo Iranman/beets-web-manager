@@ -203,16 +203,16 @@ class SlskdRequestFailureModeTests(unittest.TestCase):
 
     def test_rate_limit_and_unavailable_report_the_status(self):
         from tests.test_integrations_reliability import http_error
-        with self.assertRaisesRegex(RuntimeError, "HTTP 429$"):
+        with self.assertRaisesRegex(RuntimeError, r"HTTP 429 \(slskd is rate limiting requests\)$"):
             self._req(http_error(429))
         with self.assertRaisesRegex(RuntimeError, "HTTP 503$"):
             self._req([http_error(503), http_error(503)])
 
-    def test_timeout_and_malformed_data_raise(self):
+    def test_timeout_and_malformed_data_raise(self):  # ACQ-2: fixed texts
         import socket
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(RuntimeError, "^slskd GET /searches/x timed out$"):
             self._req([socket.timeout("slow"), socket.timeout("slow")])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(RuntimeError, "^slskd GET /searches/x returned an unexpected response$"):
             self._req([self._body(b"<html>not json")])
 
 

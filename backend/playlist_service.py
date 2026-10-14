@@ -4408,7 +4408,7 @@ def _playlist_download_methods(raw: Any = "") -> List[str]:
     for method in _download_method_list(raw_value or PLAYLIST_DOWNLOAD_METHODS):
         if method in {"slskd", "spotiflac", "ytdlp", "soundcloud"} and method not in methods:
             methods.append(method)
-    return methods or ["slskd", "spotiflac", "ytdlp", "soundcloud"]
+    return methods or ["slskd", "ytdlp", "soundcloud"]
 
 
 def _playlist_set_track_status(state: Dict[str, Any], track: Dict[str, Any],
