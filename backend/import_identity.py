@@ -70,7 +70,9 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     cover nested files too. Like ``_build_folder_evidence``, a symlinked file
     (or one reached through a symlinked directory) is not evidence; the flag
     reports that one exists, because a pinned Beets import would still pick
-    it up unproven (``beets.util.sorted_walk`` follows symlinked directories)."""
+    it up unproven (``beets.util.sorted_walk`` follows symlinked directories).
+    A folder or subfolder that cannot be resolved or listed also sets the
+    flag (fail closed): what it holds cannot be verified."""
     def is_link(p: Path) -> bool:
         return p.is_symlink() or os.path.isjunction(p) or p.resolve() != p
 
@@ -100,10 +102,14 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
             return True
         return False
 
+    walk_failed = []
+
     try:
         root = Path(folder).resolve(strict=True)
         files, linked = [], False
-        for dirpath, dirnames, filenames in os.walk(root):  # never descends links
+        # Fails closed like has_audio (QA394-F4): a folder or subfolder this
+        # process cannot list may still hold a link Beets would follow.
+        for dirpath, dirnames, filenames in os.walk(root, onerror=walk_failed.append):  # never descends links
             here = Path(dirpath)
             for name in list(dirnames):
                 if is_link(here / name):
@@ -117,9 +123,9 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
                     linked = True
                 elif p.is_file():
                     files.append(str(p))
-        return sorted(files, key=str.lower), linked
+        return sorted(files, key=str.lower), linked or bool(walk_failed)
     except OSError:
-        return [], False
+        return [], True
 
 
 def _acoustid_capability(statuses: Counter, files: int) -> str:

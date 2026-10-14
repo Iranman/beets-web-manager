@@ -200,6 +200,17 @@ class Stage1Tests(_Batch):
                          ("symlinked_audio", [str(Path(self.folders[0]) / "02.flac")]))
         self.assertEqual(folders[self.folders[1]]["status"], "imported")
 
+    def test_folder_without_readable_audio_is_unverifiable(self):
+        (Path(self.folders[0]) / "01.flac").unlink()
+        (Path(self.folders[0]) / "notes.txt").write_text("x")
+        _, folders = self.run_batch()
+        a = folders[self.folders[0]]
+        self.assertEqual((a["status"], a["failure_reason"]), ("review_created", "unverifiable_folder"))
+        self.assertEqual([c.args[0] for c in self.stubs["reimport_source"].call_args_list], [self.folders[1]])
+        # The shared helper fails closed when the folder cannot be resolved or listed (QA394-F4).
+        from backend.import_identity import _recursive_audio
+        self.assertEqual(_recursive_audio(str(self.tmp / "missing")), ([], True))
+
     def test_older_plugin_without_album_ids_is_not_verified(self):
         self.reimport[self.folders[0]] = {"ok": True, "albums_imported": 1, "imported_album_ids": None,
                                           "skipped": [], "not_matched": [], "not_matched_known": False}

@@ -2057,16 +2057,33 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         # even into the library): Beets never gets the folder. The identity
         # engine's walk also catches audio behind a symlinked directory, which
         # beets.util.sorted_walk follows (QA394-F3).
-        audio_files, has_linked_audio = _recursive_audio(folder)
-        if has_linked_audio:
-            # The link entries themselves (not descended), for the reviewer.
-            linked = sorted(str(p) for p in Path(folder).rglob("*") if p.is_symlink())
-            reason = "symlinked_audio: audio is reached through a symlink; import refused"
+        # A folder path that is (now) a symlink or runs through one -- swapped
+        # after discovery, or a stored path on recovery -- is refused the same
+        # way (QA394-F5). An unlistable folder or subfolder counts as linked
+        # (fail closed, QA394-F4).
+        def refuse(conflict: str, reason: str, paths: List[str]) -> None:
             log.append(f"  {reason}")
             review(plain_suggestion(reason),
-                   {"origin_step": "pre_import", "conflict": "symlinked_audio", "symlinked_paths": linked,
+                   {"origin_step": "pre_import", "conflict": conflict, "symlinked_paths": paths,
                     "ai_rank": None, "batch_job_id": batch_id},
-                   failure_reason="symlinked_audio", stage="done")
+                   failure_reason=conflict, stage="done")
+
+        if composite_workflows._has_symlink_component(folder) or Path(folder).resolve() != Path(folder):
+            refuse("symlinked_audio", "symlinked_audio: the folder path is or runs through a symlink; "
+                   "import refused", [folder])
+            return
+        audio_files, has_linked_audio = _recursive_audio(folder)
+        if has_linked_audio:
+            try:  # the link entries themselves (not descended), for the reviewer
+                linked = sorted(str(p) for p in Path(folder).rglob("*") if p.is_symlink())
+            except OSError:
+                linked = []
+            refuse("symlinked_audio", "symlinked_audio: audio is reached through a symlink, or part of "
+                   "the folder could not be read to rule that out; import refused", linked)
+            return
+        if not audio_files:
+            refuse("unverifiable_folder", "unverifiable_folder: no audio file Web Manager can read was found "
+                   "in this folder; import refused", [])
             return
         _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
         audio = len(audio_files)
