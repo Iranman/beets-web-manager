@@ -2626,7 +2626,9 @@ def _batch_write_album(album_id: int, proof: Dict[str, Any], log) -> Dict[str, A
         if not applied.get("ok") and applied.get("mutated") is False:
             raise missing_mb_batch.NotWritten(f"release group fill refused: {applied.get('code')}")
         if not applied.get("ok"):
-            raise RuntimeError(f"release group fill failed: {applied.get('code') or applied.get('error')}")
+            err = RuntimeError(f"release group fill failed: {applied.get('code') or applied.get('error')}")
+            err.transaction_ids = [plan["operation_id"]]  # mutated: the row names it for rollback
+            raise err
         log.append(f"  album {album_id}: mb_releasegroupid set to {proof['write']['mb_releasegroupid']}")
         return {"changed": True, "transaction_ids": [plan["operation_id"]]}
     try:
@@ -2786,7 +2788,9 @@ def batch_ai_suggest():
     def _do(log, cancel_event=None):
         try:
             unmatched_res = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=False)
-            album_ids = [int(r["id"]) for r in unmatched_res.get("albums", [])]
+            # An album with a Release ID (missing only its Release Group) is never sent to AI:
+            # the Missing IDs batch fills its group from MusicBrainz.
+            album_ids = [int(r["id"]) for r in unmatched_res.get("albums", []) if not _s(r.get("mb_albumid")).strip()]
         except BeetsUnavailableError as ex:
             raise RuntimeError(f"Could not load unlinked albums: Beets engine unavailable: {ex}")
         except Exception as ex:

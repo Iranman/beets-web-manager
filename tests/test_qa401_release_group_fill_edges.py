@@ -66,12 +66,23 @@ class RealLookupTests(_Fill):
         self.assertEqual((proof["proven"], proof["write"]), (True, {"mb_releasegroupid": RG}))
 
     def test_provider_down_timeout_and_rate_limit_fail_closed(self):
-        for exc in (TimeoutError("timed out"), OSError("connection refused"), RuntimeError("429")):
-            with self.subTest(type(exc).__name__):
+        # QA-N1 N-e: an outage is evidence_unavailable, never a "no group" answer.
+        import urllib.error
+        outages = (TimeoutError("timed out"), OSError("connection refused"), RuntimeError("429"),
+                   urllib.error.HTTPError("u", 429, "rate", {}, None), urllib.error.HTTPError("u", 503, "x", {}, None))
+        for exc in outages:
+            with self.subTest(repr(exc)):
                 self.w.rows.clear()
                 self.lookup_answer(exc=exc)
                 proof = mb.prove_row(self.album())
-                self.assertEqual((proof["proven"], proof["reasons"]), (False, ["release_group_not_resolved"]))
+                self.assertEqual((proof["proven"], proof["reasons"], proof["write"]),
+                                 (False, ["evidence_unavailable"], {}))
+
+    def test_release_not_found_is_a_genuine_no_group(self):
+        import urllib.error
+        self.lookup_answer(exc=urllib.error.HTTPError("u", 404, "not found", {}, None))
+        proof = mb.prove_row(self.album())
+        self.assertEqual((proof["proven"], proof["reasons"]), (False, ["release_group_not_resolved"]))
 
     def test_malformed_responses_fail_closed(self):
         bodies = {"not json": b"<html>", "list": b"[]", "no group": b'{"id": "x"}',
@@ -334,12 +345,9 @@ class LinkedFoldersEndToEnd(e2e._Roots):
         self.assertFalse(any("outside" in f for f in imported))
         self.assertIn("LinkedFile", [p["folder_name"] for p in pending])
 
-    @unittest.expectedFailure
     def test_review_rows_for_linked_folder_and_dangling_link_survive_the_queue_read(self):
-        # QA401-F1 (open): Stage 1 queues these rows, but the pending store's
-        # next read prunes them as "resolved" because the folder has no audio
-        # pathlib can see (_review_folder_has_audio does not follow links).
-        # Remove this decorator once the rows persist.
+        # QA401-F1: the pending store must not prune these rows as "resolved"
+        # because the folder has no audio pathlib can see.
         self.layout()
         from backend.pending_review_store import _load_pending_reviews
         names = [p["folder_name"] for p in _load_pending_reviews()]

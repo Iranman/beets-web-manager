@@ -2570,11 +2570,14 @@ def _uuid_or_blank(value: Any) -> str:
     return text if _MB_UUID.match(text) else ""
 
 
-def _release_group_for_release(release_id: str) -> str:
+def _release_group_for_release(release_id: str, strict: bool = False) -> str:
     """Authoritative Release Group of a Release from MusicBrainz ("" if
     unknown). Same lookup as musicbrainz_service._mb_release_group_for_release,
-    which this adapter-layer module cannot import."""
-    from helpers_mb import _fetch_mb_release_candidate
+    which this adapter-layer module cannot import. ``strict``: an outage
+    raises instead of returning "" (helpers_mb._fetch_mb_release_group_strict)."""
+    from helpers_mb import _fetch_mb_release_candidate, _fetch_mb_release_group_strict
+    if strict:
+        return _s(_fetch_mb_release_group_strict(release_id)).strip().lower()
     return _s((_fetch_mb_release_candidate(release_id) or {}).get("mb_releasegroupid") or "").strip().lower()
 
 

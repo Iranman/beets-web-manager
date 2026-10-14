@@ -5,6 +5,7 @@ of that Release ID. Every other case is refused with a reason.
 """
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import backend.composite_workflows as cw
@@ -58,7 +59,7 @@ class ProofTests(_FillCase):
         proof = mb.prove_row(self.album(mb_albumid=REL))
         self.assertTrue(proof["proven"], proof["reasons"])
         self.assertEqual(proof["write"], {"mb_releasegroupid": RG})
-        self.lookup.assert_called_once_with(REL)
+        self.lookup.assert_called_once_with(REL, strict=True)
         self.w.ai_key.assert_not_called()
         # The fill needs no folder identification (no AcoustID/fingerprint run).
         self.assertEqual(proof["evidence"]["sources"], ["musicbrainz_release_lookup"])
@@ -151,6 +152,90 @@ class RouteWriterTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 rl._batch_write_album(7, {"write": {"mb_releasegroupid": RG}}, [])
             self.assertNotIsInstance(ctx.exception, mb.NotWritten)
+
+
+class FailedFillRecordsItsTransaction(_FillCase):
+    def setUp(self):
+        import routes_library  # noqa: F401  (first import outside the _World patches)
+        super().setUp()
+
+    def test_mutated_failure_names_the_metadata_update_on_the_row(self):
+        import routes_library as rl
+        self.album()
+        store = TransactionStore(tempfile.mkdtemp(prefix="rgfill_"))
+        preview = mb.run_preview(list(self.w.rows), [], store=store)
+        with mock.patch.object(rl.composite_workflows, "plan_album_metadata",
+                               return_value={"ok": True, "operation_id": "op9"}), \
+                mock.patch.object(rl.composite_workflows, "apply_album_metadata",
+                                  return_value={"ok": False, "mutated": True, "code": "metadata_apply_failed"}):
+            res = mb.run_apply(preview["transaction_id"], apply_album=rl._batch_write_album, apply_item=None,
+                               log=[], store=store)
+        self.assertEqual((res["status"], res["rows"][0]["status"]), ("Failed", "write_failed"))
+        self.assertEqual(res["rows"][0]["transaction_ids"], ["op9"])
+
+
+class LinkedReviewRowsAreNotAutoResolved(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rgfill_store_"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        p = mock.patch("backend.pending_review_store._library_album_ids_for_folder", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def resolved(self, conflict, exists=True):
+        from backend.pending_review_store import _pending_review_item_is_resolved
+        folder = self.tmp / f"Album-{conflict}-{exists}"
+        if exists:
+            folder.mkdir(exist_ok=True)
+        item = {"path": str(folder), "suggestion": {}, "evidence": {"conflict": conflict} if conflict else {}}
+        return _pending_review_item_is_resolved(item)
+
+    def test_refused_folder_without_visible_audio_stays_while_it_exists(self):
+        self.assertFalse(self.resolved("symlinked_audio"))
+        self.assertFalse(self.resolved("unverifiable_folder"))
+
+    def test_other_rows_and_deleted_folders_still_resolve(self):
+        self.assertTrue(self.resolved(""))
+        self.assertTrue(self.resolved("symlinked_audio", exists=False))
+
+
+class OtherUnmatchedCallers(unittest.TestCase):
+    """get_unmatched_review_items now also returns albums that have a Release
+    ID but no Release Group; its two other callers keep their old meaning."""
+
+    ALBUMS = {"albums": [{"id": 1, "mb_albumid": ""}, {"id": 2, "mb_albumid": REL}], "singletons": []}
+
+    def test_unmatched_tracks_excludes_albums_with_a_release_id(self):
+        import os
+        import app as app_module
+        with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}), \
+                mock.patch.object(cw, "get_unmatched_review_items", return_value=self.ALBUMS), \
+                mock.patch.object(cw, "find_all_items_by_album_id",
+                                  side_effect=lambda aid: [{"id": aid * 10, "mb_trackid": "", "added": aid}]):
+            body = app_module.app.test_client().get("/api/unmatched-tracks").get_json()
+        self.assertEqual([t["id"] for t in body["tracks"]], [10])
+
+    def test_batch_ai_suggest_never_asks_ai_for_a_release_group_row(self):
+        import os
+        import app as app_module
+        import routes_library as rl
+        asked = []
+
+        def run_now(fn, **_kw):
+            fn([])
+            return mock.Mock(job_id="j")
+        with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}), \
+                mock.patch.object(rl, "_ai_api_key", return_value="k"), \
+                mock.patch.object(cw, "get_unmatched_review_items", return_value=self.ALBUMS), \
+                mock.patch.object(rl, "_load_album_mb_suggestions", return_value={}), \
+                mock.patch.object(rl.lib, "get_album", side_effect=lambda aid: mock.Mock(albumartist="A", album="B")), \
+                mock.patch.object(rl, "_ai_suggest_album_internal",
+                                  side_effect=lambda album, log, existing_album_id: asked.append(existing_album_id)
+                                  or {"suggestion": {}, "evidence": {}}), \
+                mock.patch.object(rl, "_get_ai_batch_store"), \
+                mock.patch.object(rl.jobs, "start_python", side_effect=run_now):
+            app_module.app.test_client().post("/api/albums/batch-ai-suggest", json={})
+        self.assertEqual(asked, [1])
 
 
 if __name__ == "__main__":
