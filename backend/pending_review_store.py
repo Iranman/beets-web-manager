@@ -134,6 +134,9 @@ def _review_album_is_resolved(album_id: int) -> bool:
         return False
 
 
+_NO_AUDIO_NOT_RESOLVED = frozenset({"symlinked_audio", "unverifiable_folder"})
+
+
 def _review_folder_has_audio(folder_path: str) -> bool:
     raw = _s(folder_path).strip()
     if not raw:
@@ -153,7 +156,8 @@ def _review_folder_has_audio(folder_path: str) -> bool:
 
 
 def _review_path_is_resolved(folder_path: str,
-                             existing_album_ids: Optional[Iterable[Any]] = None) -> bool:
+                             existing_album_ids: Optional[Iterable[Any]] = None,
+                             *, no_audio_resolves: bool = True) -> bool:
     raw = _s(folder_path).strip()
     album_ids = []
     for value in existing_album_ids or []:
@@ -170,7 +174,7 @@ def _review_path_is_resolved(folder_path: str,
     if unique_ids and all(_review_album_is_resolved(aid) for aid in unique_ids):
         return True
 
-    if raw and not _review_folder_has_audio(raw):
+    if no_audio_resolves and raw and not _review_folder_has_audio(raw):
         return True
     return False
 
@@ -178,7 +182,13 @@ def _review_path_is_resolved(folder_path: str,
 def _pending_review_item_is_resolved(item: Dict[str, Any]) -> bool:
     suggestion = (item or {}).get("suggestion") or {}
     existing_ids = suggestion.get("existing_album_ids") or []
-    return _review_path_is_resolved(_s((item or {}).get("path", "")), existing_ids)
+    path = _s((item or {}).get("path", ""))
+    # A folder refused for linked or unreadable content has no audio pathlib
+    # can see (links are never followed); while it exists, "no audio" does
+    # not resolve its row (QA401-F1).
+    refused = _s(((item or {}).get("evidence") or {}).get("conflict")) in _NO_AUDIO_NOT_RESOLVED
+    keep = refused and bool(path.strip()) and os.path.lexists(path.strip())
+    return _review_path_is_resolved(path, existing_ids, no_audio_resolves=not keep)
 
 
 def _apply_review_origin(target: Dict[str, Any], origin: Dict[str, Any]) -> None:

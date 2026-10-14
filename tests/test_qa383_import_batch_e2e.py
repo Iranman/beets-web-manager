@@ -214,14 +214,31 @@ class ScanRootPathSafety(_Roots):
         self.symlink(self.dl / "Lib", self.music)
         self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl), []), [str(self.dl / "Real")])
 
-    def test_symlinked_audio_file_not_counted(self):
+    def test_folder_with_only_symlinked_audio_is_reported_never_imported(self):
+        # QA-N4: the folder is queued (not silently dropped), the link is
+        # logged by name, and Stage 1 refuses it as symlinked_audio.
         (self.outside / "01.flac").write_bytes(b"x")
         (self.dl / "Album").mkdir()
         try:
             (self.dl / "Album" / "01.flac").symlink_to(self.outside / "01.flac")
         except (OSError, NotImplementedError):
             self.skipTest("cannot create symlinks here")
-        self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl), []), [])
+        log = []
+        self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl), log), [str(self.dl / "Album")])
+        self.assertIn(f"symlink not followed, never imported: {self.dl / 'Album' / '01.flac'}", log)
+        _files, conflict = ai._ai_batch_preimport_check(str(self.dl / "Album"))
+        self.assertEqual(conflict["conflict"], "symlinked_audio")
+
+    def test_folder_with_only_symlinked_subfolder_is_reported_never_followed(self):
+        self.audio("Elsewhere/01.flac", base=self.outside)
+        (self.dl / "Album").mkdir()
+        self.symlink(self.dl / "Album" / "CD1", self.outside / "Elsewhere")
+        log = []
+        self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl), log), [str(self.dl / "Album")])
+        self.assertIn(f"symlink not followed, never imported: {self.dl / 'Album' / 'CD1'}", log)
+        self.assertFalse(any("Elsewhere" in line for line in log), log)  # never walked
+        _files, conflict = ai._ai_batch_preimport_check(str(self.dl / "Album"))
+        self.assertEqual(conflict["conflict"], "symlinked_audio")
 
     def test_disc_folder_directly_in_root_is_logged_not_dropped(self):
         self.audio("CD1/01.flac")

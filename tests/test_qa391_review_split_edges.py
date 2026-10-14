@@ -68,7 +68,8 @@ class MissingMbIdsRealCompositeTests(_ClientCase):
             {"id": 1, "album": "Multi", "albumartist": "Art", "added": 5000},
             {"id": 2, "album": "Plain", "albumartist": "Art", "added": 1500.5},
             {"id": 3, "album": "Old", "albumartist": "Art", "added": 10},
-            {"id": 9, "album": "Matched", "albumartist": "Art", "mb_albumid": "abc", "added": 9999},
+            {"id": 9, "album": "Matched", "albumartist": "Art", "mb_albumid": "abc",
+             "mb_releasegroupid": "def", "added": 9999},  # fully identified (QA-N1)
         ]
         self.adapter = _CountingAdapter(items, albums)
         self.patch("backend.composite_workflows.beets_adapter", new=self.adapter)

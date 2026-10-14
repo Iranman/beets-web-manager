@@ -275,6 +275,14 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: stale-while-revalidate as for the Find Music list (serve the last payload, rebuild in a `job_engine` job), and Beets reads that fetch only the fields the builder uses.
 - Priority: P2. Status: Open (narrowed).
 
+## ARCH-032 Release Group Fill Rollback Blanks Embedded Tags (0.7.0, QA #401 N-d)
+
+- Affected area: `backend/missing_mb_batch.py` (Release Group fill), `backend/composite_workflows.py` `rollback_album_metadata`.
+- Evidence: the Missing IDs batch fills `mb_releasegroupid` on an album that has a Release ID but no Release Group through a Metadata Update with tag writes. Rolling that update back restores the album's captured value (empty) and rewrites tags, so an item whose file tag already carried the same Release Group loses it.
+- Current risk: low. The fill is refused when any item carries a different Release Group, so only an identical embedded value can be blanked, and only by an explicit rollback.
+- Desired state: rollback restores each item's own captured value instead of the album's.
+- Priority: P3. Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).

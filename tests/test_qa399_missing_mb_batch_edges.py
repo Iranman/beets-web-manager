@@ -46,12 +46,19 @@ class ProofEdgeTests(_Case):
         self.w.album_items[1][1]["path"] = "Elsewhere/x.flac"
         self.assertEqual(mb.prove_row(row)["reasons"], ["items_outside_album_folder"])
 
-    def test_album_with_release_id_set_but_rg_empty_is_left_alone(self):
+    def test_album_with_release_id_set_but_rg_unresolved_is_left_alone(self):
+        # QA-N1: only a MusicBrainz release -> release-group lookup may fill it.
         row = self.w.add_album(1)
         self.w.albums[1].mb_albumid = REL
+        self.patch("backend.missing_mb_batch.composite_workflows._release_group_for_release", return_value="")
         proof = mb.prove_row(row)
         self.assertFalse(proof["proven"])
-        self.assertEqual(proof["reasons"], ["already_has_release_id"])
+        self.assertEqual((proof["reasons"], proof["write"]), (["release_group_not_resolved"], {}))
+
+    def test_album_with_release_id_and_rg_is_left_alone(self):
+        row = self.w.add_album(1)
+        self.w.albums[1].mb_albumid, self.w.albums[1].mb_releasegroupid = REL, RG
+        self.assertEqual(mb.prove_row(row)["reasons"], ["already_has_release_id"])
 
     def test_album_with_matching_rg_and_no_release_is_proven(self):
         row = self.w.add_album(1)

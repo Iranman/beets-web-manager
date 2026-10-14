@@ -511,6 +511,29 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
     return result[:limit]
 
 
+def _fetch_mb_release_group_strict(mb_id: str) -> str:
+    """Release Group id of a Release as MusicBrainz states it, or "" when
+    MusicBrainz answered without a usable one (not found, no group, malformed
+    body). A failure to get an answer (down, timeout, 429, 5xx) raises, so a
+    caller can tell an outage from a real "no group"."""
+    mb_id = (mb_id or "").strip().lower()
+    if not _MB_UUID_RE.match(mb_id):
+        return ""
+    req = urllib.request.Request(f"https://musicbrainz.org/ws/2/release/{mb_id}?inc=release-groups&fmt=json",
+                                 headers={"User-Agent": "BeetsWebControl/1.0"})
+    try:
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as r:
+            rel = json.loads(r.read())
+    except urllib.error.HTTPError as ex:
+        if ex.code in (400, 404):
+            return ""
+        raise
+    except ValueError:  # MusicBrainz answered, but not with JSON
+        return ""
+    group = rel.get("release-group") if isinstance(rel, dict) else None
+    return str(group.get("id") or "") if isinstance(group, dict) else ""
+
+
 def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
     """Fetch a single MB release by UUID and return a candidate dict.
 
