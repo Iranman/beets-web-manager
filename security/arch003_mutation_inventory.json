@@ -338,7 +338,7 @@
       "key": "backend/ai_service.py:_record_recent_import:6b38a7ebf342",
       "file": "backend/ai_service.py",
       "function": "_record_recent_import",
-      "line": 2549,
+      "line": 2554,
       "kind": "filesystem",
       "call_text": "_RECENT_IMPORTS_FILE.write_text(json.dumps(existing[:100], indent=2))",
       "classification": "APP_STATE",
