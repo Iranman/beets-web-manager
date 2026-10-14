@@ -538,7 +538,8 @@ def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] =
         return True
     except Exception as ex:
         if log is not None:
-            log.append(f"  Pending Review cleanup warning: {ex}")
+            # Type name only: the cleanup route returns this log (CodeQL #1425 class).
+            log.append(f"  Pending Review cleanup warning: {type(ex).__name__}")
     return False
 
 
