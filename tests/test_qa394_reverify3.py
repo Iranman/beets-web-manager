@@ -20,6 +20,7 @@ def setUpModule():
 
 
 class PartlyUnreadableFolder(_Batch):
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX permissions")
     def test_unreadable_subfolder_next_to_readable_audio_is_refused_not_imported_in_part(self):
         if os.geteuid() == 0:
             self.skipTest("root reads everything")

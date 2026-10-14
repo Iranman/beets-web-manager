@@ -24851,34 +24851,35 @@
    ]
   },
   {
-   "name": "_ai_batch_has_hardlinked_audio",
+   "name": "_has_hardlinked_file",
    "module": "backend/ai_service.py",
    "lines": [
     2035,
-    2042
+    2049
    ],
-   "size": 8,
-   "body_lines": 7,
+   "size": 15,
+   "body_lines": 10,
    "route": null,
    "mutation_capable": false,
-   "domain": "AI",
-   "desired_owner": "backend/ai_service.py",
-   "migration_status": "EXTRACTED",
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
    "callers": [
-    "_ai_batch_process_folder"
+    "_ai_batch_process_folder",
+    "_ai_import_folder"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": []
   },
   {
    "name": "_ai_batch_process_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2045,
-    2237
+    2052,
+    2245
    ],
-   "size": 193,
-   "body_lines": 186,
+   "size": 194,
+   "body_lines": 187,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -24893,7 +24894,6 @@
     "_ai_batch_already_in_library",
     "_ai_batch_commit",
     "_ai_batch_control",
-    "_ai_batch_has_hardlinked_audio",
     "_ai_batch_import_failure_outcome",
     "_ai_batch_mark_folder",
     "_ai_batch_preimport_check",
@@ -24901,6 +24901,7 @@
     "_ai_batch_review_suggestion",
     "_ai_batch_skip_reason",
     "_ai_import_folder",
+    "_has_hardlinked_file",
     "_invalidate_lib_cache",
     "_pending_review_has_path",
     "_preserve_torrent_source_path",
@@ -24914,8 +24915,8 @@
    "name": "_ai_batch_run_folders",
    "module": "backend/ai_service.py",
    "lines": [
-    2240,
-    2284
+    2248,
+    2292
    ],
    "size": 45,
    "body_lines": 41,
@@ -24940,8 +24941,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2287,
-    2299
+    2295,
+    2307
    ],
    "size": 13,
    "body_lines": 12,
@@ -24964,8 +24965,8 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2302,
-    2360
+    2310,
+    2368
    ],
    "size": 59,
    "body_lines": 55,
@@ -24990,8 +24991,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2363,
-    2500
+    2371,
+    2508
    ],
    "size": 138,
    "body_lines": 137,
@@ -25030,8 +25031,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2513,
-    2531
+    2521,
+    2539
    ],
    "size": 19,
    "body_lines": 16,
@@ -25050,8 +25051,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2534,
-    2556
+    2542,
+    2564
    ],
    "size": 23,
    "body_lines": 19,
@@ -25078,11 +25079,11 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2559,
-    2687
+    2567,
+    2700
    ],
-   "size": 129,
-   "body_lines": 122,
+   "size": 134,
+   "body_lines": 126,
    "route": null,
    "mutation_capable": true,
    "domain": "AI",
@@ -25096,6 +25097,7 @@
     "_auto_merge_case_duplicate_artist_folder",
     "_fetch_artwork_after_retag",
     "_fetch_mb_release_tracklist",
+    "_has_hardlinked_file",
     "_invalidate_lib_cache",
     "_preserve_torrent_source_path",
     "_record_ai_match",
@@ -25110,8 +25112,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2690,
-    2724
+    2703,
+    2737
    ],
    "size": 35,
    "body_lines": 25,

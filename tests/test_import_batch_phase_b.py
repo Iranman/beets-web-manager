@@ -263,7 +263,7 @@ class PreImportCheckTests(_Batch):
         opts = {c.args[0]: c.args[1] for c in self.stubs["reimport_source"].call_args_list}
         self.assertEqual((opts[self.folders[0]]["copy"], opts[self.folders[0]]["move"]), (True, False))
         self.assertEqual((opts[self.folders[1]]["copy"], opts[self.folders[1]]["move"]), (False, True))
-        self.assertTrue(any("Hardlinked audio" in line for line in self.log))
+        self.assertTrue(any("Hardlinked source" in line for line in self.log))
 
     def test_hardlinked_audio_is_copied_in_the_pinned_import_too(self):
         try:
@@ -274,6 +274,57 @@ class PreImportCheckTests(_Batch):
         self.ident = identity(True)
         self.run_batch()
         self.assertIs(self.stubs["plan"].call_args.args[0]["use_move"], False)
+
+    def test_linked_empty_directory_is_refused(self):
+        # N8: the target can be filled or re-pointed before Beets walks it.
+        (self.tmp / "empty").mkdir()
+        self.link(Path(self.folders[0]) / "Scans", self.tmp / "empty", is_dir=True)
+        _, folders = self.run_batch()
+        self.assertEqual(folders[self.folders[0]]["failure_reason"], "symlinked_audio")
+        self.assertEqual(self.beets_folders(), [self.folders[1]])
+
+    def test_hardlinked_non_audio_file_means_copy(self):
+        # N11: Beets moves every file in the folder, not only audio.
+        cover = Path(self.folders[0]) / "cover.jpg"
+        cover.write_bytes(b"jpg")
+        try:
+            os.link(cover, self.tmp / "seeding.jpg")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create hardlinks here")
+        self.run_batch()
+        opts = {c.args[0]: c.args[1] for c in self.stubs["reimport_source"].call_args_list}
+        self.assertEqual((opts[self.folders[0]]["copy"], opts[self.folders[0]]["move"]), (True, False))
+
+    def test_pinned_import_rechecks_hardlinks_itself(self):
+        # N10: Stage 2b does not reuse Stage 1's answer; a hardlink made after
+        # Stage 1 moved nothing still forces a copy, logged as such.
+        def stage1(folder, opts, timeout):
+            if folder == self.folders[0]:
+                os.link(Path(folder) / "01.flac", self.tmp / "late.flac")
+                return skipped(folder)
+            return imported([7])
+        self.stubs["reimport_source"].side_effect = stage1
+        self.ident = identity(True)
+        self.folders = self.folders[:1]
+        try:
+            self.run_batch()
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create hardlinks here")
+        opts = self.stubs["reimport_source"].call_args.args[1]
+        self.assertEqual((opts["copy"], opts["move"]), (False, True))
+        self.assertIs(self.stubs["plan"].call_args.args[0]["use_move"], False)
+        self.assertTrue(any("Hardlinked source" in line for line in self.log), self.log)
+        self.assertFalse(any("[torrent]" in line for line in self.log), self.log)
+
+    def test_non_batch_pinned_import_copies_hardlinked_source(self):
+        try:
+            os.link(Path(self.folders[0]) / "01.flac", self.tmp / "seeding.flac")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create hardlinks here")
+        log = []
+        ai._ai_import_folder(self.folders[0], REL, {}, log)
+        self.assertIs(self.stubs["plan"].call_args.args[0]["use_move"], False)
+        self.assertFalse(any("[torrent]" in line for line in log), log)
 
     def test_symlinked_import_root_with_normal_folders_imports(self):
         real = self.tmp / "real_downloads"

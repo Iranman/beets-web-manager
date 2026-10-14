@@ -13,6 +13,7 @@ evidence builder there). Only layer-5 workflows and routes may import it.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from pathlib import Path
@@ -33,7 +34,7 @@ from helpers_mb import _mb_release_search, _resolve_release_group_to_release
 #: MusicBrainz tracklist fetch and a preflight).
 MAX_RELEASES = 10
 
-# Directory entries the symlink-target audio probe may visit per folder (#381).
+# Directory entries the (diagnostic) symlink-target probe may visit per folder (#381).
 _LINKED_AUDIO_PROBE_MAX_ENTRIES = 20_000
 
 _EMBEDDED_KEYS = {
@@ -71,8 +72,10 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     (or one reached through a symlinked directory) is not evidence; the flag
     reports that one exists, because a pinned Beets import would still pick
     it up unproven (``beets.util.sorted_walk`` follows symlinked directories).
-    Any linked file counts, whatever its name, and so does a linked directory
-    holding any file: Beets recognises audio by content, not extension.
+    Any linked file counts, whatever its name, and so does every linked or
+    junction directory, empty target included: Beets recognises audio by
+    content, and a target can be filled or re-pointed before Beets walks it
+    (QA394-B1, N8). What a linked target holds is only logged (debug).
     A folder or subfolder that cannot be resolved or listed also sets the
     flag (fail closed): what it holds cannot be verified."""
     def is_link(p: Path) -> bool:
@@ -81,8 +84,8 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
     budget = [_LINKED_AUDIO_PROBE_MAX_ENTRIES]
 
     def has_audio(top: Path) -> bool:  # follows links; `seen` guards loops
-        # Fails closed: a link target too big to scan within the shared entry
-        # budget, or one that cannot be read, counts as linked audio (#381).
+        # Diagnostics only (N8): a target too big for the shared entry budget,
+        # or unreadable, reports as holding files (#381).
         seen = set()
 
         def _raise(exc: OSError) -> None:
@@ -118,7 +121,11 @@ def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
             for name in list(dirnames):
                 if is_link(here / name):
                     dirnames.remove(name)
-                    linked = linked or has_audio(here / name)
+                    linked = True  # whatever the target holds (N8)
+                    if _app_logger.isEnabledFor(logging.DEBUG):
+                        _app_logger.debug("Linked folder %s: target %s", here / name,
+                                          "holds files (or is too large or unreadable to list)"
+                                          if has_audio(here / name) else "is empty")
             for name in filenames:
                 p = here / name
                 # Every linked file, before the extension filter (QA394-B1):

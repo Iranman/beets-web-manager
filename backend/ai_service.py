@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import hashlib, json, os, re, threading, time, uuid
+import hashlib, json, os, re, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from pathlib import Path
@@ -2032,14 +2032,21 @@ def _ai_batch_preimport_check(folder: str):
     return audio_files, None
 
 
-def _ai_batch_has_hardlinked_audio(audio_files: List[str]) -> bool:
-    for f in audio_files:
-        try:
-            if os.stat(f).st_nlink > 1:
+def _has_hardlinked_file(folder: str) -> bool:
+    """True when any regular file under ``folder`` (any name, not only audio)
+    shares its inode with another path, e.g. a seeding torrent or a Lidarr
+    hardlink: a move with tag writes would rewrite the other copy (QA394-L2,
+    N11). A file or folder that cannot be checked also counts: copy, never move."""
+    failed: List[OSError] = []
+    for dirpath, _dirnames, filenames in os.walk(folder, onerror=failed.append):
+        for name in filenames:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
                 return True
-        except OSError:
-            return True  # cannot tell: copy, never move
-    return False
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                return True
+    return bool(failed)
 
 
 def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_event=None,
@@ -2119,11 +2126,11 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
                     "ai_rank": None, "batch_job_id": batch_id},
                    failure_reason=conflict["conflict"], stage="done")
             return
-        if not preserve and _ai_batch_has_hardlinked_audio(audio_files):
+        if not preserve and _has_hardlinked_file(folder):
             # Lidarr hardlinks imports and a seeding torrent shares inodes: a
             # move with write would rewrite the other copy's tags (QA394-L2).
             preserve = True
-            log.append("  Hardlinked audio (another copy shares these files): Beets copies instead of moving.")
+            log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
         log.append(f"  Stage 1: Beets import ({'copy' if preserve else 'move'})")
         _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
         audio = len(audio_files)
@@ -2206,7 +2213,8 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     mark(current_step="Stage 2b: pinned Beets import", stage="pinned_import", **found)
     log.append(f"  Stage 2b: every file proven; Beets import pinned to release {release_id}")
     try:
-        out = _ai_import_folder(folder, release_id, {}, log, cancel_event, copy_source=preserve)
+        # Re-checks torrent and hardlinks itself right before planning (N10).
+        out = _ai_import_folder(folder, release_id, {}, log, cancel_event)
         aid = int(out["album_id"])
         # post_conditions: beets_strong_match (quiet_fallback skip in the
         # Apply) and single_new_album_with_release_group (the Apply checks one
@@ -2561,12 +2569,14 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     """Import a folder as a specific MB release through Beets' own importer
     (confirmed import), which tags, writes and places the files. Web Manager
     does not retag the result (ARCH-024). A preserved torrent source is
-    copied, never moved; ``copy_source`` forces a copy too (hardlinked audio).
+    copied, never moved, and so is a folder holding a hardlinked file (checked
+    right before planning, N10); ``copy_source`` forces a copy too.
     Runs directly -- safe for background threads."""
-    preserve_torrent_source = copy_source or _preserve_torrent_source_path(folder_path)
-    if preserve_torrent_source:
+    torrent_source = _preserve_torrent_source_path(folder_path)
+    if torrent_source:
         log.append("  [torrent] Protected source detected; Beets copies it, "
                    "leaving the qBittorrent source in place.")
+    preserve_torrent_source = copy_source or torrent_source
 
     # ── Step 1: confirmed_import_v1 (Plan -> Apply) with the AI-reviewed,
     # human/AI-approved release ──────────────────────────────────────────
@@ -2612,6 +2622,9 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
                            "import could not be verified. Import was not started.")
     log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
 
+    if not preserve_torrent_source and _has_hardlinked_file(folder_path):
+        preserve_torrent_source = True
+        log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
     plan_res = composite_workflows.plan_confirmed_import({
         "source_folder": folder_path,
         "mb_albumid": mb_albumid,

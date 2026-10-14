@@ -213,13 +213,13 @@ class SymlinkEdges(_FolderFixture):
         self.assertTrue(linked)
         self.assertEqual(len(files), 4)  # real files counted once, none via links
 
-    def test_symlinked_directory_blocks_only_when_it_holds_a_file(self):
-        # QA394-B1: Beets sniffs content, so a linked "cover.jpg" may be audio.
+    def test_symlinked_directory_blocks_even_when_empty(self):
+        # N8 / sec I6: every linked directory blocks; an empty target can be
+        # filled or re-pointed before Beets walks it.
         outside = Path(self.tmp.name) / "art"
         (outside / "empty").mkdir(parents=True)
         self._link(self.folder / "Scans", outside, is_dir=True)
-        auto = self.identify()["auto_import"]
-        self.assertTrue(auto["eligible"], auto)
+        self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
         (outside / "cover.jpg").write_bytes(b"synthetic")
         self.assertNotEligible(self.identify(), "folder_conflict:symlinked_audio_file")
 
@@ -231,12 +231,18 @@ class SymlinkEdges(_FolderFixture):
         for i in range(12):  # empty folders: any file would block (QA394-B1)
             (outside / f"scan{i}").mkdir()
         self._link(self.folder / "Scans", outside, is_dir=True)
+        # N8: the link blocks either way; the bounded probe only feeds the
+        # debug diagnostic.
         from unittest import mock
-        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", 5):
+        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", 5), \
+                self.assertLogs(ii._app_logger, "DEBUG") as logs:
             files, linked = ii._recursive_audio(str(self.folder))
         self.assertEqual((len(files), linked), (3, True))
-        files, linked = ii._recursive_audio(str(self.folder))  # default budget: no audio
-        self.assertEqual((len(files), linked), (3, False))
+        self.assertIn("too large", " ".join(logs.output))
+        with self.assertLogs(ii._app_logger, "DEBUG") as logs:  # default budget
+            files, linked = ii._recursive_audio(str(self.folder))
+        self.assertEqual((len(files), linked), (3, True))
+        self.assertIn("is empty", " ".join(logs.output))
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "needs a non-root POSIX user")
     def test_unreadable_dir_under_link_fails_closed(self):

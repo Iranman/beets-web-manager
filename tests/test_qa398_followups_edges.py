@@ -35,8 +35,12 @@ class LinkProbeBudget(_FolderFixture):
             self.skipTest("symlinks not supported here")
 
     def _linked(self, budget):
-        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", budget):
-            return ii._recursive_audio(str(self.folder))[1]
+        # N8: every linked folder blocks; the budget bounds only the diagnostic
+        # probe, so report whether the probe gave up (or found files).
+        with mock.patch.object(ii, "_LINKED_AUDIO_PROBE_MAX_ENTRIES", budget), \
+                self.assertLogs(ii._app_logger, "DEBUG") as logs:
+            self.assertTrue(ii._recursive_audio(str(self.folder))[1])
+        return any("holds files" in line for line in logs.output)
 
     def test_budget_boundary_is_exact(self):
         self._linked_dir("Scans", 6)  # top: 1 + 6 entries, then 6 x 1 = 13
@@ -57,7 +61,7 @@ class LinkProbeBudget(_FolderFixture):
             os.symlink(outside, self.folder / "Loop", target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest("symlinks not supported here")
-        self.assertFalse(ii._recursive_audio(str(self.folder))[1])
+        self.assertFalse(self._linked(ii._LINKED_AUDIO_PROBE_MAX_ENTRIES))  # probe terminates: empty
 
 
 class RefreshReuseLimits(_CacheCase):
