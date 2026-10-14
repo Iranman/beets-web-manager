@@ -64,7 +64,16 @@ const REASON_LABELS: Record<string, string> = {
   symlinked_item_path: "a track's file is a symlink",
   symlinked_audio_in_folder: 'the album folder holds symlinked audio',
   folder_files_mismatch: "the folder's audio files do not match the album's tracks",
+  release_group_not_resolved: "MusicBrainz did not return a release group for this album's release",
+  embedded_release_group_conflict: "A track's tags name a different release group",
+  item_release_id_conflict: "A track's tags name a different release",
 };
+
+/** Preview chip: a Release Group fill keeps the album's Release ID, so it is not a full match. */
+function previewChipLabel(row: MissingMbPreviewRow) {
+  if (!row.proven) return 'Needs review';
+  return row.evidence?.fill === 'release_group' ? 'Add release group (keeps release)' : 'Proven';
+}
 
 /** The persisted job record redacts the token; such a preview cannot be applied. */
 const REDACTED_TOKEN = '[REDACTED]';
@@ -396,8 +405,10 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
               Write MusicBrainz IDs to {plural(provenKinds.albums, 'album')} and {plural(provenKinds.tracks, 'track')}?
             </DialogTitle>
             <p className="mt-2 text-sm leading-6 text-zinc-400">
-              This changes your library. Each album gets its Release Group and Release ID, then its tags are written and its
-              files may be renamed or moved by your Beets path settings. Each track gets its Recording ID. Every row is
+              This changes your library. An album with no Release ID gets its Release Group and Release ID, then its tags
+              are written and its files may be renamed or moved by your Beets path settings. An album that already has a
+              Release ID keeps it and gets only its Release Group, written to its tags; its files are not moved. Each track
+              gets its Recording ID. Every row is
               checked again first; a row whose evidence changed is skipped. The first failed write stops the batch. Rows
               that need review are not touched.
             </p>
@@ -420,7 +431,7 @@ function PreviewRows({ rows, label }: { rows: MissingMbPreviewRow[]; label: (id:
       {rows.map((row) => (
         <li key={row.row_id} className="rounded border border-graphite-700 px-2 py-1 text-sm">
           <div className="flex flex-wrap items-center gap-2">
-            <Chip size="small" color={row.proven ? 'success' : 'warning'} variant="outlined" label={row.proven ? 'Proven' : 'Needs review'} />
+            <Chip size="small" color={row.proven ? 'success' : 'warning'} variant="outlined" label={previewChipLabel(row)} />
             <span className="truncate text-zinc-200">{label(row.row_id)}</span>
           </div>
           <div className="text-xs text-zinc-400">{row.message}</div>
