@@ -64,6 +64,8 @@ def unmatched_tracks():
 
     tracks = []
     for a in review_data.get("albums", []):
+        if _s(a.get("mb_albumid")).strip():
+            continue  # has a Release ID, missing only its Release Group: not unmatched
         aid = int(a["id"])
         items = composite_workflows.find_all_items_by_album_id(aid)
         for item in items:

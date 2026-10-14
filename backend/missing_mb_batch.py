@@ -242,9 +242,9 @@ def _prove_release_group_fill(album_id: int, row_id: str, current: Dict[str, str
         reasons.append("item_release_id_conflict")
     if reasons:
         return _proof("album", album_id, row_id, reasons, {}, {"album_items": len(items)}, current)
-    # None on any MusicBrainz failure: fails closed, never guessed.
-    # A non-UUID answer is no answer: it must never be previewed as proven.
-    rgid = composite_workflows._uuid_or_blank(composite_workflows._release_group_for_release(release_id))
+    # An outage raises (prove_row: evidence_unavailable); "" is MusicBrainz's
+    # own "no group". A non-UUID answer is no answer: never previewed as proven.
+    rgid = composite_workflows._uuid_or_blank(composite_workflows._release_group_for_release(release_id, strict=True))
     embedded = sorted({_uuid(it.get("mb_releasegroupid")) for it in items} - {""})
     evidence: Dict[str, Any] = {"fill": "release_group", "release_id": release_id,
                                 "release_group_from_release": rgid, "embedded_release_groups": embedded,
@@ -481,6 +481,11 @@ def _verify_written(proof: Dict[str, Any]) -> bool:
     return bool(item) and _uuid(getattr(item, "mb_trackid", "")) == write["mb_trackid"]
 
 
+def _tx_ids(ex: BaseException) -> List[str]:
+    """Transactions a failed writer already committed (set on the exception)."""
+    return [_s(t) for t in getattr(ex, "transaction_ids", None) or [] if t]
+
+
 def _row_result(proof: Dict[str, Any], status: str, **extra: Any) -> Dict[str, Any]:
     return {"row_id": proof["row_id"], "kind": proof["kind"], "target_id": proof["target_id"],
             "status": status, "message": ROW_MESSAGES[status], "write": proof.get("write") or {}, **extra}
@@ -556,12 +561,12 @@ def run_apply(tx_id: str, *, apply_album: Callable[..., Dict[str, Any]], apply_i
                 log.append(f"{label}: writer refused before writing: {_redact_security_text(str(ex))[:200]}")
             except RecoveryRequired as ex:
                 stop = "recovery_required"
-                results.append(_row_result(proof, "recovery_required"))
+                results.append(_row_result(proof, "recovery_required", transaction_ids=_tx_ids(ex)))
                 log.append(f"{label}: RECOVERY REQUIRED: {_redact_security_text(str(ex))[:300]}")
             except Exception as ex:
                 recovery = "recovery required" in str(ex).lower()
                 stop = "recovery_required" if recovery else "write_failed"
-                results.append(_row_result(proof, stop))
+                results.append(_row_result(proof, stop, transaction_ids=_tx_ids(ex)))
                 log.append(f"{label}: ERROR: {_redact_security_text(str(ex))[:300]}")
         store.update(tx_id, metadata={"results": results})  # checkpoint after every row
         if update_state:
