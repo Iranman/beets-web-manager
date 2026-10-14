@@ -2220,12 +2220,14 @@ def match_album(aid):
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
-def _match_album_run(aid: int, mb_input: str, log) -> List[str]:
+def _match_album_run(aid: int, mb_input: str, log, *, release_selected_by_operator: bool = True) -> List[str]:
     """The Match album writer: validate the album against one MusicBrainz
     release, then stamp it, sync tracks, write tags and relocate through the
     engine transactions, rolling metadata back if a later stage fails.
     Shared by POST /api/albums/<aid>/match and the Missing IDs batch.
-    Returns the engine operation ids it committed."""
+    Returns the engine operation ids it committed. Only the operator's own
+    Match may move the album to another Release Group; the batch passes
+    ``release_selected_by_operator=False`` so the identity guard refuses that."""
     operation_ids: List[str] = []
     # 0 ── resolve release-group → release if needed
     mb_albumid = _resolve_mb_release_id(mb_input, log)
@@ -2267,7 +2269,8 @@ def _match_album_run(aid: int, mb_input: str, log) -> List[str]:
 
     # 2 ── set mb_albumid on both items AND the album record
     log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
-    metadata_result = composite_workflows.update_album_metadata(aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=True)
+    metadata_result = composite_workflows.update_album_metadata(
+        aid, {"mb_albumid": mb_albumid}, release_selected_by_operator=release_selected_by_operator)
     _require_attach_stage_success(metadata_result, "match album metadata update")
     rg_change = metadata_result.get("release_group_change") if isinstance(metadata_result, dict) else None
     if rg_change:
@@ -2613,7 +2616,8 @@ _BATCH_CHILD_TIMEOUT_SECONDS = 900
 def _batch_write_album(album_id: int, proof: Dict[str, Any], log) -> Dict[str, Any]:
     """The batch's album writer is the Match album writer."""
     try:
-        operation_ids = _match_album_run(album_id, proof["write"]["mb_albumid"], log)
+        operation_ids = _match_album_run(album_id, proof["write"]["mb_albumid"], log,
+                                         release_selected_by_operator=False)
     except RuntimeError as ex:
         if str(ex).startswith("requires_review"):  # refused before any write
             raise missing_mb_batch.NotWritten(str(ex)) from ex

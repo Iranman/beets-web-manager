@@ -27,6 +27,7 @@ RG = "11111111-1111-1111-1111-111111111111"
 REL = "22222222-2222-2222-2222-222222222222"
 REC = "33333333-3333-3333-3333-333333333333"
 OTHER_REC = "44444444-4444-4444-4444-444444444444"
+RG2 = "66666666-6666-6666-6666-666666666666"  # a second, distinct Release Group
 FOLDER = str(MUSIC_ROOT / "Artist" / "Album")
 
 
@@ -40,12 +41,12 @@ def _item_row(iid):
             "path": str(MUSIC_ROOT / "Loose" / f"{iid}.mp3"), "sort_ts": float(iid)}
 
 
-def _ident(aid, eligible=True, files=2, tracks=2, conflicts=()):
+def _ident(aid, eligible=True, files=2, tracks=2, conflicts=(), rg=RG):
     return {
-        "auto_import": {"eligible": eligible, "release_group_id": RG if eligible else "",
+        "auto_import": {"eligible": eligible, "release_group_id": rg if eligible else "",
                         "release_id": REL if eligible else "",
                         "reasons": [] if eligible else ["no_release_group_verified"]},
-        "candidates": [{"release_group_id": RG, "representative_release_id": REL,
+        "candidates": [{"release_group_id": rg, "representative_release_id": REL,
                         "evidence": {"local_tracks_verified": files, "sources": ["acoustid_release_group"],
                                      "releases_evaluated": [{"release_id": REL, "track_count": tracks}]}}],
         "conflicts": list(conflicts),
@@ -73,6 +74,9 @@ class _World:
         p("backend.missing_mb_batch.composite_workflows.find_all_items_by_album_id",
           side_effect=lambda aid: self.album_items.get(aid, []))
         p("backend.missing_mb_batch.identify_import_folder", side_effect=lambda folder: self.idents[folder])
+        p("backend.missing_mb_batch.composite_workflows.find_all_albums_by_releasegroupid",
+          side_effect=lambda rg: [{"id": aid, "mb_releasegroupid": a.mb_releasegroupid}
+                                  for aid, a in self.albums.items() if a.mb_releasegroupid == rg])
         p("backend.missing_mb_batch._missing_mb_rows", side_effect=lambda search="": list(self.rows))
         self.real_folders = set()
         real_scan = mb._recursive_audio
@@ -211,6 +215,34 @@ class ProofTests(_Case):
         proof = mb.prove_row(self.w.add_real_album(1, root / "B", [root / "B" / "x.flac", root / "B" / "y.flac"]))
         self.assertEqual((proof["proven"], proof["reasons"]), (False, ["folder_files_mismatch:2/2"]))
 
+    def test_music_root_reached_through_a_symlink_still_proves(self):
+        # The operator's mount may be a link; links below it are still refused.
+        root = self._tree()
+        (root / "A" / "B").mkdir()
+        for n in ("x", "y"):
+            (root / "A" / "B" / f"{n}.flac").write_bytes(b"a")
+        self._link(root / "A", root / "M", target_is_directory=True)
+        self.patch("backend.missing_mb_batch.MUSIC_ROOT", new=root / "M")
+        folder = root / "M" / "B"
+        proof = mb.prove_row(self.w.add_real_album(1, folder, [folder / "x.flac", folder / "y.flac"]))
+        self.assertTrue(proof["proven"], proof["reasons"])
+        self._link(root / "A" / "B", root / "A" / "L", target_is_directory=True)
+        proof = mb.prove_row(self.w.add_real_album(2, folder, [folder / "x.flac", root / "M" / "L" / "y.flac"]))
+        self.assertEqual(proof["reasons"], ["symlinked_item_path"])
+
+    def test_existing_other_release_group_is_never_replaced(self):
+        row = self.w.add_album(1)
+        self.w.albums[1].mb_releasegroupid = "55555555-5555-5555-5555-555555555555"
+        proof = mb.prove_row(row)
+        self.assertEqual((proof["proven"], proof["write"]), (False, {}))
+        self.assertIn("existing_release_group_differs", proof["reasons"])
+
+    def test_release_group_held_by_another_album_is_a_duplicate(self):
+        self.w.albums[9] = SimpleNamespace(mb_albumid=REL, mb_releasegroupid=RG)
+        proof = mb.prove_row(self.w.add_album(1))
+        self.assertEqual((proof["proven"], proof["reasons"]), (False, ["duplicate_release_group"]))
+        self.assertEqual(proof["evidence"]["release_group_held_by"], [9])
+
     def test_album_conflict_or_import_review_claim_is_not_proven(self):
         self.assertIn("conflicts:symlinked_audio_file",
                       mb.prove_row(self.w.add_album(1, conflicts=["symlinked_audio_file"]))["reasons"])
@@ -295,13 +327,36 @@ class BatchTests(_BatchCase):
         writer.assert_not_called()
 
     def test_row_no_longer_proven_at_apply_is_skipped(self):
-        pre = self.preview([self.w.add_album(1), self.w.add_album(2)])
+        pre = self.preview([self.w.add_album(1), self.w.add_album(2, rg=RG2)])
         self.w.idents[f"{FOLDER}1"] = _ident(1, eligible=False)
         out = self.apply(pre["transaction_id"])
         self.assertEqual([r["status"] for r in out["rows"]], ["no_longer_proven", "written"])
 
-    def test_cancel_mid_run_finishes_current_row_then_stops(self):
+    def test_same_release_group_in_one_batch_is_a_duplicate(self):
         pre = self.preview([self.w.add_album(1), self.w.add_album(2), self.w.add_item(5)])
+        self.assertEqual([r["reasons"] for r in pre["rows"]],
+                         [["duplicate_release_group"], ["duplicate_release_group"], []])
+        self.assertEqual(pre["counts"]["proven"], 1)
+
+    def test_duplicate_appearing_after_preview_is_not_written(self):
+        pre = self.preview([self.w.add_album(1)])
+        self.w.albums[9] = SimpleNamespace(mb_albumid=REL, mb_releasegroupid=RG)
+        writer = mock.Mock()
+        out = self.apply(pre["transaction_id"], album=writer)
+        writer.assert_not_called()
+        self.assertEqual(out["rows"][0]["status"], "no_longer_proven")
+
+    def test_identity_set_after_preview_is_evidence_changed(self):
+        # Same group, still provable, but the album changed under the preview.
+        pre = self.preview([self.w.add_album(1)])
+        self.w.albums[1].mb_releasegroupid = RG
+        writer = mock.Mock()
+        out = self.apply(pre["transaction_id"], album=writer)
+        writer.assert_not_called()
+        self.assertEqual(out["rows"][0]["status"], "evidence_changed")
+
+    def test_cancel_mid_run_finishes_current_row_then_stops(self):
+        pre = self.preview([self.w.add_album(1), self.w.add_album(2, rg=RG2), self.w.add_item(5)])
         cancel = threading.Event()
 
         def write_then_cancel(aid, proof, log):
@@ -430,7 +485,7 @@ class RouteTests(_Case):
                 self.w.albums[aid].mb_releasegroupid = RG
                 return {"ok": True, "operation_id": f"txn_meta_{aid}"}
             return {"ok": True}
-        self.patch(cw + "update_album_metadata", side_effect=update_album_metadata)
+        self.update_metadata = self.patch(cw + "update_album_metadata", side_effect=update_album_metadata)
         self.patch(cw + "plan_album_mb_track_repair", return_value={"ok": True})
         self.relocate = self.patch(cw + "relocate_album", return_value={"ok": True} if relocate_ok
                                    else {"ok": False, "error": "relocate refused"})
@@ -479,9 +534,22 @@ class RouteTests(_Case):
         self.assertEqual((tx["status"], tx["originating_job"]), ("Completed", job.job_id))
         self.assertEqual(tx["metadata"]["results"][0]["transaction_ids"], ["txn_meta_1"])
 
+    def test_batch_never_writes_as_operator_selected(self):
+        self.patch_match_writer()
+        pre = self.preview([self.w.add_album(1)["id"]])
+        self.wait(self.apply(pre).get_json()["job_id"])
+        stamp = [c for c in self.update_metadata.call_args_list if "mb_albumid" in c.args[1]]
+        self.assertEqual([c.kwargs.get("release_selected_by_operator") for c in stamp], [False])
+        # The operator's own Match keeps its meaning.
+        self.update_metadata.reset_mock()
+        self.w.add_album(2, rg=RG2)
+        self.wait(self.client.post("/api/albums/2/match", json={"mb_id": REL}).get_json()["job_id"])
+        stamp = [c for c in self.update_metadata.call_args_list if "mb_albumid" in c.args[1]]
+        self.assertEqual([c.kwargs.get("release_selected_by_operator") for c in stamp], [True])
+
     def test_transaction_failure_rolls_back_and_stops(self):
         self.patch_match_writer(relocate_ok=False)
-        pre = self.preview([self.w.add_album(1)["id"], self.w.add_album(2)["id"]])
+        pre = self.preview([self.w.add_album(1)["id"], self.w.add_album(2, rg=RG2)["id"]])
         job = self.wait(self.apply(pre).get_json()["job_id"])
         self.assertEqual(job.status, "failed")
         self.assertEqual([r["status"] for r in job.result["rows"]], ["write_failed", "not_attempted"])

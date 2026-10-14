@@ -47,7 +47,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path
-from backend.app_runtime import _app_logger, _path_is_under, _redact_security_text, _s, transactions
+from backend.app_runtime import MUSIC_ROOT, _app_logger, _path_is_under, _redact_security_text, _s, transactions
 from backend.beets_adapter import beets_adapter, lib
 from backend.import_identity import _recursive_audio, identify_import_folder
 from backend.library_service import _missing_mb_rows, _reconstruct_track_recording_candidates
@@ -89,11 +89,25 @@ class NotWritten(RuntimeError):
 
 
 def _has_link_component(path: str) -> bool:
-    return os.path.realpath(path) != os.path.abspath(path)
+    """A symlink (or junction) in the path below MUSIC_ROOT. A link at or above
+    MUSIC_ROOT is the operator's mount and allowed; a path outside MUSIC_ROOT
+    must have no link at all."""
+    absolute, root = os.path.abspath(path), os.path.abspath(MUSIC_ROOT)
+    try:
+        rel = os.path.relpath(absolute, root)
+    except ValueError:  # another drive
+        rel = os.pardir
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        expected = absolute
+    else:
+        expected = os.path.join(os.path.realpath(root), rel)
+    return os.path.normcase(os.path.realpath(absolute)) != os.path.normcase(os.path.normpath(expected))
 
 
 def _norm_path(path: str) -> str:
-    return os.path.normcase(os.path.abspath(path))
+    """Resolved form, so item paths under a linked MUSIC_ROOT compare with the
+    folder scan (which resolves the folder); links below it are refused first."""
+    return os.path.normcase(os.path.realpath(path))
 
 
 def _token_hash(token: str) -> str:
@@ -107,7 +121,8 @@ def _uuid(value: Any) -> str:
 
 def _digest(proof: Dict[str, Any]) -> str:
     """Identity-relevant evidence only, so a stable match keeps its digest."""
-    keep = {k: proof.get(k) for k in ("kind", "target_id", "write")}
+    # ``current`` is in the digest: an ID set on the target after the preview is a change.
+    keep = {k: proof.get(k) for k in ("kind", "target_id", "write", "current")}
     keep["evidence"] = {k: v for k, v in (proof.get("evidence") or {}).items() if k != "sources"}
     return hashlib.sha256(json.dumps(keep, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -188,8 +203,33 @@ def prove_album(album_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str
         reasons.append(f"folder_audio_count_mismatch:{evidence['audio_files']}/{len(items)}")
     if auto.get("eligible") and release_tracks != len(items):
         reasons.append(f"track_count_mismatch:{release_tracks}/{len(items)}")
+    if rgid and current["mb_releasegroupid"] and current["mb_releasegroupid"] != rgid:
+        # Never move canonical identity in a batch; that is an operator decision.
+        reasons.append("existing_release_group_differs")
+    if rgid:
+        others = sorted(int(a.get("id") or 0) for a in composite_workflows.find_all_albums_by_releasegroupid(rgid) or []
+                        if _uuid(a.get("mb_releasegroupid")) == rgid and int(a.get("id") or 0) != int(album_id))
+        evidence["release_group_held_by"] = others
+        if others:  # a duplicate goes to the gated dedup flow, never stamped here
+            reasons.append("duplicate_release_group")
     write = {"mb_releasegroupid": rgid, "mb_albumid": release_id} if rgid and release_id else {}
     return _proof("album", album_id, row_id, reasons, write, evidence, current)
+
+
+def _mark_batch_duplicates(proofs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Two rows of one batch proven to the same Release Group are duplicates:
+    neither is proven."""
+    groups: Dict[str, int] = {}
+    for p in proofs:
+        if p["proven"] and p["kind"] == "album":
+            groups[p["write"]["mb_releasegroupid"]] = groups.get(p["write"]["mb_releasegroupid"], 0) + 1
+    out = []
+    for p in proofs:
+        if p["proven"] and p["kind"] == "album" and groups[p["write"]["mb_releasegroupid"]] > 1:
+            p = _proof("album", p["target_id"], p["row_id"], ["duplicate_release_group"], {},
+                       {**p["evidence"], "duplicate_in_batch": True}, p["current"])
+        out.append(p)
+    return out
 
 
 def prove_item(item_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -302,6 +342,10 @@ def run_preview(rows: List[Dict[str, Any]], log: List[str], cancel_event=None, u
         if update_state:
             update_state(progress={"done": index, "total": len(rows)})
 
+    proofs = _mark_batch_duplicates(proofs)
+    for p in proofs:
+        if (p.get("evidence") or {}).get("duplicate_in_batch"):
+            log.append(f"{p['row_id']}: needs review (duplicate_release_group within this batch)")
     proven = [p for p in proofs if p["proven"]]
     counts = {"rows": len(proofs), "proven": len(proven), "needs_review": len(proofs) - len(proven)}
     if not proven:
