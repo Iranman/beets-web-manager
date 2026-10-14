@@ -218,7 +218,7 @@ class RefusalReasonCodeTests(unittest.TestCase):
 class FpcalcOutcomeTests(unittest.TestCase):
     """helpers_mb flags per-file fpcalc failures; no network, no real fpcalc."""
 
-    def _outcome(self, run):
+    def _fpcalc_lookup(self, run):
         import helpers_mb
         with mock.patch.dict("os.environ", {"ACOUSTID_API_KEY": "synthetic"}), \
                 mock.patch.object(helpers_mb.shutil, "which", return_value=__file__), \
@@ -237,7 +237,7 @@ class FpcalcOutcomeTests(unittest.TestCase):
 
         for run in (timeout, short):
             with self.subTest(run=run.__name__):
-                outcome = self._outcome(run)
+                outcome = self._fpcalc_lookup(run)
                 self.assertFalse(outcome.answered)
                 self.assertIs(outcome.evidence.get("fingerprintable"), False)
 
