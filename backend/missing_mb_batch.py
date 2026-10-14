@@ -243,7 +243,8 @@ def _prove_release_group_fill(album_id: int, row_id: str, current: Dict[str, str
     if reasons:
         return _proof("album", album_id, row_id, reasons, {}, {"album_items": len(items)}, current)
     # None on any MusicBrainz failure: fails closed, never guessed.
-    rgid = _uuid(composite_workflows._release_group_for_release(release_id))
+    # A non-UUID answer is no answer: it must never be previewed as proven.
+    rgid = composite_workflows._uuid_or_blank(composite_workflows._release_group_for_release(release_id))
     embedded = sorted({_uuid(it.get("mb_releasegroupid")) for it in items} - {""})
     evidence: Dict[str, Any] = {"fill": "release_group", "release_id": release_id,
                                 "release_group_from_release": rgid, "embedded_release_groups": embedded,
