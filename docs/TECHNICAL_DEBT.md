@@ -283,6 +283,15 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: rollback restores each item's own captured value instead of the album's.
 - Priority: P3. Status: Open.
 
+## ARCH-033 Review Queue Follow-ups (0.7.1, QA #410 N1-N3)
+
+- Affected area: `backend/pending_review_store.py` (queue lock and prune), `backend/ai_service.py` (batch import review enqueue).
+- N3: a list-only Review Queue load prunes stale rows while it holds the global queue lock, and the prune makes Beets HTTP calls. A slow Beets therefore serializes every queue reader and writer. Fix: run the checks outside the lock, then re-read and apply the result under the lock, or move pruning to a job.
+- N1: a partial-import batch folder whose review enqueue fails is marked `import_failed`, and a retry re-runs its Stage 1 import.
+- N2: the final-pass `_queue` review drops the original evidence (`conflict`, `skipped_paths`, `kept_album_ids`, `deterministic_decision`).
+- Current risk: low. No queue item is lost; the cost is latency (N3), a repeated import attempt (N1) and less evidence on the review row (N2).
+- Priority: P3. Status: Open.
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
@@ -305,6 +314,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 ## SEC-006 Review Queue Writes After A Failed Load (0.7.1 security review)
 
 - Status: Closed in 0.7.1. Every load-modify-write path loads with `_load_pending_reviews(strict=True)`, which raises `PendingReviewLoadError` on an unreadable or torn queue file instead of returning `[]`; `_add_to_pending`, `DELETE /api/ai-pending-review` and the stale-cleanup route save nothing and answer with fixed text. A `BeetsUnavailableError` during the prune keeps the remaining rows unpruned. All queue saves go through `_save_pending_reviews` (atomic temp file plus replace). List-only readers still get `[]` on a failed load.
+- Follow-ups (security review, not blockers): F3, `_atomic_write_text` replaces the file without an `fsync`, so a power loss right after a save can leave an empty or old queue file. F4, a newly created queue file gets mode 0600, so an operator tool running as another user cannot read it. Priority: P3. Status: Open.
 
 ## SEC-005 Request Text Reaches The qBittorrent Scan Log Unescaped (0.7.0 security review F1, pre-existing)
 
