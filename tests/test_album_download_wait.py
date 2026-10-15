@@ -30,7 +30,8 @@ class AlbumDownloadWaitTests(qa.ChildJobQaTests):
         self.assertIn("Still making progress", " ".join(job.log))
 
     def test_album_download_waiters_use_the_progress_aware_wait(self):
-        self.assertGreater(self.js.ALBUM_DOWNLOAD_WAIT["idle_timeout"], 0)
+        # above the silent inner caps (import-slot wait, SpotiFLAC subprocess: 1200s each)
+        self.assertGreater(self.js.ALBUM_DOWNLOAD_WAIT["idle_timeout"], 1200)
         for rel in ("routes_acquisition.py", "backend/replacement_service.py"):
             src = (ROOT / rel).read_text(encoding="utf-8")
             self.assertIn("**ALBUM_DOWNLOAD_WAIT", src, rel)

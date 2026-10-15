@@ -3014,8 +3014,8 @@
    "name": "note_job_progress",
    "module": "backend/job_service.py",
    "lines": [
-    30,
-    37
+    32,
+    39
    ],
    "size": 8,
    "body_lines": 3,
@@ -3034,8 +3034,8 @@
    "name": "_call_job_fn",
    "module": "backend/job_service.py",
    "lines": [
-    40,
-    47
+    42,
+    49
    ],
    "size": 8,
    "body_lines": 7,
@@ -3054,8 +3054,8 @@
    "name": "_wait_for_child_job",
    "module": "backend/job_service.py",
    "lines": [
-    50,
-    250
+    52,
+    252
    ],
    "size": 201,
    "body_lines": 197,
@@ -3084,8 +3084,8 @@
    "name": "_running_job_of_type",
    "module": "backend/job_service.py",
    "lines": [
-    253,
-    261
+    255,
+    263
    ],
    "size": 9,
    "body_lines": 8,
@@ -3108,8 +3108,8 @@
    "name": "_root_folder_repair_running_job",
    "module": "backend/job_service.py",
    "lines": [
-    264,
-    271
+    266,
+    273
    ],
    "size": 8,
    "body_lines": 7,
