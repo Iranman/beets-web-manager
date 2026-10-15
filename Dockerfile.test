@@ -4,7 +4,7 @@
 # ffmpeg, curl), and a non-root user like the GitHub runner, so permission
 # tests run instead of skipping as root. Test-only; never published or
 # deployed. The source tree is bind-mounted at /src at run time.
-FROM python:3.13-slim
+FROM python:3.14-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends sqlite3 ffmpeg curl \
  && rm -rf /var/lib/apt/lists/*
