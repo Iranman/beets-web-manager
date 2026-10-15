@@ -17,6 +17,9 @@ from job_engine import is_read_only_job
 #: not stop at once.
 # ponytail: fixed window; per-caller values if a child type needs longer.
 CHILD_SETTLE_SECONDS = 300
+# An album download (Soulseek peers, then fallback sources, then the import) may
+# legitimately run past 40 minutes; give up only once it stops making progress.
+ALBUM_DOWNLOAD_WAIT = {"timeout": 2400, "idle_timeout": 900}
 
 #: Set by the transaction job wrapper (transaction_service) for the job running
 #: on this thread: ``note_job_progress`` reports into that job's audit.

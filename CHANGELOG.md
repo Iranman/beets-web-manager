@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Download All (and format replacement) killed an album download at 40 minutes even while it was still making progress. A slow Soulseek run that had just downloaded every requested track was cancelled before its import, and the files were removed. The wait is now progress-aware: past 40 minutes it keeps going while the download logs progress, and gives up only after 15 minutes with no progress.
+
 ## v0.7.1 - 2026-10-14
 
 ### Fixed

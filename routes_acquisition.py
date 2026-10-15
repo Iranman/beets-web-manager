@@ -11,7 +11,7 @@ import backend.provider_boundary as provider_boundary
 from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses
 from backend.acquisition_service import _ACQ_QUEUE_SOURCES, _DOWNLOAD_METHODS, _acq_download_all_record, _acq_download_payload, _acq_item_mbid, _acq_start_download_job, _acq_trim_batch_log, _download_sources_status, _load_acq_download_all_last, acquisition_queue_mark_done, acquisition_queue_page, download_entered_library, acquisition_queue_snapshot, ensure_acquisition_queue_fresh, refresh_acquisition_queue, start_acquisition_queue_build, _qbit_hardlink_missing_impl, _qbit_status_payload, _save_acq_download_all_last, start_album_download
 from backend.app_runtime import QBIT_CATEGORY, QBIT_FILTER, QBIT_URL, YTDLP_ALLOW_BROWSER_COOKIES, _app_logger, _s, _ytdlp_ready, jobs
-from backend.job_service import _wait_for_child_job
+from backend.job_service import ALBUM_DOWNLOAD_WAIT, _wait_for_child_job
 from backend.matching_service import _invalidate_lib_cache
 from backend.replacement_service import _music_format_replace_rows, _music_format_scan_library
 from backend.serializers import json_route_result
@@ -412,7 +412,7 @@ def acquisition_download_all():
                         log.append(f"  child job: {child_id}")
                         result = _wait_for_child_job(
                             child_id, log, cancel_event,
-                            prefix=prefix, timeout=2400,
+                            prefix=prefix, **ALBUM_DOWNLOAD_WAIT,
                         )
                         totals["success"] += 1
                         if download_entered_library(result):
