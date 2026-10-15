@@ -2100,7 +2100,15 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
 
     def review(suggestion: Dict[str, Any], evidence: Dict[str, Any], status: str = "review_created",
                current_step: str = "review item created", **fields) -> None:
-        review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=evidence, batch_job_id=batch_id)
+        try:
+            review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=evidence, batch_job_id=batch_id)
+        except PendingReviewLoadError:
+            # SEC-006: queue left untouched; keep this folder's own fields and leave it retryable.
+            log.append("  Review item not created (Review Queue could not be read); retry this folder later")
+            reason = _s(fields.get("failure_reason"))
+            mark(**{**fields, "status": "import_failed", "current_step": "Review Queue could not be read",
+                    "failure_reason": "review_queue_unreadable" + (f" ({reason})" if reason else "")})
+            return
         log.append(f"review item created: {folder}")
         mark(status=status, current_step=current_step, review_item_id=review_id, **fields)
 

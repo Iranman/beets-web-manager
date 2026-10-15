@@ -252,7 +252,9 @@ def _apply_review_origin(target: Dict[str, Any], origin: Dict[str, Any]) -> None
 _AI_PENDING_FILE = Path(os.environ.get("AI_PENDING_REVIEW_FILE", str(WEB_MANAGER_DATA_DIR / "ai_pending_review.json")))
 
 
-_ai_pending_lock = threading.Lock()
+# Re-entrant: writers hold it around _load_pending_reviews, which also takes it
+# so a list reader's prune save can never write a stale snapshot (QA #410 F1).
+_ai_pending_lock = threading.RLock()
 
 
 _ai_review_decision_lock = threading.Lock()
@@ -300,6 +302,11 @@ def _save_pending_reviews(items: list) -> None:
 
 
 def _load_pending_reviews(*, prune_resolved: bool = True, strict: bool = False) -> list:
+    with _ai_pending_lock:
+        return _load_pending_reviews_locked(prune_resolved=prune_resolved, strict=strict)
+
+
+def _load_pending_reviews_locked(*, prune_resolved: bool, strict: bool) -> list:
     """The queue, pruned of resolved rows. A failed read returns [] for
     list-only callers; ``strict=True`` raises PendingReviewLoadError instead,
     so a caller that saves never writes a failed load over the queue."""
