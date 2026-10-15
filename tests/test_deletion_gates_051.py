@@ -188,10 +188,12 @@ class PendingReviewClearTests(unittest.TestCase):
         self.pending = Path(tmp.name) / "ai_pending_review.json"
         self.items = [{"path": "/downloads/A"}, {"path": "/downloads/B"}]
         self.pending.write_text(json.dumps(self.items))
-        for name, value in (("_AI_PENDING_FILE", self.pending),
-                            ("_load_pending_reviews", lambda **k: json.loads(self.pending.read_text())),
-                            ("_record_ai_review_decision", lambda *a, **k: None)):
-            p = mock.patch.object(routes_import, name, value)
+        import backend.pending_review_store as prs
+        self.prs = prs
+        for mod, name, value in ((prs, "_AI_PENDING_FILE", self.pending),
+                                 (routes_import, "_load_pending_reviews", lambda **k: json.loads(self.pending.read_text())),
+                                 (routes_import, "_record_ai_review_decision", lambda *a, **k: None)):
+            p = mock.patch.object(mod, name, value)
             p.start()
             self.addCleanup(p.stop)
 
@@ -207,7 +209,7 @@ class PendingReviewClearTests(unittest.TestCase):
                 self.assertEqual(json.loads(self.pending.read_text()), self.items)
 
     def test_path_removes_only_that_item_atomically(self):
-        with mock.patch.object(self.r, "_atomic_write_text", wraps=self.r._atomic_write_text) as write:
+        with mock.patch.object(self.prs, "_atomic_write_text", wraps=self.prs._atomic_write_text) as write:
             self.assertEqual(self._delete(json={"path": "/downloads/A"}), 200)
         write.assert_called_once()
         self.assertEqual(json.loads(self.pending.read_text()), [{"path": "/downloads/B"}])

@@ -13,6 +13,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, WEB_MANAG
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.import_reconciliation_service import _reconcile_pending_review_enqueue_item
 from backend.beets_adapter import BeetsUnavailableError
+from backend.beets_plugins import _atomic_write_text
 import backend.composite_workflows as composite_workflows
 from backend.serializers import REVIEW_ORIGIN_FIELDS, REVIEW_ORIGIN_LABELS, _normalize_review_origin_type, _review_origin_payload
 import hashlib
@@ -251,7 +252,9 @@ def _apply_review_origin(target: Dict[str, Any], origin: Dict[str, Any]) -> None
 _AI_PENDING_FILE = Path(os.environ.get("AI_PENDING_REVIEW_FILE", str(WEB_MANAGER_DATA_DIR / "ai_pending_review.json")))
 
 
-_ai_pending_lock = threading.Lock()
+# Re-entrant: writers hold it around _load_pending_reviews, which also takes it
+# so a list reader's prune save can never write a stale snapshot (QA #410 F1).
+_ai_pending_lock = threading.RLock()
 
 
 _ai_review_decision_lock = threading.Lock()
@@ -287,70 +290,110 @@ def _record_ai_review_decision(action: str, folder_path: str,
         pass
 
 
-def _load_pending_reviews(*, prune_resolved: bool = True) -> list:
-    try:
-        if _AI_PENDING_FILE.exists():
-            items = json.loads(_AI_PENDING_FILE.read_text())
-            if not isinstance(items, list):
-                return []
-            filtered = []
-            resolved_items = []
-            changed = False
-            for item in items:
-                item = item if isinstance(item, dict) else {}
-                reconciled_item, reconcile_changed = _reconcile_pending_review_enqueue_item(item)
-                if reconcile_changed:
-                    changed = True
-                if reconciled_item is None:
-                    resolved_items.append(item)
-                    continue
-                item = reconciled_item
-                path = _s((item or {}).get("path", ""))
-                suggestion = (item or {}).get("suggestion") or {}
-                origin_info = _review_origin_payload(
-                    path,
-                    suggestion,
-                    item=item,
-                    evidence=(item or {}).get("evidence") or {},
-                )
-                if not item.get("origin_type") or not suggestion.get("origin_type"):
-                    suggestion = dict(suggestion or {})
-                    _apply_review_origin(item, origin_info)
-                    _apply_review_origin(suggestion, origin_info)
-                    item["suggestion"] = suggestion
-                    changed = True
-                # An active import may have moved the folder itself; only its
-                # reconciliation (above) decides that row.
-                if (_review_status_key(item.get("status")) not in {"import_enqueueing", "import_queued"}
-                        and _review_download_folder_is_gone(path)):
-                    changed = True
-                    resolved_items.append(item)
-                    continue
-                if prune_resolved:
-                    if path and _library_album_ids_for_folder(path) and not suggestion.get("allow_existing_review"):
-                        changed = True
-                        resolved_items.append(item)
-                        continue
-                    if _pending_review_item_is_resolved(item or {}):
-                        changed = True
-                        resolved_items.append(item)
-                        continue
-                filtered.append(item)
-            if changed:
-                _AI_PENDING_FILE.write_text(json.dumps(filtered, indent=2))
-                for item in resolved_items:
-                    _record_ai_review_decision(
-                        "auto_resolved",
-                        item.get("path", ""),
-                        item.get("suggestion") or {},
-                        item.get("evidence") or {},
-                        note="pruned from review queue after current library/source check",
-                    )
-            return filtered
-    except Exception:
-        pass
-    return []
+class PendingReviewLoadError(RuntimeError):
+    """The saved Review Queue could not be read (SEC-006). A load-modify-write
+    caller must not save: the list it holds is not the queue."""
 
+
+def _save_pending_reviews(items: list) -> None:
+    """Atomic: a torn write can never leave a half-written queue (SEC-006)."""
+    _AI_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(_AI_PENDING_FILE, json.dumps(items, indent=2))
+
+
+def _load_pending_reviews(*, prune_resolved: bool = True, strict: bool = False) -> list:
+    with _ai_pending_lock:
+        return _load_pending_reviews_locked(prune_resolved=prune_resolved, strict=strict)
+
+
+def _load_pending_reviews_locked(*, prune_resolved: bool, strict: bool) -> list:
+    """The queue, pruned of resolved rows. A failed read returns [] for
+    list-only callers; ``strict=True`` raises PendingReviewLoadError instead,
+    so a caller that saves never writes a failed load over the queue."""
+    try:
+        try:
+            items = json.loads(_AI_PENDING_FILE.read_text())
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as ex:
+            raise PendingReviewLoadError("Review Queue file could not be read.") from ex
+        if not isinstance(items, list):
+            raise PendingReviewLoadError("Review Queue file is not a list.")
+        filtered = []
+        resolved_items = []
+        changed = False
+        beets_down = False
+        for item in items:
+            item = item if isinstance(item, dict) else {}
+            reconciled_item, reconcile_changed = _reconcile_pending_review_enqueue_item(item)
+            if reconcile_changed:
+                changed = True
+            if reconciled_item is None:
+                resolved_items.append(item)
+                continue
+            item = reconciled_item
+            path = _s((item or {}).get("path", ""))
+            suggestion = (item or {}).get("suggestion") or {}
+            origin_info = _review_origin_payload(
+                path,
+                suggestion,
+                item=item,
+                evidence=(item or {}).get("evidence") or {},
+            )
+            if not item.get("origin_type") or not suggestion.get("origin_type"):
+                suggestion = dict(suggestion or {})
+                _apply_review_origin(item, origin_info)
+                _apply_review_origin(suggestion, origin_info)
+                item["suggestion"] = suggestion
+                changed = True
+            # An active import may have moved the folder itself; only its
+            # reconciliation (above) decides that row.
+            if (_review_status_key(item.get("status")) not in {"import_enqueueing", "import_queued"}
+                    and _review_download_folder_is_gone(path)):
+                changed = True
+                resolved_items.append(item)
+                continue
+            if prune_resolved and not beets_down:
+                try:
+                    resolved = bool(
+                        (path and _library_album_ids_for_folder(path)
+                         and not suggestion.get("allow_existing_review"))
+                        or _pending_review_item_is_resolved(item or {}))
+                except BeetsUnavailableError:
+                    # Unknown is not resolved: keep this row and every later
+                    # one unpruned rather than wait out Beets per row (SEC-006).
+                    beets_down = True
+                    resolved = False
+                if resolved:
+                    changed = True
+                    resolved_items.append(item)
+                    continue
+            filtered.append(item)
+        if changed:
+            try:
+                _save_pending_reviews(filtered)
+            except OSError as ex:
+                _app_logger.warning("Review Queue prune not saved: %s", type(ex).__name__)
+                if strict:
+                    # A writer would save the pruned rows without their audit records.
+                    raise PendingReviewLoadError("Review Queue prune could not be saved.") from ex
+                return filtered
+            for item in resolved_items:
+                _record_ai_review_decision(
+                    "auto_resolved",
+                    item.get("path", ""),
+                    item.get("suggestion") or {},
+                    item.get("evidence") or {},
+                    note="pruned from review queue after current library/source check",
+                )
+        return filtered
+    except Exception as ex:
+        _app_logger.warning("Review Queue load failed: %s", type(ex).__name__)
+        if strict:
+            if isinstance(ex, PendingReviewLoadError):
+                raise
+            raise PendingReviewLoadError("Review Queue could not be loaded.") from ex
+        return []
 
 def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = False,
                     evidence: Optional[Dict[str, Any]] = None,
@@ -364,7 +407,7 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
     if evidence:
         suggestion["review_evidence"] = evidence
     with _ai_pending_lock:
-        items = _load_pending_reviews()
+        items = _load_pending_reviews(strict=True)
         updated = False
         for item in items:
             try:
@@ -407,7 +450,7 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
                 entry["evidence"] = evidence
             _apply_review_origin(entry, origin_info)
             items.append(entry)
-        _AI_PENDING_FILE.write_text(json.dumps(items, indent=2))
+        _save_pending_reviews(items)
     _record_ai_review_decision(
         "queued",
         folder_path,
@@ -523,7 +566,7 @@ def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] =
                 kept.append(item)
             if not removed:
                 return False
-            _AI_PENDING_FILE.write_text(json.dumps(kept, indent=2))
+            _save_pending_reviews(kept)
         for item in removed_items:
             _record_ai_review_decision(
                 "resolved",
@@ -734,7 +777,7 @@ def _mark_pending_review_status(folder_path: str, status: str, note: str = "",
                 changed = True
                 break
             if changed:
-                _AI_PENDING_FILE.write_text(json.dumps(items, indent=2))
+                _save_pending_reviews(items)
             return changed
     except Exception:
         return False

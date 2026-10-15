@@ -16,6 +16,7 @@ The project uses Semantic Versioning.
 - If the downloads folder could not be checked (for example a stale network mount answering `Permission denied`), opening the Review Queue read it as empty and the next queued item overwrote the saved queue. A failed check now keeps every item.
 - A refusal reason code is now read only from the fixed import refusal message, so a Soulseek peer cannot stop the peer search by putting `[reason_code=...]` in a file name.
 - slskd transfer cancellation never sends a request for a `.` or `..` username or transfer id.
+- The Review Queue could be wiped: if Beets was unavailable while an item was being queued, or the queue file could not be read, the saved queue was replaced by just the new item (or by nothing, when one item was removed). A failed load is now never saved over the queue (adding or removing an item answers 503 and changes nothing), a Beets outage during the queue's self-cleanup keeps every item, and queue saves are atomic.
 - The Review Queue no longer lists an item whose downloads folder has been deleted (for example a failed download candidate that was cleaned up). The item is auto-resolved.
 
 ## v0.7.0 - 2026-10-14
