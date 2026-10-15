@@ -17,7 +17,7 @@ import backend.composite_workflows as composite_workflows
 import backend.item_replacement as _item_replacement
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_hits_or_none, _playlist_artist_name_score, _playlist_title_score, _read_file_media_tags
-from backend.job_service import _wait_for_child_job
+from backend.job_service import ALBUM_DOWNLOAD_WAIT, _wait_for_child_job
 from backend.serializers import _json_from_flask_response
 
 # ── ARCH-001 extracted code ──
@@ -590,7 +590,7 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
             started = _json_from_flask_response(start_album_download(payload))
             if not started.get("ok") or not started.get("job_id"):
                 raise RuntimeError(started.get("error") or "replacement download did not start")
-            _wait_for_child_job(started["job_id"], log, cancel_event, prefix="replacement", timeout=2400)
+            _wait_for_child_job(started["job_id"], log, cancel_event, prefix="replacement", **ALBUM_DOWNLOAD_WAIT)
             replacement = _music_format_find_verified_replacement(resolved, prefs)
             if not replacement:
                 raise RuntimeError("replacement failed verification")
