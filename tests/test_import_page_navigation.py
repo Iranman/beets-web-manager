@@ -117,8 +117,8 @@ class RouterDependencyPolicyTests(unittest.TestCase):
         self.assertEqual(self.pkg["dependencies"]["react-router"], "8.4.0")
 
     def test_postcss_patched_version_and_override_are_present(self):
-        self.assertEqual(self.pkg["dependencies"]["postcss"], "8.5.29")
-        self.assertEqual(self.pkg["overrides"]["postcss"], "8.5.29")
+        self.assertEqual(self.pkg["dependencies"]["postcss"], "8.5.30")
+        self.assertEqual(self.pkg["overrides"]["postcss"], "8.5.30")
 
 
 if __name__ == "__main__":

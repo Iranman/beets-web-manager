@@ -18,6 +18,11 @@ The project uses Semantic Versioning.
 
 - Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).
 
+### Dependencies
+
+- Frontend: next 16.4.0, @mui/material 9.5.0, @tanstack/react-query 5.104.2, postcss 8.5.30 (dependency and override), vitest 5.0.4.
+- yt-dlp PO-token provider bgutil-ytdlp-pot-provider 2.0.2, kept in step across the pip plugin (`requirements.txt` and the `YTDLP_BGUTIL_PIP_PACKAGE` runtime default) and the `docker-compose.full.yml` server image (digest-pinned). 2.0.2 refreshes vulnerable server lockfile dependencies; the plugin code is unchanged apart from its version string.
+
 ## v0.7.2 - 2026-10-15
 
 ### Fixed
