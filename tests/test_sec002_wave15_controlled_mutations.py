@@ -291,6 +291,7 @@ class FlaskEndpointTests(unittest.TestCase):
                 "operation_id": "tx-folder-del",
                 "status": "Preview",
             }
+            mock_bc._import_review_allowed_roots.return_value = ["/downloads"]
             mock_bc.apply_import_review_cleanup.return_value = {
                 "ok": True,
                 "operation_id": "tx-folder-del",
