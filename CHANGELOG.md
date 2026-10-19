@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).
+
 ## v0.7.2 - 2026-10-15
 
 ### Fixed

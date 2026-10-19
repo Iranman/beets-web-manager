@@ -2753,15 +2753,15 @@ export interface ImportTargetPreviewPayload {
   candidate_identity_error?: string;
 }
 
+// Matches POST /api/import/review-folder/delete (routes_import.py ->
+// library_service._delete_review_source_folder). Library files are quarantined
+// (rollbackable), never deleted; everything else is deleted.
 export interface DeleteReviewFolderResponse extends ApiOkResponse {
-  path: string;
-  files_removed: number;
-  audio_files_removed: number;
-  bytes_removed: number;
-  db_rows_removed?: number;
-  library_folder_deleted?: boolean;
-  pending_review_removed: boolean;
-  log?: string[];
+  operation_id?: string;
+  deleted?: string[];
+  quarantined?: Array<{ source: string; quarantined: string }>;
+  files_removed?: number;
+  status?: string;
 }
 
 export type ImportReviewFileCleanupAction =
