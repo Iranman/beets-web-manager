@@ -15,11 +15,11 @@
     "@emotion/react": "11.14.0",
     "@emotion/styled": "11.14.1",
     "@headlessui/react": "2.2.10",
-    "@mui/material": "9.4.0",
+    "@mui/material": "9.5.0",
     "@tailwindcss/postcss": "4.3.3",
-    "@tanstack/react-query": "5.104.1",
-    "next": "16.3.8",
-    "postcss": "8.5.29",
+    "@tanstack/react-query": "5.104.2",
+    "next": "16.4.0",
+    "postcss": "8.5.30",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-router": "8.4.0",
@@ -27,7 +27,7 @@
   },
   "overrides": {
     "nanoid": "^3.3.17",
-    "postcss": "8.5.29",
+    "postcss": "8.5.30",
     "sharp": "0.35.5"
   },
   "devDependencies": {
@@ -40,6 +40,6 @@
     "jsdom": "30.1.2",
     "typescript": "6.0.3",
     "typescript-eslint": "^8.71.1",
-    "vitest": "5.0.3"
+    "vitest": "5.0.4"
   }
 }

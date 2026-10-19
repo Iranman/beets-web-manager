@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Dependencies
+
+- Frontend: next 16.4.0, @mui/material 9.5.0, @tanstack/react-query 5.104.2, postcss 8.5.30 (dependency and override), vitest 5.0.4.
+- yt-dlp PO-token provider bgutil-ytdlp-pot-provider 2.0.2, kept in step across the pip plugin (`requirements.txt` and the `YTDLP_BGUTIL_PIP_PACKAGE` runtime default) and the `docker-compose.full.yml` server image (digest-pinned). 2.0.2 refreshes vulnerable server lockfile dependencies; the plugin code is unchanged apart from its version string.
+
 ## v0.7.2 - 2026-10-15
 
 ### Fixed
