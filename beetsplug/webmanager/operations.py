@@ -441,7 +441,7 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
-_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_relocation", "album_relocation_link", "operations", "status"]
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_relocation", "album_relocation_link", "operations", "status", "library_fields"]
 _PLUGIN_GATED_CAPABILITIES = ["mbsync", "mbsync_library", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
@@ -686,6 +686,15 @@ def _import_session_class(autotag: bool, tasks: List[Any], partial_release_id: s
             tasks.append(task)
             partial = _pinned_partial_match(task, partial_release_id)
             if partial is not None:
+                # Stock choose_match lets plugins act first (badfiles'
+                # import_action_on_error: skip); the override must not skip that.
+                from beets import plugins
+                actions = [a for a in plugins.send("import_task_before_choice", session=self, task=task) if a]
+                if len(actions) > 1:
+                    raise plugins.PluginConflictError(
+                        "Only one handler for `import_task_before_choice` may return an action.")
+                if actions:
+                    return self._identity_checked(task, actions[0])
                 task.webmanager_partial_match = True
                 return partial
             return self._identity_checked(task, super().choose_match(task))
@@ -1603,3 +1612,4 @@ from . import untracked_ops  # noqa: E402,F401
 from . import folder_ops  # noqa: E402,F401
 from . import art_ops  # noqa: E402,F401
 from . import relocation_ops  # noqa: E402,F401
+from . import read_ops  # noqa: E402,F401
