@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Completing an incomplete album (Download All / missing-track repair) always failed with "Beets could not confidently match this source to the selected MusicBrainz release", then downloaded the album again from the next Soulseek peer. The staged folder holds only the missing tracks, and Beets' quiet importer never applies a release with missing tracks (`match.max_rec.missing_tracks: medium`, and each missing track counts in the distance), even with the release pinned. A missing-track repair now asks the webmanager plugin (1.17.0) to accept the pinned release for that folder when the best candidate is that release, every file sits on one of its tracks, no other penalty is capped below strong, and the distance without the missing-track penalty is under `match.strong_rec_thresh`. AcoustID must still confirm every file before it is merged into the existing album; anything less still goes to Review. Restart the `beets` container so it loads plugin 1.17.0.
+
 ## v0.7.2 - 2026-10-15
 
 ### Fixed

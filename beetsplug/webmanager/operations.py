@@ -622,7 +622,47 @@ def on_import_task_created(session, task):
     return None
 
 
-def _import_session_class(autotag: bool, tasks: List[Any]):
+def _pinned_partial_match(task, release_id: str):
+    """The pinned Release as a match for a source that holds only some of its
+    tracks, or None.
+
+    Beets caps the recommendation of any match with missing tracks at medium
+    (``match.max_rec.missing_tracks``) and counts every missing track in the
+    distance, so ``beet import -q --search-id`` always skips a folder of an
+    album's missing tracks. A missing-track repair asks for exactly that
+    folder, so the missing tracks are not evidence against it. Everything
+    else keeps Beets' own bar: the best candidate must be the pinned Release,
+    every file must sit on one of its tracks (no extra items), no other
+    penalty may be capped below strong, and the distance without the
+    missing-track penalty must be under ``match.strong_rec_thresh``."""
+    candidates = list(getattr(task, "candidates", None) or [])
+    if not release_id or not candidates:
+        return None
+    match = candidates[0]
+    if getattr(getattr(match, "info", None), "album_id", None) != release_id:
+        return None
+    missing = len(getattr(match, "extra_tracks", None) or [])
+    if not missing or getattr(match, "extra_items", None):
+        return None
+    dist = match.distance
+    keys = set(dist.keys())
+    for track_dist in (getattr(dist, "tracks", None) or {}).values():
+        keys.update(track_dist.keys())
+    keys.discard("missing_tracks")
+    max_rec = beets_config["match"]["max_rec"]
+    for key in keys:
+        if key in max_rec.keys() and max_rec[key].as_str() != "strong":
+            return None
+    weight = missing * beets_config["match"]["distance_weights"]["missing_tracks"].as_number()
+    max_distance = dist.max_distance - weight
+    if max_distance <= 0:
+        return None
+    if (dist.raw_distance - weight) / max_distance >= beets_config["match"]["strong_rec_thresh"].as_number():
+        return None
+    return match
+
+
+def _import_session_class(autotag: bool, tasks: List[Any], partial_release_id: str = ""):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
 
@@ -644,6 +684,10 @@ def _import_session_class(autotag: bool, tasks: List[Any]):
 
         def choose_match(self, task):
             tasks.append(task)
+            partial = _pinned_partial_match(task, partial_release_id)
+            if partial is not None:
+                task.webmanager_partial_match = True
+                return partial
             return self._identity_checked(task, super().choose_match(task))
 
         def choose_item(self, task):
@@ -706,6 +750,15 @@ def run_import():
         return jsonify({
             "error": "search_ids must be lowercase MusicBrainz Release IDs and need autotag",
             "error_code": "INVALID_SEARCH_IDS",
+        }), 400
+
+    # A missing-track repair: accept the pinned Release although the source
+    # holds only some of its tracks (_pinned_partial_match).
+    allow_missing_tracks = data.get("allow_missing_tracks", False)
+    if not isinstance(allow_missing_tracks, bool) or (allow_missing_tracks and len(search_ids) != 1):
+        return jsonify({
+            "error": "allow_missing_tracks must be a boolean and needs exactly one search_id",
+            "error_code": "INVALID_ALLOW_MISSING_TRACKS",
         }), 400
 
     # Policy 2: Validate duplicate_action strictly
@@ -874,7 +927,8 @@ def run_import():
                 # Convert paths to bytestrings for Beets importer
                 path_bytes = [util.bytestring_path(p) for p in safe_paths]
                 tasks: List[Any] = []
-                session = _import_session_class(autotag, tasks)(
+                session = _import_session_class(
+                    autotag, tasks, search_ids[0] if allow_missing_tracks else "")(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
                 global _IMPORTED_ALBUM_IDS
@@ -910,6 +964,9 @@ def run_import():
                     "duplicate_action": duplicate_action,
                     "skipped_paths": skipped,
                     "skipped": skipped_reasons,
+                    "partial_matches": sum(
+                        1 for t in tasks if getattr(t, "webmanager_partial_match", False)
+                        and not getattr(t, "skip", False)),
                     "imported_album_ids": sorted(set(imported_ids)),
                 }
                 if op_id_arg:
