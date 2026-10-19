@@ -154,8 +154,8 @@ class LibraryCoverArtNames(unittest.TestCase):
                               "track": 1, "disc": 1, "albumartist": "Art", "artist": "Art", "album": album,
                               "year": 2000})
             fake = mock.Mock()
-            fake.items.side_effect = lambda q=None: [RemoteItem(dict(r)) for r in items]
-            fake.albums.side_effect = lambda q=None: []
+            fake.items.side_effect = lambda q=None, fields=None: [RemoteItem(dict(r)) for r in items]
+            fake.albums.side_effect = lambda q=None, fields=None: []
             with mock.patch.object(ls, "MUSIC_ROOT", root), mock.patch.object(ls, "lib", fake), \
                     mock.patch.object(ls, "_load_pending_reviews", return_value=[]):
                 payload = ls._build_library_payload()

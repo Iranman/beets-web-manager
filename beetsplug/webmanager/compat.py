@@ -31,6 +31,7 @@ def register_webmanager_blueprint(plugin: Any) -> bool:
 
         from .auth import require_webmanager_auth, set_api_key_file
         from .operations import webmanager_bp
+        from . import read_ops  # noqa: F401  (adds its route before registration)
 
         # Configure API key file path if specified in plugin config
         if hasattr(plugin, "config") and "api_key_file" in plugin.config:
