@@ -12,10 +12,14 @@
 #   toomanyrequests: retry-after: ..., allowed: 44000/minute
 # (GHCR's limit). With GHCR_TOKEN set (the job's GITHUB_TOKEN) the pull is
 # authenticated and counted against that token; the login is removed again
-# before the tests run. The image is then pulled under the lscr.io name the
-# tests and Compose files use (layers are already local, so that pull only
-# resolves the manifest). It is still the unmodified upstream image: nothing
-# is built or published.
+# before the tests run. The image is then made available under the lscr.io
+# name the tests and Compose files use (re-tag, or an anonymous manifest-only
+# pull: layers are already local). It is still the unmodified upstream image:
+# nothing is built or published.
+#
+# Never `docker login lscr.io`: lscr.io is a third-party proxy, not GitHub,
+# and GHCR's bearer token for a credentialed login is the base64 of the
+# credential itself, so every request to lscr.io would carry GITHUB_TOKEN.
 set -euo pipefail
 
 COMPOSE="$(dirname "$0")/../docker-compose.yml"
@@ -28,11 +32,9 @@ SRC="ghcr.io/${IMAGE#lscr.io/}"
 ATTEMPTS="${ATTEMPTS:-5}"
 
 if [ -n "${GHCR_TOKEN:-}" ]; then
-  trap 'docker logout ghcr.io >/dev/null 2>&1 || true; docker logout lscr.io >/dev/null 2>&1 || true' EXIT
-  for host in ghcr.io lscr.io; do
-    printf '%s' "$GHCR_TOKEN" | docker login "$host" -u "${GITHUB_ACTOR:-ci}" --password-stdin >/dev/null \
-      || echo "::warning::$host login failed; pulling anonymously (rate-limited)" >&2
-  done
+  trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:-ci}" --password-stdin >/dev/null \
+    || echo "::warning::ghcr.io login failed; pulling anonymously (rate-limited)" >&2
 fi
 
 pull() {
@@ -51,7 +53,10 @@ pull() {
 }
 
 pull "$SRC"
-pull "$IMAGE"
+docker tag "$SRC" "${IMAGE%@*}"
+# The containerd image store resolves tag@digest from the re-tag; the classic
+# store needs the lscr.io manifest, fetched ANONYMOUSLY (never log in there).
+docker image inspect "$IMAGE" >/dev/null 2>&1 || pull "$IMAGE"
 # Provenance: record exactly which image and digest this job tested against.
 echo "stock Beets image: $IMAGE"
 echo "stock Beets digest: $(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
