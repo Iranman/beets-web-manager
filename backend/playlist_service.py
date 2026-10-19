@@ -2076,7 +2076,10 @@ def _playlist_atomic_json_replace(path: Path,
     tmp = Path(tmp_text)
 
     try:
-        with tmp.open("w", encoding="utf-8") as handle:
+        # Exclusive create (O_EXCL): parent is already symlink-resolved, and a
+        # symlink pre-planted at the temp name fails here instead of
+        # redirecting the write outside the state roots (QA #423).
+        with tmp.open("x", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=indent, sort_keys=sort_keys, default=str)
             handle.write("\n")
             handle.flush()
