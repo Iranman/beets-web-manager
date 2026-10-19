@@ -110,8 +110,8 @@ IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
 #: A missing-track fill imported but its merge into the existing album did not
 #: complete. Terminal for the whole acquisition: every further peer or direct
 #: source would import again and leave another partial album row (#432 B2).
+#: Not a resolver refusal, so not in IMPORT_REFUSAL_REASONS.
 EXISTING_ALBUM_MERGE_FAILED = "existing_album_merge_failed"
-IMPORT_REFUSAL_REASONS[EXISTING_ALBUM_MERGE_FAILED] = False
 #: The fixed start of that job error; import_service raises it verbatim.
 EXISTING_ALBUM_MERGE_FAILED_MESSAGE = (
     "Could not merge the imported track(s) into the existing album "
@@ -130,8 +130,11 @@ _REFUSAL_CODE_RE = re.compile(
 def import_refusal_reason_code(message: Any) -> str:
     """The reason code in a refused import's error text ("" when none)."""
     match = _REFUSAL_CODE_RE.match(_s(message))
-    code = (match.group(1) or match.group(2)) if match else ""
-    return code if code in IMPORT_REFUSAL_REASONS else ""
+    if not match:
+        return ""
+    if match.group(2):
+        return EXISTING_ALBUM_MERGE_FAILED
+    return match.group(1) if match.group(1) in IMPORT_REFUSAL_REASONS else ""
 
 
 def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict[str, Any]]]]], *,
