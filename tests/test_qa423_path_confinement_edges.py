@@ -174,7 +174,7 @@ class TransactionStoreRootFormsTests(unittest.TestCase):
             (base / "link").symlink_to(base / "real" / "sub", target_is_directory=True)
             store = te.TransactionStore(str(base / "link" / ".." / "state"))
             tx = store.create(operation_type="Rename", initiating_user="qa")
-            self.assertTrue((base / "real" / "state" / f"{tx['id']}.json").exists())
+            self.assertIn(f"{tx['id']}.json", os.listdir(base / "real" / "state"))
             self.assertEqual(store.get(tx["id"])["id"], tx["id"])
 
     def test_relative_root_roundtrip_across_cwd_change(self):
@@ -197,7 +197,7 @@ class TransactionStoreRootFormsTests(unittest.TestCase):
             link.symlink_to(real, target_is_directory=True)
             store = te.TransactionStore(str(link))
             tx = store.create(operation_type="Rename", initiating_user="qa")
-            self.assertTrue((real / f"{tx['id']}.json").exists())
+            self.assertIn(f"{tx['id']}.json", os.listdir(real))
             self.assertEqual(te.TransactionStore(str(real)).get(tx["id"])["id"], tx["id"])
 
 
