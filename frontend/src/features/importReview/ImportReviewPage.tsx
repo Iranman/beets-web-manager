@@ -69,6 +69,7 @@ import type {
   AiSuggestResponse,
   AiSuggestion,
   AttachRecordingResponse,
+  DeleteReviewFolderResponse,
   FolderStatsResponse,
   ImportReviewFileCleanupResponse,
   ImportReviewManualIdResponse,
@@ -440,6 +441,20 @@ function wrongSourceEvidenceNote(item?: ReviewItem): string {
     return `Folder has ${preflight?.audio_count ?? 0} audio file(s), but the selected release has ${preflight?.expected ?? 0} tracks.`;
   }
   return '';
+}
+
+export function deleteFolderResultMessage(result: DeleteReviewFolderResponse): string {
+  const deleted = Array.isArray(result.deleted) ? result.deleted.length : 0;
+  const quarantined = Array.isArray(result.quarantined) ? result.quarantined.length : 0;
+  const total = typeof result.files_removed === 'number' && Number.isFinite(result.files_removed)
+    ? result.files_removed
+    : deleted + quarantined;
+  if (total <= 0) return 'Source folder removed. No files needed to be deleted or quarantined.';
+  const parts = [
+    deleted ? `${deleted} deleted` : '',
+    quarantined ? `${quarantined} moved to quarantine` : '',
+  ].filter(Boolean);
+  return `Source folder removed: ${total} file${total === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}.`;
 }
 
 function deleteFolderActionLabel(item?: ReviewItem): string {
@@ -4495,10 +4510,11 @@ export function ImportReviewPage({
     try {
       const result = await deleteReviewFolder(item.path, isMusicLibraryPath(item.path), item.album_id);
       removeLocalItem(item);
-      setAction(item.id, {
-        status: 'success',
-        message: `Deleted ${result.audio_files_removed} audio file(s) and ${result.files_removed} total file(s).`,
-      });
+      const message = deleteFolderResultMessage(result);
+      setAction(item.id, { status: 'success', message });
+      // The item leaves the list at once, so its card never shows the action
+      // message; repeat it on the page status line.
+      setCleanupMsg(message);
       void loadQueue(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -4801,7 +4817,7 @@ export function ImportReviewPage({
             </span>
           ) : null}
           {revalidateMsg ? <span className="text-xs text-zinc-700">{revalidateMsg}</span> : null}
-          {cleanupMsg ? <span className="text-xs text-zinc-700">{cleanupMsg}</span> : null}
+          {cleanupMsg ? <span role="status" className="text-xs text-zinc-700">{cleanupMsg}</span> : null}
         </div>
       </div>
 
