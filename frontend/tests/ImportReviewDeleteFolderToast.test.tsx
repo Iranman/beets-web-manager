@@ -2,7 +2,7 @@
 // file(s)" because it used a field POST /api/import/review-folder/delete never
 // returns. The endpoint returns operation_id, deleted[], quarantined[],
 // files_removed and status.
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReviewItem } from '../src/api/types';
@@ -50,26 +50,41 @@ describe('deleteFolderResultMessage', () => {
   it('reports deleted and quarantined counts from the real response shape', () => {
     expect(deleteFolderResultMessage({
       ok: true, operation_id: 'op1', status: 'Completed', files_removed: 3,
-      deleted: ['/d/a.flac', '/d/b.flac'], quarantined: ['/m/c.flac'],
-    })).toBe('Source folder removed: 3 files (2 deleted, 1 moved to quarantine).');
+      deleted: ['/d/a.flac', '/d/b.flac'], quarantined: [{ source: '/m/c.flac', quarantined: '/q/c.flac' }],
+    })).toBe('Delete Folder finished: 3 files (2 deleted, 1 moved to quarantine).');
   });
 
   it('falls back to list lengths when files_removed is missing', () => {
     expect(deleteFolderResultMessage({ ok: true, deleted: ['/d/a.flac'] }))
-      .toBe('Source folder removed: 1 file (1 deleted).');
+      .toBe('Delete Folder finished: 1 file (1 deleted).');
   });
 
   it('uses files_removed alone when the lists are missing', () => {
-    expect(deleteFolderResultMessage({ ok: true, files_removed: 4 })).toBe('Source folder removed: 4 files.');
+    expect(deleteFolderResultMessage({ ok: true, files_removed: 4 })).toBe('Delete Folder finished: 4 files.');
   });
 
   it('never shows undefined or NaN for zero or missing counts', () => {
     for (const result of [{ ok: true }, { ok: true, files_removed: 0, deleted: [], quarantined: [] }]) {
       const message = deleteFolderResultMessage(result);
-      expect(message).toBe('Source folder removed. No files needed to be deleted or quarantined.');
+      expect(message).toBe('Delete Folder finished. No files needed to be deleted or quarantined.');
     }
   });
 });
+
+// The page status line carries the message; the item card is gone (or, here,
+// re-listed by the mocked reload), so its card message is not enough.
+async function confirmDeleteAndExpectStatus(text: string) {
+  render(<MemoryRouter><ImportReviewPage active /></MemoryRouter>);
+  const btn = await screen.findByRole('button', { name: 'Delete Folder' });
+  await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(btn);
+  const dialog = await screen.findByRole('dialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete Folder' }));
+  await waitFor(() => expect(mocked.deleteReviewFolder).toHaveBeenCalledTimes(1));
+  await waitFor(() => {
+    expect(screen.queryAllByRole('status').map((el) => el.textContent)).toContain(text);
+  });
+}
 
 describe('Import Review: Delete Folder success message', () => {
   it('shows the real file count after a confirmed delete', async () => {
@@ -77,21 +92,19 @@ describe('Import Review: Delete Folder success message', () => {
       ok: true, operation_id: 'op1', status: 'Completed', files_removed: 3,
       deleted: [`${FOLDER}/01.flac`, `${FOLDER}/02.flac`, `${FOLDER}/cover.jpg`], quarantined: [],
     });
-    render(<MemoryRouter><ImportReviewPage active /></MemoryRouter>);
-    const btn = await screen.findByRole('button', { name: 'Delete Folder' });
-    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(btn);
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete Folder' }));
-    await waitFor(() => expect(mocked.deleteReviewFolder).toHaveBeenCalledTimes(1));
-    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    await confirmDeleteAndExpectStatus('Delete Folder finished: 3 files (3 deleted).');
+    expect(document.body.textContent).not.toMatch(/undefined|NaN/);
+  });
 
-    // The page status line carries the message; the item card is gone (or,
-    // here, re-listed by the mocked reload), so its card message is not enough.
-    await waitFor(() => {
-      const lines = screen.queryAllByRole('status').map((el) => el.textContent);
-      expect(lines).toContain('Source folder removed: 3 files (3 deleted).');
+  it('reports an all-quarantined delete from the real {source, quarantined} entries', async () => {
+    mocked.deleteReviewFolder.mockResolvedValue({
+      ok: true, operation_id: 'op2', status: 'Completed', files_removed: 2, deleted: [],
+      quarantined: [
+        { source: `${FOLDER}/01.flac`, quarantined: '/q/op2/01.flac' },
+        { source: `${FOLDER}/02.flac`, quarantined: '/q/op2/02.flac' },
+      ],
     });
-    expect(document.body.textContent).not.toMatch(/undefined/);
+    await confirmDeleteAndExpectStatus('Delete Folder finished: 2 files (2 moved to quarantine).');
+    expect(document.body.textContent).not.toMatch(/undefined|NaN/);
   });
 });

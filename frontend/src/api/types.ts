@@ -2759,7 +2759,7 @@ export interface ImportTargetPreviewPayload {
 export interface DeleteReviewFolderResponse extends ApiOkResponse {
   operation_id?: string;
   deleted?: string[];
-  quarantined?: string[];
+  quarantined?: Array<{ source: string; quarantined: string }>;
   files_removed?: number;
   status?: string;
 }

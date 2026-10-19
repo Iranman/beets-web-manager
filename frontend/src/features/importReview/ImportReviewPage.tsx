@@ -449,12 +449,12 @@ export function deleteFolderResultMessage(result: DeleteReviewFolderResponse): s
   const total = typeof result.files_removed === 'number' && Number.isFinite(result.files_removed)
     ? result.files_removed
     : deleted + quarantined;
-  if (total <= 0) return 'Source folder removed. No files needed to be deleted or quarantined.';
+  if (total <= 0) return 'Delete Folder finished. No files needed to be deleted or quarantined.';
   const parts = [
     deleted ? `${deleted} deleted` : '',
     quarantined ? `${quarantined} moved to quarantine` : '',
   ].filter(Boolean);
-  return `Source folder removed: ${total} file${total === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}.`;
+  return `Delete Folder finished: ${total} file${total === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}.`;
 }
 
 function deleteFolderActionLabel(item?: ReviewItem): string {
