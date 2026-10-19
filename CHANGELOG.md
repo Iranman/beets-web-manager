@@ -10,6 +10,10 @@ The project uses Semantic Versioning.
 
 - The Library page's first load after a restart (and after any 3-minute gap) reads much less from Beets. Web Manager now asks the webmanager plugin for only the dozen item and album fields the page uses (`GET /webmanager/fields/<item|album>`, plugin 1.18.0, capability `library_fields`) instead of Beets' full `/item/` and `/album/` lists, which carry every field and check every file's size on disk. On a synthetic 3,960-track library in the stock Beets image the item read went from 6.7 s and 10.4 MB to 1.1 s and 1.2 MB. With an older plugin Web Manager keeps using the full lists.
 
+### Fixed
+
+- Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).
+
 ### Upgrade Notes
 
 - Restart the Beets container so it loads webmanager plugin 1.18.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, the Library page keeps working through the slower full reads.
