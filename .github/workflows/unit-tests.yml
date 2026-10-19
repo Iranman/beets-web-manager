@@ -47,8 +47,8 @@ jobs:
         run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
       - run: python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py
       - name: Pull the pinned stock Beets image from docker-compose.yml (authenticated, #234)
-        # tests.test_stock_beets_acceptance boots it; its own pull falls back
-        # to this image when the anonymous registry pull is rate-limited.
+        # One authenticated ghcr.io pull; the script exports its ghcr.io name
+        # as STOCK_BEETS_IMAGE, which the Docker tests boot without pulling again.
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci_pull_stock_beets.sh

@@ -18,8 +18,8 @@ The pin changes only through a reviewed PR:
    `docker buildx imagetools inspect lscr.io/linuxserver/beets:<tag>`.
 2. Make the PR consistent: the same `tag@digest` in `docker-compose.yml`,
    `docker-compose.full.yml`, the `docker-compose.dev.yml` default, and the
-   install examples in `README.md`, `docs/INSTALLATION.md` and
-   `docs/EXAMPLES.md`. If the Beets version itself changes (not only the
+   install examples in `README.md`, `docs/INSTALLATION.md`,
+   `docs/EXAMPLES.md` and `docs/CONFIGURATION.md`. If the Beets version itself changes (not only the
    `-lsNNN` build), bump the `beets==` test fixture to match in
    `requirements-dev.txt`, `BEETS_TEST_FIXTURE_VERSION` in
    `.github/workflows/docker-build.yml`, and the `pip install beets==` lines in

@@ -3,8 +3,11 @@
 # anonymous registry pull.
 #
 # Which image: the pinned `beets` image in docker-compose.yml (the single
-# source of truth, e.g. lscr.io/linuxserver/beets:2.14.1-ls356@sha256:...),
-# unless STOCK_BEETS_IMAGE overrides it (the scheduled `:latest` canary).
+# source of truth, e.g. lscr.io/linuxserver/beets:2.14.1-ls356@sha256:...).
+# STOCK_BEETS_PIN_OVERRIDE may name another lscr.io/linuxserver/beets tag
+# only together with STOCK_BEETS_ALLOW_FLOATING=1, which only the scheduled
+# `:latest` canary sets; anywhere else a mismatch with the pin fails. Only
+# this script (through $GITHUB_ENV) sets STOCK_BEETS_IMAGE for later steps.
 #
 # lscr.io is LinuxServer's redirector in front of ghcr.io/linuxserver; both
 # names serve the same manifest, so the digest is identical. Anonymous pulls
@@ -25,16 +28,25 @@
 set -euo pipefail
 
 COMPOSE="$(dirname "$0")/../docker-compose.yml"
-IMAGE="${STOCK_BEETS_IMAGE:-$(sed -n 's/^    image: \(lscr\.io\/linuxserver\/beets:[^ ]*\)$/\1/p' "$COMPOSE" | head -n 1)}"
+PIN="$(sed -n 's/^    image: \(lscr\.io\/linuxserver\/beets:[^ ]*\)$/\1/p' "$COMPOSE" | head -n 1)"
+IMAGE="${STOCK_BEETS_PIN_OVERRIDE:-$PIN}"
 case "$IMAGE" in
   lscr.io/linuxserver/beets:*) ;;
   *) echo "::error::no stock lscr.io/linuxserver/beets image found (got '${IMAGE}')" >&2; exit 1 ;;
 esac
+if [ "$IMAGE" != "$PIN" ] && [ "${STOCK_BEETS_ALLOW_FLOATING:-}" != "1" ]; then
+  echo "::error::'${IMAGE}' is not the docker-compose.yml pin '${PIN}' (set STOCK_BEETS_ALLOW_FLOATING=1 only in the canary)" >&2
+  exit 1
+fi
 SRC="ghcr.io/${IMAGE#lscr.io/}"
 ATTEMPTS="${ATTEMPTS:-5}"
 
+# Throwaway Docker client config: the ghcr.io login never touches the
+# runner's own ~/.docker, and is deleted with it on exit.
+DOCKER_CONFIG="$(mktemp -d)"
+export DOCKER_CONFIG
+trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
 if [ -n "${GHCR_TOKEN:-}" ]; then
-  trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
   printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:-ci}" --password-stdin >/dev/null \
     || echo "::warning::ghcr.io login failed; pulling anonymously (rate-limited)" >&2
 fi

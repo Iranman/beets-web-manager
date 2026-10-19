@@ -29,10 +29,21 @@ def pinned_stock_beets_image() -> str:
     return match.group(1)
 
 
-# STOCK_BEETS_IMAGE is set by scripts/ci_pull_stock_beets.sh in CI: the
-# ghcr.io name of the same pin (one authenticated pull, #234), or of
-# `:latest` in the scheduled canary (.github/workflows/beets-latest-canary.yml).
-STOCK_BEETS_IMAGE = os.environ.get("STOCK_BEETS_IMAGE") or pinned_stock_beets_image()
+def resolve_stock_beets_image(env=os.environ) -> str:
+    """The image to boot. STOCK_BEETS_IMAGE is set by
+    scripts/ci_pull_stock_beets.sh in CI: the ghcr.io name of the same pin
+    (one authenticated pull, #234). Anything other than the pin or its
+    ghcr.io name is refused unless STOCK_BEETS_ALLOW_FLOATING=1, which only
+    the scheduled canary (.github/workflows/beets-latest-canary.yml) sets."""
+    pin = pinned_stock_beets_image()
+    image = env.get("STOCK_BEETS_IMAGE") or pin
+    allowed = (pin, "ghcr.io/" + pin.removeprefix("lscr.io/"))
+    if image not in allowed and env.get("STOCK_BEETS_ALLOW_FLOATING") != "1":
+        raise RuntimeError(f"STOCK_BEETS_IMAGE={image!r} is not the docker-compose.yml pin {pin!r}")
+    return image
+
+
+STOCK_BEETS_IMAGE = resolve_stock_beets_image()
 
 
 def _docker_with_retry(cmd, attempts=3, backoff=5):
@@ -1027,6 +1038,23 @@ webmanager:
         for iid in made["item_ids"]:
             self.assertEqual(call("GET", f"/item/{iid}")[0], 404)
         self.assertEqual([csha(f["path"]) for f in album_files], [f["sha256"] for f in album_files])
+
+
+class StockBeetsImageSelectionTests(unittest.TestCase):
+    def test_pin_and_its_ghcr_name_are_accepted(self):
+        pin = pinned_stock_beets_image()
+        ghcr = "ghcr.io/" + pin.removeprefix("lscr.io/")
+        self.assertEqual(resolve_stock_beets_image({}), pin)
+        self.assertEqual(resolve_stock_beets_image({"STOCK_BEETS_IMAGE": ghcr}), ghcr)
+
+    def test_floating_image_is_refused_without_explicit_opt_in(self):
+        for image in ("lscr.io/linuxserver/beets:latest", "ghcr.io/linuxserver/beets:latest",
+                      "evil.example/beets:1"):
+            with self.assertRaises(RuntimeError):
+                resolve_stock_beets_image({"STOCK_BEETS_IMAGE": image})
+        latest = "ghcr.io/linuxserver/beets:latest"
+        self.assertEqual(
+            resolve_stock_beets_image({"STOCK_BEETS_IMAGE": latest, "STOCK_BEETS_ALLOW_FLOATING": "1"}), latest)
 
 
 if __name__ == "__main__":

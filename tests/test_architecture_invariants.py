@@ -17,6 +17,8 @@ a build context, or naming a job/step after the removed custom-engine jobs.
 import glob
 import os
 import re
+import shutil
+import subprocess
 import sys
 import unittest
 
@@ -137,10 +139,11 @@ class PinnedStockBeetsImageTests(unittest.TestCase):
         # Every shipped Compose file and copy-paste install example uses the
         # same pin as docker-compose.yml (the single source of truth CI reads).
         for rel in ("docker-compose.full.yml", "docker-compose.dev.yml", "README.md",
-                    "docs/INSTALLATION.md", "docs/EXAMPLES.md"):
+                    "docs/INSTALLATION.md", "docs/EXAMPLES.md", "docs/CONFIGURATION.md"):
             refs = {m.group(0) for m in PINNED_BEETS_RE.finditer(_read(rel))}
             self.assertEqual(refs, {compose_pin}, rel)
-            self.assertNotIn("linuxserver/beets:latest", _read(rel), rel)
+            if rel != "docs/CONFIGURATION.md":  # documents `latest` as a user's own choice
+                self.assertNotIn("linuxserver/beets:latest", _read(rel), rel)
 
     def test_shipped_python_does_not_describe_beets_latest(self):
         # Shipped code and scripts (not tests, whose fixtures may use :latest).
@@ -157,6 +160,16 @@ class PinnedStockBeetsImageTests(unittest.TestCase):
         self.assertIn(f'BEETS_TEST_FIXTURE_VERSION: "{version}"', _read(".github/workflows/docker-build.yml"))
         for wf in (".github/workflows/unit-tests.yml", ".github/workflows/security.yml"):
             self.assertRegex(_read(wf), "pip install " + pin, wf)
+
+    @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "needs POSIX bash")
+    def test_ci_pull_script_refuses_an_unpinned_image_without_opt_in(self):
+        # Fails before any docker login or pull: only the canary may float.
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("STOCK_BEETS_", "GHCR_TOKEN"))}
+        env["STOCK_BEETS_PIN_OVERRIDE"] = "lscr.io/linuxserver/beets:latest"
+        proc = subprocess.run(["bash", os.path.join(ROOT, "scripts", "ci_pull_stock_beets.sh")],
+                              env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("is not the docker-compose.yml pin", proc.stderr)
 
     def test_compose_validator_rejects_floating_beets_latest(self):
         sys.path.insert(0, os.path.join(ROOT, "scripts"))

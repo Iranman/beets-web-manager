@@ -25,14 +25,20 @@ jobs:
       contents: read
       packages: read  # authenticated stock-Beets pull (#234)
     env:
-      STOCK_BEETS_IMAGE: lscr.io/linuxserver/beets:latest
+      # Inputs to scripts/ci_pull_stock_beets.sh, which then sets
+      # STOCK_BEETS_IMAGE (the ghcr.io name) through $GITHUB_ENV. Only this
+      # workflow may float off the docker-compose.yml pin.
+      STOCK_BEETS_PIN_OVERRIDE: lscr.io/linuxserver/beets:latest
+      STOCK_BEETS_ALLOW_FLOATING: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install -r requirements-dev.txt
-      - name: Pull lscr.io/linuxserver/beets:latest (authenticated, #234)
+      - name: Pull upstream :latest by its ghcr.io name (authenticated, #234)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci_pull_stock_beets.sh
