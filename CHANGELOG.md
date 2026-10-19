@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Security
+
+- Closed CodeQL `py/path-injection` alerts #1411-#1416 and #1422 by stating existing path containment in a form static analysis can verify. The transaction store now also checks that a transaction file path stays inside its directory, in addition to the id format check. The Review Queue folder-delete route confines the path to the cleanup roots before it resolves anything. State JSON writes go through the checked path in its symlink-resolved directory, and a symlinked state file is replaced rather than written through. The temporary file is created exclusively, so a symlink planted at its name cannot redirect the write. Requests that were accepted before are still accepted, and refusals return the same messages.
+
 ### Upgrade Notes
 
 - Nothing changes for a running stack: Docker Compose keeps whatever `image:` your own Compose file names. If your `beets` service still says `lscr.io/linuxserver/beets:latest` and you want the same protection, replace that line with the pinned reference above. If `docker inspect beets --format '{{index .Config.Labels "org.opencontainers.image.version"}}'` already reports `2.14.1-ls356`, it is the image you run now, so Beets keeps its version. If it reports anything else, changing the line is a Beets version change: follow `docs/BEETS_ENGINE_MIGRATION.md` first.
