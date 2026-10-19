@@ -32,10 +32,10 @@ class BeetsAdapterTests(unittest.TestCase):
         self.token = "b" * 64
         with open(self.key_file, "w", encoding="utf-8") as f:
             f.write(self.token + "\n")
-        set_api_key_file(self.key_file)
-
-        # Setup Beets web plugin
+        # Setup Beets web plugin. Its first registration in a process sets the
+        # key file from its own config, so point it at the test key after.
         self.plugin = WebManagerPlugin()
+        set_api_key_file(self.key_file)
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["TESTING"] = True

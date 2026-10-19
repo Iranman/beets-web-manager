@@ -26,7 +26,10 @@ READ_FIELDS = {
 _PATH_FIELD = {"item": "path", "album": "artpath"}
 _ROOT = {"item": "items", "album": "albums"}
 
-ops._CORE_CAPABILITIES.append("library_fields")
+# ponytail: operations.py is held by another branch; move this into
+# _CORE_CAPABILITIES (and import read_ops there) once it is free.
+if "library_fields" not in ops._CORE_CAPABILITIES:
+    ops._CORE_CAPABILITIES.append("library_fields")
 
 
 def _bad(message: str, code: str):
@@ -60,6 +63,7 @@ def read_fields(entity: str):
     for obj in (lib.items() if entity == "item" else lib.albums()):
         row = {name: obj.get(name) for name in names}
         if path_field in row:
-            row[path_field] = util.displayable_path(row[path_field])
+            value = row[path_field]
+            row[path_field] = util.displayable_path(value) if value else ""
         rows.append(row)
     return jsonify({_ROOT[entity]: rows})
