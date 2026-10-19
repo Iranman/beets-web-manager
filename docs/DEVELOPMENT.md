@@ -23,7 +23,7 @@ Run from the repository root before opening a change:
 
 ```bash
 python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/release_metadata.py
-python -m unittest discover -s tests -p "test_*.py"
+python scripts/run_tests.py          # the unittest suite, one worker per CPU
 python scripts/security_secret_scan.py
 python scripts/validate_compose_security.py
 python scripts/generate_endpoint_inventory.py --check
@@ -44,7 +44,15 @@ npm run build
 npm audit --audit-level=high
 ```
 
-For a targeted Python test: `python -m unittest tests.test_name`.
+### Running the backend tests
+
+`scripts/run_tests.py` runs exactly the tests of `python -m unittest discover -s tests -p "test_*.py"` (which still works, single process) in `os.cpu_count()` worker processes, and prints unittest's summary (`Ran N tests ... OK (skipped=K)`) and exit code. On 12 cores the full suite takes about 3.5 minutes instead of about 21.
+
+- `python scripts/run_tests.py test_name [test_other ...]`: one or a few modules (module names, `tests.test_name` or file paths). This is the quick way to run one module; it sets up the shared suite environment the same way the full run does.
+- `-j N`: worker count. `-v`: per-test output, including every skip reason. `--slowest N`: the N modules that used the most worker time (default 10).
+- Each worker first imports `tests/test_ai_batch_retry_race.py`, as discover does at collection: it points `BEETSDIR`, the transaction directory and the other state paths at a temp directory and imports `app.py` there. Some modules rely on that and fail under a bare `python -m unittest tests.test_name`.
+- Work is handed out longest-first using `scripts/test_durations.json`. A module recorded as slower than `--split-seconds` (30) runs one TestCase class at a time, so `test_deploy_truenas_rollout` (about 9 CPU-minutes) does not set the wall time. After adding or slowing down tests, refresh the file with `python scripts/run_tests.py --save-durations`. A stale file only costs balance, never correctness.
+- Memory: about 0.3 GB per worker. Give the container `-m 4g` for 12 workers, or keep `-m 1500m` with `-j 4`.
 
 ### Supported environment for the full backend suite
 
@@ -52,10 +60,10 @@ The suite is supported on what CI runs: Python 3.13 with `requirements-dev.txt` 
 
 ```bash
 docker build -f Dockerfile.test -t bwm-test .
-docker run --rm -m 1500m -v "$PWD:/src" bwm-test                  # full suite
+docker run --rm -m 4g -v "$PWD:/src" bwm-test                     # full suite, one worker per CPU
 docker run --rm -m 1500m -v "$PWD:/src" bwm-test \
   env BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000 \
-  python -m unittest tests.test_name                               # one module
+  python scripts/run_tests.py test_name                            # one module
 ```
 
 On Git Bash, prefix the `docker run` lines with `MSYS_NO_PATHCONV=1`. `Dockerfile.test` is test-only (never published). Rebuild it after `requirements*.txt` changes. CI's `compose-verification` job builds it on every PR.
