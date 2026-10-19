@@ -121,6 +121,71 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "no_strong_match"}])
         self.assertEqual(len(self.lib.albums()), 0)
 
+    def _pinned_release(self, titles, album_id=REL):
+        from beets.autotag.hooks import AlbumInfo, TrackInfo
+        return AlbumInfo(
+            tracks=[TrackInfo(title=t, track_id=f"00000000-0000-4000-8000-00000000000{i}", index=i,
+                              medium=1, medium_index=i, medium_total=len(titles), length=1.0)
+                    for i, t in enumerate(titles, 1)],
+            album="Partial", album_id=album_id, artist="Some Artist",
+            artist_id="11111111-1111-4111-8111-111111111111",
+            releasegroup_id="22222222-2222-4222-8222-222222222222",
+            mediums=1, data_source="MusicBrainz")
+
+    def _import_pinned(self, info, **body):
+        """A real Beets quiet import whose MusicBrainz lookup returns ``info``."""
+        from unittest import mock
+        import beets.autotag.match as match_mod
+        src = os.path.join(self.downloads, "Some Artist - Partial")
+        _album(src, "Some Artist", "Partial")  # files: Track 1, Track 2
+        with mock.patch.object(match_mod.metadata_plugins, "albums_for_ids", lambda ids: iter([info])):
+            res = self._import(paths=[src], autotag=True, search_ids=[REL], copy=True, move=False,
+                               duplicate_action="keep", **body)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return src, res.get_json()
+
+    def test_missing_track_source_is_always_skipped_without_allow_missing_tracks(self):
+        """The live failure (38 Spesh, Beyond Belief): a folder that holds
+        exactly the missing tracks of the pinned release, with matching
+        titles, lengths and artist, is still skipped by Beets' quiet importer
+        (match.max_rec.missing_tracks caps it at medium)."""
+        src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2", "Track 3"]))
+        self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
+        self.assertEqual(len(self.lib.albums()), 0)
+
+    def test_allow_missing_tracks_imports_the_pinned_release(self):
+        src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2", "Track 3"]),
+                                        allow_missing_tracks=True)
+        self.assertEqual((data["skipped"], data["partial_matches"]), ([], 1))
+        albums = list(self.lib.albums())
+        self.assertEqual([a.mb_albumid for a in albums], [REL])
+        self.assertEqual(sorted(i.title for i in albums[0].items()), ["Track 1", "Track 2"])
+
+    def test_allow_missing_tracks_keeps_the_bar_for_everything_else(self):
+        """Only the missing-track penalty is set aside: a source whose files
+        do not fit the pinned release's tracks, or a candidate that is not
+        the pinned release, is still skipped."""
+        for name, info in (
+            ("titles", self._pinned_release(["Other Song", "Something Else", "Track 3"])),
+            ("not pinned", self._pinned_release(["Track 1", "Track 2", "Track 3"],
+                                                album_id="b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9")),
+        ):
+            with self.subTest(name):
+                src, data = self._import_pinned(info, allow_missing_tracks=True)
+                self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
+                self.assertEqual(len(self.lib.albums()), 0)
+                shutil.rmtree(src)
+
+    def test_allow_missing_tracks_validation(self):
+        src = os.path.join(self.downloads, "A")
+        os.makedirs(src)
+        for body in ({"allow_missing_tracks": True},
+                     {"allow_missing_tracks": True, "search_ids": [REL, REL]},
+                     {"allow_missing_tracks": 1, "search_ids": [REL]}):
+            res = self._import(paths=[src], autotag=True, **body)
+            self.assertEqual((res.status_code, res.get_json()["error_code"]),
+                             (400, "INVALID_ALLOW_MISSING_TRACKS"), body)
+
     def test_autotag_asis_is_refused(self):
         """An unmatched album never enters the library without a release
         group (#261 F-5 / D3): quiet_fallback=asis is refused before Beets runs."""

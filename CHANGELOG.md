@@ -12,7 +12,14 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- Completing an incomplete album (Download All / missing-track repair) always failed with "Beets could not confidently match this source to the selected MusicBrainz release", then downloaded the album again from the next Soulseek peer. The staged folder holds only the missing tracks, and Beets' quiet importer never applies a release with missing tracks (`match.max_rec.missing_tracks: medium`, and each missing track counts in the distance), even with the release pinned. A missing-track repair now asks the webmanager plugin (1.17.0) to accept the pinned release for that folder when the best candidate is that release, every file sits on one of its tracks, no other penalty is capped below strong, and the distance without the missing-track penalty is under `match.strong_rec_thresh`. AcoustID must still confirm every file before it is merged into the existing album; anything less still goes to Review. Restart the `beets` container so it loads plugin 1.17.0.
+
 - Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).
+
+### Dependencies
+
+- Frontend: next 16.4.0, @mui/material 9.5.0, @tanstack/react-query 5.104.2, postcss 8.5.30 (dependency and override), vitest 5.0.4.
+- yt-dlp PO-token provider bgutil-ytdlp-pot-provider 2.0.2, kept in step across the pip plugin (`requirements.txt` and the `YTDLP_BGUTIL_PIP_PACKAGE` runtime default) and the `docker-compose.full.yml` server image (digest-pinned). 2.0.2 refreshes vulnerable server lockfile dependencies; the plugin code is unchanged apart from its version string.
 
 ### Upgrade Notes
 

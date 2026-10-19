@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 import backend.acquisition_service as acq
 import backend.slskd_service as slskd
 
@@ -48,7 +50,7 @@ class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
         )
         m = patches
         with mock.patch.multiple(acq, **patches), \
-                mock.patch.object(acq.time, "sleep"):
+                module_time(acq, sleep=mock.Mock()):
             body, _ = acq.start_album_download({
                 "artist": "A", "album": "B", "method": "slskd",
                 "auto_import": True, "try_source_fallback": True,

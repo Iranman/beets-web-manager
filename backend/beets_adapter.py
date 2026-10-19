@@ -755,6 +755,7 @@ class BeetsAdapter:
         search_ids: Optional[List[str]] = None,
         quiet_fallback: Optional[str] = None,
         timeout: Optional[float] = None,
+        allow_missing_tracks: bool = False,
     ) -> Dict[str, Any]:
         """Execute a non-interactive import with Beets' own ImportSession.
 
@@ -762,6 +763,8 @@ class BeetsAdapter:
         ``import.search_ids`` / ``import.quiet_fallback`` settings (the
         ``--search-id`` flag and quiet-mode fallback). They are only sent
         when given, so a plugin that does not know them never sees them.
+        ``allow_missing_tracks`` (plugin 1.17.0, one search id) lets Beets
+        apply the pinned Release to a folder holding only some of its tracks.
         """
         payload = {
             "paths": [paths] if isinstance(paths, str) else paths,
@@ -780,6 +783,8 @@ class BeetsAdapter:
             payload["search_ids"] = list(search_ids)
         if quiet_fallback:
             payload["quiet_fallback"] = quiet_fallback
+        if allow_missing_tracks:
+            payload["allow_missing_tracks"] = True
         headers = {}
         if is_async:
             headers["Prefer"] = "respond-async"
