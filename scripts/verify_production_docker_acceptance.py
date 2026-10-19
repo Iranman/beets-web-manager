@@ -2,7 +2,7 @@
 
 Validates the standard, production stock-Beets deployment architecture
 (docker-compose.yml, unmodified):
-1. Stock Beets container (lscr.io/linuxserver/beets:latest) -- the sole
+1. Stock Beets container (pinned lscr.io/linuxserver/beets) -- the sole
    authoritative Beets runtime, owning /config/musiclibrary.blb.
 2. Beets Web Manager container (beets-web-manager:ci built from local
    Dockerfile) -- no local Beets Python runtime, talks to stock Beets
@@ -73,7 +73,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_BASE = ROOT / "docker-compose.yml"
 IMAGE_TAG = "beets-web-manager:ci"
-STOCK_BEETS_IMAGE = "lscr.io/linuxserver/beets:latest"
+# The production stack runs docker-compose.yml unmodified, so this is the
+# image pinned there (the single source of truth for the Beets version).
+_BEETS_IMAGE_MATCH = re.search(r"^    image: (lscr\.io/linuxserver/beets:\S+)$", COMPOSE_BASE.read_text(encoding="utf-8"), re.M)
+PINNED_BEETS_IMAGE = _BEETS_IMAGE_MATCH.group(1) if _BEETS_IMAGE_MATCH else ""
+# CI (scripts/ci_pull_stock_beets.sh) exports the ghcr.io name of the same
+# pin, pulled once with authentication (#234). The classic image store cannot
+# resolve the lscr.io tag@digest from it, so the Compose override below points
+# the beets service at it. Only that exact pin (same tag and digest) is accepted.
+STOCK_BEETS_IMAGE = os.environ.get("STOCK_BEETS_IMAGE") or PINNED_BEETS_IMAGE
+if not PINNED_BEETS_IMAGE or STOCK_BEETS_IMAGE not in (
+        PINNED_BEETS_IMAGE, "ghcr.io/" + PINNED_BEETS_IMAGE.removeprefix("lscr.io/")):
+    sys.exit(f"STOCK_BEETS_IMAGE={STOCK_BEETS_IMAGE!r} is not the docker-compose.yml pin {PINNED_BEETS_IMAGE!r}")
 
 FAILURES: list[str] = []
 
@@ -176,6 +187,7 @@ class ProductionAcceptanceStack:
 services:
   beets:
     container_name: {self.project_name}-beets
+    image: {STOCK_BEETS_IMAGE}
   beets-web-manager:
     container_name: {self.project_name}-web-manager
     image: {IMAGE_TAG}
@@ -710,7 +722,7 @@ def main():
     start_time = time.time()
     print("=" * 70)
     print("PRODUCTION DOCKER ACCEPTANCE TEST")
-    print("Stock-Beets architecture: linuxserver/beets:latest + beets-web-manager:ci")
+    print(f"Stock-Beets architecture: {STOCK_BEETS_IMAGE} + beets-web-manager:ci")
     print("=" * 70)
 
     try:

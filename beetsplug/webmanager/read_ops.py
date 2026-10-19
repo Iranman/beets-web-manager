@@ -18,7 +18,7 @@ READ_FIELDS = {
         "albumartist", "artist", "album", "year",
     }),
     "album": frozenset({
-        "id", "album", "albumartist", "albumartist_credit", "albumartists", "albumartists_credit",
+        "id", "album", "albumartist", "artist", "albumartist_credit", "albumartists", "albumartists_credit",
         "mb_albumartistid", "mb_albumartistids", "mb_albumid", "mb_releasegroupid",
         "albumtype", "albumtypes", "artpath",
     }),

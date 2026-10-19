@@ -43,7 +43,7 @@ mkdir beets-stack && cd beets-stack
 ```yaml
 services:
   beets:
-    image: lscr.io/linuxserver/beets:latest
+    image: lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73
     container_name: beets
     restart: unless-stopped
     environment:

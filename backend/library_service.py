@@ -1882,7 +1882,7 @@ def _refresh_library_cache() -> dict:
 # its per-item file stat. Add a field here when the builder starts using it.
 _LIBRARY_ITEM_FIELDS = ("id", "path", "album_id", "title", "track", "disc", "tracktotal", "mb_trackid",
                         "albumartist", "artist", "album", "year")
-_LIBRARY_ALBUM_FIELDS = ("id", "album", "albumartist", "albumartist_credit", "albumartists",
+_LIBRARY_ALBUM_FIELDS = ("id", "album", "albumartist", "artist", "albumartist_credit", "albumartists",
                          "albumartists_credit", "mb_albumartistid", "mb_albumartistids", "mb_albumid",
                          "mb_releasegroupid", "albumtype", "albumtypes", "artpath")
 
