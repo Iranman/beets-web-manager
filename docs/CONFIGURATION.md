@@ -251,11 +251,15 @@ The plugin report (`/api/plugins/status`) shows `musicbrainz` as enabled and loa
 
 ## Beets image version
 
-`docker-compose.yml`'s `beets` service image tag selects the stock Beets version:
+`docker-compose.yml`'s `beets` service `image:` line selects the stock Beets version. The shipped Compose files pin it to an exact LinuxServer build tag plus its manifest digest:
 
-- **`latest`** (the production default): resolves to whatever LinuxServer currently publishes. This is also the version the `stock-beets-acceptance` CI job in `.github/workflows/docker-build.yml` runs the real Docker acceptance test against.
-- **An exact version** (e.g. `lscr.io/linuxserver/beets:2.13.1`): fully reproducible; use this if you need a pinned version instead of floating with `latest`.
-- **A digest pin** (e.g. `lscr.io/linuxserver/beets:2.13.1@sha256:...`): fully reproducible and immune to a registry retagging the same version tag.
+```yaml
+    image: lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73
+```
+
+That is the exact image the `stock-beets-acceptance` and `production-docker-acceptance` CI jobs test; CI reads it from `docker-compose.yml`, so the pin is the single source of truth. A newer Beets therefore never reaches you unannounced: it arrives as a Dependabot PR (or a maintainer PR) that changes this line, re-runs the acceptance against the new image, and is listed in the CHANGELOG. Past upstream Beets releases changed behavior Web Manager depends on (Beets 2.13 renamed `genre` to `genres`; Beets 2.14 changed relative paths and broke stock web routes), so the shipped default no longer floats on `latest`.
+
+You can still choose another tag in your own Compose file (`lscr.io/linuxserver/beets:latest` floats; any other tag is untested by this project's CI). Changing the Beets version on an existing library can migrate its database irreversibly: follow `docs/BEETS_ENGINE_MIGRATION.md`. The scheduled `beets-latest-canary` workflow runs the same acceptance against `latest` every week so upstream breakage is seen before a pin bump; it is informational and never blocks a merge.
 
 The Beets image version is independent of the Beets Web Manager image version -- upgrading one does not require upgrading the other.
 

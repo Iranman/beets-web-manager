@@ -1,0 +1,48 @@
+name: beets-latest-canary
+
+# Early warning, never a gate. Shipped Compose files and every required CI
+# job use the `beets` image pinned in docker-compose.yml. This workflow runs
+# the stock-Beets acceptance against upstream `lscr.io/linuxserver/beets:latest`
+# once a week so an upstream Beets change that would break Web Manager
+# (e.g. Beets 2.13 genre->genres, 2.14 relative paths) shows up as a failed
+# scheduled run before anyone bumps the pin. It runs on a schedule and on
+# demand only -- not on pull requests -- so it can never block a merge.
+# To act on a failure: see "Upgrading the pinned Beets image" in
+# docs/BEETS_ENGINE_MIGRATION.md.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stock-beets-latest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # authenticated stock-Beets pull (#234)
+    env:
+      # Inputs to scripts/ci_pull_stock_beets.sh, which then sets
+      # STOCK_BEETS_IMAGE (the ghcr.io name) through $GITHUB_ENV. Only this
+      # workflow may float off the docker-compose.yml pin.
+      STOCK_BEETS_PIN_OVERRIDE: lscr.io/linuxserver/beets:latest
+      STOCK_BEETS_ALLOW_FLOATING: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - name: Pull upstream :latest by its ghcr.io name (authenticated, #234)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_pull_stock_beets.sh
+      - name: Report upstream Beets version
+        run: docker run --rm --entrypoint /lsiopy/bin/beet "$STOCK_BEETS_IMAGE" version || true
+      - name: Stock-Beets acceptance against :latest
+        run: python -m unittest -v tests.test_stock_beets_acceptance tests.test_beets_fresh_install_plugins
