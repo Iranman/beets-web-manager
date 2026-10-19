@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 from job_engine import DuplicateJobError, JobStore
 from tests.test_staging_mutation_hardening import _RouteEnv
 
@@ -242,7 +244,7 @@ class NoAdHocThreadTests(unittest.TestCase):
         cancel = threading.Event()
         cancel.set()
         busy = RuntimeError("HTTP 429: Only one concurrent operation is permitted")
-        with mock.patch.object(slskd, "_slskd_req", side_effect=busy),                 mock.patch.object(slskd.time, "sleep", side_effect=AssertionError("slept")):
+        with mock.patch.object(slskd, "_slskd_req", side_effect=busy),                 module_time(slskd, sleep=mock.Mock(side_effect=AssertionError("slept"))):
             with self.assertRaisesRegex(RuntimeError, "^cancelled$"):
                 slskd._slskd_search_and_queue("A", "B", "", [], busy_retries=5, cancel_event=cancel)
 

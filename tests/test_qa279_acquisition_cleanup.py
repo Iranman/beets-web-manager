@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 import backend.acquisition_service as acq
 import backend.app_runtime as rt
 import backend.slskd_service as slskd
@@ -51,8 +53,8 @@ class FailedCandidateCleanupE2E(unittest.TestCase):
             mock.patch.object(acq, "jobs"),
             mock.patch.object(acq, "_slskd_search_and_queue", side_effect=search),
             mock.patch.object(slskd, "_slskd_req", return_value={}),
-            mock.patch.object(slskd.time, "sleep"),
-            mock.patch.object(acq.time, "sleep"),
+            module_time(slskd, sleep=mock.Mock()),
+            module_time(acq, sleep=mock.Mock()),
             mock.patch.object(acq, "_slskd_fallback_methods", return_value=["ytdlp"]),
             mock.patch.object(acq, "slskd_configured", return_value=True),
             mock.patch.object(acq, "_direct_source_unavailable_reason", return_value=""),

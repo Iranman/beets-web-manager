@@ -12,10 +12,11 @@ import os
 import tempfile
 import threading
 import time
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tests._module_time import module_time
 
 import backend.app_runtime as rt
 import backend.slskd_service as slskd
@@ -76,8 +77,7 @@ def _module_time(**fakes):
     """Patch only backend.slskd_service's `time` name (#266): patching
     `slskd.time.time` replaced the process-wide `time.time`, so leftover
     threads from earlier tests consumed _Clock ticks."""
-    real = {"time": time.time, "sleep": time.sleep, "monotonic": time.monotonic}
-    return mock.patch.object(slskd, "time", types.SimpleNamespace(**{**real, **fakes}))
+    return module_time(slskd, **fakes)
 
 
 def _apply(patches):
