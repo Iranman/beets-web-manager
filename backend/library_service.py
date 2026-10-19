@@ -1877,6 +1877,16 @@ def _refresh_library_cache() -> dict:
     return payload
 
 
+# ARCH-031: the only Beets fields _build_library_payload reads. Fetching just
+# these (plugin 1.17.0 fields read) skips stock web's full serialisation and
+# its per-item file stat. Add a field here when the builder starts using it.
+_LIBRARY_ITEM_FIELDS = ("id", "path", "album_id", "title", "track", "disc", "tracktotal", "mb_trackid",
+                        "albumartist", "artist", "album", "year")
+_LIBRARY_ALBUM_FIELDS = ("id", "album", "albumartist", "albumartist_credit", "albumartists",
+                         "albumartists_credit", "mb_albumartistid", "mb_albumartistids", "mb_albumid",
+                         "mb_releasegroupid", "albumtype", "albumtypes", "artpath")
+
+
 def _build_library_payload() -> dict:
     """Walk /data/media/music on disk + inject library items whose files are
     missing (shown in red). Pure builder -- no caching or request handling,
@@ -1892,7 +1902,7 @@ def _build_library_payload() -> dict:
                    "broadcast": 4, "other": 5, "": 6}
     path_to_id:   Dict[str, int] = {}
     path_to_item: Dict[str, Any] = {}
-    all_lib_items = list(lib.items([]))
+    all_lib_items = list(lib.items([], fields=_LIBRARY_ITEM_FIELDS))
     for item in all_lib_items:
         p = _s(item.path)
         # Resolve relative beets path → absolute
@@ -1907,7 +1917,7 @@ def _build_library_payload() -> dict:
     beets_album_lk: Dict[tuple, dict] = {}
     beets_album_lk_by_id: Dict[int, dict] = {}   # fallback: album DB id → metadata
     try:
-        for ba in lib.albums([]):
+        for ba in lib.albums([], fields=_LIBRARY_ALBUM_FIELDS):
             try:
                 a_name = _s(getattr(ba, "albumartist", "") or getattr(ba, "artist", "") or "")
                 a_alb  = _s(getattr(ba, "album", "") or "")
