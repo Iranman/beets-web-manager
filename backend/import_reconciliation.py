@@ -344,6 +344,7 @@ def plan_reconciliation(existing_items: Iterable[Dict[str, Any]], imported_items
         plan.held_item_ids = [_int(r.get("id")) for r in imported_rows]
         return plan
     forced = {_int(v) for v in forced_replace_ids if _int(v)}
+    forced_claimed: set = set()
     by_slot: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in sorted(existing_items, key=lambda r: (*slot_key(r), _int(r.get("id")))):
         key = slot_key(row)
@@ -358,7 +359,22 @@ def plan_reconciliation(existing_items: Iterable[Dict[str, Any]], imported_items
             if forced_rows:
                 # The format-replacement pipeline retires these rows through its
                 # own verified transaction after this import; bookkeeping only.
-                by_slot[key] = [ex for ex in occupants if _int(ex.get("id")) not in forced]
+                # The imported row stays on its own album row for that verified
+                # replacement Preview: a move into the still-occupied slot is a
+                # slot_overlap the row merge refuses (#432 B1). The forced
+                # occupant stays in by_slot: the slot is still filled, so a
+                # second imported row for it is held, never planned as a move.
+                if key in forced_claimed:
+                    # Recorded for review, never resolved silently.
+                    plan.held_item_ids.append(_int(row.get("id")))
+                    plan.decisions.append(SlotDecision(
+                        ReconciliationOutcome.KEEP_BOTH_REVIEW, key, _int(forced_rows[0].get("id")),
+                        _int(row.get("id")), "", _side_summary(forced_rows[0], None),
+                        _side_summary(row, None), ["extra_import_for_replaced_slot"],
+                        "A second imported file for a slot under format replacement; compare and "
+                        "keep the correct one."))
+                forced_claimed.add(key)
+                continue
             else:
                 decisions = [decide_slot(ex, row, target_by_slot.get(key), hits_fn=hits_fn,
                                          exists_fn=exists_fn, similarity_fn=similarity_fn) for ex in occupants]

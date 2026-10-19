@@ -22,7 +22,7 @@ from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
-from backend.matching_service import IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
+from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED, IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
 from backend.job_service import _wait_for_child_job
 from job_engine import DuplicateJobError
@@ -494,6 +494,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         _delete_staged_import_folder(
                             fallback_result.get("aldir", ""), log
                         )
+                    if import_refusal_reason_code(direct_ex) == EXISTING_ALBUM_MERGE_FAILED:
+                        # #432 B2: imported but not merged; another source
+                        # would leave another partial album row.
+                        raise RuntimeError(
+                            f"Direct-source import stopped: {direct_ex}") from direct_ex
             raise RuntimeError(
                 f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "
                 + "; ".join(failures)
@@ -699,7 +704,18 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         # #406: a refusal that is not about this copy (False in
                         # IMPORT_REFUSAL_REASONS) fails every peer the same way.
                         reason_code = import_refusal_reason_code(ex)
-                        if reason_code and not IMPORT_REFUSAL_REASONS[reason_code]:
+                        if reason_code == EXISTING_ALBUM_MERGE_FAILED:
+                            # #432 B2 (see #428): the files were imported but not
+                            # merged; another peer or a direct source would import
+                            # again and leave another partial album row.
+                            log.append(
+                                "  [slskd] Not trying other Soulseek peers or direct sources: "
+                                "the import into the existing album did not complete "
+                                f"({reason_code}); see the import log for its Review status.")
+                            raise RuntimeError(
+                                f"SLSKD import stopped after one candidate: {ex}") from ex
+                        # An unknown code is not proven candidate-specific: stop.
+                        if reason_code and not IMPORT_REFUSAL_REASONS.get(reason_code, False):
                             log.append(
                                 f"  [slskd] Not trying other Soulseek peers: import refused "
                                 f"for a reason that is not specific to this copy "

@@ -31,7 +31,12 @@ def _queue_folder_for_manual_review(folder_path: str, suggestion: Optional[dict]
                                     evidence: Optional[Dict[str, Any]] = None,
                                     origin: Optional[Any] = None) -> bool:
     """Put a folder back in Import Review without failing the current job."""
-    existing_ids = _library_album_ids_for_folder(folder_path)
+    try:
+        existing_ids = _library_album_ids_for_folder(folder_path)
+    except Exception as ex:  # engine unavailable: never replace the caller's own error
+        if log is not None:
+            log.append(f"  WARN could not queue manual Review item: {ex}")
+        return False
     if existing_ids and not allow_existing:
         if log is not None:
             log.append(
