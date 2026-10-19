@@ -2075,11 +2075,13 @@ def _playlist_atomic_json_replace(path: Path,
         raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp_name}")
     tmp = Path(tmp_text)
 
+    created = False
     try:
         # Exclusive create (O_EXCL): parent is already symlink-resolved, and a
         # symlink pre-planted at the temp name fails here instead of
         # redirecting the write outside the state roots (QA #423).
         with tmp.open("x", encoding="utf-8") as handle:
+            created = True
             json.dump(payload, handle, ensure_ascii=False, indent=indent, sort_keys=sort_keys, default=str)
             handle.write("\n")
             handle.flush()
@@ -2100,13 +2102,16 @@ def _playlist_atomic_json_replace(path: Path,
         if not path.exists():
             raise RuntimeError(f"final file was not created: {path}")
     except BaseException as exc:
-        # Every failure path removes the temp file, including a refused
-        # replace (an ACL'd dataset) and an interrupt; a leftover is logged.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError as unlink_exc:
-            _app_logger.warning("Playlist temp file %s could not be removed: %s",
-                                tmp.name, type(unlink_exc).__name__)
+        # Every failure path removes the temp file this call created,
+        # including a refused replace (an ACL'd dataset) and an interrupt; a
+        # leftover is logged. An entry that blocked the exclusive create is
+        # not ours and is left alone.
+        if created:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                _app_logger.warning("Playlist temp file %s could not be removed: %s",
+                                    tmp.name, type(unlink_exc).__name__)
         if log is not None and isinstance(exc, Exception):
             log.append(f"  [playlist] {label} save failed for {path.name}: {type(exc).__name__}")
         raise

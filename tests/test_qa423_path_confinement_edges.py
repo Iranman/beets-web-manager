@@ -158,12 +158,15 @@ class PlaylistAtomicReplaceSymlinkTests(unittest.TestCase):
         import uuid
         sentinel = self.outside / "sentinel"
         sentinel.write_text("KEEP")
-        (self.state / "m.k.1000.00000000.tmp").symlink_to(sentinel)
+        planted = self.state / "m.k.1000.00000000.tmp"
+        planted.symlink_to(sentinel)
         with mock.patch.object(ps.time, "time", return_value=1.0),                 mock.patch.object(ps.uuid, "uuid4", return_value=uuid.UUID(int=0)):
             with self.assertRaises(OSError):
                 ps._playlist_atomic_json_replace(self.state / "m.json", {"x": 1}, save_key="k")
         self.assertEqual(sentinel.read_text(), "KEEP")
         self.assertFalse((self.state / "m.json").exists())
+        # The blocking entry was not created by this call, so it is not removed.
+        self.assertTrue(planted.is_symlink())
 
 
 class TransactionStoreRootFormsTests(unittest.TestCase):
