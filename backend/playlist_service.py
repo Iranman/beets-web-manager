@@ -2044,43 +2044,29 @@ def _playlist_atomic_json_replace(path: Path,
                 allowed_roots.append(Path(val).resolve(strict=False))
             except Exception:
                 pass
-    safe = False
+    # Every later use of path and tmp (mkdir, open, replace, exists, the
+    # cleanup unlink) goes through these normalised, prefix-checked forms of
+    # the contained paths (CodeQL #1411-#1413).
+    path_text = os.path.normpath(str(resolved_path))
+    root_prefix = ""
     for root in allowed_roots:
-        try:
-            get_is_under = _path_is_under
-            if (get_is_under and get_is_under(resolved_path, root)) or resolved_path.parent.resolve(strict=False) == root.resolve(strict=False):
-                safe = True
-                break
-            resolved_path.relative_to(root)
-            safe = True
+        candidate = os.path.join(os.path.normpath(str(root)), "")
+        if path_text.startswith(candidate):
+            root_prefix = candidate
             break
-        except ValueError:
-            pass
-    if not safe:
+    if not root_prefix:
         raise ValueError(f"Refusing atomic write to unsafe path outside state roots: {path}")
+    path = Path(path_text)
 
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
     safe_key = re.sub(r"[^a-zA-Z0-9_.-]+", "_", _s(save_key).strip())[:80]
     if not safe_key:
         safe_key = str(threading.get_ident())
-    tmp = parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
-    resolved_tmp = tmp.resolve(strict=False)
-    tmp_root = None
-    for root in allowed_roots:
-        try:
-            resolved_tmp.relative_to(root)
-            tmp_root = root
-            break
-        except ValueError:
-            pass
-    if tmp_root is None:
-        raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp}")
-    # Every later use of tmp (open, replace, the cleanup unlink) goes through
-    # this normalised, prefix-checked form of the same contained path.
-    tmp_text = os.path.normpath(str(resolved_tmp))
-    if not tmp_text.startswith(os.path.normpath(str(tmp_root)).rstrip(os.sep) + os.sep):
-        raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp.name}")
+    tmp_name = f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
+    tmp_text = os.path.normpath(os.path.join(str(parent), tmp_name))
+    if not tmp_text.startswith(root_prefix):
+        raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp_name}")
     tmp = Path(tmp_text)
 
     try:

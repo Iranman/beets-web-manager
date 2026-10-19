@@ -411,7 +411,14 @@ class TransactionStore:
         safe = str(transaction_id or "").strip()
         if not _TRANSACTION_ID_RE.fullmatch(safe):
             raise KeyError("Invalid transaction id")
-        return self.root / f"{safe}.json"
+        # CodeQL #1415/#1416: the id regex already forbids separators and
+        # dots; this prefix check states the containment where static
+        # analysis sees it, and holds even if the regex is ever loosened.
+        root_text = os.path.abspath(str(self.root))
+        path_text = os.path.abspath(os.path.join(root_text, f"{safe}.json"))
+        if not path_text.startswith(os.path.join(root_text, "")):
+            raise KeyError("Invalid transaction id")
+        return Path(path_text)
 
     def _settings_path(self) -> Path:
         return self.root / "settings.json"

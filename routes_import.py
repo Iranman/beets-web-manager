@@ -116,6 +116,9 @@ def import_folder_stats():
     })
 
 
+_REVIEW_FOLDER_NOT_PENDING = "Folder is not in Pending Review, or a Needs MB ID album row match."
+
+
 @app.post("/api/import/review-folder/delete")
 def delete_import_review_folder():
     payload = request.get_json(silent=True)
@@ -133,7 +136,19 @@ def delete_import_review_folder():
         album_id = 0
     log: List[str] = []
 
-    resolved = Path(src_path).resolve(strict=False)
+    # CodeQL #1422: confine the request path to the engine's own cleanup
+    # roots (the library included) before anything else uses it. The pending
+    # and album-row gates below already imply this; the inline realpath +
+    # prefix check is the form static analysis recognises as a barrier. Same
+    # fixed refusal as the pending gate, so it adds no classification oracle.
+    real_path = os.path.realpath(src_path)
+    resolved = None
+    for root in composite_workflows._import_review_allowed_roots(True):
+        if real_path.startswith(os.path.join(root, "")):
+            resolved = Path(real_path)
+            break
+    if resolved is None:
+        return jsonify({"ok": False, "error": _REVIEW_FOLDER_NOT_PENDING}), 400
     is_library_path = _path_is_under(resolved, MUSIC_ROOT)
     lexical = Path(os.path.normpath(src_path))
     lexical_library = lexical == Path(os.path.normpath(str(MUSIC_ROOT))) or \
@@ -145,7 +160,7 @@ def delete_import_review_folder():
     missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
 
     if not missing_mbid_album_match and not _pending_review_matches(src_path, ""):
-        return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match."}), 400
+        return jsonify({"ok": False, "error": _REVIEW_FOLDER_NOT_PENDING}), 400
 
     # CodeQL #1388: the ValueError and the log carry executor and exception
     # text (paths, raw errors). Both stay in the server log; the client gets
