@@ -3,6 +3,7 @@
 Comprehensive focused test suite for existing_album_reconcile_v1 mutation family.
 """
 import ast
+import contextlib
 import math
 import os
 import sqlite3
@@ -269,6 +270,40 @@ class Wave18InteractionTests(Wave20FixtureBase):
 
         # Apply failed -- the function must NOT claim the merge succeeded.
         self.assertEqual(res, 2)
+
+    def _merge_raises_with(self, **patches):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(10, 1, "Track 1 Old", 1, 1, "track1_existing.wav")
+        self._create_item(21, 2, "Track 2 New", 1, 2, "track2_imported.wav", staging=True)
+        apply_rec_mock = patches.setdefault("apply_existing_album_reconcile",
+                                            mock.MagicMock(return_value={"ok": True}))
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(app_module.composite_workflows, name, value))
+            with self.assertRaises(app_module._ExistingAlbumMergeFailed):
+                app_module._merge_imported_album_into_existing(2, 1, str(self.staging_root), [], mb_albumid="")
+        return apply_rec_mock
+
+    def test_merge_apply_failure_raises(self):
+        """#429 N3: a moved slot whose reconcile Apply fails raises instead
+        of returning the imported album id as if it were a result."""
+        self._merge_raises_with(
+            plan_existing_album_reconcile=mock.MagicMock(return_value={"ok": True, "operation_id": "op_rec"}),
+            apply_existing_album_reconcile=mock.MagicMock(return_value={"ok": False, "error": "simulated"}))
+
+    def test_merge_plan_failure_raises(self):
+        apply_rec_mock = self._merge_raises_with(plan_existing_album_reconcile=mock.MagicMock(
+            return_value={"ok": False, "error": "simulated plan failure"}))
+        apply_rec_mock.assert_not_called()
+
+    def test_merge_reconcile_exception_raises(self):
+        self._merge_raises_with(plan_existing_album_reconcile=mock.MagicMock(
+            side_effect=RuntimeError("engine exploded")))
+
+    def test_merge_unexpected_exception_raises(self):
+        self._merge_raises_with(find_all_items_by_album_id=mock.MagicMock(
+            side_effect=RuntimeError("engine unavailable")))
 
 
 
