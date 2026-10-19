@@ -8,7 +8,11 @@ The project uses Semantic Versioning.
 
 ### Security
 
-- Closed CodeQL `py/path-injection` alerts #1411-#1416 and #1422 by stating existing path containment in a form static analysis can verify. The transaction store now also checks that a transaction file path stays inside its directory, in addition to the id format check. The Review Queue folder-delete route confines the path to the cleanup roots before it resolves anything. State JSON writes go through the checked path in its symlink-resolved directory, and a symlinked state file is replaced rather than written through. Requests that were accepted before are still accepted, and refusals return the same messages.
+- Closed CodeQL `py/path-injection` alerts #1411-#1416 and #1422 by stating existing path containment in a form static analysis can verify. The transaction store now also checks that a transaction file path stays inside its directory, in addition to the id format check. The Review Queue folder-delete route confines the path to the cleanup roots before it resolves anything. State JSON writes go through the checked path in its symlink-resolved directory, and a symlinked state file is replaced rather than written through. The temporary file is created exclusively, so a symlink planted at its name cannot redirect the write. Requests that were accepted before are still accepted, and refusals return the same messages.
+
+### Fixed
+
+- Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).
 
 ## v0.7.2 - 2026-10-15
 

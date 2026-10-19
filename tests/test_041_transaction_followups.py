@@ -65,8 +65,11 @@ class ChildJobReconcileTests(_RouteEnvBase):
         self.assertTrue(started.wait(5))
         if cancel:
             job.kill()
+        # #384: wait for the parent job, not the transaction status: the
+        # wrapper writes the status before its last log line.
+        self.assertTrue(_wait(lambda: job.status != "running"))
         tx_id = job.metadata["transaction_id"]
-        self.assertTrue(_wait(lambda: self.store.get(tx_id)["status"] != "Running"))
+        self.assertNotEqual(self.store.get(tx_id)["status"], "Running")
         return job, self.store.get(tx_id), seen
 
     def test_child_that_finishes_its_work_after_the_cancel_is_not_audited_as_cancelled(self):

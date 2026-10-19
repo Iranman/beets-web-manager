@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 import app as app_module  # noqa: F401  -- loads the module family in order
 import backend.playlist_service as ps
 import backend.plex_service as plex_service
@@ -68,7 +70,7 @@ class SearchPollCancelTests(unittest.TestCase):  # #280
         event = mock.Mock()
         event.wait.return_value = True  # set while waiting
         with mock.patch.object(slskd, "_slskd_req", return_value={}), \
-                mock.patch.object(slskd.time, "sleep", side_effect=AssertionError("slept despite cancel")):
+                module_time(slskd, sleep=mock.Mock(side_effect=AssertionError("slept despite cancel"))):
             with self.assertRaisesRegex(RuntimeError, "^cancelled$"):
                 slskd._slskd_search_and_queue("A", "B", "", [], cancel_event=event)
         event.wait.assert_called_once_with(1)
@@ -91,7 +93,7 @@ class BoundedWalkTests(unittest.TestCase):  # #263
                 calls.append(1)
                 return 0.0 if len(calls) <= 3 else 10.0
 
-            with mock.patch.object(slskd.time, "monotonic", side_effect=monotonic):
+            with module_time(slskd, monotonic=monotonic):
                 found = list(slskd._slskd_bounded_walk(root, 5.0))
             self.assertLess(len(found), 5)
 
@@ -237,7 +239,7 @@ class PlexDeadlineTests(unittest.TestCase):  # #339
 
         with mock.patch.object(plex_service, "_plex_settings", return_value=dict(self.SETTINGS)), \
                 mock.patch.object(plex_service.provider_boundary, "opened", side_effect=opened), \
-                mock.patch.object(plex_service.time, "time", side_effect=lambda: clock[0]):
+                module_time(plex_service, time=lambda: clock[0]):
             return plex_service._plex_request("/x", timeout=30, attempts=1, deadline=deadline)
 
     def test_slow_body_past_the_deadline_times_out_without_a_thread(self):

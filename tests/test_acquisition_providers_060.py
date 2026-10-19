@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 acq = rt = replacement = slskd = yts = OutboundPolicyError = None
 
 
@@ -46,7 +48,7 @@ class _AcquisitionJobCase(unittest.TestCase):
             mock.patch.object(rt, "DOWNLOADS_ALLOWED_ROOTS", (downloads,)),
             mock.patch.object(rt, "TORRENT_SOURCE_ROOTS", ()),
             mock.patch.object(slskd, "DOWNLOADS_ROOT", downloads),
-            mock.patch.object(slskd.time, "sleep"),
+            module_time(slskd, sleep=mock.Mock()),
             mock.patch.object(acq, "_ytdlp_album_download", side_effect=self._direct_download),
         ]
         for patcher in patches:

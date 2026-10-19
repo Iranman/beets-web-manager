@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 from backend import config_layers
 
 
@@ -126,7 +128,7 @@ class SlskdSearchRootTests(unittest.TestCase):
                     mock.patch.object(rt, "DOWNLOADS_ALLOWED_ROOTS", (dl,)), \
                     mock.patch.object(rt, "TORRENT_SOURCE_ROOTS", (dl,)), \
                     mock.patch.object(slskd, "_slskd_req", return_value=[]), \
-                    mock.patch.object(slskd.time, "sleep", side_effect=_StopWaiting), \
+                    module_time(slskd, sleep=mock.Mock(side_effect=_StopWaiting)), \
                     mock.patch.object(Path, "rglob", rglob):
                 # The wait loop has no deadline yet (F8, #248): stop it at its
                 # first sleep, after one scan of every search root.
