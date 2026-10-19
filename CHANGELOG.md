@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.8.0 - 2026-10-19
 
 ### Security
 
@@ -12,8 +12,8 @@ The project uses Semantic Versioning.
 
 ### Upgrade Notes
 
-- Nothing changes for a running stack: Docker Compose keeps whatever `image:` your own Compose file names. If your `beets` service still says `lscr.io/linuxserver/beets:latest` and you want the same protection, replace that line with the pinned reference above. If `docker inspect beets --format '{{index .Config.Labels "org.opencontainers.image.version"}}'` already reports `2.14.1-ls356`, it is the image you run now, so Beets keeps its version. If it reports anything else, changing the line is a Beets version change: follow `docs/BEETS_ENGINE_MIGRATION.md` first.
-- Restart the Beets container so it loads webmanager plugin 1.18.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, the Library page keeps working through the slower full reads.
+- Nothing changes for a running stack: Docker Compose keeps whatever `image:` your own Compose file names. If your `beets` service still says `lscr.io/linuxserver/beets:latest` and you want the same protection, replace that line with the pinned reference under Changed below. If `docker inspect beets --format '{{index .Config.Labels "org.opencontainers.image.version"}}'` already reports `2.14.1-ls356`, it is the image you run now, so Beets keeps its version. If it reports anything else, changing the line is a Beets version change: follow `docs/BEETS_ENGINE_MIGRATION.md` first.
+- Restart the Beets container so it loads webmanager plugin 1.18.1. The rollout script does this itself when the plugin version changes. Until Beets restarts, the Library page keeps working through the slower full reads.
 - With a wrong or missing Web Manager API key (`BEETS_WEBMANAGER_API_KEY` or the key file) the Library page now fails with a Beets authentication error. Its library read now goes through the authenticated webmanager plugin; before, it used Beets' unauthenticated `/item/` list and loaded anyway. Fix the key as described in docs/TROUBLESHOOTING.md.
 
 ### Changed
