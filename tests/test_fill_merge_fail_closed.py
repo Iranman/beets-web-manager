@@ -8,11 +8,17 @@ removed here. Format replacement (N4) keeps allow_missing_tracks and the
 AcoustID gate, and its Preview result is not mistaken for a failed fill.
 """
 import contextlib
+import os
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
+import backend.composite_workflows as cw
 import backend.import_service as isvc
+from backend.matching_service import import_refusal_reason_code
+from backend.transaction_engine import TransactionStore
 
 REL = "11111111-1111-1111-1111-111111111111"
 RG = "22222222-2222-2222-2222-222222222222"
@@ -21,7 +27,7 @@ WANTED = [{"disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-2"}]
 CODE = "[reason_code=existing_album_merge_failed]"
 
 
-class FillMergeFailClosedTests(unittest.TestCase):
+class _JobHarness(unittest.TestCase):
     def setUp(self):
         self.result = {}
         self.planned = {}
@@ -77,10 +83,11 @@ class FillMergeFailClosedTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def _run(self, merge, **payload):
+    def _run(self, merge=None, **payload):
         body = {"aldir": str(isvc.DOWNLOADS_ROOT) + "/Artist/Album", "mb_albumid": REL,
                 "existing_album_id": EXISTING, "wanted_tracks": WANTED, "skip_import_lock": True, **payload}
-        with mock.patch.object(isvc, "_merge_imported_album_into_existing", **merge):
+        with (mock.patch.object(isvc, "_merge_imported_album_into_existing", **merge)
+              if merge is not None else contextlib.nullcontext()):
             resp, code = isvc.start_reimport_disk(body)
         self.assertEqual(code, 200, resp)
         return self.result
@@ -98,6 +105,8 @@ class FillMergeFailClosedTests(unittest.TestCase):
         self.assertTrue(any(f"imported album_id {IMPORTED} remains a separate album row" in line
                             for line in res["log"]), res["log"])
 
+
+class FillMergeFailClosedTests(_JobHarness):
     def test_happy_path_completes_on_the_existing_album(self):
         res = self._run({"side_effect": self._move_items})
         self.assertEqual(res["status"], "completed", res)
@@ -144,6 +153,98 @@ class FillMergeFailClosedTests(unittest.TestCase):
         res = self._run({"side_effect": isvc._ExistingAlbumMergeFailed("boom")},
                         replace_existing=True, replace_existing_item_ids=[51])
         self._assert_failed_to_review(res)
+
+    def test_multi_disc_album_wide_numbering_matches_by_recording_id(self):
+        """per_disc_numbering off: Beets stores disc 2 track 1 as track 13;
+        the read-back still finds it by mb_trackid and verifies the move."""
+        self.items[IMPORTED] = [{"id": 93, "disc": 2, "track": 13, "mb_trackid": "REC-21"}]
+        res = self._run({"side_effect": self._move_items},
+                        wanted_tracks=[{"disc": 2, "track": 1, "mb_trackid": "rec-21"}])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertTrue(any("Verified 1 requested track(s)" in line for line in res["log"]), res["log"])
+
+    def test_partial_merge_with_an_unmoved_requested_track_fails(self):
+        """Some rows moved (merge reports existing_album_id) but one requested
+        track stayed on the imported row, e.g. held for reconciliation review."""
+        self.items[IMPORTED].append({"id": 94, "disc": 1, "track": 3, "mb_trackid": "rec-3"})
+
+        def merge(*a, **k):
+            moved = [r for r in self.items[IMPORTED] if r["id"] == 92]
+            self.items[IMPORTED] = [r for r in self.items[IMPORTED] if r["id"] != 92]
+            self.items[EXISTING] += moved
+            return EXISTING
+        res = self._run({"side_effect": merge}, wanted_tracks=WANTED + [
+            {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+        self._assert_failed_to_review(res)
+        self.assertIn("item_id(s) 94", res["error"])
+
+    def test_merge_failure_message_is_the_fixed_parseable_one(self):
+        """#432 B2: the acquisition layer reads the code from the fixed start."""
+        res = self._run({"side_effect": isvc._ExistingAlbumMergeFailed("peer text [reason_code=file_unverified]")})
+        self.assertEqual(import_refusal_reason_code(f"import job failed: ERROR: {res['error']}"),
+                         "existing_album_merge_failed")
+
+
+class RealMergeJobTests(_JobHarness):
+    """The job with the REAL _merge_imported_album_into_existing,
+    plan_reconciliation and plan_existing_album_reconcile/plan_rows_merge
+    (a fake Beets adapter over the same rows). #432 B1: mocking the merge
+    result hid that a forced-replace slot was planned as a move."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        store = TransactionStore(str(self.root / "tx"))
+        for rows in self.items.values():
+            for r in rows:
+                r.setdefault("album_id", EXISTING if r["id"] < 90 else IMPORTED)
+        ad = mock.MagicMock()
+        ad.get_album.side_effect = lambda aid, **k: {"id": aid, "mb_albumid": REL, "mb_releasegroupid": RG}
+        ad.find_all_items_by_album_id.side_effect = lambda aid: list(self.items.get(int(aid), []))
+        self.reconcile_plans = []
+        real_plan = cw.plan_existing_album_reconcile
+
+        def plan(payload):
+            res = real_plan(payload, adapter=ad, store=store)
+            self.reconcile_plans.append(res)
+            return res
+        for patcher in (
+            mock.patch.object(cw, "plan_existing_album_reconcile", side_effect=plan),
+            mock.patch.object(cw, "apply_existing_album_reconcile", side_effect=AssertionError("nothing to apply")),
+            mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": str(self.root)}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_format_replacement_reaches_preview_with_the_real_merge(self):
+        # Existing item 51 holds slot 1/2 and is the one being replaced.
+        self.items[EXISTING] = [{"id": 51, "album_id": EXISTING, "disc": 1, "track": 2, "mb_trackid": "rec-2"}]
+        res = self._run(replace_existing=True, replace_existing_item_ids=[51])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual(res["result"]["album_ids"], [IMPORTED])
+        self.assertEqual(self.reviews, [])
+        self.assertEqual(self.reconcile_plans, [])  # no move into the occupied slot
+
+    def test_real_reconcile_plan_failure_fails_the_fill(self):
+        # The imported file is not on disk, so the real row merge refuses it.
+        res = self._run()
+        self.assertEqual([p.get("code") for p in self.reconcile_plans], ["file_missing"])
+        self._assert_failed_to_review(res)
+
+
+
+class QueueReviewLookupFailureTests(unittest.TestCase):
+    def test_engine_lookup_failure_does_not_replace_the_callers_error(self):
+        """N5: the album-id lookup raising (engine unavailable) returns False
+        like any other queue failure, so the job keeps its own error."""
+        import backend.pending_review_store as prs
+        log = []
+        with mock.patch.object(prs, "_library_album_ids_for_folder",
+                               side_effect=isvc.BeetsUnavailableError("down")):
+            self.assertFalse(prs._queue_folder_for_manual_review("/downloads/x", {}, "r", log))
+        self.assertIn("could not queue manual Review item", log[0])
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ _MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
-    def _run(self, refusal):
+    def _run(self, refusal, error=None, raises="direct-source fallback also failed", wait=None, keep=()):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -41,13 +41,15 @@ class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
             _stage_selected_audio_files=mock.Mock(return_value=str(root / "stage")),
             _validate_import_source_audio=mock.Mock(),
             _start_reimport_disk_job_internal=mock.Mock(return_value="job1"),
-            _wait_for_child_job=mock.Mock(side_effect=RuntimeError(
+            _wait_for_child_job=wait or mock.Mock(side_effect=RuntimeError(error or (
                 "import job failed: ERROR: Could not resolve a MusicBrainz release ID "
-                f"for import{refusal}; queued for Review")),
+                f"for import{refusal}; queued for Review"))),
             _delete_staged_import_folder=mock.Mock(),
             _slskd_cancel_queued_downloads=mock.Mock(),
             _slskd_cleanup_failed_candidate_files=mock.Mock(),
         )
+        for name in keep:  # patched by the caller instead
+            patches.pop(name)
         m = patches
         with mock.patch.multiple(acq, **patches), \
                 module_time(acq, sleep=mock.Mock()):
@@ -58,7 +60,7 @@ class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
             self.assertTrue(body["ok"], body)
             job_fn = m["jobs"].start_python.call_args[0][0]
             log = []
-            with self.assertRaisesRegex(RuntimeError, "direct-source fallback also failed"):
+            with self.assertRaisesRegex(RuntimeError, raises):
                 job_fn(log)
         return m, log
 
@@ -75,6 +77,43 @@ class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
         self.assertIn("acoustid_unavailable", stop[0])
         self.assertIn("would be refused the same way", stop[0])
         self.assertFalse([line for line in log if "Trying the next peer" in line], log)
+
+    def test_existing_album_merge_failure_stops_peers_and_fallback(self):
+        """#432 B2 (see #428): the files were imported but not merged into the
+        existing album; another peer or a direct source would import again
+        and leave another partial album row."""
+        m, log = self._run("", error=(
+            "import job failed: ERROR: Could not merge the imported track(s) into the existing "
+            "album [reason_code=existing_album_merge_failed]: existing album_id 5, boom. "
+            "Album_id 9 was left in the library for review."),
+            raises="SLSKD import stopped after one candidate")
+        self.assertEqual(m["_slskd_search_and_queue"].call_count, 1)
+        self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 1)
+        m["_ytdlp_album_download"].assert_not_called()
+        self.assertFalse([line for line in log if "Trying the next peer" in line], log)
+
+    def test_existing_album_merge_failure_stops_the_direct_source_loop(self):
+        """#432 B2: a direct source whose import did not merge stops the
+        fallback loop; the next direct source does not import again."""
+        merge_failed = ("import job failed: ERROR: Could not merge the imported track(s) into the "
+                        "existing album [reason_code=existing_album_merge_failed]: boom.")
+        waits = mock.Mock(side_effect=[RuntimeError("import job failed: ERROR: Could not resolve a MusicBrainz release "
+                                   "ID for import [reason_code=acoustid_unavailable]"),
+                      RuntimeError(merge_failed)])
+        with mock.patch.object(acq, "_slskd_fallback_methods", return_value=["soundcloud", "youtube"]),                 mock.patch.object(acq, "_ytdlp_album_download", return_value=1) as ytdlp:
+            m, log = self._run("", error=None, raises="Direct-source import stopped",
+                               wait=waits,
+                               keep=("_slskd_fallback_methods", "_ytdlp_album_download"))
+        self.assertEqual(ytdlp.call_count, 1)
+        self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 2)
+
+    def test_merge_failure_code_in_peer_text_is_not_trusted(self):
+        """The code counts only from the fixed message start, never from
+        detail text a peer controls (v0.7.1)."""
+        m, log = self._run("", error=(
+            "import job failed: ERROR: Beets import failed for 'x Could not merge the imported track(s) "
+            "into the existing album [reason_code=existing_album_merge_failed].flac'"))
+        self.assertEqual(m["_slskd_search_and_queue"].call_count, 12)
 
     def test_candidate_specific_code_keeps_trying_peers(self):
         m, log = self._run(" [reason_code=file_unverified]")

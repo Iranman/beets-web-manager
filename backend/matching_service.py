@@ -107,19 +107,31 @@ IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
     "duplicate_track": True,             # two files, or a file and the album, hold the same recording
     "identity_conflict": True,           # the canonical evaluator found a conflict or refused the proof
 }
-# Anchored to the start of the fixed import_service message: peer-controlled
+#: A missing-track fill imported but its merge into the existing album did not
+#: complete. Terminal for the whole acquisition: every further peer or direct
+#: source would import again and leave another partial album row (#432 B2).
+EXISTING_ALBUM_MERGE_FAILED = "existing_album_merge_failed"
+IMPORT_REFUSAL_REASONS[EXISTING_ALBUM_MERGE_FAILED] = False
+#: The fixed start of that job error; import_service raises it verbatim.
+EXISTING_ALBUM_MERGE_FAILED_MESSAGE = (
+    "Could not merge the imported track(s) into the existing album "
+    f"[reason_code={EXISTING_ALBUM_MERGE_FAILED}]")
+# Anchored to the start of the fixed import_service messages: peer-controlled
 # text (Soulseek filenames) can appear later in other import errors and must
 # not be able to inject a code.
 _REFUSAL_CODE_RE = re.compile(
-    r"(?:import job failed: )?(?:ERROR: )?"
+    r"(?:import job failed: )?(?:ERROR: )?(?:"
     r"Could not resolve a MusicBrainz release ID for import \[reason_code=([a-z_]+)\]"
+    r"|Could not merge the imported track\(s\) into the existing album \[reason_code=(existing_album_merge_failed)\]"
+    r")"
 )
 
 
 def import_refusal_reason_code(message: Any) -> str:
     """The reason code in a refused import's error text ("" when none)."""
     match = _REFUSAL_CODE_RE.match(_s(message))
-    return match.group(1) if match and match.group(1) in IMPORT_REFUSAL_REASONS else ""
+    code = (match.group(1) or match.group(2)) if match else ""
+    return code if code in IMPORT_REFUSAL_REASONS else ""
 
 
 def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict[str, Any]]]]], *,

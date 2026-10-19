@@ -358,7 +358,11 @@ def plan_reconciliation(existing_items: Iterable[Dict[str, Any]], imported_items
             if forced_rows:
                 # The format-replacement pipeline retires these rows through its
                 # own verified transaction after this import; bookkeeping only.
+                # The imported row stays on its own album row for that verified
+                # replacement Preview: a move into the still-occupied slot is a
+                # slot_overlap the row merge refuses (#432 B1).
                 by_slot[key] = [ex for ex in occupants if _int(ex.get("id")) not in forced]
+                continue
             else:
                 decisions = [decide_slot(ex, row, target_by_slot.get(key), hits_fn=hits_fn,
                                          exists_fn=exists_fn, similarity_fn=similarity_fn) for ex in occupants]

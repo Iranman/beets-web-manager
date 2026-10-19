@@ -30,7 +30,7 @@ from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_hits_
                                       acoustid_failure_status)
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
-from backend.matching_service import _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
+from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
@@ -1148,13 +1148,11 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             raise RuntimeError(
                 "Could not look up the Release Group of the selected MusicBrainz release; "
                 "nothing was imported.")
-        def _keep_for_review(reason: str, kept_ids: List[int], reason_code: str = "") -> None:
+        def _keep_for_review(reason: str, kept_ids: List[int]) -> None:
             # Never removes the rows Beets just imported: a removal goes
             # through the transaction preview/approve flow, not this job.
             ids = ", ".join(str(i) for i in kept_ids)
             reason = f"{reason} Album_id {ids} was left in the library for review."
-            if reason_code:
-                reason += f" [reason_code={reason_code}]"
             _queue_folder_for_manual_review(
                 aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
                         "kept_album_ids": kept_ids, "reason": reason},
@@ -1229,8 +1227,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 log.append(f"  [merge] FAILED: imported album_id {imported_aid} remains a separate album "
                            f"row next to existing album_id {existing_album_id}; clean it up through "
                            "Review / Transactions.")
-                _keep_for_review(f"Merging into existing album_id {existing_album_id} did not complete: "
-                                 f"{detail}.", [imported_aid], reason_code="existing_album_merge_failed")
+                # The fixed message comes first: the acquisition layer reads the
+                # code only from it, never from the detail (engine/peer text).
+                _keep_for_review(f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id "
+                                 f"{existing_album_id}, {detail}.", [imported_aid])
 
             # A missing-track fill must end with the delivered tracks on the
             # existing album; a format replacement stays a separate row
