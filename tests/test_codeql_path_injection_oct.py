@@ -72,7 +72,8 @@ class ReviewFolderDeleteRootConfinementTests(unittest.TestCase):
         folder = self.outside / "album"
         self._write_audio(folder / "01.flac")
         self._write_pending(folder)
-        with mock.patch.object(routes_import, "_delete_review_source_folder") as delete:
+        # Force the pending gate open so only the #1422 root gate can refuse.
+        with mock.patch.object(routes_import, "_pending_review_matches", return_value=True),                 mock.patch.object(routes_import, "_delete_review_source_folder") as delete:
             resp = self.client.post("/api/import/review-folder/delete", json={"path": str(folder)})
         self.assertEqual(resp.status_code, 400, resp.get_json())
         self.assertEqual(resp.get_json()["error"], routes_import._REVIEW_FOLDER_NOT_PENDING)
