@@ -2,11 +2,38 @@
 
 Beets Web Manager has no custom Beets image and no control agent — the sole
 Beets runtime is the published `lscr.io/linuxserver/beets` image, referenced
-by tag in `docker-compose.yml` (`:latest` by default; pin an exact tag or
-digest for reproducibility). This document describes what actually happens
+in `docker-compose.yml` by an exact LinuxServer build tag and manifest digest
+(e.g. `2.14.1-ls356@sha256:...`). This document describes what actually happens
 when that image's Beets version changes on a deployment with an existing
 library, and how to do it safely. It is not specific to any one version pair
 — the same steps apply to any future Beets version bump.
+
+## Upgrading the pinned Beets image (maintainers)
+
+The pin changes only through a reviewed PR:
+
+1. Dependabot's weekly `docker-compose` run proposes the new tag and digest
+   in the Compose files, or a maintainer opens the PR by hand. Resolve a
+   tag's digest with
+   `docker buildx imagetools inspect lscr.io/linuxserver/beets:<tag>`.
+2. Make the PR consistent: the same `tag@digest` in `docker-compose.yml`,
+   `docker-compose.full.yml`, the `docker-compose.dev.yml` default, and the
+   install examples in `README.md`, `docs/INSTALLATION.md`,
+   `docs/EXAMPLES.md` and `docs/CONFIGURATION.md`. If the Beets version itself changes (not only the
+   `-lsNNN` build), bump the `beets==` test fixture to match in
+   `requirements-dev.txt`, `BEETS_TEST_FIXTURE_VERSION` in
+   `.github/workflows/docker-build.yml`, and the `pip install beets==` lines in
+   `unit-tests.yml` and `security.yml`.
+   `tests/test_architecture_invariants.py` fails until all of these agree,
+   so a Dependabot PR that changes the Beets version stays red until a
+   maintainer finishes it.
+3. CI's `stock-beets-acceptance` and `production-docker-acceptance` jobs run
+   against the new pin. Read the upstream Beets release notes for changed
+   fields, path handling or plugin APIs that the `webmanager` plugin uses.
+4. Add a CHANGELOG entry naming the old and new Beets version and telling
+   operators to follow the checklist below before they move their own stack.
+5. On the maintainer's deployment, the bump is a Beets upgrade: run the
+   pre-upgrade checklist and snapshot below, then the upgrade steps.
 
 ## What actually happens on first open
 

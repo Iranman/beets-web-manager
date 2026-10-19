@@ -10,9 +10,24 @@ The project uses Semantic Versioning.
 
 - Closed CodeQL `py/path-injection` alerts #1411-#1416 and #1422 by stating existing path containment in a form static analysis can verify. The transaction store now also checks that a transaction file path stays inside its directory, in addition to the id format check. The Review Queue folder-delete route confines the path to the cleanup roots before it resolves anything. State JSON writes go through the checked path in its symlink-resolved directory, and a symlinked state file is replaced rather than written through. The temporary file is created exclusively, so a symlink planted at its name cannot redirect the write. Requests that were accepted before are still accepted, and refusals return the same messages.
 
+### Upgrade Notes
+
+- Nothing changes for a running stack: Docker Compose keeps whatever `image:` your own Compose file names. If your `beets` service still says `lscr.io/linuxserver/beets:latest` and you want the same protection, replace that line with the pinned reference above. If `docker inspect beets --format '{{index .Config.Labels "org.opencontainers.image.version"}}'` already reports `2.14.1-ls356`, it is the image you run now, so Beets keeps its version. If it reports anything else, changing the line is a Beets version change: follow `docs/BEETS_ENGINE_MIGRATION.md` first.
+
+### Changed
+
+- The shipped Compose files no longer float on `lscr.io/linuxserver/beets:latest`. `docker-compose.yml`, `docker-compose.full.yml`, the `docker-compose.dev.yml` default and the install examples pin `lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73` (Beets 2.14.1): the image CI has been testing, and the one `latest` pointed to on 2026-10-19. Beets upgrades now arrive as reviewed PRs that re-run the stock-Beets acceptance, instead of on the next `docker compose pull`; upstream Beets 2.13 and 2.14 each broke Web Manager that way. CI reads the pin from `docker-compose.yml`, `scripts/validate_compose_security.py` now rejects `:latest` on the `beets` service, and a new weekly, non-blocking `beets-latest-canary` workflow runs the acceptance against `latest` to catch upstream breakage early. See "Beets image version" in `docs/CONFIGURATION.md` and "Upgrading the pinned Beets image" in `docs/BEETS_ENGINE_MIGRATION.md`.
+
 ### Fixed
 
+- Completing an incomplete album (Download All / missing-track repair) always failed with "Beets could not confidently match this source to the selected MusicBrainz release", then downloaded the album again from the next Soulseek peer. The staged folder holds only the missing tracks, and Beets' quiet importer never applies a release with missing tracks (`match.max_rec.missing_tracks: medium`, and each missing track counts in the distance), even with the release pinned. A missing-track repair now asks the webmanager plugin (1.17.0) to accept the pinned release for that folder when the best candidate is that release, every file sits on one of its tracks, no other penalty is capped below strong, and the distance without the missing-track penalty is under `match.strong_rec_thresh`. AcoustID must still confirm every file before it is merged into the existing album; anything less still goes to Review. Restart the `beets` container so it loads plugin 1.17.0.
+
 - Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).
+
+### Dependencies
+
+- Frontend: next 16.4.0, @mui/material 9.5.0, @tanstack/react-query 5.104.2, postcss 8.5.30 (dependency and override), vitest 5.0.4.
+- yt-dlp PO-token provider bgutil-ytdlp-pot-provider 2.0.2, kept in step across the pip plugin (`requirements.txt` and the `YTDLP_BGUTIL_PIP_PACKAGE` runtime default) and the `docker-compose.full.yml` server image (digest-pinned). 2.0.2 refreshes vulnerable server lockfile dependencies; the plugin code is unchanged apart from its version string.
 
 ## v0.7.2 - 2026-10-15
 

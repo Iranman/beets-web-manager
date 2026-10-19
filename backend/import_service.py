@@ -1155,6 +1155,9 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir),
             "in_place": source_is_music_library,
             "duplicate_action": "keep" if existing_album_id else "skip",
+            # A missing-track fill holds only the missing tracks; Beets would
+            # otherwise always skip it. AcoustID still gates the merge below.
+            "allow_missing_tracks": bool(existing_album_id and wanted_tracks),
         })
         atomic_res = composite_workflows.apply_confirmed_import(
             plan_res["operation_id"], timeout=import_timeout + 15.0)

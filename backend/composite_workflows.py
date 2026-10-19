@@ -4018,6 +4018,8 @@ def apply_confirmed_import(
     MusicBrainz, applies it and places the files; Web Manager only verifies
     the album row it produced. A source Beets would not confidently match is
     skipped by Beets and reported as ``not_imported`` -- never imported as-is.
+    ``allow_missing_tracks: True`` in the plan (a missing-track repair) lets
+    the pinned Release match a source holding only some of its tracks.
 
     Copy unless the plan says ``use_move: True`` (the caller has already
     applied the preserved-torrent-source rule) or ``in_place: True`` (a
@@ -4057,7 +4059,7 @@ def apply_confirmed_import(
         before = {int(a.get("id") or 0) for a in ad.find_all_albums_by_mb_albumid(release_id)}
         ad.run_import(paths=paths, autotag=True, search_ids=[release_id], quiet_fallback="skip",
                       duplicate_action=duplicate_action, copy=not (use_move or in_place), move=use_move, write=True,
-                      timeout=timeout)
+                      timeout=timeout, allow_missing_tracks=meta.get("allow_missing_tracks") is True)
         new = [a for a in ad.find_all_albums_by_mb_albumid(release_id) if int(a.get("id") or 0) not in before]
     except Exception as ex:  # any failure ends Failed, never a stuck Running/Preview row
         refused = _import_refused(ex)

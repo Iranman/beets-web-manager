@@ -65,6 +65,18 @@ class ConfirmedImportTests(unittest.TestCase):
         self.assertEqual((kw["copy"], kw["move"]), (True, False))
         self.assertEqual(tx["status"], "Completed")
 
+    def test_allow_missing_tracks_only_when_the_plan_says_so(self):
+        """A missing-track repair plans allow_missing_tracks; every other
+        confirmed import keeps Beets' own full-release bar."""
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        self._run(ad)
+        self.assertFalse(ad.run_import.call_args.kwargs["allow_missing_tracks"])
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        self._run(ad, allow_missing_tracks=True, existing_album_id=5, duplicate_action="keep")
+        self.assertTrue(ad.run_import.call_args.kwargs["allow_missing_tracks"])
+        src = (Path(__file__).resolve().parents[1] / "backend" / "import_service.py").read_text(encoding="utf-8")
+        self.assertIn('"allow_missing_tracks": bool(existing_album_id and wanted_tracks)', src)
+
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
         self._run(ad, use_move=True)
@@ -192,9 +204,12 @@ class AdapterPayloadTests(unittest.TestCase):
         with mock.patch.object(ad, "_request", return_value={}) as req:
             ad.run_import("/downloads/A")
             self.assertNotIn("search_ids", req.call_args.kwargs["json_data"])
-            ad.run_import("/downloads/A", autotag=True, search_ids=[REL], quiet_fallback="skip", timeout=5)
+            self.assertNotIn("allow_missing_tracks", req.call_args.kwargs["json_data"])
+            ad.run_import("/downloads/A", autotag=True, search_ids=[REL], quiet_fallback="skip", timeout=5,
+                          allow_missing_tracks=True)
             body = req.call_args.kwargs["json_data"]
-        self.assertEqual((body["search_ids"], body["quiet_fallback"]), ([REL], "skip"))
+        self.assertEqual((body["search_ids"], body["quiet_fallback"], body["allow_missing_tracks"]),
+                         ([REL], "skip", True))
         self.assertEqual(req.call_args.kwargs["timeout"], 5)
 
 

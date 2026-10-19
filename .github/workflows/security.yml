@@ -48,7 +48,7 @@ jobs:
         # than a workflow `env:` assignment.
         run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
 
-      - name: Pull lscr.io/linuxserver/beets:latest (authenticated, #234)
+      - name: Pull the pinned stock Beets image from docker-compose.yml (authenticated, #234)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci_pull_stock_beets.sh
