@@ -42,8 +42,8 @@ class LibraryBuildSyscallTests(unittest.TestCase):
                            "disc": 1, "tracktotal": 1, "albumartist": "Artist 1", "artist": "Artist 1",
                            "album": "Gone", "year": 2001})
         fake = mock.Mock()
-        fake.items.side_effect = lambda q=None: [RemoteItem(dict(r)) for r in self.items]
-        fake.albums.side_effect = lambda q=None: [RemoteAlbum(dict(r), adapter=object()) for r in self.albums]
+        fake.items.side_effect = lambda q=None, fields=None: [RemoteItem(dict(r)) for r in self.items]
+        fake.albums.side_effect = lambda q=None, fields=None: [RemoteAlbum(dict(r), adapter=object()) for r in self.albums]
         for patcher in (mock.patch.object(ls, "MUSIC_ROOT", self.root), mock.patch.object(ls, "lib", fake),
                         mock.patch.object(ls, "_load_pending_reviews", return_value=[])):
             patcher.start()

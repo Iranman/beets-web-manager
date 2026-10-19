@@ -19,7 +19,7 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from backend.config_layers import redact_url_userinfo, url_has_userinfo
 
@@ -584,6 +584,27 @@ class BeetsAdapter:
             return self._rows([res])[0] if isinstance(res, dict) else None
         except BeetsAdapterNotFoundError:
             return None
+
+    def get_fields(self, entity: str, fields: Sequence[str]) -> List[Dict[str, Any]]:
+        """Every item or album with only ``fields`` (plus ``id``), from
+        ``GET /webmanager/fields/<entity>`` (plugin 1.18.0, capability
+        ``library_fields``). Stock ``/item/`` serialises every field and stats
+        every file. An older plugin has no such route (404), so the stock full
+        read answers instead; callers ignore the extra fields."""
+        # ponytail: an older plugin is re-probed every 10 minutes, so a Beets
+        # restart onto 1.18.0 is picked up without restarting Web Manager.
+        if time.monotonic() < getattr(self, "_no_fields_until", 0.0):
+            return self.get_items() if entity == "item" else self.get_albums()
+        try:
+            res = self._request("GET", f"/webmanager/fields/{entity}", params={"fields": ",".join(fields)})
+        except BeetsAdapterNotFoundError:
+            log.info("webmanager plugin before 1.18.0 has no fields read; using the stock %s read", entity)
+            self._no_fields_until = time.monotonic() + 600
+            return self.get_items() if entity == "item" else self.get_albums()
+        rows = res.get("items" if entity == "item" else "albums") if isinstance(res, dict) else None
+        if not isinstance(rows, list):
+            raise BeetsAdapterError("Beets returned a malformed fields read response")
+        return self._rows(rows)
 
     def get_unique_field_values(
         self, entity: str, key: str, sort_key: Optional[str] = None
@@ -1657,7 +1678,10 @@ class StockBeetsLibrary:
             return q
         raise BeetsAdapterError(f"Unsupported query shape: {query!r}")
 
-    def items(self, query: Any = None) -> List[RemoteItem]:
+    def items(self, query: Any = None, fields: Optional[Sequence[str]] = None) -> List[RemoteItem]:
+        """``fields`` limits a whole-library read to those fields (ARCH-031)."""
+        if fields and hasattr(self.adapter, "get_fields") and self._normalize_item_query(query) is None:
+            return [RemoteItem(r) for r in self.adapter.get_fields("item", fields)]
         if hasattr(self.adapter, "get_items"):
             query_str = self._normalize_item_query(query)
             items_data = self.adapter.get_items(query_str)
@@ -1714,7 +1738,10 @@ class StockBeetsLibrary:
 
         raise BeetsAdapterError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
 
-    def albums(self, query: Any = None) -> List[RemoteAlbum]:
+    def albums(self, query: Any = None, fields: Optional[Sequence[str]] = None) -> List[RemoteAlbum]:
+        """``fields`` limits a whole-library read to those fields (ARCH-031)."""
+        if fields and hasattr(self.adapter, "get_fields") and self._normalize_album_query(query) is None:
+            return [RemoteAlbum(r, adapter=self.adapter) for r in self.adapter.get_fields("album", fields)]
         if hasattr(self.adapter, "get_albums"):
             query_str = self._normalize_album_query(query)
             albums_data = self.adapter.get_albums(query_str)

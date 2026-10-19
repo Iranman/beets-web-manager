@@ -32,10 +32,10 @@ class BeetsAdapterTests(unittest.TestCase):
         self.token = "b" * 64
         with open(self.key_file, "w", encoding="utf-8") as f:
             f.write(self.token + "\n")
-        set_api_key_file(self.key_file)
-
-        # Setup Beets web plugin
+        # Setup Beets web plugin. Its first registration in a process sets the
+        # key file from its own config, so point it at the test key after.
         self.plugin = WebManagerPlugin()
+        set_api_key_file(self.key_file)
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["TESTING"] = True
@@ -241,6 +241,84 @@ class BeetsAdapterTests(unittest.TestCase):
         self.assertEqual(len(cleanup_idx), 3)
         item1_row = next(r for r in cleanup_idx if r.get("item_id") == self.item.id)
         self.assertEqual(item1_row.get("album_album"), "Discovery")
+
+    # ARCH-031: fields-limited bulk reads (plugin 1.18.0).
+    def test_fields_read_returns_only_requested_fields_with_absolute_paths(self):
+        items = self.adapter.get_fields("item", ["path", "title", "album_id"])
+        self.assertEqual(len(items), 3)
+        row = next(r for r in items if r["id"] == self.item.id)
+        self.assertEqual(set(row), {"id", "path", "title", "album_id"})  # no size, format, ...
+        self.assertEqual(row["path"], os.path.join(self.td, "track1.mp3"))
+        self.assertEqual(row["album_id"], self.album.id)
+        albums = self.adapter.get_fields("album", ["album", "mb_releasegroupid", "artpath"])
+        row = next(r for r in albums if r["id"] == self.album.id)
+        self.assertEqual(row, {"id": self.album.id, "album": "Discovery", "artpath": "",
+                               "mb_releasegroupid": "r1111111-1111-1111-1111-111111111111"})
+
+    def test_fields_read_matches_stock_values(self):
+        stock = {r["id"]: r for r in self.adapter.get_items()}
+        for row in self.adapter.get_fields("item", ["path", "title", "track", "year", "mb_trackid", "album_id"]):
+            for key, value in row.items():
+                self.assertEqual(value, stock[row["id"]][key], key)
+
+    def test_fields_read_omits_paths_when_include_paths_is_off(self):
+        beets_web_app.config["INCLUDE_PATHS"] = False
+        self.addCleanup(beets_web_app.config.__setitem__, "INCLUDE_PATHS", True)
+        rows = self.adapter.get_fields("item", ["path", "title"])
+        self.assertTrue(rows and all(set(r) == {"id", "title"} for r in rows))
+
+    def test_fields_read_rejects_unlisted_field_and_entity(self):
+        auth = {"Authorization": f"Bearer {self.token}"}
+        for url in ("/webmanager/fields/item?fields=title,format",
+                    "/webmanager/fields/item?fields=__class__",
+                    "/webmanager/fields/item?fields=",
+                    "/webmanager/fields/artist?fields=id"):
+            res = self.client.get(url, headers=auth)
+            self.assertEqual(res.status_code, 400, url)
+            self.assertIn(res.get_json()["error_code"], {"INVALID_FIELD", "INVALID_ENTITY"})
+            self.assertNotIn("__class__", res.get_data(as_text=True))
+
+    def test_fields_read_requires_auth(self):
+        res = self.client.get("/webmanager/fields/item?fields=title")
+        self.assertEqual(res.status_code, 401)
+        res = self.client.get("/webmanager/fields/item?fields=title", headers={"Authorization": "Bearer " + "c" * 64})
+        self.assertEqual(res.status_code, 401)
+
+    def test_fields_capability_advertised(self):
+        self.assertIn("library_fields", self.adapter.get_plugin_status()["capabilities"])
+
+    def test_fields_read_falls_back_to_stock_read_on_older_plugin(self):
+        real = self.adapter._request
+        calls = []
+
+        def old_plugin(method, path, **kw):
+            calls.append(path)
+            if path.startswith("/webmanager/fields/"):
+                raise BeetsAdapterNotFoundError("Not found", status_code=404)
+            return real(method, path, **kw)
+
+        self.adapter._request = old_plugin
+        items = self.adapter.get_fields("item", ["title"])
+        self.assertEqual(len(items), 3)
+        self.assertIn("format", items[0])  # the stock full row
+        self.assertEqual(len(self.adapter.get_fields("album", ["album"])), 2)
+        # The miss is remembered: the second read went straight to /album/.
+        self.assertEqual(calls, ["/webmanager/fields/item", "/item/", "/album/"])
+
+    def test_fields_read_raises_on_malformed_response(self):
+        self.adapter._request = lambda *a, **kw: {"items": "nope"}
+        with self.assertRaises(BeetsAdapterError):
+            self.adapter.get_fields("item", ["title"])
+
+    def test_stock_lib_fields_only_for_whole_library_reads(self):
+        rows = self.stock_lib.items([], fields=["title"])
+        self.assertTrue(all(set(r.keys()) == {"id", "title"} for r in rows))
+        albums = self.stock_lib.albums([], fields=["album"])
+        self.assertTrue(all({k for k in a.keys() if k != "_adapter"} == {"id", "album"} for a in albums))
+        # A query keeps the stock read (the fields route has no query support).
+        rows = self.stock_lib.items("title:Lucky", fields=["title"])
+        self.assertEqual([r.title for r in rows], ["Get Lucky"])
+        self.assertIn("format", rows[0])
 
     def test_adapter_pagination(self):
         page0 = self.adapter.get_items_page(offset=0, limit=2)

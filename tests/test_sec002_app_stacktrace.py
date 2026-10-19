@@ -181,6 +181,8 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
             json={"path": "/data/downloads/Some Album", "confirmed_wrong_library_folder": True},
         ), mock.patch.object(routes_import, "_library_no_mb_album_matches_folder", return_value=False,
         ), mock.patch.object(routes_import, "_pending_review_matches", return_value=True,
+        ), mock.patch.object(routes_import.composite_workflows, "_import_review_allowed_roots",
+                             return_value=["/data/downloads"],
         ), mock.patch.object(routes_import, "_delete_review_source_folder", side_effect=effect):
             response = routes_import.delete_import_review_folder()
         body, status = response if isinstance(response, tuple) else (response, response.status_code)

@@ -213,7 +213,7 @@ class AlbumArtRefusalTests(AlbumArtEngineTests):
         self.assertEqual(res.status_code, status, res.get_json())
         self.assertEqual(res.get_json()["error_code"], code)
         self.assertEqual(self._artpath(), "")
-        self.assertEqual(os.listdir(self.album_dir), ["01 Track.flac", "02 Track.flac"])
+        self.assertEqual(sorted(os.listdir(self.album_dir)), ["01 Track.flac", "02 Track.flac"])
 
     def test_non_image_is_refused(self):
         self.assertRefused(self._set(b"<svg xmlns='http://www.w3.org/2000/svg'/>" * 4), 400, "INVALID_IMAGE")
