@@ -414,7 +414,9 @@ class TransactionStore:
         # CodeQL #1415/#1416: the id regex already forbids separators and
         # dots; this prefix check states the containment where static
         # analysis sees it, and holds even if the regex is ever loosened.
-        root_text = os.path.abspath(str(self.root))
+        # realpath, not abspath: ".." after a symlinked component must
+        # resolve the way the OS resolves self.root everywhere else.
+        root_text = os.path.realpath(str(self.root))
         path_text = os.path.abspath(os.path.join(root_text, f"{safe}.json"))
         if not path_text.startswith(os.path.join(root_text, "")):
             raise KeyError("Invalid transaction id")

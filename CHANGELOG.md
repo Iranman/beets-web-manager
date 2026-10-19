@@ -8,7 +8,7 @@ The project uses Semantic Versioning.
 
 ### Security
 
-- Closed CodeQL `py/path-injection` alerts #1411-#1416 and #1422 by stating existing path containment in a form static analysis can verify. The transaction store now also checks that a transaction file path stays inside its directory, in addition to the id format check. The Review Queue folder-delete route confines the path to the cleanup roots before it resolves anything. State JSON writes use the checked, symlink-resolved path. Requests that were accepted before are still accepted, and refusals return the same messages.
+- Closed CodeQL `py/path-injection` alerts #1411-#1416 and #1422 by stating existing path containment in a form static analysis can verify. The transaction store now also checks that a transaction file path stays inside its directory, in addition to the id format check. The Review Queue folder-delete route confines the path to the cleanup roots before it resolves anything. State JSON writes go through the checked path in its symlink-resolved directory, and a symlinked state file is replaced rather than written through. Requests that were accepted before are still accepted, and refusals return the same messages.
 
 ## v0.7.2 - 2026-10-15
 

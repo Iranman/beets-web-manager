@@ -2044,17 +2044,23 @@ def _playlist_atomic_json_replace(path: Path,
                 allowed_roots.append(Path(val).resolve(strict=False))
             except Exception:
                 pass
-    # Every later use of path and tmp (mkdir, open, replace, exists, the
-    # cleanup unlink) goes through these normalised, prefix-checked forms of
-    # the contained paths (CodeQL #1411-#1413).
-    path_text = os.path.normpath(str(resolved_path))
+    # The target (symlinks followed) must lie inside a state root ...
+    resolved_text = os.path.normpath(str(resolved_path))
+    if not any(resolved_text.startswith(os.path.join(os.path.normpath(str(root)), ""))
+               for root in allowed_roots):
+        raise ValueError(f"Refusing atomic write to unsafe path outside state roots: {path}")
+    # ... and every later use of path and tmp (mkdir, open, replace, exists,
+    # the cleanup unlink) goes through these normalised, prefix-checked forms
+    # (CodeQL #1411-#1413). Only the directory is symlink-resolved: a
+    # symlinked leaf is replaced, never written through.
+    path_text = os.path.normpath(os.path.join(os.path.realpath(os.path.dirname(str(path))), path.name))
     root_prefix = ""
     for root in allowed_roots:
         candidate = os.path.join(os.path.normpath(str(root)), "")
         if path_text.startswith(candidate):
             root_prefix = candidate
             break
-    if not root_prefix:
+    if not root_prefix or not path_text.startswith(root_prefix):
         raise ValueError(f"Refusing atomic write to unsafe path outside state roots: {path}")
     path = Path(path_text)
 

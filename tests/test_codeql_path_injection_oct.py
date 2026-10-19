@@ -1,8 +1,10 @@
 """py/path-injection regressions: CodeQL #1415/#1416 (transaction store
 file path) and #1422 (review-folder delete route)."""
 
+import os
 import re
 import tempfile
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -11,6 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     from tests import test_sec002_app_path_import_review_cleanup as _route_mod
 
+import backend.playlist_service as ps
 import backend.transaction_engine as te
 import routes_import
 
@@ -25,6 +28,38 @@ class TransactionStorePathContainmentTests(unittest.TestCase):
                 for bad in ("../escape", "../../etc/passwd", "/etc/passwd"):
                     with self.subTest(bad=bad), self.assertRaises(KeyError):
                         store._path(bad)
+
+
+    def test_root_with_dotdot_after_symlink_resolves_like_the_os(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            (base / "real" / "store").mkdir(parents=True)
+            (base / "a").mkdir()
+            os.symlink(base / "real" / "store", base / "a" / "link")
+            store = te.TransactionStore(str(base / "a" / "link" / ".." / "store"))
+            self.assertEqual(Path(store._path("txn_1_abcdef12")).parent, base / "real" / "store")
+
+
+class PlaylistAtomicJsonLeafSymlinkTests(unittest.TestCase):
+    def test_symlinked_leaf_is_replaced_not_written_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            other = root / "settings.json"
+            other.write_text('{"keep": true}', encoding="utf-8")
+            leaf = root / "manifest.json"
+            os.symlink(other, leaf)
+            with mock.patch.object(ps, "WEB_MANAGER_DATA_DIR", str(root)):
+                ps._playlist_atomic_json_replace(leaf, {"new": 1})
+            self.assertEqual(other.read_text(encoding="utf-8"), '{"keep": true}')
+            self.assertFalse(leaf.is_symlink())
+
+    def test_path_outside_state_roots_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            with mock.patch.object(ps, "WEB_MANAGER_DATA_DIR", tmp):
+                with self.assertRaises(ValueError):
+                    ps._playlist_atomic_json_replace(Path(out) / "x.json", {"a": 1})
+                with self.assertRaises(ValueError):
+                    ps._playlist_atomic_json_replace(Path(tmp) / ".." / "escape.json", {"a": 1})
 
 
 class ReviewFolderDeleteRootConfinementTests(unittest.TestCase):
