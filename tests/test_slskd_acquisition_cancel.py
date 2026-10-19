@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 import backend.acquisition_service as acq
 import backend.app_runtime as rt
 import backend.slskd_service as slskd
@@ -49,8 +51,9 @@ class AcquisitionCancelDuringSlskd(unittest.TestCase):
             mock.patch.object(acq, "_slskd_search_and_queue",
                               return_value=("peer", ["Music\\Album\\01.flac"], str(downloads / "peer"), "Music\\Album")),
             mock.patch.object(slskd, "_slskd_req", return_value={}),
-            # One shared time module: record every sleep; a busy loop fails fast.
-            mock.patch.object(slskd.time, "sleep", side_effect=self._sleep),
+            # Record every sleep of both modules; a busy loop fails fast (#373:
+            # their own `time` names only, not the process-wide module).
+            module_time(slskd, sleep=self._sleep),
             mock.patch.object(acq, "_slskd_cancel_queued_downloads"),
             mock.patch.object(acq, "_slskd_cleanup_failed_candidate_files"),
             # Any direct-source fallback fails fast instead of reaching the network.
@@ -58,6 +61,7 @@ class AcquisitionCancelDuringSlskd(unittest.TestCase):
             mock.patch.object(acq, "slskd_configured", return_value=True),
             mock.patch.object(acq, "_direct_source_unavailable_reason", return_value=""),
             mock.patch.object(acq, "_ytdlp_album_download", side_effect=RuntimeError("fell back")),
+            module_time(acq, sleep=self._sleep),
         ]
         if stage == "search":
             patches.append(mock.patch.object(acq, "_slskd_wait_downloads", return_value=("", [])))

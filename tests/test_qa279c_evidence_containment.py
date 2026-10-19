@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 import backend.app_runtime as rt
 import backend.slskd as slskd_mod
 import backend.slskd_service as slskd
@@ -96,7 +98,7 @@ class RealQueueToCleanup(unittest.TestCase):
                        mock.patch.object(rt, "DOWNLOADS_ALLOWED_ROOTS", (dl,)),
                        mock.patch.object(rt, "TORRENT_SOURCE_ROOTS", ()),
                        mock.patch.object(slskd, "_slskd_req", side_effect=req),
-                       mock.patch.object(slskd.time, "sleep"))
+                       module_time(slskd, sleep=mock.Mock()))
             started = _apply(patches)
             try:
                 user, queued, _exp, _rdir = slskd._slskd_search_and_queue("Artist", "Album", "", log)

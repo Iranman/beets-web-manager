@@ -32,8 +32,12 @@ class ChildJobQaTests(tf.ChildJobReconcileTests):
         return job
 
     def _settled(self, job):
+        # #384: the transaction turns terminal before its ERROR line is
+        # appended, so wait for the parent job itself: it ends only after
+        # every transaction write of its wrapper.
+        self.assertTrue(tf._wait(lambda: job.status != "running"))
         tx_id = job.metadata["transaction_id"]
-        self.assertTrue(tf._wait(lambda: self.store.get(tx_id)["status"] != "Running"))
+        self.assertNotEqual(self.store.get(tx_id)["status"], "Running")
         return self.store.get(tx_id)
 
     def test_child_that_published_mutation_started_then_stopped_is_partial_not_cancelled(self):
