@@ -153,9 +153,66 @@ class PlanTests(unittest.TestCase):
         plan = plan_reconciliation([_row(1)], [_row(2)], {(1, 1): TARGET_TRACK},
                                    album_identity({"mb_releasegroupid": RG}, {"mb_releasegroupid": RG}),
                                    forced_replace_ids=[1])
-        self.assertEqual(plan.move_ids, [2])
+        # #432 B1: the imported row stays on its own album row for the
+        # format-replacement Preview; it is not moved into the occupied slot.
+        self.assertEqual(plan.move_ids, [])
         self.assertEqual(plan.replace_rows, [])
         self.assertEqual(plan.decisions, [])
+        self.assertEqual(plan.held_item_ids, [])
+
+    def test_forced_replacement_slot_is_never_handed_to_the_row_merge(self):
+        """#432 B1: the real row merge refuses a move into an occupied slot
+        (slot_overlap), so planning one made every format replacement fail."""
+        from unittest import mock
+        import backend.album_row_merge as album_row_merge
+        from backend.transaction_engine import TransactionStore
+        existing, imported = [dict(_row(1, track=2), album_id=5)], [dict(_row(2, track=2), album_id=9),
+                                                                     dict(_row(3, track=3), album_id=9)]
+        plan = plan_reconciliation(existing, imported, {},
+                                   album_identity({"mb_releasegroupid": RG}, {"mb_releasegroupid": RG}),
+                                   forced_replace_ids=[1])
+        self.assertEqual(plan.move_ids, [3])  # the free slot still moves
+        ad = mock.MagicMock()
+        ad.get_album.side_effect = lambda aid, **k: {"id": aid, "mb_albumid": REL, "mb_releasegroupid": RG}
+        ad.find_all_items_by_album_id.side_effect = lambda aid: existing if aid == 5 else imported
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TransactionStore(tmp)
+            refused = album_row_merge.plan_rows_merge(5, [9], [2], adapter=ad, store=store)
+            self.assertEqual(refused.get("code"), "slot_overlap")
+            moved = album_row_merge.plan_rows_merge(5, [9], plan.move_ids, adapter=ad, store=store,
+                                                    abs_path=lambda p: __file__)
+            self.assertTrue(moved.get("ok"), moved)
+
+    def test_second_row_in_a_forced_slot_is_held_not_moved(self):
+        """LTE N1: the forced occupant still fills its slot, so a second
+        imported row there is held; only the free-slot row moves, and the
+        real row merge plans that move without a slot_overlap."""
+        from unittest import mock
+        import backend.album_row_merge as album_row_merge
+        from backend.transaction_engine import TransactionStore
+        existing = [dict(_row(1, track=2), album_id=5)]
+        imported = [dict(_row(2, track=2), album_id=9), dict(_row(3, track=2), album_id=9),
+                    dict(_row(4, track=3), album_id=9)]
+        plan = plan_reconciliation(existing, imported, {},
+                                   album_identity({"mb_releasegroupid": RG}, {"mb_releasegroupid": RG}),
+                                   forced_replace_ids=[1])
+        self.assertEqual(plan.move_ids, [4])
+        self.assertEqual(plan.held_item_ids, [3])
+        # QA F2: the held row is persisted as a review record.
+        with tempfile.TemporaryDirectory() as tmp:
+            records = record_reviews(plan, existing_album_id=5, imported_album_id=9, release_id=REL,
+                                     source_folder="/downloads/x", path=Path(tmp) / "reviews.json")
+            stored = json.loads((Path(tmp) / "reviews.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["imported_item_id"], r["outcome"]) for r in records], [(3, "keep_both_review")])
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(plan.counts()["keep_both_review"], 1)
+        ad = mock.MagicMock()
+        ad.get_album.side_effect = lambda aid, **k: {"id": aid, "mb_albumid": REL, "mb_releasegroupid": RG}
+        ad.find_all_items_by_album_id.side_effect = lambda aid: existing if aid == 5 else imported
+        with tempfile.TemporaryDirectory() as tmp:
+            res = album_row_merge.plan_rows_merge(5, [9], plan.move_ids, adapter=ad, store=TransactionStore(tmp),
+                                                  abs_path=lambda p: __file__)
+        self.assertTrue(res.get("ok"), res)
 
     def test_review_records_persist_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:

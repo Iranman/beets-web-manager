@@ -30,7 +30,7 @@ from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_hits_
                                       acoustid_failure_status)
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
-from backend.matching_service import _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
+from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
@@ -185,6 +185,12 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
         return 0
 
 
+class _ExistingAlbumMergeFailed(RuntimeError):
+    """The engine reconcile into the existing album was attempted and did not
+    complete (plan or apply not ok, or an exception). The imported album row
+    is left as it is; the caller routes the folder to Review."""
+
+
 def _merge_imported_album_into_existing(imported_album_id: int, existing_album_id: int,
                                         source_folder: str, log: list,
                                         mb_albumid: str = "",
@@ -197,6 +203,11 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
     unproven slot keeps both files and both rows and is recorded for review.
     This function only gathers inputs and applies the planned engine
     transactions.
+
+    Returns existing_album_id when the planned moves were applied, and
+    imported_album_id when nothing was moved (different album identity,
+    replacements left in Preview). Raises _ExistingAlbumMergeFailed when the
+    reconcile failed or raised, so a failure is never reported as a result.
     """
     if not imported_album_id or not existing_album_id or imported_album_id == existing_album_id:
         return imported_album_id
@@ -252,7 +263,6 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         if not plan.album.same_album:
             return imported_album_id
 
-        replace_ok = True
         reconcile_ok = True
         for pair in plan.mapping_pairs:
             # One canonical item-file replacement per slot, left in Preview:
@@ -310,15 +320,17 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 reconcile_ok = False
                 log.append(f"  [merge] WARN exception delegating existing album reconcile to engine: {ex}")
 
-        # Report existing_album_id only when what was attempted succeeded.
+        if not reconcile_ok:
+            raise _ExistingAlbumMergeFailed("the existing album reconcile did not complete")
         # Rows held for review stay untouched in the imported album row; the
         # caller then validates the existing album and never the held rows.
         attempted = bool(plan.move_ids or plan.duplicate_rows)
-        succeeded = replace_ok and reconcile_ok
-        return existing_album_id if (attempted and succeeded) else imported_album_id
+        return existing_album_id if attempted else imported_album_id
+    except _ExistingAlbumMergeFailed:
+        raise
     except Exception as ex:
-        log.append(f"  [merge] Warning: {ex}")
-        return imported_album_id
+        log.append(f"  [merge] FAILED: {ex}")
+        raise _ExistingAlbumMergeFailed(f"merge raised: {ex}") from ex
 
 
 def _start_reimport_disk_job_internal(aldir: str, mb_albumid: str,
@@ -507,6 +519,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
     def _do(log, cancel_event=None):
         nonlocal aldir, mb_albumid, existing_album_id, wanted_tracks
+        requested_tracks = list(wanted_tracks)  # before the source scan narrows it
 
         # Accept a release UUID, release URL, release-group UUID/URL, or a blank
         # value that can be resolved from the folder/artist context.  The rest
@@ -1141,10 +1154,11 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # through the transaction preview/approve flow, not this job.
             ids = ", ".join(str(i) for i in kept_ids)
             reason = f"{reason} Album_id {ids} was left in the library for review."
-            _queue_folder_for_manual_review(
-                aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
-                        "kept_album_ids": kept_ids, "reason": reason},
-                reason, log, allow_existing=True)
+            if not _queue_folder_for_manual_review(
+                    aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                            "kept_album_ids": kept_ids, "reason": reason},
+                    reason, log, allow_existing=True):
+                log.append(f"  No Review entry was written; album_id {ids} was left in the library.")
             raise RuntimeError(reason)
 
         plan_res = composite_workflows.plan_confirmed_import({
@@ -1198,6 +1212,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         def _needs_review(reason: str) -> None:
             _keep_for_review(reason, [aid])
 
+        undelivered_tracks: List[Dict[str, Any]] = []
         if existing_album_id:
             # Missing-track fill: Beets kept the new files as their own album
             # (duplicate_action keep); merge them onto the existing album.
@@ -1207,9 +1222,65 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 if not fp_validation.get("ok"):
                     _needs_review(fp_validation.get("reason") or "AcoustID did not verify the downloaded "
                                   "file(s) for the requested missing MusicBrainz track(s).")
-            aid = _merge_imported_album_into_existing(
-                aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
-                replace_existing_item_ids=replace_existing_item_ids)
+            imported_aid = aid
+
+            def _merge_failed(detail: str) -> None:
+                # Fail closed: the imported album row stays as it is, never
+                # removed here; cleanup goes through the controlled workflow.
+                log.append(f"  [merge] FAILED: imported album_id {imported_aid} remains a separate album "
+                           f"row next to existing album_id {existing_album_id}; clean it up through "
+                           "Review / Transactions.")
+                # The fixed message comes first: the acquisition layer reads the
+                # code only from it, never from the detail (engine/peer text).
+                _keep_for_review(f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id "
+                                 f"{existing_album_id}, {detail}.", [imported_aid])
+
+            # A missing-track fill must end with the delivered tracks on the
+            # existing album; a format replacement stays a separate row
+            # until its Preview is approved, so only fills are read back.
+            verify_fill = bool(wanted_tracks) and not replace_existing
+            fill_item_ids: List[int] = []
+            if verify_fill:
+                def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
+                    rid = _s(t.get("mb_trackid")).strip().lower()
+                    return bool(
+                        (int(t.get("track") or 0)
+                         and (int(row.get("disc") or 1), int(row.get("track") or 0))
+                         == (int(t.get("disc") or 1), int(t.get("track") or 0)))
+                        or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
+                try:
+                    imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
+                except Exception as ex:
+                    _merge_failed(f"could not read the imported items ({ex})")
+                fill_item_ids = [int(r["id"]) for r in imported_rows
+                                 if any(_is_wanted(r, t) for t in wanted_tracks)]
+            try:
+                aid = _merge_imported_album_into_existing(
+                    aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
+                    replace_existing_item_ids=replace_existing_item_ids)
+            except _ExistingAlbumMergeFailed as ex:
+                _merge_failed(str(ex))
+            if verify_fill:
+                try:
+                    existing_rows = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
+                except Exception as ex:
+                    _merge_failed(f"could not read back existing album_id {existing_album_id} ({ex})")
+                on_existing = {int(r.get("id") or 0) for r in existing_rows}
+                unmerged = [i for i in fill_item_ids if i not in on_existing]
+                if aid != existing_album_id or not fill_item_ids or unmerged:
+                    _merge_failed("the requested track(s) are not on the existing album"
+                                  + (f" (item_id(s) {', '.join(map(str, unmerged))})" if unmerged else ""))
+                log.append(f"  [merge] Verified {len(fill_item_ids)} requested track(s) on existing "
+                           f"album_id {existing_album_id}.")
+                # The read-back covers what the source delivered. Originally
+                # requested tracks still absent from the album are reported,
+                # not failed (QA N1); the source scan narrows wanted_tracks.
+                undelivered_tracks = [t for t in requested_tracks
+                                      if not any(_is_wanted(r, t) for r in existing_rows)]
+                if undelivered_tracks:
+                    log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
+                               f"track(s), still missing from album_id {existing_album_id}: "
+                               + ", ".join(_wanted_track_label(t) for t in undelivered_tracks[:8]))
             merged = composite_workflows.get_album(aid) or {}
             if (_s(merged.get("mb_albumid")).strip().lower() != mb_albumid
                     or _s(merged.get("mb_releasegroupid")).strip().lower() != planned_rg):
@@ -1261,6 +1332,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "aldir": aldir,
             "mb_albumid": mb_albumid,
             "existing_album_id": int(existing_album_id or 0),
+            "undelivered_tracks": undelivered_tracks,
         }
 
     def _do_locked(log, cancel_event=None):
