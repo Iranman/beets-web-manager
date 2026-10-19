@@ -86,6 +86,9 @@ class GenreEditTests(unittest.TestCase):
         set_api_key_file(key)
         ops_mod.set_allowed_roots([self.music])
         beets_web_app.config["lib"] = self.lib
+        # Item rows must carry their paths, or the plugin has no file to tag.
+        # Set here, not inherited from whichever test module ran before.
+        beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["TESTING"] = True
         self.client = beets_web_app.test_client()
         self.path = os.path.join(self.music, "01.wav")
