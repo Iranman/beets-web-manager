@@ -18,6 +18,8 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
+from tests._module_time import module_time
+
 import app as app_module  # noqa: F401  -- loads the module family in order
 import backend.acquisition_service as acq
 import backend.artwork_service as artwork_service
@@ -56,7 +58,7 @@ class _BoundaryCase(unittest.TestCase):
             mock.patch.dict("os.environ", {"PROVIDER_MAX_ATTEMPTS": ""}),
             mock.patch.dict(pb.POLICIES, {name: pb.ProviderPolicy(pol.max_attempts, 0.0)
                                           for name, pol in pb.POLICIES.items()}),
-            mock.patch.object(helpers_mb.time, "sleep"),  # main's nested loops slept for real
+            module_time(helpers_mb, sleep=mock.Mock()),  # main's nested loops slept for real
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -134,7 +136,7 @@ class MusicBrainzOutageTests(_BoundaryCase):
 
     def test_folder_track_search_outage_raises(self):
         with mock.patch.object(mbs, "_folder_track_search_titles", return_value=["One", "Two"]), \
-                mock.patch.object(mbs.time, "sleep"), \
+                module_time(mbs, sleep=mock.Mock()), \
                 mock.patch.object(urllib.request, "urlopen", side_effect=http_error(503)) as urlopen:
             with self.assertRaises(pb.ProviderError):
                 mbs._mb_release_search_by_folder_tracks("/x", artist="Artist", log=[])
@@ -478,7 +480,7 @@ class SlskdTests(_BoundaryCase):
     def setUp(self):
         super().setUp()
         for patcher in (mock.patch.object(slskd, "SLSKD_API_KEY", "k"),
-                        mock.patch.object(slskd.time, "sleep")):
+                        module_time(slskd, sleep=mock.Mock())):
             patcher.start()
             self.addCleanup(patcher.stop)
 

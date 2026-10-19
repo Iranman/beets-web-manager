@@ -63,6 +63,11 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
             patch_app_family(app_module, "MUSIC_ROOT", self.music),
             patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
             mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
+            # #384: no real Beets or MusicBrainz calls. They cannot be
+            # cancelled, so a scan job that got past its cancel check
+            # outlived the test on a slow or offline runner.
+            patch_app_family(app_module, "_artist_folder_db_counts", return_value={}),
+            patch_app_family(app_module, "_mb_canonical_for_artist_entries", return_value={}),
         ]
         for patch in self.patches:
             patch.start()
@@ -100,6 +105,9 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(resp.status_code, 200, data)
         self.assertTrue(data["ok"])
+        job = app_module.jobs.get(data["job_id"])
+        job._thread.join(10)  # #384: the scan finishes before tearDown cancels it
+        self.assertEqual(job.status, "success", job.log)
 
     def test_scan_rejects_subfolder_of_music_root(self):
         # The UI labels this field "Library root" with no supported concept
@@ -293,6 +301,9 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
             patch_app_family(app_module, "MUSIC_ROOT", self.music),
             patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
             mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
+            # #384: no real Beets or MusicBrainz calls.
+            patch_app_family(app_module, "_artist_folder_db_counts", return_value={}),
+            patch_app_family(app_module, "_mb_canonical_for_artist_entries", return_value={}),
         ]
         for patch in self.patches:
             patch.start()
@@ -495,6 +506,9 @@ class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
             patch_app_family(app_module, "MUSIC_ROOT", self.music),
             patch_app_family(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
             mock.patch.object(app_module.composite_workflows, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
+            # #384: no real Beets or MusicBrainz calls.
+            patch_app_family(app_module, "_artist_folder_db_counts", return_value={}),
+            patch_app_family(app_module, "_mb_canonical_for_artist_entries", return_value={}),
         ]
         for patch in self.patches:
             patch.start()
