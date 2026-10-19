@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -16,7 +17,21 @@ from beetsplug.webmanager import WebManagerPlugin
 from beetsplug.webmanager.auth import set_api_key_file
 import beetsplug.webmanager.operations as ops_mod
 
-STOCK_BEETS_IMAGE = "lscr.io/linuxserver/beets:latest"
+
+def pinned_stock_beets_image() -> str:
+    """The `beets` image pinned in docker-compose.yml: the single source of
+    truth for which stock LinuxServer Beets version CI tests and ships."""
+    compose = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docker-compose.yml")
+    with open(compose, encoding="utf-8") as fh:
+        match = re.search(r"^    image: (lscr\.io/linuxserver/beets:\S+)$", fh.read(), re.M)
+    if not match:
+        raise RuntimeError("docker-compose.yml has no lscr.io/linuxserver/beets image line")
+    return match.group(1)
+
+
+# STOCK_BEETS_IMAGE overrides the pin only for the scheduled `:latest` canary
+# (.github/workflows/beets-latest-canary.yml).
+STOCK_BEETS_IMAGE = os.environ.get("STOCK_BEETS_IMAGE") or pinned_stock_beets_image()
 
 
 def _docker_with_retry(cmd, attempts=3, backoff=5):
@@ -265,7 +280,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
 class StockBeetsDockerAcceptanceTests(unittest.TestCase):
     @unittest.skipIf(not shutil.which("docker"), "Docker CLI not available on host")
     def test_real_stock_docker_container_acceptance(self):
-        """Real Docker Acceptance Test booting unmodified lscr.io/linuxserver/beets:latest.
+        """Real Docker Acceptance Test booting the unmodified, pinned lscr.io/linuxserver/beets image.
 
         Tests:
         1. Stock image startup with web & webmanager plugins mounted in /config

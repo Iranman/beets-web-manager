@@ -2,7 +2,7 @@
 
 Validates the standard, production stock-Beets deployment architecture
 (docker-compose.yml, unmodified):
-1. Stock Beets container (lscr.io/linuxserver/beets:latest) -- the sole
+1. Stock Beets container (pinned lscr.io/linuxserver/beets) -- the sole
    authoritative Beets runtime, owning /config/musiclibrary.blb.
 2. Beets Web Manager container (beets-web-manager:ci built from local
    Dockerfile) -- no local Beets Python runtime, talks to stock Beets
@@ -73,7 +73,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_BASE = ROOT / "docker-compose.yml"
 IMAGE_TAG = "beets-web-manager:ci"
-STOCK_BEETS_IMAGE = "lscr.io/linuxserver/beets:latest"
+# The production stack runs docker-compose.yml unmodified, so this is the
+# image pinned there (the single source of truth for the Beets version).
+_BEETS_IMAGE_MATCH = re.search(r"^    image: (lscr\.io/linuxserver/beets:\S+)$", COMPOSE_BASE.read_text(encoding="utf-8"), re.M)
+STOCK_BEETS_IMAGE = _BEETS_IMAGE_MATCH.group(1) if _BEETS_IMAGE_MATCH else ""
 
 FAILURES: list[str] = []
 
@@ -710,7 +713,7 @@ def main():
     start_time = time.time()
     print("=" * 70)
     print("PRODUCTION DOCKER ACCEPTANCE TEST")
-    print("Stock-Beets architecture: linuxserver/beets:latest + beets-web-manager:ci")
+    print(f"Stock-Beets architecture: {STOCK_BEETS_IMAGE} + beets-web-manager:ci")
     print("=" * 70)
 
     try:

@@ -6,6 +6,14 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- Nothing changes for a running stack: Docker Compose keeps whatever `image:` your own Compose file names. If your `beets` service still says `lscr.io/linuxserver/beets:latest` and you want the same protection, replace that line with the pinned reference above. If `docker inspect beets --format '{{index .Config.Labels "org.opencontainers.image.version"}}'` already reports `2.14.1-ls356`, it is the image you run now, so Beets keeps its version. If it reports anything else, changing the line is a Beets version change: follow `docs/BEETS_ENGINE_MIGRATION.md` first.
+
+### Changed
+
+- The shipped Compose files no longer float on `lscr.io/linuxserver/beets:latest`. `docker-compose.yml`, `docker-compose.full.yml`, the `docker-compose.dev.yml` default and the install examples pin `lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73` (Beets 2.14.1): the image CI has been testing, and the one `latest` pointed to on 2026-10-19. Beets upgrades now arrive as reviewed PRs that re-run the stock-Beets acceptance, instead of on the next `docker compose pull`; upstream Beets 2.13 and 2.14 each broke Web Manager that way. CI reads the pin from `docker-compose.yml`, `scripts/validate_compose_security.py` now rejects `:latest` on the `beets` service, and a new weekly, non-blocking `beets-latest-canary` workflow runs the acceptance against `latest` to catch upstream breakage early. See "Beets image version" in `docs/CONFIGURATION.md` and "Upgrading the pinned Beets image" in `docs/BEETS_ENGINE_MIGRATION.md`.
+
 ### Fixed
 
 - Import Review: after Delete Folder, the success message read "Deleted undefined audio file(s)", and the item left the list before its message could be seen. The message now gives the real count from the server, split into deleted and quarantined files, and also appears on the page status line. The message says "Delete Folder finished", not "removed", because skipped symlinks or a failed final folder removal can leave the folder on disk. The frontend response type now matches what the endpoint returns (#275).

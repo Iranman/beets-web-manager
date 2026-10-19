@@ -28,12 +28,11 @@ permissions:
 env:
   # This is a Python *package* version pin for CI-only test fixtures
   # (backend/transaction_engine.py's native-Beets-formatting tests), NOT
-  # the deployed Beets container version -- production docker-compose.yml
-  # runs the `beets` service on the `:latest` LinuxServer image tag by
-  # design (see stock-beets-acceptance below, which is the real `:latest`
-  # compatibility lane). Kept in sync with requirements-dev.txt's own
-  # `beets==` pin so local `python -m unittest` and CI see the same
-  # fixture behavior.
+  # the deployed Beets container version, which is the `beets` image pinned
+  # in docker-compose.yml (see stock-beets-acceptance below). Kept equal to
+  # that image's Beets version and to requirements-dev.txt's own `beets==`
+  # pin so local `python -m unittest` and CI see the same fixture behavior;
+  # tests/test_architecture_invariants.py enforces both.
   BEETS_TEST_FIXTURE_VERSION: "2.14.1"
 
 jobs:
@@ -154,14 +153,16 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements.txt
       - run: pip install beets==${{ env.BEETS_TEST_FIXTURE_VERSION }}
-      - name: Pull lscr.io/linuxserver/beets:latest (authenticated) and record its digest
-        # Section 19 provenance requirement: the compatibility lane below
-        # floats on `:latest`, so record exactly which digest this run
-        # actually tested against. Authenticated pull: see the script (#234).
+      - name: Pull the pinned stock Beets image (authenticated) and record its digest
+        # Tests exactly the `beets` image pinned (tag@digest) in
+        # docker-compose.yml -- the version users get. A Beets bump is a
+        # reviewable PR that changes that pin and re-runs this job.
+        # Upstream `:latest` is watched separately by the non-blocking
+        # beets-latest-canary workflow. Authenticated pull: see the script (#234).
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci_pull_stock_beets.sh
-      - name: Real Docker acceptance against unmodified lscr.io/linuxserver/beets:latest
+      - name: Real Docker acceptance against the unmodified, pinned lscr.io/linuxserver/beets image
         # Never builds or publishes a derived engine image -- pulls and
         # runs the real upstream image as-is, then exercises the
         # webmanager integration plugin against it over HTTP.
@@ -182,7 +183,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
-      - name: Pull lscr.io/linuxserver/beets:latest (authenticated, #234)
+      - name: Pull the pinned stock Beets image from docker-compose.yml (authenticated, #234)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci_pull_stock_beets.sh

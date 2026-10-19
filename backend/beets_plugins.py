@@ -1,6 +1,6 @@
 """Authoritative Beets Plugin Manifest & Management Engine for Beets Web Manager.
 
-Stock lscr.io/linuxserver/beets:latest is the sole, authoritative Beets
+Stock lscr.io/linuxserver/beets (pinned in docker-compose.yml) is the sole, authoritative Beets
 runtime -- Web Manager never runs Beets itself, never loads Beets plugins
 locally, and never owns plugin-loading decisions. This module's job is
 narrowly: maintain the plugin manifest, provision bundled plugin files into
