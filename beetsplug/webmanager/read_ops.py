@@ -26,12 +26,6 @@ READ_FIELDS = {
 _PATH_FIELD = {"item": "path", "album": "artpath"}
 _ROOT = {"item": "items", "album": "albums"}
 
-# ponytail: operations.py is held by another branch; move this into
-# _CORE_CAPABILITIES (and import read_ops there) once it is free.
-if "library_fields" not in ops._CORE_CAPABILITIES:
-    ops._CORE_CAPABILITIES.append("library_fields")
-
-
 def _bad(message: str, code: str):
     return jsonify({"error": message, "error_code": code}), 400
 

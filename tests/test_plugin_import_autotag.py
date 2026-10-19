@@ -161,6 +161,26 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual([a.mb_albumid for a in albums], [REL])
         self.assertEqual(sorted(i.title for i in albums[0].items()), ["Track 1", "Track 2"])
 
+    def test_before_choice_plugin_can_veto_a_partial_match(self):
+        """QA N1 (#429): a plugin answering import_task_before_choice (badfiles'
+        import_action_on_error: skip) vetoes the partial override as it does
+        stock choose_match; the listener sees the task before any choice."""
+        from unittest import mock
+        from beets.importer import Action
+        from beets.plugins import BeetsPlugin
+        seen = []
+
+        def veto(session, task):
+            seen.append(task)
+            return Action.SKIP
+        with mock.patch.dict(BeetsPlugin.listeners, {"import_task_before_choice": [veto]}):
+            src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2", "Track 3"]),
+                                            allow_missing_tracks=True)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(data["partial_matches"], 0)
+        self.assertEqual([s["path"] for s in data["skipped"]], [src])
+        self.assertEqual(len(self.lib.albums()), 0)
+
     def test_allow_missing_tracks_keeps_the_bar_for_everything_else(self):
         """Only the missing-track penalty is set aside: a source whose files
         do not fit the pinned release's tracks, or a candidate that is not
