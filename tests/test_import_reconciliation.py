@@ -198,6 +198,14 @@ class PlanTests(unittest.TestCase):
                                    forced_replace_ids=[1])
         self.assertEqual(plan.move_ids, [4])
         self.assertEqual(plan.held_item_ids, [3])
+        # QA F2: the held row is persisted as a review record.
+        with tempfile.TemporaryDirectory() as tmp:
+            records = record_reviews(plan, existing_album_id=5, imported_album_id=9, release_id=REL,
+                                     source_folder="/downloads/x", path=Path(tmp) / "reviews.json")
+            stored = json.loads((Path(tmp) / "reviews.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["imported_item_id"], r["outcome"]) for r in records], [(3, "keep_both_review")])
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(plan.counts()["keep_both_review"], 1)
         ad = mock.MagicMock()
         ad.get_album.side_effect = lambda aid, **k: {"id": aid, "mb_albumid": REL, "mb_releasegroupid": RG}
         ad.find_all_items_by_album_id.side_effect = lambda aid: existing if aid == 5 else imported

@@ -365,7 +365,14 @@ def plan_reconciliation(existing_items: Iterable[Dict[str, Any]], imported_items
                 # occupant stays in by_slot: the slot is still filled, so a
                 # second imported row for it is held, never planned as a move.
                 if key in forced_claimed:
+                    # Recorded for review, never resolved silently.
                     plan.held_item_ids.append(_int(row.get("id")))
+                    plan.decisions.append(SlotDecision(
+                        ReconciliationOutcome.KEEP_BOTH_REVIEW, key, _int(forced_rows[0].get("id")),
+                        _int(row.get("id")), "", _side_summary(forced_rows[0], None),
+                        _side_summary(row, None), ["extra_import_for_replaced_slot"],
+                        "A second imported file for a slot under format replacement; compare and "
+                        "keep the correct one."))
                 forced_claimed.add(key)
                 continue
             else:

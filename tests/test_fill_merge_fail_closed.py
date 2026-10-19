@@ -202,6 +202,20 @@ class FillMergeFailClosedTests(_JobHarness):
         self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
         self.assertTrue(any("did not deliver 1 requested track(s)" in line for line in res["log"]), res["log"])
 
+    def test_undelivered_tracks_survive_the_source_scan_narrowing(self):
+        """QA F1: the staged Download All path narrows wanted_tracks to what
+        the delivered files matched; the report uses the original request."""
+        aldir = str(isvc.DOWNLOADS_ROOT) + "/Artist/Album"
+        scan = {"ok": True, "useful_files": [aldir + "/02 Two.flac"], "duplicate_files": [],
+                "unknown_files": [], "missing_count": 2, "wanted_tracks": WANTED}
+        with mock.patch.object(isvc, "_source_audio_missing_track_scan", return_value=scan), \
+                mock.patch.object(isvc, "_stage_selected_audio_files", return_value=aldir):
+            res = self._run({"side_effect": self._move_items}, wanted_tracks=WANTED + [
+                {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
+        self.assertTrue(any("did not deliver 1 requested track(s)" in line for line in res["log"]), res["log"])
+
     def test_no_review_entry_is_logged_truthfully(self):
         """Integration C: when Review could not be written, the log says so."""
         with mock.patch.object(isvc, "_queue_folder_for_manual_review", return_value=False):
@@ -296,6 +310,20 @@ class RealMergeJobTests(_JobHarness):
         self.assertEqual(res["result"]["album_ids"], [IMPORTED])
         self.assertEqual(self.reviews, [])
         self.assertEqual(self.reconcile_plans, [])  # no move into the occupied slot
+
+    def test_extra_row_in_the_replaced_slot_is_recorded_for_review(self):
+        """QA F2: a second imported file for the replaced slot is persisted
+        as a reconciliation review and logged, not silently kept."""
+        import json
+        self.items[EXISTING] = [{"id": 51, "album_id": EXISTING, "disc": 1, "track": 2, "mb_trackid": "rec-2"}]
+        self.items[IMPORTED].append({"id": 93, "album_id": IMPORTED, "disc": 1, "track": 2, "mb_trackid": "rec-2"})
+        res = self._run(replace_existing=True, replace_existing_item_ids=[51])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual(self.reconcile_plans, [])
+        stored = json.loads((self.root / "import_reconciliation_reviews.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["imported_item_id"], r["outcome"]) for r in stored], [(93, "keep_both_review")])
+        self.assertTrue(any("1 item(s) kept on both sides and queued for reconciliation review" in line
+                            for line in res["log"]), res["log"])
 
     def test_real_reconcile_plan_failure_fails_the_fill(self):
         # The imported file is not on disk, so the real row merge refuses it.

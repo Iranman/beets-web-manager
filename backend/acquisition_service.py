@@ -711,7 +711,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             log.append(
                                 "  [slskd] Not trying other Soulseek peers or direct sources: "
                                 "the import into the existing album did not complete "
-                                f"({reason_code}); see the import log for its Review entry.")
+                                f"({reason_code}); see the import log for its Review status.")
                             raise RuntimeError(
                                 f"SLSKD import stopped after one candidate: {ex}") from ex
                         # An unknown code is not proven candidate-specific: stop.

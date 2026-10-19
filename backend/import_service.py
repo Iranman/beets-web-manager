@@ -519,6 +519,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
     def _do(log, cancel_event=None):
         nonlocal aldir, mb_albumid, existing_album_id, wanted_tracks
+        requested_tracks = list(wanted_tracks)  # before the source scan narrows it
 
         # Accept a release UUID, release URL, release-group UUID/URL, or a blank
         # value that can be resolved from the folder/artist context.  The rest
@@ -1253,10 +1254,6 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     _merge_failed(f"could not read the imported items ({ex})")
                 fill_item_ids = [int(r["id"]) for r in imported_rows
                                  if any(_is_wanted(r, t) for t in wanted_tracks)]
-                # Read-back covers what the source delivered; requested tracks it
-                # did not deliver are reported, not failed (QA N1).
-                undelivered_tracks = [t for t in wanted_tracks
-                                      if not any(_is_wanted(r, t) for r in imported_rows)]
             try:
                 aid = _merge_imported_album_into_existing(
                     aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
@@ -1265,16 +1262,21 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 _merge_failed(str(ex))
             if verify_fill:
                 try:
-                    on_existing = {int(r.get("id") or 0) for r in
-                                   composite_workflows.find_all_items_by_album_id(int(existing_album_id))}
+                    existing_rows = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
                 except Exception as ex:
                     _merge_failed(f"could not read back existing album_id {existing_album_id} ({ex})")
+                on_existing = {int(r.get("id") or 0) for r in existing_rows}
                 unmerged = [i for i in fill_item_ids if i not in on_existing]
                 if aid != existing_album_id or not fill_item_ids or unmerged:
                     _merge_failed("the requested track(s) are not on the existing album"
                                   + (f" (item_id(s) {', '.join(map(str, unmerged))})" if unmerged else ""))
                 log.append(f"  [merge] Verified {len(fill_item_ids)} requested track(s) on existing "
                            f"album_id {existing_album_id}.")
+                # The read-back covers what the source delivered. Originally
+                # requested tracks still absent from the album are reported,
+                # not failed (QA N1); the source scan narrows wanted_tracks.
+                undelivered_tracks = [t for t in requested_tracks
+                                      if not any(_is_wanted(r, t) for r in existing_rows)]
                 if undelivered_tracks:
                     log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
                                f"track(s), still missing from album_id {existing_album_id}: "
