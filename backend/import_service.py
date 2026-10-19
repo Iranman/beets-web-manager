@@ -1153,10 +1153,11 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # through the transaction preview/approve flow, not this job.
             ids = ", ".join(str(i) for i in kept_ids)
             reason = f"{reason} Album_id {ids} was left in the library for review."
-            _queue_folder_for_manual_review(
-                aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
-                        "kept_album_ids": kept_ids, "reason": reason},
-                reason, log, allow_existing=True)
+            if not _queue_folder_for_manual_review(
+                    aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                            "kept_album_ids": kept_ids, "reason": reason},
+                    reason, log, allow_existing=True):
+                log.append(f"  No Review entry was written; album_id {ids} was left in the library.")
             raise RuntimeError(reason)
 
         plan_res = composite_workflows.plan_confirmed_import({
@@ -1210,6 +1211,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         def _needs_review(reason: str) -> None:
             _keep_for_review(reason, [aid])
 
+        undelivered_tracks: List[Dict[str, Any]] = []
         if existing_album_id:
             # Missing-track fill: Beets kept the new files as their own album
             # (duplicate_action keep); merge them onto the existing album.
@@ -1238,17 +1240,23 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             verify_fill = bool(wanted_tracks) and not replace_existing
             fill_item_ids: List[int] = []
             if verify_fill:
-                wanted_slots = {(int(t.get("disc") or 1), int(t.get("track") or 0))
-                                for t in wanted_tracks if int(t.get("track") or 0)}
-                wanted_mbids = {_s(t.get("mb_trackid")).strip().lower() for t in wanted_tracks} - {""}
+                def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
+                    rid = _s(t.get("mb_trackid")).strip().lower()
+                    return bool(
+                        (int(t.get("track") or 0)
+                         and (int(row.get("disc") or 1), int(row.get("track") or 0))
+                         == (int(t.get("disc") or 1), int(t.get("track") or 0)))
+                        or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
                 try:
-                    fill_item_ids = [
-                        int(r["id"]) for r in composite_workflows.find_all_items_by_album_id(int(aid))
-                        if (int(r.get("disc") or 1), int(r.get("track") or 0)) in wanted_slots
-                        or _s(r.get("mb_trackid")).strip().lower() in wanted_mbids
-                    ]
+                    imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
                 except Exception as ex:
                     _merge_failed(f"could not read the imported items ({ex})")
+                fill_item_ids = [int(r["id"]) for r in imported_rows
+                                 if any(_is_wanted(r, t) for t in wanted_tracks)]
+                # Read-back covers what the source delivered; requested tracks it
+                # did not deliver are reported, not failed (QA N1).
+                undelivered_tracks = [t for t in wanted_tracks
+                                      if not any(_is_wanted(r, t) for r in imported_rows)]
             try:
                 aid = _merge_imported_album_into_existing(
                     aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
@@ -1267,6 +1275,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                   + (f" (item_id(s) {', '.join(map(str, unmerged))})" if unmerged else ""))
                 log.append(f"  [merge] Verified {len(fill_item_ids)} requested track(s) on existing "
                            f"album_id {existing_album_id}.")
+                if undelivered_tracks:
+                    log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
+                               f"track(s), still missing from album_id {existing_album_id}: "
+                               + ", ".join(_wanted_track_label(t) for t in undelivered_tracks[:8]))
             merged = composite_workflows.get_album(aid) or {}
             if (_s(merged.get("mb_albumid")).strip().lower() != mb_albumid
                     or _s(merged.get("mb_releasegroupid")).strip().lower() != planned_rg):
@@ -1318,6 +1330,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "aldir": aldir,
             "mb_albumid": mb_albumid,
             "existing_album_id": int(existing_album_id or 0),
+            "undelivered_tracks": undelivered_tracks,
         }
 
     def _do_locked(log, cancel_event=None):

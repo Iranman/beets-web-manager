@@ -185,6 +185,76 @@ class FillMergeFailClosedTests(_JobHarness):
                          "existing_album_merge_failed")
 
 
+    def test_job_error_through_the_real_child_wait_stays_terminal(self):
+        """The job error, read back through the real _wait_for_child_job,
+        still carries the code from the fixed message start."""
+        res = self._run({"side_effect": isvc._ExistingAlbumMergeFailed("peer x [reason_code=file_unverified]")})
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(import_refusal_reason_code(child_wait_error(res["error"])),
+                         "existing_album_merge_failed")
+
+    def test_undelivered_requested_tracks_are_reported_not_failed(self):
+        """QA N1: only delivered requested tracks are read back; the ones the
+        source did not deliver are logged and returned, not silently dropped."""
+        res = self._run({"side_effect": self._move_items}, wanted_tracks=WANTED + [
+            {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
+        self.assertTrue(any("did not deliver 1 requested track(s)" in line for line in res["log"]), res["log"])
+
+    def test_no_review_entry_is_logged_truthfully(self):
+        """Integration C: when Review could not be written, the log says so."""
+        with mock.patch.object(isvc, "_queue_folder_for_manual_review", return_value=False):
+            res = self._run({"return_value": IMPORTED})
+        self.assertEqual(res["status"], "failed")
+        self.assertIn(f"  No Review entry was written; album_id {IMPORTED} was left in the library.", res["log"])
+        self.assertFalse([line for line in res["log"] if "Queued folder for manual Review" in line])
+
+
+def child_wait_error(job_error_text):
+    """The error the real _wait_for_child_job raises for a failed child job."""
+    import backend.job_service as js
+    child = types.SimpleNamespace(status="failed", log=["[merge] something", f"ERROR: {job_error_text}"],
+                                  state={}, metadata={}, result=None)
+    with mock.patch.object(js, "jobs") as jobs:
+        jobs.get.return_value = child
+        try:
+            js._wait_for_child_job("job1", [], prefix="import", timeout=5)
+        except RuntimeError as ex:
+            return ex
+    raise AssertionError("_wait_for_child_job did not raise")
+
+
+class MergeFailedCodeParsingTests(unittest.TestCase):
+    FIXED = ("Could not merge the imported track(s) into the existing album "
+             "[reason_code=existing_album_merge_failed]")
+
+    def test_code_is_read_only_from_the_fixed_message_start(self):
+        fixed = self.FIXED
+        rejected = [
+            "import job failed: ERROR: Beets import failed for '" + fixed + ".flac'",
+            "import job failed: ERROR: x" + fixed,
+            "import job failed: Traceback " + fixed,
+            " " + fixed,
+            "import job failed: ERROR:  " + fixed,
+            fixed.replace("existing_album_merge_failed", "existing_album_merge_failedX"),
+            "import job failed: ERROR: Could not resolve a MusicBrainz release ID for import "
+            "[reason_code=existing_album_merge_failed]",
+            # A newline-injected detail never starts a new "message".
+            "import job failed: ERROR: Beets import failed: peer.flac\n" + fixed,
+            "import job failed: ERROR: peer\nimport job failed: ERROR: " + fixed,
+            "peer.flac\n" + fixed,
+            # The fixed text in the detail, not at the start of the string.
+            "import job failed: ERROR: Could not resolve a MusicBrainz release ID for import "
+            "[reason_code=file_unverified]: " + fixed,
+            "import job failed: ERROR: SLSKD failed: " + fixed,
+        ]
+        for text in rejected:
+            self.assertNotEqual(import_refusal_reason_code(text), "existing_album_merge_failed", text)
+        for good in (fixed, "ERROR: " + fixed, "import job failed: ERROR: " + fixed + ": x"):
+            self.assertEqual(import_refusal_reason_code(good), "existing_album_merge_failed", good)
+
+
 class RealMergeJobTests(_JobHarness):
     """The job with the REAL _merge_imported_album_into_existing,
     plan_reconciliation and plan_existing_album_reconcile/plan_rows_merge
@@ -218,7 +288,7 @@ class RealMergeJobTests(_JobHarness):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_format_replacement_reaches_preview_with_the_real_merge(self):
+    def test_format_replacement_keeps_the_imported_row_with_the_real_merge(self):
         # Existing item 51 holds slot 1/2 and is the one being replaced.
         self.items[EXISTING] = [{"id": 51, "album_id": EXISTING, "disc": 1, "track": 2, "mb_trackid": "rec-2"}]
         res = self._run(replace_existing=True, replace_existing_item_ids=[51])

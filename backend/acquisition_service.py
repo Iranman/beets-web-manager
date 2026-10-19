@@ -711,10 +711,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             log.append(
                                 "  [slskd] Not trying other Soulseek peers or direct sources: "
                                 "the import into the existing album did not complete "
-                                f"({reason_code}); it is queued for Review.")
+                                f"({reason_code}); see the import log for its Review entry.")
                             raise RuntimeError(
                                 f"SLSKD import stopped after one candidate: {ex}") from ex
-                        if reason_code and not IMPORT_REFUSAL_REASONS[reason_code]:
+                        # An unknown code is not proven candidate-specific: stop.
+                        if reason_code and not IMPORT_REFUSAL_REASONS.get(reason_code, False):
                             log.append(
                                 f"  [slskd] Not trying other Soulseek peers: import refused "
                                 f"for a reason that is not specific to this copy "

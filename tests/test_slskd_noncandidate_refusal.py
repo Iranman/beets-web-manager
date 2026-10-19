@@ -107,6 +107,17 @@ class NonCandidateRefusalStopsPeerLoop(unittest.TestCase):
         self.assertEqual(ytdlp.call_count, 1)
         self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 2)
 
+    def test_real_child_wait_error_stops_peers_and_fallback(self):
+        """The merge failure as the real _wait_for_child_job reports it."""
+        from tests.test_fill_merge_fail_closed import child_wait_error
+        ex = child_wait_error("Could not merge the imported track(s) into the existing album "
+                              "[reason_code=existing_album_merge_failed]: existing album_id 5, boom. "
+                              "Album_id 9 was left in the library for review.")
+        m, _log = self._run("", wait=mock.Mock(side_effect=ex), raises="SLSKD import stopped after one candidate")
+        self.assertEqual(m["_slskd_search_and_queue"].call_count, 1)
+        self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 1)
+        self.assertEqual(m["_ytdlp_album_download"].call_count, 0)
+
     def test_merge_failure_code_in_peer_text_is_not_trusted(self):
         """The code counts only from the fixed message start, never from
         detail text a peer controls (v0.7.1)."""
