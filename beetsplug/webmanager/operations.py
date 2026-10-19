@@ -29,7 +29,10 @@ from .schemas import (
 from .version import PLUGIN_VERSION, PROTOCOL_VERSION
 from . import plugin_ops
 
-log = logging.getLogger("beets.webmanager")
+# Not "beets.webmanager": BeetsPlugin.__init__ creates that name as a beets
+# BeetsLogger (str.format, %-style args dropped). A child beets never creates
+# stays a stdlib Logger whatever the import order; records still propagate up.
+log = logging.getLogger("beets.webmanager.ops")
 
 # Lock to serialize library write operations safely within Beets process
 mutation_lock = threading.RLock()
