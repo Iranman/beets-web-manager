@@ -1878,7 +1878,7 @@ def _refresh_library_cache() -> dict:
 
 
 # ARCH-031: the only Beets fields _build_library_payload reads. Fetching just
-# these (plugin 1.17.0 fields read) skips stock web's full serialisation and
+# these (plugin 1.18.0 fields read) skips stock web's full serialisation and
 # its per-item file stat. Add a field here when the builder starts using it.
 _LIBRARY_ITEM_FIELDS = ("id", "path", "album_id", "title", "track", "disc", "tracktotal", "mb_trackid",
                         "albumartist", "artist", "album", "year")

@@ -1,4 +1,4 @@
-"""Fields-limited bulk library reads (plugin 1.17.0, capability ``library_fields``).
+"""Fields-limited bulk library reads (plugin 1.18.0, capability ``library_fields``).
 
 Stock web's ``GET /item/`` and ``GET /album/`` serialise every field of every
 row, and ``/item/`` also stats every item's file for its size. Web Manager's

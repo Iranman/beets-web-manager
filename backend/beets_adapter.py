@@ -587,18 +587,18 @@ class BeetsAdapter:
 
     def get_fields(self, entity: str, fields: Sequence[str]) -> List[Dict[str, Any]]:
         """Every item or album with only ``fields`` (plus ``id``), from
-        ``GET /webmanager/fields/<entity>`` (plugin 1.17.0, capability
+        ``GET /webmanager/fields/<entity>`` (plugin 1.18.0, capability
         ``library_fields``). Stock ``/item/`` serialises every field and stats
         every file. An older plugin has no such route (404), so the stock full
         read answers instead; callers ignore the extra fields."""
         # ponytail: an older plugin is re-probed every 10 minutes, so a Beets
-        # restart onto 1.17.0 is picked up without restarting Web Manager.
+        # restart onto 1.18.0 is picked up without restarting Web Manager.
         if time.monotonic() < getattr(self, "_no_fields_until", 0.0):
             return self.get_items() if entity == "item" else self.get_albums()
         try:
             res = self._request("GET", f"/webmanager/fields/{entity}", params={"fields": ",".join(fields)})
         except BeetsAdapterNotFoundError:
-            log.info("webmanager plugin before 1.17.0 has no fields read; using the stock %s read", entity)
+            log.info("webmanager plugin before 1.18.0 has no fields read; using the stock %s read", entity)
             self._no_fields_until = time.monotonic() + 600
             return self.get_items() if entity == "item" else self.get_albums()
         rows = res.get("items" if entity == "item" else "albums") if isinstance(res, dict) else None

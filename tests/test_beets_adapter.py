@@ -242,7 +242,7 @@ class BeetsAdapterTests(unittest.TestCase):
         item1_row = next(r for r in cleanup_idx if r.get("item_id") == self.item.id)
         self.assertEqual(item1_row.get("album_album"), "Discovery")
 
-    # ARCH-031: fields-limited bulk reads (plugin 1.17.0).
+    # ARCH-031: fields-limited bulk reads (plugin 1.18.0).
     def test_fields_read_returns_only_requested_fields_with_absolute_paths(self):
         items = self.adapter.get_fields("item", ["path", "title", "album_id"])
         self.assertEqual(len(items), 3)

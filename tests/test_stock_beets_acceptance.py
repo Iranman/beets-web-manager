@@ -203,7 +203,7 @@ class StockBeetsInProcessAcceptanceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         status_data = res.get_json()
         self.assertEqual(status_data["protocol_version"], "1.0")
-        self.assertEqual(status_data["plugin_version"], "1.17.0")
+        self.assertEqual(status_data["plugin_version"], "1.18.0")
         self.assertTrue(status_data["upstream_web_readonly"])
         self.assertTrue(status_data["plugin_mutations_enabled"])
         self.assertIn("import", status_data["capabilities"])
@@ -468,7 +468,7 @@ webmanager:
                 with _raw_urlopen(req, timeout=5) as resp:
                     status_res = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(status_res["protocol_version"], "1.0")
-                    self.assertEqual(status_res["plugin_version"], "1.17.0")
+                    self.assertEqual(status_res["plugin_version"], "1.18.0")
                     self.assertTrue(status_res["upstream_web_readonly"])
                     self.assertTrue(status_res["plugin_mutations_enabled"])
                     self.assertIn("import", status_res["capabilities"])
@@ -599,7 +599,7 @@ webmanager:
                 self.assertEqual(adapter.get_item(imported_item["id"])["path"], resolved)
                 with adapter.open_item_file(imported_item["id"]) as resp:
                     self.assertEqual(resp.read(), streamed)
-                # Step 6c (plugin 1.17.0, ARCH-031): the fields-limited read on the
+                # Step 6c (plugin 1.18.0, ARCH-031): the fields-limited read on the
                 # real stock image returns only the requested fields, same values.
                 rows = adapter.get_fields("item", ["path", "title", "album_id"])
                 row = next(r for r in rows if r["id"] == imported_item["id"])

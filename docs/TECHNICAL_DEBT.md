@@ -270,7 +270,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Fixed in 0.7.0: each folder is listed once with `os.scandir` and that listing answers both the item existence check and the walk (only items not found in their folder's listing are `stat`-ed). Missing buckets are indexed by artist.
 - Current risk:
   - On a cold page cache each `stat` reaches the disk, so the remaining cost on a NAS is about one directory read per folder plus one `stat` per missing item. It was not measured on the live instance.
-  - (Narrowed, plugin 1.17.0) The builder's two Beets reads now use `GET /webmanager/fields/<item|album>`, which returns only the dozen fields the builder reads. Stock `GET /item/` serialised every field, looked up each item's album for its album-level fields, and stat-ed every file for `size`. Measured on a synthetic library in the stock `lscr.io/linuxserver/beets` image (Beets 2.14.1; 120 artists, 360 albums, 3,960 items with lyrics and a flexible attribute; library on a Linux Docker volume; first request after a container restart, then warm):
+  - (Narrowed, plugin 1.18.0) The builder's two Beets reads now use `GET /webmanager/fields/<item|album>`, which returns only the dozen fields the builder reads. Stock `GET /item/` serialised every field, looked up each item's album for its album-level fields, and stat-ed every file for `size`. Measured on a synthetic library in the stock `lscr.io/linuxserver/beets` image (Beets 2.14.1; 120 artists, 360 albums, 3,960 items with lyrics and a flexible attribute; library on a Linux Docker volume; first request after a container restart, then warm):
 
     | Read | Stock cold / warm | Fields cold / warm | Payload stock / fields |
     |---|---|---|---|
@@ -280,7 +280,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 
     With the library on a Windows bind mount (slow file I/O, closer to a cold NAS) stock items took 30-33 s and fields items 1.6-1.9 s. What is left (about 0.85 s per 4,000 items) is Beets building its `Item` models in `lib.items()`. Going below that would need SQL against the library, which this project does not do. Other bulk readers (`get_artist_counts`, `list_item_paths`, Clean All indexes, dedup scans) still use the stock full reads; switch them when they show up as slow.
   - The build still runs on the request thread whenever the cache is older than `_LIB_CACHE_TTL` (180 s). The 2-minute warmer (`maintenance_service._auto_scan_tick`) runs only with `BEETS_ENABLE_LEGACY_LOCAL_SCAN`, which is off by default, so with default settings the first `GET /api/library` after any 3-minute gap pays the whole build, not only the first one after a restart.
-- Desired state: stale-while-revalidate as for the Find Music list (serve the last payload, rebuild in a `job_engine` job). (Done in plugin 1.17.0: Beets reads that fetch only the fields the builder uses.)
+- Desired state: stale-while-revalidate as for the Find Music list (serve the last payload, rebuild in a `job_engine` job). (Done in plugin 1.18.0: Beets reads that fetch only the fields the builder uses.)
 - Priority: P2. Status: Open (narrowed).
 
 ## ARCH-032 Release Group Fill Rollback Blanks Embedded Tags (0.7.0, QA #401 N-d)

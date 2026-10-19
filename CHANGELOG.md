@@ -8,11 +8,11 @@ The project uses Semantic Versioning.
 
 ### Changed
 
-- The Library page's first load after a restart (and after any 3-minute gap) reads much less from Beets. Web Manager now asks the webmanager plugin for only the dozen item and album fields the page uses (`GET /webmanager/fields/<item|album>`, plugin 1.17.0, capability `library_fields`) instead of Beets' full `/item/` and `/album/` lists, which carry every field and check every file's size on disk. On a synthetic 3,960-track library in the stock Beets image the item read went from 6.7 s and 10.4 MB to 1.1 s and 1.2 MB. With an older plugin Web Manager keeps using the full lists.
+- The Library page's first load after a restart (and after any 3-minute gap) reads much less from Beets. Web Manager now asks the webmanager plugin for only the dozen item and album fields the page uses (`GET /webmanager/fields/<item|album>`, plugin 1.18.0, capability `library_fields`) instead of Beets' full `/item/` and `/album/` lists, which carry every field and check every file's size on disk. On a synthetic 3,960-track library in the stock Beets image the item read went from 6.7 s and 10.4 MB to 1.1 s and 1.2 MB. With an older plugin Web Manager keeps using the full lists.
 
 ### Upgrade Notes
 
-- Restart the Beets container so it loads webmanager plugin 1.17.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, the Library page keeps working through the slower full reads.
+- Restart the Beets container so it loads webmanager plugin 1.18.0. The rollout script does this itself when the plugin version changes. Until Beets restarts, the Library page keeps working through the slower full reads.
 
 ## v0.7.2 - 2026-10-15
 
