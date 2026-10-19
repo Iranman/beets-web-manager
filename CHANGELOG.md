@@ -4,11 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## v0.8.0 - 2026-10-19
+## Unreleased
 
 ### Development
 
-- The backend test suite now runs in parallel. `scripts/run_tests.py` runs the same tests as `python -m unittest discover` in one worker process per CPU, with the same summary and exit code. The test image and the `unit-tests` workflow use it. A full local run on 12 cores drops from about 21 minutes to about 3.5. `docs/DEVELOPMENT.md` has the commands and memory sizing.
+- The backend test suite now runs in parallel. `scripts/run_tests.py` runs the same tests as `python -m unittest discover` in one worker process per CPU, with the same summary and exit code. The test image and the `unit-tests` workflow use it. A full local run on 12 cores drops from about 21 minutes to about 4. `docs/DEVELOPMENT.md` has the commands and memory sizing.
+
+## v0.8.0 - 2026-10-19
 
 ### Security
 

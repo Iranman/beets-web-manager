@@ -46,7 +46,7 @@ npm audit --audit-level=high
 
 ### Running the backend tests
 
-`scripts/run_tests.py` runs exactly the tests of `python -m unittest discover -s tests -p "test_*.py"` (which still works, single process) in `os.cpu_count()` worker processes, and prints unittest's summary (`Ran N tests ... OK (skipped=K)`) and exit code. On 12 cores the full suite takes about 3.5 minutes instead of about 21.
+`scripts/run_tests.py` runs exactly the tests of `python -m unittest discover -s tests -p "test_*.py"` (which still works, single process) in `os.cpu_count()` worker processes, and prints unittest's summary (`Ran N tests ... OK (skipped=K)`) and exit code. On 12 cores the full suite takes about 4 minutes instead of about 21.
 
 - `python scripts/run_tests.py test_name [test_other ...]`: one or a few modules (module names, `tests.test_name` or file paths). This is the quick way to run one module; it sets up the shared suite environment the same way the full run does.
 - `-j N`: worker count. `-v`: per-test output, including every skip reason. `--slowest N`: the N modules that used the most worker time (default 10).
