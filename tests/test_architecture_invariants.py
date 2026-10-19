@@ -142,6 +142,14 @@ class PinnedStockBeetsImageTests(unittest.TestCase):
             self.assertEqual(refs, {compose_pin}, rel)
             self.assertNotIn("linuxserver/beets:latest", _read(rel), rel)
 
+    def test_shipped_python_does_not_describe_beets_latest(self):
+        # Shipped code and scripts (not tests, whose fixtures may use :latest).
+        paths = glob.glob(os.path.join(ROOT, "*.py"))
+        for d in ("backend", "beetsplug", "scripts"):
+            paths += glob.glob(os.path.join(ROOT, d, "**", "*.py"), recursive=True)
+        offenders = [p for p in paths if "linuxserver/beets:latest" in _read(os.path.relpath(p, ROOT))]
+        self.assertEqual(offenders, [])
+
     def test_beets_test_fixture_matches_pinned_image_version(self):
         version = PINNED_BEETS_RE.search(_read("docker-compose.yml")).group(1)
         pin = rf"beets=={re.escape(version)}\s"

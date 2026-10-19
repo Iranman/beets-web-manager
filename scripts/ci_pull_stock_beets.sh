@@ -12,10 +12,12 @@
 #   toomanyrequests: retry-after: ..., allowed: 44000/minute
 # (GHCR's limit). With GHCR_TOKEN set (the job's GITHUB_TOKEN) the pull is
 # authenticated and counted against that token; the login is removed again
-# before the tests run. The image is then made available under the lscr.io
-# name the tests and Compose files use (re-tag, or an anonymous manifest-only
-# pull: layers are already local). It is still the unmodified upstream image:
-# nothing is built or published.
+# before the tests run. Consumers then use the ghcr.io tag@digest reference
+# exported as STOCK_BEETS_IMAGE (the tests, and the production acceptance's
+# Compose override), so there is exactly one registry pull and no lscr.io
+# request at all. A re-tag cannot help: the classic image store does not
+# resolve `lscr.io/...:tag@sha256:...` from a re-tag of another repository.
+# It is still the unmodified upstream image: nothing is built or published.
 #
 # Never `docker login lscr.io`: lscr.io is a third-party proxy, not GitHub,
 # and GHCR's bearer token for a credentialed login is the base64 of the
@@ -53,14 +55,10 @@ pull() {
 }
 
 pull "$SRC"
-docker tag "$SRC" "${IMAGE%@*}"
-# The containerd image store resolves tag@digest from the re-tag; the classic
-# store needs the lscr.io manifest, fetched ANONYMOUSLY (never log in there).
-docker image inspect "$IMAGE" >/dev/null 2>&1 || pull "$IMAGE"
 # Provenance: record exactly which image and digest this job tested against.
-echo "stock Beets image: $IMAGE"
-echo "stock Beets digest: $(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
+echo "stock Beets image: $SRC (pin: $IMAGE)"
+echo "stock Beets digest: $(docker inspect --format '{{index .RepoDigests 0}}' "$SRC")"
 {
-  echo "STOCK_BEETS_IMAGE=$IMAGE"
+  echo "STOCK_BEETS_IMAGE=$SRC"
   echo "STOCK_BEETS_PREPULLED=1"
 } >> "${GITHUB_ENV:-/dev/null}"

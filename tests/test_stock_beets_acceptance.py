@@ -29,8 +29,9 @@ def pinned_stock_beets_image() -> str:
     return match.group(1)
 
 
-# STOCK_BEETS_IMAGE overrides the pin only for the scheduled `:latest` canary
-# (.github/workflows/beets-latest-canary.yml).
+# STOCK_BEETS_IMAGE is set by scripts/ci_pull_stock_beets.sh in CI: the
+# ghcr.io name of the same pin (one authenticated pull, #234), or of
+# `:latest` in the scheduled canary (.github/workflows/beets-latest-canary.yml).
 STOCK_BEETS_IMAGE = os.environ.get("STOCK_BEETS_IMAGE") or pinned_stock_beets_image()
 
 
@@ -400,8 +401,11 @@ webmanager:
             # 5. Pre-pull image and start stock Beets container bound strictly to loopback 127.0.0.1.
             # Registry pulls and loopback port picks can flake in CI (`docker run` exit 125), so both
             # are retried a bounded number of times; the last failure's stderr goes into the assertion.
-            pull_err = _docker_with_retry(["docker", "pull", STOCK_BEETS_IMAGE])
+            # CI pre-pulls it once (STOCK_BEETS_PREPULLED=1); never pull again there.
             cached = subprocess.run(["docker", "image", "inspect", STOCK_BEETS_IMAGE], capture_output=True).returncode == 0
+            pull_err = None
+            if not (cached and os.environ.get("STOCK_BEETS_PREPULLED") == "1"):
+                pull_err = _docker_with_retry(["docker", "pull", STOCK_BEETS_IMAGE])
             if pull_err is not None and not cached:
                 self.fail(f"docker pull {STOCK_BEETS_IMAGE} failed after retries:\n{pull_err}")
 
