@@ -751,11 +751,12 @@ def _playlist_candidate_match_score(artist, title, cand_artist, cand_title,
         score = ts * 0.78 + as_ * 0.22
     else:
         # Title-only acceptance is for entries with genuinely no artist. If the
-        # entry DID carry an artist that merely normalizes away (punctuation-
-        # only, e.g. "!!!"), we cannot verify it, so we must not silently map
-        # it onto a row that has a real artist -- that is how "!!! - Hello"
-        # wrongly matched Adele's "Hello".
-        if _s(artist).strip() and _norm(cand_artist):
+        # entry DID carry an artist string that merely normalizes away
+        # (punctuation-only, e.g. "!!!"), we cannot verify it, so we must not
+        # silently accept a title-only match at all -- that is how "!!! -
+        # Hello" wrongly matched Adele's "Hello" (and, with a punctuation-named
+        # library row, how "!!!" would match "???").
+        if _s(artist).strip():
             return None
         if ts < 0.90:
             return None
@@ -818,26 +819,29 @@ _PLAYLIST_SPACED_DASH_RE = re.compile(r"\s[-–—]\s")
 
 # Tokens that are version/format labels, never an artist. Used ONLY to reject
 # a reversed-order (compact "Title-ARTIST") reading whose would-be artist is
-# really a suffix label ("Song-Live", "Song-Remix"). Anchored whole-string
-# match -> linear time.
+# really a suffix label ("Song-Live", "Song-Remix"). Matched against _norm()
+# output (lowercased, punctuation stripped) -- the SAME normalization the
+# scorer uses -- so trailing punctuation like "LIVE!" cannot slip past the
+# anchor. Anchored whole-string match -> linear time.
 _PLAYLIST_VERSION_LABEL_RE = re.compile(
-    r"(?i)^(?:"
+    r"^(?:"
     r"live|remix(?:es)?|acoustic|demo|audio|video|visualizer|instrumental|karaoke|cover|"
     r"mix|edit|version|remaster(?:ed)?|extended|bonus|reprise|interlude|intro|outro|skit|"
-    r"lyrics?|lyric\s+video|official|official\s+(?:music\s+)?video|official\s+audio|"
-    r"radio\s+edit|album\s+version|single\s+version|slowed|reverb|sped\s+up|nightcore"
+    r"lyrics?|lyric video|official|official (?:music )?video|official audio|"
+    r"radio edit|album version|single version|slowed|reverb|sped up|nightcore"
     r")$"
 )
 
 
 def _playlist_artist_candidate_is_version_label(value) -> bool:
     """A would-be artist token that is actually a version/format suffix
-    ("Live", "Remix", "Official Video", ...), which must never be treated as
-    an artist when reinterpreting a compact "Title-ARTIST" entry."""
-    return bool(_PLAYLIST_VERSION_LABEL_RE.match(_s(value).strip()))
+    ("Live", "Remix", "Official Video", "LIVE!", ...), which must never be
+    treated as an artist when reinterpreting a compact "Title-ARTIST" entry.
+    Checked on the normalized token so punctuation cannot evade it."""
+    return bool(_PLAYLIST_VERSION_LABEL_RE.match(_norm(value)))
 
 
-def _playlist_query_match_variants(artist, title):
+def _playlist_query_match_variants(artist, title, allow_compact_reverse: bool = True):
     """(artist, title) query shapes to try against the library index.
 
     A YouTube/SoundCloud entry routinely carries the real "Artist - Title"
@@ -865,6 +869,13 @@ def _playlist_query_match_variants(artist, title):
     * The reversed order is dropped when its would-be artist is a
       version/format label ("Song-Live", "Song-Remix"), which is a suffix,
       not an artist.
+    * `allow_compact_reverse=False` suppresses the reversed order entirely.
+      The caller passes this when `title` is already the RESIDUAL of a prior
+      spaced split / canonicalization promotion (an explicit artist was
+      pulled from a spaced separator ahead of the compact tail), so the tail
+      is not a standalone "Title-ARTIST" pair -- e.g. "Some Music" (channel)
+      + "Drake - Hello-ADELE" canonicalizes to artist="Drake",
+      title="Hello-ADELE", and reversing that tail would wrongly map "ADELE".
 
     Deterministic and AcoustID/MusicBrainz-independent: no provider call, no
     outbound HTTP.
@@ -880,7 +891,8 @@ def _playlist_query_match_variants(artist, title):
         # Compact "Title-ARTIST" is order-ambiguous; the spaced shape is not.
         stripped = _playlist_strip_video_title_suffix(_playlist_strip_track_prefix(title))
         spaced = bool(_PLAYLIST_SPACED_DASH_RE.search(stripped))
-        if not spaced and not _playlist_artist_candidate_is_version_label(right):
+        if (allow_compact_reverse and not spaced
+                and not _playlist_artist_candidate_is_version_label(right)):
             orders.append((right, left))
         for cand_artist, cand_title in orders:
             key = (_norm(cand_artist), _norm(cand_title))
@@ -890,8 +902,8 @@ def _playlist_query_match_variants(artist, title):
     return variants
 
 
-def _playlist_match_payload_from_candidates(artist, title,
-                                            candidates: Any) -> Optional[Dict[str, Any]]:
+def _playlist_match_payload_from_candidates(artist, title, candidates: Any,
+                                            allow_compact_reverse: bool = True) -> Optional[Dict[str, Any]]:
     if isinstance(candidates, dict):
         by_title = candidates.get("by_title") or {}
         all_rows = list(candidates.get("all") or [])
@@ -901,7 +913,7 @@ def _playlist_match_payload_from_candidates(artist, title,
 
     best_payload: Optional[Dict[str, Any]] = None
     best_score = 0.0
-    for q_artist, q_title in _playlist_query_match_variants(artist, title):
+    for q_artist, q_title in _playlist_query_match_variants(artist, title, allow_compact_reverse):
         rows = list(by_title.get(_norm(q_title), []) or []) if by_title else []
         if not rows:
             rows = all_rows
@@ -1084,7 +1096,12 @@ def _match_playlist_tracks(tracks, verify_acoustid: bool = False):
     for trk in _playlist_canonicalize_tracks(tracks):
         artist = (trk.get("artist") or "").strip()
         title = (trk.get("title") or "").strip()
-        payload = _playlist_match_payload_from_candidates(artist, title, candidates)
+        # When canonicalization already pulled the artist out of the video
+        # title (a spaced split), `title` is the residual, not a standalone
+        # "Title-ARTIST" pair, so its compact tail must not be reversed.
+        allow_compact_reverse = trk.get("canonical_source") != "video-title"
+        payload = _playlist_match_payload_from_candidates(
+            artist, title, candidates, allow_compact_reverse=allow_compact_reverse)
         if payload:
             for key in ("source_artist", "source_title", "canonicalized", "canonical_source"):
                 if key in trk:

@@ -169,6 +169,28 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
         lib = [_item("Adele", "Hello")]
         self.assertMissing(lib, "uploader", "Adele - Hello")
 
+    def test_nested_spaced_then_compact_is_not_reversed(self):
+        # A channel/aggregator uploader ("Some Music") makes canonicalization
+        # split the SPACED dash first: "Drake - Hello-ADELE" -> artist="Drake",
+        # title="Hello-ADELE". The residual compact tail must NOT be reversed
+        # into artist="ADELE" and mapped onto Adele's present "Hello".
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "Some Music", "Drake - Hello-ADELE")
+
+    def test_punctuated_version_label_is_not_treated_as_artist(self):
+        # "LIVE!" must be recognized as a version label after normalization
+        # (the scorer normalizes punctuation away), so the reversed order of
+        # "Lightning Crashes-LIVE!" must not map onto a band named "Live".
+        lib = [_item("Lightning Crashes", "Live")]
+        self.assertMissing(lib, "uploader", "Lightning Crashes-LIVE!")
+
+    def test_punctuation_artist_does_not_title_only_match_punctuation_row(self):
+        # Blank uploader + "!!! - ???": the promoted "!!!" artist normalizes
+        # away, and must not title-only match a present row whose artist also
+        # normalizes away ("???").
+        lib = [_item("Song", "???")]
+        self.assertMissing(lib, "", "!!! - Song")
+
 
 if __name__ == "__main__":
     unittest.main()
