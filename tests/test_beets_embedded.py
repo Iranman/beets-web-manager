@@ -11,6 +11,7 @@ import ast
 import json
 import os
 import shutil
+import site
 import struct
 import subprocess
 import sys
@@ -159,6 +160,8 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
             "WEB_MANAGER_DATA_DIR": os.path.join(self.td, "wm"),
             "BEETS_TRANSACTION_DIR": os.path.join(self.td, "wm", "transactions"),
             "MUSIC_ROOT": self.music, "DOWNLOADS_ROOT": self.downloads,
+            # HOME is replaced, so keep the user site-packages (pip --user) visible.
+            "PYTHONUSERBASE": os.environ.get("PYTHONUSERBASE") or site.getuserbase(),
         })
         if path_env is not None:
             env["PATH"] = path_env

@@ -9,6 +9,7 @@ process-global). No live data.
 import json
 import os
 import shutil
+import site
 import subprocess
 import sys
 import unittest
@@ -30,7 +31,9 @@ def _beets_available() -> bool:
 class EmbeddedParityTests(unittest.TestCase):
     def _run(self, driver: str) -> dict:
         env = {k: v for k, v in os.environ.items() if not k.startswith(("BEETS_", "BEETSDIR"))}
-        env.update({"BWM_ROOT": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"})
+        # The drivers replace HOME; keep the user site-packages (pip --user) visible.
+        env.update({"BWM_ROOT": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONUSERBASE": os.environ.get("PYTHONUSERBASE") or site.getuserbase()})
         proc = subprocess.run([sys.executable, str(FIXTURES / driver)], cwd=str(ROOT), env=env,
                               capture_output=True, text=True, timeout=300)
         self.assertEqual(proc.returncode, 0, proc.stderr[-4000:])
