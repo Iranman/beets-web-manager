@@ -70,13 +70,20 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _host_matches(host: str, *domains: str) -> bool:
+    # Exact host or a real dot-boundary subdomain only (mirrors
+    # ytdlp_guard.ytdlp_host_allowed). A bare ``endswith("youtube.com")`` would
+    # also match ``evilyoutube.com`` (py/incomplete-url-substring-sanitization).
+    clean = (host or "").strip().rstrip(".").lower()
+    return bool(clean) and any(clean == d or clean.endswith("." + d) for d in domains)
+
+
 def _is_youtube_host(host: str) -> bool:
-    host = (host or "").rstrip(".").lower()
-    return host.endswith("youtube.com") or host.endswith("youtu.be") or host.endswith("youtube-nocookie.com")
+    return _host_matches(host, "youtube.com", "youtu.be", "youtube-nocookie.com")
 
 
 def _is_soundcloud_host(host: str) -> bool:
-    return (host or "").rstrip(".").lower().endswith("soundcloud.com")
+    return _host_matches(host, "soundcloud.com")
 
 
 def _platform_for_host(host: str) -> str:

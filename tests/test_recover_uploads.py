@@ -127,6 +127,18 @@ class TargetsBuiltThroughGuard(unittest.TestCase):
         ydl = _FakeYDL.instances[-1]
         self.assertEqual(ydl.opts.get("extract_flat"), "in_playlist")
 
+    def test_host_classification_is_dot_bounded(self):
+        # Lookalike hosts must never be classified as a real platform
+        # (py/incomplete-url-substring-sanitization). The allowlist guard
+        # rejects them too, but classification must not be fooled either.
+        self.assertTrue(recover_service._is_youtube_host("music.youtube.com"))
+        self.assertTrue(recover_service._is_youtube_host("youtube.com"))
+        self.assertFalse(recover_service._is_youtube_host("evilyoutube.com"))
+        self.assertFalse(recover_service._is_youtube_host("youtube.com.attacker.net"))
+        self.assertTrue(recover_service._is_soundcloud_host("m.soundcloud.com"))
+        self.assertFalse(recover_service._is_soundcloud_host("notsoundcloud.com"))
+        self.assertEqual(recover_service._platform_for_host("evilyoutube.com"), "other")
+
     def test_soundcloud_original_detected_in_plan(self):
         plan = recover_service._recover_format_plan(
             "soundcloud.com",
