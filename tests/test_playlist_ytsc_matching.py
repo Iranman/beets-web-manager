@@ -2,13 +2,17 @@
 
 YT/SC entries routinely carry the real "Artist - Title" (spaced) or compact
 "Title-ARTIST" inside the video title while the uploader field is a
-VEVO/Topic/aggregator channel that is not the artist. Before the query-side
-title split, the plain (uploader, title) pair never reached a confident
-score, so a library track that was actually present stayed "missing".
+VEVO/Topic/aggregator channel that is not the artist. Deriving a different
+artist by re-splitting the title is DEFAULT-DENY: it happens only for a
+genuinely artist-less entry, or a raw uploader field paired with the original
+title (rows carry `uploader_artist`, as the producers set). Any established
+artist -- upstream metadata, a parser split, a canonicalization promotion,
+m3u EXTINF, or file tags -- leaves the title settled and never re-split.
 
-These tests exercise the real import match path (`_match_playlist_tracks`,
-which canonicalizes then matches) with the real normalization helpers, plus
-a false-positive guard proving a distinct track is never cross-mapped.
+These tests feed representative builder rows into the real match path
+(`_match_playlist_tracks`) and prove both recall and that a distinct track is
+never cross-mapped. `PlaylistDedupMatchTests` covers the dedup caller that
+opts out entirely.
 """
 
 import difflib
@@ -45,201 +49,244 @@ def _item(title, artist):
     )
 
 
+def _ns(items):
+    return {
+        "Any": Any,
+        "Dict": Dict,
+        "Iterable": Iterable,
+        "List": List,
+        "Optional": Optional,
+        "difflib": difflib,
+        "re": re,
+        "Path": Path,
+        "PLAYLIST_MIN_DOWNLOAD_SECONDS": 45,
+        "MUSIC_ROOT": Path("/tmp/music"),
+        "lib": SimpleNamespace(items=lambda _query: items),
+        # Deterministic path only: MusicBrainz "unavailable" (empty) here,
+        # exactly as when the provider is down -- matching must still work.
+        "provider_boundary": SimpleNamespace(ProviderError=Exception),
+        "_mb_recording_search": lambda *a, **k: [],
+        # Force the fallback library scan (no prebuilt index in tests).
+        "_playlist_library_index": lambda: (_ for _ in ()).throw(RuntimeError("no index")),
+        # Isolate matching from on-disk file quality checks.
+        "_playlist_quality_for_item": lambda it, path: {
+            "quality": "ok",
+            "quality_flags": [],
+            "length": 210.0,
+            "format": "MP3",
+            "bitrate": 256,
+            "albumartist": getattr(it, "albumartist", ""),
+            "source": "Library",
+        },
+    }
+
+
 class PlaylistYtScMatchingTests(unittest.TestCase):
     def _match(self, items):
-        namespace: Dict[str, Any] = {
-            "Any": Any,
-            "Dict": Dict,
-            "Iterable": Iterable,
-            "List": List,
-            "Optional": Optional,
-            "difflib": difflib,
-            "re": re,
-            "Path": Path,
-            "PLAYLIST_MIN_DOWNLOAD_SECONDS": 45,
-            "MUSIC_ROOT": Path("/tmp/music"),
-            "lib": SimpleNamespace(items=lambda _query: items),
-            # Deterministic path only: MusicBrainz "unavailable" (empty) here,
-            # exactly as when the provider is down -- matching must still work.
-            "provider_boundary": SimpleNamespace(ProviderError=Exception),
-            "_mb_recording_search": lambda *a, **k: [],
-            # Force the fallback library scan (no prebuilt index in tests).
-            "_playlist_library_index": lambda: (_ for _ in ()).throw(RuntimeError("no index")),
-            # Isolate matching from on-disk file quality checks.
-            "_playlist_quality_for_item": lambda it, path: {
-                "quality": "ok",
-                "quality_flags": [],
-                "length": 210.0,
-                "format": "MP3",
-                "bitrate": 256,
-                "albumartist": getattr(it, "albumartist", ""),
-                "source": "Library",
-            },
-        }
-        helpers = load_app_closure(["_match_playlist_tracks"], namespace)
-        return helpers["_match_playlist_tracks"]
+        return load_app_closure(["_match_playlist_tracks"], _ns(items))["_match_playlist_tracks"]
 
-    def assertMatches(self, items, artist, title, expected_title):
-        match_tracks = self._match(items)
-        matched, missing = match_tracks([{"artist": artist, "title": title}])
-        self.assertTrue(matched, f"expected a match for ({artist!r}, {title!r}); missing={missing}")
+    def assertMatches(self, items, artist, title, expected_title, **flags):
+        row = {"artist": artist, "title": title, **flags}
+        matched, missing = self._match(items)([row])
+        self.assertTrue(matched, f"expected a match for {row!r}; missing={missing}")
         self.assertEqual(expected_title, matched[0].get("title"))
         self.assertGreaterEqual(float(matched[0].get("score") or 0), 0.82)
 
-    def assertMissing(self, items, artist, title):
-        match_tracks = self._match(items)
-        matched, missing = match_tracks([{"artist": artist, "title": title}])
-        self.assertFalse(
-            matched,
-            f"({artist!r}, {title!r}) must not match; got {matched}",
-        )
+    def assertMissing(self, items, artist, title, **flags):
+        row = {"artist": artist, "title": title, **flags}
+        matched, missing = self._match(items)([row])
+        self.assertFalse(matched, f"{row!r} must not match; got {matched}")
 
-    # ── recall: present library tracks now match ──────────────────────────
+    # ── recall: uploader-sourced entries (uploader_artist, as producers set) ─
     def test_youtube_vevo_uploader_with_artist_title_in_video_title(self):
         lib = [_item("Hotline Bling", "Drake")]
-        # "<Artist>VEVO" uploader is not the artist; real pair lives in the title.
-        self.assertMatches(lib, "DrakeVEVO", "Drake - Hotline Bling (Official Video)", "Hotline Bling")
+        self.assertMatches(lib, "DrakeVEVO", "Drake - Hotline Bling (Official Video)",
+                           "Hotline Bling", uploader_artist=True)
 
     def test_youtube_official_music_video_suffix(self):
         lib = [_item("Redbone", "Childish Gambino")]
-        self.assertMatches(
-            lib, "ChildishGambinoVEVO",
-            "Childish Gambino - Redbone (Official Music Video)", "Redbone",
-        )
+        self.assertMatches(lib, "ChildishGambinoVEVO",
+                           "Childish Gambino - Redbone (Official Music Video)",
+                           "Redbone", uploader_artist=True)
 
     def test_youtube_aggregator_channel_uploader(self):
         lib = [_item("Sicko Mode", "Travis Scott")]
-        # Promo/aggregator uploader ("TrapNation") is not the artist.
-        self.assertMatches(lib, "TrapNation", "Travis Scott - SICKO MODE (Audio)", "Sicko Mode")
+        self.assertMatches(lib, "TrapNation", "Travis Scott - SICKO MODE (Audio)",
+                           "Sicko Mode", uploader_artist=True)
 
     def test_soundcloud_spaced_artist_title(self):
         lib = [_item("Jocelyn Flores", "XXXTentacion")]
-        self.assertMatches(lib, "coolvibes", "XXXTentacion - Jocelyn Flores", "Jocelyn Flores")
+        self.assertMatches(lib, "coolvibes", "XXXTentacion - Jocelyn Flores",
+                           "Jocelyn Flores", uploader_artist=True)
 
     def test_soundcloud_compact_title_dash_artist(self):
         lib = [_item("Passionfruit", "Drake")]
         # SoundCloud/SpotiFLAC "Title-ARTIST" compact order.
-        self.assertMatches(lib, "SoundCloud User", "Passionfruit-DRAKE", "Passionfruit")
+        self.assertMatches(lib, "SoundCloud User", "Passionfruit-DRAKE",
+                           "Passionfruit", uploader_artist=True)
 
-    def test_plain_entry_without_channel_noise_still_matches(self):
+    def test_hyphenated_artist_spaced_still_matches(self):
+        lib = [_item("Empire State of Mind", "Jay-Z")]
+        self.assertMatches(lib, "SomeVEVO", "Jay-Z - Empire State of Mind",
+                           "Empire State of Mind", uploader_artist=True)
+
+    def test_genuinely_artist_less_entry_matches_by_title(self):
+        lib = [_item("Hello", "Adele")]
+        self.assertMatches(lib, "", "Hello", "Hello")
+
+    def test_established_metadata_artist_matches_directly(self):
+        # A correct metadata artist+title (no uploader flag) matches with no
+        # re-split needed; feat. noise in the title is handled by scoring.
         lib = [_item("One Dance", "Drake")]
         self.assertMatches(lib, "Drake", "One Dance (feat. Wizkid & Kyla)", "One Dance")
 
     # ── precision: ABSENT track must not be invented ──────────────────────
     def test_dash_title_wrong_artist_stays_missing(self):
-        # "Hello" is in the library by Adele; a "Hello - Goodbye" entry by a
-        # different artist must NOT be mapped onto it via the title split.
         lib = [_item("Hello", "Adele"), _item("Hotline Bling", "Drake")]
-        self.assertMissing(lib, "Beatles", "Hello - Goodbye")
+        self.assertMissing(lib, "Beatles", "Hello - Goodbye", uploader_artist=True)
 
     def test_split_does_not_map_absent_track(self):
         lib = [_item("Hello", "Adele")]
-        self.assertMissing(lib, "SomeChannel", "Adele - Someone Like You")
+        self.assertMissing(lib, "SomeChannel", "Adele - Someone Like You", uploader_artist=True)
 
     def test_swap_does_not_match_on_title_alone(self):
         lib = [_item("Hotline Bling", "Drake")]
-        self.assertMissing(lib, "RandomUploader", "Hotline Bling - Ringtone Remix")
+        self.assertMissing(lib, "RandomUploader", "Hotline Bling - Ringtone Remix", uploader_artist=True)
 
     # ── precision: a PRESENT-but-wrong row must not be cross-mapped ────────
     def test_punctuation_only_split_artist_does_not_title_only_match(self):
-        # "!!!" normalizes to empty; "!!! - Hello" must not fall into the
-        # artist-less title-only branch and map onto Adele's present "Hello".
         lib = [_item("Hello", "Adele")]
-        self.assertMissing(lib, "someuploader", "!!! - Hello")
+        self.assertMissing(lib, "someuploader", "!!! - Hello", uploader_artist=True)
 
     def test_punctuation_only_artist_with_blank_uploader_stays_missing(self):
-        # Same, when the uploader itself is blank (canonicalization promotes
-        # the "!!!" half to the artist before matching).
+        # Artist-less entry: re-split is allowed, but the promoted "!!!"
+        # normalizes away and must not title-only match Adele's "Hello".
         lib = [_item("Hello", "Adele")]
         self.assertMissing(lib, "", "!!! - Hello")
 
     def test_compact_version_label_is_not_treated_as_artist(self):
-        # "Lightning Crashes-Live": "Live" is a version suffix, not the artist,
-        # so the reversed order must not map onto a present row artist="Live".
         lib = [_item("Lightning Crashes", "Live")]
-        self.assertMissing(lib, "uploader", "Lightning Crashes-Live")
+        self.assertMissing(lib, "uploader", "Lightning Crashes-Live", uploader_artist=True)
 
     def test_compact_remix_label_is_not_treated_as_artist(self):
         lib = [_item("Humble", "Remix")]
-        self.assertMissing(lib, "uploader", "Humble-Remix")
+        self.assertMissing(lib, "uploader", "Humble-Remix", uploader_artist=True)
 
     def test_spaced_artist_title_is_not_reversed(self):
-        # Spaced "Adele - Hello" is unambiguous; it must NOT be reversed into
-        # artist="Hello"/title="Adele" and map onto a present swapped row.
         lib = [_item("Adele", "Hello")]
-        self.assertMissing(lib, "uploader", "Adele - Hello")
+        self.assertMissing(lib, "uploader", "Adele - Hello", uploader_artist=True)
 
     def test_nested_spaced_then_compact_is_not_reversed(self):
-        # A channel/aggregator uploader ("Some Music") makes canonicalization
-        # split the SPACED dash first: "Drake - Hello-ADELE" -> artist="Drake",
-        # title="Hello-ADELE". The residual compact tail must NOT be reversed
-        # into artist="ADELE" and mapped onto Adele's present "Hello".
-        lib = [_item("Hello", "Adele")]
-        self.assertMissing(lib, "Some Music", "Drake - Hello-ADELE")
-
-    def test_punctuated_version_label_is_not_treated_as_artist(self):
-        # "LIVE!" must be recognized as a version label after normalization
-        # (the scorer normalizes punctuation away), so the reversed order of
-        # "Lightning Crashes-LIVE!" must not map onto a band named "Live".
-        lib = [_item("Lightning Crashes", "Live")]
-        self.assertMissing(lib, "uploader", "Lightning Crashes-LIVE!")
-
-    def test_punctuation_artist_does_not_title_only_match_punctuation_row(self):
-        # Blank uploader + "!!! - ???": the promoted "!!!" artist normalizes
-        # away, and must not title-only match a present row whose artist also
-        # normalizes away ("???").
-        lib = [_item("Song", "???")]
-        self.assertMissing(lib, "", "!!! - Song")
-
-    # ── structural: a title whose artist was already established is a
-    #     RESIDUAL and is never re-split in EITHER direction ──────────────
-    def test_forward_split_of_residual_is_suppressed(self):
         # Channel uploader -> canonicalization splits the SPACED dash first:
-        # "Drake - ADELE-Hello" -> artist="Drake", title="ADELE-Hello". The
-        # FORWARD split of that residual ("ADELE","Hello") must not map onto
-        # Adele's present "Hello" either.
+        # "Drake - Hello-ADELE" -> artist="Drake", title="Hello-ADELE" (now a
+        # residual). The compact tail must not be reversed onto Adele.
         lib = [_item("Hello", "Adele")]
-        self.assertMissing(lib, "Some Music", "Drake - ADELE-Hello")
+        self.assertMissing(lib, "Some Music", "Drake - Hello-ADELE", uploader_artist=True)
+
+    def test_forward_split_of_residual_is_suppressed(self):
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "Some Music", "Drake - ADELE-Hello", uploader_artist=True)
 
     def test_gateless_fallback_channelish_promotion_is_suppressed(self):
         # Empty uploader -> "Roxy Music - Hello-ADELE" promotes artist="Roxy
-        # Music" (itself channelish). The library-title fallback must not
-        # reverse the residual "Hello-ADELE" onto Adele's "Hello".
+        # Music"; the residual "Hello-ADELE" must not be reversed onto Adele.
         lib = [_item("Hello", "Adele")]
         self.assertMissing(lib, "", "Roxy Music - Hello-ADELE")
 
     def test_version_label_with_hyphen_and_double_space_is_caught(self):
-        lib = [_item("Lightning Crashes", "Live")]
-        self.assertMissing(lib, "uploader", "Lightning Crashes-Sped-Up!")
-        lib2 = [_item("Lightning Crashes", "Video")]
-        self.assertMissing(lib2, "uploader", "Lightning Crashes-Official  Video")
+        self.assertMissing([_item("Lightning Crashes", "Live")],
+                           "uploader", "Lightning Crashes-Sped-Up!", uploader_artist=True)
+        self.assertMissing([_item("Lightning Crashes", "Video")],
+                           "uploader", "Lightning Crashes-Official  Video", uploader_artist=True)
+        self.assertMissing([_item("Lightning Crashes", "Video")],
+                           "uploader", "Lightning Crashes-Official.Video", uploader_artist=True)
 
-    def test_hyphenated_artist_spaced_still_matches(self):
-        # Keep recall for a hyphenated artist name in the spaced shape.
-        lib = [_item("Empire State of Mind", "Jay-Z")]
-        self.assertMatches(lib, "SomeVEVO", "Jay-Z - Empire State of Mind", "Empire State of Mind")
+    def test_punctuation_artist_does_not_title_only_match_punctuation_row(self):
+        lib = [_item("Song", "???")]
+        self.assertMissing(lib, "", "!!! - Song")
 
-    # ── provenance: the matcher honors the `artist_from_split` flag that the
-    #     paste parser (`parse_playlist_request`, source="text") sets for a
-    #     "Artist - Title" line, so the residual is not re-split ───────────
-    def test_matcher_honors_artist_from_split_provenance(self):
-        # The exact track shape the text parser emits for "Drake - Hello-ADELE"
-        # (artist pulled from the line). The residual "Hello-ADELE" must not be
-        # reversed onto Adele's present "Hello".
+    # ── default-deny: an established artist row is never re-split ──────────
+    def test_established_artist_compact_tail_not_resplit(self):
+        # No uploader flag -> established artist (upstream metadata / EXTINF /
+        # parser split). "Drake" + "ADELE-Hello" must not reinterpret to Adele.
         lib = [_item("Hello", "Adele")]
-        match_tracks = self._match(lib)
-        matched, missing = match_tracks(
-            [{"artist": "Drake", "title": "Hello-ADELE", "artist_from_split": True}])
-        self.assertFalse(matched, f"residual must not be re-split; got {matched}")
+        self.assertMissing(lib, "Drake", "ADELE-Hello")
+        self.assertMissing(lib, "Drake", "Hello-ADELE")
+
+    def test_established_channelish_artist_not_resplit(self):
+        # c2: a real artist that merely looks channelish ("Roxy Music") is
+        # trusted, not discarded in favor of a title-derived one.
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "Roxy Music", "ADELE-Hello")
+        self.assertMissing(lib, "Roxy Music", "Hello-ADELE")
+
+    def test_matcher_honors_artist_from_split_provenance(self):
+        # The exact track shape the text paste parser emits for a
+        # "Drake - Hello-ADELE" line (artist pulled from the line).
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "Drake", "Hello-ADELE", artist_from_split=True)
 
     def test_artist_from_split_provenance_still_matches_correct_entry(self):
-        # Recall: a correctly pasted present entry still matches.
         lib = [_item("Hello", "Adele")]
-        match_tracks = self._match(lib)
-        matched, missing = match_tracks(
-            [{"artist": "Adele", "title": "Hello", "artist_from_split": True}])
-        self.assertTrue(matched, f"expected a match; missing={missing}")
-        self.assertEqual("Hello", matched[0].get("title"))
+        self.assertMatches(lib, "Adele", "Hello", "Hello", artist_from_split=True)
+
+
+class PlaylistBuilderRowMatchTests(unittest.TestCase):
+    """Representative producer rows into the matcher. The producer that sets
+    an artist from upstream metadata (Spotify, yt-dlp `entry.artist`) or from
+    a title split (m3u EXTINF) leaves no `uploader_artist` flag, so the title
+    is settled and a compact tail is never reinterpreted onto a distinct row."""
+
+    def _match(self, items):
+        return load_app_closure(["_match_playlist_tracks"], _ns(items))["_match_playlist_tracks"]
+
+    def _assert_missing(self, row):
+        matched, _ = self._match([_item("Hello", "Adele")])([row])
+        self.assertFalse(matched, f"{row!r} must not match; got {matched}")
+
+    def test_spotify_metadata_row(self):
+        # _fetch_spotify_playlist_tracks -> {"artist": <metadata>, "title": ...}
+        self._assert_missing({"artist": "Drake", "title": "Hello-ADELE"})
+
+    def test_ytdlp_metadata_artist_row(self):
+        # yt-dlp entry.get("artist") present -> established, no uploader flag.
+        self._assert_missing({"artist": "Drake", "title": "ADELE-Hello"})
+
+    def test_m3u_extinf_split_row(self):
+        # EXTINF "Artist - Title" -> {"artist": <split>, "title": ...}, established.
+        self._assert_missing({"artist": "Drake", "title": "Hello-ADELE"})
+
+    def test_ytdlp_uploader_row_still_matches(self):
+        # yt-dlp uploader/channel fallback -> uploader_artist=True -> re-split ok.
+        matched, _ = self._match([_item("Hotline Bling", "Drake")])(
+            [{"artist": "DrakeVEVO", "title": "Drake - Hotline Bling (Official Video)",
+              "uploader_artist": True}])
+        self.assertTrue(matched)
+        self.assertEqual("Hotline Bling", matched[0].get("title"))
+
+
+class PlaylistDedupMatchTests(unittest.TestCase):
+    """The dedup caller (`backend/dedup_service.py`) calls
+    `_playlist_match_payload_from_candidates` with no flag -- it is
+    mutation-adjacent and must stay default-deny (no title re-split)."""
+
+    def _helpers(self, items):
+        return load_app_closure(
+            ["_playlist_match_payload_from_candidates", "_playlist_library_match_candidates"],
+            _ns(items))
+
+    def test_dedup_file_tag_residual_not_resplit(self):
+        h = self._helpers([_item("Hello", "Adele")])
+        cands = h["_playlist_library_match_candidates"]()
+        # File tags artist="Drake", title="ADELE-Hello": default-deny, no match.
+        self.assertIsNone(h["_playlist_match_payload_from_candidates"]("Drake", "ADELE-Hello", cands))
+
+    def test_dedup_direct_match_still_works(self):
+        h = self._helpers([_item("Hello", "Adele")])
+        cands = h["_playlist_library_match_candidates"]()
+        payload = h["_playlist_match_payload_from_candidates"]("Adele", "Hello", cands)
+        self.assertIsNotNone(payload)
+        self.assertEqual("Hello", payload.get("title"))
 
 
 if __name__ == "__main__":

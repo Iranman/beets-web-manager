@@ -13932,6 +13932,29 @@
    ]
   },
   {
+   "name": "_playlist_entry_allows_title_resplit",
+   "module": "backend/playlist_service.py",
+   "lines": [
+    1138,
+    1149
+   ],
+   "size": 12,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLAYLIST",
+   "desired_owner": "backend/playlist_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_match_playlist_tracks",
+    "_playlist_suggestions_for_track"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
    "name": "_match_playlist_tracks",
    "module": "backend/playlist_service.py",
    "lines": [
