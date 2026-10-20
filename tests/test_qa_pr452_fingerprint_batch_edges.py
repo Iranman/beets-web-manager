@@ -8,7 +8,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import backend.acquisition_service as acq
+acq = None
+
+
+def setUpModule():
+    # Deferred: test_ai_batch_retry_race must be the first to import app.
+    global acq
+    import app  # noqa: F401
+    import backend.acquisition_service as acq
 
 TRACKS = [
     {"title": "Alpha", "track": 1, "mb_trackid": "aaaaaaaa-0000-0000-0000-000000000001"},

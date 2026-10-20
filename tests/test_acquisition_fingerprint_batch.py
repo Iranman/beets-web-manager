@@ -11,8 +11,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import backend.acquisition_service as acq
-from backend.acoustid_service import _audio_identity_decision
+acq = _audio_identity_decision = None
+
+
+def setUpModule():
+    # Deferred: this module sorts before test_ai_batch_retry_race, which must
+    # be the first to import app (at collection, in its temp env).
+    global acq, _audio_identity_decision
+    import app  # noqa: F401  -- loads the module family in order
+    import backend.acquisition_service as acq
+    from backend.acoustid_service import _audio_identity_decision
 
 REC = "33333333-3333-3333-3333-333333333333"
 OTHER = "66666666-6666-6666-6666-666666666666"
