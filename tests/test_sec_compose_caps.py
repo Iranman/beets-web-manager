@@ -9,7 +9,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILES = (
     ROOT / "docker-compose.full.yml",
-    ROOT / "examples" / "docker-compose.external-beets.yml",
+    ROOT / "docker-compose.yml",
 )
 ENTRYPOINT = (ROOT / "docker" / "web-manager-entrypoint.sh").read_text(encoding="utf-8")
 REQUIRED_CAPS = {"CHOWN", "SETUID", "SETGID"}

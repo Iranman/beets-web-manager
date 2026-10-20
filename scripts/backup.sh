@@ -17,7 +17,7 @@
 #   --web-manager-data DIR   host folder mounted at /web-manager-data
 #                                                               [WEB_MANAGER_DATA_DIR, default ./web-manager]
 #   --out DIR                where the .tar.gz is written       [BACKUP_DIR, default ./backups]
-#   --beets-stopped          you have stopped the beets container (needed only
+#   --beets-stopped          you have stopped Web Manager, which runs Beets (needed only
 #                            when neither the sqlite3 tool nor python3 is installed)
 #
 # The database is copied with SQLite's online backup API (the `sqlite3`
@@ -118,12 +118,12 @@ PYEOF
     stopped)
       WAL="${DB}-wal"
       [ "${BEETS_STOPPED}" -eq 1 ] || fail "Neither the sqlite3 command nor python3 is installed, so the database
-  can only be copied while Beets is stopped. Stop it (docker compose stop beets),
-  re-run with --beets-stopped, then start it again (docker compose start beets).
+  can only be copied while Beets is stopped. Stop Web Manager (docker compose stop),
+  re-run with --beets-stopped, then start it again (docker compose start).
   Or install sqlite3 to back up while Beets runs."
       if [ -s "${WAL}" ]; then
         fail "${WAL} is not empty, so Beets is still running or did not close the database
-  cleanly. Stop the beets container and try again (or install sqlite3)."
+  cleanly. Stop Web Manager and try again (or install sqlite3)."
       fi
       cp -p "${DB}" "${STAGE}/beets/musiclibrary.blb"
       CHECK="not checked (no sqlite tool)"

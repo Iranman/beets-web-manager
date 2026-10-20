@@ -1,5 +1,6 @@
-"""#212: scripts/validate_compose_security.py must check every third-party
-service image in the compose files, not only beets/beets-web-manager."""
+"""#212: scripts/validate_compose_security.py checks every third-party
+service image in the compose files; ADR 0006: and that each file runs Beets
+only inside Web Manager, with /music writable and the beets.ok healthcheck."""
 import contextlib
 import importlib.util
 import io
@@ -50,7 +51,6 @@ class ThirdPartyImageTests(unittest.TestCase):
         errors = []
         vcs._check_third_party_images(
             "services:\n"
-            "  beets:\n    image: lscr.io/linuxserver/beets:latest\n"
             "  beets-web-manager:\n    image: ghcr.io/iranman/beets-web-manager:latest\n"
             "  helper:\n    build: .\n    image: helper:dev\n"
             "volumes:\n  cache:\n",
@@ -67,7 +67,7 @@ class ThirdPartyImageTests(unittest.TestCase):
     def test_service_after_a_column_0_comment_is_checked(self):
         errors = []
         vcs._check_third_party_images(
-            "services:\n  beets:\n    image: lscr.io/linuxserver/beets:latest\n"
+            "services:\n  beets-web-manager:\n    image: ghcr.io/iranman/beets-web-manager:latest\n"
             "# optional sidecar\n  sidecar:\n    image: foo:1.0\n"
             "volumes:\n  data:\n", "x.yml", errors)
         self.assertEqual(errors, ["x.yml: sidecar image is not digest-pinned: foo:1.0"])
@@ -75,7 +75,7 @@ class ThirdPartyImageTests(unittest.TestCase):
     def test_services_indented_by_four_spaces_are_checked(self):
         errors = []
         vcs._check_third_party_images(
-            "services:\n    beets:\n        image: lscr.io/linuxserver/beets:latest\n"
+            "services:\n    beets-web-manager:\n        image: ghcr.io/iranman/beets-web-manager:latest\n"
             "    sidecar:\n        image: foo:1.0\n", "x.yml", errors)
         self.assertEqual(errors, ["x.yml: sidecar image is not digest-pinned: foo:1.0"])
 
@@ -109,6 +109,33 @@ class ThirdPartyImageTests(unittest.TestCase):
         errors = []
         vcs._check_third_party_images("services: {sidecar: {image: 'foo:1.0'}}\n", "x.yml", errors)
         self.assertEqual(errors, ["x.yml: has a services: section but no service could be read from it"])
+
+
+
+class SingleEngineTests(unittest.TestCase):
+    """ADR 0006: one container; a leftover Beets service would be a second
+    writer on the same library."""
+
+    def test_separate_beets_service_fails(self):
+        for service in ("  beets:\n    image: lscr.io/linuxserver/beets:2.14.1-ls1\n",
+                        "  music:\n    image: lscr.io/linuxserver/beets@sha256:" + "a" * 64 + "\n"):
+            rc, errors = _run_with_full_compose(FULL.replace("services:\n", "services:\n" + service, 1))
+            self.assertEqual(rc, 1)
+            self.assertTrue(any("no separate Beets container" in e for e in errors), errors)
+
+    def test_read_only_music_fails(self):
+        text = FULL.replace(":/music\n", ":/music:ro\n", 1)
+        self.assertNotEqual(text, FULL, "fixture: the /music mount was not found")
+        rc, errors = _run_with_full_compose(text)
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("/music must be read-write" in e for e in errors), errors)
+
+    def test_healthcheck_must_report_beets_ok(self):
+        text = FULL.replace("d.get('beets', {}).get('ok')", "d.get('ok')", 1)
+        self.assertNotEqual(text, FULL, "fixture: the healthcheck was not found")
+        rc, errors = _run_with_full_compose(text)
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("healthcheck must fail while beets.ok" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

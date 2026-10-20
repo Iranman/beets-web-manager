@@ -82,8 +82,6 @@ class NoOwnerSpecificDeploymentDetailsTests(unittest.TestCase):
 
     def test_examples_directory_contains_no_host_specific_paths(self):
         examples_dir = ROOT / "examples"
-        if not examples_dir.is_dir():
-            self.skipTest("no examples/ directory")
         for path in sorted(examples_dir.glob("*.yml")):
             text = path.read_text(encoding="utf-8")
             for line_no, line, label in _scan_lines_for_patterns(text, _GENERIC_HOST_PATH_PATTERNS):
