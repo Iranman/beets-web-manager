@@ -1,6 +1,7 @@
 """scripts/run_tests.py must never drop a test class when it splits a module."""
 import contextlib
 import io
+import re
 import sys
 import tempfile
 import unittest
@@ -44,6 +45,15 @@ class SplitModuleKeepsRunTestOnlyClassesTests(unittest.TestCase):
         self.assertNotEqual(code, 0, out.getvalue())
         self.assertIn("Ran 2 tests", out.getvalue())
         self.assertIn(f"{MODULE}.RunTestOnly", out.getvalue())
+
+
+class SuiteEnvSurvivesTests(unittest.TestCase):
+    def test_no_test_module_calls_patch_stopall(self):
+        # stopall also stops the suite-wide env patcher test_ai_batch_retry_race
+        # starts at import, so later tests in the same process lose that env.
+        offenders = [p.name for p in (ROOT / "tests").glob("test_*.py")
+                     if re.search(r"patch\.stopall\s*[(),]", p.read_text(encoding="utf-8"))]
+        self.assertEqual(offenders, [], "stop your own patchers instead of mock.patch.stopall")
 
 
 if __name__ == "__main__":
