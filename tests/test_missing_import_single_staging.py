@@ -1,5 +1,5 @@
-"""#427: a missing-track download is staged once per attempt, and a retried
-release keeps one Review row instead of one per peer or source."""
+"""#427: a missing-track download is staged once per attempt, its Review row
+points at that one folder, and no staged folder with a Review row is deleted."""
 import json
 import shutil
 import tempfile
@@ -12,7 +12,6 @@ import backend.library_service as ls
 import backend.pending_review_store as prs
 
 REL = "a0000000-0000-0000-0000-00000000000a"
-OTHER_REL = "b0000000-0000-0000-0000-00000000000b"
 TARGETS = [{"track": 2, "disc": 1, "title": "Two"}, {"track": 4, "disc": 1, "title": "Four"}]
 
 
@@ -30,7 +29,6 @@ class SingleStagingTests(unittest.TestCase):
             mock.patch.object(imp, "DOWNLOADS_ROOT", self.downloads),
             mock.patch.object(imp, "MUSIC_ROOT", root / "music"),
             mock.patch.object(ls, "DOWNLOADS_ALLOWED_ROOTS", [self.downloads]),
-            mock.patch.object(prs, "DOWNLOADS_ALLOWED_ROOTS", [self.downloads], create=True),
             mock.patch.object(prs, "DOWNLOADS_ROOT", self.downloads),
             mock.patch.object(prs, "_AI_PENDING_FILE", self.store),
             mock.patch.object(prs, "_library_album_ids_for_folder", return_value=[]),
@@ -40,7 +38,7 @@ class SingleStagingTests(unittest.TestCase):
             mock.patch.object(prs, "_record_ai_review_decision",
                               side_effect=lambda action, path, *a, **k: self.decisions.append((action, path))),
             # Staging-only delete stand-in for the engine's classified delete.
-            mock.patch.object(prs.composite_workflows, "delete_file",
+            mock.patch.object(imp.composite_workflows, "delete_file",
                               side_effect=lambda p: shutil.rmtree(p)),
         ]
         for p in patches:
@@ -67,7 +65,7 @@ class SingleStagingTests(unittest.TestCase):
     def _rows(self):
         return json.loads(self.store.read_text()) if self.store.exists() else []
 
-    def _failed_attempt(self, n, release=REL):
+    def _failed_attempt(self, n):
         """One peer: acquisition stages, import re-scans and stages, Beets
         refuses (Review queued), acquisition cleans its staged folder."""
         log = []
@@ -77,7 +75,7 @@ class SingleStagingTests(unittest.TestCase):
         import_dir = imp._stage_selected_audio_files(staged_a, useful, "Artist", "Album", log,
                                                      target_tracks=TARGETS)
         self.assertTrue(prs._queue_folder_for_manual_review(
-            import_dir, {"mb_albumid": release}, "not matched", log, allow_existing=True))
+            import_dir, {"mb_albumid": REL}, "not matched", log, allow_existing=True))
         imp._delete_staged_import_folder(staged_a, log)
         return staged_a, import_dir
 
@@ -90,14 +88,39 @@ class SingleStagingTests(unittest.TestCase):
         self.assertEqual([r["path"] for r in rows], [staged_a])
         self.assertTrue(Path(rows[0]["path"]).is_dir())  # not dangling
 
-    def test_retries_replace_the_release_review_row(self):
-        other_a, _ = self._failed_attempt(0, release=OTHER_REL)
+    def test_each_failed_attempt_leaves_one_folder_and_one_row(self):
+        attempts = []
         for n in (1, 2, 3):
-            last_a, _ = self._failed_attempt(n)
-        rows = self._rows()
-        self.assertEqual(sorted(r["path"] for r in rows), sorted([other_a, last_a]))
-        self.assertEqual(self._staged_folders(), sorted([Path(other_a), Path(last_a)]))
-        self.assertEqual(sum(1 for a, _ in self.decisions if a == "resolved"), 2)
+            attempts.append(self._failed_attempt(n)[0])
+            # Exactly one more folder and one more row per attempt.
+            self.assertEqual(len(self._staged_folders()), n)
+            self.assertEqual(len(self._rows()), n)
+        self.assertEqual(sorted(r["path"] for r in self._rows()), sorted(attempts))
+        self.assertEqual(self._staged_folders(), sorted(Path(a) for a in attempts))
+
+    def test_earlier_attempt_folder_survives_a_later_failed_attempt(self):
+        first, _ = self._failed_attempt(1)
+        before = sorted(p.name for p in Path(first).rglob("*.flac"))
+        self._failed_attempt(2)
+        self.assertTrue(Path(first).is_dir())
+        self.assertEqual(sorted(p.name for p in Path(first).rglob("*.flac")), before)
+        self.assertIn(first, [r["path"] for r in self._rows()])
+        self.assertNotIn("resolved", [a for a, _ in self.decisions])
+
+    def test_folder_with_review_row_is_never_deleted(self):
+        staged, _ = self._failed_attempt(1)
+        for _ in range(2):
+            self.assertFalse(imp._delete_staged_import_folder(staged, []))
+        self.assertTrue(Path(staged).is_dir())
+
+    def test_unreadable_review_queue_keeps_the_folder(self):
+        log = []
+        dl, files = self._download(1)
+        staged = imp._stage_selected_audio_files(dl, files, "Artist", "Album", log, target_tracks=TARGETS)
+        with mock.patch.object(prs, "_load_pending_reviews",
+                               side_effect=prs.PendingReviewLoadError("unreadable")):
+            self.assertFalse(imp._delete_staged_import_folder(staged, log))
+        self.assertTrue(Path(staged).is_dir())
 
     def test_cleanup_still_removes_a_folder_without_review(self):
         log = []

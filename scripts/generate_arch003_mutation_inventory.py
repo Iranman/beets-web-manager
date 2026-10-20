@@ -587,7 +587,6 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
                 "import_folder_with_id._do",
                 "start_folder_import_with_id._do",  # ARCH-001: request-free service behind the route
                 "_validate_wanted_download_identity_before_import",
-                "_add_to_pending",  # #427: superseded _beets_missing_import copy only
             ):
                 return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
             if func in ("reimport_disk._do", "start_reimport_disk._do") and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
