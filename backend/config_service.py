@@ -119,6 +119,13 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
     inside stock Beets is a live HTTP call and happens later (System page /
     setup status), once stock Beets is actually up.
     """
+    from backend import beets_embedded
+    if beets_embedded.enabled():
+        # ADR 0006: Beets runs in this process from the image's own
+        # operations package; nothing is provisioned and config.yaml is
+        # never edited. Switching back to BEETS_ENGINE=http provisions
+        # again at that start, before the Beets container reads it.
+        return
     try:
         from backend.beets_plugins import provision_bundled_plugins, update_config_yaml_plugins
         from backend.config_manager import get_config_path
