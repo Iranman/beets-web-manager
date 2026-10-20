@@ -281,6 +281,10 @@ class ApiContractTests(unittest.TestCase):
             ("/api/library/missing-mb-ids", "library_missing_mb_ids"),
             ("/api/library/missing-mb-ids/batch/preview", "library_missing_mb_ids_batch_preview"),
             ("/api/library/missing-mb-ids/batch/apply", "library_missing_mb_ids_batch_apply"),
+            ("/api/recover/cookie-state", "api_recover_cookie_state"),
+            ("/api/recover/probe", "api_recover_probe"),
+            ("/api/recover/enumerate", "api_recover_enumerate"),
+            ("/api/recover/fetch", "api_recover_fetch"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)

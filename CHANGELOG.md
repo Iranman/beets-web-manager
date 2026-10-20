@@ -19,6 +19,7 @@ The project uses Semantic Versioning.
 - `library_dir_mismatch`: Beets' `directory:` and `MUSIC_ROOT` name different folders; writes are refused.
 - The shipped Compose healthcheck fails while Beets' self-test fails (`beets.ok` false), so Docker reports the container unhealthy (#459 D3).
 - Recorded-fixture autotag tests: Beets' own importer runs through the embedded engine against a recorded MusicBrainz response for a match, a refused match, MusicBrainz down and not found (`tests/test_beets_embedded_autotag.py`, N4).
+- **Recover My Uploads (fetch + stage).** A new authorized acquisition path for your own YouTube/SoundCloud uploads that the search-only album downloader could not reach. `POST /api/recover/probe` and `POST /api/recover/enumerate` read a direct item URL or a channel/user/playlist/set URL (via `extract_flat`) through the unchanged yt-dlp guard (allowlisted hosts + public-IP/SSRF checks). `POST /api/recover/fetch` runs a tracked job that fetches each URL, keeping YouTube audio in its original lossy container unchanged (recorded as not-lossless) and SoundCloud's owner-enabled original file when available, stages it under `DOWNLOADS_ROOT`, gates each file on an ffprobe decode + duration check (rejecting `.part`/zero-byte/truncated files), and writes per-file provenance (platform, source URL, uploader, retrieval time, authorized-access flag, quality) for a later import increment. Owner-only content uses the operator's `YTDLP_COOKIE_FILE` (contents never read/logged); `GET /api/recover/cookie-state` reports `none`/`invalid`/`rejected`/`ok` by signature only. yt-dlp errors are classified (auth-needed / expired-URL / format / HLS-assembly / rate-limited / access-restricted / genuinely-DRM / misconfig) with a recoverable action; a format/HLS/auth failure is never labelled DRM, and no DRM is circumvented. This increment does not import into the library.
 
 ### Changed
 
@@ -32,6 +33,10 @@ The project uses Semantic Versioning.
 - The two-container setup: the `beets` service in every Compose file, `examples/docker-compose.external-beets.yml` and `examples/docker-compose.embedded.yml` (`docker-compose.yml` is now the single-container file), and the stock Beets image pin.
 - The HTTP transport and shared-key client to Beets, and the settings `BEETS_ENGINE`, `BEETS_WEB_URL`, `BEETS_WEBMANAGER_API_KEY` and `BEETS_WEBMANAGER_API_KEY_FILE`.
 - Plugin provisioning into `/config/beetsplug` and the startup `config.yaml` edits, with the routes `POST /api/plugins/provision`, `POST /api/setup/plugins/provision` and `POST /api/setup/beets-config/include-paths`, and the Setup/System buttons that called them. The opt-in recommended-plugins edit remains.
+
+### Fixed
+
+- Embedded Beets: a fresh install with no `config.yaml` now passes `/health/ready` (HTTP 200) instead of returning 503. A missing config is no longer a readiness blocker (the engine falls back to Beets' defaults and creates an empty library), and required-plugin health is derived from the effective runtime overlay (which always loads `web` and `webmanager`) rather than the on-disk `plugins:` list. A genuinely broken engine or a required plugin that fails to load still fails readiness.
 
 ### Security
 
