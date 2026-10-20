@@ -61,14 +61,20 @@ def _classes(module: str) -> list[str]:
     return [
         f"{module}.{name}" for name in dir(mod)
         if isinstance(obj := getattr(mod, name), type) and issubclass(obj, unittest.TestCase)
-        and loader.getTestCaseNames(obj)
+        and loader.loadTestsFromTestCase(obj).countTestCases()  # counts runTest-only classes too
     ]
 
 
 def _run(name: str, verbosity: int) -> dict:
     stream = io.StringIO()
     start = time.monotonic()
-    suite = unittest.defaultTestLoader.loadTestsFromName(name)
+    loader = unittest.defaultTestLoader
+    try:
+        suite = loader.loadTestsFromName(name)
+    except unittest.SkipTest as exc:  # module-level skip: reported as discover does
+        suite = unittest.loader._make_skipped_test(name, exc, unittest.TestSuite)
+    except Exception:  # any other import-time error: a failing test, not a dead runner
+        suite, _ = unittest.loader._make_failed_import_test(name, unittest.TestSuite)
     result = unittest.TextTestRunner(stream=stream, verbosity=verbosity).run(suite)
     return {
         "name": name,
