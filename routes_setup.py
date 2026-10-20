@@ -4003,8 +4003,11 @@ def health_live():
 
 @app.get("/health/ready")
 def health_ready():
-    """Readiness probe: stock Beets reachable over the plugin handshake plus
-    this container's own mounts (checked locally, independent of Beets)."""
+    """Readiness probe: the embedded Beets engine answers over the plugin
+    handshake plus this container's own mounts (checked locally,
+    independent of Beets). A fresh install with no config.yaml is ready --
+    Beets runs on its defaults and creates an empty library (reported as a
+    warning by /api/health, not a readiness blocker)."""
     config_path, config_path_error = _checked_beets_config_path()
     diagnostics = _beets_plugin_diagnostics(config_path)
     paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) and diagnostics.get("paths") else _local_paths_report(config_path)
@@ -4012,17 +4015,21 @@ def health_ready():
     blocking = []
     reachable = bool(diagnostics.get("remote_reachable"))
     if not reachable:
-        blocking.append("stock Beets unavailable")
+        blocking.append("Beets engine unavailable")
     if not (paths.get("config") or {}).get("writable"):
         blocking.append("config path not writable")
     if not (paths.get("downloads") or {}).get("writable"):
         blocking.append("downloads path not writable")
-    beets_config = paths.get("beets_config") or {}
+    # A missing config.yaml is NOT a blocker: the embedded engine falls back
+    # to Beets' defaults (library beside config, MUSIC_ROOT as directory).
+    # Only a config path that is refused outright (outside BEETSDIR, etc.)
+    # blocks readiness.
     if config_path_error:
         blocking.append("beets config path invalid")
-    elif not beets_config.get("exists"):
-        blocking.append("beets config missing")
-    if reachable and beets_config.get("exists") and not diagnostics.get("plugin_loader_ok"):
+    # Required-plugin health comes from the effective runtime (the handshake's
+    # loaded_plugins against the mandatory overlay), so this blocks a
+    # genuinely failed required plugin with or without an on-disk config.
+    if reachable and not diagnostics.get("plugin_loader_ok"):
         blocking.append("beets plugin loader failed")
 
     status = "ready" if not blocking else "warning"

@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DRIVER = r'''
 import json, os, socket, sys
 scenario, src = sys.argv[1], sys.argv[2]
-if scenario == "version_mismatch":
+if scenario in ("version_mismatch", "readiness_broken"):
     import beets
     beets.__version__ = "0.0.0"
 if scenario == "shadowed":  # a stale copy that resolved before the image's own
@@ -42,9 +42,21 @@ beets_embedded._beet_commands = lambda: [4242] if scenario == "writer_beet" else
 
 def no_network(*a, **k):
     raise AssertionError("the embedded engine opened a socket")
-socket.socket.connect = socket.socket.connect_ex = no_network
+if scenario not in ("readiness", "readiness_broken"):
+    socket.socket.connect = socket.socket.connect_ex = no_network
 
 a = BeetsAdapter()
+
+# Readiness probe end to end through the real app and the real embedded
+# engine (no mocking of _beets_plugin_diagnostics): a fresh config-less
+# install must be ready; a genuinely broken engine must not.
+if scenario in ("readiness", "readiness_broken"):
+    from app import app as flask_app
+    client = flask_app.test_client()
+    r = client.get("/health/ready")
+    print(json.dumps({"status_code": r.status_code, "body": r.get_json()}, default=str))
+    sys.exit(0)
+
 out = {"status": beets_embedded.status(), "public": beets_embedded.public_status()}
 if scenario != "happy":
     try:
@@ -300,6 +312,24 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual(out["status"]["library_directory"], self.music)
         self.assertFalse(os.path.exists(os.path.join(self.config, "config.yaml")))
         self.assertNotEqual((out["mutate_error"] or [None, None])[1], "BEETS_EMBEDDED_DEGRADED")
+
+    def test_fresh_install_without_config_is_ready(self):
+        # Regression (PR #466): a fresh config-less install must answer
+        # /health/ready with 200 and no blocking reasons. Driven end to end
+        # through the real app and the real embedded engine -- NOT a mocked
+        # _beets_plugin_diagnostics (the mock is exactly what hid this).
+        out = self._run("readiness")
+        self.assertEqual(out["status_code"], 200, out["body"])
+        self.assertEqual(out["body"]["blocking_reasons"], [], out["body"])
+        self.assertEqual(out["body"]["status"], "ready")
+        self.assertTrue(out["body"]["beets"]["plugin_loader_ok"], out["body"])
+
+    def test_genuinely_broken_engine_is_not_ready(self):
+        # D3 intent preserved: a genuinely broken Beets (version mismatch, so
+        # the engine never starts) must FAIL readiness with a 503.
+        out = self._run("readiness_broken")
+        self.assertEqual(out["status_code"], 503, out["body"])
+        self.assertIn("Beets engine unavailable", out["body"]["blocking_reasons"], out["body"])
 
     def test_missing_library_dir_is_an_error(self):
         missing = os.path.join(self.td, "nowhere")

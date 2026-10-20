@@ -106,7 +106,7 @@ class RoutesSetupHealthTests(unittest.TestCase):
         self.assertEqual(body["blocking_reasons"], [])
         self.assertTrue(body["beets"]["remote_reachable"])
 
-    def test_health_ready_fails_closed_when_stock_beets_unavailable(self):
+    def test_health_ready_fails_closed_when_engine_unavailable(self):
         diagnostics = {
             "available": False,
             "remote_reachable": False,
@@ -120,7 +120,50 @@ class RoutesSetupHealthTests(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         body = r.get_json()
         self.assertEqual(body["status"], "warning")
-        self.assertIn("stock Beets unavailable", body["blocking_reasons"])
+        self.assertIn("Beets engine unavailable", body["blocking_reasons"])
+
+    def test_health_ready_without_beets_config_is_still_ready(self):
+        # Regression (PR #466): the embedded engine falls back to Beets'
+        # defaults when no config.yaml exists, so a MISSING config must NOT
+        # block readiness.
+        diagnostics = {
+            "available": True,
+            "remote_reachable": True,
+            "version": "beets version 2.14.1",
+            "plugin_loader_ok": True,
+            "paths": {
+                "config": {"ok": True, "writable": True},
+                "downloads": {"ok": True, "writable": True},
+                "beets_config": {"exists": False},
+            },
+        }
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics):
+            r = self.client.get("/health/ready")
+
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["blocking_reasons"], [])
+        self.assertEqual(body["status"], "ready")
+
+    def test_health_ready_blocks_when_required_plugin_failed(self):
+        # D3 intent: a reachable engine whose required plugins did not load is
+        # not ready -- independent of whether a config.yaml exists.
+        diagnostics = {
+            "available": True,
+            "remote_reachable": True,
+            "version": "beets version 2.14.1",
+            "plugin_loader_ok": False,
+            "paths": {
+                "config": {"ok": True, "writable": True},
+                "downloads": {"ok": True, "writable": True},
+                "beets_config": {"exists": False},
+            },
+        }
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics):
+            r = self.client.get("/health/ready")
+
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("beets plugin loader failed", r.get_json()["blocking_reasons"])
 
 
 class RoutesSetupStatusTests(unittest.TestCase):
@@ -1094,4 +1137,4 @@ class RoutesSetupConfigLayerTests(unittest.TestCase):
              mock.patch.object(self.module, "_local_paths_report", return_value=self._ok_paths()):
             r = self.client.get("/health/ready")
         self.assertEqual(r.status_code, 503)
-        self.assertEqual(r.get_json()["blocking_reasons"], ["stock Beets unavailable"])
+        self.assertEqual(r.get_json()["blocking_reasons"], ["Beets engine unavailable"])

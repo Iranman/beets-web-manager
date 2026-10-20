@@ -159,6 +159,35 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertIn("recommended", report["categories"])
         self.assertEqual(report["required_count"], 2)
 
+    def test_required_plugins_healthy_without_on_disk_config(self):
+        # Regression (PR #466): the embedded engine force-loads web+webmanager
+        # via a mandatory overlay, so a config-less install (no config.yaml)
+        # with those plugins LOADED must report all_required_healthy, even
+        # though they are absent from the on-disk `plugins:` list.
+        missing_config = self.config_dir / "config.yaml"
+        self.assertFalse(missing_config.exists())
+        report = verify_all_plugins(
+            self.config_dir,
+            config_file=missing_config,
+            loaded_plugins={"web", "webmanager"},
+        )
+        self.assertTrue(report["all_required_healthy"], report["summary"])
+        required = {p["name"]: p for p in report["categories"]["required"]}
+        self.assertTrue(required["web"]["healthy"])
+        self.assertTrue(required["webmanager"]["healthy"])
+
+    def test_required_plugin_that_fails_to_load_is_unhealthy(self):
+        # D3 intent preserved: a required plugin the runtime did NOT load is
+        # still unhealthy (blocks readiness / setup completion).
+        report = verify_all_plugins(
+            self.config_dir,
+            config_file=self.config_dir / "config.yaml",
+            loaded_plugins={"web"},  # webmanager failed to load
+        )
+        self.assertFalse(report["all_required_healthy"], report["summary"])
+        required = {p["name"]: p for p in report["categories"]["required"]}
+        self.assertFalse(required["webmanager"]["healthy"])
+
     def test_unconfigured_integration_does_not_block_health(self):
         pdef = BEETS_PLUGIN_MANIFEST["discogs"]
         configured = set()  # not enabled

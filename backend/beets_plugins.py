@@ -1186,6 +1186,14 @@ def verify_all_plugins(
             pass
 
     configured = set(parse_configured_plugins(config_text))
+    # The embedded engine always enables the required transport plugins
+    # (web, webmanager) through a mandatory in-memory overlay
+    # (backend/beets_embedded.py _REQUIRED_PLUGINS), whether or not they
+    # appear in the on-disk config.yaml. Reflect that effective runtime
+    # config so a fresh/config-less install is not reported as missing its
+    # required plugins; a required plugin that still fails to LOAD remains
+    # unhealthy (verify_plugin: enabled-but-not-loaded).
+    configured |= set(REQUIRED_PLUGIN_NAMES)
 
     # Plugin status as the engine reports it via BeetsAdapter
     loaded: Set[str] = set(loaded_plugins) if loaded_plugins is not None else set()
