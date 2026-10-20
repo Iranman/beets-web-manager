@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+
+- **Recover My Uploads (fetch + stage).** A new authorized acquisition path for your own YouTube/SoundCloud uploads that the search-only album downloader could not reach. `POST /api/recover/probe` and `POST /api/recover/enumerate` read a direct item URL or a channel/user/playlist/set URL (via `extract_flat`) through the unchanged yt-dlp guard (allowlisted hosts + public-IP/SSRF checks). `POST /api/recover/fetch` runs a tracked job that fetches each URL, keeping YouTube audio in its original lossy container unchanged (recorded as not-lossless) and SoundCloud's owner-enabled original file when available, stages it under `DOWNLOADS_ROOT`, gates each file on an ffprobe decode + duration check (rejecting `.part`/zero-byte/truncated files), and writes per-file provenance (platform, source URL, uploader, retrieval time, authorized-access flag, quality) for a later import increment. Owner-only content uses the operator's `YTDLP_COOKIE_FILE` (contents never read/logged); `GET /api/recover/cookie-state` reports `none`/`invalid`/`rejected`/`ok` by signature only. yt-dlp errors are classified (auth-needed / expired-URL / format / HLS-assembly / rate-limited / access-restricted / genuinely-DRM / misconfig) with a recoverable action; a format/HLS/auth failure is never labelled DRM, and no DRM is circumvented. This increment does not import into the library.
+
 ### Security
 
 - Embedded Beets (`BEETS_ENGINE=embedded`): the browser can no longer change `import.set_fields` or `replace` in `config.yaml` (#461). `set_fields` can set any field, including a file's path, before the import moves or copies the file. `replace` holds the rules that keep `paths` and `art_filename` results inside the music folder. Path templates (`paths`, `art_filename`) stay editable while the file uses Beets' default `replace` rules; with its own `replace` or an `include`, they too are edited on the server. Make these edits in `config.yaml` on the server.

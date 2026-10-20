@@ -4900,6 +4900,85 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
       ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_recover_cookie_state",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Report the recoverable yt-dlp cookie state (none/invalid/rejected/ok) for owner-only upload recovery, by path/size/mtime signature only; never cookie contents.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::CookieStateMessages::test_signature_never_includes_contents",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_recover_probe",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Probe metadata and available formats for one allowlisted YouTube/SoundCloud URL via the unchanged yt-dlp guard (allowlist + public-IP/SSRF checks). No download.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::GuardStillRejectsOnRecoverEntry::test_non_allowlisted_host_rejected_in_probe",
+        "tests/test_recover_uploads.py::GuardStillRejectsOnRecoverEntry::test_allowlisted_host_still_blocked_when_private_ip",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_recover_enumerate",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "List a channel/user/playlist/set owner's items (yt-dlp extract_flat) through the unchanged allowlist/SSRF guard; only allowlisted-host items are returned. No download.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::GuardStillRejectsOnRecoverEntry::test_loopback_host_rejected_in_enumerate",
+        "tests/test_recover_uploads.py::TargetsBuiltThroughGuard::test_enumerate_builds_flat_listing_and_filters_allowlist",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_recover_fetch",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background job to fetch and stage authorized own uploads under DOWNLOADS_ROOT through the unchanged yt-dlp guard; stages only, does not import into the library.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::GuardStillRejectsOnRecoverEntry::test_fetch_rejects_bad_url_before_job",
+        "tests/test_recover_uploads.py::TargetsBuiltThroughGuard::test_fetch_one_builds_url_target_and_stages",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
     }
   ]
 }
