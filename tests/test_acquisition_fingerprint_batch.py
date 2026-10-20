@@ -72,6 +72,14 @@ class ValidatorMixedBatch(_Patched):
             self.assertEqual(sorted(os.listdir(tmp)), ["Alpha.flac", "Beta.flac"])
             self.assertTrue(any("still missing" in line for line in log), log)
 
+    def test_unverified_file_left_in_staging_fails_closed(self):
+        self._patch({"Alpha"})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(acq.composite_workflows, "delete_file"):  # no-op: file stays
+            self._files(tmp, ["Alpha", "Beta"])
+            with self.assertRaisesRegex(RuntimeError, "still in staging"):
+                acq._validate_wanted_download_identity_before_import(tmp, TRACKS, [])
+
     def test_nothing_verified_still_fails(self):
         self._patch(set())
         with tempfile.TemporaryDirectory() as tmp:

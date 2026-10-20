@@ -743,6 +743,8 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             or download_result.get("undelivered_tracks")):
                         remaining_after_slskd = _wanted_tracks_not_in_album(
                             existing_album_id, resolved_mbid, job_wanted_tracks, log)
+                        slskd_imported_n = len(dl_wanted_tracks) - len(
+                            download_result.get("undelivered_tracks") or [])
                         if remaining_after_slskd:
                             remaining_desc = ", ".join(
                                 _wanted_track_label(t) for t in remaining_after_slskd[:8]
@@ -750,13 +752,13 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             if not try_source_fallback:
                                 raise RuntimeError(
                                     "SLSKD imported "
-                                    f"{len(dl_wanted_tracks)}/{len(job_wanted_tracks)} "
+                                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
                                     "requested missing track(s), but these remain: "
                                     f"{remaining_desc}"
                                 )
                             log.append(
                                 "[fallback] SLSKD satisfied "
-                                f"{len(dl_wanted_tracks)}/{len(job_wanted_tracks)} "
+                                f"{slskd_imported_n}/{len(job_wanted_tracks)} "
                                 "requested missing track(s); trying direct sources for remaining: "
                                 f"{remaining_desc}"
                             )
@@ -772,7 +774,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             except Exception as direct_ex:
                                 raise RuntimeError(
                                     "SLSKD imported "
-                                    f"{len(dl_wanted_tracks)}/{len(job_wanted_tracks)} "
+                                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
                                     "requested missing track(s), but direct-source fallback for the "
                                     f"remaining track(s) failed: {direct_ex}"
                                 ) from direct_ex
@@ -780,6 +782,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             combined["method"] = f"slskd+{fallback_result.get('method') or 'fallback'}"
                             combined["files"] = int(download_result.get("files") or 0) + int(fallback_result.get("files") or 0)
                             combined["fallback_result"] = fallback_result
+                            combined["undelivered_tracks"] = list(fallback_result.get("undelivered_tracks") or [])
                             return combined
                     return download_result
                 slskd_error = RuntimeError(
@@ -899,10 +902,19 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
                 detail = _playlist_identity_log(best_any_match) if best_any_match else "no identity evidence"
             # Unverified audio never reaches Beets: drop it from the staging
             # folder so the verified files in the batch can still import.
+            # Fail closed: if it cannot be removed, nothing imports.
             try:
                 composite_workflows.delete_file(path_value)
-            except Exception:
-                pass
+            except Exception as ex:
+                raise RuntimeError(
+                    "Downloaded audio did not fingerprint-verify and could not be removed "
+                    f"from staging ({detail}): {Path(path_value).name}: {ex}"
+                ) from ex
+            if Path(path_value).exists():
+                raise RuntimeError(
+                    "Downloaded audio did not fingerprint-verify and is still in staging "
+                    f"({detail}): {Path(path_value).name}"
+                )
             failures.append(f"{Path(path_value).name} ({detail})")
             _identity_log(
                 "rejected unverified requested-track download "
