@@ -9,7 +9,7 @@ from __future__ import annotations
 import json, os, threading, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _app_logger, _path_is_under, _s
+from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _app_logger, _path_is_under, _s
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.import_reconciliation_service import _reconcile_pending_review_enqueue_item
 from backend.beets_adapter import BeetsUnavailableError
@@ -400,6 +400,25 @@ def _load_pending_reviews_locked(*, prune_resolved: bool, strict: bool) -> list:
             raise PendingReviewLoadError("Review Queue could not be loaded.") from ex
         return []
 
+def _is_missing_import_staging(folder_path: Any) -> bool:
+    """True for a folder strictly inside an app-managed ``_beets_missing_import``
+    staging root: a copy the app made, never a user download (#427)."""
+    raw = _s(folder_path).strip()
+    if not raw:
+        return False
+    path = Path(raw)
+    for root in DOWNLOADS_ALLOWED_ROOTS:
+        stage_root = Path(root) / "_beets_missing_import"
+        if _path_is_under(path, stage_root) and path.resolve(strict=False) != stage_root.resolve(strict=False):
+            return True
+    return False
+
+
+def _review_release_key(suggestion: Dict[str, Any]) -> str:
+    sug = suggestion or {}
+    return _s(sug.get("rejected_mb_albumid") or sug.get("mb_albumid")).strip().lower()
+
+
 def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = False,
                     evidence: Optional[Dict[str, Any]] = None,
                     origin: Optional[Any] = None):
@@ -455,7 +474,35 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
                 entry["evidence"] = evidence
             _apply_review_origin(entry, origin_info)
             items.append(entry)
+        # #427: a retried missing-track download for the same release replaces
+        # the Review row of the earlier staged copy instead of adding one per
+        # peer/source. Only idle rows for app-made staging copies are replaced.
+        superseded: List[Dict[str, Any]] = []
+        release_key = _review_release_key(suggestion)
+        if release_key and _is_missing_import_staging(folder_path):
+            new_key = _pending_review_path_key(folder_path)
+            kept_items = []
+            for item in items:
+                path = _s(item.get("path", ""))
+                if (_pending_review_path_key(path) != new_key
+                        and _is_missing_import_staging(path)
+                        and _review_release_key(item.get("suggestion") or {}) == release_key
+                        and _review_status_key(item.get("status")) not in {"import_enqueueing", "import_queued"}):
+                    superseded.append(item)
+                else:
+                    kept_items.append(item)
+            items = kept_items
         _save_pending_reviews(items)
+    for item in superseded:
+        old_path = _s(item.get("path", ""))
+        try:
+            # Classified staging-only delete; never a library path (LT-13).
+            composite_workflows.delete_file(old_path)
+        except Exception as ex:
+            _app_logger.warning("superseded staging folder not removed: %s", type(ex).__name__)
+        _record_ai_review_decision(
+            "resolved", old_path, item.get("suggestion") or {}, item.get("evidence") or {},
+            note="replaced by a newer staged download of the same release")
     _record_ai_review_decision(
         "queued",
         folder_path,

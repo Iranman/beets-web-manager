@@ -9,6 +9,7 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - webmanager plugin 1.18.2: the plugin's log messages now include their values. Beets creates the `beets.webmanager` logger as its own `str.format` logger when the plugin loads, so the plugin's `%s`-style messages (for example the warning about a dropped allowed mutation root) were logged as raw templates without their arguments. The plugin now logs through `beets.webmanager.ops`, a standard logger that Beets never replaces; records still reach `beets.webmanager` handlers. Restart the Beets container to load 1.18.2 (the rollout script does this when the plugin version changes).
+- Missing-track downloads no longer leave a second staged copy and a Review row for every failed peer or source (#427). The import now uses a folder that the app already staged under `_beets_missing_import` in place, as long as the folder holds exactly the selected files. If Beets refuses the import, the acquisition cleanup keeps that folder because its Review row points at it. A later failed attempt for the same release replaces the old Review row and deletes the old staged folder through the staging-only delete, so the queue keeps one row per release.
 
 ### Development
 
