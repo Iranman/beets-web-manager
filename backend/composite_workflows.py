@@ -4057,9 +4057,15 @@ def apply_confirmed_import(
         return _apply_refused(st, operation_id)
     try:
         before = {int(a.get("id") or 0) for a in ad.find_all_albums_by_mb_albumid(release_id)}
-        ad.run_import(paths=paths, autotag=True, search_ids=[release_id], quiet_fallback="skip",
-                      duplicate_action=duplicate_action, copy=not (use_move or in_place), move=use_move, write=True,
-                      timeout=timeout, allow_missing_tracks=meta.get("allow_missing_tracks") is True)
+        allow_missing = meta.get("allow_missing_tracks") is True
+        try:
+            existing_album_id = int(meta.get("existing_album_id") or 0) if allow_missing else 0
+        except (TypeError, ValueError):
+            existing_album_id = 0
+        imported = ad.run_import(
+            paths=paths, autotag=True, search_ids=[release_id], quiet_fallback="skip",
+            duplicate_action=duplicate_action, copy=not (use_move or in_place), move=use_move, write=True,
+            timeout=timeout, allow_missing_tracks=allow_missing, existing_album_id=existing_album_id)
         new = [a for a in ad.find_all_albums_by_mb_albumid(release_id) if int(a.get("id") or 0) not in before]
     except Exception as ex:  # any failure ends Failed, never a stuck Running/Preview row
         refused = _import_refused(ex)
@@ -4080,9 +4086,14 @@ def apply_confirmed_import(
                      f"Beets imported album {album_id} with a different Release Group than the one confirmed; "
                      "review it before continuing.", mutated=True, album_ids=[album_id])
     item_ids = [int(i.get("id")) for i in ad.find_all_items_by_album_id(album_id) if i.get("id") is not None]
+    relaxed = imported.get("partial_artist_relaxed") if isinstance(imported, dict) else None
     st.transition(operation_id, "Running", "Completed",
+                  append_logs=[f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
+                               "(AcoustID matched every file; the source artist is part of the release credit)"]
+                  if relaxed else [],
                   metadata={"engine_result": {"album_id": album_id, "item_ids": item_ids,
-                                              "mb_releasegroupid": got_rg}})
+                                              "mb_releasegroupid": got_rg,
+                                              "partial_artist_relaxed": bool(relaxed)}})
     return {"ok": True, "operation_id": operation_id, "status": "Completed", "album_id": album_id,
             "item_ids": item_ids, "album_id_verified": True, "mb_releasegroupid": got_rg}
 

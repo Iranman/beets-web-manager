@@ -573,6 +573,10 @@
       "DISPLAY_ONLY",
       "Non-matching (embedart compare_threshold)."
     ],
+    "beetsplug/webmanager/operations.py::_pinned_partial_match": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Beets' own match of the one Release the confirmed import pinned (search_ids): only that Release can be accepted, under Beets' match.strong_rec_thresh, with no extra items; it sets aside data_source (and, for a repair, missing_tracks, and the artist penalty only with AcoustID proof on every file and the repaired album on that Release). The backend still verifies the release group after import."
+    ],
     "helpers_mb.py::_acoustid_lookup": [
       "CANDIDATE_GENERATION_ONLY",
       "AcoustID provider lookup; classified canonically by consumers."
