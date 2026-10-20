@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- webmanager plugin 1.18.2: the plugin's log messages now include their values. Beets creates the `beets.webmanager` logger as its own `str.format` logger when the plugin loads, so the plugin's `%s`-style messages (for example the warning about a dropped allowed mutation root) were logged as raw templates without their arguments. The plugin now logs through `beets.webmanager.ops`, a standard logger that Beets never replaces; records still reach `beets.webmanager` handlers. Restart the Beets container to load 1.18.2 (the rollout script does this when the plugin version changes).
+
 ## v0.8.0 - 2026-10-19
 
 ### Security

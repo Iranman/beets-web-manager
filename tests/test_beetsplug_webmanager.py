@@ -174,7 +174,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.18.1")
+        self.assertEqual(data["plugin_version"], "1.18.2")
         self.assertIn("library_fields", data["capabilities"])
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
@@ -188,7 +188,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.18.1")
+        self.assertEqual(PLUGIN_VERSION, "1.18.2")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(
@@ -759,6 +759,36 @@ class DerivedAllowedRootsTests(unittest.TestCase):
     def test_normal_library_directory_is_used(self):
         music = os.path.join(self.config_dir + "-music", "lib")
         self.assertEqual(self._derived(music), [os.path.normpath(music), "/downloads"])
+
+
+class PluginLoggerFormatTests(unittest.TestCase):
+    """Plugin %-style log args are formatted even when Beets creates the
+    "beets.webmanager" logger (a str.format BeetsLogger) before operations
+    is imported -- the real Beets load order."""
+
+    SCRIPT = """
+import logging, sys
+from beetsplug.webmanager import WebManagerPlugin
+assert "beetsplug.webmanager.operations" not in sys.modules
+WebManagerPlugin()
+from beetsplug.webmanager import operations as ops
+out = []
+h = logging.Handler(); h.emit = lambda r: out.append(r.getMessage())
+logging.getLogger("beets.webmanager").addHandler(h)
+ops._warn_dropped_root("/config", "import root")
+print(out[0])
+"""
+
+    def test_percent_style_args_survive_beets_logger_creation_order(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as beetsdir:
+            env = dict(os.environ, BEETSDIR=beetsdir)
+            proc = subprocess.run([sys.executable, "-c", self.SCRIPT], env=env,
+                                  capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("import root '/config'", proc.stdout)
+        self.assertNotIn("%", proc.stdout)
 
 
 if __name__ == "__main__":
