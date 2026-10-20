@@ -4,15 +4,13 @@ name: docker-build
 # required check.
 #
 # Architecture invariant: this repository builds and publishes exactly one
-# application image, ghcr.io/iranman/beets-web-manager. There is no custom
-# Beets engine image -- Beets itself is the unmodified, official
-# lscr.io/linuxserver/beets image, run as its own container and reached
-# only over HTTP via the bundled webmanager integration plugin.
-# `stock-beets-acceptance` below pulls and runs that actual upstream image
-# and exercises the webmanager integration plugin against it over HTTP,
-# never building a derived engine image. See
-# tests/test_architecture_invariants.py for the CI guard that fails if any
-# active workflow tries to build/publish a custom engine image.
+# image, ghcr.io/iranman/beets-web-manager, and it is the only container.
+# Beets runs inside it (docs/adr/0006-embedded-beets.md): upstream Beets from
+# PyPI at the requirements.txt pin, unmodified, with the webmanager plugin
+# mounted on Beets' own web app in-process. `stock-beets-acceptance` (name
+# kept for the required check) runs the embedded engine against that pinned
+# Beets. tests/test_architecture_invariants.py fails if any workflow builds
+# or publishes a second (Beets engine) image.
 
 on:
   pull_request:
@@ -26,13 +24,10 @@ permissions:
   contents: read
 
 env:
-  # This is a Python *package* version pin for CI-only test fixtures
-  # (backend/transaction_engine.py's native-Beets-formatting tests), NOT
-  # the deployed Beets container version, which is the `beets` image pinned
-  # in docker-compose.yml (see stock-beets-acceptance below). Kept equal to
-  # that image's Beets version and to requirements-dev.txt's own `beets==`
-  # pin so local `python -m unittest` and CI see the same fixture behavior;
-  # tests/test_architecture_invariants.py enforces both.
+  # The Beets version the image ships (requirements.txt), the dev/test pin
+  # (requirements-dev.txt) and backend/beets_embedded.py's
+  # PINNED_BEETS_VERSION; tests/test_architecture_invariants.py keeps all
+  # four equal.
   BEETS_TEST_FIXTURE_VERSION: "2.14.1"
 
 jobs:
@@ -60,8 +55,6 @@ jobs:
   compose-verification:
     runs-on: ubuntu-latest
     env:
-      BEETS_WEB_URL: http://beets.ci.invalid:8337
-      BEETS_OUTBOUND_ALLOWLIST: beets.ci.invalid:8337
       BEETS_WEB_AUTH_TOKEN: changeme
       OPENAI_API_KEY: changeme
       PLEX_TOKEN: changeme
@@ -75,8 +68,6 @@ jobs:
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose -f docker-compose.full.yml config
-      - run: docker compose -f examples/docker-compose.external-beets.yml config
-      - run: docker compose -f examples/docker-compose.embedded.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
       - name: BUILD_INFO.json matches the image's OCI labels
@@ -118,17 +109,20 @@ jobs:
             -v /tmp/beets-ci-music:/music \
             -v /tmp/beets-ci-downloads:/downloads \
             beets-web-manager:ci
+          # Healthy = live AND Beets' self-test passed with the shipped
+          # config.yaml.example (every plugin it lists loads in the image).
           alive=0
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18337/health/live >/dev/null 2>&1; then
-              echo "Container is alive after ${i}0s"
+            if curl -fsS http://127.0.0.1:18337/api/health 2>/dev/null \
+                | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["beets"]["ok"] else 1)'; then
+              echo "Container is healthy after ${i}0s"
               alive=1
               break
             fi
             sleep 10
           done
-          echo "--- /health/live ---"
-          curl -fsS http://127.0.0.1:18337/health/live || true
+          echo "--- /api/health ---"
+          curl -fsS http://127.0.0.1:18337/api/health || true
           echo "--- /api/setup/status ---"
           curl -fsS -H "Authorization: Bearer ci-smoke-test-token-not-a-real-secret" \
             http://127.0.0.1:18337/api/setup/status || true
@@ -137,44 +131,39 @@ jobs:
           docker stop beets-ci || true
           docker rm beets-ci || true
           if [ "$alive" -ne 1 ]; then
-            echo "::error::Container never became healthy within the timeout"
+            echo "::error::Container never became healthy (beets.ok) within the timeout"
             exit 1
           fi
 
   stock-beets-acceptance:
+    # Name kept for the required check. Beets inside Web Manager, against
+    # upstream Beets at the requirements.txt pin: start-up self-test
+    # (version, config, plugins, library, second writers), parity with a
+    # real `beet web` process, threaded-request safety, the webmanager
+    # plugin on Beets' own web app, and recorded-fixture autotag imports.
     name: stock-beets-acceptance
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: pip install -r requirements.txt
-      - run: pip install beets==${{ env.BEETS_TEST_FIXTURE_VERSION }}
-      - name: Pull the pinned stock Beets image (authenticated) and record its digest
-        # Tests exactly the `beets` image pinned (tag@digest) in
-        # docker-compose.yml -- the version users get. A Beets bump is a
-        # reviewable PR that changes that pin and re-runs this job.
-        # Upstream `:latest` is watched separately by the non-blocking
-        # beets-latest-canary workflow. Authenticated pull: see the script (#234).
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/ci_pull_stock_beets.sh
-      - name: Real Docker acceptance against the unmodified, pinned lscr.io/linuxserver/beets image
-        # Never builds or publishes a derived engine image -- pulls and
-        # runs the real upstream image as-is, then exercises the
-        # webmanager integration plugin against it over HTTP.
-        run: python -m unittest tests.test_stock_beets_acceptance -v
+      - name: Install the image's Python dependencies (pinned Beets) and ffmpeg/fpcalc
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools
+          pip install -r requirements.txt
+      - name: Embedded Beets acceptance against the pinned upstream Beets
+        run: >-
+          python -m unittest -v
+          tests.test_beets_embedded
+          tests.test_beets_embedded_parity
+          tests.test_beets_embedded_autotag
+          tests.test_stock_beets_acceptance
+          tests.test_beets214_item_paths
 
   production-docker-acceptance:
     name: production-docker-acceptance
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - name: Checkout at exact PR head
         uses: actions/checkout@v7
@@ -183,12 +172,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: pip install -r requirements.txt
-      - name: Pull the pinned stock Beets image from docker-compose.yml (authenticated, #234)
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/ci_pull_stock_beets.sh
-      - name: Run production Docker acceptance
+      - name: Run production Docker acceptance (docker-compose.yml, one container)
         run: python scripts/verify_production_docker_acceptance.py
 
   publish-ghcr:

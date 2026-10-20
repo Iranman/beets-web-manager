@@ -1,6 +1,8 @@
+# Beets config for Beets Web Manager. Beets runs inside the Web Manager
+# container (docs/adr/0006-embedded-beets.md); web, webmanager and discpath
+# ship in the image, so no pluginpath is needed. `directory:` must equal
+# Web Manager's MUSIC_ROOT (/music in the shipped Compose files).
 plugins: web webmanager fetchart embedart scrub zero ftintitle fromfilename mbsync mbsubmit chroma replaygain lastgenre discpath musicbrainz listenbrainz
-pluginpath:
-  - /config/beetsplug
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -8,16 +10,8 @@ threaded: yes
 original_date: no
 per_disc_numbering: yes
 
-# ── Built-in Web Plugin (:8337) ──────────────────────────────────────────────
-web:
-    host: 0.0.0.0
-    port: 8337
-    readonly: yes
-    include_paths: yes
-
 # ── Web Manager Integration Plugin ───────────────────────────────────────────
 webmanager:
-    api_key_file: /config/.webmanager_api_key
     allowed_roots:
         - /music
         - /downloads

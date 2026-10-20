@@ -10,8 +10,9 @@
 # SIGKILL after the stop timeout) under both capability sets.
 #
 # Usage: docker/acceptance/hardened_restart.sh [image] [bind-mount-dir]
-# Uses the real examples/docker-compose.external-beets.yml service
-# definition so the hardening flags tested here cannot drift from it.
+# Uses the real docker-compose.yml service definition so the hardening
+# flags tested here cannot drift from it. "Healthy" means Beets' self-test
+# passed (/api/health beets.ok), the same test the Compose healthcheck runs.
 set -euo pipefail
 
 IMAGE="${1:-beets-web-manager:ci}"
@@ -20,19 +21,31 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PROJECT="${BWM_ACCEPT_PROJECT:-bwm-sec-hardened}"
 VOLUME="${PROJECT}-data"
 OVERRIDE="$(mktemp)"
-export BEETS_WEB_URL=http://beets.ci.invalid:8337
-export BEETS_OUTBOUND_ALLOWLIST=beets.ci.invalid:8337
-export BEETS_WEB_BIND_ADDRESS=127.0.0.1 WEBCONTROL_PORT=18339
+export WEBCONTROL_PORT=18339
+# Beets config, music and downloads for the run: a minimal valid config whose
+# `directory:` is the container's MUSIC_ROOT, so the self-test can pass.
+MEDIA="$(mktemp -d)"
+mkdir -p "$MEDIA/config" "$MEDIA/music" "$MEDIA/downloads"
+printf 'directory: /music\nlibrary: /config/musiclibrary.blb\n' >"$MEDIA/config/config.yaml"
+chmod -R a+rwX "$MEDIA"
+export BEETS_CONFIG_PATH="$MEDIA/config" MUSIC_PATH="$MEDIA/music" DOWNLOADS_PATH="$MEDIA/downloads"
 
 compose() {
-    docker compose -p "$PROJECT" -f "$ROOT/examples/docker-compose.external-beets.yml" -f "$OVERRIDE" "$@"
+    docker compose -p "$PROJECT" -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" "$@"
 }
 
 cleanup() {
     compose down -v --remove-orphans >/dev/null 2>&1 || true
     docker rm -f "${PROJECT}-default" >/dev/null 2>&1 || true
     docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-    rm -f "$OVERRIDE"
+    MSYS_NO_PATHCONV=1 docker run --rm -v "$MEDIA:/m" alpine rm -rf /m/config /m/music /m/downloads >/dev/null 2>&1 || true
+    rm -rf "$MEDIA" "$OVERRIDE"
+}
+
+# 0 when /api/health answers and Beets' self-test passed.
+beets_ok() {
+    curl -fsS "http://127.0.0.1:${WEBCONTROL_PORT}/api/health" 2>/dev/null \
+        | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["beets"]["ok"] else 1)' 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -45,13 +58,14 @@ wait_healthy() {
             running/healthy) return 0 ;;
             exited/*|dead/*) break ;;
         esac
-        # Don't wait for the 30s healthcheck interval: probe the same URL.
-        if curl -fsS "http://127.0.0.1:${WEBCONTROL_PORT}/api/health" >/dev/null 2>&1; then
+        # Don't wait for the healthcheck interval: run the same check.
+        if beets_ok; then
             return 0
         fi
         sleep 2
     done
     echo "::error::container not healthy (state $status)" >&2
+    curl -sS "http://127.0.0.1:${WEBCONTROL_PORT}/api/health" >&2 || true
     docker logs --tail 50 "$cid" >&2 || true
     return 1
 }
@@ -88,6 +102,8 @@ services:
   beets-web-manager:
     image: $IMAGE
     container_name: ${PROJECT}-app
+    ports: !override
+      - "127.0.0.1:${WEBCONTROL_PORT}:8337"
     volumes:
       - $2:/web-manager-data
 EOF
@@ -143,7 +159,7 @@ docker volume rm "$VOLUME" >/dev/null 2>&1 || true
 docker volume create "$VOLUME" >/dev/null
 default_boot() {
     docker rm -f "${PROJECT}-default" >/dev/null 2>&1 || true
-    MSYS_NO_PATHCONV=1 docker run -d --name "${PROJECT}-default"         -p "127.0.0.1:${WEBCONTROL_PORT}:8337"         -e BEETS_WEB_URL -e BEETS_OUTBOUND_ALLOWLIST -e WEBCONTROL_PORT=8337         -e WEB_MANAGER_DATA_DIR=/web-manager-data         -e BEETS_WEB_AUTH_TOKEN_FILE=/web-manager-data/.auth_token         -v "$VOLUME:/web-manager-data" "$IMAGE" >/dev/null
+    MSYS_NO_PATHCONV=1 docker run -d --name "${PROJECT}-default"         -p "127.0.0.1:${WEBCONTROL_PORT}:8337"         -e WEBCONTROL_PORT=8337         -v "$MEDIA/config:/config" -v "$MEDIA/music:/music"         -e WEB_MANAGER_DATA_DIR=/web-manager-data         -e BEETS_WEB_AUTH_TOKEN_FILE=/web-manager-data/.auth_token         -v "$VOLUME:/web-manager-data" "$IMAGE" >/dev/null
     wait_healthy "${PROJECT}-default"
 }
 echo "== default capabilities: seed boot"

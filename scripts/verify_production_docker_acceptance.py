@@ -1,52 +1,23 @@
 """Production Docker Acceptance Verification for Beets Web Manager.
 
-Validates the standard, production stock-Beets deployment architecture
-(docker-compose.yml, unmodified):
-1. Stock Beets container (pinned lscr.io/linuxserver/beets) -- the sole
-   authoritative Beets runtime, owning /config/musiclibrary.blb.
-2. Beets Web Manager container (beets-web-manager:ci built from local
-   Dockerfile) -- no local Beets Python runtime, talks to stock Beets
-   only over HTTP via backend/beets_adapter.py.
-3. Shared volumes, all genuinely fresh host directories, no pre-seeded
-   state:
-   - ./beets -> /config (config.yaml and musiclibrary.blb, both created by
-     stock Beets on first boot; config.yaml's plugins:/pluginpath: entries
-     are provisioned by Web Manager's own startup bootstrap BEFORE stock
-     Beets ever reads the file -- this script never pre-writes
-     config.yaml itself, which would be exactly the "magical configuration
-     a real user would never get" this test must not create)
-   - ./music -> /music (read-only in beets-web-manager)
-   - ./downloads -> /downloads
-   - ./web-manager -> /web-manager-data
-4. Zero initial tokens required in .env / clean-room startup.
-5. Web Manager can persist .auth_token AND .flask_secret_key to a fresh
-   /web-manager-data bind mount (a UID mismatch between a freshly-created
-   host directory and the container's identity previously broke this,
-   independent of PUID/PGID customization).
-6. Web Manager reaches stock Beets only via BEETS_WEB_URL (http://beets:8337,
-   container-internal) -- port 8338 is never involved. The image bundles
-   Beets at the requirements.txt pin (ADR 0006, used only when
-   BEETS_ENGINE=embedded); the default http transport is what is exercised.
-7. First-run browser setup authentication wizard, through explicit completion.
-8. Basic Auth and auto-generated bearer token authentication.
-9. Stock Beets container stays in a stable "running" state with no
-   "unknown command" restart-loop errors in its logs (its own default
-   service is `beet web`, which requires the `web` plugin actually enabled
-   -- proving Web Manager's startup provisioning genuinely ran before
-   stock Beets' own first boot, per the depends_on/healthcheck ordering
-   in docker-compose.yml).
-10. The webmanager integration plugin loaded inside stock Beets and its
-    protocol version is compatible with this Web Manager build.
-11. Real media import (via the stock Beets CLI, the only place `beet`
-    exists) and cross-container read visibility through Web Manager's own
-    API -- proving BeetsAdapter's reads reflect real, independently-made
-    mutations to the shared library.
-12. A controlled mutation performed THROUGH Web Manager's own API
-    (attach-mbids, backed by backend/beets_adapter.py's modify()) is
-    visible back through a subsequent stock-Beets-side read.
-13. Full persistence across `docker compose down && docker compose up -d`
-    and `--force-recreate`.
-14. Clean teardown in `finally` block.
+Boots docker-compose.yml (one container; Beets runs inside Web Manager, ADR
+0006) with the image built from this checkout, on genuinely fresh host
+folders, and checks:
+1. A fresh install with no Beets config.yaml comes up healthy: /health/live,
+   /health/ready, /api/health `beets.ok` and the Compose healthcheck. Beets
+   creates its library at /config/musiclibrary.blb and nothing is installed
+   into /config (no beetsplug folder, no config.yaml written).
+2. Nothing listens on port 8338 and no separate Beets service exists.
+3. First-run browser setup, Basic Auth and the auto-generated bearer token.
+4. The image's Beets is exactly the requirements.txt pin.
+5. An existing library (imported with the image's own `beet` while the app
+   is stopped, as an upgrade brings one) is read through Web Manager's API.
+6. A controlled mutation through Web Manager's API is visible on read-back.
+7. Leftover two-container settings (BEETS_ENGINE, BEETS_WEB_URL, the shared
+   key) do not stop startup: Beets is still healthy and reports
+   `legacy_settings_ignored`.
+8. State persists across `down`/`up` and `--force-recreate`.
+9. Clean teardown.
 
 Usage:
     python scripts/verify_production_docker_acceptance.py
@@ -59,7 +30,6 @@ import os
 import re
 import shutil
 import socket
-import sqlite3
 import struct
 import subprocess
 import sys
@@ -74,19 +44,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_BASE = ROOT / "docker-compose.yml"
 IMAGE_TAG = "beets-web-manager:ci"
-# The production stack runs docker-compose.yml unmodified, so this is the
-# image pinned there (the single source of truth for the Beets version).
-_BEETS_IMAGE_MATCH = re.search(r"^    image: (lscr\.io/linuxserver/beets:\S+)$", COMPOSE_BASE.read_text(encoding="utf-8"), re.M)
-PINNED_BEETS_IMAGE = _BEETS_IMAGE_MATCH.group(1) if _BEETS_IMAGE_MATCH else ""
-# CI (scripts/ci_pull_stock_beets.sh) exports the ghcr.io name of the same
-# pin, pulled once with authentication (#234). The classic image store cannot
-# resolve the lscr.io tag@digest from it, so the Compose override below points
-# the beets service at it. Only that exact pin (same tag and digest) is accepted.
-STOCK_BEETS_IMAGE = os.environ.get("STOCK_BEETS_IMAGE") or PINNED_BEETS_IMAGE
-if not PINNED_BEETS_IMAGE or STOCK_BEETS_IMAGE not in (
-        PINNED_BEETS_IMAGE, "ghcr.io/" + PINNED_BEETS_IMAGE.removeprefix("lscr.io/")):
-    sys.exit(f"STOCK_BEETS_IMAGE={STOCK_BEETS_IMAGE!r} is not the docker-compose.yml pin {PINNED_BEETS_IMAGE!r}")
-
 FAILURES: list[str] = []
 
 
@@ -176,24 +133,9 @@ class ProductionAcceptanceStack:
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.override_file = self.tmp_dir / "docker-compose.override.yml"
 
-        # Deliberately does NOT pre-seed beets/config.yaml. A real user
-        # following the documented `docker compose up -d` path never
-        # creates one either -- Web Manager's own startup bootstrap
-        # (app.py's _bootstrap_beets_plugins) writes a default config.yaml
-        # with the required plugins:/pluginpath: entries before its own
-        # health endpoint comes up, and stock Beets (which depends_on that
-        # healthcheck) only reads config.yaml after that has happened.
-
-        override_content = f"""
-services:
-  beets:
-    container_name: {self.project_name}-beets
-    image: {STOCK_BEETS_IMAGE}
-  beets-web-manager:
-    container_name: {self.project_name}-web-manager
-    image: {IMAGE_TAG}
-"""
-        self.override_file.write_text(override_content.strip() + "\n", encoding="utf-8")
+        # Deliberately does NOT pre-seed beets/config.yaml: a fresh install
+        # has none, and Beets must come up healthy without one.
+        self.write_override()
 
         # Augment the inherited environment, never replace it: the docker
         # CLI (particularly the Windows/Docker Desktop client's `compose`
@@ -214,6 +156,16 @@ services:
             "DOWNLOADS_PATH": str(self.downloads_dir),
             "WEB_MANAGER_DATA_PATH": str(self.web_manager_dir),
         }
+
+    def write_override(self, extra_env: dict | None = None) -> None:
+        env = "".join(f"      {k}: {json.dumps(v)}\n" for k, v in (extra_env or {}).items())
+        self.override_file.write_text(
+            "services:\n"
+            "  beets-web-manager:\n"
+            f"    container_name: {self.project_name}-web-manager\n"
+            f"    image: {IMAGE_TAG}\n"
+            + ("    environment:\n" + env if env else ""),
+            encoding="utf-8")
 
     def compose(self, *args, **kwargs):
         cmd = [
@@ -245,15 +197,24 @@ services:
         return res.stdout + "\n" + res.stderr
 
     def wait_healthy(self, timeout: float = 90.0) -> bool:
+        """Live, ready, Beets' self-test passed, and Docker agrees (the
+        Compose healthcheck runs the same /api/health beets.ok test)."""
         start = time.time()
         while time.time() - start < timeout:
-            status, _, _ = self.request("GET", "/health/live")
-            if status == 200:
-                ready_status, _, _ = self.request("GET", "/health/ready")
-                if ready_status == 200:
-                    return True
+            live, _, _ = self.request("GET", "/health/live")
+            ready, _, _ = self.request("GET", "/health/ready")
+            _, _, health = self.request("GET", "/api/health")
+            beets_ok = isinstance(health, dict) and (health.get("beets") or {}).get("ok") is True
+            state = self.compose("ps", "beets-web-manager", "--format", "{{.Health}}").stdout.strip()
+            if live == 200 and ready == 200 and beets_ok and state == "healthy":
+                return True
             time.sleep(2.0)
+        print(f"Last /api/health: {self.request('GET', '/api/health')[2]}")
         return False
+
+    def beets_codes(self) -> list:
+        _, _, health = self.request("GET", "/api/health")
+        return (health.get("beets") or {}).get("codes") or [] if isinstance(health, dict) else []
 
     def request(
         self,
@@ -315,18 +276,6 @@ def build_images() -> None:
         sys.exit(2)
     _ok(f"Built {IMAGE_TAG} successfully (VCS_REF={head_sha})")
 
-    print(f"==> Step 2: Ensuring stock Beets image {STOCK_BEETS_IMAGE} is present...")
-    # CI pre-pulls it once per job with an authenticated pull
-    # (scripts/ci_pull_stock_beets.sh, #234) and sets STOCK_BEETS_PREPULLED=1;
-    # a second anonymous pull here would only re-hit the registry rate limit.
-    prepulled = os.environ.get("STOCK_BEETS_PREPULLED") == "1" and \
-        run(["docker", "image", "inspect", STOCK_BEETS_IMAGE]).returncode == 0
-    pull_res = None if prepulled else run(["docker", "pull", STOCK_BEETS_IMAGE])
-    if pull_res is not None and pull_res.returncode != 0:
-        print(f"FATAL: Failed to pull {STOCK_BEETS_IMAGE}:\n{pull_res.stderr}")
-        sys.exit(2)
-    digest_res = run(["docker", "inspect", "--format", "{{index .RepoDigests 0}}", STOCK_BEETS_IMAGE])
-    _ok(f"Stock Beets image {STOCK_BEETS_IMAGE} is available (digest: {digest_res.stdout.strip()})")
 
 
 def run_acceptance() -> None:
@@ -339,25 +288,36 @@ def run_acceptance() -> None:
     try:
         stack.up()
 
-        # 1. Health checks
-        print("==> Step 4: Waiting for Web Manager health endpoints (/health/live, /health/ready)...")
-        if not stack.wait_healthy(timeout=90):
+        # 1. Health checks, fresh install without a config.yaml
+        print("==> Step 4: Waiting for health (/health/live, /health/ready, /api/health beets.ok, Docker)...")
+        if not stack.wait_healthy(timeout=120):
             logs = stack.logs()
-            _fail(f"Services did not reach healthy state within timeout.\nLogs:\n{logs}")
+            _fail(f"Web Manager did not become healthy within timeout.\nLogs:\n{logs}")
             return
-        _ok("Web Manager reported healthy on /health/live and /health/ready")
+        _ok("Healthy on /health/live, /health/ready and /api/health (beets.ok), and Docker reports healthy")
+        codes = stack.beets_codes()
+        if "config_missing" not in codes:
+            _fail(f"Fresh install without config.yaml should report config_missing, got {codes}")
+        if not (stack.beets_dir / "musiclibrary.blb").exists():
+            _fail("Beets did not create /config/musiclibrary.blb on a fresh install")
+        else:
+            _ok("Fresh install: Beets created /config/musiclibrary.blb")
+        if (stack.beets_dir / "config.yaml").exists() or (stack.beets_dir / "beetsplug").exists():
+            _fail("Web Manager wrote into the Beets /config folder (config.yaml or beetsplug/)")
+        else:
+            _ok("Nothing was installed into /config (no config.yaml written, no beetsplug folder)")
 
-        # 2. No port 8338 anywhere in this architecture
-        print("==> Step 5: Verifying port 8338 is not used anywhere...")
+        # 2. One container, no port 8338
+        print("==> Step 5: Verifying one service and no port 8338...")
+        services = stack.compose("config", "--services").stdout.split()
+        if services != ["beets-web-manager"]:
+            _fail(f"docker-compose.yml should define only beets-web-manager, got {services}")
+        else:
+            _ok("docker-compose.yml defines one service: beets-web-manager")
         if is_port_open("127.0.0.1", 8338, timeout=0.5):
-            _fail("Port 8338 is open on the host network! Nothing in the stock-Beets architecture uses it.")
+            _fail("Port 8338 is open on the host network! Nothing in this architecture uses it.")
         else:
-            _ok("Port 8338 is not exposed on the host (nothing in this architecture uses it)")
-        wm_logs = stack.logs("beets-web-manager")
-        if ":8338" in wm_logs:
-            _fail("beets-web-manager logs reference port 8338 -- a legacy control-agent code path may still be live")
-        else:
-            _ok("beets-web-manager logs contain no reference to port 8338")
+            _ok("Port 8338 is not exposed on the host")
 
         # 3. First-Run Browser Setup Mode
         print("==> Step 6: Verifying First-Run browser setup flow...")
@@ -431,53 +391,19 @@ def run_acceptance() -> None:
             return
         _ok("First-run admin credentials established successfully")
 
-        # 3a. Verify stock Beets plugin provisioning happened before stock
-        # Beets' own first boot, and that the webmanager integration
-        # plugin's protocol handshake is compatible with this build.
-        print("==> Step 7a: Verifying stock Beets plugin health and integration-plugin compatibility...")
+        # 3a. Beets inside Web Manager is available to setup diagnostics.
+        print("==> Step 7a: Verifying Beets diagnostics...")
         status, _, status_body = stack.request("GET", "/api/setup/status", headers=bearer_header, timeout=30.0)
         if status != 200 or not isinstance(status_body, dict):
             _fail(f"GET /api/setup/status failed: {status} {status_body}")
             return
         beets_diag = status_body.get("beets") or {}
         if not beets_diag.get("available"):
-            _fail(f"Stock Beets not reported available: {beets_diag}")
+            _fail(f"Beets not reported available: {beets_diag}")
             return
-        if not beets_diag.get("plugin_loader_ok"):
-            _fail(f"Stock Beets plugin loader not healthy: {beets_diag}")
-            return
-        compat = beets_diag.get("engine_compatibility") or {}
-        if not compat.get("compatible"):
-            _fail(f"webmanager integration plugin protocol incompatible: {compat}")
-            return
-        _ok(f"Stock Beets available, plugin loader healthy, integration plugin protocol compatible: {compat.get('protocol_version')}")
+        _ok("Beets reported available by setup diagnostics")
 
-        # Check bundled discpath.py exists on host mount (provisioned by
-        # Web Manager into the shared /config/beetsplug before stock Beets'
-        # own first boot -- see docker-compose.yml's depends_on ordering).
-        discpath_host = stack.beets_dir / "beetsplug" / "discpath.py"
-        if not discpath_host.exists():
-            _fail(f"Bundled plugin discpath.py missing on host mount: {discpath_host}")
-            return
-        _ok("Bundled discpath.py exists under /config/beetsplug")
-
-        webmanager_plugin_host = stack.beets_dir / "beetsplug" / "webmanager"
-        if not webmanager_plugin_host.exists():
-            _fail(f"webmanager integration plugin missing on host mount: {webmanager_plugin_host}")
-            return
-        _ok("webmanager integration plugin exists under /config/beetsplug")
-
-        plugins_report = status_body.get("plugins") or {}
-        if not plugins_report.get("all_required_healthy"):
-            _fail(f"Expected all_required_healthy=True on fresh install, got: {plugins_report}")
-            return
-        _ok(f"All {plugins_report.get('required_count')} required Beets plugins are healthy (plugins_ready=True)")
-
-        # ADR 0006: the image bundles Beets as a pinned library (used
-        # in-process when BEETS_ENGINE=embedded). Prove the installed version
-        # is exactly the requirements.txt pin, so an image drift cannot slip
-        # through. The default (http) transport above still talks to stock
-        # Beets and those checks are unchanged.
+        # ADR 0006: the image bundles Beets at the requirements.txt pin.
         pin_match = re.search(r"^beets==(\S+)", (ROOT / "requirements.txt").read_text(encoding="utf-8"), re.M)
         if not pin_match:
             _fail("requirements.txt has no beets==<version> pin")
@@ -527,72 +453,34 @@ def run_acceptance() -> None:
             return
         _ok("Authenticated via auto-generated Bearer token")
 
-        # 5. Stock Beets Version and Execution Check
-        print("==> Step 9: Verifying Beets CLI in the stock Beets container...")
-        beet_exec = stack.compose("exec", "-T", "beets", "/lsiopy/bin/beet", "version")
-        if beet_exec.returncode != 0:
-            beet_exec = stack.compose("exec", "-T", "beets", "beet", "version")
-        if beet_exec.returncode != 0 or not re.search(r"beets version \d", beet_exec.stdout, re.I):
-            _fail(f"Stock beets container version check failed: {beet_exec.returncode}\n{beet_exec.stdout}\n{beet_exec.stderr}")
-            return
-        _ok(f"Stock Beets container executed beet version successfully: {beet_exec.stdout.strip().splitlines()[0]}")
-
-        # The stock image's own default long-running service is `beet
-        # web` (it can optionally double as a standalone Beets web UI).
-        # If the config it ends up with doesn't enable that plugin, s6
-        # restart-loops it forever, spamming "error: unknown command
-        # 'web'" -- `docker compose exec` succeeding above only proves
-        # the container can still run a one-shot command, not that its
-        # own supervised service isn't crash-looping in the background.
-        ps_res = stack.compose("ps", "beets", "--format", "{{.State}}")
-        beets_state = ps_res.stdout.strip().lower()
-        if "running" not in beets_state:
-            _fail(f"Stock Beets container is not in a stable 'running' state: {beets_state!r}")
-            return
-        beets_logs = stack.logs("beets")
-        unknown_command_count = beets_logs.lower().count("unknown command")
-        if unknown_command_count > 0:
-            _fail(f"Stock Beets container logs contain {unknown_command_count} \"unknown command\" errors (its default service is restart-looping): {beets_logs[-2000:]}")
-            return
-        _ok("Stock Beets container is running stably with no \"unknown command\" restart-loop errors")
-
-        # 6. Seed Synthetic Audio and Perform Import (via the stock Beets
-        # CLI -- the only place a `beet` executable exists in this stack)
-        print("==> Step 10: Seeding synthetic audio in downloads directory and importing...")
+        # 5. An existing library: import with the image's own `beet` while
+        # the app is stopped (two writers on one library are refused), the
+        # way a library arrives from the old Beets container.
+        print("==> Step 10: Importing a library with the image's `beet` while Web Manager is stopped...")
         album_dir = stack.downloads_dir / "Acceptance Artist" / "Acceptance Album"
         album_dir.mkdir(parents=True, exist_ok=True)
         track_file = album_dir / "01 - Acceptance Track.wav"
         track_file.write_bytes(generate_wav_bytes(freq=440.0, duration=2.0))
-        _ok(f"Seeded synthetic WAV file at {track_file}")
-
+        os.chmod(album_dir, 0o777)
+        os.chmod(track_file, 0o666)
+        stop = stack.compose("stop", "beets-web-manager")
+        if stop.returncode != 0:
+            _fail(f"docker compose stop failed: {stop.stderr}")
+            return
         import_exec = stack.compose(
-            # Run as the LSIO service user (abc), like a real import, so the
-            # files are owned by the same user the webmanager plugin writes as.
-            "exec", "-T", "--user", "abc", "beets",
-            "/lsiopy/bin/beet", "-c", "/config/config.yaml", "-l", "/config/musiclibrary.blb",
-            "import", "-q", "-A", "/downloads/Acceptance Artist/Acceptance Album"
-        )
-        if import_exec.returncode != 0:
-            import_exec = stack.compose(
-                "exec", "-T", "--user", "abc", "beets",
-                "beet", "-c", "/config/config.yaml", "-l", "/config/musiclibrary.blb",
-                "import", "-q", "-A", "/downloads/Acceptance Artist/Acceptance Album"
-            )
+            "run", "--rm", "-T", "--no-deps", "beets-web-manager",
+            "beet", "-l", "/config/musiclibrary.blb", "-d", "/music",
+            "import", "-q", "-A", "/downloads/Acceptance Artist/Acceptance Album")
         if import_exec.returncode != 0:
             _fail(f"Beets import failed:\n{import_exec.stderr}\n{import_exec.stdout}")
             return
-        _ok(f"Import command executed successfully:\n{import_exec.stdout}")
-
-        # 7. Cross-container read verification: prove BeetsAdapter's reads
-        # (through Web Manager's own API, not a local sqlite3 connection)
-        # see the item stock Beets just imported.
-        print("==> Step 11: Verifying Web Manager's API sees the imported item via BeetsAdapter...")
-        db_path = stack.beets_dir / "musiclibrary.blb"
-        if not db_path.exists():
-            _fail(f"musiclibrary.blb not found on host at {db_path} (stock Beets should be its sole owner)")
+        _ok("Imported with the image's `beet` (as PUID:PGID)")
+        stack.up()
+        if not stack.wait_healthy(timeout=90):
+            _fail("Web Manager did not become healthy after the import")
             return
-        _ok(f"Confirmed musiclibrary.blb exists on the shared /config host mount ({db_path})")
 
+        print("==> Step 11: Verifying Web Manager's API sees the imported item...")
         status, _, albums_body = stack.request("GET", "/api/albums", headers=basic_header)
         if status != 200 or not isinstance(albums_body, dict) or not albums_body.get("albums"):
             _fail(f"GET /api/albums did not see the imported album: {status} {albums_body}")
@@ -670,6 +558,20 @@ def run_acceptance() -> None:
             return
         _ok("Controlled mutation via Web Manager's API is visible on read-back (mb_releasegroupid updated)")
 
+        # 9. Leftover two-container settings: a warning, never a stop.
+        print("==> Step 11b: Restarting with leftover two-container settings...")
+        stack.write_override({"BEETS_ENGINE": "http", "BEETS_WEB_URL": "http://beets:8337",
+                              "BEETS_WEBMANAGER_API_KEY": "0" * 64})
+        stack.up()
+        if not stack.wait_healthy(timeout=90):
+            _fail("Leftover BEETS_ENGINE/BEETS_WEB_URL/BEETS_WEBMANAGER_API_KEY stopped Beets from starting")
+            return
+        if "legacy_settings_ignored" not in stack.beets_codes():
+            _fail(f"Leftover settings were not reported: {stack.beets_codes()}")
+            return
+        _ok("Leftover two-container settings are ignored with a warning (legacy_settings_ignored)")
+        stack.write_override()
+
         # 9. Test Stack Down / Up Persistence
         print("==> Step 12: Testing persistence across `docker compose down` and `docker compose up -d`...")
         down_res = stack.compose("down")
@@ -734,7 +636,7 @@ def main():
     start_time = time.time()
     print("=" * 70)
     print("PRODUCTION DOCKER ACCEPTANCE TEST")
-    print(f"Stock-Beets architecture: {STOCK_BEETS_IMAGE} + beets-web-manager:ci")
+    print("One container: beets-web-manager:ci with Beets inside (ADR 0006)")
     print("=" * 70)
 
     try:
