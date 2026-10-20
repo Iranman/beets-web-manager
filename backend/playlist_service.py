@@ -664,6 +664,11 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
         artist, title = split
         channelish = _playlist_artist_looks_like_channel(artist)
         split_source = "video-title"
+        # The artist was pulled from this title, so the title is now a
+        # residual: mark it so every return path (including the channelish
+        # fallback, which sets no canonical_source) tells the matcher not to
+        # re-split it. Rides through the `{**track}` in each return below.
+        track = {**track, "artist_from_split": True}
 
     title_cleaned = variant_title_cleaned or title != _playlist_clean_video_text(track.get("title") or original_title)
     if not channelish and artist:
@@ -690,7 +695,10 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
             "canonical_source": "channel-alias",
         }
 
-    library_title_match = _match_track("", title)
+    # If an artist was already pulled from this title (split_source), `title`
+    # is a residual and must not be re-split here (f3: a channelish promoted
+    # artist like "Roxy Music" would otherwise reverse the residual).
+    library_title_match = _match_track("", title, allow_title_resplit=not split_source)
     if library_title_match:
         item, score = library_title_match
         if float(score or 0) >= 0.93:
@@ -835,13 +843,20 @@ _PLAYLIST_VERSION_LABEL_RE = re.compile(
 
 def _playlist_artist_candidate_is_version_label(value) -> bool:
     """A would-be artist token that is actually a version/format suffix
-    ("Live", "Remix", "Official Video", "LIVE!", ...), which must never be
-    treated as an artist when reinterpreting a compact "Title-ARTIST" entry.
-    Checked on the normalized token so punctuation cannot evade it."""
-    return bool(_PLAYLIST_VERSION_LABEL_RE.match(_norm(value)))
+    ("Live", "Remix", "Official Video", "LIVE!", "Sped-Up!", "Official  Video",
+    ...), which must never be treated as an artist when reinterpreting a
+    compact "Title-ARTIST" entry. Normalized the same way the matcher treats
+    text -- hyphens/underscores to spaces, other punctuation dropped,
+    whitespace collapsed -- so punctuation or spacing cannot evade the
+    anchored match. Linear-time character-class substitutions only."""
+    text = _s(value).lower()
+    text = re.sub(r"[-_]+", " ", text)
+    text = re.sub(r"[^\w\s]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return bool(_PLAYLIST_VERSION_LABEL_RE.match(text))
 
 
-def _playlist_query_match_variants(artist, title, allow_compact_reverse: bool = True):
+def _playlist_query_match_variants(artist, title, allow_title_resplit: bool = True):
     """(artist, title) query shapes to try against the library index.
 
     A YouTube/SoundCloud entry routinely carries the real "Artist - Title"
@@ -853,29 +868,31 @@ def _playlist_query_match_variants(artist, title, allow_compact_reverse: bool = 
     *library* item's title/stem this way (`_playlist_item_text_variants`);
     this is the symmetric split on the *query* side.
 
-    Precision rules (each variant is only an ADDITIONAL shape to score; the
-    dual threshold in `_playlist_candidate_match_score` still decides, but it
-    alone does not catch these, so they are enforced here):
+    STRUCTURAL RULE: re-splitting the title to DERIVE A DIFFERENT ARTIST is
+    done only when no explicit artist has been established for this entry yet.
+    `allow_title_resplit=False` means an artist was already pulled from this
+    title (a parser "Artist - Title" split, or a spaced
+    canonicalization promotion), so `title` is a RESIDUAL, not a standalone
+    pair; it must never be re-split in EITHER direction (that is how a
+    pasted "Drake - Hello-ADELE" or a channel-uploader "Some Music" +
+    "Drake - Hello-ADELE" would otherwise be reinterpreted onto Adele's
+    "Hello"). When the artist came from the uploader field or is absent,
+    the title IS the original and may be reinterpreted.
 
-    * Both normalized halves must be non-empty. Otherwise a punctuation-only
-      side (e.g. "!!! - Hello", left normalizes to "") would fall into the
-      artist-less title-only branch and match a different track with no
-      artist check.
-    * The reversed order is offered ONLY for the compact "Title-ARTIST"
-      shape that genuinely needs it (SoundCloud/SpotiFLAC). For the spaced
-      "Artist - Title" shape the order is unambiguous, so reversing it (which
-      would make the title the artist, e.g. "Adele - Hello" -> artist
-      "Hello") is never offered.
+    When re-splitting is allowed, each derived shape is only an ADDITIONAL
+    candidate; the dual threshold in `_playlist_candidate_match_score` still
+    decides, and these extra precision rules apply (it alone does not catch
+    them):
+
+    * Both normalized halves must be non-empty, so a punctuation-only side
+      ("!!! - Hello") cannot slip into the artist-less title-only branch.
+    * The reversed order is offered ONLY for the order-ambiguous compact
+      "Title-ARTIST" shape (SoundCloud/SpotiFLAC), never for the unambiguous
+      spaced "Artist - Title" ("Adele - Hello" must not become artist
+      "Hello").
     * The reversed order is dropped when its would-be artist is a
-      version/format label ("Song-Live", "Song-Remix"), which is a suffix,
-      not an artist.
-    * `allow_compact_reverse=False` suppresses the reversed order entirely.
-      The caller passes this when `title` is already the RESIDUAL of a prior
-      spaced split / canonicalization promotion (an explicit artist was
-      pulled from a spaced separator ahead of the compact tail), so the tail
-      is not a standalone "Title-ARTIST" pair -- e.g. "Some Music" (channel)
-      + "Drake - Hello-ADELE" canonicalizes to artist="Drake",
-      title="Hello-ADELE", and reversing that tail would wrongly map "ADELE".
+      version/format label ("Song-Live", "Song-Remix"), a suffix not an
+      artist.
 
     Deterministic and AcoustID/MusicBrainz-independent: no provider call, no
     outbound HTTP.
@@ -883,6 +900,8 @@ def _playlist_query_match_variants(artist, title, allow_compact_reverse: bool = 
     artist = _s(artist).strip()
     title = _s(title).strip()
     variants = [(artist, title)]
+    if not allow_title_resplit:
+        return variants
     seen = {(_norm(artist), _norm(title))}
     split = _playlist_split_artist_title(title)
     if split:
@@ -891,8 +910,7 @@ def _playlist_query_match_variants(artist, title, allow_compact_reverse: bool = 
         # Compact "Title-ARTIST" is order-ambiguous; the spaced shape is not.
         stripped = _playlist_strip_video_title_suffix(_playlist_strip_track_prefix(title))
         spaced = bool(_PLAYLIST_SPACED_DASH_RE.search(stripped))
-        if (allow_compact_reverse and not spaced
-                and not _playlist_artist_candidate_is_version_label(right)):
+        if not spaced and not _playlist_artist_candidate_is_version_label(right):
             orders.append((right, left))
         for cand_artist, cand_title in orders:
             key = (_norm(cand_artist), _norm(cand_title))
@@ -903,7 +921,7 @@ def _playlist_query_match_variants(artist, title, allow_compact_reverse: bool = 
 
 
 def _playlist_match_payload_from_candidates(artist, title, candidates: Any,
-                                            allow_compact_reverse: bool = True) -> Optional[Dict[str, Any]]:
+                                            allow_title_resplit: bool = True) -> Optional[Dict[str, Any]]:
     if isinstance(candidates, dict):
         by_title = candidates.get("by_title") or {}
         all_rows = list(candidates.get("all") or [])
@@ -913,7 +931,7 @@ def _playlist_match_payload_from_candidates(artist, title, candidates: Any,
 
     best_payload: Optional[Dict[str, Any]] = None
     best_score = 0.0
-    for q_artist, q_title in _playlist_query_match_variants(artist, title, allow_compact_reverse):
+    for q_artist, q_title in _playlist_query_match_variants(artist, title, allow_title_resplit):
         rows = list(by_title.get(_norm(q_title), []) or []) if by_title else []
         if not rows:
             rows = all_rows
@@ -935,13 +953,16 @@ def _playlist_match_payload_from_candidates(artist, title, candidates: Any,
     return best_payload
 
 
-def _match_track(artist, title):
-    """Fuzzy-match artist+title against the beets library. Returns best item or None."""
+def _match_track(artist, title, allow_title_resplit: bool = True):
+    """Fuzzy-match artist+title against the beets library. Returns best item or None.
+
+    ``allow_title_resplit=False`` when ``title`` is a residual whose artist
+    was already pulled from it (see `_playlist_query_match_variants`)."""
     t_norm = _norm(title)
     if not t_norm:
         return None
     payload = _playlist_match_payload_from_candidates(
-        artist, title, _playlist_library_match_candidates())
+        artist, title, _playlist_library_match_candidates(), allow_title_resplit)
     if not payload:
         return None
     item = type("PlaylistMatchedItem", (), {})()
@@ -1096,12 +1117,17 @@ def _match_playlist_tracks(tracks, verify_acoustid: bool = False):
     for trk in _playlist_canonicalize_tracks(tracks):
         artist = (trk.get("artist") or "").strip()
         title = (trk.get("title") or "").strip()
-        # When canonicalization already pulled the artist out of the video
-        # title (a spaced split), `title` is the residual, not a standalone
-        # "Title-ARTIST" pair, so its compact tail must not be reversed.
-        allow_compact_reverse = trk.get("canonical_source") != "video-title"
+        # If an explicit artist was already established from this title -- by
+        # the input parser ("artist_from_split") or by a spaced
+        # canonicalization promotion ("video-title") -- `title` is a residual,
+        # not a standalone "Title-ARTIST" pair, and must not be re-split in
+        # either direction to derive a different artist.
+        allow_title_resplit = not (
+            trk.get("artist_from_split")
+            or trk.get("canonical_source") == "video-title"
+        )
         payload = _playlist_match_payload_from_candidates(
-            artist, title, candidates, allow_compact_reverse=allow_compact_reverse)
+            artist, title, candidates, allow_title_resplit=allow_title_resplit)
         if payload:
             for key in ("source_artist", "source_title", "canonicalized", "canonical_source"):
                 if key in trk:
@@ -3912,7 +3938,9 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 continue
             if " - " in line:
                 a, t = line.split(" - ", 1)
-                tracks.append({"artist": a.strip(), "title": t.strip()})
+                # The artist was extracted from this line, so the title is a
+                # residual the matcher must not re-split (provenance flag).
+                tracks.append({"artist": a.strip(), "title": t.strip(), "artist_from_split": True})
             else:
                 tracks.append({"artist": "", "title": line})
 
@@ -4035,16 +4063,23 @@ def parse_playlist_request(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 artist = re.sub(r'\s*-\s*Topic$', '', artist, flags=re.IGNORECASE).strip()
 
                 # If title is "Artist - Title" and we have no artist from metadata, split it
+                artist_from_split = False
                 if " - " in raw_title and not entry.get("artist"):
                     parts  = raw_title.split(" - ", 1)
                     artist = parts[0].strip()
                     title  = parts[1].strip()
+                    artist_from_split = True
 
                 # Clean junk suffixes from title
                 title = _JUNK_RE.sub("", title).strip()
 
                 if title:
-                    tracks.append({"artist": artist, "title": title})
+                    # When the artist was pulled from this title, the residual
+                    # must not be re-split by the matcher (provenance flag).
+                    row = {"artist": artist, "title": title}
+                    if artist_from_split:
+                        row["artist_from_split"] = True
+                    tracks.append(row)
 
     tracks = _playlist_canonicalize_tracks(tracks)
     # Match each track against beets library
@@ -8377,7 +8412,13 @@ def _playlist_suggestions_for_track(track: Dict[str, Any],
     suggestions: List[Dict[str, Any]] = []
     seen: set = set()
 
-    match = _match_track(artist, title)
+    # Same residual rule as the main matcher: do not re-split a title whose
+    # artist was already established from it.
+    allow_title_resplit = not (
+        track.get("artist_from_split")
+        or _s(track.get("canonical_source")).strip() == "video-title"
+    )
+    match = _match_track(artist, title, allow_title_resplit=allow_title_resplit)
     if match:
         item, score = match
         cand_artist = _s(getattr(item, "artist", "")).strip()

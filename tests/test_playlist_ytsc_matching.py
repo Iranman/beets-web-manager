@@ -191,6 +191,56 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
         lib = [_item("Song", "???")]
         self.assertMissing(lib, "", "!!! - Song")
 
+    # ── structural: a title whose artist was already established is a
+    #     RESIDUAL and is never re-split in EITHER direction ──────────────
+    def test_forward_split_of_residual_is_suppressed(self):
+        # Channel uploader -> canonicalization splits the SPACED dash first:
+        # "Drake - ADELE-Hello" -> artist="Drake", title="ADELE-Hello". The
+        # FORWARD split of that residual ("ADELE","Hello") must not map onto
+        # Adele's present "Hello" either.
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "Some Music", "Drake - ADELE-Hello")
+
+    def test_gateless_fallback_channelish_promotion_is_suppressed(self):
+        # Empty uploader -> "Roxy Music - Hello-ADELE" promotes artist="Roxy
+        # Music" (itself channelish). The library-title fallback must not
+        # reverse the residual "Hello-ADELE" onto Adele's "Hello".
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "", "Roxy Music - Hello-ADELE")
+
+    def test_version_label_with_hyphen_and_double_space_is_caught(self):
+        lib = [_item("Lightning Crashes", "Live")]
+        self.assertMissing(lib, "uploader", "Lightning Crashes-Sped-Up!")
+        lib2 = [_item("Lightning Crashes", "Video")]
+        self.assertMissing(lib2, "uploader", "Lightning Crashes-Official  Video")
+
+    def test_hyphenated_artist_spaced_still_matches(self):
+        # Keep recall for a hyphenated artist name in the spaced shape.
+        lib = [_item("Empire State of Mind", "Jay-Z")]
+        self.assertMatches(lib, "SomeVEVO", "Jay-Z - Empire State of Mind", "Empire State of Mind")
+
+    # ── provenance: the matcher honors the `artist_from_split` flag that the
+    #     paste parser (`parse_playlist_request`, source="text") sets for a
+    #     "Artist - Title" line, so the residual is not re-split ───────────
+    def test_matcher_honors_artist_from_split_provenance(self):
+        # The exact track shape the text parser emits for "Drake - Hello-ADELE"
+        # (artist pulled from the line). The residual "Hello-ADELE" must not be
+        # reversed onto Adele's present "Hello".
+        lib = [_item("Hello", "Adele")]
+        match_tracks = self._match(lib)
+        matched, missing = match_tracks(
+            [{"artist": "Drake", "title": "Hello-ADELE", "artist_from_split": True}])
+        self.assertFalse(matched, f"residual must not be re-split; got {matched}")
+
+    def test_artist_from_split_provenance_still_matches_correct_entry(self):
+        # Recall: a correctly pasted present entry still matches.
+        lib = [_item("Hello", "Adele")]
+        match_tracks = self._match(lib)
+        matched, missing = match_tracks(
+            [{"artist": "Adele", "title": "Hello", "artist_from_split": True}])
+        self.assertTrue(matched, f"expected a match; missing={missing}")
+        self.assertEqual("Hello", matched[0].get("title"))
+
 
 if __name__ == "__main__":
     unittest.main()
