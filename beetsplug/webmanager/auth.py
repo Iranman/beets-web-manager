@@ -8,6 +8,7 @@ from flask import request, jsonify
 
 _HEX_KEY_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 _KEY_FILE_PATH: Optional[str] = None
+_IN_MEMORY_KEY: Optional[str] = None
 
 
 def _is_valid_key_format(key: str) -> bool:
@@ -21,6 +22,13 @@ def set_api_key_file(path: str):
     _KEY_FILE_PATH = path
 
 
+def set_api_key(key: Optional[str]) -> None:
+    """In-process engine (ADR 0006): a per-process key held only in memory.
+    It wins over the env and the key file; ``None`` clears it."""
+    global _IN_MEMORY_KEY
+    _IN_MEMORY_KEY = key if key and _is_valid_key_format(key) else None
+
+
 def get_expected_api_key() -> str:
     """Read API key from configured file or environment variable.
 
@@ -28,6 +36,9 @@ def get_expected_api_key() -> str:
     Reads directly from the file to eliminate cache staleness on key rotation.
     """
     global _KEY_FILE_PATH
+
+    if _IN_MEMORY_KEY:
+        return _IN_MEMORY_KEY
 
     env_key = os.environ.get("BEETS_WEBMANAGER_API_KEY", "").strip()
     if env_key:

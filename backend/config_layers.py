@@ -78,6 +78,7 @@ HOST_KEYS = frozenset({
 # saved by an earlier release is removed by the settings migration.
 OPERATOR_KEYS = frozenset({
     "BEETS_OUTBOUND_ALLOWLIST",          # outbound network boundary (SSRF)
+    "BEETS_ENGINE",                      # which process opens and writes the Beets library (ADR 0006)
     "BEETS_WEB_AUTH_DISABLED",           # turns authentication off
     "BEETS_TRUSTED_PROXIES",             # whose X-Forwarded-For is believed
     "BEETS_WEB_SESSION_COOKIE_SECURE",   # session cookie transport security

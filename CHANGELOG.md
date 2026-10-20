@@ -6,6 +6,18 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+
+- Beets can run inside Web Manager (`BEETS_ENGINE=embedded`, opt-in; [ADR 0006](docs/adr/0006-embedded-beets.md), Phase 1). Web Manager loads Beets 2.14.1 as a pinned Python library, reads the same `config.yaml` (from `BEETSDIR`), and opens the same `musiclibrary.blb` and music folder through Beets' own Library API. Every Beets call runs in-process through the existing `webmanager` operations, with no HTTP, no plugin provisioning and no plugin version that can drift from Web Manager's. A startup self-test checks the following and reports a stable code and a fix for each failure:
+  - the Beets version against the pin;
+  - that `config.yaml` parses;
+  - that the library opens (a newly created empty library is flagged);
+  - that the music and library folders are writable;
+  - that every configured Beets plugin loaded;
+  - that `fpcalc` and `ffmpeg` are present.
+
+  `/api/health` lists the failing codes, and `/api/health/detail` (authenticated) has the messages. The default stays `http` (the separate Beets container), and the shipped Compose files are unchanged until the Phase 2 cutover. `requirements.txt` now pins `beets==2.14.1` and `pyacoustid==1.3.1`.
+
 ### Fixed
 
 - webmanager plugin 1.18.4: a missing-track repair whose files name only some of the Release's credited artists (for example "38 Spesh" for "38 Spesh & Harry Fraud") is no longer skipped for its artist penalty alone. The plugin sets the album-level `artist` penalty aside only when every guard holds: the library album being repaired (`existing_album_id`, now sent by Web Manager and checked by the plugin) is on the pinned Release; chroma is loaded and AcoustID matched every file to the recording of the Release track Beets mapped it to; and every artist name in the source tags, split on `,` `;` `/` `&` `x` `and` `feat.` `ft.` `featuring` `with` and compared after Unicode and case normalization, is one of the Release's credited artists (never a Various Artists release, never a blank artist). The `album` penalty and every track-level penalty stay in, and the rest must still be under `match.strong_rec_thresh`. Such an import is listed in the plugin's `partial_artist_relaxed` response field and logged in the import transaction. Only an AcoustID result from this import counts: a Web Manager import drops chroma's cached results for its files before chroma fingerprints them again. An explicit `match.max_rec.data_source` cap is still honoured. Restart the Beets container to load 1.18.4.

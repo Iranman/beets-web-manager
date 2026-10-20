@@ -24,13 +24,11 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertIn("pylast==7.2.0", REQ)
         self.assertNotIn("beets==2.2.0", REQ)
         self.assertNotIn("python3-discogs-client==", REQ)
-        # Stock-Beets architecture: chroma/AcoustID fingerprinting runs
-        # entirely inside the stock lscr.io/linuxserver/beets container via
-        # the real beetsplug.chroma plugin (see beets_adapter.mbsubmit()).
-        # Web Manager has no local Beets runtime of its own, so it must not
-        # depend on pyacoustid (or beets itself) to perform production work.
-        self.assertNotIn("pyacoustid", REQ)
-        self.assertNotRegex(REQ, r"(?im)^beets==")
+        # ADR 0006: Beets runs in-process, pinned to the version the
+        # embedded engine is tested against, with chroma's pyacoustid.
+        from backend.beets_embedded import PINNED_BEETS_VERSION
+        self.assertRegex(REQ, rf"(?m)^beets=={PINNED_BEETS_VERSION}$")
+        self.assertRegex(REQ, r"(?m)^pyacoustid==\d+\.\d+\.\d+$")
 
     def test_default_plugin_list_is_importable_model(self):
         first_line = CONFIG.splitlines()[0]
