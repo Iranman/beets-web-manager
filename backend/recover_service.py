@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -265,7 +266,10 @@ def classify_recover_error(error: Any) -> Dict[str, str]:
         "widevine" in text
         or "fairplay" in text
         or "playready" in text
-        or "eme" in text
+        # "eme" as a standalone token only: a word-boundary match so that an
+        # ordinary "Unsupported URL scheme" error (sch-EME) is never mislabeled
+        # as DRM. DRM is marked only on real EME/CDM evidence.
+        or re.search(r"\beme\b", text)
         or "drm protected" in text
         or "protected by drm" in text
         or ("drm" in text and "protect" in text)

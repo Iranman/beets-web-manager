@@ -306,6 +306,15 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(cat, "auth-needed")
         self.assertNotEqual(cat, "genuinely-DRM")
 
+    def test_unsupported_scheme_not_drm(self):
+        # "scheme" contains the substring "eme"; a generic protocol error must
+        # not be mislabeled as DRM (word-boundary EME match only).
+        cat = self._cat('ERROR: Unsupported URL scheme "file"')
+        self.assertNotEqual(cat, "genuinely-DRM")
+
+    def test_standalone_eme_still_marked_drm(self):
+        self.assertEqual(self._cat("Protected content: EME required"), "genuinely-DRM")
+
     def test_message_is_sanitized_string(self):
         info = recover_service.classify_recover_error("boom")
         self.assertIn("category", info)
