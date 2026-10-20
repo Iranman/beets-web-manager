@@ -13689,6 +13689,28 @@
    ]
   },
   {
+   "name": "_playlist_norm_alnum",
+   "module": "backend/playlist_service.py",
+   "lines": [
+    887,
+    891
+   ],
+   "size": 5,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLAYLIST",
+   "desired_owner": "backend/playlist_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_playlist_artist_candidate_is_version_label"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
    "name": "_playlist_artist_candidate_is_version_label",
    "module": "backend/playlist_service.py",
    "lines": [

@@ -230,15 +230,15 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
         lib = [_item("Hello", "Adele")]
         self.assertMatches(lib, "Adele", "Hello", "Hello", artist_from_split=True)
 
-    # ── F1: stylized dotted version labels must not evade the guard ────────
-    def test_dotted_version_label_does_not_match_band(self):
-        # "L.I.V.E." normalizes to "live" under the scorer's _norm (which
-        # deletes dots), so it must be recognized as the "live" label and not
-        # reversed onto a band named "Live".
-        self.assertMissing([_item("Lightning Crashes", "Live")],
-                           "uploader", "Lightning Crashes-L.I.V.E.", uploader_artist=True)
-        self.assertMissing([_item("Lightning Crashes", "Official")],
-                           "uploader", "Lightning Crashes-O.F.F.I.C.I.A.L", uploader_artist=True)
+    # ── F1: NO punctuation/stylization spelling of a label may evade the
+    #     guard -- it is recognized on the alnum-collapsed form ─────────────
+    def test_stylized_version_labels_do_not_match_band(self):
+        for tail in ("L.I.V.E.", "L.I.V.E._", "re.mix", "R.E.M.I.X!", "(Live)", "Live!!"):
+            self.assertMissing([_item("Lightning Crashes", "Live")],
+                               "uploader", f"Lightning Crashes-{tail}", uploader_artist=True)
+        for tail in ("O.F.F.I.C.I.A.L", "Official_Video", "Official.Video"):
+            self.assertMissing([_item("Lightning Crashes", "Official")],
+                               "uploader", f"Lightning Crashes-{tail}", uploader_artist=True)
 
     # ── F3: a promoted artist is trusted; the title-only fallback must not
     #     adopt a different library artist for the residual ─────────────────
@@ -261,6 +261,13 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
         # Recall: the alias still resolves and matches the present track.
         self.assertMatches([_item("Essence", "Wizkid")],
                            "StarBoy TV", "Essence", "Essence", uploader_artist=True)
+
+    def test_channel_alias_applied_when_channel_also_in_title(self):
+        # fix(4): the channel name is both the uploader and the title prefix
+        # ("StarBoy TV" + "StarBoy TV - Essence"); the alias must still resolve
+        # to Wizkid rather than returning the promoted channel name.
+        self.assertMatches([_item("Essence", "Wizkid")],
+                           "StarBoy TV", "StarBoy TV - Essence", "Essence", uploader_artist=True)
 
 
 class PlaylistBuilderRowMatchTests(unittest.TestCase):
@@ -295,6 +302,77 @@ class PlaylistBuilderRowMatchTests(unittest.TestCase):
               "uploader_artist": True}])
         self.assertTrue(matched)
         self.assertEqual("Hotline Bling", matched[0].get("title"))
+
+
+class PlaylistProvenanceDropTests(unittest.TestCase):
+    """Every promotion that establishes a canonical artist must drop the
+    `uploader_artist` flag (F5), on both the live canonicalize path and the
+    manifest serialization used for save->reload."""
+
+    def _canon(self, track, items=(), mb=None):
+        ns = _ns(list(items))
+        if mb is not None:
+            ns["_mb_recording_search"] = lambda *a, **k: mb
+        return load_app_closure(["_playlist_canonicalize_track"], ns)["_playlist_canonicalize_track"](track)
+
+    def _manifest(self, track, items=()):
+        return load_app_closure(["_playlist_track_manifest_payload"], _ns(list(items)))[
+            "_playlist_track_manifest_payload"](track)
+
+    def test_video_title_promotion_drops_uploader_artist(self):
+        row = self._canon({"artist": "Some Music", "title": "Drake - Song", "uploader_artist": True})
+        self.assertEqual("Drake", row.get("artist"))
+        self.assertNotIn("uploader_artist", row)
+
+    def test_channel_alias_promotion_drops_uploader_artist(self):
+        row = self._canon({"artist": "StarBoy TV", "title": "Essence", "uploader_artist": True})
+        self.assertEqual("Wizkid", row.get("artist"))
+        self.assertNotIn("uploader_artist", row)
+
+    def test_library_title_promotion_drops_uploader_artist(self):
+        # Channelish uploader, no promotion/alias; the library-title fallback
+        # adopts Adele and must drop the flag.
+        row = self._canon({"artist": "Random Music", "title": "Hello", "uploader_artist": True},
+                          items=[_item("Hello", "Adele")])
+        self.assertEqual("Adele", row.get("artist"))
+        self.assertNotIn("uploader_artist", row)
+
+    def test_musicbrainz_title_promotion_drops_uploader_artist(self):
+        row = self._canon(
+            {"artist": "Random Music", "title": "Hello", "uploader_artist": True},
+            items=[], mb=[{"title": "Hello", "artist": "Adele", "score": 95}])
+        self.assertEqual("Adele", row.get("artist"))
+        self.assertNotIn("uploader_artist", row)
+
+    def test_title_cleanup_keeps_uploader_artist(self):
+        # Artist unchanged (only title noise stripped): still the raw uploader,
+        # so the flag stays and the matcher can still re-split it.
+        row = self._canon({"artist": "DrakeVEVO", "title": "Drake - Song (Official Video)",
+                           "uploader_artist": True})
+        self.assertEqual("DrakeVEVO", row.get("artist"))
+        self.assertTrue(row.get("uploader_artist"))
+
+    def test_manifest_round_trip_no_mismap(self):
+        # save->reload: canonicalize, serialize via the manifest, then re-match.
+        # An alias-resolved row must not carry uploader_artist into the reload
+        # and must not re-split onto a distinct track.
+        match_tracks = load_app_closure(["_match_playlist_tracks"], _ns([_item("Hello", "Adele")]))[
+            "_match_playlist_tracks"]
+        serialized = self._manifest({"artist": "StarBoy TV", "title": "Hello-ADELE",
+                                     "uploader_artist": True})
+        self.assertNotIn("uploader_artist", serialized)
+        matched, _ = match_tracks([serialized])
+        self.assertFalse(matched, f"reloaded row must not mis-map; got {matched}")
+
+    def test_manifest_does_not_realias_established_artist(self):
+        # QA(b): an already-established non-uploader artist must not be
+        # overwritten by reapplying the uploader's channel alias.
+        serialized = self._manifest({
+            "artist": "Some Real Band", "title": "Song",
+            "source_artist": "StarBoy TV", "canonicalized": True,
+            "canonical_source": "library-title",
+        })
+        self.assertEqual("Some Real Band", serialized.get("artist"))
 
 
 class PlaylistDedupMatchTests(unittest.TestCase):
