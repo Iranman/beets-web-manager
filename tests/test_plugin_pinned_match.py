@@ -8,8 +8,10 @@ staged "Beyond Belief" folder against its pinned Release: album raw 6.565 of
 max 26.8 = tracks 2.0 (all data_source) + missing_tracks 1.8 + artist 1.765 +
 data_source 1.0.
 """
+import sys
 import types
 import unittest
+from unittest import mock
 
 from beets.autotag.distance import Distance
 import beetsplug.webmanager.operations as ops
@@ -109,6 +111,132 @@ class PinnedMatchDistanceTests(unittest.TestCase):
     def test_no_pinned_release(self):
         task, _ = _task(_album([_track()], artist=0.0))
         self.assertIsNone(ops._pinned_partial_match(task, ""))
+
+
+class _Item:
+    """A source file: hashable like a Beets Item, keyed by path in chroma."""
+
+    def __init__(self, n):
+        self.path = b"/downloads/Beyond Belief/%02d.mp3" % n
+
+
+TRACK_IDS = ["00000000-0000-4000-8000-0000000000%02d" % n for n in range(1, 11)]
+SOURCE = [1, 2, 3, 4, 5, 7, 9, 10]  # the staged folder's eight tracks
+
+
+class _Lib:
+    def __init__(self, albums):
+        self.albums = albums
+
+    def get_album(self, album_id):
+        return self.albums.get(album_id)
+
+
+class PinnedArtistRelaxationTests(unittest.TestCase):
+    """webmanager plugin 1.18.4 (part b): a missing-track repair may set the
+    album-level artist penalty aside when the source artist is part of the
+    Release's credit and AcoustID matched every file to its mapped track."""
+
+    def _case(self, cur_artist="38 Spesh", artists=("38 Spesh", "Harry Fraud"), artist="38 Spesh, Harry Fraud",
+              va=False, hits=None, album=0.0, length=0.0, extra_items=(), existing_album_id=5,
+              lib_release=REL, chroma=True):
+        items = [_Item(n) for n in SOURCE]
+        dist = _album([_track(length=length) for _ in SOURCE], album=album)
+        info = types.SimpleNamespace(album_id=REL, va=va, artists=list(artists), artists_credit=[], artist=artist)
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[object(), object()], extra_items=list(extra_items),
+            mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[n - 1]) for it, n in zip(items, SOURCE)})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist=cur_artist,
+                                     paths=[b"/downloads/Beyond Belief"])
+        if hits is None:
+            hits = {it.path: ([TRACK_IDS[n - 1]], [REL]) for it, n in zip(items, SOURCE)}
+        lib = _Lib({5: {"mb_albumid": lib_release}})
+        modules = {"beetsplug.chroma": types.SimpleNamespace(_matches=hits)} if chroma else {}
+        with mock.patch.dict(sys.modules, modules):
+            if not chroma:
+                sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, REL, True, lib, existing_album_id)
+        return got, match, task, items
+
+    def assertAccepted(self, **kw):
+        got, match, task, _ = self._case(**kw)
+        self.assertIs(got, match, kw)
+        self.assertTrue(getattr(task, "webmanager_partial_artist_relaxed", False), kw)
+
+    def assertRejected(self, **kw):
+        got, _, task, _ = self._case(**kw)
+        self.assertIsNone(got, kw)
+        self.assertFalse(getattr(task, "webmanager_partial_artist_relaxed", False), kw)
+
+    def test_1_beyond_belief_shape_is_accepted_and_flagged(self):
+        dist = _album([_track() for _ in SOURCE])
+        raw, mx = ops._distance_without(dist, ops._PINNED_ALBUM_EXEMPT)
+        self.assertGreaterEqual(raw / mx, THRESH)  # part (a) alone: 0.0767, still skipped
+        self.assertAccepted()
+
+    def test_2_different_recordings_are_rejected(self):
+        items = [_Item(n) for n in SOURCE]
+        other = {it.path: (["99999999-0000-4000-8000-0000000000%02d" % n], []) for it, n in zip(items, SOURCE)}
+        self.assertRejected(hits=other)
+
+    def test_3_one_file_without_its_recording_is_rejected(self):
+        items = [_Item(n) for n in SOURCE]
+        hits = {it.path: ([TRACK_IDS[n - 1]], []) for it, n in zip(items, SOURCE)}
+        missing = dict(hits)
+        missing.pop(items[3].path)
+        self.assertRejected(hits=missing)
+        wrong = dict(hits)
+        wrong[items[3].path] = ([TRACK_IDS[0]], [])
+        self.assertRejected(hits=wrong)
+
+    def test_4_chroma_not_loaded_is_rejected(self):
+        self.assertRejected(chroma=False)
+
+    def test_5_artist_outside_the_credit_is_rejected(self):
+        self.assertRejected(cur_artist="Stove God Cooks")
+
+    def test_6_blank_artist_and_various_artists_are_rejected(self):
+        self.assertRejected(cur_artist="")
+        self.assertRejected(cur_artist="   ")
+        self.assertRejected(va=True)
+
+    def test_7_album_title_mismatch_is_rejected(self):
+        self.assertRejected(album=0.5)
+
+    def test_8_track_lengths_over_the_threshold_are_rejected(self):
+        self.assertRejected(length=1.0)
+
+    def test_9_repaired_album_must_be_on_the_pinned_release(self):
+        self.assertRejected(existing_album_id=0)
+        self.assertRejected(existing_album_id=6)
+        self.assertRejected(lib_release="b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9")
+
+    def test_10_extra_items_are_rejected(self):
+        self.assertRejected(extra_items=[object()])
+
+    def test_11_credit_variants(self):
+        for name in ("38 Spesh & Harry Fraud", "38 Spesh feat. Harry Fraud", "38 SPESH",
+                     "\uff13\uff18 Spesh", "38\u00a0Spesh  x  Harry Fraud", "Harry Fraud / 38 Spesh"):
+            with self.subTest(name):
+                self.assertAccepted(cur_artist=name)
+        # The credit taken from the joined artist string when no list is given.
+        self.assertAccepted(cur_artist="38 Spesh & Harry Fraud", artists=())
+        for artists in (("38 Spesh", "Harry Fraud"), ()):
+            with self.subTest(artists=artists):
+                self.assertRejected(cur_artist="38 Spesh, Unknown Guest", artists=artists)
+
+    def test_complete_source_is_never_relaxed(self):
+        """Only a missing-track repair may set the artist penalty aside."""
+        items = [_Item(n) for n in range(1, 11)]
+        dist = _album([_track() for _ in items], missing=0)
+        info = types.SimpleNamespace(album_id=REL, va=False, artists=["38 Spesh", "Harry Fraud"])
+        match = types.SimpleNamespace(info=info, distance=dist, extra_tracks=[], extra_items=[],
+                                      mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[i])
+                                               for i, it in enumerate(items)})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="38 Spesh")
+        hits = {it.path: ([TRACK_IDS[i]], []) for i, it in enumerate(items)}
+        with mock.patch.dict(sys.modules, {"beetsplug.chroma": types.SimpleNamespace(_matches=hits)}):
+            self.assertIsNone(ops._pinned_partial_match(task, REL, True, _Lib({5: {"mb_albumid": REL}}), 5))
 
 
 if __name__ == "__main__":

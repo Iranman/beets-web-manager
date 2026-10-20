@@ -756,6 +756,7 @@ class BeetsAdapter:
         quiet_fallback: Optional[str] = None,
         timeout: Optional[float] = None,
         allow_missing_tracks: bool = False,
+        existing_album_id: int = 0,
     ) -> Dict[str, Any]:
         """Execute a non-interactive import with Beets' own ImportSession.
 
@@ -765,6 +766,9 @@ class BeetsAdapter:
         when given, so a plugin that does not know them never sees them.
         ``allow_missing_tracks`` (plugin 1.17.0, one search id) lets Beets
         apply the pinned Release to a folder holding only some of its tracks.
+        ``existing_album_id`` (plugin 1.18.4) names the library album such a
+        repair fills; the plugin checks it is on the pinned Release before it
+        may set the artist penalty aside.
         """
         payload = {
             "paths": [paths] if isinstance(paths, str) else paths,
@@ -785,6 +789,8 @@ class BeetsAdapter:
             payload["quiet_fallback"] = quiet_fallback
         if allow_missing_tracks:
             payload["allow_missing_tracks"] = True
+            if existing_album_id:
+                payload["existing_album_id"] = int(existing_album_id)
         headers = {}
         if is_async:
             headers["Prefer"] = "respond-async"

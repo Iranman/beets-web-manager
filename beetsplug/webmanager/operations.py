@@ -9,6 +9,8 @@ import time
 import uuid
 import logging
 import threading
+import sys
+import unicodedata
 import hashlib
 import json
 from typing import Dict, Any, Optional, List, Tuple
@@ -656,7 +658,63 @@ def _distance_without(dist, album_exempt, track_exempt=_PINNED_TRACK_EXEMPT):
     return raw, mx
 
 
-def _pinned_partial_match(task, release_id: str, allow_missing: bool = True):
+#: Separators between the names of a joined artist credit ("A & B", "A feat. B").
+_ARTIST_SPLIT = re.compile(r"\s*[,;/&]\s*|\s+(?:x|and|feat\.?|ft\.|featuring|with)\s+")
+
+
+def _norm_name(name) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(name or "")).casefold().split())
+
+
+def _artist_parts(name) -> List[str]:
+    return [part.strip() for part in _ARTIST_SPLIT.split(_norm_name(name)) if part.strip()]
+
+
+def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int) -> bool:
+    """True when the album-level ``artist`` penalty of a missing-track repair
+    says nothing against the pinned Release (the source names only some of
+    the Release's credited artists, e.g. "38 Spesh" for "38 Spesh & Harry
+    Fraud"). Every guard must hold:
+
+    - G1: the library album being repaired is on the pinned Release
+      (checked here, not trusted from the caller);
+    - G2: chroma is loaded and AcoustID returned, for every file, the
+      recording of the Release track Beets mapped it to (chroma's
+      ``_matches`` itself, never the ``track_id`` distance key, which is
+      also 0 without a hit);
+    - G3: every artist name in the source's tags is one of the Release's
+      credited artists, and the Release is not Various Artists."""
+    if not existing_album_id or lib is None:
+        return False
+    try:
+        album = lib.get_album(int(existing_album_id))
+    except Exception:
+        return False
+    if album is None or album.get("mb_albumid") != release_id:
+        return False
+    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
+    matches = getattr(chroma, "_matches", None)
+    items = list(getattr(task, "items", None) or [])
+    mapping = getattr(match, "mapping", None) or {}
+    if not isinstance(matches, dict) or not items:
+        return False
+    for item in items:
+        track_id = getattr(mapping.get(item), "track_id", None)
+        hit = matches.get(item.path)
+        if not track_id or not hit or track_id not in hit[0]:
+            return False
+    info = match.info
+    if getattr(info, "va", False):
+        return False
+    parts = _artist_parts(getattr(task, "cur_artist", None))
+    credits = (getattr(info, "artists", None) or getattr(info, "artists_credit", None)
+               or _artist_parts(getattr(info, "artist", None)))
+    credits = {_norm_name(name) for name in credits}
+    return bool(parts) and all(part in credits for part in parts)
+
+
+def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
+                          lib=None, existing_album_id: int = 0):
     """The Release pinned by the request's one search id as a match, or None.
 
     Beets caps the recommendation of any match with missing tracks at medium
@@ -674,7 +732,14 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True):
     Everything else keeps Beets' own bar: the best candidate must be the
     pinned Release, every file must sit on one of its tracks (no extra
     items), no other penalty may be capped below strong, and the distance
-    without those penalties must be under ``match.strong_rec_thresh``."""
+    without those penalties must be under ``match.strong_rec_thresh``.
+
+    A missing-track repair may also set the album-level ``artist`` penalty
+    aside, only when every guard of ``_artist_relaxable`` holds (repaired
+    album on this Release, an AcoustID hit on the mapped recording for every
+    file, the source artist a part of the Release's credit). ``album`` and
+    every track-level penalty stay in. Such a match is flagged
+    ``webmanager_partial_artist_relaxed`` and reported for the audit trail."""
     candidates = list(getattr(task, "candidates", None) or [])
     if not release_id or not candidates:
         return None
@@ -692,16 +757,24 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True):
     for key in keys - _PINNED_ALBUM_EXEMPT:
         if key in max_rec.keys() and max_rec[key].as_str() != "strong":
             return None
+    thresh = beets_config["match"]["strong_rec_thresh"].as_number()
     raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT)
-    if max_distance <= 0:
-        return None
-    if raw / max_distance >= beets_config["match"]["strong_rec_thresh"].as_number():
-        return None
-    return match
+    if max_distance > 0 and raw / max_distance < thresh:
+        return match
+    if missing and _artist_relaxable(task, match, release_id, lib, existing_album_id):
+        raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT | {"artist"})
+        if max_distance > 0 and raw / max_distance < thresh:
+            task.webmanager_partial_artist_relaxed = True
+            log.info("Pinned release %s accepted for %s with the artist penalty set aside "
+                     "(source artist %r, AcoustID hit on every file)", release_id,
+                     [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
+                     getattr(task, "cur_artist", None))
+            return match
+    return None
 
 
 def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: str = "",
-                          allow_missing_tracks: bool = False):
+                          allow_missing_tracks: bool = False, existing_album_id: int = 0):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
 
@@ -723,7 +796,8 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
 
         def choose_match(self, task):
             tasks.append(task)
-            partial = _pinned_partial_match(task, pinned_release_id, allow_missing_tracks)
+            partial = _pinned_partial_match(task, pinned_release_id, allow_missing_tracks,
+                                            self.lib, existing_album_id)
             if partial is not None:
                 # Stock choose_match lets plugins act first (badfiles'
                 # import_action_on_error: skip); the override must not skip that.
@@ -807,6 +881,13 @@ def run_import():
         return jsonify({
             "error": "allow_missing_tracks must be a boolean and needs exactly one search_id",
             "error_code": "INVALID_ALLOW_MISSING_TRACKS",
+        }), 400
+    # The library album a missing-track repair fills (_artist_relaxable G1).
+    existing_album_id = data.get("existing_album_id", 0)
+    if isinstance(existing_album_id, bool) or not isinstance(existing_album_id, int) or existing_album_id < 0:
+        return jsonify({
+            "error": "existing_album_id must be a non-negative integer",
+            "error_code": "INVALID_EXISTING_ALBUM_ID",
         }), 400
 
     # Policy 2: Validate duplicate_action strictly
@@ -976,7 +1057,8 @@ def run_import():
                 path_bytes = [util.bytestring_path(p) for p in safe_paths]
                 tasks: List[Any] = []
                 session = _import_session_class(
-                    autotag, tasks, search_ids[0] if len(search_ids) == 1 else "", allow_missing_tracks)(
+                    autotag, tasks, search_ids[0] if len(search_ids) == 1 else "", allow_missing_tracks,
+                    existing_album_id if allow_missing_tracks else 0)(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
                 global _IMPORTED_ALBUM_IDS
@@ -1015,6 +1097,10 @@ def run_import():
                     "partial_matches": sum(
                         1 for t in tasks if getattr(t, "webmanager_partial_match", False)
                         and not getattr(t, "skip", False)),
+                    "partial_artist_relaxed": [
+                        util.displayable_path(tp) for t in tasks
+                        if getattr(t, "webmanager_partial_artist_relaxed", False) and not getattr(t, "skip", False)
+                        for tp in getattr(t, "paths", None) or []],
                     "imported_album_ids": sorted(set(imported_ids)),
                 }
                 if op_id_arg:

@@ -74,8 +74,26 @@ class ConfirmedImportTests(unittest.TestCase):
         ad = _adapter({"id": 9, "mb_albumid": REL})
         self._run(ad, allow_missing_tracks=True, existing_album_id=5, duplicate_action="keep")
         self.assertTrue(ad.run_import.call_args.kwargs["allow_missing_tracks"])
+        # The plugin checks this album is on the pinned release (artist relaxation G1).
+        self.assertEqual(ad.run_import.call_args.kwargs["existing_album_id"], 5)
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        self._run(ad, existing_album_id=5, duplicate_action="keep")
+        self.assertEqual(ad.run_import.call_args.kwargs["existing_album_id"], 0)
         src = (Path(__file__).resolve().parents[1] / "backend" / "import_service.py").read_text(encoding="utf-8")
         self.assertIn('"allow_missing_tracks": bool(existing_album_id and wanted_tracks)', src)
+
+    def test_artist_relaxation_is_recorded_in_the_transaction(self):
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "partial_artist_relaxed": ["/downloads/A"]}
+        res, tx = self._run(ad, allow_missing_tracks=True, existing_album_id=5, duplicate_action="keep")
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(tx["metadata"]["engine_result"]["partial_artist_relaxed"])
+        self.assertTrue(any("artist penalty set aside" in line for line in tx["logs"]))
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "partial_artist_relaxed": []}
+        res, tx = self._run(ad, allow_missing_tracks=True, existing_album_id=5, duplicate_action="keep")
+        self.assertFalse(tx["metadata"]["engine_result"]["partial_artist_relaxed"])
+        self.assertFalse(any("artist penalty set aside" in line for line in tx.get("logs") or []))
 
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
@@ -207,7 +225,13 @@ class AdapterPayloadTests(unittest.TestCase):
             self.assertNotIn("allow_missing_tracks", req.call_args.kwargs["json_data"])
             ad.run_import("/downloads/A", autotag=True, search_ids=[REL], quiet_fallback="skip", timeout=5,
                           allow_missing_tracks=True)
+            self.assertNotIn("existing_album_id", req.call_args.kwargs["json_data"])
+            ad.run_import("/downloads/A", autotag=True, search_ids=[REL], existing_album_id=5)
+            self.assertNotIn("existing_album_id", req.call_args.kwargs["json_data"])
+            ad.run_import("/downloads/A", autotag=True, search_ids=[REL], quiet_fallback="skip", timeout=5,
+                          allow_missing_tracks=True, existing_album_id=5)
             body = req.call_args.kwargs["json_data"]
+            self.assertEqual(body["existing_album_id"], 5)
         self.assertEqual((body["search_ids"], body["quiet_fallback"], body["allow_missing_tracks"]),
                          ([REL], "skip", True))
         self.assertEqual(req.call_args.kwargs["timeout"], 5)

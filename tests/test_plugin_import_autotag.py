@@ -158,6 +158,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2", "Track 3"]),
                                         allow_missing_tracks=True)
         self.assertEqual((data["skipped"], data["partial_matches"]), ([], 1))
+        self.assertEqual(data["partial_artist_relaxed"], [])  # artist matched; nothing set aside
         albums = list(self.lib.albums())
         self.assertEqual([a.mb_albumid for a in albums], [REL])
         self.assertEqual(sorted(i.title for i in albums[0].items()), ["Track 1", "Track 2"])
@@ -247,6 +248,11 @@ class PluginImportAutotagTests(unittest.TestCase):
             res = self._import(paths=[src], autotag=True, **body)
             self.assertEqual((res.status_code, res.get_json()["error_code"]),
                              (400, "INVALID_ALLOW_MISSING_TRACKS"), body)
+        for bad in (True, -1, "5", 1.5):
+            res = self._import(paths=[src], autotag=True, search_ids=[REL], allow_missing_tracks=True,
+                               existing_album_id=bad)
+            self.assertEqual((res.status_code, res.get_json()["error_code"]),
+                             (400, "INVALID_EXISTING_ALBUM_ID"), bad)
 
     def test_autotag_asis_is_refused(self):
         """An unmatched album never enters the library without a release
