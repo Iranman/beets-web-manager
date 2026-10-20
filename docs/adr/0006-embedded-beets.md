@@ -151,9 +151,18 @@ eviction in `on_import_task_created` covers it.
   engine every Web Manager writer of `config.yaml` reachable from HTTP (editor save and
   revert, Setup's recommended-plugin and `web.include_paths` fixes, plugin provisioning) is
   fail-closed: a change passes only if every changed key is on an allowlist of settings and
-  plugin names that run no external command and no user-written expression
+  plugin names that run no command and no user-written expression taken from `config.yaml`
   (`backend/config_manager.py`, `EMBEDDED_*`); anything else gets
-  `CONFIG_CODE_EXECUTION_EDIT_REFUSED` (403). An earlier denylist (`hook`, `pluginpath`,
+  `CONFIG_CODE_EXECUTION_EDIT_REFUSED` (403). The allowlist is not a sandbox: `chroma` runs
+  the image's fixed `fpcalc` helper, and `fetchart`'s `cover_art_url` source fetches the URL
+  stored in a file's tag, outside `provider_boundary`. Keys that choose which files are read
+  or where they are written stay locked: `import.log`, `import.set_fields` (it can set
+  `path` before the import moves the file), and `replace`, whose rules keep `paths` and
+  `art_filename` results inside `directory` (#461); with a custom `replace` or an `include`,
+  which the guard cannot check, `paths` and `art_filename` are locked as well. In every mode,
+  the editor refuses YAML aliases, non-text keys and files over 1 MiB before anything is
+  constructed, because aliases (and merge keys) load as shared references that make
+  construction and the guard's walk exponential. An earlier denylist (`hook`, `pluginpath`,
   `include`) missed `inline` fields and plugin command options. Such changes are made by
   editing the file on the server; a file that already has them still loads.
 - **Egress.** Beets plugins make their own outbound requests (MusicBrainz, AcoustID,

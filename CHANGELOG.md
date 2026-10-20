@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Security
+
+- Embedded Beets (`BEETS_ENGINE=embedded`): the browser can no longer change `import.set_fields` or `replace` in `config.yaml` (#461). `set_fields` can set any field, including a file's path, before the import moves or copies the file. `replace` holds the rules that keep `paths` and `art_filename` results inside the music folder. Path templates (`paths`, `art_filename`) stay editable while the file uses Beets' default `replace` rules; with its own `replace` or an `include`, they too are edited on the server. Make these edits in `config.yaml` on the server.
+- Config editor (every mode): a save or revert whose YAML uses aliases (`*name`, including `<<: *name` merges), has a key that is not text (such as `1:`), or is larger than 1 MiB is refused as invalid before it is parsed into data, so a few lines can no longer make parsing and the embedded guard's comparison run for minutes while holding the config write lock (#461). YAML nested too deeply, or with a value that cannot be read (such as an impossible date), is now a validation error instead of a server error. Write aliased values out in full.
+- The documentation no longer says the allowed plugins run nothing external: `chroma` runs the fixed `fpcalc` helper, and `fetchart`'s `cover_art_url` source fetches URLs read from file tags, outside Web Manager's outbound policy.
+
 ## v0.8.1 - 2026-10-20
 
 ### Highlights

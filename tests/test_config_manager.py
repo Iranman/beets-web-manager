@@ -146,6 +146,49 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.assertIn("import.log", self._refused(self.BASE, self.BASE + "import:\n  log: /tmp/x\n"))
         self.assertIn("fetchart.fallback", self._refused(self.BASE, self.BASE + "fetchart:\n  fallback: /tmp/x\n"))
 
+    def test_refuses_import_set_fields_and_replace(self):
+        # #461 F1/F2: set_fields can set `path`; `replace` holds the rules that
+        # keep path templates inside `directory`.
+        self.assertIn("import.set_fields",
+                      self._refused(self.BASE, self.BASE + "import:\n  set_fields:\n    genre: Rock\n"))
+        self.assertIn("replace", self._refused(self.BASE, self.BASE + "replace:\n  'x': y\n"))
+        stored = self.BASE + "replace:\n  '^\\.': _\n"
+        self.assertIn("replace", self._refused(stored, self.BASE))
+
+    def test_path_templates_stay_editable(self):
+        self.assertTrue(self._save(self.BASE, self.BASE + "paths:\n  default: $albumartist/$album/$title\n"
+                                   "art_filename: folder\nimport:\n  move: yes\n")["ok"])
+
+    def test_path_templates_are_locked_with_a_custom_replace_or_include(self):
+        # #461 F2: only Beets' default `replace` rules are known to keep
+        # templates inside `directory`.
+        for stored in (self.BASE + "replace:\n  'x': y\n", self.BASE + "include: [more.yaml]\n"):
+            with self.subTest(stored=stored):
+                self.assertIn("paths.default", self._refused(stored, stored + "paths:\n  default: $album/$title\n"))
+                self.assertIn("art_filename", self._refused(stored, stored + "art_filename: folder\n"))
+                self.assertTrue(self._save(stored, stored + "va_name: VA\n")["ok"])
+
+    def test_validation_refuses_aliases_non_text_keys_and_oversized_text(self):
+        # #461 F3: decided on the node graph, before construction, in every mode.
+        from backend.config_manager import validate_config_yaml
+        cases = {
+            "match: &m {}\nui: *m\n": "aliases",
+            "match: &m {x: 1}\nui:\n  <<: *m\n": "aliases",
+            "match:\n  1: x\n": "keys must be text",
+            "a: " + "x" * (1024 * 1024) + "\n": "larger than 1 MiB",
+            "a: " + "[" * 5000 + "]" * 5000 + "\n": "nested too deeply",
+            "match: 2026-99-99\n": "could not be read",
+        }
+        for text, reason in cases.items():
+            with self.subTest(reason=reason):
+                ok, msg = validate_config_yaml(text)
+                self.assertFalse(ok)
+                self.assertIn(reason, msg)
+        self.assertEqual(validate_config_yaml("match:\n  '1': x\n<<: {a: 1}\n"), (True, ""))
+        with self.assertRaises(ConfigValidationError):
+            self._save(self.BASE, self.BASE + "match: &m {}\nui: *m\n")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
+
     def test_refuses_unparseable_or_non_mapping_text(self):
         from backend.config_manager import refuse_code_execution_edits
         for new in ("- just\n- a list\n", "a: [\n"):
