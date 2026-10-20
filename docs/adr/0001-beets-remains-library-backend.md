@@ -4,7 +4,7 @@ Date: 2026-07-20
 
 ## Status
 
-Accepted
+Accepted. The transport (stock container over HTTP) is superseded by ADR 0006 (Beets in-process); the decision below still holds.
 
 ## Context
 
