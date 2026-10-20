@@ -9,6 +9,7 @@ import os
 import shutil
 import struct
 import tempfile
+import types
 import unittest
 import wave
 
@@ -195,6 +196,47 @@ class PluginImportAutotagTests(unittest.TestCase):
                 self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
                 self.assertEqual(len(self.lib.albums()), 0)
                 shutil.rmtree(src)
+
+    def test_pinned_import_ignores_the_data_source_penalty(self):
+        """With a second metadata source loaded (chroma, deezer), Beets adds a
+        data_source penalty to the album and every track of a download, which
+        keeps even a complete, exactly matching folder over the strong
+        threshold. The one pinned Release is judged without it (1.18.3),
+        both for a complete folder and for a missing-track repair."""
+        from unittest import mock
+        from beets import metadata_plugins
+        sources = [types.SimpleNamespace(data_source=n, data_source_mismatch_penalty=0.5)
+                   for n in ("MusicBrainz", "Acoustid")]
+        with mock.patch.object(metadata_plugins, "find_metadata_source_plugins",
+                               lambda: sources):
+            src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2"]))
+            self.assertEqual((data["skipped"], data["partial_matches"]), ([], 0))
+            shutil.rmtree(src)
+            src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2", "Track 3"]),
+                                            allow_missing_tracks=True)
+            self.assertEqual((data["skipped"], data["partial_matches"]), ([], 1))
+        self.assertEqual([a.mb_albumid for a in self.lib.albums()], [REL, REL])
+
+    def test_pinned_import_without_data_source_relief_was_skipped(self):
+        """Control for the test above: Beets' own recommendation for that
+        complete folder is not strong, so stock quiet mode would skip it."""
+        from unittest import mock
+        from beets import metadata_plugins
+        import beets.autotag.match as match_mod
+        from beets.autotag import Recommendation
+        from beets.autotag.source import Source
+        from beets.library import Item
+        sources = [types.SimpleNamespace(data_source=n, data_source_mismatch_penalty=0.5)
+                   for n in ("MusicBrainz", "Acoustid")]
+        src = os.path.join(self.downloads, "Some Artist - Full")
+        _album(src, "Some Artist", "Partial")
+        items = [Item.from_path(os.path.join(src, f)) for f in sorted(os.listdir(src))]
+        info = self._pinned_release(["Track 1", "Track 2"])
+        with mock.patch.object(metadata_plugins, "find_metadata_source_plugins",
+                               lambda: sources),                 mock.patch.object(match_mod.metadata_plugins, "albums_for_ids", lambda ids: iter([info])):
+            prop = match_mod.tag_album(Source.from_items(items), search_ids=[REL])
+        self.assertNotEqual(prop.recommendation, Recommendation.strong)
+        self.assertGreater(prop.candidates[0].distance["data_source"], 0)
 
     def test_allow_missing_tracks_validation(self):
         src = os.path.join(self.downloads, "A")

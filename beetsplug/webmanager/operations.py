@@ -625,19 +625,56 @@ def on_import_task_created(session, task):
     return None
 
 
-def _pinned_partial_match(task, release_id: str):
-    """The pinned Release as a match for a source that holds only some of its
-    tracks, or None.
+#: Penalties that say nothing against a Release pinned by its one search id:
+#: the source's tracks the Release lacks are checked as extra items, and
+#: ``data_source`` only says the files carry no ``data_source`` of their own
+#: (every untagged download does once a second metadata source is loaded).
+_PINNED_ALBUM_EXEMPT = frozenset({"missing_tracks", "data_source"})
+_PINNED_TRACK_EXEMPT = frozenset({"data_source"})
+
+
+def _distance_without(dist, album_exempt, track_exempt=_PINNED_TRACK_EXEMPT):
+    """(raw, max) of a Beets album Distance with the named album-level
+    penalties left out and each track's distance recomputed without the
+    named track-level ones. Same weights and sums as Beets' own
+    ``Distance.raw_distance``/``max_distance``."""
+    weights = dist._weights
+    raw = mx = 0.0
+    for key, penalties in dist._penalties.items():
+        if key in album_exempt or key == "tracks":
+            continue
+        raw += sum(penalties) * weights[key]
+        mx += len(penalties) * weights[key]
+    for track_dist in (getattr(dist, "tracks", None) or {}).values():
+        t_raw = t_max = 0.0
+        for key, penalties in track_dist._penalties.items():
+            if key not in track_exempt:
+                t_raw += sum(penalties) * weights[key]
+                t_max += len(penalties) * weights[key]
+        raw += (t_raw / t_max if t_max else 0.0) * weights["tracks"]
+        mx += weights["tracks"]
+    return raw, mx
+
+
+def _pinned_partial_match(task, release_id: str, allow_missing: bool = True):
+    """The Release pinned by the request's one search id as a match, or None.
 
     Beets caps the recommendation of any match with missing tracks at medium
     (``match.max_rec.missing_tracks``) and counts every missing track in the
     distance, so ``beet import -q --search-id`` always skips a folder of an
-    album's missing tracks. A missing-track repair asks for exactly that
-    folder, so the missing tracks are not evidence against it. Everything
-    else keeps Beets' own bar: the best candidate must be the pinned Release,
-    every file must sit on one of its tracks (no extra items), no other
-    penalty may be capped below strong, and the distance without the
-    missing-track penalty must be under ``match.strong_rec_thresh``."""
+    album's missing tracks. A missing-track repair (``allow_missing``) asks
+    for exactly that folder, so the missing tracks are not evidence against
+    it. With a second metadata source loaded (chroma, deezer), Beets also
+    adds its ``data_source`` penalty to the album and to every track of any
+    source whose files carry no ``data_source`` -- every download -- which
+    alone keeps a perfectly tagged complete album over the strong threshold.
+    With exactly one pinned Release that penalty is no evidence either, so it
+    is left out for both partial and complete sources.
+
+    Everything else keeps Beets' own bar: the best candidate must be the
+    pinned Release, every file must sit on one of its tracks (no extra
+    items), no other penalty may be capped below strong, and the distance
+    without those penalties must be under ``match.strong_rec_thresh``."""
     candidates = list(getattr(task, "candidates", None) or [])
     if not release_id or not candidates:
         return None
@@ -645,27 +682,26 @@ def _pinned_partial_match(task, release_id: str):
     if getattr(getattr(match, "info", None), "album_id", None) != release_id:
         return None
     missing = len(getattr(match, "extra_tracks", None) or [])
-    if not missing or getattr(match, "extra_items", None):
+    if (missing and not allow_missing) or getattr(match, "extra_items", None):
         return None
     dist = match.distance
     keys = set(dist.keys())
     for track_dist in (getattr(dist, "tracks", None) or {}).values():
         keys.update(track_dist.keys())
-    keys.discard("missing_tracks")
     max_rec = beets_config["match"]["max_rec"]
-    for key in keys:
+    for key in keys - _PINNED_ALBUM_EXEMPT:
         if key in max_rec.keys() and max_rec[key].as_str() != "strong":
             return None
-    weight = missing * beets_config["match"]["distance_weights"]["missing_tracks"].as_number()
-    max_distance = dist.max_distance - weight
+    raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT)
     if max_distance <= 0:
         return None
-    if (dist.raw_distance - weight) / max_distance >= beets_config["match"]["strong_rec_thresh"].as_number():
+    if raw / max_distance >= beets_config["match"]["strong_rec_thresh"].as_number():
         return None
     return match
 
 
-def _import_session_class(autotag: bool, tasks: List[Any], partial_release_id: str = ""):
+def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: str = "",
+                          allow_missing_tracks: bool = False):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
 
@@ -687,7 +723,7 @@ def _import_session_class(autotag: bool, tasks: List[Any], partial_release_id: s
 
         def choose_match(self, task):
             tasks.append(task)
-            partial = _pinned_partial_match(task, partial_release_id)
+            partial = _pinned_partial_match(task, pinned_release_id, allow_missing_tracks)
             if partial is not None:
                 # Stock choose_match lets plugins act first (badfiles'
                 # import_action_on_error: skip); the override must not skip that.
@@ -698,7 +734,7 @@ def _import_session_class(autotag: bool, tasks: List[Any], partial_release_id: s
                         "Only one handler for `import_task_before_choice` may return an action.")
                 if actions:
                     return self._identity_checked(task, actions[0])
-                task.webmanager_partial_match = True
+                task.webmanager_partial_match = bool(partial.extra_tracks)
                 return partial
             return self._identity_checked(task, super().choose_match(task))
 
@@ -940,7 +976,7 @@ def run_import():
                 path_bytes = [util.bytestring_path(p) for p in safe_paths]
                 tasks: List[Any] = []
                 session = _import_session_class(
-                    autotag, tasks, search_ids[0] if allow_missing_tracks else "")(
+                    autotag, tasks, search_ids[0] if len(search_ids) == 1 else "", allow_missing_tracks)(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
                 global _IMPORTED_ALBUM_IDS
