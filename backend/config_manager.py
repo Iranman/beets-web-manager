@@ -22,7 +22,6 @@ import stat
 import tempfile
 import threading
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -128,15 +127,6 @@ def _changed_paths(old: Any, new: Any, path: tuple = ()) -> list:
     return out
 
 
-def _new_aliases(old_text: str, new_text: str) -> Counter:
-    """#461 F3: YAML aliases the new text adds. Aliases load as shared
-    references, so a few lines can make _changed_paths (and ==) visit
-    exponentially many nodes under CONFIG_WRITE_LOCK."""
-    def aliases(text: str) -> Counter:
-        return Counter(t.value for t in yaml.scan(text or "") if isinstance(t, yaml.AliasToken))
-    return aliases(new_text) - aliases(old_text)
-
-
 def _edit_allowed(path: tuple) -> bool:
     if not path or not isinstance(path[0], str) or path[0] not in EMBEDDED_EDITABLE_KEYS:
         return False
@@ -154,7 +144,7 @@ def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
     def load(text: str) -> Dict[str, Any]:
         try:
             data = yaml.safe_load(text or "")
-        except (yaml.YAMLError, RecursionError):
+        except (yaml.YAMLError, ValueError, OverflowError, RecursionError):
             raise ConfigCodeExecutionEditRefused(["a config.yaml that does not parse"]) from None
         if data is None:
             return {}
@@ -162,15 +152,16 @@ def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
             raise ConfigCodeExecutionEditRefused(["a config.yaml that is not a mapping"])
         return data
     old, new = load(old_text), load(new_text)
-    added_aliases = _new_aliases(old_text, new_text)
-    if added_aliases:
-        raise ConfigCodeExecutionEditRefused(sorted(f"YAML alias *{a}" for a in added_aliases))
+    # #461 F2: Beets' default `replace` rules keep path templates inside
+    # `directory`; a custom set (here or in an included file) is not checked,
+    # so templates are then edited on the server only.
+    custom_replace = "replace" in old or "include" in old
     refused = []
     for path in _changed_paths(old, new):
         if path == ("plugins",):
             added = _plugin_names(new.get("plugins")) - _plugin_names(old.get("plugins"))
             refused += sorted(f"the {p} plugin" for p in added - EMBEDDED_SAFE_PLUGINS)
-        elif not _edit_allowed(path):
+        elif not _edit_allowed(path) or (custom_replace and path[0] in ("paths", "art_filename")):
             refused.append(".".join(str(k) for k in path))
     if refused:
         raise ConfigCodeExecutionEditRefused(refused)
@@ -306,17 +297,50 @@ def get_config_backup_path(config_path: Optional[Path] = None) -> Path:
     return cfg.with_suffix(".yaml.bak")
 
 
+MAX_CONFIG_BYTES = 1024 * 1024
+_YAML_TEXT_KEY_TAGS = ("tag:yaml.org,2002:str", "tag:yaml.org,2002:merge")
+
+
+def _yaml_shape_error(content: str) -> str:
+    """#461 F3: checked on the node graph, before anything is constructed.
+    Aliases load as shared references (merge keys copy them), so a few lines
+    can make construction and the embedded guard's diff walk exponential, and
+    non-text keys can collide in one hash bucket. Beets' config needs neither."""
+    if len(content.encode("utf-8", "replace")) > MAX_CONFIG_BYTES:
+        return "Config is larger than 1 MiB"
+    root = yaml.compose(content)
+    seen, stack = set(), [root] if root is not None else []
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            return "YAML aliases (*name) are not supported; write the value out in full"
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if not (isinstance(key, yaml.ScalarNode) and key.tag in _YAML_TEXT_KEY_TAGS):
+                    return "Config keys must be text"
+                stack.append(value)
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+    return ""
+
+
 def validate_config_yaml(content: str) -> Tuple[bool, str]:
     """Validate that content is parseable YAML mapping."""
     if not content or not content.strip():
         return False, "Config content cannot be empty"
     try:
+        shape_error = _yaml_shape_error(content)
+        if shape_error:
+            return False, shape_error
         parsed = yaml.safe_load(content)
         if parsed is not None and not isinstance(parsed, dict):
             return False, "Configuration root must be a YAML mapping/dictionary"
         return True, ""
     except RecursionError:
         return False, "Invalid YAML: nested too deeply"
+    except (ValueError, OverflowError):
+        return False, "Invalid YAML: a value could not be read (for example an impossible date)"
     except yaml.YAMLError as exc:
         return False, f"Invalid YAML syntax: {exc}"
 

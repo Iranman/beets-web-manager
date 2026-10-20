@@ -159,18 +159,35 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.assertTrue(self._save(self.BASE, self.BASE + "paths:\n  default: $albumartist/$album/$title\n"
                                    "art_filename: folder\nimport:\n  move: yes\n")["ok"])
 
-    def test_refuses_new_yaml_aliases_but_keeps_existing_ones(self):
-        # #461 F3: aliases load as shared references; new ones are refused
-        # before the diff walk runs.
-        self.assertIn("YAML alias *m", self._refused(self.BASE, self.BASE + "match: &m {}\nui: *m\n"))
-        stored = self.BASE + "match: &m {}\nui: *m\n"
-        self.assertTrue(self._save(stored, stored + "va_name: VA\n")["ok"])
+    def test_path_templates_are_locked_with_a_custom_replace_or_include(self):
+        # #461 F2: only Beets' default `replace` rules are known to keep
+        # templates inside `directory`.
+        for stored in (self.BASE + "replace:\n  'x': y\n", self.BASE + "include: [more.yaml]\n"):
+            with self.subTest(stored=stored):
+                self.assertIn("paths.default", self._refused(stored, stored + "paths:\n  default: $album/$title\n"))
+                self.assertIn("art_filename", self._refused(stored, stored + "art_filename: folder\n"))
+                self.assertTrue(self._save(stored, stored + "va_name: VA\n")["ok"])
 
-    def test_deeply_nested_yaml_is_a_validation_error(self):
+    def test_validation_refuses_aliases_non_text_keys_and_oversized_text(self):
+        # #461 F3: decided on the node graph, before construction, in every mode.
         from backend.config_manager import validate_config_yaml
-        ok, msg = validate_config_yaml("a: " + "[" * 5000 + "]" * 5000 + "\n")
-        self.assertFalse(ok)
-        self.assertIn("nested too deeply", msg)
+        cases = {
+            "match: &m {}\nui: *m\n": "aliases",
+            "match: &m {x: 1}\nui:\n  <<: *m\n": "aliases",
+            "match:\n  1: x\n": "keys must be text",
+            "a: " + "x" * (1024 * 1024) + "\n": "larger than 1 MiB",
+            "a: " + "[" * 5000 + "]" * 5000 + "\n": "nested too deeply",
+            "match: 2026-99-99\n": "could not be read",
+        }
+        for text, reason in cases.items():
+            with self.subTest(reason=reason):
+                ok, msg = validate_config_yaml(text)
+                self.assertFalse(ok)
+                self.assertIn(reason, msg)
+        self.assertEqual(validate_config_yaml("match:\n  '1': x\n<<: {a: 1}\n"), (True, ""))
+        with self.assertRaises(ConfigValidationError):
+            self._save(self.BASE, self.BASE + "match: &m {}\nui: *m\n")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
 
     def test_refuses_unparseable_or_non_mapping_text(self):
         from backend.config_manager import refuse_code_execution_edits

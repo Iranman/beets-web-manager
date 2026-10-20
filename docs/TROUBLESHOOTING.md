@@ -24,7 +24,7 @@ With `BEETS_ENGINE=embedded`, Web Manager checks Beets once at startup. `GET /ap
 | `ffmpeg_missing` | warning | `ffmpeg` is not on `PATH`. | Use the published image, which includes it. |
 | `engine_start_failed` | error, stops Beets | Beets raised an unexpected error while starting. | See the log for the exception. |
 
-**The Config page refuses a save with `CONFIG_CODE_EXECUTION_EDIT_REFUSED`**: with embedded Beets, whatever `config.yaml` makes Beets run runs inside Web Manager, so the browser (the Config page and Setup's plugin fixes) may change only the allowlisted settings described under *Embedded Beets* in [CONFIGURATION.md](CONFIGURATION.md); the error names the refused keys. `import.set_fields`, `replace` and new YAML aliases (`*name`) are among them. Make that change by editing `config.yaml` on the server, then restart Web Manager.
+**The Config page refuses a save with `CONFIG_CODE_EXECUTION_EDIT_REFUSED`**: with embedded Beets, whatever `config.yaml` makes Beets run runs inside Web Manager, so the browser (the Config page and Setup's plugin fixes) may change only the allowlisted settings described under *Embedded Beets* in [CONFIGURATION.md](CONFIGURATION.md); the error names the refused keys. `import.set_fields` and `replace` are among them, and so are `paths` and `art_filename` when the file has its own `replace` or `include`. A save refused as invalid YAML because of aliases (`*name`), a key that is not text or a file over 1 MiB needs the value written out in full, the key quoted, or the file trimmed. Make that change by editing `config.yaml` on the server, then restart Web Manager.
 
 ---
 
