@@ -74,7 +74,9 @@ class ConfigCodeExecutionEditRefused(ConfigError):
 # badfiles, duplicates.checksum, mbsubmit.picard_path, ...), so anything not
 # named here is refused. Plugins that may be ADDED: none runs an external
 # command or a user-written expression from config.yaml (checked against the
-# pinned Beets). Removing any plugin is allowed.
+# pinned Beets; chroma runs the fixed `fpcalc` helper, and fetchart's
+# `cover_art_url` source fetches URLs read from file tags, outside
+# provider_boundary). Removing any plugin is allowed.
 EMBEDDED_SAFE_PLUGINS = frozenset({
     "web", "webmanager", "discpath", "musicbrainz", "fetchart", "embedart", "scrub", "zero",
     "ftintitle", "fromfilename", "mbsync", "chroma", "lastgenre", "discogs", "deezer",
@@ -82,15 +84,20 @@ EMBEDDED_SAFE_PLUGINS = frozenset({
 })
 # Top-level keys whose whole subtree the browser may change...
 EMBEDDED_EDITABLE_KEYS = frozenset({
-    "import", "match", "paths", "replace", "ui", "ignore", "ignore_hidden", "threaded",
+    "import", "match", "paths", "ui", "ignore", "ignore_hidden", "threaded",
     "timeout", "per_disc_numbering", "original_date", "artist_credit", "va_name",
     "asciify_paths", "art_filename", "max_filename_length", "id3v23", "overwrite_null",
     "format_item", "format_album", "time_format", "sort_item", "sort_album",
     "sort_case_insensitive", "acoustid",
 }) | (EMBEDDED_SAFE_PLUGINS - {"web", "webmanager"})
 # ...except these: file paths Beets writes or reads, and outbound hosts.
+# #461: `import.set_fields` can set any field, `path` included, before the
+# import moves or copies the file. Top-level `replace` is not
+# editable either: its rules (`[\/]`, `^\.`) are what keep `paths` and
+# `art_filename` results inside `directory` (Beets 2.14.1 Item.destination,
+# Album.art_destination), and templates stay editable only while it is not.
 EMBEDDED_LOCKED_PATHS = (
-    ("import", "log"), ("musicbrainz", "host"), ("musicbrainz", "https"),
+    ("import", "log"), ("import", "set_fields"), ("musicbrainz", "host"), ("musicbrainz", "https"),
     ("lastgenre", "whitelist"), ("lastgenre", "canonical"), ("fetchart", "fallback"), ("lyrics", "lrcmux"),
     ("discogs", "tokenfile"), ("spotify", "tokenfile"),
 )
@@ -137,7 +144,7 @@ def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
     def load(text: str) -> Dict[str, Any]:
         try:
             data = yaml.safe_load(text or "")
-        except yaml.YAMLError:
+        except (yaml.YAMLError, ValueError, OverflowError, RecursionError):
             raise ConfigCodeExecutionEditRefused(["a config.yaml that does not parse"]) from None
         if data is None:
             return {}
@@ -145,12 +152,16 @@ def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
             raise ConfigCodeExecutionEditRefused(["a config.yaml that is not a mapping"])
         return data
     old, new = load(old_text), load(new_text)
+    # #461 F2: Beets' default `replace` rules keep path templates inside
+    # `directory`; a custom set (here or in an included file) is not checked,
+    # so templates are then edited on the server only.
+    custom_replace = "replace" in old or "include" in old
     refused = []
     for path in _changed_paths(old, new):
         if path == ("plugins",):
             added = _plugin_names(new.get("plugins")) - _plugin_names(old.get("plugins"))
             refused += sorted(f"the {p} plugin" for p in added - EMBEDDED_SAFE_PLUGINS)
-        elif not _edit_allowed(path):
+        elif not _edit_allowed(path) or (custom_replace and path[0] in ("paths", "art_filename")):
             refused.append(".".join(str(k) for k in path))
     if refused:
         raise ConfigCodeExecutionEditRefused(refused)
@@ -286,15 +297,50 @@ def get_config_backup_path(config_path: Optional[Path] = None) -> Path:
     return cfg.with_suffix(".yaml.bak")
 
 
+MAX_CONFIG_BYTES = 1024 * 1024
+_YAML_TEXT_KEY_TAGS = ("tag:yaml.org,2002:str", "tag:yaml.org,2002:merge")
+
+
+def _yaml_shape_error(content: str) -> str:
+    """#461 F3: checked on the node graph, before anything is constructed.
+    Aliases load as shared references (merge keys copy them), so a few lines
+    can make construction and the embedded guard's diff walk exponential, and
+    non-text keys can collide in one hash bucket. Beets' config needs neither."""
+    if len(content.encode("utf-8", "replace")) > MAX_CONFIG_BYTES:
+        return "Config is larger than 1 MiB"
+    root = yaml.compose(content)
+    seen, stack = set(), [root] if root is not None else []
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            return "YAML aliases (*name) are not supported; write the value out in full"
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if not (isinstance(key, yaml.ScalarNode) and key.tag in _YAML_TEXT_KEY_TAGS):
+                    return "Config keys must be text"
+                stack.append(value)
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+    return ""
+
+
 def validate_config_yaml(content: str) -> Tuple[bool, str]:
     """Validate that content is parseable YAML mapping."""
     if not content or not content.strip():
         return False, "Config content cannot be empty"
     try:
+        shape_error = _yaml_shape_error(content)
+        if shape_error:
+            return False, shape_error
         parsed = yaml.safe_load(content)
         if parsed is not None and not isinstance(parsed, dict):
             return False, "Configuration root must be a YAML mapping/dictionary"
         return True, ""
+    except RecursionError:
+        return False, "Invalid YAML: nested too deeply"
+    except (ValueError, OverflowError):
+        return False, "Invalid YAML: a value could not be read (for example an impossible date)"
     except yaml.YAMLError as exc:
         return False, f"Invalid YAML syntax: {exc}"
 

@@ -13,6 +13,7 @@ from backend.acquisition_service import _ACQ_QUEUE_SOURCES, _DOWNLOAD_METHODS, _
 from backend.app_runtime import QBIT_CATEGORY, QBIT_FILTER, QBIT_URL, YTDLP_ALLOW_BROWSER_COOKIES, _app_logger, _s, _ytdlp_ready, jobs
 from backend.job_service import ALBUM_DOWNLOAD_WAIT, _wait_for_child_job
 from backend.matching_service import _invalidate_lib_cache
+from backend.recover_service import recover_cookie_state, recover_enumerate, recover_probe, start_recover_fetch
 from backend.replacement_service import _music_format_replace_rows, _music_format_scan_library
 from backend.serializers import json_route_result
 from backend.slskd_service import _normalise_download_method
@@ -609,3 +610,44 @@ def start_music_format_replacement_retry():
                   **job_contract.contract_metadata("music-format-replace")},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
+
+
+# ── Recover My Uploads (increment 1): authorized FETCH + STAGE ──────────────
+# Added here (not a new routes_*.py) because app.py's ROUTE_MODULES is the only
+# registration path and app.py is out of scope for this change.
+@app.get("/api/recover/cookie-state")
+def api_recover_cookie_state():
+    """Recoverable yt-dlp cookie state (none/invalid/rejected/ok) for owner-only
+    recovery, by variable name and signature only — never cookie contents."""
+    return json_route_result(recover_cookie_state(), 200)
+
+
+@app.post("/api/recover/probe")
+def api_recover_probe():
+    """Probe metadata + available formats for one allowlisted URL. No download."""
+    url = _s((request.get_json(silent=True) or {}).get("url")).strip()
+    if not url:
+        return json_route_result({"ok": False, "error": "url is required"}, 200)
+    return json_route_result(recover_probe(url), 200)
+
+
+@app.post("/api/recover/enumerate")
+def api_recover_enumerate():
+    """List a channel/user/playlist/set owner's items (extract_flat). No download."""
+    data = request.get_json(silent=True) or {}
+    url = _s(data.get("url")).strip()
+    if not url:
+        return json_route_result({"ok": False, "error": "url is required"}, 200)
+    try:
+        limit = int(data.get("limit") or 500)
+    except (TypeError, ValueError):
+        limit = 500
+    return json_route_result(recover_enumerate(url, limit=limit), 200)
+
+
+@app.post("/api/recover/fetch")
+def api_recover_fetch():
+    """Start a background job to fetch + stage authorized uploads under
+    DOWNLOADS_ROOT. Does NOT import into the library in this increment."""
+    body, status = start_recover_fetch(request.get_json(silent=True) or {})
+    return json_route_result(body, status)
