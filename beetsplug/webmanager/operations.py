@@ -621,9 +621,20 @@ def on_album_imported(lib, album):
 def on_import_task_created(session, task):
     """``import_task_created`` listener (D3): without autotag, Beets places an
     album by its own tags, so one with no artist or album name is skipped
-    before anything is added or moved. Only Web Manager imports are checked."""
+    before anything is added or moved. Only Web Manager imports are checked.
+
+    For a Web Manager import it also drops chroma's AcoustID results for the
+    task's files: chroma keeps them by path for the life of the process and
+    only overwrites them on a successful lookup, so an entry from an earlier
+    import of the same path could otherwise vouch for different audio
+    (_artist_relaxable G2). chroma fingerprints the task again at
+    ``import_task_start``, after this event."""
     if getattr(session, "webmanager_require_identity", False) and _refuse_blank_identity(session, task):
         task.set_choice(_skip_action())
+    matches = getattr(sys.modules.get("beetsplug.chroma"), "_matches", None)
+    if hasattr(session, "webmanager_tasks") and isinstance(matches, dict):
+        for item in getattr(task, "items", None) or []:
+            matches.pop(item.path, None)
     return None
 
 
@@ -762,7 +773,7 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     for track_dist in (getattr(dist, "tracks", None) or {}).values():
         keys.update(track_dist.keys())
     max_rec = beets_config["match"]["max_rec"]
-    for key in keys - _PINNED_ALBUM_EXEMPT:
+    for key in keys - {"missing_tracks"}:  # an explicit data_source cap still holds
         if key in max_rec.keys() and max_rec[key].as_str() != "strong":
             return None
     thresh = beets_config["match"]["strong_rec_thresh"].as_number()

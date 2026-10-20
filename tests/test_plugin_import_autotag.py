@@ -274,7 +274,9 @@ class PluginImportAutotagTests(unittest.TestCase):
                 if rec:
                     matches[item.path] = ([rec], [REL])
             return real(task, *a, **kw)
-        with mock.patch.object(match_mod.metadata_plugins, "albums_for_ids", lambda ids: iter([info])),                 mock.patch.dict("sys.modules", {"beetsplug.chroma": types.SimpleNamespace(_matches=matches)}),                 mock.patch.object(ops_mod, "_pinned_partial_match", with_chroma_hits):
+        with mock.patch.object(match_mod.metadata_plugins, "albums_for_ids", lambda ids: iter([info])), \
+                mock.patch.dict("sys.modules", {"beetsplug.chroma": types.SimpleNamespace(_matches=matches)}), \
+                mock.patch.object(ops_mod, "_pinned_partial_match", with_chroma_hits):
             res = self._import(paths=[src], autotag=True, search_ids=[REL], copy=True, move=False,
                                duplicate_action="keep", allow_missing_tracks=True,
                                existing_album_id=album.id if existing_album_id is None else existing_album_id)
@@ -287,6 +289,38 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual(data["partial_artist_relaxed"], [src])
         self.assertEqual(len(data["imported_album_ids"]), 1)
         self.assertNotIn(old_id, data["imported_album_ids"])
+
+    def test_stale_acoustid_result_from_an_earlier_import_is_dropped(self):
+        """N2: chroma keeps _matches by path for the life of the process and
+        only overwrites an entry on a successful lookup. A Web Manager import
+        drops the entries for its files when the task is created, so only a
+        lookup made for this import (import_task_start) can satisfy G2."""
+        from unittest import mock
+        src = os.path.join(self.downloads, "Some Artist - Stale")
+        _album(src, "Some Artist", "Stale")
+        stale = {os.path.join(src, "01.wav").encode(): (["stale"], []), b"/elsewhere/x.wav": (["keep"], [])}
+        seen = []
+        with mock.patch.dict("sys.modules", {"beetsplug.chroma": types.SimpleNamespace(_matches=stale)}), \
+                mock.patch.object(ops_mod, "_pinned_partial_match",
+                                  lambda task, *a, **kw: seen.append(dict(stale))):
+            self._import(paths=[src], autotag=True, search_ids=[REL], copy=True, move=False)
+        self.assertEqual(seen, [{b"/elsewhere/x.wav": (["keep"], [])}])
+
+    def test_explicit_max_rec_data_source_cap_is_honoured(self):
+        """N1: an operator's match.max_rec.data_source cap still applies to a
+        pinned import; only missing_tracks is exempt from the cap check."""
+        from unittest import mock
+        from beets import metadata_plugins
+        sources = [types.SimpleNamespace(data_source=n, data_source_mismatch_penalty=0.5)
+                   for n in ("MusicBrainz", "Acoustid")]
+        beets_config["match"]["max_rec"]["data_source"] = "medium"
+        try:
+            with mock.patch.object(metadata_plugins, "find_metadata_source_plugins", lambda: sources):
+                src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2"]))
+        finally:
+            beets_config["match"]["max_rec"]["data_source"] = "strong"  # confuse cannot delete; strong = no cap
+        self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
+        self.assertEqual(len(self.lib.albums()), 0)
 
     def test_artist_relaxation_end_to_end_refusals(self):
         for name, rec, release, aid in (

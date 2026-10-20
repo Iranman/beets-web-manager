@@ -108,6 +108,18 @@ class PinnedMatchDistanceTests(unittest.TestCase):
                 task, _ = _task(dist, **kw)
                 self.assertIsNone(ops._pinned_partial_match(task, REL, allow_missing=allow))
 
+    def test_max_rec_data_source_cap_is_honoured(self):
+        """N1: data_source is left out of the distance, not out of an
+        operator's explicit match.max_rec cap."""
+        from beets import config as beets_config
+        task, match = _task(_album([_track() for _ in range(8)], artist=0.0))
+        self.assertIs(ops._pinned_partial_match(task, REL), match)
+        beets_config["match"]["max_rec"]["data_source"] = "medium"
+        try:
+            self.assertIsNone(ops._pinned_partial_match(task, REL))
+        finally:
+            beets_config["match"]["max_rec"]["data_source"] = "strong"  # confuse cannot delete; strong = no cap
+
     def test_no_pinned_release(self):
         task, _ = _task(_album([_track()], artist=0.0))
         self.assertIsNone(ops._pinned_partial_match(task, ""))
