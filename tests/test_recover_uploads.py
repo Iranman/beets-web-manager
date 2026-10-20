@@ -6,7 +6,12 @@ guard still rejects bad targets on the new entry, that URL and creator targets
 are built through the unchanged guard, cookie-state messages, the integrity
 gate, and the error taxonomy (a format/HLS/auth failure is never labelled DRM).
 """
+import contextlib
+import os
+import shutil
+import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,9 +21,15 @@ from backend import recover_service
 from backend.security import OutboundPolicyError
 
 
+def _outtmpl_dir(opts):
+    return (opts.get("outtmpl") or "").split("%", 1)[0].replace("%%", "%")
+
+
 # ── a fake yt-dlp that records how it was called, never touches the network ──
 class _FakeYDL:
     instances = []
+    filename = "recovered.opus"
+    content = b"\x00" * 4096
 
     def __init__(self, opts):
         self.opts = opts
@@ -39,19 +50,59 @@ class _FakeYDL:
     def download(self, targets):
         self.download_calls.append(list(targets))
         # Simulate a successful download by writing a file into the outtmpl dir.
-        outtmpl = self.opts.get("outtmpl") or ""
-        directory = outtmpl.split("%", 1)[0].replace("%%", "%")
+        directory = _outtmpl_dir(self.opts)
         Path(directory).mkdir(parents=True, exist_ok=True)
-        (Path(directory) / "recovered.opus").write_bytes(b"\x00" * 1024)
+        (Path(directory) / _FakeYDL.filename).write_bytes(_FakeYDL.content)
 
 
 def _fake_module():
     return type("yt_dlp", (), {"YoutubeDL": _FakeYDL})
 
 
+def _make_fake(info=None, filename="recovered.opus", content=b"\x00" * 4096):
+    """A self-contained fake yt-dlp module (no shared class state), for
+    concurrency and isolation tests."""
+    info = info or {
+        "title": "My Upload", "uploader": "Me", "duration": 200,
+        "webpage_url": "https://www.youtube.com/watch?v=abc", "formats": [],
+    }
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            return dict(info)
+
+        def download(self, targets):
+            directory = _outtmpl_dir(self.opts)
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            (Path(directory) / filename).write_bytes(content)
+
+    return type("yt_dlp", (), {"YoutubeDL": FakeYDL})
+
+
 def _allow_public(monkey_target="backend.ytdlp_guard.resolve_public_target"):
     # Allowlisted hosts pass the public-IP check without real DNS.
     return mock.patch(monkey_target, lambda url: None)
+
+
+@contextlib.contextmanager
+def _fetch_patches(stage_dir, duration=200.0, codec="opus"):
+    """Patch the fetch seams so a fake download stages into an isolated dir
+    without a network, a JS runtime, or a real ffprobe."""
+    with mock.patch.object(recover_service, "_recover_stage_dir", return_value=stage_dir), \
+         mock.patch.object(recover_service, "_require_ytdlp_js_runtime", return_value={}), \
+         mock.patch.object(recover_service, "_probe_file_duration", return_value=duration), \
+         mock.patch.object(recover_service, "inspect_audio_file", return_value={"ok": True, "codec": codec}), \
+         _allow_public():
+        yield
 
 
 class GuardStillRejectsOnRecoverEntry(unittest.TestCase):
@@ -139,13 +190,31 @@ class TargetsBuiltThroughGuard(unittest.TestCase):
         self.assertFalse(recover_service._is_soundcloud_host("notsoundcloud.com"))
         self.assertEqual(recover_service._platform_for_host("evilyoutube.com"), "other")
 
-    def test_soundcloud_original_detected_in_plan(self):
-        plan = recover_service._recover_format_plan(
+    def test_soundcloud_original_lossless_only_for_lossless_codec(self):
+        # F4: an owner-enabled original is "original" quality, but lossless ONLY
+        # when its codec/ext is lossless. An original MP3/AAC stays lossy.
+        flac = recover_service._recover_format_plan(
             "soundcloud.com",
-            {"formats": [{"format_id": "download", "format_note": "Original"}]})
-        self.assertEqual(plan["quality"], "original")
-        self.assertTrue(plan["lossless"])
-        self.assertIn("download", plan["format"])
+            {"formats": [{"format_id": "download", "format_note": "Original", "ext": "flac", "acodec": "flac"}]})
+        self.assertEqual(flac["quality"], "original")
+        self.assertTrue(flac["lossless"])
+
+        mp3 = recover_service._recover_format_plan(
+            "soundcloud.com",
+            {"formats": [{"format_id": "download", "format_note": "Original", "ext": "mp3", "acodec": "mp3"}]})
+        self.assertEqual(mp3["quality"], "original")
+        self.assertFalse(mp3["lossless"])
+
+        aac = recover_service._recover_format_plan(
+            "soundcloud.com",
+            {"formats": [{"format_id": "download", "format_note": "Original", "ext": "m4a", "acodec": "aac"}]})
+        self.assertFalse(aac["lossless"])
+
+        stream = recover_service._recover_format_plan(
+            "soundcloud.com", {"formats": [{"format_id": "http_mp3_128", "ext": "mp3"}]})
+        self.assertEqual(stream["quality"], "stream")
+        self.assertFalse(stream["lossless"])
+        self.assertIn("download", flac["format"])
 
     def test_fetch_one_builds_url_target_and_stages(self):
         _FakeYDL.instances = []
@@ -157,7 +226,7 @@ class TargetsBuiltThroughGuard(unittest.TestCase):
                 log = []
                 out = recover_service._recover_fetch_one(
                     "https://www.youtube.com/watch?v=abc", log,
-                    job_id="J1", ydl_module=_fake_module())
+                    run_id="J1", ydl_module=_fake_module())
             # Assert while the temp dir still exists.
             self.assertTrue(out["recovered"], out)
             self.assertEqual(out["quality"], "lossy")
@@ -315,11 +384,237 @@ class ErrorTaxonomy(unittest.TestCase):
     def test_standalone_eme_still_marked_drm(self):
         self.assertEqual(self._cat("Protected content: EME required"), "genuinely-DRM")
 
+    # ── F1: the specific strings QA found, each to its correct NON-DRM class ──
+    def test_401_entitlement_is_auth_not_drm(self):
+        cat = self._cat("HTTP Error 401: Unauthorized; entitlement required")
+        self.assertEqual(cat, "auth-needed")
+        self.assertNotEqual(cat, "genuinely-DRM")
+
+    def test_manifest_parse_is_hls_not_drm(self):
+        cat = self._cat("Element not found while parsing the manifest")
+        self.assertEqual(cat, "hls-assembly")
+        self.assertNotEqual(cat, "genuinely-DRM")
+
+    def test_eme_substring_words_are_not_drm(self):
+        # "placEMEnt", "requirEMEnt", "agrEEMEnt", "ElEMEnt" all contain "eme"
+        # as a substring but not as a standalone token; none is DRM.
+        for text in (
+            "codec placement failed",
+            "requirement not satisfied",
+            "agreement with the server",
+            "Element not found",
+        ):
+            self.assertNotEqual(self._cat(text), "genuinely-DRM", text)
+
+    def test_genuine_drm_evidence_maps_to_drm(self):
+        for text in (
+            "This content is protected by Widevine",
+            "FairPlay streaming is required",
+            "PlayReady license required",
+            "This stream uses EME",
+            "encrypted media extensions are required to play this",
+        ):
+            self.assertEqual(self._cat(text), "genuinely-DRM", text)
+
     def test_message_is_sanitized_string(self):
         info = recover_service.classify_recover_error("boom")
         self.assertIn("category", info)
         self.assertIn("action", info)
         self.assertIsInstance(info["message"], str)
+
+
+class SingleItemFetchRejectsCollections(unittest.TestCase):
+    """F3: a channel/playlist/set URL is refused in the single-item fetch path
+    (enumerate first), so no un-gated child is staged."""
+
+    _PLAYLIST = {"_type": "playlist", "title": "Chan", "uploader": "Me",
+                 "entries": [{"webpage_url": "https://www.youtube.com/watch?v=1"},
+                             {"webpage_url": "https://www.youtube.com/watch?v=2"}]}
+
+    def test_probe_flags_collection(self):
+        with _allow_public():
+            res = recover_service.recover_probe(
+                "https://www.youtube.com/@me", ydl_module=_make_fake(info=self._PLAYLIST))
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["is_collection"])
+        self.assertEqual(res["entry_count"], 2)
+
+    def test_fetch_one_refuses_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/@me", [], run_id="r",
+                    ydl_module=_make_fake(info=self._PLAYLIST))
+            self.assertFalse(out["recovered"])
+            self.assertEqual(out["category"], "collection")
+            # Nothing was staged.
+            self.assertEqual(list(Path(tmp).glob("*")), [])
+
+
+class ProvenanceFailureFailsItem(unittest.TestCase):
+    """F11: if provenance cannot be persisted the item FAILS and the orphan
+    staged file is removed."""
+
+    def test_provenance_write_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp), \
+                 mock.patch.object(recover_service, "_write_provenance", return_value=""):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=abc", [], run_id="r",
+                    ydl_module=_make_fake())
+            self.assertFalse(out["recovered"])
+            self.assertIn("provenance", out["message"].lower())
+            # The orphan was removed — no audio left behind.
+            self.assertEqual([p for p in Path(tmp).iterdir() if p.suffix == ".opus"], [])
+
+
+class AggregateStatus(unittest.TestCase):
+    """F12: a job where every item failed reports ok=False; a partial stays
+    ok=True with partial=True and per-item counts."""
+
+    def test_all_failed_reports_not_ok(self):
+        res = recover_service.recover_fetch_job(
+            ["https://attacker.example/x"], [], run_id="r")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["recovered_count"], 0)
+        self.assertEqual(res["failed_count"], 1)
+
+    def test_partial_is_ok_but_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp):
+                res = recover_service.recover_fetch_job(
+                    ["https://www.youtube.com/watch?v=abc", "https://attacker.example/x"],
+                    [], run_id="r", ydl_module=_make_fake())
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["partial"])
+        self.assertEqual(res["recovered_count"], 1)
+        self.assertEqual(res["failed_count"], 1)
+
+
+class OutputDiscoveryExtensions(unittest.TestCase):
+    """F10: a bare .aac original is discovered, not reported 'no audio produced'."""
+
+    def test_aac_original_is_staged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp, codec="aac"):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=abc", [], run_id="r",
+                    ydl_module=_make_fake(filename="original.aac"))
+            self.assertTrue(out["recovered"], out)
+            self.assertTrue(out["staged_file"].endswith(".aac"))
+            self.assertFalse(out["lossless"])  # aac is lossy
+
+
+class ConcurrentJobsAreIsolated(unittest.TestCase):
+    """F8: two concurrent recover-fetch runs on the same platform stage into
+    separate run dirs and never select/delete/mislabel each other's files."""
+
+    def test_two_concurrent_runs_do_not_interfere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def stage_for(platform, run_id):
+                return os.path.join(tmp, platform, run_id)
+
+            results = {}
+
+            def worker(rid, fname):
+                fake = _make_fake(filename=fname)
+                results[rid] = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=abc", [], run_id=rid, ydl_module=fake)
+
+            with mock.patch.object(recover_service, "_recover_stage_dir", side_effect=stage_for), \
+                 mock.patch.object(recover_service, "_require_ytdlp_js_runtime", return_value={}), \
+                 mock.patch.object(recover_service, "_probe_file_duration", return_value=200.0), \
+                 mock.patch.object(recover_service, "inspect_audio_file", return_value={"ok": True, "codec": "opus"}), \
+                 _allow_public():
+                t1 = threading.Thread(target=worker, args=("runA", "a.opus"))
+                t2 = threading.Thread(target=worker, args=("runB", "b.opus"))
+                t1.start(); t2.start(); t1.join(); t2.join()
+
+            self.assertTrue(results["runA"]["recovered"])
+            self.assertTrue(results["runB"]["recovered"])
+            dir_a = Path(results["runA"]["staged_file"]).parent
+            dir_b = Path(results["runB"]["staged_file"]).parent
+            self.assertNotEqual(dir_a, dir_b)
+            # Each run dir holds only its own audio file.
+            self.assertEqual([p.name for p in dir_a.glob("*.opus")], ["a.opus"])
+            self.assertEqual([p.name for p in dir_b.glob("*.opus")], ["b.opus"])
+
+
+class RetryFindsExistingStagedFile(unittest.TestCase):
+    """F5/F13: a crash between download and provenance is retried safely — the
+    isolated dir is re-scanned and the finished file is validated, not reported
+    'no audio produced'."""
+
+    def test_existing_file_validated_on_download_error(self):
+        class _CrashFake:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def extract_info(self, url, download=False):
+                return {"title": "T", "uploader": "Me", "duration": 200,
+                        "webpage_url": url, "formats": []}
+
+            def download(self, targets):
+                raise RuntimeError("network blip after the file was already written")
+
+        crash_module = type("yt_dlp", (), {"YoutubeDL": _CrashFake})
+        with tempfile.TemporaryDirectory() as tmp:
+            # A prior crashed run left a complete file in this run's dir.
+            (Path(tmp) / "prior.opus").write_bytes(b"\x00" * 4096)
+            with _fetch_patches(tmp):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=abc", [], run_id="r",
+                    ydl_module=crash_module)
+            self.assertTrue(out["recovered"], out)
+            self.assertTrue(out["staged_file"].endswith("prior.opus"))
+
+
+@unittest.skipUnless(
+    shutil.which("ffmpeg") and shutil.which("ffprobe"),
+    "ffmpeg/ffprobe required for real-media integrity test")
+class IntegrityGateRealMedia(unittest.TestCase):
+    """F9/F7: the integrity gate is exercised against REAL ffmpeg-generated
+    media (not a mocked duration), including a sub-2s-style truncation that the
+    old 2.0s floor would have let through."""
+
+    def _gen(self, path, duration):
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+             "-i", f"sine=frequency=440:duration={duration}",
+             "-c:a", "pcm_s16le", str(path)],
+            check=True, capture_output=True, timeout=60)
+
+    def test_healthy_file_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "ok.wav"
+            self._gen(f, 5)
+            res = recover_service.recover_integrity_check(str(f), 5.0)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["duration_verified"])
+
+    def test_truncated_file_rejected(self):
+        # 1.2 s of real audio claimed to be 3.0 s: the old max(_, 2.0 s) floor
+        # allowed a 1.8 s gap; the tightened band rejects it.
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "short.wav"
+            self._gen(f, 1.2)
+            res = recover_service.recover_integrity_check(str(f), 3.0)
+        self.assertFalse(res["ok"], res)
+        self.assertTrue(res["duration_verified"])
+
+    def test_garbage_file_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "garbage.opus"
+            f.write_bytes(b"not audio at all" * 64)
+            res = recover_service.recover_integrity_check(str(f), 5.0)
+        self.assertFalse(res["ok"])
+        self.assertIn("decode", res["reason"])
 
 
 if __name__ == "__main__":

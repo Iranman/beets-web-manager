@@ -26,11 +26,12 @@ import os
 import re
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from backend.app_runtime import AUDIO_EXT, _redact_security_text, _s, validated_downloads_root
-from backend.audio_preferences import ffmpeg_file_input
+from backend.audio_preferences import ffmpeg_file_input, inspect_audio_file
 from backend.auth_service import _yt_auth_source_failed_message, _yt_bot_check_message
 from backend.acquisition_service import _download_dest_under, _download_folder_segment
 from backend.ytdlp_guard import YtdlpTargetRejected, check_ytdlp_target, ytdlp_guarded_options
@@ -53,7 +54,33 @@ from backend.ytdlp_service import (
 # A staged file whose decoded duration is within this fraction of the probed
 # metadata duration is accepted; outside it, it is treated as truncated/corrupt.
 _RECOVER_DURATION_TOLERANCE = 0.15
-_RECOVER_DURATION_FLOOR_SECONDS = 2.0
+# Small absolute slack for container-vs-stream rounding only. Kept well under a
+# second so a sub-2s truncation of a short item cannot pass the gate (F9).
+_RECOVER_DURATION_ABS_EPSILON = 0.5
+
+# yt-dlp bestaudio / SoundCloud original can land in containers AUDIO_EXT does
+# not list (notably bare .aac, .oga). Gate output discovery on this superset so
+# a healthy original is never reported "no audio produced" (F10).
+_RECOVER_AUDIO_EXT = frozenset(AUDIO_EXT) | {".aac", ".oga"}
+
+# Codecs/containers that carry lossless audio. Anything else (mp3, aac, opus,
+# vorbis, ...) is lossy even when it is the owner's "original" upload (F4).
+_LOSSLESS_CODECS = frozenset({
+    "flac", "alac", "wav", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le",
+    "aiff", "ape", "wavpack", "wv", "tak", "tta", "dsd", "dsf", "dff",
+})
+_LOSSLESS_EXTS = frozenset({
+    ".flac", ".alac", ".wav", ".aiff", ".aif", ".ape", ".wv", ".tak", ".tta",
+    ".dsf", ".dff",
+})
+
+
+def _codec_is_lossless(codec: Any, ext: Any) -> bool:
+    c = _s(codec).strip().lower()
+    e = _s(ext).strip().lower()
+    if e and not e.startswith("."):
+        e = "." + e
+    return c in _LOSSLESS_CODECS or e in _LOSSLESS_EXTS
 
 
 # ── yt-dlp module seam (so tests can inject a fake without a network) ──
@@ -112,19 +139,24 @@ def _recover_format_plan(host: str, probe: Optional[Dict[str, Any]] = None) -> D
             "note": "YouTube audio kept in its original lossy container (not transcoded)",
         }
     if _is_soundcloud_host(host):
-        original_available = False
+        original_fmt: Optional[Dict[str, Any]] = None
         for fmt in (probe or {}).get("formats") or []:
             if _s(fmt.get("format_id")).lower() == "download" or "original" in _s(fmt.get("format_note")).lower():
-                original_available = True
+                original_fmt = fmt
                 break
+        # An owner-enabled original is only lossless when its codec/ext is
+        # lossless (an original MP3/AAC is still lossy) (F4). Best-effort from
+        # the probe; the fetch re-derives from the actual staged file.
+        lossless = bool(original_fmt) and _codec_is_lossless(
+            (original_fmt or {}).get("acodec"), (original_fmt or {}).get("ext"))
         return {
             # "download" is SoundCloud's owner-enabled original file.
             "format": "download/bestaudio/best",
-            "quality": "original" if original_available else "stream",
-            "lossless": bool(original_available),
+            "quality": "original" if original_fmt else "stream",
+            "lossless": lossless,
             "note": (
                 "SoundCloud original upload"
-                if original_available
+                if original_fmt
                 else "SoundCloud best available stream (owner download not enabled)"
             ),
         }
@@ -224,13 +256,20 @@ def classify_recover_error(error: Any) -> Dict[str, str]:
     def result(category: str, action: str) -> Dict[str, str]:
         return {"category": category, "action": action, "message": sanitized}
 
-    # Auth first: owner-only content needs the operator's cookies.
+    # Auth first: owner-only content needs the operator's cookies. 401 /
+    # Unauthorized / "entitlement required" / "sign in" are authorization
+    # failures, not DRM (F1) -- classify them positively here, ahead of the DRM
+    # branch, so they can never fall through and be mislabeled.
     if (
         _yt_auth_source_failed_message(raw)
         or _yt_bot_check_message(raw)
         or "private video" in text
         or "login required" in text
         or "sign in" in text
+        or "unauthorized" in text
+        or "http error 401" in text
+        or "error 401" in text
+        or "entitlement required" in text
         or ("members-only" in text or "members only" in text)
     ):
         return result("auth-needed",
@@ -256,19 +295,24 @@ def classify_recover_error(error: Any) -> Dict[str, str]:
     ):
         return result("expired-url", "Re-fetch a fresh URL for this item, or it no longer exists.")
 
-    if "m3u8" in text or "hls" in text or "fragment" in text or "ffmpeg exited" in text:
+    if (
+        "m3u8" in text or "hls" in text or "fragment" in text
+        or "ffmpeg exited" in text or "manifest" in text
+    ):
         return result("hls-assembly", "Transient HLS/stream assembly failure; retry the fetch.")
 
     if "requested format is not available" in text or "no video formats" in text or "no suitable format" in text or "requested format" in text:
         return result("format", "Adjust the requested format or try again; the stream format changed.")
 
+    # DRM only on real EME/CDM evidence. "eme" is matched as a standalone token
+    # only, so "sch-EME"/"placement"/"requirement"/"agreement"/"Element" never
+    # trip it. Auth/format/HLS are already classified above and cannot reach
+    # here (F1).
     if (
         "widevine" in text
         or "fairplay" in text
         or "playready" in text
-        # "eme" as a standalone token only: a word-boundary match so that an
-        # ordinary "Unsupported URL scheme" error (sch-EME) is never mislabeled
-        # as DRM. DRM is marked only on real EME/CDM evidence.
+        or "encrypted media" in text
         or re.search(r"\beme\b", text)
         or "drm protected" in text
         or "protected by drm" in text
@@ -320,8 +364,10 @@ def _probe_file_duration(path: str) -> Optional[float]:
 def _duration_within_tolerance(actual: Optional[float], expected: Optional[float],
                                tolerance: float = _RECOVER_DURATION_TOLERANCE) -> bool:
     """True when ``actual`` is within ``tolerance`` of ``expected`` (generalizes
-    ``_soundcloud_duration_ok``). Unknown ``expected`` cannot be checked here, so
-    the caller decides; this only answers the comparison."""
+    ``_soundcloud_duration_ok``). The band is proportional (``tolerance``) plus a
+    sub-second absolute epsilon for container rounding only -- NOT a 2 s floor,
+    so a sub-2s truncation of a short item is still rejected (F9). Unknown
+    ``expected`` cannot be checked here; the caller decides."""
     try:
         a = float(actual)
         e = float(expected)
@@ -329,7 +375,8 @@ def _duration_within_tolerance(actual: Optional[float], expected: Optional[float
         return False
     if e <= 0:
         return False
-    return abs(a - e) <= max(e * tolerance, _RECOVER_DURATION_FLOOR_SECONDS)
+    slack = e * tolerance + _RECOVER_DURATION_ABS_EPSILON
+    return abs(a - e) <= slack
 
 
 def recover_integrity_check(path: str, expected_duration: Optional[float]) -> Dict[str, Any]:
@@ -420,6 +467,20 @@ def recover_probe(url: str, *, ydl_module: Any = None) -> Dict[str, Any]:
     if not isinstance(info, dict):
         return {"ok": False, "error": "no metadata returned", "category": "unknown"}
 
+    # A channel/user/playlist/set resolves to a collection, not one item. Flag
+    # it so the single-item fetch path can refuse it and ask for enumerate
+    # first; a single video with a &list= param stays single (noplaylist=True).
+    if info.get("_type") == "playlist" or isinstance(info.get("entries"), list):
+        return {
+            "ok": True,
+            "is_collection": True,
+            "platform": _platform_for_host(host),
+            "entry_count": len(info.get("entries") or []),
+            "webpage_url": _s(info.get("webpage_url") or url),
+            "title": _s(info.get("title"))[:300],
+            "uploader": _s(info.get("uploader") or info.get("channel"))[:200],
+        }
+
     formats = [
         {
             "format_id": _s(f.get("format_id")),
@@ -435,6 +496,7 @@ def recover_probe(url: str, *, ydl_module: Any = None) -> Dict[str, Any]:
     plan = _recover_format_plan(host, {"formats": formats})
     return {
         "ok": True,
+        "is_collection": False,
         "platform": _platform_for_host(host),
         "title": _s(info.get("title"))[:300],
         "uploader": _s(info.get("uploader") or info.get("channel") or info.get("uploader_id"))[:200],
@@ -513,26 +575,43 @@ def _write_provenance(staged_file: str, record: Dict[str, Any]) -> str:
 
 
 # ── fetch + stage job ──
-def _recover_stage_dir(platform: str) -> str:
+def _recover_stage_dir(platform: str, run_id: str) -> str:
+    """Per-run staging dir: DOWNLOADS_ROOT/recovered/<platform>/<run_id>. The
+    run_id segment isolates concurrent recover-fetch jobs so two jobs on the
+    same platform can never select, delete or mislabel each other's files
+    (F8 / staging race)."""
     root = validated_downloads_root()
     segment = _download_folder_segment(platform) or "other"
-    return str(_download_dest_under(root, "recovered", segment))
+    safe_run = _download_folder_segment(run_id) or "run"
+    return str(_download_dest_under(root, "recovered", segment, safe_run))
 
 
-def _new_audio_files(dest_dir: str, before: set) -> List[str]:
+def _audio_files_in(dest_dir: str) -> List[str]:
+    """Audio files directly in ``dest_dir`` (a per-run isolated dir), by the
+    recover extension superset (F10)."""
     try:
-        now = {
+        return sorted(
             str(p) for p in Path(dest_dir).iterdir()
-            if p.is_file() and p.suffix.lower() in AUDIO_EXT
-        }
+            if p.is_file() and p.suffix.lower() in _RECOVER_AUDIO_EXT
+        )
     except OSError:
         return []
-    return sorted(now - before)
 
 
-def _recover_fetch_one(url: str, log: list, *, job_id: str = "",
+def _has_partial_file(dest_dir: str) -> bool:
+    try:
+        return any(
+            p.is_file() and (p.suffix.lower() in (".part", ".ytdl") or p.name.lower().endswith(".part"))
+            for p in Path(dest_dir).iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
                        ydl_module: Any = None) -> Dict[str, Any]:
     url = _s(url).strip()
+    run_id = _s(run_id).strip() or uuid.uuid4().hex
     try:
         check_ytdlp_target(url)
     except YtdlpTargetRejected as exc:
@@ -554,10 +633,18 @@ def _recover_fetch_one(url: str, log: list, *, job_id: str = "",
                 "category": probe.get("category", "unknown"),
                 "action": classify_recover_error(probe.get("error") or probe.get("message") or "").get("action", ""),
                 "message": _s(probe.get("error") or probe.get("message"))}
+    # A collection URL (channel/user/playlist/set) is refused in the single-item
+    # path: enumerate it first, then fetch each item URL, so every child is
+    # guard-checked and individually integrity/provenance-gated (F3).
+    if probe.get("is_collection"):
+        log.append(f"  [recover] Refusing collection URL in fetch: {url}")
+        return {"url": url, "recovered": False, "category": "collection",
+                "action": "Enumerate this channel/playlist first, then fetch the individual item URLs.",
+                "message": f"URL is a collection of {probe.get('entry_count', 0)} item(s), not a single upload"}
     plan = _recover_format_plan(host, probe)
     expected_duration = probe.get("duration")
 
-    stage_dir = _recover_stage_dir(platform)
+    stage_dir = _recover_stage_dir(platform, run_id)
     os.makedirs(stage_dir, exist_ok=True)
     outtmpl = _ytdlp_outtmpl(stage_dir, "%(title).120s [%(id)s].%(ext)s")
 
@@ -570,6 +657,7 @@ def _recover_fetch_one(url: str, log: list, *, job_id: str = "",
         "no_warnings": False,
         "ignoreerrors": False,
         "socket_timeout": 30,
+        # A single-item URL only; a stray &list= never expands to a playlist.
         "noplaylist": True,
         # Resume (#5): continue partial downloads and retry fragments.
         "continuedl": True,
@@ -583,13 +671,6 @@ def _recover_fetch_one(url: str, log: list, *, job_id: str = "",
     _ytdlp_apply_source_network_options(opts, "ytdlp" if _is_youtube_host(host) else "", log)
     auth = _recover_apply_owner_cookies(opts, log)
 
-    before = set()
-    try:
-        before = {str(p) for p in Path(stage_dir).iterdir()
-                  if p.is_file() and p.suffix.lower() in AUDIO_EXT}
-    except OSError:
-        pass
-
     log.append(f"  [recover] Fetching {url} ({plan['note']})")
     try:
         yt_dlp = _yt_dlp_module(ydl_module)
@@ -599,48 +680,90 @@ def _recover_fetch_one(url: str, log: list, *, job_id: str = "",
         return {"url": url, "recovered": False, "category": "misconfig",
                 "action": "Use an allowlisted public URL.", "message": _s(exc)}
     except Exception as exc:  # noqa: BLE001
-        return {"url": url, "recovered": False, **_fail_from(exc)}
+        # A crash after a complete download but before provenance is retried
+        # safely below: the isolated dir is re-scanned for a finished file.
+        if not _audio_files_in(stage_dir):
+            return {"url": url, "recovered": False, **_fail_from(exc)}
+        log.append(f"  [recover] Download reported an error but a staged file exists; validating it: {exc}")
 
-    new_files = _new_audio_files(stage_dir, before)
-    if not new_files:
+    # Every audio file in the isolated run dir belongs to THIS run, so a scan
+    # (not a before/after diff) finds the finished file even on a crash-retry
+    # where it already exists (F5/F13), and never picks up another job's file
+    # (F8). With noplaylist + collection refusal this is normally exactly one.
+    produced = _audio_files_in(stage_dir)
+    if not produced:
+        if _has_partial_file(stage_dir):
+            return {"url": url, "recovered": False, "category": "integrity",
+                    "action": "Re-fetch; only a partial (.part) download remains.",
+                    "message": "only a leftover partial download (.part) is present"}
         return {"url": url, "recovered": False, "category": "format",
                 "action": "No audio file was produced; check the requested format.",
                 "message": "no audio file produced"}
 
-    staged = new_files[-1]
-    integrity = recover_integrity_check(staged, expected_duration)
-    if not integrity.get("ok"):
-        try:
-            os.remove(staged)
-        except OSError:
-            pass
-        log.append(f"  [recover] Integrity gate failed for {Path(staged).name}: {integrity.get('reason')}")
-        return {"url": url, "recovered": False, "category": "integrity",
-                "action": "Re-fetch; the staged file was truncated or corrupt.",
-                "message": _s(integrity.get("reason"))}
+    staged_ok: List[Dict[str, Any]] = []
+    last_fail = ""
+    for staged in produced:
+        integrity = recover_integrity_check(staged, expected_duration)
+        if not integrity.get("ok"):
+            last_fail = _s(integrity.get("reason"))
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+            log.append(f"  [recover] Integrity gate failed for {Path(staged).name}: {last_fail}")
+            continue
+        # Losslessness from the ACTUAL file's codec/ext, not a blanket flag (F4).
+        probe_media = inspect_audio_file(staged)
+        lossless = _codec_is_lossless(probe_media.get("codec"), Path(staged).suffix)
+        quality = "original" if (plan["quality"] in ("original", "stream") and lossless) else plan["quality"]
+        record = {
+            "source_platform": platform,
+            "source_url": probe.get("webpage_url") or url,
+            "uploader": probe.get("uploader", ""),
+            "title": probe.get("title", ""),
+            "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "authorized_access": bool(auth),
+            "quality": quality,
+            "lossless": lossless,
+            "codec": _s(probe_media.get("codec")),
+            "duration": integrity.get("duration"),
+            "run_id": run_id,
+        }
+        sidecar = _write_provenance(staged, record)
+        if not sidecar:
+            # Provenance is required: without it a later import cannot trust the
+            # file, so the item FAILS and the orphan is removed (F11).
+            last_fail = "could not persist provenance sidecar"
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+            log.append(f"  [recover] Provenance write failed for {Path(staged).name}; discarded")
+            continue
+        log.append(f"  [recover] Staged {Path(staged).name} (quality={quality}, lossless={lossless})")
+        staged_ok.append({
+            "staged_file": staged,
+            "provenance": sidecar,
+            "quality": quality,
+            "lossless": lossless,
+            "duration": integrity.get("duration"),
+        })
 
-    record = {
-        "source_platform": platform,
-        "source_url": probe.get("webpage_url") or url,
-        "uploader": probe.get("uploader", ""),
-        "title": probe.get("title", ""),
-        "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "authorized_access": bool(auth),
-        "quality": plan["quality"],
-        "lossless": plan["lossless"],
-        "duration": integrity.get("duration"),
-        "job_id": job_id,
-    }
-    sidecar = _write_provenance(staged, record)
-    log.append(f"  [recover] Staged {Path(staged).name} (quality={plan['quality']})")
+    if not staged_ok:
+        return {"url": url, "recovered": False, "category": "integrity",
+                "action": "Re-fetch; the staged file was truncated, corrupt, or could not be recorded.",
+                "message": last_fail or "no valid audio file could be staged"}
+
+    first = staged_ok[0]
     return {
         "url": url,
         "recovered": True,
-        "staged_file": staged,
-        "provenance": sidecar,
-        "quality": plan["quality"],
-        "lossless": plan["lossless"],
-        "duration": integrity.get("duration"),
+        "staged_file": first["staged_file"],
+        "staged_files": [s["staged_file"] for s in staged_ok],
+        "provenance": first["provenance"],
+        "quality": first["quality"],
+        "lossless": first["lossless"],
+        "duration": first["duration"],
         "authorized_access": bool(auth),
     }
 
@@ -651,9 +774,11 @@ def _fail_from(exc: Any) -> Dict[str, str]:
 
 
 def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
-                      *, job_id: str = "", ydl_module: Any = None) -> Dict[str, Any]:
+                      *, run_id: str = "", ydl_module: Any = None) -> Dict[str, Any]:
     """Fetch + stage each URL under DOWNLOADS_ROOT. Does NOT import. Per-URL
-    result (recovered / failed-with-reason) goes to the job log."""
+    result (recovered / failed-with-reason) goes to the job log. Each item gets
+    its own isolated staging dir keyed by ``run_id``."""
+    run_id = _s(run_id).strip() or uuid.uuid4().hex
     recovered: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     cookie_state = recover_cookie_state()
@@ -663,7 +788,8 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("cancelled")
         log.append(f"[recover] [{idx}/{len(urls)}] {url}")
-        result = _recover_fetch_one(url, log, job_id=job_id, ydl_module=ydl_module)
+        # Per-item sub-run id keeps multiple items in one job isolated too.
+        result = _recover_fetch_one(url, log, run_id=f"{run_id}-{idx}", ydl_module=ydl_module)
         if result.get("recovered"):
             recovered.append(result)
         else:
@@ -671,14 +797,27 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
             log.append(
                 f"  [recover] Failed ({result.get('category')}): {result.get('action')}"
             )
-    return {
-        "ok": True,
+    # BA-3: a job where every item failed must report ok=False so the job engine
+    # records it as failed, not success (F12). A partial success stays ok=True
+    # but carries partial=True and the per-item counts.
+    all_failed = bool(failed) and not recovered
+    summary = {
         "cookie_state": cookie_state.get("state"),
         "recovered_count": len(recovered),
         "failed_count": len(failed),
+        "partial": bool(recovered and failed),
         "recovered": recovered,
         "failed": failed,
     }
+    if all_failed:
+        summary["ok"] = False
+        summary["error"] = (
+            f"all {len(failed)} item(s) failed to recover: "
+            + "; ".join(f"{f.get('category')}" for f in failed[:8])
+        )
+    else:
+        summary["ok"] = True
+    return summary
 
 
 def start_recover_fetch(payload_in: Dict[str, Any]) -> Any:
@@ -713,19 +852,20 @@ def start_recover_fetch(payload_in: Dict[str, Any]) -> Any:
     except RuntimeError as exc:
         return {"ok": False, "error": _s(exc)}, 200
 
-    # The download runs long after the job starts, so reading job_id from this
-    # holder inside the job (set just below) is safe for provenance labelling.
-    holder: Dict[str, str] = {"job_id": ""}
+    # Pre-generate the run id BEFORE starting the job and capture it in the
+    # closure, so the worker never reads an unset id (F5/F13) and the staging
+    # dir isolation (F8) is deterministic regardless of thread timing.
+    run_id = uuid.uuid4().hex
 
     def _do(log, cancel_event=None):
-        return recover_fetch_job(urls, log, cancel_event, job_id=holder["job_id"])
+        return recover_fetch_job(urls, log, cancel_event, run_id=run_id)
 
     label = f"Recover uploads: {len(urls)} item(s)"
     workflow = "recover-fetch-" + job_contract.slug("|".join(urls))
     job = jobs.start_python(
         job_contract.guarded(_do, workflow=workflow, fail_fast_in_process=True),
         label=label,
-        metadata={"type": "recover-fetch", "mutating": False, "url_count": len(urls)},
+        metadata={"type": "recover-fetch", "mutating": False,
+                  "url_count": len(urls), "run_id": run_id},
     )
-    holder["job_id"] = job.job_id
-    return {"ok": True, "job_id": job.job_id}, 200
+    return {"ok": True, "job_id": job.job_id, "run_id": run_id}, 200
