@@ -1,25 +1,20 @@
 """Authoritative Beets Plugin Manifest & Management Engine for Beets Web Manager.
 
-Stock lscr.io/linuxserver/beets (pinned in docker-compose.yml) is the sole, authoritative Beets
-runtime -- Web Manager never runs Beets itself, never loads Beets plugins
-locally, and never owns plugin-loading decisions. This module's job is
-narrowly: maintain the plugin manifest, provision bundled plugin files into
-the shared /config/beetsplug mount, safely update config.yaml, and inspect
-stock Beets' actual loaded-plugin state over BeetsAdapter (never a local
-`import beets` runtime check).
+Beets runs inside Web Manager (backend/beets_embedded.py) and is the only
+engine. Its required plugins (webmanager, web, musicbrainz) ship in the image
+and always load; this module maintains the plugin manifest, makes the
+user-initiated opt-in config.yaml plugin edit safely, and reports the plugins
+the engine actually loaded (BeetsAdapter.get_plugin_status()).
 
 Provides:
 1. One authoritative manifest (`BEETS_PLUGIN_MANIFEST`) classifying every plugin
    used by Beets Web Manager as REQUIRED, OPTIONAL, or INTEGRATION, and as
    builtin, bundled, or third-party.
-2. Plugin discovery and verification against the real, running stock Beets
-   process, via BeetsAdapter.get_plugin_status() -- falling back to
-   in-process `beets.plugins.find_plugins()` only for local/unit-test
-   environments where no stock Beets process is reachable at all.
-3. Bundled plugin provisioning to the shared `/config/beetsplug` mount.
-4. Safe, atomic YAML configuration updates with timestamped backups and
-   preservation of existing user settings and custom plugins.
-5. Strict security controls: curated allowlists only, no arbitrary package/plugin
+2. Plugin verification against the plugins the engine loaded, via
+   BeetsAdapter.get_plugin_status().
+3. Safe, atomic opt-in YAML edits with timestamped backups and preservation
+   of existing user settings and custom plugins.
+4. Strict security controls: curated allowlists only, no arbitrary package/plugin
    execution, path traversal containment.
 """
 
@@ -165,10 +160,8 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.RECOMMENDED,
         plugin_type=PluginType.BUILTIN,
         description="AcoustID audio fingerprinting, automated matching, and deduplication.",
-        # pyacoustid/fpcalc run inside the stock Beets container, never
-        # inside Web Manager -- this plugin's health comes from stock
-        # Beets' own live loaded_plugins signal (see `loaded` below), not
-        # a local Python-package/binary check against the wrong process.
+        # Its health comes from the engine's loaded_plugins signal (see
+        # `loaded` below), not a separate Python-package/binary check.
         binary_dependencies=["fpcalc"],
         commands=["submit"],
     ),
@@ -326,11 +319,8 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "web": PluginDefinition(
         name="web",
         display_name="Beets Built-in Web Server",
-        # REQUIRED, not optional: this is the read transport BeetsAdapter
-        # depends on for every non-mutation read, and stock Beets' own
-        # default supervised service is `beet web` -- without this
-        # plugin enabled, the container crash-loops with "unknown
-        # command 'web'".
+        # REQUIRED, not optional: BeetsAdapter dispatches every
+        # non-mutation read to this plugin's Flask app in-process.
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
         description="Beets simple built-in web server -- the read transport BeetsAdapter depends on.",
@@ -339,12 +329,9 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
     "webmanager": PluginDefinition(
         name="webmanager",
         display_name="Web Manager Integration Plugin",
-        # REQUIRED: the sole authenticated mutation transport BeetsAdapter
-        # depends on. Provisioned as a bundled directory (not a single
-        # bundled_file) by provision_bundled_plugins(); its health/loaded
-        # state must come from stock Beets' own live handshake
-        # (`loaded_plugins`), never a local check, since this plugin
-        # only ever runs inside the stock Beets container.
+        # REQUIRED: the plugin BeetsAdapter dispatches to in-process. It
+        # ships in the image; its loaded state comes from the engine's own
+        # handshake (`loaded_plugins`).
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUNDLED,
         description="Beets Web Manager's own integration plugin -- the sole authenticated mutation transport.",
@@ -364,7 +351,7 @@ REQUIRED_PLUGIN_NAMES: List[str] = [
     name for name, p in BEETS_PLUGIN_MANIFEST.items() if p.category == PluginCategory.REQUIRED
 ]
 
-# Plugins provisioning adds to config.yaml: the transport plus `musicbrainz`.
+# Plugins Web Manager needs loaded: the transport plus `musicbrainz`.
 # Since Beets 2.4 MusicBrainz is a plugin; without it in `plugins:` the
 # importer finds no candidates and a quiet import skips every album. Older
 # Beets, where it is built in, only logs "plugin musicbrainz not found".
@@ -437,192 +424,6 @@ def ensure_plugin_sys_path(config_dir: Optional[Path | str] = None) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Bundled Plugin Provisioning
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _replace_plugin_file(dest: Path, content: bytes, root: Path | str) -> None:
-    """Atomically (temp file + os.replace) install ``content`` at ``dest``.
-
-    A symlinked destination is replaced, never written through, and a
-    destination whose directory resolves outside ``root`` is refused.
-    ``root`` should be the beetsplug real path resolved ONCE by the caller
-    (SEC-237-4): containment is checked against that fixed path before the
-    temp file is created and again just before the rename, so a directory
-    swapped for a symlink in between is refused rather than followed.
-    """
-    real_root = os.path.realpath(root)
-
-    def _check_contained() -> None:
-        real_parent = os.path.realpath(dest.parent)
-        if os.path.commonpath([real_root, real_parent]) != real_root:
-            raise RuntimeError(f"Refusing to provision {dest.name}: its directory resolves outside beetsplug")
-
-    _check_contained()
-    if not dest.is_symlink() and dest.is_file() and dest.read_bytes() == content:
-        return
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=str(dest.parent))
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(content)
-        os.chmod(tmp_name, 0o644)
-        _check_contained()
-        if os.path.commonpath([real_root, os.path.realpath(tmp_name)]) != real_root:
-            raise RuntimeError(f"Refusing to provision {dest.name}: its directory resolves outside beetsplug")
-        os.replace(tmp_name, dest)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-
-
-def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[str]:
-    """Copy all Web Manager bundled plugins from `beetsplug/` into `/config/beetsplug`.
-
-    Preserves existing user plugins in `/config/beetsplug`. Uses atomic copy.
-    Returns list of provisioned plugin file names.
-    """
-    cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
-    target_beetsplug_dir = cfg_dir / "beetsplug"
-    # F5c: a symlinked beetsplug dir is not supported. Its resolved target
-    # would pass the per-file containment check, so refuse it before mkdir.
-    if target_beetsplug_dir.is_symlink():
-        raise RuntimeError("Refusing to provision plugins: beetsplug is a symbolic link")
-    target_beetsplug_dir.mkdir(parents=True, exist_ok=True)
-    # SEC-237-4: resolve the root once; every file is checked against it.
-    if target_beetsplug_dir.is_symlink():
-        raise RuntimeError("Refusing to provision plugins: beetsplug is a symbolic link")
-    real_beetsplug = os.path.realpath(target_beetsplug_dir)
-    if os.path.dirname(real_beetsplug) != os.path.realpath(cfg_dir):
-        raise RuntimeError("Refusing to provision plugins: beetsplug resolves outside the config directory")
-
-    # Ensure .webmanager_api_key file is always provisioned in config directory
-    provision_api_key_file(cfg_dir)
-
-    # Locate source beetsplug directory
-    source_dir = SOURCE_BEETSPLUG_DIR
-    if not source_dir.exists():
-        fallback = Path("/app/beetsplug")
-        if fallback.exists():
-            source_dir = fallback
-
-    provisioned: List[str] = []
-    if not source_dir.exists():
-        return provisioned
-
-    import shutil
-    import secrets
-
-    for entry in source_dir.iterdir():
-        if entry.is_file() and entry.suffix == ".py" and entry.name != "__init__.py":
-            target_file = target_beetsplug_dir / entry.name
-            content = entry.read_bytes()
-
-            # Replace, never write through, a symlinked or planted target (F5b).
-            try:
-                _replace_plugin_file(target_file, content, real_beetsplug)
-            except Exception as exc:
-                raise RuntimeError(f"Failed to copy bundled plugin {entry.name}: {exc}") from exc
-            provisioned.append(entry.name)
-
-        elif entry.is_dir() and not entry.name.startswith((".", "_", "__pycache__")):
-            target_sub = target_beetsplug_dir / entry.name
-            if target_sub.is_symlink():
-                raise RuntimeError(f"Refusing to provision {entry.name}: beetsplug/{entry.name} is a symbolic link")
-            target_sub.mkdir(parents=True, exist_ok=True)
-            for sub_entry in entry.rglob("*"):
-                if sub_entry.is_file() and not sub_entry.name.endswith(".pyc") and "__pycache__" not in sub_entry.parts:
-                    rel_p = sub_entry.relative_to(entry)
-                    dest_file = target_sub / rel_p
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    _replace_plugin_file(dest_file, sub_entry.read_bytes(), real_beetsplug)
-            provisioned.append(entry.name)
-
-    # Ensure .webmanager_api_key file is provisioned in config directory
-    provision_api_key_file(cfg_dir)
-
-    return provisioned
-
-
-def provision_api_key_file(config_dir: Path) -> bool:
-    """Securely provision /config/.webmanager_api_key at mode 0600 with 256 bits entropy.
-
-    Invariants:
-    - Exactly 64 hex characters (256 bits entropy via secrets.token_hex(32))
-    - Created with 0o600 permissions from the start (no world/group readable window)
-    - Rejects existing symlinks (does not follow or overwrite symlinks)
-    - Does not overwrite an existing valid 64-hex key
-    - Atomic file creation via O_CREAT | O_EXCL + fsync + atomic rename
-    - Sets PUID/PGID ownership when configured on POSIX
-    - Never logs token
-    """
-    import secrets
-    import os
-
-    api_key_file = config_dir / ".webmanager_api_key"
-    key_str_path = str(api_key_file)
-
-    # 1. Reject symlinks immediately
-    if os.path.islink(key_str_path):
-        log.error("Rejecting symlinked API key file at %s", key_str_path)
-        return False
-
-    hex_pattern = re.compile(r"^[0-9a-fA-F]{64}$")
-
-    # 2. Check if valid key already exists
-    if api_key_file.is_file():
-        try:
-            existing = api_key_file.read_text(encoding="utf-8").strip()
-            if hex_pattern.match(existing):
-                return True
-        except Exception:
-            pass
-
-    # 3. Generate 256-bit token (64 hex characters)
-    token = secrets.token_hex(32)
-    payload = (token + "\n").encode("utf-8")
-
-    # 4. Low-level file creation with mode 0o600 from the start
-    tmp_path = config_dir / f".webmanager_api_key.tmp.{secrets.token_hex(8)}"
-    tmp_str_path = str(tmp_path)
-
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-
-        fd = os.open(tmp_str_path, flags, 0o600)
-        try:
-            os.write(fd, payload)
-            try:
-                os.fsync(fd)
-            except OSError:
-                pass
-        finally:
-            os.close(fd)
-
-        # Chown to configured PUID/PGID if running as root on POSIX
-        if hasattr(os, "chown") and os.name == "posix":
-            puid_str = os.environ.get("PUID")
-            pgid_str = os.environ.get("PGID")
-            if puid_str and pgid_str:
-                try:
-                    puid = int(puid_str)
-                    pgid = int(pgid_str)
-                    os.chown(tmp_str_path, puid, pgid)
-                except Exception:
-                    pass
-
-        # Atomic replace
-        os.replace(tmp_str_path, key_str_path)
-        return True
-    except Exception as ex:
-        log.warning("Could not provision .webmanager_api_key in %s: %s", config_dir, type(ex).__name__)
-        try:
-            if os.path.exists(tmp_str_path):
-                os.unlink(tmp_str_path)
-        except Exception:
-            pass
-        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -767,8 +568,8 @@ def _set_web_include_paths(text: str, *, overwrite_false: bool) -> Tuple[str, bo
 
     Text-level edit so comments and formatting elsewhere are preserved. An
     explicit `include_paths: no` is only rewritten when ``overwrite_false``
-    (an explicit, user-initiated fix action); startup provisioning never
-    flips a value the user set.
+    (an explicit, user-initiated fix action); nothing else flips a value
+    the user set.
     """
     if re.search(r"(?m)^web:[ \t]*[^\s#]", text):
         raise BeetsConfigEditError(
@@ -808,7 +609,7 @@ def _plan_config_yaml_plugins(
     plugins_to_ensure: List[str],
     pluginpath_to_ensure: List[str],
 ) -> Tuple[str, List[str], bool]:
-    """Pure planner shared by provisioning, preview and opt-in apply.
+    """Pure planner shared by preview and opt-in apply.
 
     Returns (new_text, missing_plugins_added, changed).
     """
@@ -1050,127 +851,6 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-_REFUSED_CONFIG_PLUGINS: List[str] = []
-_REFUSED_CONFIG_PLUGINPATH: List[str] = []
-
-
-def _configured_names(text: str) -> Tuple[List[str], List[str]]:
-    """(plugins, pluginpath) as Beets will read them: from yaml.safe_load
-    when the text parses, else from the text parsers."""
-    try:
-        data = yaml.safe_load(text)
-        if isinstance(data, dict):
-            return (_yaml_names(data.get("plugins"), "plugins"),
-                    _yaml_names(data.get("pluginpath"), "pluginpath"))
-    except (yaml.YAMLError, BeetsConfigEditError):
-        pass
-    return parse_configured_plugins(text), parse_configured_pluginpath(text)
-
-
-def refused_config_pluginpath() -> List[str]:
-    """pluginpath entries the last refused startup edit could not add."""
-    return list(_REFUSED_CONFIG_PLUGINPATH)
-
-
-def refused_config_plugins() -> List[str]:
-    """Required plugins the last update_config_yaml_plugins() run could not
-    add because the edit was refused (fail closed); empty otherwise."""
-    return list(_REFUSED_CONFIG_PLUGINS)
-
-
-def update_config_yaml_plugins(
-    config_path: Path | str,
-    ensure_plugins: Optional[List[str]] = None,
-    ensure_pluginpath: Optional[List[str]] = None,
-    backup: bool = True,
-) -> Tuple[bool, str]:
-    """Safely update config.yaml with the integration transport plugins.
-
-    - By default ensures only ``web`` + ``webmanager`` (REQUIRED); feature
-      plugins (RECOMMENDED) are never added to an existing config here --
-      see preview_recommended_plugins()/apply_recommended_plugins() (BI-5).
-    - Preserves all existing plugins and their custom configuration.
-    - Ensures `/config/beetsplug` is in `pluginpath:`.
-    - Removes obsolete `/opt/beets-web-manager-agent/beetsplug` path.
-    - Adds `include_paths: yes` to an existing `web:` block that lacks it.
-    - Fails closed: raises BeetsConfigEditError and writes nothing when the
-      original or the planned text does not parse as YAML or the edit would
-      lose a plugin or change another setting (see refused_config_plugins()).
-    - Creates a timestamped backup before modification.
-    - Writes atomically via temporary file and replace.
-    - A missing config.yaml (fresh install) is created from
-      config.yaml.example, which still enables the recommended set.
-
-    Returns (changed: bool, message: str).
-    """
-    path = Path(config_path)
-    plugins_to_ensure = ensure_plugins if ensure_plugins is not None else list(REQUIRED_CONFIG_PLUGINS)
-    pluginpath_to_ensure = ensure_pluginpath if ensure_pluginpath is not None else ["/config/beetsplug"]
-
-    if not os.path.lexists(path):
-        # Create default config.yaml with canonical settings
-        example_path = ROOT / "config.yaml.example"
-        if example_path.exists():
-            content = example_path.read_text(encoding="utf-8")
-        else:
-            plugin_str = " ".join(plugins_to_ensure)
-            content = (
-                f"plugins: {plugin_str}\n"
-                "pluginpath:\n"
-                "  - /config/beetsplug\n"
-                "directory: /music\n"
-                "library: /config/musiclibrary.blb\n"
-                "import:\n"
-                "    write: yes\n"
-                "    copy: yes\n"
-                "    move: no\n"
-            )
-        from backend.config_manager import refuse_code_execution_edits
-        refuse_code_execution_edits("", content)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, content)
-        return True, "Created default config.yaml with required plugins"
-
-    try:
-        original = _read_config_snapshot(path)
-        text = _decode_config(original, path.name)
-    except BeetsConfigEditError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    global _REFUSED_CONFIG_PLUGINS, _REFUSED_CONFIG_PLUGINPATH
-    try:
-        new_text, missing_plugins, changed = _plan_config_yaml_plugins(text, plugins_to_ensure, pluginpath_to_ensure)
-    except BeetsConfigEditError as exc:
-        # Nothing written. Surfaced as setup warnings (refused_config_plugins /
-        # refused_config_pluginpath).
-        configured, paths = _configured_names(text)
-        _REFUSED_CONFIG_PLUGINS = [p for p in plugins_to_ensure if p not in configured]
-        _REFUSED_CONFIG_PLUGINPATH = [p for p in pluginpath_to_ensure if p not in paths]
-        log.warning("Not editing %s: %s. Add plugins %s and pluginpath %s manually.",
-                    path.name, exc, ", ".join(_REFUSED_CONFIG_PLUGINS) or "(none)",
-                    ", ".join(_REFUSED_CONFIG_PLUGINPATH) or "(none)")
-        raise
-    _REFUSED_CONFIG_PLUGINS = []
-    _REFUSED_CONFIG_PLUGINPATH = []
-    text = new_text
-
-    if not changed:
-        return False, "All required plugins and pluginpath already configured"
-
-    backup_prefix = None
-    if backup:
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_prefix = f"{_PLUGIN_MIGRATION_BACKUP_PREFIX}{ts}"
-    try:
-        _write_config_text(path, text, backup_prefix=backup_prefix, original=original)
-    except BeetsConfigEditError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    if missing_plugins:
-        return True, f"Configured {len(missing_plugins)} missing plugins ({', '.join(missing_plugins)}) in config.yaml"
-    return True, "Updated pluginpath / web settings in config.yaml"
-
-
 def _read_config_text(path: Path) -> Tuple[str, bytes]:
     original = _read_config_snapshot(path)
     return _decode_config(original, path.name), original
@@ -1333,22 +1013,6 @@ def apply_recommended_plugins(config_path: Path | str, plugins: Iterable[str]) -
         return {"ok": True, "changed": False, "added": [], "backup": None, "restart_required": False}
     backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path), original=original)
     return {"ok": True, "changed": True, "added": added, "backup": backup, "restart_required": True}
-
-
-def ensure_web_include_paths(config_path: Path | str) -> Dict[str, Any]:
-    """Explicit fix action: set `web.include_paths: yes` in config.yaml (BI-6).
-
-    Additive text edit that preserves comments; flips an explicit `no` (the
-    user asked for the fix). Idempotent. Timestamped backup (a failed backup
-    aborts the write) and atomic replace. Beets must be restarted.
-    """
-    path = Path(config_path)
-    text, original = _read_config_text(path)
-    new_text, changed = _set_web_include_paths(text, overwrite_false=True)
-    if not changed:
-        return {"ok": True, "changed": False, "backup": None, "restart_required": False}
-    backup = _write_config_text(path, new_text, backup_prefix=_timestamped_backup_prefix(path), original=original)
-    return {"ok": True, "changed": True, "backup": backup, "restart_required": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1523,7 +1187,7 @@ def verify_all_plugins(
 
     configured = set(parse_configured_plugins(config_text))
 
-    # Query stock Beets plugin integration status via BeetsAdapter
+    # Plugin status as the engine reports it via BeetsAdapter
     loaded: Set[str] = set(loaded_plugins) if loaded_plugins is not None else set()
     if not loaded and remote_status is not None:
         if isinstance(remote_status, dict):
@@ -1592,45 +1256,3 @@ def verify_all_plugins(
             "errors": [f"{r.name}: {r.note}" for r in results if not r.healthy and r.category == PluginCategory.REQUIRED],
         },
     }
-
-
-def provision_and_verify(
-    config_dir: Optional[Path | str] = None, *, config_file: Optional[Path | str] = None
-) -> Dict[str, Any]:
-    """Execute complete plugin provisioning workflow:
-
-    1. Copy bundled plugins to `/config/beetsplug`.
-    2. Safely update `config.yaml` with missing REQUIRED transport plugins
-       (web, webmanager) only; recommended plugins are opt-in.
-    3. Re-run verification against stock Beets (BeetsAdapter.get_plugin_status()
-       is a live HTTP call, not cached, so no forced-refresh step is needed
-       after writing config -- unlike the deleted embedded control agent's
-       own 30s status cache).
-    4. Return full diagnostic response.
-
-    ``config_file`` is the BEETS_CONFIG file to edit (F7); it defaults to
-    ``<config_dir>/config.yaml``.
-    """
-    from backend import beets_embedded
-    if beets_embedded.enabled():
-        # ADR 0006: the engine loads the image's own plugins and refuses to
-        # start if a copy in /config/beetsplug would shadow them.
-        from backend.config_manager import ConfigCodeExecutionEditRefused
-        raise ConfigCodeExecutionEditRefused(["plugin provisioning into the Beets config directory"])
-    cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Provision bundled plugins
-    provisioned_files = provision_bundled_plugins(cfg_dir)
-
-    # 2. Update config.yaml
-    config_path = Path(config_file) if config_file else cfg_dir / "config.yaml"
-    changed, msg = update_config_yaml_plugins(config_path)
-
-    # 3. Verify all plugins against the live stock Beets process.
-    verification = verify_all_plugins(cfg_dir, config_file=config_path)
-    verification["provisioned_files"] = provisioned_files
-    verification["config_updated"] = changed
-    verification["message"] = msg
-
-    return verification

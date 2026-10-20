@@ -216,19 +216,6 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.assertIn("pluginpath", str(ctx.exception))
         self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
 
-    def test_provision_route_is_refused(self):
-        import app as app_module
-        self.path.write_text(self.BASE, encoding="utf-8")
-        view = app_module.app.view_functions["plugins_provision"]
-        with mock.patch("backend.config_manager.get_config_path", return_value=self.path), \
-             mock.patch.dict(view.__globals__, {"_setup_csrf_failure": lambda: None}), \
-             app_module.app.test_request_context("/api/setup/plugins/provision", method="POST"):
-            resp, status = view()
-        self.assertEqual(status, 403)
-        self.assertEqual(resp.get_json()["code"], "CONFIG_CODE_EXECUTION_EDIT_REFUSED")
-        self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
-        self.assertFalse((self.path.parent / "beetsplug").exists())
-
     def test_route_returns_403_with_reason(self):
         import json
         import app as app_module

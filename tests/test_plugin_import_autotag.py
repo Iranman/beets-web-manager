@@ -463,8 +463,8 @@ class PluginImportAutotagTests(unittest.TestCase):
 
 
 class MusicbrainzProvisioningTests(unittest.TestCase):
-    """Beets >= 2.4 needs `musicbrainz` in plugins:; provisioning adds it and
-    keeps every entry, whatever the YAML form."""
+    """The opt-in config.yaml plugin edit keeps every entry, whatever the
+    YAML form, and refuses forms it cannot edit safely."""
 
     def test_musicbrainz_added_and_user_entries_kept(self):
         from backend.beets_plugins import REQUIRED_CONFIG_PLUGINS, _plan_config_yaml_plugins, parse_configured_plugins
@@ -484,77 +484,6 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
             self.assertEqual(parse_configured_plugins(new), listed)
         unchanged = "plugins: musicbrainz web webmanager\npluginpath:\n  - /config/beetsplug\nweb:\n  include_paths: yes\n"
         self.assertFalse(_plan_config_yaml_plugins(unchanged, REQUIRED_CONFIG_PLUGINS, ["/config/beetsplug"])[2])
-
-    def tearDown(self):
-        import backend.beets_plugins as bp
-        bp._REFUSED_CONFIG_PLUGINS = []
-        bp._REFUSED_CONFIG_PLUGINPATH = []
-
-    def _update(self, text):
-        """Run the startup edit on ``text``; returns (new_text, refused)."""
-        from backend.beets_plugins import BeetsConfigEditError, refused_config_plugins, update_config_yaml_plugins
-        with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, "config.yaml")
-            with open(path, "wb") as f:
-                f.write(text.encode("utf-8"))
-            try:
-                update_config_yaml_plugins(path)
-            except BeetsConfigEditError:
-                with open(path, "rb") as f:
-                    self.assertEqual(f.read(), text.encode("utf-8"), "a refused edit must not touch the file")
-                self.assertEqual(os.listdir(td), ["config.yaml"], "a refused edit must not leave a backup")
-                self.assertIn("musicbrainz", refused_config_plugins())
-                return None, True
-            with open(path, encoding="utf-8") as f:
-                return f.read(), False
-
-    def _assert_kept(self, text, new):
-        import yaml
-
-        def names(t):
-            v = (yaml.safe_load(t) or {}).get("plugins") or []
-            return set(v.split() if isinstance(v, str) else v)
-
-        self.assertEqual(names(new), names(text) | {"web", "webmanager", "musicbrainz"}, new)
-        self.assertIn("/config/beetsplug", yaml.safe_load(new)["pluginpath"])
-        for key in ("plugins:", "pluginpath:", "web:", "webmanager:"):
-            self.assertLessEqual(new.count("\n" + key) + new.startswith(key), 1, (key, new))
-
-    def test_duplicate_key_edits_that_hide_user_settings_are_refused(self):
-        """A quoted top-level key the text edit cannot see makes the planner
-        add a second `pluginpath:` / `web:`; YAML keeps the last one, so the
-        pluginpath and web checks are what stop the write."""
-        for text in (
-            'plugins: web webmanager\n"pluginpath": /config/mine\n',
-            'plugins: fetchart\npluginpath:\n  - /config/beetsplug\n"web": {host: 1.2.3.4}\n',
-        ):
-            new, refused = self._update(text)
-            self.assertTrue(refused, (text, new))
-
-    def _refuse(self, text):
-        """Startup edit that must be refused; returns (plugins, pluginpath) to add."""
-        from backend.beets_plugins import (BeetsConfigEditError, refused_config_pluginpath,
-                                           refused_config_plugins, update_config_yaml_plugins)
-        with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, "config.yaml")
-            with open(path, "wb") as f:
-                f.write(text.encode("utf-8"))
-            with self.assertRaises(BeetsConfigEditError):
-                update_config_yaml_plugins(path)
-            with open(path, "rb") as f:
-                self.assertEqual(f.read(), text.encode("utf-8"))
-        return refused_config_plugins(), refused_config_pluginpath()
-
-    def test_refused_names_come_from_yaml_n1(self):
-        """N1: a folded `plugins: >-` already listing web and webmanager must
-        not ask the user to add them."""
-        self.assertEqual(self._refuse("plugins: >-\n  web\n  webmanager\n"), (["musicbrainz"], ["/config/beetsplug"]))
-
-    def test_pluginpath_only_refusal_is_reported_n2(self):
-        self.assertEqual(
-            self._refuse("plugins: web webmanager musicbrainz\npluginpath: >-\n  /x\n"),
-            ([], ["/config/beetsplug"]),
-        )
 
     def test_opt_in_apply_shares_the_check(self):
         from backend.beets_plugins import BeetsConfigEditError, apply_recommended_plugins

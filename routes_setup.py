@@ -2762,9 +2762,6 @@ def _invalidate_setup_status_cache() -> None:
         _STATUS_CACHE_TS = 0.0
 
 
-_INCLUDE_PATHS_ACTION_ENDPOINT = "/api/setup/beets-config/include-paths"
-
-
 def _norm_container_path(value: str) -> str:
     """Normalise a POSIX container path for comparison (no filesystem access)."""
     value = str(value or "").strip().replace("\\", "/")
@@ -2805,50 +2802,8 @@ def _beets_setup_warnings(
             "message": str(compat.get("message") or "Restart the Beets container to load the provisioned webmanager plugin."),
         })
 
-    from backend.beets_plugins import refused_config_pluginpath, refused_config_plugins
-    refused = refused_config_plugins()
-    if refused:
-        warnings.append({
-            "id": "beets_config_plugins_not_added",
-            "severity": "warning",
-            "message": (
-                "Web Manager did not edit the Beets config.yaml: it could not prove the edit would keep "
-                f"valid YAML and every listed plugin. Add {', '.join(refused)} to `plugins:` in config.yaml "
-                "manually, then restart the Beets container."
-            ),
-        })
-    refused_paths = refused_config_pluginpath()
-    if refused_paths:
-        warnings.append({
-            "id": "beets_config_pluginpath_not_added",
-            "severity": "warning",
-            "message": (
-                "Web Manager did not edit the Beets config.yaml, so Beets cannot load the webmanager plugin. "
-                f"Add {', '.join(refused_paths)} to `pluginpath:` in config.yaml manually, then restart "
-                "the Beets container."
-            ),
-        })
 
     library = diagnostics.get("beets_library") if isinstance(diagnostics.get("beets_library"), dict) else {}
-
-    if library.get("web_include_paths") is False:
-        warnings.append({
-            "id": "beets_web_include_paths_disabled",
-            "severity": "warning",
-            "message": (
-                "Beets web.include_paths is disabled, so Beets does not return file paths. "
-                "Path-based features (untracked-folder scan, sync of deleted files, move cleanup) "
-                "will refuse to run until it is enabled and the Beets container is restarted."
-            ),
-            "action": "enable_web_include_paths",
-        })
-        actions.append({
-            "id": "enable_web_include_paths",
-            "label": "Enable web.include_paths in the Beets config",
-            "method": "POST",
-            "endpoint": _INCLUDE_PATHS_ACTION_ENDPOINT,
-            "restart_required": True,
-        })
 
     library_directory = library.get("library_directory")
     if isinstance(library_directory, str) and library_directory and library_directory != _UNKNOWN and music_path:
@@ -4170,38 +4125,6 @@ def plugins_status():
     return jsonify(report)
 
 
-@app.post("/api/plugins/provision")
-@app.post("/api/setup/plugins/provision")
-def plugins_provision():
-    """Copy bundled plugins to /config/beetsplug, safely update config.yaml, and re-verify."""
-    csrf_failure = _setup_csrf_failure()
-    if csrf_failure is not None:
-        return csrf_failure
-    from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE, ConfigPathError, get_config_path
-    try:
-        # get_config_path() refuses a BEETS_CONFIG outside BEETSDIR (S-3).
-        beets_config_path = get_config_path()
-        from backend.beets_plugins import provision_and_verify
-        result = provision_and_verify(beets_config_path.parent, config_file=beets_config_path)
-    except ConfigPathError as exc:
-        return jsonify({"ok": False, "all_required_healthy": False, "error": CONFIG_PATH_ERROR_MESSAGE}), exc.status_code
-    except Exception as exc:
-        from backend.beets_plugins import BeetsConfigEditError
-        from backend.config_manager import ConfigCodeExecutionEditRefused
-        if isinstance(exc, (BeetsConfigEditError, ConfigCodeExecutionEditRefused)):
-            # Refused edit: config.yaml untouched; the setup warning says what to add.
-            _invalidate_setup_status_cache()
-            return _beets_config_edit_error(exc, "plugins_provision")
-        app.logger.error("plugins_provision failed: %s", exc, exc_info=True)
-        return jsonify({
-            "ok": False,
-            "all_required_healthy": False,
-            "error": "Beets plugin provisioning failed.",
-        }), 500
-    _invalidate_setup_status_cache()
-    return jsonify(result)
-
-
 @app.post("/api/plugins/verify")
 @app.post("/api/setup/plugins/verify")
 def plugins_verify():
@@ -4271,22 +4194,6 @@ def _beets_config_edit_error(exc: Exception, operation: str):
 
 
 # Literal path (not the constant) so the AST endpoint inventory sees it.
-@app.post("/api/setup/beets-config/include-paths")
-def setup_beets_config_include_paths():
-    """Fix action for the beets_web_include_paths_disabled warning: set
-    web.include_paths to yes in the Beets config (backup first)."""
-    csrf_failure = _setup_csrf_failure()
-    if csrf_failure is not None:
-        return csrf_failure
-    try:
-        from backend.beets_plugins import ensure_web_include_paths
-        from backend.config_manager import get_config_path
-        beets_config_path = get_config_path()
-        result = ensure_web_include_paths(beets_config_path)
-    except Exception as exc:
-        return _beets_config_edit_error(exc, "setup_beets_config_include_paths")
-    _invalidate_setup_status_cache()
-    return jsonify(result)
 
 
 @app.get("/api/setup/plugins/recommended")

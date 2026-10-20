@@ -3,7 +3,6 @@ import {
   completeSetup,
   getPluginsStatus,
   getSetupStatus,
-  provisionPlugins,
   saveSetupEnv,
   submitFirstRunSetup,
   testSetupAcoustid,
@@ -45,7 +44,6 @@ export default function FirstRunSetup() {
   // Plugins state
   const [pluginsReport, setPluginsReport] = useState<BeetsPluginsReport | null>(null);
   const [pluginsLoading, setPluginsLoading] = useState(false);
-  const [pluginsProvisioning, setPluginsProvisioning] = useState(false);
   const [pluginsActionMessage, setPluginsActionMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
   // MusicBrainz state
@@ -188,26 +186,6 @@ export default function FirstRunSetup() {
       void fetchPlugins();
     }
   }, [currentStep, pluginsReport]);
-
-  const handleProvisionPlugins = async () => {
-    setPluginsProvisioning(true);
-    setPluginsActionMessage(null);
-    try {
-      const res = await provisionPlugins();
-      setPluginsReport(res);
-      setPluginsActionMessage({
-        text: res.ok
-          ? 'All required plugins successfully installed, configured, and verified!'
-          : (res.message || 'Provisioning completed with warnings.'),
-        ok: res.ok,
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Plugin provisioning failed.';
-      setPluginsActionMessage({ text: msg, ok: false });
-    } finally {
-      setPluginsProvisioning(false);
-    }
-  };
 
   const handleVerifyPlugins = async () => {
     setPluginsLoading(true);
@@ -848,7 +826,7 @@ export default function FirstRunSetup() {
               <div>
                 <h2 className="text-xl font-bold text-white">Beets Plugins</h2>
                 <p className="mt-1 text-sm text-zinc-400">
-                  Web Manager automatically discovers, provisions, and configures all required Beets plugins.
+                  Beets runs inside Web Manager with its required plugins built in. Add optional plugins to `plugins:` in config.yaml.
                 </p>
               </div>
 
@@ -874,7 +852,7 @@ export default function FirstRunSetup() {
                       <div className="text-xs opacity-80">
                         {pluginsReport.all_required_healthy
                           ? 'Beets plugin configuration and runtime dependencies are verified.'
-                          : 'Click "Install & Configure Required Plugins" to automatically configure missing plugins.'}
+                          : 'See the plugin notes below, fix config.yaml on the server, and restart Web Manager.'}
                       </div>
                     </div>
                   </div>
@@ -882,21 +860,11 @@ export default function FirstRunSetup() {
                     <button
                       type="button"
                       onClick={handleVerifyPlugins}
-                      disabled={pluginsLoading || pluginsProvisioning}
+                      disabled={pluginsLoading}
                       className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
                     >
                       {pluginsLoading ? 'Checking...' : 'Recheck'}
                     </button>
-                    {!pluginsReport.all_required_healthy && (
-                      <button
-                        type="button"
-                        onClick={handleProvisionPlugins}
-                        disabled={pluginsProvisioning}
-                        className="rounded-lg bg-red-700 px-3.5 py-1.5 text-xs font-bold text-white shadow hover:bg-red-600 disabled:opacity-50"
-                      >
-                        {pluginsProvisioning ? 'Installing...' : 'Install & Configure'}
-                      </button>
-                    )}
                   </div>
                 </div>
               )}
@@ -961,7 +929,7 @@ export default function FirstRunSetup() {
                       ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                       : 'bg-amber-950/80 text-amber-400 border border-amber-800'
                   }`}>
-                    {pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy ? '✓ Provisioned' : '⚠ Missing in /config'}
+                    {pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy ? '✓ Loaded' : '⚠ Not loaded'}
                   </span>
                 </div>
               </div>

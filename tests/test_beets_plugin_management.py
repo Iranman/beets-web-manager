@@ -27,7 +27,6 @@ from backend.beets_plugins import (
     PluginType,
     parse_configured_pluginpath,
     parse_configured_plugins,
-    provision_bundled_plugins,
     verify_all_plugins,
     verify_plugin,
 )
@@ -74,43 +73,6 @@ class BeetsPluginManifestTests(unittest.TestCase):
 
         for integ in ("listenbrainz", "deezer", "discogs", "spotify", "plexsync", "bpsync"):
             self.assertIn(integ, INTEGRATION_PLUGIN_NAMES)
-
-
-class BeetsBundledProvisioningTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-        self.config_dir = Path(self.tmp_dir)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_provision_copies_discpath(self):
-        provisioned = provision_bundled_plugins(self.config_dir)
-        self.assertIn("discpath.py", provisioned)
-        target_file = self.config_dir / "beetsplug" / "discpath.py"
-        self.assertTrue(target_file.exists())
-        content = target_file.read_text(encoding="utf-8")
-        self.assertIn("disc_subfolder", content)
-
-    def test_provision_is_idempotent(self):
-        first_run = provision_bundled_plugins(self.config_dir)
-        self.assertIn("discpath.py", first_run)
-        second_run = provision_bundled_plugins(self.config_dir)
-        self.assertIn("discpath.py", second_run)
-        target_file = self.config_dir / "beetsplug" / "discpath.py"
-        self.assertTrue(target_file.exists())
-
-    def test_user_plugins_in_beetsplug_are_preserved(self):
-        beetsplug_dir = self.config_dir / "beetsplug"
-        beetsplug_dir.mkdir(parents=True, exist_ok=True)
-        user_plugin = beetsplug_dir / "my_custom_plugin.py"
-        user_plugin.write_text("# custom user code\n", encoding="utf-8")
-
-        provision_bundled_plugins(self.config_dir)
-
-        self.assertTrue(user_plugin.exists())
-        self.assertEqual(user_plugin.read_text(encoding="utf-8"), "# custom user code\n")
-        self.assertTrue((beetsplug_dir / "discpath.py").exists())
 
 
 class BeetsConfigYamlManagementTests(unittest.TestCase):
@@ -187,8 +149,6 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertTrue(any("not enabled in config.yaml" in err for err in status.errors))
 
     def test_verify_all_plugins_returns_comprehensive_report(self):
-        provision_bundled_plugins(self.config_dir)
-
         report = verify_all_plugins(self.config_dir)
         self.assertIn("all_required_healthy", report)
         self.assertIn("required_count", report)

@@ -150,18 +150,6 @@ class BeetsConfigFollowupTests(unittest.TestCase):
             diff = beets_plugins.preview_recommended_plugins(path)["diff"]
         self.assertNotIn(S, diff)
 
-    @unittest.skipUnless(POSIX, "symlinks")
-    def test_provisioning_refuses_a_symlinked_subdirectory(self):  # SEC-237-4
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d, "beetsplug")
-            outside = Path(d, "outside")
-            root.mkdir()
-            outside.mkdir()
-            os.symlink(outside, root / "sub")
-            with self.assertRaises(RuntimeError):
-                beets_plugins._replace_plugin_file(root / "sub" / "x.py", b"x", os.path.realpath(root))
-            self.assertEqual(list(outside.iterdir()), [])
-
     def test_refused_config_path_is_never_verified_or_read(self):  # SEC-237-3
         try:
             from test_routes_setup import _load_routes_setup_against_stub_app
