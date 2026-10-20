@@ -76,6 +76,7 @@ jobs:
       - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose -f docker-compose.full.yml config
       - run: docker compose -f examples/docker-compose.external-beets.yml config
+      - run: docker compose -f examples/docker-compose.embedded.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
       - name: BUILD_INFO.json matches the image's OCI labels

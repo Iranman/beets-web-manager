@@ -11,7 +11,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPECTED_IMAGE = "ghcr.io/iranman/beets-web-manager:latest"
 IMAGE_LINE = re.compile(r"^\s*image:\s*(ghcr\.io/iranman/beets-web-manager\S*)\s*$", re.M)
-SHIPPED_COMPOSE = ("docker-compose.yml", "docker-compose.full.yml", "examples/docker-compose.external-beets.yml")
+SHIPPED_COMPOSE = ("docker-compose.yml", "docker-compose.full.yml", "examples/docker-compose.external-beets.yml",
+                   "examples/docker-compose.embedded.yml")
 DOCS = ("README.md", "docs/INSTALLATION.md", "docs/EXAMPLES.md", "docs/TROUBLESHOOTING.md", "docs/TRUENAS_ROLLOUT.md")
 
 

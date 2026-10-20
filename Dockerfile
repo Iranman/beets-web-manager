@@ -90,7 +90,10 @@ ENV WEBCONTROL_PORT=8337 \
     BEETSDIR=/config \
     MUSIC_LIBRARY_PATH=/music \
     DOWNLOAD_PATH=/downloads \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+# PYTHONPATH: a `beet` run inside the container finds the image's own Beets
+# plugins (beetsplug/webmanager, discpath) as the app does (ADR 0006).
 
 EXPOSE 8337
 

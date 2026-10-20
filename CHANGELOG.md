@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Highlights
+
+- **Beets now runs embedded inside Web Manager.** One container instead of two: Beets 2.14.1 runs in the Web Manager process against your existing `config.yaml`, `musiclibrary.blb` and music folder, with no Beets container, no HTTP bridge and no plugin to provision. Turn it on with `BEETS_ENGINE=embedded` (single-container Compose: `examples/docker-compose.embedded.yml`); it becomes the default in the next release phase. Setup, moving from two containers and rollback: `docs/INSTALLATION.md`. Self-test codes and fixes: `docs/TROUBLESHOOTING.md`. Planned next ([ADR 0006](docs/adr/0006-embedded-beets.md)): embedded by default, explainable matching, first-class partial imports, idempotent staging. Inside the image, `beet` now finds the bundled `webmanager` and `discpath` plugins (`PYTHONPATH=/app`).
+
 ### Added
 
 - Beets can run inside Web Manager (`BEETS_ENGINE=embedded`, opt-in; [ADR 0006](docs/adr/0006-embedded-beets.md), Phase 1). Web Manager loads Beets 2.14.1 as a pinned Python library, reads the same `config.yaml` (from `BEETSDIR`), and opens the same `musiclibrary.blb` and music folder through Beets' own Library API. Every Beets call runs in-process through the existing `webmanager` operations, with no HTTP, no plugin provisioning and no plugin version that can drift from Web Manager's. A startup self-test checks the following and reports a stable code and a fix for each failure:

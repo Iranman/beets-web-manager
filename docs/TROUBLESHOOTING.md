@@ -4,6 +4,30 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 
 ---
 
+## Embedded Beets self-test codes
+
+With `BEETS_ENGINE=embedded`, Web Manager checks Beets once at startup. `GET /api/health` lists the failing codes (`"beets": {"ok": ..., "codes": [...]}`); the authenticated `GET /api/health/detail` and the log (`Beets self-test <code>: ...`) give the full message. While an **error** fails, reads keep working and every library change is refused with that message (`BEETS_EMBEDDED_DEGRADED`). Codes marked **stops Beets** prevent the engine from starting at all (`BEETS_EMBEDDED_UNAVAILABLE`). Restart the container after a fix: the check runs at startup.
+
+| Code | Level | Meaning | Fix |
+|---|---|---|---|
+| `config_invalid` | error, stops Beets | `config.yaml` could not be parsed. | Fix the YAML (the message names the file and the parser error). |
+| `config_missing` | warning | No `config.yaml` in `BEETSDIR` (`/config`); Beets defaults are used. | Mount the folder with your `config.yaml` at `/config`, or create one from `config.yaml.example`. |
+| `library_open_failed` | error, stops Beets | `library:` could not be opened as a Beets database. | Check the `/config` mount, the `library:` path and ownership for `PUID`/`PGID`. |
+| `library_created` | warning | No database existed at `library:`, so an empty one was created. | Expected on a fresh install. Otherwise the wrong folder is mounted at `/config`: stop, mount the folder that holds `musiclibrary.blb`, and delete the empty file. |
+| `library_dir_missing` | error | Beets' `directory:` does not exist in the container. | Mount the music folder at that path (normally `/music`). |
+| `library_dir_not_writable` | error | The music folder is not writable. | Mount `/music` read-write (remove `:ro`) and check ownership for `PUID`/`PGID`. |
+| `library_db_not_writable` | error | The database or its folder is not writable (SQLite needs the folder for its journal). | Fix ownership of the `/config` folder for `PUID`/`PGID`. |
+| `plugins_failed` | error | A plugin in `plugins:` failed to load; the message names it. | Fix the name, remove the plugin, or (for a plugin with extra Python packages the image does not ship) remove it from `plugins:`. |
+| `operations_shadowed` | error, stops Beets | A plugin the image ships (`webmanager`, `discpath`) resolved to another copy. | Remove that copy (usually an old one in `/config/beetsplug` on a non-default `pluginpath`) and restart. |
+| `beets_version_mismatch` | error | The running Beets is not the version Web Manager is built for (2.14.1). | Use the published image; do not install another Beets into it. |
+| `fpcalc_missing` | error with `chroma`, otherwise warning | `fpcalc` (Chromaprint) is not on `PATH`. | Use the published image, which includes it. |
+| `ffmpeg_missing` | warning | `ffmpeg` is not on `PATH`. | Use the published image, which includes it. |
+| `engine_start_failed` | error, stops Beets | Beets raised an unexpected error while starting. | See the log for the exception. |
+
+**The Config page refuses a save with `CONFIG_CODE_EXECUTION_EDIT_REFUSED`**: with embedded Beets, `hook:`, `pluginpath:` and `include:` and the `hook` plugin run code inside Web Manager, so they can only be changed by editing `config.yaml` on the server. Do that, then restart Web Manager.
+
+---
+
 ## Common Deployment Failures
 
 ### 1. `pull access denied for beets` or `beets-web-manager`
@@ -61,7 +85,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 
 ---
 
-### 8. Setup says "Stock Beets is unavailable"
+### 8. Setup says "Stock Beets is unavailable" (two-container mode)
 * **Cause**: Web Manager cannot reach the `webmanager` plugin at `BEETS_WEB_URL` (default `http://beets:8337`). While Beets is down, plugin and fpcalc checks show as unknown. Only real local mount problems are listed in addition.
 * **Fix**: `docker compose ps beets`, `docker compose logs beets`. For an external Beets, check that `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` agree.
 * **`beets_web_url_userinfo` ("BEETS_WEB_URL contains a user name or password")**: `BEETS_WEB_URL` has `user:pass@` in it. This never worked (no credentials were sent and the request failed), so Web Manager now refuses the URL and sends nothing. Remove the credentials, for example `BEETS_WEB_URL=http://beets:8337`, and restart Web Manager. The System page refuses to save such a URL. The `webmanager` plugin is authenticated with its bearer key; if a reverse proxy in front of Beets needs Basic auth, point `BEETS_WEB_URL` at Beets directly instead.
@@ -69,13 +93,13 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **The Library page fails with an authentication error, while other Beets pages load**: since webmanager plugin 1.18.0 the Library page reads the library through the authenticated plugin (`/webmanager/fields/...`). Before, it used Beets' unauthenticated `/item/` list, so a wrong or missing key went unnoticed there. Make Web Manager's key (`BEETS_WEBMANAGER_API_KEY`, or the key file `BEETS_WEBMANAGER_API_KEY_FILE`, default `/config/.webmanager_api_key`) match the plugin's `webmanager.api_key_file` in Beets' `config.yaml`, then recreate the Web Manager container. The System page's plugin status reports the same 401.
 * **Outside Compose, always set `BEETS_WEB_URL`.** The default `http://beets:8337` only means "the `beets` service" on a Compose network. Under `docker run`, Kubernetes, or a host whose DNS search domain resolves `beets` to some other machine, Web Manager would send its `webmanager` bearer key to whatever `beets` resolves to. Set `BEETS_WEB_URL` to your Beets address explicitly and keep `BEETS_OUTBOUND_ALLOWLIST` limited to that host and port.
 
-### 8a. Startup did not add the webmanager plugin to `config.yaml`
+### 8a. Startup did not add the webmanager plugin to `config.yaml` (two-container mode)
 * **Cause**: Startup auto-provisioning backs up `config.yaml` before every edit, and a failed backup aborts the edit. If the Beets config directory is mounted read-only into Web Manager (or is not writable by its `PUID`/`PGID`), the backup cannot be written, so startup skips the `config.yaml` edit and logs `Auto plugin provisioning on startup skipped/failed`. Nothing is changed. The same happens when `BEETS_CONFIG` is not a file directly inside `BEETSDIR` (default `/config`), or when `config.yaml` is a symbolic link (Web Manager never edits a config file through a link; replace it with the real file).
 * **Fix**: Mount the Beets config directory read-write into Web Manager (as the shipped Compose files do) and restart it, or add `web` and `webmanager` to `plugins:` and `/config/beetsplug` to `pluginpath:` yourself. Then restart the `beets` container.
 
 * **Beets log: "not using ... as an allowed mutation root"**: the `webmanager` plugin (1.6.1+) never derives a mutation root from `/`, the Beets config directory or one of its parents (1.6.2+: or a directory inside it, such as `/config/music`), whether it comes from Beets' `directory:` or `webmanager.import_roots`. The warning is logged once per root. Fix `directory:`/`import_roots` in `config.yaml`, or set `webmanager.allowed_roots` explicitly (an explicit value is used as given).
 
-### 9. Setup warns about include_paths, root mismatches or a required restart
+### 9. Setup warns about include_paths, root mismatches or a required restart (two-container mode)
 * **`beets_web_include_paths_disabled`**: your Beets `config.yaml` has `web: include_paths: no`, so Beets returns items without file paths. Path-based operations then fail with `BEETS_PATHS_UNAVAILABLE` (HTTP 503). Use the setup action "Enable web.include_paths" (`POST /api/setup/beets-config/include-paths`), which backs up `config.yaml` first. Then restart the `beets` container.
 * **`music_root_mismatch`**: Beets' `directory:` and Web Manager's `MUSIC_ROOT` differ. Mount the library at the same container path in both services, or change one of the two settings (see `docs/CONFIGURATION.md`).
 * **`downloads_root_not_import_root`**: Web Manager's `DOWNLOADS_ROOT` is not inside the plugin's `webmanager.import_roots`. Mount downloads at the same path in both containers, or add that path to `webmanager.import_roots` in `config.yaml`.
@@ -83,6 +107,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * If these fields show as `unknown`, Beets is running a plugin older than 1.6.0. Restart Beets so it loads the provisioned plugin.
 
 ### 10. fpcalc is reported missing although chroma is enabled
+* **Embedded Beets**: see `fpcalc_missing` in [Embedded Beets self-test codes](#embedded-beets-self-test-codes). The rest of this entry is for the two-container stack.
 * **Cause**: from plugin 1.6.0, Beets reports whether the `fpcalc` binary is on its own `PATH`. The `chroma` plugin can load without it, but fingerprinting then fails.
 * **Fix**: use the stock LinuxServer Beets image, which ships `fpcalc`, or install chromaprint in your Beets image. Web Manager itself never needs `fpcalc`.
 

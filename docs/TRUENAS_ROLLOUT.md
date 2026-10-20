@@ -6,6 +6,16 @@ SQLite database left behind by pre-#64 installs. The tooling for this is
 `scripts/deploy_truenas_web_manager.sh` -- reusable across releases via its
 `VERSION` env var, not tied to one release in its filename.
 
+> **Embedded Beets.** This script and procedure are for the two-container
+> stack (a `beets` container next to `beets-web-manager`): the script resolves
+> the library from `docker inspect beets` and refuses to continue without it.
+> A stack running Beets inside Web Manager (`BEETS_ENGINE=embedded`, one
+> container) is not supported by the script yet; it is adapted at the Phase 2
+> cutover (`docs/adr/0006-embedded-beets.md`). Until then, move to or update an
+> embedded stack with the manual steps in `docs/INSTALLATION.md` ("Moving from
+> two containers to one", "Rolling back to two containers"), with a backup
+> and DB sha256 and album/item counts recorded before and after.
+
 ## Which version to deploy
 
 Always deploy a tagged, published release of `beets-web-manager` (e.g. `0.1.5`, `0.1.6`, `1.0.0`).
