@@ -61,13 +61,6 @@ _lock_fd: Optional[int] = None
 _probe_cache: Dict[str, Any] = {"at": None, "url": ""}
 
 
-def enabled() -> bool:
-    """Always True: Beets runs only inside Web Manager. Kept for the callers
-    in backend/config_manager.py and backend/beets_plugins.py until they drop
-    their checks (sequenced after #461)."""
-    return True
-
-
 class EmbeddedBeetsUnavailable(Exception):
     """The engine could not start, or writes are refused; ``status`` says why."""
 

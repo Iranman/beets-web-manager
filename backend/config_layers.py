@@ -78,7 +78,7 @@ HOST_KEYS = frozenset({
 # saved by an earlier release is removed by the settings migration.
 OPERATOR_KEYS = frozenset({
     "BEETS_OUTBOUND_ALLOWLIST",          # outbound network boundary (SSRF)
-    "BEETS_ENGINE",                      # which process opens and writes the Beets library (ADR 0006)
+    "BEETS_ENGINE",                      # retired (Beets is embedded); a saved value is still removed
     "BEETS_WEB_AUTH_DISABLED",           # turns authentication off
     "BEETS_TRUSTED_PROXIES",             # whose X-Forwarded-For is believed
     "BEETS_WEB_SESSION_COOKIE_SECURE",   # session cookie transport security
@@ -145,7 +145,6 @@ APP_KEYS = frozenset({
     "BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS",
     "BEETS_OUTBOUND_MAX_REDIRECTS",
     "BEETS_OUTBOUND_MAX_RESPONSE_BYTES",
-    "BEETS_WEB_URL",
     "AI_BASE_URL",
     "AI_MODEL",
     "PLEX_URL",
@@ -192,8 +191,6 @@ LOADABLE_LAYERS = frozenset({LAYER_APP, LAYER_SECRET})
 # Keys whose value is read once at import time by a module constant, so a
 # Settings change needs a restart even though the boot loader supports it.
 _RESTART_APP_KEYS = frozenset({
-    "BEETS_WEB_URL",
-    "BEETS_WEBMANAGER_API_KEY",
     "BEETS_WEB_AUTH_DISABLED",
     "BEETS_TRUSTED_PROXIES",
     "BEETS_WEB_SESSION_COOKIE_SECURE",
@@ -378,14 +375,6 @@ def safe_roots(name: str, roots: Iterable, music_root_path) -> Tuple[Path, ...]:
 
 def beets_config_file(environ: Optional[Dict[str, str]] = None) -> str:
     return container_path("BEETS_CONFIG", "/config/config.yaml", environ=environ)
-
-
-DEFAULT_BEETS_WEB_URL = "http://beets:8337"
-
-
-def beets_web_url(environ: Optional[Dict[str, str]] = None) -> str:
-    env = os.environ if environ is None else environ
-    return (env.get("BEETS_WEB_URL", "") or "").strip() or DEFAULT_BEETS_WEB_URL
 
 
 def url_has_userinfo(url: str) -> bool:

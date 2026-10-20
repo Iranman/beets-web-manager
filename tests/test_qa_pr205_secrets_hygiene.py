@@ -144,23 +144,6 @@ class RedactionTests(unittest.TestCase):
         for raw, want in self.CASES.items():
             self.assertEqual(cl.redact_url_userinfo(raw), want, raw)
 
-    def test_status_and_diagnostics_hide_ipv6_userinfo(self):
-        flask_app, module = _load_routes_setup_against_stub_app(self)
-        client = flask_app.test_client()
-        saved = os.environ.get("BEETS_WEB_URL")
-        os.environ["BEETS_WEB_URL"] = "http://alice:hunter2pw@[fd00::5]:8337"
-        self.addCleanup(lambda: os.environ.pop("BEETS_WEB_URL", None) if saved is None
-                        else os.environ.__setitem__("BEETS_WEB_URL", saved))
-        from backend.beets_adapter import beets_adapter
-        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=RuntimeError("down")):
-            for url in ("/api/setup/status", "/api/setup/diagnostics"):
-                r = client.get(url)
-                text = r.get_data(as_text=True)
-                self.assertNotIn("hunter2pw", text, url)
-                self.assertNotIn("alice", text, url)
-                if r.status_code == 200:
-                    self.assertIn("[fd00::5]:8337", text, url)
-
 
 class TimeoutValueTests(unittest.TestCase):
     def _run(self, raw):

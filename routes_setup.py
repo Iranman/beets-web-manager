@@ -514,7 +514,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_OUTBOUND_ALLOWLIST": {
         "section": "Authentication & Security",
-        "default": "127.0.0.1:8337,localhost:8337,beets:8337",
+        "default": "127.0.0.1:8337,localhost:8337",
         "description": (
             "Operator-only (set in Docker Compose). Extra local-network endpoints the app may contact, as "
             "exact host:port, IP:port, CIDR:port or [IPv6]:port entries. Public internet addresses need no "
@@ -578,25 +578,6 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
 
     # 4. Beets Core & Engine
-    "BEETS_WEB_URL": {
-        "section": "Beets Core & Engine",
-        "default": "http://beets:8337",
-        "description": "Primary read transport: Stock Beets Web API (http://beets:8337)",
-        "secret": False,
-        "editable": True,
-        "restart_required": True,
-        "type": "string",
-    },
-    "BEETS_WEBMANAGER_API_KEY": {
-        "section": "Beets Core & Engine",
-        "default": None,
-        "description": "Integration plugin: Bearer-authenticated /webmanager/* API key",
-        "secret": True,
-        "editable": True,
-        "revealable": True,
-        "restart_required": True,
-        "type": "secret",
-    },
     "BEETS_CONFIG": {
         "section": "Beets Core & Engine",
         "default": "/config/config.yaml",
@@ -1396,9 +1377,7 @@ def _resolve_setting_item(
     }
 
 
-def _beets_web_url() -> str:
-    """BEETS_WEB_URL for status/diagnostics display, userinfo redacted."""
-    return config_layers.redact_url_userinfo(config_layers.beets_web_url())
+BEETS_LOCATION = "Beets inside Web Manager"
 
 
 _LAYER_NOTES = {
@@ -1483,7 +1462,7 @@ _URL_DISPLAY_FIELDS = ("value", "effective_value", "saved_value", "runtime_value
 
 
 def _is_url_setting(name: str) -> bool:
-    """URL-valued settings (BEETS_WEB_URL, PLEX_URL, AI_BASE_URL, ...). The
+    """URL-valued settings (PLEX_URL, AI_BASE_URL, ...). The
     catalog has no URL type, so the *_URL naming convention is the marker."""
     return name.endswith("_URL")
 
@@ -1507,10 +1486,8 @@ def _redact_url_setting(name: str, item: Dict[str, Any], raw_values: Iterable[st
 
 def _is_redacted_url_echo(name: str, value: str, stored: Iterable[str]) -> bool:
     """True when a saved URL setting is just the redacted form GET returned
-    for a stored credentialed URL; saving it must keep the stored value.
-    BEETS_WEB_URL is exempt: its userinfo is refused (#208), so saving the
-    plain URL is exactly how the user removes it."""
-    if not _is_url_setting(name) or name == "BEETS_WEB_URL":
+    for a stored credentialed URL; saving it must keep the stored value."""
+    if not _is_url_setting(name):
         return False
     return any(
         raw and raw != value and config_layers.url_has_userinfo(raw)
@@ -1668,12 +1645,6 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
             raise ValueError(f"{key} cannot contain newlines")
         if len(value) > 4096:
             raise ValueError(f"{key} is too long")
-        if key == "BEETS_WEB_URL":
-            from backend.beets_adapter import BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo
-            if beets_web_url_has_userinfo(value):
-                # #208: refused at save, not only after the next restart;
-                # the constant message never echoes the value.
-                raise ValueError(BEETS_WEB_URL_USERINFO_MESSAGE)
         if key == "SPOTIFLAC_SERVICES":
             # #340: these become spotiflac argv; refuse options and unknown names.
             from backend.security import parse_spotiflac_services
@@ -1941,10 +1912,10 @@ def _remote_failure_shape(
     diagnostic_error: str = "",
     remote_error: str = "unavailable",
 ) -> Dict[str, Any]:
-    safe_error = _redact_diagnostic_text(error or "Stock Beets is unavailable.")
+    safe_error = _redact_diagnostic_text(error or "Beets inside Web Manager is unavailable.")
     return {
         "available": False,
-        "path": _beets_web_url(),
+        "path": BEETS_LOCATION,
         "version": "",
         "diagnostic_error": _redact_diagnostic_text(diagnostic_error),
         "plugin_loader_ok": False,
@@ -2049,7 +2020,7 @@ def _checked_beets_config_path() -> Tuple[Path, str]:
 
 def _local_paths_report(config_path: Path) -> Dict[str, Any]:
     """Web Manager's own mounts, checked locally. Independent of whether
-    stock Beets is reachable (BI-7)."""
+    Beets started (BI-7)."""
     music = _local_path_report(_web_manager_music_root())
     music["path"] = config_layers.music_root()
     downloads = _local_path_report(_web_manager_downloads_root(), require_writable=True)
@@ -2070,15 +2041,15 @@ def _web_manager_music_root() -> Path:
     so the setup check never carries its own hard-coded library path
     (#143). It is a Web Manager-local check: Web Manager reads library
     files itself (duplicate scan, fingerprints, artwork), so its own mount
-    is what has to be readable. Beets' own `directory` lives in the other
-    container and is not a path this process can test."""
+    is what has to be readable. Beets' own `directory` is compared with it
+    by the engine self-test (`library_dir_mismatch`)."""
     return Path(config_layers.music_root())
 
 
 def _parse_replaygain_settings(config_text: str) -> Tuple[str, str]:
     """Best-effort local parse of config.yaml's replaygain: backend/command.
 
-    Web Manager cannot inspect binaries inside the stock Beets container
+    Web Manager does not probe the replaygain backend binaries
     (ffmpeg/bs1770gain/etc.), so this reports what's *configured*, not
     whether the backend binary is actually present there."""
     backend = ""
@@ -2097,7 +2068,7 @@ def _parse_replaygain_settings(config_text: str) -> Tuple[str, str]:
 
 
 def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
-    """Return Beets plugin diagnostics from stock Beets (via BeetsAdapter),
+    """Return Beets plugin diagnostics from Beets (via BeetsAdapter),
     never from a local `beet` executable or the deleted control agent.
 
     The returned shape preserves the public setup-status fields the
@@ -2111,9 +2082,9 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
 
     def _remote_beets_diagnostics_failure(*args, **kwargs) -> Dict[str, Any]:
         failure = _remote_failure_shape(*args, **kwargs)
-        # Local mounts are still checked for real; fpcalc lives in the Beets
-        # container, so while Beets is unreachable it is "unknown", not
-        # "missing" (BI-7).
+        # Local mounts are still checked for real; fpcalc is reported by the
+        # webmanager plugin, so while Beets is not running it is "unknown",
+        # not "missing" (BI-7).
         failure["paths"] = _local_paths_report(config_path)
         failure["fpcalc_state"] = "unknown"
         return failure
@@ -2122,28 +2093,28 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         plugin_status = beets_adapter.get_plugin_status()
     except BeetsAdapterAuthError:
         return _remote_beets_diagnostics_failure(
-            "Stock Beets integration plugin authentication failed.",
-            diagnostic_error="Stock Beets integration plugin authentication failed.",
+            "Beets' webmanager plugin authentication failed.",
+            diagnostic_error="Beets' webmanager plugin authentication failed.",
             remote_error="authentication_failed",
         )
     except BeetsAdapterTimeoutError:
         return _remote_beets_diagnostics_failure(
-            "Stock Beets integration plugin status request timed out.",
+            "Beets' webmanager plugin status request timed out.",
             timed_out=True,
-            diagnostic_error="Stock Beets integration plugin status request timed out.",
+            diagnostic_error="Beets' webmanager plugin status request timed out.",
             remote_error="timeout",
         )
     except Exception:
         return _remote_beets_diagnostics_failure(
-            "Stock Beets is unavailable.",
-            diagnostic_error="Stock Beets is unavailable.",
+            "Beets inside Web Manager is unavailable.",
+            diagnostic_error="Beets inside Web Manager is unavailable.",
             remote_error="unavailable",
         )
 
     if not isinstance(plugin_status, dict) or not plugin_status.get("protocol_version"):
         return _remote_beets_diagnostics_failure(
-            "Malformed stock Beets integration plugin status response.",
-            diagnostic_error="Malformed stock Beets integration plugin status response.",
+            "Malformed webmanager plugin status response.",
+            diagnostic_error="Malformed webmanager plugin status response.",
             remote_error="malformed_response",
         )
 
@@ -2215,7 +2186,7 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
 
     return {
         "available": True,
-        "path": _beets_web_url(),
+        "path": BEETS_LOCATION,
         "version": beets_version,
         "diagnostic_error": "",
         "plugin_loader_ok": plugin_loader_ok,
@@ -2314,13 +2285,13 @@ def _check_integration_plugin_compatibility(plugin_status: Dict[str, Any]) -> Di
     message = ""
     if not installed:
         state = "not_installed"
-        message = "The webmanager integration plugin is not reachable on stock Beets."
+        message = "The webmanager plugin did not answer inside Web Manager."
     elif not compatible:
         state = "incompatible"
         message = (
             f"Integration plugin protocol version ({protocol_version}) does not match "
             f"the version Web Manager expects ({_EXPECTED_PROTOCOL_VERSION}). "
-            "Restart stock Beets after upgrading Web Manager."
+            "Use the published Web Manager image."
         )
     else:
         state = "compatible"
@@ -2337,8 +2308,8 @@ def _check_integration_plugin_compatibility(plugin_status: Dict[str, Any]) -> Di
     if restart_required:
         state = "restart_required"
         message = (
-            f"Stock Beets is running webmanager plugin {plugin_version}, but this Web Manager "
-            f"provisioned {bundled_version}. Restart the Beets container to load it."
+            f"Beets is running webmanager plugin {plugin_version}, but this image ships "
+            f"{bundled_version}. Restart Web Manager."
         )
 
     return {
@@ -2799,7 +2770,7 @@ def _beets_setup_warnings(
         warnings.append({
             "id": "beets_restart_required",
             "severity": "warning",
-            "message": str(compat.get("message") or "Restart the Beets container to load the provisioned webmanager plugin."),
+            "message": str(compat.get("message") or "Restart Web Manager."),
         })
 
 
@@ -2951,23 +2922,13 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             entry["category"] = "service" if key in _SERVICE_INTEGRATION_KEYS else "beets_plugin"
 
     blocking = []
-    # #208: a BEETS_WEB_URL with user:pass@ is refused by the adapter (it
-    # never authenticated). Checked from the setting itself; the message
-    # never echoes the credentials.
-    from backend.beets_adapter import (
-        BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo,
-    )
-    beets_web_url_userinfo = beets_web_url_has_userinfo(config_layers.beets_web_url())
-    if beets_web_url_userinfo:
-        blocking.append(BEETS_WEB_URL_USERINFO_MESSAGE)
-    elif not beets_reachable:
-        # One primary reason while stock Beets is unreachable; everything
-        # that depends on it (plugins, fpcalc, compatibility) is unknown,
-        # not failed.
+    if not beets_reachable:
+        # One primary reason while Beets is unavailable; everything that
+        # depends on it (plugins, fpcalc, compatibility) is unknown, not failed.
         remote_error = str(diagnostics.get("remote_error") or "unavailable")
         blocking.append(
-            f"Stock Beets is unavailable ({remote_error}) at {_beets_web_url()} - check that the beets "
-            "container is running and that BEETS_WEB_URL points to it"
+            f"Beets inside Web Manager is unavailable ({remote_error}) - see the beets codes in "
+            "/api/health and docs/TROUBLESHOOTING.md, fix the cause, and restart Web Manager"
         )
     if not config_check["writable"]:
         blocking.append(f"Cannot write to config directory {config_check['path']}")
@@ -3014,12 +2975,6 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             "id": "beets_config_path_invalid",
             "severity": "warning",
             "message": config_path_error,
-        })
-    if beets_web_url_userinfo:
-        warnings.insert(0, {
-            "id": BEETS_WEB_URL_USERINFO_CODE,
-            "severity": "warning",
-            "message": BEETS_WEB_URL_USERINFO_MESSAGE,
         })
 
     ready = not blocking
@@ -3243,9 +3198,6 @@ def setup_save_env():
     try:
         backup_path = _write_env_file(updates, clear)
     except ValueError as ex:
-        from backend.beets_adapter import BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE
-        if str(ex) == BEETS_WEB_URL_USERINFO_MESSAGE:
-            return jsonify({"ok": False, "error": BEETS_WEB_URL_USERINFO_MESSAGE, "code": BEETS_WEB_URL_USERINFO_CODE}), 400
         return jsonify({"ok": False, "error": str(ex)}), 400
     except Exception as ex:
         app.logger.warning("Could not save environment file: %s", type(ex).__name__)
@@ -3660,12 +3612,6 @@ def setup_save_settings():
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "expected a JSON object"}), 400
     expected_revision = payload.pop("expected_revision", None)
-    from backend.beets_adapter import (
-        BEETS_WEB_URL_USERINFO_CODE, BEETS_WEB_URL_USERINFO_MESSAGE, beets_web_url_has_userinfo,
-    )
-    if beets_web_url_has_userinfo(str(payload.get("BEETS_WEB_URL") or "")):
-        # #208: same refusal as the adapter; never echo the value.
-        return jsonify({"ok": False, "error": BEETS_WEB_URL_USERINFO_MESSAGE, "code": BEETS_WEB_URL_USERINFO_CODE}), 400
     store, relative_name = _settings_store_for_target()
     record = store.read_text_record(relative_name)
     if record.get("exists") and not expected_revision:
@@ -3917,10 +3863,10 @@ def setup_test_beets():
         stats = beets_adapter.get_stats()
         stock_ok = isinstance(stats, dict) and "items" in stats
         if not stock_ok:
-            stock_error = "Stock Beets Web API returned an unexpected response."
+            stock_error = "Beets returned an unexpected response."
     except Exception as ex:
         app.logger.warning("setup_test_beets: stock Beets read test failed: %s", ex)
-        stock_error = "Could not connect to stock Beets Web API. Check that the stock Beets container is running and reachable on :8337."
+        stock_error = "Beets inside Web Manager is unavailable. See the beets codes in /api/health."
 
     # 2. Integration plugin handshake, tested independently of #1's result.
     plugin_result: Dict[str, Any] = {"ok": False}
@@ -3949,14 +3895,14 @@ def setup_test_beets():
             "status": "connected",
             "version": stock_version,
             "beets_version": stock_version,
-            "message": "Connected to Stock Beets Web API",
+            "message": "Beets is running inside Web Manager",
             "plugin_status": plugin_result,
         })
 
     return jsonify({
         "ok": False,
         "status": "failed",
-        "error": stock_error or "Could not connect to stock Beets. Check BEETS_WEB_URL and ensure stock Beets is running on :8337.",
+        "error": stock_error or "Beets inside Web Manager is unavailable. See the beets codes in /api/health.",
         "plugin_status": plugin_result,
     }), 200
 

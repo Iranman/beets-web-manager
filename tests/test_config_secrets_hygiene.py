@@ -2,7 +2,7 @@
 
 Files that can hold secrets are created at mode 0600 (never at umask mode
 then chmod'ed), a failed chmod is logged, API responses and status text
-carry no BEETS_WEB_URL userinfo or absolute backup paths, and a bad
+carry no absolute backup paths, and a bad
 BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS no longer aborts startup.
 """
 
@@ -99,20 +99,6 @@ class SetupStatusRedactionTests(unittest.TestCase):
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
-        saved = os.environ.get("BEETS_WEB_URL")
-        os.environ["BEETS_WEB_URL"] = "http://alice:hunter2pw@beets:8337"
-        self.addCleanup(lambda: os.environ.pop("BEETS_WEB_URL", None) if saved is None
-                        else os.environ.__setitem__("BEETS_WEB_URL", saved))
-
-    def test_status_does_not_echo_beets_web_url_userinfo(self):
-        from backend.beets_adapter import beets_adapter
-        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=RuntimeError("down")):
-            response = self.client.get("/api/setup/status")
-        self.assertEqual(response.status_code, 200)
-        text = response.get_data(as_text=True)
-        self.assertIn("http://beets:8337", text)
-        self.assertNotIn("hunter2pw", text)
-        self.assertNotIn("alice", text)
 
     def test_redact_url_userinfo(self):
         self.assertEqual(cl.redact_url_userinfo("https://u:p@h:1/x?token=t#f"), "https://h:1/x")

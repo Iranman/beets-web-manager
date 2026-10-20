@@ -1,4 +1,4 @@
-"""Security wave 5 regressions: #208 (BEETS_WEB_URL userinfo in adapter
+"""Security wave 5 regressions: #208 (URL userinfo in adapter
 errors/logs), IA-15 (AI provider error body in job log/result) and IA-21
 (Discogs token in the query string; unvalidated provider artist id in the
 request path). Each test fails on 67f9fd0."""

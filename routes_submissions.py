@@ -263,7 +263,7 @@ def _submission_readiness() -> Dict[str, Any]:
             "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
             "beet_available": False,
             "remote_reachable": False,
-            "reason": "Stock Beets integration plugin is unreachable or not authenticated",
+            "reason": "Beets inside Web Manager is unavailable",
         }
 
     capabilities = set(plugin_status.get("capabilities") or [])

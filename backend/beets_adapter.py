@@ -19,25 +19,10 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from backend import beets_embedded
-from backend.config_layers import url_has_userinfo
 
 log = logging.getLogger("beets.adapter")
 
 _IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")  # the plugin's own rule (#308)
-
-# Compatibility for routes_setup.py's BEETS_WEB_URL setting checks (#208).
-# BEETS_WEB_URL is no longer used by the adapter; remove these together with
-# those checks (sequenced after #461).
-BEETS_WEB_URL_USERINFO_CODE = "beets_web_url_userinfo"
-BEETS_WEB_URL_USERINFO_MESSAGE = (
-    "BEETS_WEB_URL contains a user name or password (user:pass@host). Web Manager does not "
-    "send URL credentials to Beets; remove them from BEETS_WEB_URL and restart Web Manager."
-)
-
-
-def beets_web_url_has_userinfo(url: str) -> bool:
-    """True for a URL that carries userinfo (see the compatibility note above)."""
-    return url_has_userinfo(url)
 
 
 class BeetsAdapterError(Exception):
@@ -120,8 +105,8 @@ class BeetsAdapterPathsUnavailableError(BeetsAdapterError):
     def __init__(
         self,
         message: str = (
-            "Beets returned items without paths. Set web.include_paths: true in the "
-            "Beets config.yaml (Setup offers a one-click fix) and restart the Beets container."
+            "Beets returned items without paths. Web Manager turns on web.include_paths "
+            "at startup; restart Web Manager."
         ),
         status_code: int = 503,
         response_data: Optional[Any] = None,

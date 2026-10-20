@@ -1,8 +1,8 @@
 """Composite Workflow Engine for Beets Web Manager.
 
-Orchestrates multi-step, user-confirmed workflows across stock Beets:
+Orchestrates multi-step, user-confirmed workflows across Beets:
 - Web Manager owns planning, preview, audit trails, checkpoints, and rollback.
-- Stock Beets owns library state mutations via BeetsAdapter (/webmanager/* endpoints).
+- Beets owns library state mutations via BeetsAdapter (/webmanager/* endpoints).
 - Zero raw SQLite access to musiclibrary.blb.
 - Zero Docker socket access.
 """
@@ -2286,7 +2286,7 @@ def delete_album_art(
                                                        "Beets tried to put it back; check the album.")])
             return {"ok": False, "code": code.lower() or "beets_error", "operation_id": op_id, "status": "Failed",
                     "mutated": False if known else None,
-                    "error": ("Restart the beets container so it loads webmanager plugin 1.16.0; nothing was changed."
+                    "error": ("This image's webmanager plugin is older than 1.16.0; use the published Web Manager image; nothing was changed."
                               if code == "BEETS_NOT_FOUND" else
                               "Beets could not remove the cover; nothing was changed." if known else
                               "Beets could not remove the cover; check the album's artwork.")}
@@ -2311,7 +2311,7 @@ _ART_REFUSALS = {
     "ALBUM_EMPTY": "The album has no tracks, so Beets has no folder for its artwork.",
     "DESTINATION_PATH_INVALID": "The album folder is outside the folders Beets may write to.",
     "OLD_ART_PATH_INVALID": "The album's current cover is outside the folders Beets may write to.",
-    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.12.0; nothing was changed.",
+    "BEETS_NOT_FOUND": "This image's webmanager plugin is older than 1.12.0; use the published Web Manager image; nothing was changed.",
 }
 
 
@@ -3247,7 +3247,7 @@ _RELOCATION_REFUSALS = {
     "BLANK_IDENTITY": "The album has no artist or album name to place it under; fix its tags first. "
                       "Nothing was moved.",
     "UNDONE": "Beets could not finish and put every file back; nothing was changed.",
-    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.16.0; nothing was changed.",
+    "BEETS_NOT_FOUND": "This image's webmanager plugin is older than 1.16.0; use the published Web Manager image; nothing was changed.",
     "INVALID_REQUEST": "Beets refused the request as malformed; nothing was changed.",
     "SOURCE_CHANGED": "A torrent original is gone or changed since the album was linked into the library "
                       "(the torrent client or another tool changed it); nothing was changed.",
@@ -3365,7 +3365,7 @@ def apply_album_relocation(
                 "1.15.0 or later (capability album_relocation_link) to link it; nothing was changed."])
             return {"ok": False, "code": "plugin_outdated", "mutated": False, "operation_id": op_id,
                     "status": "Failed",
-                    "error": "Restart the beets container so it loads webmanager plugin 1.16.0, which links "
+                    "error": "This image's webmanager plugin is older than 1.16.0; use the published Web Manager image, which links "
                              "a seeding torrent's files instead of moving them; nothing was changed."}
     from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
     with resource_locks().hold([f"album:{aid}"], attempt_owner(op_id), timeout=10):
@@ -3978,7 +3978,7 @@ def _import_refused(ex: Exception) -> Dict[str, Any]:
         return {"ok": False, "code": code.lower(), "mutated": False, "error": _IMPORT_REFUSALS[code]}
     if isinstance(ex, (BeetsAdapterConnectionError, BeetsAdapterTimeoutError)):
         return {"ok": False, "code": "beets_unavailable", "mutated": None,
-                "error": "Beets did not answer the import request; check the Beets container and the library."}
+                "error": "Beets did not answer the import request; check /api/health and the library."}
     return {"ok": False, "code": (code or "import_failed").lower(), "mutated": None,
             "error": "Beets reported that the import failed; see the Beets log for details."}
 
@@ -5000,7 +5000,7 @@ MBSYNC_LIBRARY_ROLLBACK_REASON = (
     "and new values of the first 200 changed albums or singles, so they can be put back by hand. "
     "Files are never moved; tags written to files stay written.")
 _MBSYNC_LIBRARY_REFUSALS = {
-    "BEETS_NOT_FOUND": "Restart the beets container so it loads webmanager plugin 1.13.0; nothing was changed.",
+    "BEETS_NOT_FOUND": "This image's webmanager plugin is older than 1.13.0; use the published Web Manager image; nothing was changed.",
     "CAPABILITY_UNAVAILABLE": "Enable Beets' mbsync plugin (add mbsync to plugins: in Beets' config.yaml and "
                               "restart Beets); nothing was changed.",
     "ALREADY_RUNNING": "Beets is already syncing the library from MusicBrainz; wait for it to finish.",
@@ -5136,7 +5136,7 @@ def mbsync_library(
             # #326 F4: a re-run sees no database difference and never retries the write.
             parts.append(f"{counts['write_failed_count']} tracks' tags could not be written (their Beets "
                          "database fields did change; a re-run will not retry them: fix the files' "
-                         "permissions, then run `beet write` in the Beets container)")
+                         "permissions, then run `beet write` in the Web Manager container)")
         out.update(code="MBSYNC_PARTIAL",
                    error=f"{'; '.join(parts)}. {counts['processed']} of {counts['targets']} were synced.")
     if st:

@@ -488,7 +488,7 @@ export default function FirstRunSetup() {
                     </button>
                     {showBeetsDetails && (
                       <div className="font-mono text-[11px] text-zinc-400 bg-black/50 p-2 rounded border border-zinc-800">
-                        Endpoint: {setupStatus?.beets?.path || 'http://beets:8337'}<br />
+                        Engine: {setupStatus?.beets?.path || 'Beets inside Web Manager'}<br />
                         Reachable: {setupStatus?.beets?.available ? 'Yes' : 'No'}
                       </div>
                     )}
