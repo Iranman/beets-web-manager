@@ -591,14 +591,19 @@ def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] =
     return False
 
 
-def _pending_review_has_path(folder_path: str) -> bool:
+def _pending_review_has_path(folder_path: str, *, unknown: bool = False) -> bool:
+    """True when a Review row points at ``folder_path``. When the queue
+    cannot be read, returns ``unknown``: a caller about to delete the folder
+    passes True so it keeps it (fail closed, #427)."""
     key = _pending_review_path_key(folder_path)
     if not key:
         return False
     try:
-        return key in _pending_review_path_set()
+        # Strict load only for fail-closed callers; others keep the lenient
+        # load (rows still visible when saving the pruned queue fails).
+        return key in _pending_review_path_set(_load_pending_reviews(strict=unknown))
     except Exception:
-        return False
+        return unknown
 
 
 def _pending_review_path_key(folder_path: str) -> str:

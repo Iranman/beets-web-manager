@@ -12,7 +12,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
-from backend.pending_review_store import _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
+from backend.pending_review_store import _pending_review_has_path, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
@@ -87,6 +87,21 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
                                 force_stage: bool = False,
                                 target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
     """Copy a selected subset to a clean import folder when the source has extras."""
+    # #427: a folder the app already staged that holds exactly the selected
+    # files is imported in place; a second copy would leave the Review row and
+    # the acquisition cleanup pointing at different folders.
+    stage_root = os.path.normpath(str(validated_downloads_root() / "_beets_missing_import"))
+    source = os.path.normpath(str(aldir))
+    if source != stage_root and source.startswith(stage_root + os.sep):
+        try:
+            present = {p.resolve(strict=False) for p in Path(aldir).rglob("*")
+                       if p.is_file() and p.suffix.lower() in AUDIO_EXT}
+            selected = {Path(p).resolve(strict=False) for p in audio_files}
+        except OSError:
+            present = set()
+        if present and present == selected:
+            log.append(f"  [import] Using staged folder in place: {aldir}")
+            return aldir
     # Validated root only; an unsafe DOWNLOADS_ROOT raises the setup-block
     # message instead of creating _beets_missing_import inside it (#268 S-2).
     return _stage_selected_audio_files_impl(
@@ -381,6 +396,11 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
             raise ValueError(f"'{folder}' is not a recognised app-managed download path")
         downloads_root = DOWNLOADS_ROOT.resolve(strict=False)
         if folder == downloads_root:
+            return False
+        if _pending_review_has_path(str(folder), unknown=True):
+            # #427: the import queued this folder for Review; deleting it
+            # would leave the row dangling. An unreadable queue keeps it too.
+            log.append(f"  [import] Kept staging folder queued for Review: {folder}")
             return False
         if folder.exists():
             composite_workflows.delete_file(str(folder))
