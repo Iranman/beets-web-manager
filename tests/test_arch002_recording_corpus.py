@@ -390,9 +390,28 @@ class TestVerifyAudioAgainstRequest(unittest.TestCase):
         self.assertEqual(self._v(hits, expected_title="Song", expected_artist="Band",
                                  expected_recording_id=REC)["decision"], "accept")
 
-    def test_expected_id_tied_with_different_song_needs_review(self):
-        hits = [self._h(REC, 92), self._h(OTHER, 92, title="Different Song Entirely")]
-        self.assertEqual(self._v(hits, expected_title="Song", expected_recording_id=REC)["decision"], "review")
+    def test_expected_id_tied_for_top_with_different_songs_accepts(self):
+        # AcoustID links one fingerprint to several recordings at one score;
+        # the requested Recording ID among them at the top score is proof.
+        hits = [self._h(OTHER, 92, title="Different Song Entirely"), self._h(REC, 92),
+                self._h(THIRD, 92, title="Another Song")]
+        out = self._v(hits, expected_title="Song", expected_recording_id=REC)
+        self.assertEqual(out["decision"], "accept")
+        self.assertEqual(out["recording_id"], REC)
+
+    def test_expected_id_top_with_lower_different_song_accepts(self):
+        hits = [self._h(REC, 94), self._h(OTHER, 92, title="Different Song Entirely")]
+        self.assertEqual(self._v(hits, expected_title="Song", expected_recording_id=REC)["decision"], "accept")
+
+    def test_expected_id_present_but_not_top_is_not_accepted(self):
+        hits = [self._h(OTHER, 95, title="Different Song Entirely"), self._h(REC, 93)]
+        out = self._v(hits, expected_title="Song", expected_recording_id=REC)
+        self.assertNotEqual(out["decision"], "accept")
+        self.assertEqual(out["status"], "ambiguous")
+
+    def test_expected_id_below_floor_is_not_accepted(self):
+        hits = [self._h(OTHER, 92, title="Different Song Entirely"), self._h(REC, 60)]
+        self.assertNotEqual(self._v(hits, expected_title="Song", expected_recording_id=REC)["decision"], "accept")
 
     def test_fingerprint_names_other_recording_of_same_song_is_review_not_accept(self):
         out = self._v([self._h(OTHER, 95)], expected_title="Song", expected_artist="Band", expected_recording_id=REC)

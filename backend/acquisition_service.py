@@ -353,8 +353,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 if import_wanted_tracks is not None
                 else job_wanted_tracks
             )
+            undelivered: List[Dict[str, Any]] = []
             if active_wanted_tracks:
-                _validate_wanted_download_identity_before_import(
+                # Only fingerprint-verified tracks import; the rest stay missing.
+                active_wanted_tracks, undelivered = _validate_wanted_download_identity_before_import(
                     import_dir,
                     active_wanted_tracks,
                     log,
@@ -371,12 +373,19 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             import_result = _wait_for_child_job(import_job_id, log, cancel_event,
                                                 prefix="import", timeout=1200)
             log.append("[import] Complete — files imported, tagged, and moved into the music folder")
+            if undelivered:
+                log.append(
+                    f"[import] {len(undelivered)} requested track(s) did not fingerprint-verify "
+                    "and are still missing: "
+                    + ", ".join(_wanted_track_label(t) for t in undelivered[:8])
+                )
             return {
                 "imported": True,
                 "import_job_id": import_job_id,
                 "import_result": import_result,
                 "existing_album_id": existing_album_id,
                 "missing_track_count": len(active_wanted_tracks),
+                "undelivered_tracks": undelivered,
             }
 
         def _direct_dest_dir(selection_tracks: Optional[List[Dict[str, Any]]] = None,
@@ -729,9 +738,13 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             )
                             continue
                         break
-                    if job_wanted_tracks and dl_wanted_tracks and len(dl_wanted_tracks) < len(job_wanted_tracks):
+                    if job_wanted_tracks and dl_wanted_tracks and (
+                            len(dl_wanted_tracks) < len(job_wanted_tracks)
+                            or download_result.get("undelivered_tracks")):
                         remaining_after_slskd = _wanted_tracks_not_in_album(
                             existing_album_id, resolved_mbid, job_wanted_tracks, log)
+                        slskd_imported_n = len(dl_wanted_tracks) - len(
+                            download_result.get("undelivered_tracks") or [])
                         if remaining_after_slskd:
                             remaining_desc = ", ".join(
                                 _wanted_track_label(t) for t in remaining_after_slskd[:8]
@@ -739,13 +752,13 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             if not try_source_fallback:
                                 raise RuntimeError(
                                     "SLSKD imported "
-                                    f"{len(dl_wanted_tracks)}/{len(job_wanted_tracks)} "
+                                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
                                     "requested missing track(s), but these remain: "
                                     f"{remaining_desc}"
                                 )
                             log.append(
                                 "[fallback] SLSKD satisfied "
-                                f"{len(dl_wanted_tracks)}/{len(job_wanted_tracks)} "
+                                f"{slskd_imported_n}/{len(job_wanted_tracks)} "
                                 "requested missing track(s); trying direct sources for remaining: "
                                 f"{remaining_desc}"
                             )
@@ -761,7 +774,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             except Exception as direct_ex:
                                 raise RuntimeError(
                                     "SLSKD imported "
-                                    f"{len(dl_wanted_tracks)}/{len(job_wanted_tracks)} "
+                                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
                                     "requested missing track(s), but direct-source fallback for the "
                                     f"remaining track(s) failed: {direct_ex}"
                                 ) from direct_ex
@@ -769,6 +782,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             combined["method"] = f"slskd+{fallback_result.get('method') or 'fallback'}"
                             combined["files"] = int(download_result.get("files") or 0) + int(fallback_result.get("files") or 0)
                             combined["fallback_result"] = fallback_result
+                            combined["undelivered_tracks"] = list(fallback_result.get("undelivered_tracks") or [])
                             return combined
                     return download_result
                 slskd_error = RuntimeError(
@@ -824,18 +838,24 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 def _validate_wanted_download_identity_before_import(import_dir: str,
                                                      wanted_tracks: List[Dict[str, Any]],
                                                      log: list,
-                                                     fallback_artist: str = "") -> List[str]:
-    """Require downloaded wanted-track files to fingerprint-match before import."""
+                                                     fallback_artist: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Require downloaded wanted-track files to fingerprint-match before import.
+
+    Returns ``(verified_tracks, undelivered_tracks)``. Files that do not
+    verify are removed from the staging folder so only verified audio reaches
+    Beets; their tracks are reported as undelivered (still missing). Raises
+    only when no requested track verified.
+    """
     wanted = _normalise_wanted_tracks(wanted_tracks)
     if not wanted:
-        return []
+        return [], []
     audio_files = sorted(_audio_files_in_dir(import_dir))
     if not audio_files:
         raise RuntimeError(
             "No downloaded audio files found for requested track verification"
         )
 
-    accepted: List[str] = []
+    verified: List[Dict[str, Any]] = []
     failures: List[str] = []
     remaining = list(wanted)
 
@@ -875,18 +895,26 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
                 best_ok_score = score
                 best_idx = idx
 
-        if best_idx < 0:
-            identity = (
-                best_any_match.get("identity")
-                if isinstance(best_any_match, dict) and isinstance(best_any_match.get("identity"), dict)
-                else {}
-            )
-            if _s(identity.get("final_action") or "review") == "reject":
-                try:
-                    composite_workflows.delete_file(path_value)
-                except Exception:
-                    pass
-            detail = _playlist_identity_log(best_any_match) if best_any_match else "no identity evidence"
+        if best_idx < 0 or not _playlist_download_audio_allowed(path_value, _identity_log):
+            if best_idx >= 0:
+                detail = "format rejected"
+            else:
+                detail = _playlist_identity_log(best_any_match) if best_any_match else "no identity evidence"
+            # Unverified audio never reaches Beets: drop it from the staging
+            # folder so the verified files in the batch can still import.
+            # Fail closed: if it cannot be removed, nothing imports.
+            try:
+                composite_workflows.delete_file(path_value)
+            except Exception as ex:
+                raise RuntimeError(
+                    "Downloaded audio did not fingerprint-verify and could not be removed "
+                    f"from staging ({detail}): {Path(path_value).name}: {ex}"
+                ) from ex
+            if Path(path_value).exists():
+                raise RuntimeError(
+                    "Downloaded audio did not fingerprint-verify and is still in staging "
+                    f"({detail}): {Path(path_value).name}"
+                )
             failures.append(f"{Path(path_value).name} ({detail})")
             _identity_log(
                 "rejected unverified requested-track download "
@@ -897,9 +925,6 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
         track = remaining.pop(best_idx)
         title = _s(track.get("title") or "").strip()
         track_artist = _s(track.get("artist") or fallback_artist or "").strip()
-        if not _playlist_download_audio_allowed(path_value, _identity_log):
-            failures.append(f"{Path(path_value).name} (format rejected)")
-            continue
         _playlist_stamp_download_tags(path_value, track_artist, title, _identity_log)
         match = _playlist_download_match(
             path_value,
@@ -907,21 +932,26 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
             title,
             _s(track.get("mb_trackid") or ""),
         )
-        accepted.append(path_value)
+        verified.append(track)
         _identity_log(
             "accepted fingerprint-verified requested-track download "
             f"({_playlist_identity_log(match)}): {Path(path_value).name}"
         )
 
-    if failures or remaining:
-        missing = ", ".join(_wanted_track_label(track) for track in remaining[:5])
-        details = "; ".join(failures[:5])
+    missing = ", ".join(_wanted_track_label(track) for track in remaining[:5])
+    details = "; ".join(failures[:5])
+    if not verified:
         raise RuntimeError(
             "Downloaded audio did not fingerprint-verify as requested MusicBrainz track(s)"
             + (f": {missing}" if missing else "")
             + (f" ({details})" if details else "")
         )
-    return accepted
+    if remaining:
+        _identity_log(
+            f"importing {len(verified)}/{len(wanted)} fingerprint-verified requested track(s); "
+            f"still missing: {missing}" + (f" ({details})" if details else "")
+        )
+    return verified, remaining
 
 
 def _deno_download_url() -> str:
