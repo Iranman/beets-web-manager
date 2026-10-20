@@ -996,16 +996,17 @@ def _write_config_text(
     Fails closed: if the backup cannot be made, config.yaml is not touched.
     Returns the backup's file name only (never a host/container path).
     """
-    from backend.config_manager import CONFIG_WRITE_LOCK
+    from backend.config_manager import CONFIG_WRITE_LOCK, refuse_code_execution_edits
     backup_path: Optional[Path] = None
     with CONFIG_WRITE_LOCK:  # #324 F4: same lock as the config editor's save/revert
-        if original is not None:
-            try:
-                current = _read_config_snapshot(path)
-            except Exception as exc:
-                raise BeetsConfigEditError(f"Could not re-read {path.name}: {type(exc).__name__}") from exc
-            if current != original:
-                raise BeetsConfigEditError(f"{path.name} changed while it was being edited; try again")
+        try:
+            current = _read_config_snapshot(path)
+        except Exception as exc:
+            raise BeetsConfigEditError(f"Could not re-read {path.name}: {type(exc).__name__}") from exc
+        if original is not None and current != original:
+            raise BeetsConfigEditError(f"{path.name} changed while it was being edited; try again")
+        # ADR 0006 / S1 on #457: every Web Manager writer passes the embedded allowlist.
+        refuse_code_execution_edits(current.decode("utf-8", "replace"), text)
         if backup_prefix:
             if original is None:
                 raise BeetsConfigEditError("internal error: backup requested without the original snapshot")
@@ -1124,6 +1125,8 @@ def update_config_yaml_plugins(
                 "    copy: yes\n"
                 "    move: no\n"
             )
+        from backend.config_manager import refuse_code_execution_edits
+        refuse_code_execution_edits("", content)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(path, content)
         return True, "Created default config.yaml with required plugins"
@@ -1608,6 +1611,12 @@ def provision_and_verify(
     ``config_file`` is the BEETS_CONFIG file to edit (F7); it defaults to
     ``<config_dir>/config.yaml``.
     """
+    from backend import beets_embedded
+    if beets_embedded.enabled():
+        # ADR 0006: the engine loads the image's own plugins and refuses to
+        # start if a copy in /config/beetsplug would shadow them.
+        from backend.config_manager import ConfigCodeExecutionEditRefused
+        raise ConfigCodeExecutionEditRefused(["plugin provisioning into the Beets config directory"])
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
     cfg_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,6 +1,9 @@
-"""Beets Adapter — Direct HTTP adapter for stock Beets (beetsplug.web + beetsplug.webmanager).
+"""Beets Adapter — the one interface to Beets (beetsplug.web + beetsplug.webmanager).
 
-Communicates over HTTP with the stock LinuxServer Beets container:
+With ``BEETS_ENGINE=embedded`` (docs/adr/0006-embedded-beets.md) every call is
+dispatched in-process to the same handlers through ``backend.beets_embedded``.
+Otherwise (the migration-time default) it communicates over HTTP with the
+stock LinuxServer Beets container:
 - Native reads via beetsplug.web REST endpoints (/stats, /artist/, /item/, /album/)
 - Authenticated mutations via beetsplug.webmanager (/webmanager/*)
 """
@@ -21,6 +24,7 @@ import urllib.parse
 import urllib.error
 from typing import Any, Dict, List, Optional, Sequence, Union
 
+from backend import beets_embedded
 from backend.config_layers import redact_url_userinfo, url_has_userinfo
 
 try:
@@ -238,6 +242,34 @@ def _with_legacy_genre(row: Any) -> Any:
     return row
 
 
+class _StreamedResponse:
+    """The ``read``/``close``/``headers``/``status`` surface routes use on
+    an upstream file response, over an in-process Werkzeug response."""
+
+    def __init__(self, resp: Any):
+        self._resp = resp
+        self._chunks = iter(resp.response)
+        self._buf = b""
+        self.headers = resp.headers
+        self.status = resp.status_code
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self._buf) < size:
+            try:
+                chunk = next(self._chunks)
+            except StopIteration:
+                break
+            self._buf += chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+        if size < 0:
+            out, self._buf = self._buf, b""
+        else:
+            out, self._buf = self._buf[:size], self._buf[size:]
+        return out
+
+    def close(self) -> None:
+        self._resp.close()
+
+
 class BeetsAdapter:
     """Client for Stock Beets Web & WebManager Plugin APIs."""
 
@@ -322,6 +354,102 @@ class BeetsAdapter:
             path = "/" + path
         return f"{self.base_url}{path}"
 
+    @staticmethod
+    def _raise_upstream(status: int, path: str, raw_body: bytes) -> None:
+        """Map an error status from Beets (HTTP or in-process) to the adapter's exceptions."""
+        err_body = raw_body.decode("utf-8", errors="replace")
+        try:
+            err_json = json.loads(err_body)
+        except Exception:
+            err_json = {"raw": err_body}
+
+        # Raw upstream response bodies (potentially raw HTML error pages,
+        # internal stack traces, or unexpected content) are logged
+        # server-side ONLY -- never embedded in the exception message,
+        # which callers may surface directly in an HTTP response.
+        log.warning("Beets upstream error %s on %s: %s", status, path, err_body[:2000])
+
+        # If our own webmanager plugin returned a structured error_code,
+        # carry it forward -- it is already a sanitized, stable field.
+        upstream_error_code = err_json.get("error_code") if isinstance(err_json, dict) else None
+
+        if status == 400:
+            raise BeetsAdapterBadRequestError(
+                f"Beets rejected the request on {path} (bad request)",
+                status_code=status,
+                response_data=err_json,
+                error_code=upstream_error_code or "BEETS_BAD_REQUEST",
+            )
+        if status == 401:
+            raise BeetsAdapterAuthError(
+                f"Beets authentication failed on {path}",
+                status_code=status,
+                response_data=err_json,
+                error_code=upstream_error_code or "BEETS_AUTH_FAILED",
+            )
+        if status == 404:
+            raise BeetsAdapterNotFoundError(
+                f"Beets resource not found on {path}",
+                status_code=status,
+                response_data=err_json,
+                error_code=upstream_error_code or "BEETS_NOT_FOUND",
+            )
+        raise BeetsAdapterError(
+            f"Beets request failed on {path} (status {status})",
+            status_code=status,
+            response_data=err_json,
+            error_code=upstream_error_code or "BEETS_UPSTREAM_ERROR",
+        )
+
+    @staticmethod
+    def _embedded_engine():
+        """The in-process engine (ADR 0006), or the self-test's reason as a
+        connection error, so callers' "Beets unavailable" handling applies."""
+        try:
+            return beets_embedded.engine()
+        except beets_embedded.EmbeddedBeetsUnavailable as ex:
+            raise BeetsAdapterConnectionError(str(ex), error_code="BEETS_EMBEDDED_UNAVAILABLE") from None
+
+    def _embedded_request(self, method, path, params, json_data, headers) -> Any:
+        """``_request`` over the in-process engine: same handlers, same
+        status/error contract, no socket."""
+        engine = self._embedded_engine()
+        req_headers = {"Accept": "application/json", **(headers or {})}
+        key = req_headers.get("Idempotency-Key")
+        if key and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+            req_headers["Idempotency-Key"] = "k-" + hashlib.sha256(key.encode("utf-8")).hexdigest()
+        try:
+            resp = engine.call(method, path, params=params, json_data=json_data, headers=req_headers)
+        except beets_embedded.EmbeddedBeetsUnavailable as ex:
+            raise BeetsAdapterError(f"Beets changes are refused until this is fixed: {ex}",
+                                    status_code=503, error_code="BEETS_EMBEDDED_DEGRADED") from None
+        except Exception as ex:  # a handler bug must not escape as a bare exception
+            log.exception("Embedded Beets call %s %s failed", method, path)
+            raise BeetsAdapterError(f"Beets request failed on {path} ({type(ex).__name__})",
+                                    status_code=500, error_code="BEETS_UPSTREAM_ERROR") from ex
+        if resp.status_code >= 400:
+            self._raise_upstream(resp.status_code, path, resp.get_data())
+        if "application/json" in (resp.headers.get("Content-Type") or ""):
+            try:
+                return json.loads(resp.get_data())
+            except Exception as json_err:
+                raise BeetsAdapterError(f"Malformed JSON response from Beets on {path}",
+                                        error_code="MALFORMED_RESPONSE") from json_err
+        return resp.get_data()
+
+    def _embedded_open(self, path: str, what: str):
+        """Stream a file route in-process (item audio, album art)."""
+        engine = self._embedded_engine()
+        resp = engine.call("GET", path, stream=True)
+        if resp.status_code == 404:
+            resp.close()
+            raise BeetsAdapterNotFoundError(f"{what} not found", status_code=404)
+        if resp.status_code >= 400:
+            resp.close()
+            raise BeetsAdapterError(f"Error retrieving {what}", status_code=resp.status_code,
+                                    error_code="BEETS_UPSTREAM_ERROR")
+        return _StreamedResponse(resp)
+
     def _request(
         self,
         method: str,
@@ -331,6 +459,8 @@ class BeetsAdapter:
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
     ) -> Any:
+        if beets_embedded.enabled():
+            return self._embedded_request(method, path, params, json_data, headers)
         self._refuse_if_misconfigured()
         url = self._build_url(path)
         if params:
@@ -379,50 +509,7 @@ class BeetsAdapter:
                         ) from json_err
                 return data
         except urllib.error.HTTPError as ex:
-            status = ex.code
-            err_body = ex.read().decode("utf-8", errors="replace")
-            try:
-                err_json = json.loads(err_body)
-            except Exception:
-                err_json = {"raw": err_body}
-
-            # Raw upstream response bodies (potentially raw HTML error pages,
-            # internal stack traces, or unexpected content) are logged
-            # server-side ONLY -- never embedded in the exception message,
-            # which callers may surface directly in an HTTP response.
-            log.warning("Beets upstream error %s on %s: %s", status, path, err_body[:2000])
-
-            # If our own webmanager plugin returned a structured error_code,
-            # carry it forward -- it is already a sanitized, stable field.
-            upstream_error_code = err_json.get("error_code") if isinstance(err_json, dict) else None
-
-            if status == 400:
-                raise BeetsAdapterBadRequestError(
-                    f"Beets rejected the request on {path} (bad request)",
-                    status_code=status,
-                    response_data=err_json,
-                    error_code=upstream_error_code or "BEETS_BAD_REQUEST",
-                )
-            if status == 401:
-                raise BeetsAdapterAuthError(
-                    f"Beets authentication failed on {path}",
-                    status_code=status,
-                    response_data=err_json,
-                    error_code=upstream_error_code or "BEETS_AUTH_FAILED",
-                )
-            if status == 404:
-                raise BeetsAdapterNotFoundError(
-                    f"Beets resource not found on {path}",
-                    status_code=status,
-                    response_data=err_json,
-                    error_code=upstream_error_code or "BEETS_NOT_FOUND",
-                )
-            raise BeetsAdapterError(
-                f"Beets request failed on {path} (status {status})",
-                status_code=status,
-                response_data=err_json,
-                error_code=upstream_error_code or "BEETS_UPSTREAM_ERROR",
-            )
+            self._raise_upstream(ex.code, path, ex.read())
         except TimeoutError as ex:
             log.warning("Timeout connecting to Beets server at %s (%s): %s", self._display_url, path, ex)
             raise BeetsAdapterTimeoutError(
@@ -626,6 +713,8 @@ class BeetsAdapter:
 
     def open_item_file(self, item_id: int):
         """Open raw HTTP response stream for an item audio file."""
+        if beets_embedded.enabled():
+            return self._embedded_open(f"/item/{int(item_id)}/file", f"Audio file for item {item_id}")
         self._refuse_if_misconfigured()
         url = self._build_url(f"/item/{int(item_id)}/file")
         try:
@@ -677,6 +766,8 @@ class BeetsAdapter:
 
     def open_album_art(self, album_id: int):
         """Open raw HTTP response stream for an album cover art."""
+        if beets_embedded.enabled():
+            return self._embedded_open(f"/album/{int(album_id)}/art", f"Art for album {album_id}")
         self._refuse_if_misconfigured()
         url = self._build_url(f"/album/{int(album_id)}/art")
         try:

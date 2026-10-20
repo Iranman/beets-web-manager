@@ -24,8 +24,9 @@ Validates the standard, production stock-Beets deployment architecture
    host directory and the container's identity previously broke this,
    independent of PUID/PGID customization).
 6. Web Manager reaches stock Beets only via BEETS_WEB_URL (http://beets:8337,
-   container-internal) -- port 8338 is never involved, and beets-web-manager
-   never runs a local `beet` command of its own.
+   container-internal) -- port 8338 is never involved. The image bundles
+   Beets at the requirements.txt pin (ADR 0006, used only when
+   BEETS_ENGINE=embedded); the default http transport is what is exercised.
 7. First-run browser setup authentication wizard, through explicit completion.
 8. Basic Auth and auto-generated bearer token authentication.
 9. Stock Beets container stays in a stable "running" state with no
@@ -472,13 +473,24 @@ def run_acceptance() -> None:
             return
         _ok(f"All {plugins_report.get('required_count')} required Beets plugins are healthy (plugins_ready=True)")
 
-        # beets-web-manager has no local Beets runtime of its own -- prove
-        # it, rather than merely asserting it in a comment.
-        no_beet_exec = stack.compose("exec", "-T", "beets-web-manager", "sh", "-c", "command -v beet")
-        if no_beet_exec.returncode == 0 and no_beet_exec.stdout.strip():
-            _fail(f"beets-web-manager unexpectedly has a local `beet` executable: {no_beet_exec.stdout.strip()}")
+        # ADR 0006: the image bundles Beets as a pinned library (used
+        # in-process when BEETS_ENGINE=embedded). Prove the installed version
+        # is exactly the requirements.txt pin, so an image drift cannot slip
+        # through. The default (http) transport above still talks to stock
+        # Beets and those checks are unchanged.
+        pin_match = re.search(r"^beets==(\S+)", (ROOT / "requirements.txt").read_text(encoding="utf-8"), re.M)
+        if not pin_match:
+            _fail("requirements.txt has no beets==<version> pin")
             return
-        _ok("Confirmed beets-web-manager has no local `beet` executable (no embedded Beets runtime)")
+        pinned = pin_match.group(1)
+        beets_ver = stack.compose(
+            "exec", "-T", "beets-web-manager", "python", "-c", "import beets; print(beets.__version__)"
+        )
+        installed = beets_ver.stdout.strip() if beets_ver.returncode == 0 else ""
+        if installed != pinned:
+            _fail(f"beets-web-manager image Beets version {installed or '<missing>'!r} != pinned {pinned!r}")
+            return
+        _ok(f"beets-web-manager image bundles Beets {installed} (matches requirements.txt pin)")
 
         # Completing setup is a separate, explicit step (mirrors the real
         # browser wizard's final "Finish" action) -- this is exactly the

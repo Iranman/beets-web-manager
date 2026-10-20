@@ -55,6 +55,9 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
     later startup. Backs up the original once, to its own filename (not the
     config editor's /api/config/revert backup), before ever touching it.
     """
+    from backend import beets_embedded
+    if beets_embedded.enabled():
+        return  # ADR 0006: config.yaml is never edited at startup; the self-test names a bad plugin
     from backend.beets_plugins import _decode_config, _read_config_snapshot, _write_config_text
     from backend.config_manager import get_config_path
     try:
@@ -119,6 +122,13 @@ def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
     inside stock Beets is a live HTTP call and happens later (System page /
     setup status), once stock Beets is actually up.
     """
+    from backend import beets_embedded
+    if beets_embedded.enabled():
+        # ADR 0006: Beets runs in this process from the image's own
+        # operations package; nothing is provisioned and config.yaml is
+        # never edited. Switching back to BEETS_ENGINE=http provisions
+        # again at that start, before the Beets container reads it.
+        return
     try:
         from backend.beets_plugins import provision_bundled_plugins, update_config_yaml_plugins
         from backend.config_manager import get_config_path

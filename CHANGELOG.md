@@ -6,6 +6,22 @@ The project uses Semantic Versioning.
 
 ## v0.8.1 - 2026-10-20
 
+### Highlights
+
+- **Beets now runs embedded inside Web Manager.** One container instead of two: Beets 2.14.1 runs in the Web Manager process against your existing `config.yaml`, `musiclibrary.blb` and music folder, with no Beets container, no HTTP bridge and no plugin to provision. Turn it on with `BEETS_ENGINE=embedded` (single-container Compose: `examples/docker-compose.embedded.yml`); it becomes the default in the next release phase. Setup, moving from two containers and rollback: `docs/INSTALLATION.md`. Self-test codes and fixes: `docs/TROUBLESHOOTING.md`. Planned next ([ADR 0006](docs/adr/0006-embedded-beets.md)): embedded by default, explainable matching, first-class partial imports, idempotent staging. Inside the image, `beet` now finds the bundled `webmanager` and `discpath` plugins (`PYTHONPATH=/app`).
+
+### Added
+
+- Beets can run inside Web Manager (`BEETS_ENGINE=embedded`, opt-in; [ADR 0006](docs/adr/0006-embedded-beets.md), Phase 1). Web Manager loads Beets 2.14.1 as a pinned Python library, reads the same `config.yaml` (from `BEETSDIR`), and opens the same `musiclibrary.blb` and music folder through Beets' own Library API. Every Beets call runs in-process through the existing `webmanager` operations, with no HTTP, no plugin provisioning and no plugin version that can drift from Web Manager's. A startup self-test checks the following and reports a stable code and a fix for each failure:
+  - the Beets version against the pin;
+  - that `config.yaml` parses;
+  - that the library opens (a newly created empty library is flagged);
+  - that the music and library folders are writable;
+  - that every configured Beets plugin loaded;
+  - that `fpcalc` and `ffmpeg` are present.
+
+  `/api/health` lists the failing codes, and `/api/health/detail` (authenticated) has the messages. While any error-level check fails, Beets reads keep working but every library change is refused with that check's message (`BEETS_EMBEDDED_DEGRADED`); a Beets version that differs from the pin is an error. The plugins the image ships (`webmanager`, `discpath`) are always loaded from the image; if a copy elsewhere would be used instead, the engine does not start. In embedded mode Web Manager never edits `config.yaml` at startup, and the browser may change only an allowlist of `config.yaml` settings and add only plugins that run no external command or user-written expression; any other change from the Config page (save or revert) or Setup's plugin fixes is refused (`CONFIG_CODE_EXECUTION_EDIT_REFUSED`), and plugin provisioning is refused, because what they run would now run inside Web Manager (see [CONFIGURATION.md](docs/CONFIGURATION.md)); edit those in the file directly. The default stays `http` (the separate Beets container), and the shipped Compose files are unchanged until the Phase 2 cutover. `requirements.txt` now pins `beets==2.14.1` and `pyacoustid==1.3.1`.
+
 ### Fixed
 
 - webmanager plugin 1.18.4: a missing-track repair whose files name only some of the Release's credited artists (for example "38 Spesh" for "38 Spesh & Harry Fraud") is no longer skipped for its artist penalty alone. The plugin sets the album-level `artist` penalty aside only when every guard holds: the library album being repaired (`existing_album_id`, now sent by Web Manager and checked by the plugin) is on the pinned Release; chroma is loaded and AcoustID matched every file to the recording of the Release track Beets mapped it to; and every artist name in the source tags, split on `,` `;` `/` `&` `x` `and` `feat.` `ft.` `featuring` `with` and compared after Unicode and case normalization, is one of the Release's credited artists (never a Various Artists release, never a blank artist). The `album` penalty and every track-level penalty stay in, and the rest must still be under `match.strong_rec_thresh`. Such an import is listed in the plugin's `partial_artist_relaxed` response field and logged in the import transaction. Only an AcoustID result from this import counts: a Web Manager import drops chroma's cached results for its files before chroma fingerprints them again. An explicit `match.max_rec.data_source` cap is still honoured. Restart the Beets container to load 1.18.4.

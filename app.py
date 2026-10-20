@@ -81,6 +81,7 @@ _install_optional_plugins()  # a no-op placeholder: no thread needed
 
 from flask import Flask, Response, abort, jsonify, request, send_file
 from backend.beets_adapter import beets_adapter
+from backend import beets_embedded  # noqa: E402
 # Compatibility: engine error types callers historically imported from app.
 from backend.beets_adapter import (  # noqa: F401
     BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsAuthError, BeetsBadRequestError,
@@ -398,7 +399,11 @@ def _health_checks() -> Dict[str, bool]:
 @app.get("/api/health")
 def health():
     # Public/unauthenticated liveness. Dependency/readiness detail belongs on
-    # /health/ready and authenticated /api/health/detail.
+    # /health/ready and authenticated /api/health/detail. Liveness stays 200;
+    # with the in-process engine the Beets self-test's failing codes ride
+    # along (codes only, never paths: this route is public).
+    if beets_embedded.enabled():
+        return jsonify({"ok": True, "beets": beets_embedded.public_status()})
     return jsonify({"ok": True})
 
 
@@ -407,8 +412,14 @@ def health_detail():
     """Authenticated dependency diagnostics for the web manager."""
     checks = _health_checks()
     ok = checks["app"] and (checks["beets_web"] or checks["beets_webmanager_plugin"])
+    if beets_embedded.enabled():
+        beets_status = beets_embedded.status()
+        return jsonify({"ok": ok and beets_status["ok"], "checks": checks, "beets": beets_status})
     return jsonify({"ok": ok, "checks": checks})
 
+
+if beets_embedded.enabled():
+    beets_embedded.status()  # start Beets at boot so the self-test is logged now, not on first use
 
 try:
     _ai_batch_migration_result = _get_ai_batch_store().migrate_legacy_files(

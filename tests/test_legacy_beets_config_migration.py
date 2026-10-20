@@ -107,6 +107,14 @@ class LegacyBeetsConfigMigrationTests(unittest.TestCase):
         with mock.patch.object(APP.shutil, "which", side_effect=fake_which):
             APP._repair_legacy_beets_config(str(self.config_path))
 
+    def test_embedded_engine_never_edits_config(self):
+        # ADR 0006: with Beets in-process, startup never rewrites config.yaml.
+        self._write(OLD_BROKEN_CONFIG)
+        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "embedded"}):
+            self._repair()
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), OLD_BROKEN_CONFIG)
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["config.yaml"])
+
     def test_drops_plexsync_from_plugins_line(self):
         self._write(OLD_BROKEN_CONFIG)
         self._repair()

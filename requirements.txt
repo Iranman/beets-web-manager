@@ -19,6 +19,12 @@ bgutil-ytdlp-pot-provider==2.0.2
 # Tag reading & demo-mode metadata helper
 mutagen==1.48.1
 
+# Beets runs in-process (docs/adr/0006-embedded-beets.md). Keep equal to
+# backend/beets_embedded.PINNED_BEETS_VERSION and requirements-dev.txt.
+beets==2.14.1
+# chroma plugin (AcoustID fingerprints via fpcalc)
+pyacoustid==1.3.1
+
 # Tag I/O
 mediafile==0.17.0
 PyYAML==6.0.3

@@ -420,6 +420,16 @@ class ConfigPathContainmentTests(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(self.outside.read_text(encoding="utf-8"), _BASE_CONFIG)
         self.assertEqual(sorted(p.name for p in self.config_dir.iterdir()), ["config.yaml"])
 
+    def test_embedded_engine_skips_startup_provisioning(self):
+        # ADR 0006: with Beets in-process nothing is provisioned and
+        # config.yaml is left exactly as the user wrote it.
+        from backend.config_service import _bootstrap_beets_plugins
+        self._make_config()
+        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "embedded"}):
+            _bootstrap_beets_plugins(self.config_dir)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), _BASE_CONFIG)
+        self.assertEqual(sorted(p.name for p in self.config_dir.iterdir()), ["config.yaml"])
+
     def test_startup_auto_provision_refuses_beets_config_outside_beetsdir(self):
         from backend.config_service import _bootstrap_beets_plugins
         self._make_config()

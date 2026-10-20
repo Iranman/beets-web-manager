@@ -8,7 +8,7 @@ This project exists because the Beets web plugin didn't cover enough on its own:
 
 ## Features
 
-- Flask web manager that talks to a standard stock `lscr.io/linuxserver/beets` container over HTTP via its `web` plugin (reads) and a bundled `webmanager` integration plugin (authenticated mutations) — Beets Web Manager has no Beets runtime of its own.
+- Beets runs embedded inside Web Manager: one container, Beets 2.14.1 as a pinned library, your existing `config.yaml`, `musiclibrary.blb` and music folder, and a startup self-test that names what is wrong ([ADR 0006](docs/adr/0006-embedded-beets.md)). Enable it with `BEETS_ENGINE=embedded`; it becomes the default in the next phase. The legacy two-container mode (a stock `lscr.io/linuxserver/beets` container reached over HTTP) still works and is the rollback path.
 - React and Next.js static frontend served by the backend.
 - Import review queue with evidence-driven accept, reject, and cleanup actions.
 - Playlist ingestion from files, URLs, pasted tracks, and saved playlist manifests.
@@ -28,18 +28,75 @@ See [SCREENSHOTS.md](SCREENSHOTS.md) for a tour of the app (Library, Import, Pla
 ## Installation & Deployment
 
 > [!IMPORTANT]
-> **Beets Web Manager requires Beets.** Both services run together in the same Docker Compose stack sharing your library volumes. You do **not** need to install Python, Beets, `pip`, or `uv` on your host machine.
+> **Beets now runs inside Web Manager.** One container holds the web app and Beets itself (a pinned Beets 2.14.1). It uses the same Beets `config.yaml`, `musiclibrary.blb` and music folder a Beets container would. You do **not** need to install Python, Beets, `pip`, or `uv` on your host machine.
+>
+> Embedded Beets is turned on with `BEETS_ENGINE=embedded`. Until it becomes the default, a Compose file without that line runs the legacy two-container setup below.
 
-### Quick Start (Production)
+### Quick Start (Production, single container)
 
-Deploying Beets Web Manager takes just 4 steps:
-
-#### 1. Create a project directory
+#### 1. Create a project directory with a Beets config
 ```bash
 mkdir beets-stack && cd beets-stack
+mkdir beets web-manager
+curl -fsSL -o beets/config.yaml https://raw.githubusercontent.com/Iranman/beets-web-manager/main/config.yaml.example
 ```
 
+Already have a Beets `/config` folder (with `config.yaml` and `musiclibrary.blb`)? Use that folder instead of `./beets`, and see [Moving from two containers to one](docs/INSTALLATION.md#moving-from-two-containers-to-one) first.
+
 #### 2. Create `docker-compose.yml`
+```yaml
+services:
+  beets-web-manager:
+    image: ghcr.io/iranman/beets-web-manager:latest
+    container_name: beets-web-manager
+    restart: unless-stopped
+    ports:
+      - "8337:8337"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - BEETS_ENGINE=embedded
+      - MUSIC_ROOT=/music
+      - DOWNLOADS_ROOT=/downloads
+      - BEETS_CONFIG=/config/config.yaml
+    volumes:
+      - ./beets:/config
+      - /path/to/music:/music
+      - /path/to/downloads:/downloads
+      - ./web-manager:/web-manager-data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+```
+
+`/music` is mounted read-write: Beets moves, tags and imports files from inside this container. [`examples/docker-compose.embedded.yml`](examples/docker-compose.embedded.yml) is the full, commented file with every optional integration variable and the container hardening.
+
+*(Adjust `/path/to/music` and `/path/to/downloads` to match your media storage folders).*
+
+#### 3. Start it
+```bash
+docker compose up -d
+```
+
+#### 4. Check Beets and open Beets Web Manager
+```bash
+curl -s http://127.0.0.1:8337/api/health
+```
+
+`"beets": {"engine": "embedded", "ok": true, ...}` means Beets started. If `ok` is false, `codes` names the problem; [Troubleshooting](docs/TROUBLESHOOTING.md#embedded-beets-self-test-codes) has the fix for each code. A new, empty library reports `library_created`, which is expected on a fresh install.
+
+Open **`http://<server-ip>:8337`** in your browser. On your first visit, you will be guided through a simple setup wizard to create your administrator username and password.
+
+---
+
+### Legacy: two containers (stock Beets over HTTP)
+
+This is the setup the repository's [`docker-compose.yml`](docker-compose.yml) still ships until embedded becomes the default, and the rollback path from embedded mode. Web Manager talks to a stock LinuxServer Beets container over HTTP and installs its `webmanager` plugin into that container's `/config/beetsplug`.
+
 ```yaml
 services:
   beets:
@@ -85,35 +142,25 @@ services:
       start_period: 20s
 ```
 
-See the repository's [`docker-compose.yml`](docker-compose.yml) for the exact, fully-commented production file (including every optional integration variable).
-
-*(Adjust `/path/to/music` and `/path/to/downloads` to match your media storage folders).*
-
-#### 3. Start the stack
-```bash
-docker compose up -d
-```
-
-#### 4. Open Beets Web Manager
-Open **`http://<server-ip>:8337`** in your browser. On your first visit, you will be guided through a simple setup wizard to create your administrator username and password.
+See the repository's [`docker-compose.yml`](docker-compose.yml) for the exact, fully-commented two-container file.
 
 ---
 
 ### Running Beets CLI Commands
-You can run any standard Beets command anytime directly inside the `beets` container:
+
+Embedded: the same `beet` runs inside the Web Manager container. Run it as the app's user, and keep to read-only commands; library changes go through the Web Manager UI so they get a preview, an audit entry and a rollback:
 
 ```bash
-docker compose exec beets beet version
-docker compose exec beets beet ls
-docker compose exec beets beet import /downloads/new-album
+docker compose exec -u 1000:1000 beets-web-manager beet version
+docker compose exec -u 1000:1000 beets-web-manager beet ls artist:311
 ```
 
-Both Beets Web Manager and the Beets CLI share the exact same library and configuration files atomically.
+Two containers: run commands in the `beets` container, for example `docker compose exec beets beet ls`.
 
 ---
 
-### Advanced: Standalone / External Beets (e.g. TrueNAS)
-If you already run a standalone Beets container on a separate server or stack, see [examples/docker-compose.external-beets.yml](examples/docker-compose.external-beets.yml) to connect Beets Web Manager over the network.
+### Advanced: Standalone / External Beets (legacy)
+If you run a standalone Beets container on a separate server or stack and want to keep it, see [examples/docker-compose.external-beets.yml](examples/docker-compose.external-beets.yml) to connect Beets Web Manager over the network. With embedded Beets you mount that server's Beets `/config` and music folders into the Web Manager container instead.
 
 ### Development Installation (Source Builds)
 To build both services from local source code:
@@ -141,7 +188,7 @@ npm run build
 
 Most runtime configuration comes from environment variables and `/config/config.yaml` inside the container. Secrets can be provided through `.env`, Docker Compose environment variables, or configured directly in the web UI.
 
-The standard Compose stack shares `/config`, `/music` (read-only in the Web Manager container — stock Beets owns all writes there), and `/downloads` volumes between Beets and Beets Web Manager. `/web-manager-data` is Web Manager's own durable state and is not shared.
+With embedded Beets, the Web Manager container mounts `/config` (Beets `config.yaml` and `musiclibrary.blb`), `/music` (read-write), `/downloads`, and `/web-manager-data` (Web Manager's own state). Web Manager never edits `config.yaml` in this mode; change Beets settings in the file or on the Config page. In the legacy two-container stack, `/config`, `/music` (read-only in Web Manager; stock Beets owns the writes) and `/downloads` are shared between the two containers.
 
 ## Environment Variables
 
@@ -257,7 +304,10 @@ Compose is attempting to use a local-only image name instead of the published re
 **`failed to read dockerfile`**
 A development Compose file or `build: .` block is being run outside the repository root directory. Production Compose files use published images and do not require a local Dockerfile. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for existing stack snippets.
 
-**`cannot connect to Beets`**
+**`/api/health` shows `"beets": {"ok": false, "codes": [...]}`**
+Embedded Beets failed a startup check. Each code and its fix is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#embedded-beets-self-test-codes). While a check fails, reads keep working but library changes are refused with the reason.
+
+**`cannot connect to Beets`** (two-container mode)
 Beets Web Manager talks to the stock `beets` container over HTTP at `BEETS_WEB_URL` (default `http://beets:8337`, the Docker Compose service name and stock Beets' own `web`/`webmanager` plugin port). Confirm the `beets` container is running and healthy, and that `BEETS_WEB_URL` and `BEETS_OUTBOUND_ALLOWLIST` in your `.env` point at it.
 
 **The app returns 503 "Authentication is required" and I can't reach the UI at all.**
@@ -312,6 +362,8 @@ docker compose up -d
 
 ## Manual Beets CLI
 
+With embedded Beets, `beet` runs inside the Web Manager container (see [Running Beets CLI Commands](#running-beets-cli-commands)). The rest of this section is about the legacy two-container stack.
+
 The `beets` service is the **stock, unmodified** `lscr.io/linuxserver/beets` image — the sole authoritative Beets runtime and the sole owner of `/config/musiclibrary.blb`. Beets Web Manager never opens that database directly; it reads and writes through the same `beets` container's HTTP API (its `web` plugin for reads, its bundled `webmanager` plugin for authenticated mutations).
 
 Read-only CLI inspection inside the `beets` container is always safe, any time:
@@ -350,7 +402,11 @@ curl -s http://127.0.0.1:8337/health/ready
 curl -s http://127.0.0.1:8337/api/setup/status  # "blocking_reasons" should be empty
 ```
 
+With embedded Beets there is no `beets` container to restart: steps 4 and the `beet version` check do not apply. `curl -s http://127.0.0.1:8337/api/health` shows the Beets self-test instead.
+
 ### Rollback
+
+To go from embedded Beets back to two containers, see [Rolling back to two containers](docs/INSTALLATION.md#rolling-back-to-two-containers).
 
 Put the previous version back in the `image:` line of `beets-web-manager` (for example `ghcr.io/iranman/beets-web-manager:0.1.48` instead of `:latest`), restore the backup you made before upgrading, and start again:
 
