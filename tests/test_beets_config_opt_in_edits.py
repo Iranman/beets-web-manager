@@ -151,50 +151,35 @@ class ConfigWriteModeTests(_TempConfigMixin, unittest.TestCase):
     """S-2: rewriting config.yaml keeps its mode and leaves no temp file."""
 
     def test_0600_config_stays_0600(self):
-        from backend.beets_plugins import apply_recommended_plugins, ensure_web_include_paths
+        from backend.beets_plugins import apply_recommended_plugins
         path = self._make_config()
         os.chmod(path, 0o600)
-        ensure_web_include_paths(path)
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         apply_recommended_plugins(path, ["fetchart"])
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         leftovers = [p.name for p in self.config_dir.iterdir() if "tmp" in p.name]
         self.assertEqual(leftovers, [])
-
-    def test_fresh_install_config_is_0600(self):
-        """#324 N-2: config.yaml holds Beets' secrets once they are set. Beets
-        runs as the same PUID, so 0600 still lets it read the file."""
-        from backend.beets_plugins import update_config_yaml_plugins
-        path = self._make_config(text=None)
-        old_umask = os.umask(0)
-        try:
-            update_config_yaml_plugins(path)
-        finally:
-            os.umask(old_umask)
-        self.assertTrue(path.exists())
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
 class ConfigBackupTests(_TempConfigMixin, unittest.TestCase):
     """N5/N6/N7: backup name exposure, uniqueness, and fail-closed writes."""
 
     def test_backup_in_response_is_a_basename(self):
-        from backend.beets_plugins import apply_recommended_plugins, ensure_web_include_paths
+        from backend.beets_plugins import apply_recommended_plugins
         path = self._make_config()
-        for result in (ensure_web_include_paths(path), apply_recommended_plugins(path, ["fetchart"])):
+        for result in (apply_recommended_plugins(path, ["fetchart"]), apply_recommended_plugins(path, ["embedart"])):
             self.assertEqual(result["backup"], Path(result["backup"]).name)
             self.assertNotIn("/", result["backup"])
             self.assertTrue((self.config_dir / result["backup"]).is_file())
 
     def test_same_second_writes_get_distinct_backups(self):
-        from backend.beets_plugins import apply_recommended_plugins, ensure_web_include_paths
+        from backend.beets_plugins import apply_recommended_plugins
         path = self._make_config()
         original = path.read_text(encoding="utf-8")
         with mock.patch("backend.beets_plugins._timestamped_backup_prefix",
                         return_value="config.yaml.bak-20260101-000000"):
-            first = ensure_web_include_paths(path)["backup"]
+            first = apply_recommended_plugins(path, ["fetchart"])["backup"]
             after_first = path.read_text(encoding="utf-8")
-            second = apply_recommended_plugins(path, ["fetchart"])["backup"]
+            second = apply_recommended_plugins(path, ["embedart"])["backup"]
         self.assertNotEqual(first, second)
         self.assertEqual(len(self._backups()), 2)
         self.assertEqual((self.config_dir / first).read_text(encoding="utf-8"), original)
@@ -206,7 +191,7 @@ class ConfigBackupTests(_TempConfigMixin, unittest.TestCase):
         created 0600 (os.open), not copied with the source's 0644 and then
         chmod-ed. Every chmod of a backup records the mode it had before."""
         import backend.beets_plugins as bp
-        from backend.beets_plugins import ensure_web_include_paths
+        from backend.beets_plugins import apply_recommended_plugins
         path = self._make_config()
         os.chmod(path, 0o644)
         observed = []
@@ -220,56 +205,23 @@ class ConfigBackupTests(_TempConfigMixin, unittest.TestCase):
         old_umask = os.umask(0)
         try:
             with mock.patch.object(bp.os, "chmod", spy_chmod):
-                backup = ensure_web_include_paths(path)["backup"]
+                backup = apply_recommended_plugins(path, ["fetchart"])["backup"]
         finally:
             os.umask(old_umask)
         observed.append(stat.S_IMODE(os.stat(self.config_dir / backup).st_mode))
         self.assertEqual(set(observed), {0o600})
 
     def test_plugin_update_fails_closed_when_backup_fails(self):
-        from backend.beets_plugins import update_config_yaml_plugins
-        path = self._make_config("plugins: fetchart\n")
+        from backend.beets_plugins import BeetsConfigEditError, apply_recommended_plugins
+        path = self._make_config()
         with mock.patch("backend.beets_plugins._create_backup", side_effect=PermissionError("denied")):
-            with self.assertRaises(RuntimeError):
-                update_config_yaml_plugins(path, backup=True)
-        self.assertEqual(path.read_text(encoding="utf-8"), "plugins: fetchart\n")
+            with self.assertRaises(BeetsConfigEditError):
+                apply_recommended_plugins(path, ["fetchart"])
+        self.assertEqual(path.read_text(encoding="utf-8"), _BASE_CONFIG)
         self.assertEqual([p.name for p in self.config_dir.iterdir()], ["config.yaml"])
 
 
 class EnsureWebIncludePathsTests(_TempConfigMixin, unittest.TestCase):
-    def test_absent_key_is_added_with_backup_and_restart_flag(self):
-        from backend.beets_plugins import ensure_web_include_paths, read_web_include_paths
-        path = self._make_config()
-        result = ensure_web_include_paths(path)
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["changed"])
-        self.assertTrue(result["restart_required"])
-        self.assertTrue(result["backup"])
-        self.assertEqual(len(self._backups()), 1)
-        text = path.read_text(encoding="utf-8")
-        self.assertTrue(read_web_include_paths(text))
-        self.assertIn("# user's choice, must not be rewritten", text)
-        self.assertIn("backend: gstreamer", text)
-        self.assertIn("port: 8337", text)
-
-    def test_explicit_no_is_flipped(self):
-        from backend.beets_plugins import ensure_web_include_paths, read_web_include_paths
-        path = self._make_config(_BASE_CONFIG.replace("  port: 8337\n", "  port: 8337\n  include_paths: no\n"))
-        result = ensure_web_include_paths(path)
-        self.assertTrue(result["changed"])
-        self.assertTrue(read_web_include_paths(path.read_text(encoding="utf-8")))
-
-    def test_idempotent(self):
-        from backend.beets_plugins import ensure_web_include_paths
-        path = self._make_config()
-        ensure_web_include_paths(path)
-        before = path.read_text(encoding="utf-8")
-        result = ensure_web_include_paths(path)
-        self.assertFalse(result["changed"])
-        self.assertFalse(result["restart_required"])
-        self.assertIsNone(result["backup"])
-        self.assertEqual(path.read_text(encoding="utf-8"), before)
-        self.assertEqual(len(self._backups()), 1)
 
     def test_flow_style_web_block_is_refused(self):
         from backend.beets_plugins import BeetsConfigEditError, ensure_web_include_paths
@@ -419,38 +371,6 @@ class ConfigPathContainmentTests(_TempConfigMixin, unittest.TestCase):
         self.assertTrue(self.config_path.is_symlink())
         self.assertEqual(self.outside.read_text(encoding="utf-8"), _BASE_CONFIG)
         self.assertEqual(sorted(p.name for p in self.config_dir.iterdir()), ["config.yaml"])
-
-    def test_embedded_engine_skips_startup_provisioning(self):
-        # ADR 0006: with Beets in-process nothing is provisioned and
-        # config.yaml is left exactly as the user wrote it.
-        from backend.config_service import _bootstrap_beets_plugins
-        self._make_config()
-        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "embedded"}):
-            _bootstrap_beets_plugins(self.config_dir)
-        self.assertEqual(self.config_path.read_text(encoding="utf-8"), _BASE_CONFIG)
-        self.assertEqual(sorted(p.name for p in self.config_dir.iterdir()), ["config.yaml"])
-
-    def test_startup_auto_provision_refuses_beets_config_outside_beetsdir(self):
-        from backend.config_service import _bootstrap_beets_plugins
-        self._make_config()
-        if not str(self.config_path).startswith("/"):
-            self.skipTest("get_config_path requires POSIX container paths")
-        self._make_outside()
-        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.outside), "BEETSDIR": str(self.config_dir)}):
-            _bootstrap_beets_plugins()
-        self.assertEqual(self.outside.read_text(encoding="utf-8"), _BASE_CONFIG)
-        self.assertEqual(sorted(p.name for p in self.outside.parent.iterdir()), ["config.yaml"])
-
-    def test_startup_auto_provision_edits_contained_config(self):
-        from backend.beets_plugins import read_web_include_paths
-        from backend.config_service import _bootstrap_beets_plugins
-        self._make_config()
-        if not str(self.config_path).startswith("/"):
-            self.skipTest("get_config_path requires POSIX container paths")
-        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(self.config_path), "BEETSDIR": str(self.config_dir)}):
-            _bootstrap_beets_plugins()
-        self.assertTrue(read_web_include_paths(self.config_path.read_text(encoding="utf-8")))
-        self.assertTrue((self.config_dir / "beetsplug").is_dir())
 
 
 class ConfigSnapshotRaceTests(_TempConfigMixin, unittest.TestCase):
@@ -613,15 +533,6 @@ class ConfigEditRouteTests(_TempConfigMixin, unittest.TestCase):
         os.symlink(self.outside, link)
         with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(link)}):
             self._assert_all_routes_refuse()
-
-    def test_include_paths_route_enables_and_reports_restart(self):
-        from backend.beets_plugins import read_web_include_paths
-        response = self.client.post("/api/setup/beets-config/include-paths")
-        self.assertEqual(response.status_code, 200)
-        body = response.get_json()
-        self.assertTrue(body["changed"])
-        self.assertTrue(body["restart_required"])
-        self.assertTrue(read_web_include_paths(self.config_path.read_text(encoding="utf-8")))
 
     def test_include_paths_route_flow_style_is_409(self):
         text = _BASE_CONFIG.replace("web:\n  host: 0.0.0.0\n  port: 8337\n", "web: {host: 0.0.0.0}\n")
@@ -892,30 +803,6 @@ class ConfigFollowupTests(_TempConfigMixin, unittest.TestCase):
         ensure_plugin_sys_path(self.config_dir)
         self.assertEqual(sys.path[: len(before)], before)
         self.assertEqual(sys.path[-1], str(self.config_dir / "beetsplug"))
-
-    def test_provision_edits_the_beets_config_file_f7(self):
-        from backend.beets_plugins import provision_and_verify, read_web_include_paths
-        self._make_config(text=None)
-        other = self.config_dir / "beets.yaml"
-        other.write_text(_BASE_CONFIG, encoding="utf-8")
-        with mock.patch("backend.beets_adapter.beets_adapter.get_plugin_status", side_effect=RuntimeError("down")):
-            result = provision_and_verify(self.config_dir, config_file=other)
-        self.assertTrue(result["config_updated"])
-        self.assertTrue(read_web_include_paths(other.read_text(encoding="utf-8")))
-        self.assertFalse(self.config_path.exists())
-
-    def test_startup_provision_edits_the_beets_config_file_f7(self):
-        from backend.beets_plugins import read_web_include_paths
-        from backend.config_service import _bootstrap_beets_plugins
-        self._make_config(text=None)
-        if not str(self.config_dir).startswith("/"):
-            self.skipTest("get_config_path requires POSIX container paths")
-        other = self.config_dir / "beets.yaml"
-        other.write_text(_BASE_CONFIG, encoding="utf-8")
-        with mock.patch.dict(os.environ, {"BEETS_CONFIG": str(other), "BEETSDIR": str(self.config_dir)}):
-            _bootstrap_beets_plugins()
-        self.assertTrue(read_web_include_paths(other.read_text(encoding="utf-8")))
-        self.assertFalse(self.config_path.exists())
 
 
 class ConfigPathStatusTests(_TempConfigMixin, unittest.TestCase):

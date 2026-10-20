@@ -20,7 +20,7 @@ from beetsplug.webmanager.schemas import (
     ALLOWED_ITEM_FIELDS,
     ALLOWED_ALBUM_FIELDS,
 )
-from beetsplug.webmanager.auth import set_api_key_file, get_expected_api_key, verify_token
+from beetsplug.webmanager.auth import set_api_key, get_expected_api_key, verify_token
 from beetsplug.webmanager.compat import register_webmanager_blueprint
 import beetsplug.webmanager.operations as ops_mod
 
@@ -38,13 +38,9 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.dbpath = os.path.join(self.td, "test_library.blb")
         self.lib = Library(self.dbpath, directory=self.td)
 
-        self.key_file = os.path.join(self.td, ".webmanager_api_key")
         self.token = TEST_64_HEX_TOKEN
-        with open(self.key_file, "w", encoding="utf-8") as f:
-            f.write(self.token + "\n")
-
         self.plugin = WebManagerPlugin()
-        set_api_key_file(self.key_file)
+        set_api_key(self.token)
         ops_mod.set_allowed_roots([self.td, "/music", "/downloads", self.music_dir, self.downloads_dir])
         ops_mod.set_import_roots(None)
 
@@ -55,7 +51,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
     def tearDown(self):
         ops_mod.set_allowed_roots(None)
         ops_mod.set_import_roots(None)
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             beets_config["web"]["readonly"] = True
         except Exception:
@@ -100,42 +96,19 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertFalse(is_strict_descendant("", allowed))
         self.assertFalse(is_strict_descendant(None, allowed))
 
-    def test_key_security_and_format_validation(self):
-        """Verify 64-hex validation, symlink rejection, short/malformed keys fail closed."""
-        valid_key = "a" * 64
-        real_key_file = os.path.join(self.td, "valid.key")
-        with open(real_key_file, "w", encoding="utf-8") as f:
-            f.write(valid_key + "\n")
-
+    def test_key_format_validation(self):
+        """Only a 64-hex key is accepted; anything else leaves no key (fail closed)."""
         try:
-            set_api_key_file(real_key_file)
-            self.assertEqual(get_expected_api_key(), valid_key)
-            self.assertTrue(verify_token(valid_key))
-
-            # Short key (< 64 chars)
-            short_file = os.path.join(self.td, "short.key")
-            with open(short_file, "w", encoding="utf-8") as f:
-                f.write("a" * 32 + "\n")
-            set_api_key_file(short_file)
-            self.assertEqual(get_expected_api_key(), "")
-
-            # Non-hex characters (64 chars but contains 'z')
-            non_hex_file = os.path.join(self.td, "non_hex.key")
-            with open(non_hex_file, "w", encoding="utf-8") as f:
-                f.write("z" * 64 + "\n")
-            set_api_key_file(non_hex_file)
-            self.assertEqual(get_expected_api_key(), "")
-
-            # Symlink rejection
-            try:
-                symlink_file = os.path.join(self.td, "symlink.key")
-                os.symlink(real_key_file, symlink_file)
-                set_api_key_file(symlink_file)
+            set_api_key("a" * 64)
+            self.assertEqual(get_expected_api_key(), "a" * 64)
+            self.assertTrue(verify_token("a" * 64))
+            self.assertFalse(verify_token("b" * 64))
+            for bad in ("a" * 32, "z" * 64, "", None):
+                set_api_key(bad)
                 self.assertEqual(get_expected_api_key(), "")
-            except (OSError, NotImplementedError):
-                pass
+                self.assertFalse(verify_token("a" * 64))
         finally:
-            set_api_key_file(self.key_file)
+            set_api_key(self.token)
 
     def test_field_validation(self):
         raw_item_fields = {
@@ -454,13 +427,9 @@ class WebManagerPhase3MutationTests(unittest.TestCase):
         self.dbpath = os.path.join(self.td, "test_library.blb")
         self.lib = Library(self.dbpath, directory=self.music_dir)
 
-        self.key_file = os.path.join(self.td, ".webmanager_api_key")
         self.token = TEST_64_HEX_TOKEN
-        with open(self.key_file, "w", encoding="utf-8") as f:
-            f.write(self.token + "\n")
-
         self.plugin = WebManagerPlugin()
-        set_api_key_file(self.key_file)
+        set_api_key(self.token)
 
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["TESTING"] = True
@@ -474,7 +443,7 @@ class WebManagerPhase3MutationTests(unittest.TestCase):
 
     def tearDown(self):
         self._plugins_mod._instances[:] = self._saved_instances
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:

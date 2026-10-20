@@ -29,9 +29,9 @@ ROOT = Path(__file__).resolve().parents[1]
 R = "[REDACTED]"
 
 STORED = (
-    "plex:\n"
-    "    host: http://plex.example:32400\n"
-    "    token: plex-SECRET-1\n"
+    "deezer:\n"
+    "    host: http://deezer.example:32400\n"
+    "    token: deezer-SECRET-1\n"
     "listenbrainz:\n"
     "    token: lb-SECRET-2   # personal\n"
     "discogs:\n"
@@ -44,7 +44,7 @@ STORED = (
     "          api_key: ai-SECRET-4\n"
     "        - api_key: ai-SECRET-5\n"
 )
-SECRETS = ("plex-SECRET-1", "lb-SECRET-2", "ai-SECRET-3", "ai-SECRET-4", "ai-SECRET-5")
+SECRETS = ("deezer-SECRET-1", "lb-SECRET-2", "ai-SECRET-3", "ai-SECRET-4", "ai-SECRET-5")
 
 
 class ConfigEditorRoundTripTests(unittest.TestCase):
@@ -96,32 +96,32 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
         self.assertEqual(yaml.safe_load(saved), yaml.safe_load(text))
 
     def test_unchanged_placeholder_keeps_stored_secret(self):
-        saved = self._save(STORED, lambda s: s.replace("http://plex.example", "http://plex2.example"))
-        self.assertEqual(saved, STORED.replace("http://plex.example", "http://plex2.example"))
+        saved = self._save(STORED, lambda s: s.replace("http://deezer.example", "http://deezer2.example"))
+        self.assertEqual(saved, STORED.replace("http://deezer.example", "http://deezer2.example"))
         self.assertNotIn(R, saved)
 
     def test_same_key_in_two_sections_never_swaps(self):
         # Reorder sections in the editor: each placeholder still gets its own.
         def swap(s):
-            plex, rest = s.split("listenbrainz:\n", 1)
+            deezer, rest = s.split("listenbrainz:\n", 1)
             lb, tail = rest.split("discogs:\n", 1)
-            return "listenbrainz:\n" + lb + plex + "discogs:\n" + tail
+            return "listenbrainz:\n" + lb + deezer + "discogs:\n" + tail
         data = yaml.safe_load(self._save(STORED, swap))
-        self.assertEqual(data["plex"]["token"], "plex-SECRET-1")
+        self.assertEqual(data["deezer"]["token"], "deezer-SECRET-1")
         self.assertEqual(data["listenbrainz"]["token"], "lb-SECRET-2")
         self.assertEqual([p["api_key"] for p in data["aisauce"]["providers"]],
                          ["ai-SECRET-3", "ai-SECRET-4", "ai-SECRET-5"])
 
     def test_edit_a_secret(self):
-        saved = self._save(STORED, lambda s: s.replace(f'    token: "{R}"\nlistenbrainz', "    token: NEW-plex\nlistenbrainz", 1))
+        saved = self._save(STORED, lambda s: s.replace(f'    token: "{R}"\nlistenbrainz', "    token: NEW-deezer\nlistenbrainz", 1))
         data = yaml.safe_load(saved)
-        self.assertEqual(data["plex"]["token"], "NEW-plex")
+        self.assertEqual(data["deezer"]["token"], "NEW-deezer")
         self.assertEqual(data["listenbrainz"]["token"], "lb-SECRET-2")
 
     def test_clear_a_secret(self):
         saved = self._save(STORED, lambda s: s.replace(f'    token: "{R}"\nlistenbrainz', '    token: ""\nlistenbrainz', 1))
         data = yaml.safe_load(saved)
-        self.assertEqual(data["plex"]["token"], "")
+        self.assertEqual(data["deezer"]["token"], "")
         self.assertEqual(data["listenbrainz"]["token"], "lb-SECRET-2")
 
     def test_partial_placeholder_is_refused(self):
@@ -131,7 +131,7 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
         self.assertEqual(self.path.read_text(encoding="utf-8"), STORED)
 
     def test_duplicate_stored_key_is_refused(self):
-        stored = "plex:\n  token: A-SECRET\n  token: B-SECRET\n"
+        stored = "deezer:\n  token: A-SECRET\n  token: B-SECRET\n"
         with self.assertRaises(ConfigSecretMergeError) as ctx:
             self._save(stored, lambda s: s)
         self.assertEqual(ctx.exception.error_code, "config_secret_ambiguous")
@@ -140,7 +140,7 @@ class ConfigEditorRoundTripTests(unittest.TestCase):
 
     def test_duplicated_placeholder_line_is_refused(self):
         with self.assertRaises(ConfigSecretMergeError):
-            self._save(STORED, lambda s: s.replace("plex:\n", f'plex:\n    token: "{R}"\n', 1))
+            self._save(STORED, lambda s: s.replace("deezer:\n", f'deezer:\n    token: "{R}"\n', 1))
 
     def test_placeholder_under_a_key_path_with_no_stored_secret_is_refused(self):
         # Covers a key-path change only. A placeholder pasted inside another

@@ -19,7 +19,7 @@ from beets import config as beets_config
 from beets.library import Library
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 import beetsplug.webmanager.operations as ops_mod
 
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -55,11 +55,8 @@ class PluginImportAutotagTests(unittest.TestCase):
         self._dir = beets_config["directory"].get()
         beets_config["directory"] = self.music
         self.lib = Library(os.path.join(self.td, "lib.blb"), directory=self.music)
-        key = os.path.join(self.td, ".key")
-        with open(key, "w", encoding="utf-8") as f:
-            f.write(TOKEN + "\n")
         self.plugin = WebManagerPlugin()
-        set_api_key_file(key)
+        set_api_key(TOKEN)
         ops_mod.set_allowed_roots([self.music, self.downloads])
         ops_mod.set_import_roots([self.downloads])
         beets_web_app.config["lib"] = self.lib
@@ -70,7 +67,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         beets_config["directory"] = self._dir
         ops_mod.set_allowed_roots(None)
         ops_mod.set_import_roots(None)
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:
@@ -523,35 +520,6 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
         for key in ("plugins:", "pluginpath:", "web:", "webmanager:"):
             self.assertLessEqual(new.count("\n" + key) + new.startswith(key), 1, (key, new))
 
-    def test_security_probe_layouts_keep_every_plugin(self):
-        """PR #299 security probes: (a) comment inside a block list,
-        (b) zero-indent block list, (c) multi-line flow list."""
-        for text in (
-            "plugins:\n  - web\n  - webmanager\n  # disabled\n  - fetchart\n",
-            "plugins:\n- web\n- webmanager\n",
-            "plugins: [web,\n  webmanager, fetchart]\n",
-            "plugins:\n  - web\n\n  - fetchart  # mine\npluginpath:\n- /config/beetsplug\ndirectory: /music\n",
-            "directory: /music\nplugins:\n  - chroma\nweb:\n  port: 9000\n",
-        ):
-            new, refused = self._update(text)
-            self.assertFalse(refused, text)
-            self._assert_kept(text, new)
-        new, _ = self._update("plugins:\n  - web\n  - webmanager\n  # disabled\n  - fetchart\n")
-        self.assertIn("  # disabled\n  - fetchart\n  - musicbrainz", new)
-
-    def test_unsafe_layouts_are_refused_byte_identical(self):
-        from backend.beets_plugins import refused_config_plugins
-        for text in (
-            "plugins: web\n  bad: [\n",           # original is not YAML
-            "plugins: >\n  web\n  fetchart\n",    # folded scalar the text edit cannot follow
-            "plugins: {web: 1}\n",                # not a list of names
-            "- just\n- a list\n",                 # not a mapping
-        ):
-            new, refused = self._update(text)
-            self.assertTrue(refused, (text, new))
-        self.assertFalse(self._update("plugins: web\n")[1])
-        self.assertEqual(refused_config_plugins(), [])
-
     def test_duplicate_key_edits_that_hide_user_settings_are_refused(self):
         """A quoted top-level key the text edit cannot see makes the planner
         add a second `pluginpath:` / `web:`; YAML keeps the last one, so the
@@ -587,33 +555,6 @@ class MusicbrainzProvisioningTests(unittest.TestCase):
             self._refuse("plugins: web webmanager musicbrainz\npluginpath: >-\n  /x\n"),
             ([], ["/config/beetsplug"]),
         )
-
-    def test_flow_pluginpath_is_edited_n3(self):
-        import yaml
-        from backend.beets_plugins import parse_configured_pluginpath
-        self.assertEqual(parse_configured_pluginpath("pluginpath: [/a, '/b']  # c\n"), ["/a", "/b"])
-        for text, paths in (
-            ("plugins: web webmanager\npluginpath: [/a, /config/beetsplug]\n", ["/a", "/config/beetsplug"]),
-            ("plugins: web webmanager\npluginpath: [/a]\n", ["/a", "/config/beetsplug"]),
-        ):
-            new, refused = self._update(text)
-            self.assertFalse(refused, text)
-            self.assertEqual(yaml.safe_load(new)["pluginpath"], paths)
-
-    def test_utf8_bom_is_dropped_n4(self):
-        import yaml
-        from backend.beets_plugins import update_config_yaml_plugins
-        with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, "config.yaml")
-            with open(path, "wb") as f:
-                f.write(b"\xef\xbb\xbfplugins: web webmanager\n")
-            update_config_yaml_plugins(path, backup=False)
-            with open(path, "rb") as f:
-                raw = f.read()
-        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
-        loaded = yaml.safe_load(raw.decode("utf-8"))
-        self.assertEqual(loaded["plugins"].split(), ["web", "webmanager", "musicbrainz"])
-        self.assertEqual([k for k in loaded if "plugins" in k], ["plugins"])
 
     def test_opt_in_apply_shares_the_check(self):
         from backend.beets_plugins import BeetsConfigEditError, apply_recommended_plugins

@@ -148,27 +148,17 @@ class IdempotencyKeyValidationTests(unittest.TestCase):
 
     def test_backend_keys_match_and_caller_keys_are_mapped(self):
         import backend.beets_adapter as ba
+        from flask import Response
         sent = {}
 
-        class _Resp:
-            status = 200
-            headers = {"Content-Type": "application/json"}
+        def call(method, path, params=None, json_data=None, headers=None):
+            sent["key"] = headers.get("Idempotency-Key")
+            return Response(b"{}", content_type="application/json")
 
-            def read(self):
-                return b"{}"
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        def fake_urlopen(req, timeout=None):
-            sent["key"] = req.headers.get("Idempotency-key")
-            return _Resp()
-
-        ad = ba.BeetsAdapter(base_url="http://beets:8337", api_key="t")
-        with mock.patch.object(ba.urllib.request, "urlopen", side_effect=fake_urlopen):
+        engine = mock.Mock()
+        engine.call.side_effect = call
+        ad = ba.BeetsAdapter()
+        with mock.patch.object(ba.BeetsAdapter, "_engine", return_value=engine):
             for key in ("txn_1791493807_5801d3f3b547", "txn_1_a:apply:12", "txn_1_a:rollback",
                         "mbsync-library-txn_1_a", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"):
                 ad._request("POST", "/webmanager/folder-op", json_data={}, headers={"Idempotency-Key": key})

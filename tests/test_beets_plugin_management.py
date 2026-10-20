@@ -27,9 +27,7 @@ from backend.beets_plugins import (
     PluginType,
     parse_configured_pluginpath,
     parse_configured_plugins,
-    provision_and_verify,
     provision_bundled_plugins,
-    update_config_yaml_plugins,
     verify_all_plugins,
     verify_plugin,
 )
@@ -153,69 +151,6 @@ class BeetsConfigYamlManagementTests(unittest.TestCase):
             ["/config/beetsplug", "/custom/plugins"]
         )
 
-    def test_update_config_creates_default_if_missing(self):
-        changed, msg = update_config_yaml_plugins(self.config_path)
-        self.assertTrue(changed)
-        self.assertTrue(self.config_path.exists())
-        content = self.config_path.read_text(encoding="utf-8")
-        plugins = parse_configured_plugins(content)
-        for req in ("web", "webmanager"):
-            self.assertIn(req, plugins)
-        # A brand-new config is seeded from the documented example (fresh
-        # install, no existing library to disturb); BI-5 opt-in applies to
-        # pre-existing configs (see the preserve test below).
-        pluginpath = parse_configured_pluginpath(content)
-        self.assertIn("/config/beetsplug", pluginpath)
-
-    def test_update_config_preserves_custom_plugins_and_settings(self):
-        initial_yaml = (
-            "plugins: fetchart my_awesome_custom_plugin embedart\n"
-            "pluginpath:\n"
-            "  - /config/beetsplug\n"
-            "directory: /custom/music/path\n"
-            "custom_user_setting: true\n"
-        )
-        self.config_path.write_text(initial_yaml, encoding="utf-8")
-
-        changed, msg = update_config_yaml_plugins(self.config_path)
-        self.assertTrue(changed)
-        content = self.config_path.read_text(encoding="utf-8")
-
-        # Custom plugin preserved
-        self.assertIn("my_awesome_custom_plugin", content)
-        # Custom setting preserved
-        self.assertIn("custom_user_setting: true", content)
-        self.assertIn("directory: /custom/music/path", content)
-
-        # All required plugins now present
-        plugins = parse_configured_plugins(content)
-        for req in ("web", "webmanager", "fetchart", "embedart"):
-            self.assertIn(req, plugins)
-        for rec in ("chroma", "discpath", "scrub", "mbsync"):
-            self.assertNotIn(rec, plugins)
-        self.assertIn("my_awesome_custom_plugin", plugins)
-
-    def test_update_config_creates_backup(self):
-        initial_yaml = "plugins: fetchart\n"
-        self.config_path.write_text(initial_yaml, encoding="utf-8")
-
-        changed, _ = update_config_yaml_plugins(self.config_path, backup=True)
-        self.assertTrue(changed)
-
-        backups = list(self.config_dir.glob("config.yaml.bak-plugins-*"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_text(encoding="utf-8"), initial_yaml)
-
-    def test_update_config_idempotence(self):
-        # First update
-        update_config_yaml_plugins(self.config_path)
-        first_content = self.config_path.read_text(encoding="utf-8")
-
-        # Second update
-        changed, msg = update_config_yaml_plugins(self.config_path)
-        self.assertFalse(changed)
-        self.assertEqual(self.config_path.read_text(encoding="utf-8"), first_content)
-
 
 class BeetsPluginVerificationTests(unittest.TestCase):
     def setUp(self):
@@ -253,7 +188,6 @@ class BeetsPluginVerificationTests(unittest.TestCase):
 
     def test_verify_all_plugins_returns_comprehensive_report(self):
         provision_bundled_plugins(self.config_dir)
-        update_config_yaml_plugins(self.config_dir / "config.yaml")
 
         report = verify_all_plugins(self.config_dir)
         self.assertIn("all_required_healthy", report)
@@ -274,11 +208,6 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertFalse(status.enabled)
         self.assertEqual(len(status.errors), 0)
 
-    def test_provision_and_verify_end_to_end(self):
-        result = provision_and_verify(self.config_dir)
-        self.assertTrue(result.get("config_updated"))
-        self.assertIn("discpath.py", result.get("provisioned_files", []))
-        self.assertIn("summary", result)
 
 class BeetsPluginApiRoutesTests(unittest.TestCase):
     def setUp(self):
@@ -307,14 +236,6 @@ class BeetsPluginApiRoutesTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertIn("all_required_healthy", data)
-
-    def test_post_plugins_provision_endpoint(self):
-        res = self.client.post("/api/plugins/provision")
-        self.assertEqual(res.status_code, 200)
-        data = res.get_json()
-        self.assertTrue(data.get("config_updated"))
-        self.assertIn("discpath.py", data.get("provisioned_files", []))
-        self.assertTrue(self.config_path.exists())
 
     def test_post_plugins_verify_endpoint(self):
         res = self.client.post("/api/plugins/verify")

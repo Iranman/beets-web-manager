@@ -1,6 +1,5 @@
 """Unit tests for backend/config_manager.py."""
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,7 +34,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertIsNone(res["backup_ts"])
 
     def test_save_and_get_config(self):
-        initial_yaml = "library: /music/library.db\ndirectory: /music\n"
+        initial_yaml = "va_name: Various\nimport:\n  copy: yes\n"
         res = save_config(initial_yaml, config_path=self.config_path)
         self.assertTrue(res["ok"])
         self.assertTrue(res["backed_up"])
@@ -46,16 +45,16 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(read_res["revision"], compute_revision(initial_yaml))
 
     def test_cas_conflict_protection(self):
-        v1 = "library: /v1\n"
+        v1 = "va_name: v1\n"
         save_config(v1, config_path=self.config_path)
         rev1 = compute_revision(v1)
 
         # Update with wrong expected_revision
         with self.assertRaises(ConfigConflictError):
-            save_config("library: /v2\n", expected_revision="wrong_rev", config_path=self.config_path)
+            save_config("va_name: v2\n", expected_revision="wrong_rev", config_path=self.config_path)
 
         # Update with correct expected_revision succeeds
-        v2 = "library: /v2\n"
+        v2 = "va_name: v2\n"
         res2 = save_config(v2, expected_revision=rev1, config_path=self.config_path)
         self.assertTrue(res2["ok"])
         self.assertEqual(res2["revision"], compute_revision(v2))
@@ -100,9 +99,6 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.path = Path(self.tmpdir.name) / "config.yaml"
-        env = mock.patch.dict(os.environ, {"BEETS_ENGINE": "embedded"})
-        env.start()
-        self.addCleanup(env.stop)
 
     def _save(self, stored, new):
         self.path.write_text(stored, encoding="utf-8")
@@ -161,9 +157,10 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.assertTrue(self._save(self.BASE, "directory: /music\nplugins: []\n")["ok"])
 
     def test_revert_cannot_reintroduce_a_hook(self):
-        self.path.write_text(self.BASE + "hook:\n  hooks: []\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "http"}):
-            save_config(self.BASE, config_path=self.path)  # backup now holds the hook
+        from backend.config_manager import get_config_backup_path
+        self.path.write_text(self.BASE, encoding="utf-8")
+        # A backup left from the two-container layout may still hold a hook.
+        get_config_backup_path(self.path).write_text(self.BASE + "hook:\n  hooks: []\n", encoding="utf-8")
         with self.assertRaises(ConfigCodeExecutionEditRefused):
             revert_config(expected_revision=compute_revision(self.BASE), config_path=self.path)
         self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
@@ -188,10 +185,6 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.assertEqual(resp.get_json()["code"], "CONFIG_CODE_EXECUTION_EDIT_REFUSED")
         self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
         self.assertFalse((self.path.parent / "beetsplug").exists())
-
-    def test_http_transport_is_unchanged(self):
-        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "http"}):
-            self.assertTrue(self._save(self.BASE, self.BASE + "pluginpath: [/opt/p]\n")["ok"])
 
     def test_route_returns_403_with_reason(self):
         import json

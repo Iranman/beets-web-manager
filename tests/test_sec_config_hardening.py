@@ -116,7 +116,8 @@ class RevisionAndLockTests(unittest.TestCase):
         outside.write_text("keep", encoding="utf-8")
         os.symlink(outside, config_manager.get_config_backup_path(self.path))
         rev = config_manager.get_config(self.path)["revision"]
-        config_manager.save_config("directory: /music\n", expected_revision=rev, config_path=self.path)
+        config_manager.save_config(self.path.read_text(encoding="utf-8") + "va_name: VA\n",
+                                   expected_revision=rev, config_path=self.path)
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
         backups = [config_manager.get_config_backup_path(self.path)] + list(self.path.parent.glob("config.yaml.bak.*"))
         self.assertEqual(len(backups), 2)

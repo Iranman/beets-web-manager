@@ -54,9 +54,12 @@ class TestArch003FinalClosure(unittest.TestCase):
         self.assertNotIn("sqlite3.connect", self.beets_adapter_source)
 
     def test_import_fails_closed_when_engine_unreachable(self):
-        adapter = BeetsAdapter(base_url="http://127.0.0.1:59999", timeout=0.5)
-        with self.assertRaises(BeetsUnavailableError):
-            adapter.run_import(["/staging/album1"])
+        from backend import beets_embedded
+        down = beets_embedded.EmbeddedBeetsUnavailable(
+            {"checks": [{"code": "library_open_failed", "ok": False, "severity": "error", "message": "x"}]})
+        with mock.patch.object(beets_embedded, "engine", side_effect=down):
+            with self.assertRaises(BeetsUnavailableError):
+                BeetsAdapter().run_import(["/staging/album1"])
 
     # ── _album_cleanup_apply_issue: prove absence, not just presence ──────
 

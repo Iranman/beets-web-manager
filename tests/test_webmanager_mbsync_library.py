@@ -19,7 +19,7 @@ from beets.library import Item, Library
 from beetsplug.mbsync import MBSyncPlugin
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 import beetsplug.webmanager.operations as ops_mod
 import beetsplug.webmanager.plugin_ops as plugin_ops
 
@@ -42,11 +42,8 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         self.files = os.path.join(self.td, "files")
         os.makedirs(self.files)
         self.lib = Library(os.path.join(self.td, "lib.blb"), directory=os.path.join(self.td, "music"))
-        key_file = os.path.join(self.td, "key")
-        with open(key_file, "w", encoding="utf-8") as fh:
-            fh.write(TOKEN + "\n")
         WebManagerPlugin()
-        set_api_key_file(key_file)
+        set_api_key(TOKEN)
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["TESTING"] = True
         self.client = beets_web_app.test_client()
@@ -66,7 +63,7 @@ class MbsyncLibraryEndpointTests(unittest.TestCase):
         for k, v in self._saved_import.items():
             beets_config["import"][k] = v
         beets_plugins_mod._instances[:] = self._saved_instances
-        set_api_key_file(None)
+        set_api_key(None)
         with ops_mod._library_sync_lock:
             ops_mod._library_sync.clear()
         try:
@@ -327,7 +324,7 @@ class AdapterToPluginTests(MbsyncLibraryEndpointTests):
     def setUp(self):
         super().setUp()
         from backend.beets_adapter import BeetsAdapter, BeetsAdapterError, BeetsAdapterNotFoundError
-        self.adapter = BeetsAdapter(base_url="http://beets.invalid:8337", api_key=TOKEN)
+        self.adapter = BeetsAdapter()
         client = self.client
 
         def request(method, path, params=None, json_data=None, headers=None, timeout=None):

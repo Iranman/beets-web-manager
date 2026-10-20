@@ -196,35 +196,6 @@ class FailClosedRedactionTests(unittest.TestCase):
             self.assertNotIn("u:p", out, raw)
 
 
-@unittest.skipUnless(POSIX, "symlinks and modes are POSIX-only here")
-class LegacyBackupTighteningTests(_Tmp):
-    """d41b993 F4: an old 0644 legacy backup is tightened; a symlink is not followed."""
-
-    def _cfg(self):
-        cfg = self.root / "config.yaml"
-        cfg.write_text("plugins: plexsync fetchart\n", encoding="utf-8")
-        return cfg
-
-    def test_existing_regular_backup_is_tightened_and_kept(self):
-        from backend import config_service
-        cfg = self._cfg()
-        old = self.root / "config.yaml.bak-legacy-plugin-migration"
-        old.write_text("ORIGINAL", encoding="utf-8")
-        os.chmod(old, 0o644)
-        config_service._repair_legacy_beets_config(str(cfg))
-        self.assertEqual(old.read_text(encoding="utf-8"), "ORIGINAL")
-        self.assertEqual(_mode(old), 0o600)
-
-    def test_symlinked_backup_target_is_not_chmodded(self):
-        from backend import config_service
-        cfg = self._cfg()
-        os.chmod(self.victim, 0o644)
-        (self.root / "config.yaml.bak-legacy-plugin-migration").symlink_to(self.victim)
-        config_service._repair_legacy_beets_config(str(cfg))
-        self.assertEqual(self.victim.read_text(encoding="utf-8"), "VICTIM")
-        self.assertEqual(_mode(self.victim), 0o644)
-
-
 @unittest.skipUnless(POSIX, "modes are POSIX-only")
 class FchmodTests(_Tmp):
     """d41b993 F5: mode comes from the fd; path chmod is not needed."""

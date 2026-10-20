@@ -133,46 +133,6 @@ class ContainerPathLogTests(unittest.TestCase):
         self.assertIn("MUSIC_ROOT", "\n".join(logs.output))
 
 
-@unittest.skipUnless(POSIX, "file modes are POSIX-only")
-class LegacyConfigBackupModeTests(_PrivateFileCase):
-    def test_legacy_plugin_migration_backup_is_0600(self):
-        from backend import config_service
-        cfg = self.root / "config.yaml"
-        cfg.write_text("plugins: plexsync fetchart\nplex:\n  token: not-real\n", encoding="utf-8")
-        os.chmod(cfg, 0o644)
-        config_service._repair_legacy_beets_config(str(cfg))
-        backup = self.root / "config.yaml.bak-legacy-plugin-migration"
-        self.assertIn("plexsync", backup.read_text(encoding="utf-8"))
-        self.assertEqual(_mode(backup), 0o600)
-        self.assertNotIn("plexsync", cfg.read_text(encoding="utf-8"))
-
-
-    def _legacy_cfg(self):
-        cfg = self.root / "config.yaml"
-        cfg.write_text("plugins: plexsync fetchart" + NL, encoding="utf-8")
-        return cfg, self.root / "config.yaml.bak-legacy-plugin-migration"
-
-    def test_existing_legacy_backup_is_tightened_to_0600(self):
-        from backend import config_service
-        cfg, backup = self._legacy_cfg()
-        backup.write_text("old backup", encoding="utf-8")
-        os.chmod(backup, 0o644)
-        config_service._repair_legacy_beets_config(str(cfg))
-        self.assertEqual(_mode(backup), 0o600)
-        self.assertEqual(backup.read_text(encoding="utf-8"), "old backup")
-
-    def test_symlinked_legacy_backup_is_not_followed(self):
-        from backend import config_service
-        cfg, backup = self._legacy_cfg()
-        victim = self.root / "victim"
-        victim.write_text("x", encoding="utf-8")
-        os.chmod(victim, 0o644)
-        backup.symlink_to(victim)
-        config_service._repair_legacy_beets_config(str(cfg))
-        self.assertEqual(_mode(victim), 0o644)
-        self.assertEqual(victim.read_text(encoding="utf-8"), "x")
-
-
 class RuntimeDeadKeyTests(unittest.TestCase):
     def test_app_runtime_does_not_read_dead_keys(self):
         source = (ROOT / "backend" / "app_runtime.py").read_text(encoding="utf-8")

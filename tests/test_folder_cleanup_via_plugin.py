@@ -24,7 +24,7 @@ from backend import transaction_engine as te
 from backend.beets_adapter import (BeetsAdapter, BeetsAdapterError, BeetsAdapterNotFoundError,
                                    BeetsAdapterTimeoutError)
 from beetsplug.webmanager import WebManagerPlugin, folder_ops
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 from tests._folder_ops_local import LocalFolderOps, patch_local_folder_ops
 from tests.test_s1_containment_followup import CAN_SYMLINK
 from tests.test_staging_mutation_hardening import _RouteEnv
@@ -43,12 +43,9 @@ class PluginFolderOpTests(unittest.TestCase):
         os.makedirs(os.path.join(self.music, "Artist", "Albm"))
         self.lib = Library(os.path.join(self.td, "library.blb"), directory=self.music)
         self.addCleanup(lambda: self.lib._connection().close())
-        key_file = os.path.join(self.td, "key")
-        with open(key_file, "w", encoding="utf-8") as fh:
-            fh.write(TOKEN + "\n")
         self.plugin = WebManagerPlugin()
-        set_api_key_file(key_file)
-        self.addCleanup(set_api_key_file, None)
+        set_api_key(TOKEN)
+        self.addCleanup(set_api_key, None)
         ops_mod.set_allowed_roots([self.music])
         self.addCleanup(ops_mod.set_allowed_roots, None)
         beets_web_app.config["lib"] = self.lib
@@ -284,7 +281,7 @@ class PluginFolderOpTests(unittest.TestCase):
 
 class AdapterTests(unittest.TestCase):
     def test_folder_op_posts_one_step_with_idempotency_key(self):
-        ad = BeetsAdapter(base_url="http://beets:8337", api_key=TOKEN)
+        ad = BeetsAdapter()
         with mock.patch.object(ad, "_request", return_value={"success": True}) as req:
             ad.folder_op("rename_dir", "txn_1:apply:0", source="/music/a", target="/music/b")
         req.assert_called_once_with("POST", "/webmanager/folder-op",
