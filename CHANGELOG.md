@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- YouTube and SoundCloud playlist entries now match library tracks that are actually present far more often. These sources routinely put the real "Artist - Title" (or the compact "Title-ARTIST" that SoundCloud/SpotiFLAC use) inside the video title while the uploader field is a VEVO, "- Topic" or aggregator channel that is not the artist (for example uploader "DrakeVEVO" or "TrapNation", title "Travis Scott - SICKO MODE (Official Video)"). Playlist matching now also tries the artist/title split out of the entry title, in both dash orders, against the library. It is purely additive to matching and changes nothing about what is downloaded: the existing dual title-and-artist score threshold still decides each match, so a candidate is accepted only when both halves identify one library track and a distinct track is never mis-mapped. The split uses no AcoustID or MusicBrainz lookup and makes no network call, so it works even with those providers unavailable.
+
 ## v0.8.1 - 2026-10-20
 
 ### Highlights

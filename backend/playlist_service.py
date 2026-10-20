@@ -803,28 +803,66 @@ def _playlist_library_match_candidates() -> Dict[str, Any]:
     return {"all": candidates, "by_title": by_title}
 
 
+def _playlist_query_match_variants(artist, title):
+    """(artist, title) query shapes to try against the library index.
+
+    A YouTube/SoundCloud entry routinely carries the real "Artist - Title"
+    (spaced) or compact "Title-ARTIST" INSIDE the video title, while the
+    uploader field is a VEVO/Topic/aggregator channel that is not the
+    artist (e.g. uploader "TrapNation" / "DrakeVEVO", title "Travis Scott -
+    SICKO MODE"). The plain (uploader, title) pair then never reaches a
+    confident score even though the track is present. We already split the
+    *library* item's title/stem this way (`_playlist_item_text_variants`);
+    this is the symmetric split on the *query* side.
+
+    Both dash orders are offered because SoundCloud/SpotiFLAC names are
+    frequently "Title-ARTIST". Safety is delegated to the unchanged dual
+    threshold in `_playlist_candidate_match_score` (title AND artist must
+    both clear their floors against a single library row), so an extra
+    variant can only ever add a match when both halves genuinely identify
+    one track -- it cannot mis-map a distinct track. Deterministic and
+    AcoustID/MusicBrainz-independent: no provider call, no outbound HTTP.
+    """
+    artist = _s(artist).strip()
+    title = _s(title).strip()
+    variants = [(artist, title)]
+    seen = {(_norm(artist), _norm(title))}
+    split = _playlist_split_artist_title(title)
+    if split:
+        left, right = split
+        for cand_artist, cand_title in ((left, right), (right, left)):
+            key = (_norm(cand_artist), _norm(cand_title))
+            if key[1] and key not in seen:
+                seen.add(key)
+                variants.append((cand_artist, cand_title))
+    return variants
+
+
 def _playlist_match_payload_from_candidates(artist, title,
                                             candidates: Any) -> Optional[Dict[str, Any]]:
-    best_payload: Optional[Dict[str, Any]] = None
-    best_score = 0.0
-    rows: List[Dict[str, Any]]
     if isinstance(candidates, dict):
         by_title = candidates.get("by_title") or {}
-        rows = list(by_title.get(_norm(title), []) or [])
-        if not rows:
-            rows = list(candidates.get("all") or [])
+        all_rows = list(candidates.get("all") or [])
     else:
-        rows = list(candidates or [])
-    for candidate in rows:
-        score = _playlist_candidate_match_score(
-            artist, title,
-            candidate.get("artist", ""),
-            candidate.get("title", ""),
-            candidate.get("quality") or {})
-        if score is None or score <= best_score:
-            continue
-        best_score = score
-        best_payload = dict(candidate.get("payload") or {})
+        by_title = {}
+        all_rows = list(candidates or [])
+
+    best_payload: Optional[Dict[str, Any]] = None
+    best_score = 0.0
+    for q_artist, q_title in _playlist_query_match_variants(artist, title):
+        rows = list(by_title.get(_norm(q_title), []) or []) if by_title else []
+        if not rows:
+            rows = all_rows
+        for candidate in rows:
+            score = _playlist_candidate_match_score(
+                q_artist, q_title,
+                candidate.get("artist", ""),
+                candidate.get("title", ""),
+                candidate.get("quality") or {})
+            if score is None or score <= best_score:
+                continue
+            best_score = score
+            best_payload = dict(candidate.get("payload") or {})
     if best_payload is None or best_score < 0.82:
         return None
     best_payload["query_artist"] = artist
