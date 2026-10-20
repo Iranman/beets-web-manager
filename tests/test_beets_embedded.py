@@ -474,6 +474,7 @@ class EmbeddedBeetsStructure(unittest.TestCase):
                 self.assertEqual(_beet_subcommand(list(argv)), want)
 
     def test_only_writing_beet_commands_count(self):
+        from unittest import mock
         from backend.beets_embedded import _beet_commands
         proc = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, proc, True)
@@ -483,8 +484,29 @@ class EmbeddedBeetsStructure(unittest.TestCase):
             os.makedirs(os.path.join(proc, pid))
             with open(os.path.join(proc, pid, "cmdline"), "wb") as f:
                 f.write(b"\0".join(argv) + b"\0")
-        self.assertEqual(_beet_commands(proc), [12, 13])
-        self.assertEqual(_beet_commands(os.path.join(proc, "missing")), [])
+        # Pin getpid outside the fake set: in a low-PID container a test
+        # worker's real PID can collide with a fake pid dir and be skipped by
+        # the (correct) self-skip in _beet_commands.
+        with mock.patch("backend.beets_embedded.os.getpid", return_value=999999):
+            self.assertEqual(_beet_commands(proc), [12, 13])
+            self.assertEqual(_beet_commands(os.path.join(proc, "missing")), [])
+
+    @unittest.skipIf(os.name == "nt", "flock/symlink")
+    def test_lock_refuses_a_symlinked_lock_path_without_following_it(self):
+        from backend import beets_embedded as be
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        dbpath = os.path.join(d, "musiclibrary.blb")
+        target = os.path.join(d, "victim")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("precious")
+        os.symlink(target, dbpath + be.LOCK_SUFFIX)  # planted symlink at the lock path
+        self.addCleanup(setattr, be, "_lock_fd", be._lock_fd)
+        be._lock_fd = None
+        holder = be._acquire_library_lock(dbpath)
+        self.assertIsNotNone(holder)  # fail safe: refuses instead of following
+        self.assertEqual(open(target, encoding="utf-8").read(), "precious")  # target untouched
+        self.assertIsNone(be._lock_fd)
 
     def test_old_service_probe_finds_a_listener_and_skips_this_container(self):
         import socket

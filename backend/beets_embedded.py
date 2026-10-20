@@ -22,6 +22,7 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import threading
 import time
 import urllib.parse
@@ -252,7 +253,9 @@ class EmbeddedBeets:
 
 def _acquire_library_lock(dbpath: str) -> Optional[str]:
     """Hold an exclusive lock next to the library for this process' lifetime.
-    Returns None when held (or locking is unavailable), else who holds it.
+    Returns None when this process holds it (or locking is unavailable on this
+    platform), else a short description of who/what holds it. Fail safe: a lock
+    that cannot be proven free refuses writes, it is never read as "free".
     ponytail: flock is advisory and only as good as the filesystem's locking
     (NFS/SMB may not honour it); the live checks below cover the old service."""
     global _lock_fd
@@ -260,13 +263,23 @@ def _acquire_library_lock(dbpath: str) -> Optional[str]:
         return None
     try:
         import fcntl
-    except ImportError:  # Windows development checkouts
+    except ImportError:  # Windows development checkouts: no flock available
         return None
+    lockpath = dbpath + LOCK_SUFFIX
+    # O_NOFOLLOW: the lock path is predictable and sits in the mounted /config
+    # dir, so a planted symlink must never be followed and then truncated
+    # (#183 S-4 applies here too). fstat confirms a regular file before the
+    # ftruncate/write below.
     try:
-        fd = os.open(dbpath + LOCK_SUFFIX, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(lockpath, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError:
-        return None  # library_db_not_writable already reports an unwritable folder
+        # A symlink (ELOOP), a special file, or an unopenable lock file (e.g.
+        # EACCES on one owned by another user): refuse, never assume it is free.
+        return f"an unusable lock file next to {os.path.basename(dbpath)}"
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return f"an unusable lock file next to {os.path.basename(dbpath)}"
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         try:
