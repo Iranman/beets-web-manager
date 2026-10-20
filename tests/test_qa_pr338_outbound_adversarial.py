@@ -113,13 +113,13 @@ class PolicyBreakAttempts(_TrustBase):
 
 
 class DefaultDeploymentRegressions(_TrustBase):
-    def test_default_allowlist_still_admits_beets_and_loopback(self):
+    def test_default_allowlist_still_admits_loopback(self):
+        # Beets is embedded; the default no longer carries beets:8337. The
+        # loopback entries remain so a sidecar on 127.0.0.1 still works.
         with mock.patch.dict("os.environ", {"BEETS_OUTBOUND_ALLOWLIST": security.DEFAULT_OUTBOUND_ALLOWLIST}):
-            net = _Net(self, {"beets": ["172.18.0.3"], "localhost": ["127.0.0.1"]})
-            for url in ("http://beets:8337/api/x", "http://localhost:8337/api/x"):
-                with self.subTest(url=url):
-                    self.assertEqual(security.secure_urlopen(url, timeout=5).read(), b"ok")
-            self.assertEqual([c[0] for c in net.connected], ["172.18.0.3", "127.0.0.1"])
+            net = _Net(self, {"localhost": ["127.0.0.1"]})
+            self.assertEqual(security.secure_urlopen("http://localhost:8337/api/x", timeout=5).read(), b"ok")
+            self.assertEqual([c[0] for c in net.connected], ["127.0.0.1"])
 
     def test_public_provider_needs_no_trust(self):
         net = _Net(self, {"musicbrainz.org": ["138.201.227.205"]})
