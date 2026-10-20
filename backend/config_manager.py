@@ -55,6 +55,47 @@ class ConfigValidationError(ConfigError):
         super().__init__(message, error_code="CONFIG_INVALID_YAML", status_code=400)
 
 
+class ConfigCodeExecutionEditRefused(ConfigError):
+    """ADR 0006: with Beets in-process, config.yaml keys that run code run it
+    inside Web Manager, so the browser editor may not change them."""
+
+    def __init__(self, keys: list):
+        super().__init__(
+            f"Changes to {', '.join(keys)} are refused from the web editor: Beets runs inside "
+            "Web Manager, so these settings run code in this process. Edit config.yaml "
+            "directly on the server and restart Web Manager.",
+            error_code="CONFIG_CODE_EXECUTION_EDIT_REFUSED", status_code=403)
+
+
+def _plugin_names(value: Any) -> set:
+    if isinstance(value, str):
+        return set(value.split())
+    if isinstance(value, list):
+        return {str(v) for v in value}
+    return set()
+
+
+def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
+    """Raise ConfigCodeExecutionEditRefused when, with the embedded engine,
+    ``new_text`` changes `hook:`, `pluginpath:` or `include:`, or adds the
+    `hook` plugin. Unchanged values (a file that already has hooks) pass."""
+    from backend import beets_embedded
+    if not beets_embedded.enabled():
+        return
+    def load(text: str) -> Dict[str, Any]:
+        try:
+            data = yaml.safe_load(text or "")
+        except yaml.YAMLError:
+            return {}
+        return data if isinstance(data, dict) else {}
+    old, new = load(old_text), load(new_text)
+    changed = [k for k in ("hook", "pluginpath", "include") if old.get(k) != new.get(k)]
+    if "hook" in _plugin_names(new.get("plugins")) - _plugin_names(old.get("plugins")):
+        changed.append("the hook plugin in plugins")
+    if changed:
+        raise ConfigCodeExecutionEditRefused(changed)
+
+
 # #324 F5: the revision is an HMAC under a per-process random key, not a bare
 # sha256 of the plaintext, so a revision returned to the browser cannot be
 # used offline to confirm a guess of a low-entropy secret in config.yaml.
@@ -308,6 +349,7 @@ def save_config(
             # so this error carries no parser detail.
             if not validate_config_yaml(content)[0]:
                 raise ConfigValidationError("Invalid YAML after restoring redacted secrets")
+        refuse_code_execution_edits(current_data["content"], content)
 
         cfg.parent.mkdir(parents=True, exist_ok=True)
         if cfg.exists() and cfg.is_file():
@@ -353,6 +395,7 @@ def revert_config(
         valid, err_msg = validate_config_yaml(backup_content)
         if not valid:
             raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}")
+        refuse_code_execution_edits(current_data["content"], backup_content)
 
         try:
             _replace_config_file(cfg, backup_content)

@@ -1,10 +1,13 @@
 """Unit tests for backend/config_manager.py."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from backend.config_manager import (
+    ConfigCodeExecutionEditRefused,
     ConfigConflictError,
     ConfigError,
     ConfigValidationError,
@@ -85,6 +88,71 @@ class TestConfigManager(unittest.TestCase):
         # Verify content is back to v1
         read_res_after = get_config(self.config_path)
         self.assertEqual(read_res_after["content"], v1)
+
+
+class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
+    """ADR 0006: with Beets in-process, the browser editor may not change
+    config keys that run code inside Web Manager."""
+
+    BASE = "directory: /music\nplugins: [chroma]\n"
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.path = Path(self.tmpdir.name) / "config.yaml"
+        env = mock.patch.dict(os.environ, {"BEETS_ENGINE": "embedded"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _save(self, stored, new):
+        self.path.write_text(stored, encoding="utf-8")
+        return save_config(new, expected_revision=compute_revision(stored), config_path=self.path)
+
+    def test_refuses_hook_pluginpath_include_and_hook_plugin(self):
+        for new in (
+            self.BASE + "hook:\n  hooks:\n    - event: import\n      command: touch /tmp/x\n",
+            self.BASE + "pluginpath: [/tmp/evil]\n",
+            self.BASE + "include: [other.yaml]\n",
+            "directory: /music\nplugins: chroma hook\n",
+        ):
+            with self.subTest(new=new):
+                with self.assertRaises(ConfigCodeExecutionEditRefused) as ctx:
+                    self._save(self.BASE, new)
+                self.assertEqual(ctx.exception.status_code, 403)
+                self.assertIn("Edit config.yaml directly", str(ctx.exception))
+                self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
+
+    def test_allows_other_edits_including_files_that_already_have_hooks(self):
+        stored = self.BASE + "pluginpath: [/opt/p]\nhook:\n  hooks: []\n"
+        self.assertTrue(self._save(stored, stored + "import:\n  copy: yes\n")["ok"])
+        self.assertTrue(self._save(self.BASE, self.BASE.replace("[chroma]", "[chroma, fetchart]"))["ok"])
+
+    def test_revert_cannot_reintroduce_a_hook(self):
+        self.path.write_text(self.BASE + "hook:\n  hooks: []\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "http"}):
+            save_config(self.BASE, config_path=self.path)  # backup now holds the hook
+        with self.assertRaises(ConfigCodeExecutionEditRefused):
+            revert_config(expected_revision=compute_revision(self.BASE), config_path=self.path)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), self.BASE)
+
+    def test_http_transport_is_unchanged(self):
+        with mock.patch.dict(os.environ, {"BEETS_ENGINE": "http"}):
+            self.assertTrue(self._save(self.BASE, self.BASE + "pluginpath: [/opt/p]\n")["ok"])
+
+    def test_route_returns_403_with_reason(self):
+        import json
+        import app as app_module
+        stored = self.BASE
+        self.path.write_text(stored, encoding="utf-8")
+        body = {"content": stored + "pluginpath: [/tmp/evil]\n", "expected_revision": compute_revision(stored)}
+        with mock.patch("backend.config_manager.get_config_path", return_value=self.path), \
+             app_module.app.test_request_context("/api/config", method="POST", data=json.dumps(body),
+                                                 content_type="application/json"):
+            resp, status = app_module.save_config()
+        self.assertEqual(status, 403)
+        self.assertEqual(resp.get_json()["code"], "CONFIG_CODE_EXECUTION_EDIT_REFUSED")
+        self.assertIn("pluginpath", resp.get_json()["error"])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), stored)
 
 
 if __name__ == "__main__":

@@ -25,8 +25,21 @@ log = logging.getLogger("beets.embedded")
 PINNED_BEETS_VERSION = "2.14.1"  # keep equal to requirements.txt
 ENGINE_ENV = "BEETS_ENGINE"
 _REQUIRED_PLUGINS = ("web", "webmanager")
-_OPS_PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "beetsplug", "webmanager")))
+# Plugins the image ships (beetsplug/webmanager, beetsplug/discpath.py). They
+# are imported from here before Beets adds `pluginpath`, so a stale copy once
+# provisioned into /config/beetsplug can never shadow them.
+_BUNDLED_PLUGIN_DIR = os.path.normcase(os.path.realpath(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "beetsplug")))
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _bundled_plugins() -> List[str]:
+    return sorted(
+        n[:-3] if n.endswith(".py") else n
+        for n in os.listdir(_BUNDLED_PLUGIN_DIR)
+        if (n.endswith(".py") and n != "__init__.py")
+        or os.path.isfile(os.path.join(_BUNDLED_PLUGIN_DIR, n, "__init__.py"))
+    )
 
 _init_lock = threading.Lock()
 _engine: Optional["EmbeddedBeets"] = None
@@ -69,8 +82,7 @@ class EmbeddedBeets:
         version = getattr(beets, "__version__", "unknown")
         _check(checks, "beets_version_mismatch", version == PINNED_BEETS_VERSION,
                f"Beets {version} is running but Web Manager is built and tested against "
-               f"{PINNED_BEETS_VERSION}. Use the published image, or install beets=={PINNED_BEETS_VERSION}.",
-               severity="warning")
+               f"{PINNED_BEETS_VERSION}. Use the published image, or install beets=={PINNED_BEETS_VERSION}.")
 
         config_path = ""
         try:
@@ -95,18 +107,23 @@ class EmbeddedBeets:
         config["plugins"].set(configured + [p for p in _REQUIRED_PLUGINS if p not in configured])
         config["web"]["include_paths"].set(True)
 
-        # Import the operations package from the image BEFORE Beets extends
-        # beetsplug.__path__ with `pluginpath`, so a stale copy provisioned
-        # into /config/beetsplug can never shadow it.
-        import beetsplug.webmanager as ops_pkg
-        ops_dir = os.path.normcase(os.path.realpath(os.path.dirname(ops_pkg.__file__)))
-        _check(checks, "operations_shadowed", ops_dir == _OPS_PACKAGE_DIR,
-               f"The webmanager operations were loaded from {ops_dir}, not from the Web Manager "
-               "image. Remove that copy from Beets' pluginpath and restart.")
+        # Import the image's own plugins BEFORE Beets extends beetsplug.__path__
+        # with `pluginpath`. Fail closed if one resolves anywhere else: running
+        # foreign operations code in this process is never acceptable.
+        import importlib
+        for name in _bundled_plugins():
+            mod = importlib.import_module(f"beetsplug.{name}")
+            where = os.path.normcase(os.path.realpath(mod.__file__))
+            if not _check(checks, "operations_shadowed", where.startswith(_BUNDLED_PLUGIN_DIR + os.sep),
+                          f"Beets plugin {name!r} was loaded from {where}, not from the Web Manager "
+                          "image. Remove that copy from Beets' pluginpath and restart."):
+                self.status = _summary(checks, beets_version=version)
+                raise EmbeddedBeetsUnavailable(self.status)
 
         plugins.load_plugins()
         loaded = sorted({p.name for p in plugins.find_plugins()})
-        failed = sorted(set(plugins.get_plugin_names()) - set(loaded))
+        disabled = set(config["disabled_plugins"].as_str_seq())
+        failed = sorted(set(config["plugins"].as_str_seq()) - disabled - set(loaded))
         _check(checks, "plugins_failed", not failed,
                f"Beets plugin(s) {', '.join(failed)} failed to load (see the log for the import "
                "error). Check the names in config.yaml `plugins:`; a plugin with extra Python "
@@ -167,7 +184,10 @@ class EmbeddedBeets:
 
     def call(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None,
              json_data: Any = None, headers: Optional[Dict[str, str]] = None, stream: bool = False):
-        """One in-process request; returns the Werkzeug response."""
+        """One in-process request; returns the Werkzeug response. Writes are
+        refused while any error-level self-test check fails; reads continue."""
+        if method.upper() not in _READ_METHODS and not self.status["ok"]:
+            raise EmbeddedBeetsUnavailable(self.status)
         hdrs = dict(headers or {})
         if path.startswith("/webmanager"):
             hdrs.setdefault("Authorization", f"Bearer {self._key}")

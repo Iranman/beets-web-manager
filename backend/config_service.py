@@ -55,6 +55,9 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
     later startup. Backs up the original once, to its own filename (not the
     config editor's /api/config/revert backup), before ever touching it.
     """
+    from backend import beets_embedded
+    if beets_embedded.enabled():
+        return  # ADR 0006: config.yaml is never edited at startup; the self-test names a bad plugin
     from backend.beets_plugins import _decode_config, _read_config_snapshot, _write_config_text
     from backend.config_manager import get_config_path
     try:

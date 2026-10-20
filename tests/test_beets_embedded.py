@@ -27,6 +27,11 @@ scenario, src = sys.argv[1], sys.argv[2]
 if scenario == "version_mismatch":
     import beets
     beets.__version__ = "0.0.0"
+if scenario == "shadowed":  # a stale copy that resolved before the image's own
+    import types
+    stale = types.ModuleType("beetsplug.discpath")
+    stale.__file__ = os.path.join(os.environ["HOME"], "stale", "beetsplug", "discpath.py")
+    sys.modules["beetsplug.discpath"] = stale
 from backend import beets_embedded
 from backend.beets_adapter import BeetsAdapter, BeetsAdapterError
 
@@ -42,6 +47,11 @@ if scenario != "happy":
         out["stats_error"] = None
     except BeetsAdapterError as ex:
         out["stats_error"] = [type(ex).__name__, ex.error_code, str(ex)]
+    try:
+        a.modify({"title": "x"}, item_ids=[1])
+        out["mutate_error"] = None
+    except BeetsAdapterError as ex:
+        out["mutate_error"] = [type(ex).__name__, ex.error_code, str(ex), ex.status_code]
     print(json.dumps(out, default=str))
     sys.exit(0)
 
@@ -66,6 +76,8 @@ except BeetsAdapterError as ex:
     out["bad_modify"] = [type(ex).__name__, ex.status_code, ex.error_code]
 out["missing_item"] = a.get_item(999999)
 out["plugin_status"] = a.get_plugin_status()
+import beetsplug.discpath
+out["discpath_file"] = beetsplug.discpath.__file__
 
 # A transaction-engine mutation end to end: album rename (plan -> approve ->
 # apply through Beets' Album.move()) and its rollback.
@@ -119,13 +131,15 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
 
     def tearDown(self):
         os.chmod(self.music, 0o755)
+        if os.path.exists(self.dbpath):
+            os.chmod(self.dbpath, 0o644)
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def _write_config(self, plugins="[]", extra=""):
+    def _write_config(self, plugins="[]", extra="", library=None):
         with open(os.path.join(self.config, "config.yaml"), "w", encoding="utf-8") as f:
             f.write(
                 f"directory: {self.music}\n"
-                f"library: {self.dbpath}\n"
+                f"library: {library or self.dbpath}\n"
                 f"plugins: {plugins}\n"
                 "webmanager:\n"
                 f"  import_roots: [{self.downloads}]\n"
@@ -158,7 +172,12 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         return {c["code"]: c["severity"] for c in status["checks"] if not c["ok"]}
 
     def test_reads_import_modify_and_stream_in_process_without_network(self):
-        self._write_config()
+        stale = os.path.join(self.td, "stale")
+        os.makedirs(os.path.join(stale, "webmanager"))
+        for rel in ("discpath.py", os.path.join("webmanager", "__init__.py")):
+            with open(os.path.join(stale, rel), "w", encoding="utf-8") as f:
+                f.write("raise RuntimeError('stale copy from pluginpath was imported')\n")
+        self._write_config(plugins="[discpath]", extra=f"pluginpath: [{stale}]\n")
         self._precreate_library()
         out = self._run("happy")
         status = out["status"]
@@ -180,6 +199,10 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual(out["bad_modify"][:2], ["BeetsAdapterBadRequestError", 400])
         self.assertIsNone(out["missing_item"])
         self.assertEqual(out["plugin_status"]["library_directory"], self.music)
+        # The image's own discpath (and webmanager) won over the stale pluginpath copies.
+        self.assertIn("discpath", status["loaded_plugins"])
+        self.assertEqual(os.path.realpath(out["discpath_file"]),
+                         os.path.realpath(ROOT / "beetsplug" / "discpath.py"))
         self.assertTrue(out["plugin_status"]["web_include_paths"])
         # Transaction-engine relocation and rollback through the in-process engine.
         self.assertTrue(out["relocate"]["ok"], out["relocate"])
@@ -192,7 +215,7 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.src)), ["01.wav", "02.wav"])
         # The user's config.yaml is never rewritten by the engine.
         with open(os.path.join(self.config, "config.yaml"), encoding="utf-8") as f:
-            self.assertIn("plugins: []", f.read())
+            self.assertIn("plugins: [discpath]", f.read())
 
     def test_new_library_is_reported(self):
         self._write_config()
@@ -218,6 +241,48 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual({k for k, v in self._failed(out["status"]).items() if v == "error"}, {"plugins_failed"})
         msg = next(c["message"] for c in out["status"]["checks"] if c["code"] == "plugins_failed")
         self.assertIn("doesnotexist", msg)
+        # Degraded: reads continue, mutations are refused with the self-test message.
+        self.assertIsNone(out["stats_error"])
+        self.assertEqual(out["mutate_error"][1], "BEETS_EMBEDDED_DEGRADED")
+        self.assertEqual(out["mutate_error"][3], 503)
+        self.assertIn("doesnotexist", out["mutate_error"][2])
+
+    def test_healthy_engine_does_not_refuse_mutations(self):
+        self._write_config()
+        self._precreate_library()
+        out = self._run("new_library")
+        self.assertNotEqual((out["mutate_error"] or [None, None])[1], "BEETS_EMBEDDED_DEGRADED")
+
+    def test_shadowed_bundled_plugin_fails_closed(self):
+        self._write_config()
+        self._precreate_library()
+        out = self._run("shadowed")
+        self.assertFalse(out["status"]["ok"])
+        self.assertEqual(self._failed(out["status"]).get("operations_shadowed"), "error")
+        self.assertEqual(out["stats_error"][1], "BEETS_EMBEDDED_UNAVAILABLE")
+        self.assertIn("discpath", out["stats_error"][2])
+
+    def test_missing_config_and_library_dir_are_reported(self):
+        out = self._run("no_config")  # no config.yaml: Beets defaults, ~/Music missing
+        failed = self._failed(out["status"])
+        self.assertEqual(failed.get("config_missing"), "warning")
+        self.assertEqual(failed.get("library_dir_missing"), "error")
+        self.assertFalse(out["status"]["ok"])
+
+    def test_unopenable_library_fails_with_code(self):
+        self._write_config(library=self.music)  # a directory is not a database
+        out = self._run("bad_library")
+        self.assertIn("library_open_failed", self._failed(out["status"]))
+        self.assertEqual(out["stats_error"][1], "BEETS_EMBEDDED_UNAVAILABLE")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file permissions")
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_read_only_library_db_is_an_error(self):
+        self._write_config()
+        self._run("new_library")  # Beets creates and migrates the schema first
+        os.chmod(self.dbpath, 0o444)
+        out = self._run("ro_db")
+        self.assertEqual(self._failed(out["status"]).get("library_db_not_writable"), "error")
 
     def test_missing_fpcalc_is_an_error_when_chroma_is_configured(self):
         self._write_config(plugins="[chroma]")
@@ -236,6 +301,7 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         os.makedirs(empty_bin)
         out = self._run("no_fpcalc", path_env=empty_bin)
         self.assertEqual(self._failed(out["status"]).get("fpcalc_missing"), "warning")
+        self.assertEqual(self._failed(out["status"]).get("ffmpeg_missing"), "warning")
         self.assertTrue(out["status"]["ok"])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores directory permissions")
@@ -252,7 +318,8 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self._write_config()
         self._precreate_library()
         out = self._run("version_mismatch")
-        self.assertEqual(self._failed(out["status"]).get("beets_version_mismatch"), "warning")
+        self.assertEqual(self._failed(out["status"]).get("beets_version_mismatch"), "error")
+        self.assertFalse(out["status"]["ok"])
 
     def test_public_status_carries_codes_but_no_paths_or_messages(self):
         self._write_config(plugins="[doesnotexist]")

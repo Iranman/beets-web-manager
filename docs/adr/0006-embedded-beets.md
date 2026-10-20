@@ -138,9 +138,27 @@ eviction in `on_import_task_created` covers it.
 - **Plugins.** Everything else in `plugins:` (musicbrainz, chroma, deezer, fetchart,
   embedart, lastgenre, mbsync, ...) loads through Beets' own `plugins.load_plugins()`,
   including the user's `pluginpath`. Before Beets extends `beetsplug.__path__` with
-  `pluginpath`, the engine imports `beetsplug.webmanager` from the image, so a stale copy
-  provisioned into `/config/beetsplug` can never shadow it. The self-test names any
-  configured plugin that failed to load.
+  `pluginpath`, the engine imports every plugin the image ships (`beetsplug/webmanager`,
+  `beetsplug/discpath.py`) from the image, so a stale copy provisioned into
+  `/config/beetsplug` can never shadow it. If one still resolves elsewhere, the engine
+  refuses to start (`operations_shadowed`, fail closed). The self-test names any configured
+  plugin that failed to load.
+- **Trust consolidation.** Everything `config.yaml` can make Beets execute now runs inside
+  the Web Manager process, with its environment and its access to `/web-manager-data`:
+  `pluginpath` modules, the `hook` plugin's commands, and plugin-configured commands such as
+  `convert`, `play` and `badfiles`. Before, they ran in the Beets container. `config.yaml` is
+  therefore part of Web Manager's trusted configuration, as the image is. With the embedded
+  engine the browser config editor (`POST /api/config` and revert) refuses any change to
+  `hook:`, `pluginpath:` or `include:`, and adding the `hook` plugin, with
+  `CONFIG_CODE_EXECUTION_EDIT_REFUSED` (403). Those changes are made by editing the file on
+  the server. A file that already has them still loads and can still be edited elsewhere.
+  Other command-bearing plugin keys are not guarded by the editor; enabling those plugins is
+  already an operator decision.
+- **Egress.** Beets plugins make their own outbound requests (MusicBrainz, AcoustID,
+  Deezer, cover-art sources, Last.fm) with their own clients. That traffic does not go
+  through `provider_boundary`, as it did not when it left the Beets container. It now leaves
+  from the Web Manager container. Rate limits and retries are Beets'. Routing plugin egress
+  through `provider_boundary` is out of scope until a phase needs it.
 - **Library.** The database path comes from `library` and the music root from `directory` in
   Beets' config, as `beet` resolves them. The default `/config/musiclibrary.blb` and
   `/music` therefore keep working unchanged, and so do custom locations. A database file that
@@ -291,13 +309,20 @@ else is built.
   Each failure has a stable code and an actionable message. The public `/api/health` gets a
   minimal `beets` block (`engine`, `ok`, failing `codes`). The authenticated
   `/api/health/detail` gets the full checks with messages. Adapter calls fail with that message
-  instead of a generic "Beets unreachable".
+  instead of a generic "Beets unreachable". Every check is error level except
+  `config_missing`, `library_created`, `ffmpeg_missing` and `fpcalc_missing` without
+  `chroma`. While any error-level check fails, the engine keeps serving reads but refuses
+  every write (any non-GET operation) with the failing check's message
+  (`BEETS_EMBEDDED_DEGRADED`, 503). `config_invalid`, `library_open_failed` and
+  `operations_shadowed` stop the engine altogether.
 - **Acceptance (Phase 1, `tests/test_beets_embedded.py`).**
   1. A valid temporary config and library give `ok: true` with every check passing.
   2. Each failure gives `ok: false` with exactly its code: invalid YAML (`config_invalid`), an
      unloadable plugin (`plugins_failed`), a missing `fpcalc` with `chroma`
      (`fpcalc_missing`), an unwritable library directory (`library_dir_not_writable`), and a
      version mismatch (`beets_version_mismatch`).
+  4. With an error-level failure, a read succeeds and a mutation is refused with the
+     check's message.
   3. `/api/health` exposes the codes and never a path.
 
 ### 5. Performance (Phase 2 reads, Phase 4 fingerprints)
@@ -333,9 +358,9 @@ else is built.
 |---|---|---|
 | 0 | This ADR; ARCHITECTURE rules updated | Committed |
 | 1 | `backend/beets_embedded.py`, the adapter's in-process transport behind `BEETS_ENGINE=embedded`, the self-test (4) in `/api/health`, and the Beets pin in `requirements.txt` | Tests on a temporary library cover reads, an import and a mutation through the adapter, plus the improvement 4 acceptance tests. The full suite passes. |
-| 2 | Cutover: Compose without the `beets` service and with `/music` rw, `BEETS_ENGINE=embedded` by default, setup and diagnostics from the self-test, second-writer guard, provisioning skipped in embedded mode, direct reads (5, reads), docs, an `embedded-acceptance` CI job, and a MINOR release | A fresh install and an upgrade from the two-container stack pass acceptance, and counts and checksum are unchanged on a copy of a real library |
+| 2 | Cutover: Compose without the `beets` service and with `/music` rw, `BEETS_ENGINE=embedded` by default, setup and diagnostics from the self-test, second-writer guard, direct reads (5, reads), docs, an `embedded-acceptance` CI job, and a MINOR release | A fresh install and an upgrade from the two-container stack pass acceptance, and counts and checksum are unchanged on a copy of a real library. Embedded autotag and MusicBrainz tests run on recorded provider fixtures, including a refused match and a provider-down case. A second writer is detected by a lock or marker file in the Beets config folder (not only by probing `BEETS_WEB_URL`), and writes are refused while it is held by another process. |
 | 3 | Improvements 1 and 2 | Their acceptance tests pass |
-| 4 | Improvements 3, 5 (fingerprints) and 6 | Their acceptance tests pass |
+| 4 | Improvements 3, 5 (fingerprints) and 6 | Their acceptance tests pass. No request thread calls a long synchronous adapter operation (import, mbsync, fetchart, relocation): those callers use the async or job path, enforced by a test. |
 | 5 | Remove the HTTP transport, `BEETS_WEB_URL`, the API key, provisioning (`beets_plugins.py` provisioning, `_bootstrap_beets_plugins`), the stock-Beets Compose pin and `stock-beets-acceptance`. Handlers become plain functions. | A single code path remains. `BEETS_ENGINE` is gone. |
 
 ## Docs, tests and CI that change

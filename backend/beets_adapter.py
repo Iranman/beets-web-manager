@@ -420,6 +420,9 @@ class BeetsAdapter:
             req_headers["Idempotency-Key"] = "k-" + hashlib.sha256(key.encode("utf-8")).hexdigest()
         try:
             resp = engine.call(method, path, params=params, json_data=json_data, headers=req_headers)
+        except beets_embedded.EmbeddedBeetsUnavailable as ex:
+            raise BeetsAdapterError(f"Beets changes are refused until this is fixed: {ex}",
+                                    status_code=503, error_code="BEETS_EMBEDDED_DEGRADED") from None
         except Exception as ex:  # a handler bug must not escape as a bare exception
             log.exception("Embedded Beets call %s %s failed", method, path)
             raise BeetsAdapterError(f"Beets request failed on {path} ({type(ex).__name__})",
