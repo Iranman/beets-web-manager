@@ -239,6 +239,70 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertNotEqual(prop.recommendation, Recommendation.strong)
         self.assertGreater(prop.candidates[0].distance["data_source"], 0)
 
+    def _relaxation_case(self, recording_of, existing_release=REL, existing_album_id=None):
+        """QA (PR #454 b): a real Beets quiet import of a missing-track repair
+        whose files name one artist of a two-artist Release credit. Real
+        ImportTask, Items, mapping and Library album, so the guards read the
+        attributes stock Beets actually provides (2.14: ``task.source``, no
+        ``cur_artist``). ``recording_of(item, track_id)`` is the recording
+        AcoustID returned for each file, keyed by the Item path chroma uses."""
+        from unittest import mock
+        from beets.autotag.hooks import AlbumInfo, TrackInfo
+        from beets.library import Item
+        import beets.autotag.match as match_mod
+        album = self.lib.add_album([Item(title="Track 3", artist="Some Artist", album="Partial",
+                                         mb_albumid=existing_release)])
+        info = AlbumInfo(
+            tracks=[TrackInfo(title=t, track_id=f"00000000-0000-4000-8000-00000000000{i}", index=i,
+                              medium=1, medium_index=i, medium_total=3, length=1.0)
+                    for i, t in enumerate(["Track 1", "Track 2", "Track 3"], 1)],
+            album="Partial", album_id=REL, artist="Some Artist & Guest Producer",
+            artists=["Some Artist", "Guest Producer"],
+            artist_id="11111111-1111-4111-8111-111111111111",
+            releasegroup_id="22222222-2222-4222-8222-222222222222",
+            mediums=1, data_source="MusicBrainz")
+        src = os.path.join(self.downloads, "Some Artist - Partial")
+        _album(src, "Some Artist", "Partial")
+        matches = {}
+        real = ops_mod._pinned_partial_match
+
+        def with_chroma_hits(task, *a, **kw):
+            # chroma fills _matches at import_task_start, keyed by item.path.
+            mapping = task.candidates[0].mapping if task.candidates else {}
+            for item in task.items:
+                rec = recording_of(item, getattr(mapping.get(item), "track_id", None))
+                if rec:
+                    matches[item.path] = ([rec], [REL])
+            return real(task, *a, **kw)
+        with mock.patch.object(match_mod.metadata_plugins, "albums_for_ids", lambda ids: iter([info])),                 mock.patch.dict("sys.modules", {"beetsplug.chroma": types.SimpleNamespace(_matches=matches)}),                 mock.patch.object(ops_mod, "_pinned_partial_match", with_chroma_hits):
+            res = self._import(paths=[src], autotag=True, search_ids=[REL], copy=True, move=False,
+                               duplicate_action="keep", allow_missing_tracks=True,
+                               existing_album_id=album.id if existing_album_id is None else existing_album_id)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return src, res.get_json(), album.id
+
+    def test_artist_relaxation_end_to_end_real_beets(self):
+        src, data, old_id = self._relaxation_case(lambda item, tid: tid)
+        self.assertEqual(data["skipped"], [], data)
+        self.assertEqual(data["partial_artist_relaxed"], [src])
+        self.assertEqual(len(data["imported_album_ids"]), 1)
+        self.assertNotIn(old_id, data["imported_album_ids"])
+
+    def test_artist_relaxation_end_to_end_refusals(self):
+        for name, rec, release, aid in (
+            ("acoustid other recording", lambda item, tid: "99999999-0000-4000-8000-000000000001", REL, None),
+            ("acoustid missing", lambda item, tid: None, REL, None),
+            ("repaired album on another release", lambda item, tid: tid,
+             "b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9", None),
+            ("no existing_album_id", lambda item, tid: tid, REL, 0),
+        ):
+            with self.subTest(name):
+                src, data, _ = self._relaxation_case(rec, release, aid)
+                self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}], data)
+                self.assertEqual(data["partial_artist_relaxed"], [])
+                self.assertEqual(data["imported_album_ids"], [])
+                shutil.rmtree(src)
+
     def test_allow_missing_tracks_validation(self):
         src = os.path.join(self.downloads, "A")
         os.makedirs(src)

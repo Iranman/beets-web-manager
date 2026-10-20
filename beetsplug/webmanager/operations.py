@@ -670,6 +670,14 @@ def _artist_parts(name) -> List[str]:
     return [part.strip() for part in _ARTIST_SPLIT.split(_norm_name(name)) if part.strip()]
 
 
+def _source_artist(task):
+    """The source's consensus artist as Beets matched it: ``task.source.artist``
+    on Beets 2.14 (no ``cur_artist`` there), ``task.cur_artist`` before."""
+    source = getattr(task, "source", None)
+    artist = getattr(source, "artist", None) if source is not None else None
+    return artist if artist is not None else getattr(task, "cur_artist", None)
+
+
 def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int) -> bool:
     """True when the album-level ``artist`` penalty of a missing-track repair
     says nothing against the pinned Release (the source names only some of
@@ -706,7 +714,7 @@ def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int)
     info = match.info
     if getattr(info, "va", False):
         return False
-    parts = _artist_parts(getattr(task, "cur_artist", None))
+    parts = _artist_parts(_source_artist(task))
     credits = (getattr(info, "artists", None) or getattr(info, "artists_credit", None)
                or _artist_parts(getattr(info, "artist", None)))
     credits = {_norm_name(name) for name in credits}
@@ -768,7 +776,7 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
             log.info("Pinned release %s accepted for %s with the artist penalty set aside "
                      "(source artist %r, AcoustID hit on every file)", release_id,
                      [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
-                     getattr(task, "cur_artist", None))
+                     _source_artist(task))
             return match
     return None
 
