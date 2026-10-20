@@ -91,7 +91,7 @@ EMBEDDED_EDITABLE_KEYS = frozenset({
 # ...except these: file paths Beets writes or reads, and outbound hosts.
 EMBEDDED_LOCKED_PATHS = (
     ("import", "log"), ("musicbrainz", "host"), ("musicbrainz", "https"),
-    ("lastgenre", "whitelist"), ("lastgenre", "canonical"),
+    ("lastgenre", "whitelist"), ("lastgenre", "canonical"), ("fetchart", "fallback"), ("lyrics", "lrcmux"),
     ("discogs", "tokenfile"), ("spotify", "tokenfile"),
 )
 

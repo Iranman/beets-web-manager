@@ -144,6 +144,7 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
 
     def test_refuses_locked_path_inside_a_new_editable_section(self):
         self.assertIn("import.log", self._refused(self.BASE, self.BASE + "import:\n  log: /tmp/x\n"))
+        self.assertIn("fetchart.fallback", self._refused(self.BASE, self.BASE + "fetchart:\n  fallback: /tmp/x\n"))
 
     def test_refuses_unparseable_or_non_mapping_text(self):
         from backend.config_manager import refuse_code_execution_edits
