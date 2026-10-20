@@ -6,9 +6,36 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- **Breaking: Beets runs only inside Web Manager.** Embedded Beets is the only engine ([ADR 0006](docs/adr/0006-embedded-beets.md), Phase 2 cutover with the Phase 5 removal). The separate `beets` container, the HTTP transport to it, `BEETS_ENGINE` and the plugin provisioning into `/config/beetsplug` are gone. Before you pull this release, follow [Upgrading from two containers](docs/INSTALLATION.md#upgrading-from-two-containers): back up, `docker compose stop beets && docker compose rm -f beets`, delete the `beets` service, mount `/music` read-write in `beets-web-manager`, make sure `plugins:` in `config.yaml` lists `musicbrainz` (nothing adds it any more), remove the legacy settings, and `docker compose up -d --remove-orphans`. Your `config.yaml`, `musiclibrary.blb` and music folder are used as they are, with the same Beets 2.14.1.
+- Rollback is the previous image: put back your previous Compose file (with its `beets` service) and pin `ghcr.io/iranman/beets-web-manager:0.8.1` ([Rolling back](docs/INSTALLATION.md#rolling-back)).
+- Leftover `BEETS_ENGINE`, `BEETS_WEB_URL`, `BEETS_WEBMANAGER_API_KEY` or `BEETS_WEBMANAGER_API_KEY_FILE` never stop startup: Beets starts and the self-test reports `legacy_settings_ignored` naming them.
+- `BEETS_OUTBOUND_ALLOWLIST` now defaults to `127.0.0.1:8337,localhost:8337` (`beets:8337` is gone with the service); `docker-compose.full.yml` forwards `bgutil-provider:4416`.
+
+### Added
+
+- Second-writer detection. A second Web Manager on the same library gets `library_locked` (an exclusive lock next to `musiclibrary.blb`). While the old `beets` service still answers (`separate_beets_running`, at `BEETS_WEB_URL` if set, else `http://beets:8337`) or a mutating `beet` command runs in the container (`beet_command_running`), every library write is refused with `BEETS_EMBEDDED_DEGRADED`; writes resume without a restart once it stops (#459).
+- `library_dir_mismatch`: Beets' `directory:` and `MUSIC_ROOT` name different folders; writes are refused.
+- The shipped Compose healthcheck fails while Beets' self-test fails (`beets.ok` false), so Docker reports the container unhealthy (#459 D3).
+- Recorded-fixture autotag tests: Beets' own importer runs through the embedded engine against a recorded MusicBrainz response for a match, a refused match, MusicBrainz down and not found (`tests/test_beets_embedded_autotag.py`, N4).
+
+### Changed
+
+- A Beets version other than the pin now stops Beets before it reads `config.yaml` or opens the library (`beets_version_mismatch`, #459 N-a).
+- `web` and `webmanager` load even when `disabled_plugins:` lists them (#459 N-b).
+- Without a `config.yaml`, Beets uses `library: /config/musiclibrary.blb` and `directory:` = `MUSIC_ROOT`, and reports `config_missing`.
+- CI: `stock-beets-acceptance` runs the embedded-engine acceptance against the pinned upstream Beets; `compose-verification` and `production-docker-acceptance` check the single-container Compose files and refuse a separate Beets service; `beets-latest-canary` tests the newest Beets from PyPI. Job names are unchanged.
+
+### Removed
+
+- The two-container setup: the `beets` service in every Compose file, `examples/docker-compose.external-beets.yml` and `examples/docker-compose.embedded.yml` (`docker-compose.yml` is now the single-container file), and the stock Beets image pin.
+- The HTTP transport and shared-key client to Beets, and the settings `BEETS_ENGINE`, `BEETS_WEB_URL`, `BEETS_WEBMANAGER_API_KEY` and `BEETS_WEBMANAGER_API_KEY_FILE`.
+- Plugin provisioning into `/config/beetsplug` and the startup `config.yaml` edits, with the routes `POST /api/plugins/provision`, `POST /api/setup/plugins/provision` and `POST /api/setup/beets-config/include-paths`, and the Setup/System buttons that called them. The opt-in recommended-plugins edit remains.
+
 ### Security
 
-- Embedded Beets (`BEETS_ENGINE=embedded`): the browser can no longer change `import.set_fields` or `replace` in `config.yaml` (#461). `set_fields` can set any field, including a file's path, before the import moves or copies the file. `replace` holds the rules that keep `paths` and `art_filename` results inside the music folder. Path templates (`paths`, `art_filename`) stay editable while the file uses Beets' default `replace` rules; with its own `replace` or an `include`, they too are edited on the server. Make these edits in `config.yaml` on the server.
+- Embedded Beets: the browser can no longer change `import.set_fields` or `replace` in `config.yaml` (#461). `set_fields` can set any field, including a file's path, before the import moves or copies the file. `replace` holds the rules that keep `paths` and `art_filename` results inside the music folder. Path templates (`paths`, `art_filename`) stay editable while the file uses Beets' default `replace` rules; with its own `replace` or an `include`, they too are edited on the server. Make these edits in `config.yaml` on the server.
 - Config editor (every mode): a save or revert whose YAML uses aliases (`*name`, including `<<: *name` merges), has a key that is not text (such as `1:`), or is larger than 1 MiB is refused as invalid before it is parsed into data, so a few lines can no longer make parsing and the embedded guard's comparison run for minutes while holding the config write lock (#461). YAML nested too deeply, or with a value that cannot be read (such as an impossible date), is now a validation error instead of a server error. Write aliased values out in full.
 - The documentation no longer says the allowed plugins run nothing external: `chroma` runs the fixed `fpcalc` helper, and `fetchart`'s `cover_art_url` source fetches URLs read from file tags, outside Web Manager's outbound policy.
 

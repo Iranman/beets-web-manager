@@ -4,7 +4,7 @@ This is the master prompt for AI coding agents (Claude Code, Codex, and others) 
 
 ## What this project is
 
-Beets Web Manager is a self-hosted web UI and workflow layer that embeds Beets as a pinned Python library (migrating from a separate stock `lscr.io/linuxserver/beets` container; see `docs/adr/0006-embedded-beets.md`). It handles importing, matching, tagging, cleanup, artwork, playlists, and acquisition. Integrations: MusicBrainz, AcoustID, Lidarr, slskd, Plex, Discogs, ListenBrainz, and an optional AI provider.
+Beets Web Manager is a self-hosted web UI and workflow layer that embeds Beets as a pinned Python library; embedded Beets is the only engine, and stock `lscr.io/linuxserver/beets` is no longer part of the architecture (`docs/adr/0006-embedded-beets.md`). It handles importing, matching, tagging, cleanup, artwork, playlists, and acquisition. Integrations: MusicBrainz, AcoustID, Lidarr, slskd, Plex, Discogs, ListenBrainz, and an optional AI provider.
 
 **Current goal: public release readiness.** The project is moving from "works on the maintainer's NAS" to "works for anyone who installs it". Two kinds of user need to succeed:
 
@@ -25,7 +25,7 @@ These docs are the source of truth. This file does not repeat them:
 
 In short, the rules you're most likely to trip over:
 
-1. Beets runs in-process (`docs/adr/0006-embedded-beets.md`). Only `backend/beets_embedded.py` opens the library, and only through `beets.library.Library`; never `sqlite3` on `musiclibrary.blb`. All Beets reads and mutations go through `backend/beets_adapter.py` to the `beetsplug/webmanager` operations. During the migration `BEETS_ENGINE=http` still selects the old HTTP transport to a stock Beets container.
+1. Beets runs in-process (`docs/adr/0006-embedded-beets.md`). Only `backend/beets_embedded.py` opens the library, and only through `beets.library.Library`; never `sqlite3` on `musiclibrary.blb`. All Beets reads and mutations go through `backend/beets_adapter.py` to the `beetsplug/webmanager` operations. There is no engine setting, no HTTP transport to Beets and no separate Beets container; never add one back to code, Compose files or docs.
 2. Every library mutation (move, rename, merge, delete, tag write, artwork write) uses the preview/apply/audit/recovery workflow in `backend/transaction_engine.py`.
 3. Long-running work uses `job_engine.py`, not ad hoc threads.
 4. The release-group ID (`mb_releasegroupid`) is the canonical album identity. Never substitute `mb_albumid` for it.

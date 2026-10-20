@@ -1,47 +1,38 @@
-# Upgrading The Stock Beets Image Version
+# Upgrading The Pinned Beets Version
 
-Beets Web Manager has no custom Beets image and no control agent — the sole
-Beets runtime is the published `lscr.io/linuxserver/beets` image, referenced
-in `docker-compose.yml` by an exact LinuxServer build tag and manifest digest
-(e.g. `2.14.1-ls356@sha256:...`). This document describes what actually happens
-when that image's Beets version changes on a deployment with an existing
-library, and how to do it safely. It is not specific to any one version pair
-— the same steps apply to any future Beets version bump.
+Beets runs inside the Web Manager image as a pinned Python dependency
+(`beets==2.14.1` in `requirements.txt`, ADR 0006). There is no separate Beets
+container and no custom Beets image. This document describes what happens
+when a Web Manager release moves that pin on a deployment with an existing
+library, and how to do it safely. It is not specific to any one version pair.
 
-## Upgrading the pinned Beets image (maintainers)
+## Upgrading the pinned Beets (maintainers)
 
 The pin changes only through a reviewed PR:
 
-1. Dependabot's weekly `docker-compose` run proposes the new tag and digest
-   in the Compose files, or a maintainer opens the PR by hand. Resolve a
-   tag's digest with
-   `docker buildx imagetools inspect lscr.io/linuxserver/beets:<tag>`.
-2. Make the PR consistent: the same `tag@digest` in `docker-compose.yml`,
-   `docker-compose.full.yml`, the `docker-compose.dev.yml` default, and the
-   install examples in `README.md`, `docs/INSTALLATION.md`,
-   `docs/EXAMPLES.md` and `docs/CONFIGURATION.md`. If the Beets version itself changes (not only the
-   `-lsNNN` build), bump the `beets==` test fixture to match in
-   `requirements-dev.txt`, `BEETS_TEST_FIXTURE_VERSION` in
-   `.github/workflows/docker-build.yml`, and the `pip install beets==` lines in
-   `unit-tests.yml` and `security.yml`.
-   `tests/test_architecture_invariants.py` fails until all of these agree,
-   so a Dependabot PR that changes the Beets version stays red until a
-   maintainer finishes it.
+1. Dependabot's weekly `pip` run proposes the new `beets==` version, or a
+   maintainer opens the PR by hand. The `beets-latest-canary` workflow runs
+   the embedded-Beets acceptance against the newest Beets on PyPI every week,
+   so upstream breakage is usually known before the PR.
+2. Make the PR consistent: the same version in `requirements.txt`,
+   `requirements-dev.txt`, `PINNED_BEETS_VERSION` in
+   `backend/beets_embedded.py` and `BEETS_TEST_FIXTURE_VERSION` in
+   `.github/workflows/docker-build.yml`. `tests/test_architecture_invariants.py`
+   fails until all of these agree, and the engine refuses any other version at
+   startup (`beets_version_mismatch`).
 3. CI's `stock-beets-acceptance` and `production-docker-acceptance` jobs run
-   against the new pin. Read the upstream Beets release notes for changed
-   fields, path handling or plugin APIs that the `webmanager` plugin uses.
+   the built image against the new pin. Read the upstream Beets release notes
+   for changed fields, path handling or plugin APIs that the `webmanager`
+   plugin uses.
 4. Add a CHANGELOG entry naming the old and new Beets version and telling
-   operators to follow the checklist below before they move their own stack.
-5. On the maintainer's deployment, the bump is a Beets upgrade: run the
-   pre-upgrade checklist and snapshot below, then the upgrade steps.
+   operators to follow the checklist below before they upgrade.
 
 ## What actually happens on first open
 
 Opening an existing `musiclibrary.blb` with a newer Beets version can
-trigger Beets' own automatic, one-time schema migration (this is Beets'
-own behavior, entirely internal to the `beets` container — Web Manager is
-not involved and has no way to see or control it). Verified once against a
-real version jump (2.4.0 → 2.13.1, using a synthetic, disposable database):
+trigger Beets' own automatic, one-time schema migration (Beets' own
+behavior; Web Manager does not control it). Verified once against a real
+version jump (2.4.0 -> 2.13.1, using a synthetic, disposable database):
 
 - Data integrity: item/album/artist counts and total size were identical
   before and after migration in testing.
@@ -54,74 +45,50 @@ real version jump (2.4.0 → 2.13.1, using a synthetic, disposable database):
 - The migration is idempotent: a second run against the same
   already-migrated database creates zero additional backups.
 - **This migration is not version-reversible.** Beets itself has no
-  "downgrade schema" command. An older Beets binary is not guaranteed to
-  open a database migrated by a newer one. Rollback means restoring a
-  pre-migration snapshot/backup, not just swapping the image tag back.
-- The migration runs on the **first Beets invocation of any kind** against
-  the real database under the new version — not only an import. Even a
-  read-only status/version check triggers it. Treat starting the new image
-  against the real `/config` mount as the point of no return.
+  "downgrade schema" command. An older Beets is not guaranteed to open a
+  database migrated by a newer one. Rollback means restoring a pre-migration
+  backup, not just going back to the previous Web Manager image.
+- The migration runs when Web Manager starts on the new image, before any
+  job. Treat starting the new image against the real `/config` mount as the
+  point of no return.
 
 ## Pre-upgrade checklist
 
 1. Stop Web Manager mutation jobs (imports, cleanup, retag, playlist-repair
    jobs). Confirm no job is `running` or `queued` in the Jobs view.
-2. Back up, from the real `/config` mount:
-   - `config.yaml`
-   - `musiclibrary.blb`
-   - any custom plugins under `/config/beetsplug`
-   - any transaction/undo state Web Manager keeps under `/web-manager-data`
+2. Back up (`./backup.sh`, see the README's Backups section), which covers
+   `config.yaml`, `musiclibrary.blb`, any custom plugins under
+   `/config/beetsplug`, and `/web-manager-data`.
 3. Create a filesystem/volume snapshot (ZFS, LVM, or equivalent) of the
    volume backing `/config` immediately before pulling the new image. This
-   is the actual rollback target — the file copies in step 2 are a second,
-   independent safety net, not a replacement for it.
-4. Record the currently running `beets` image's digest
-   (`docker inspect --format '{{.Image}}' beets`) so the exact prior image
-   can be re-pulled if needed.
+   is the actual rollback target; the backup in step 2 is a second,
+   independent safety net.
+4. Record the running Web Manager version (`curl -s
+   http://127.0.0.1:8337/health/live`) and the album and item counts.
 5. Ensure `/config`'s filesystem has free space for the one-time backup
    proliferation described above.
 
 ## Upgrade steps
 
-6. Pull the new `beets` image tag/digest and recreate just that service
-   (`docker compose pull beets && docker compose up -d beets`). Do not
-   re-enable Web Manager mutation jobs yet.
-7. This step is the point of no return described above — the schema
-   migration, if any, runs here.
-8. Verify: container health, `docker compose exec beets beet version`
-   reports the expected version, the loaded plugin list matches
-   expectations, and `docker compose exec beets beet stats` reports the
-   same item/album counts as before the upgrade.
-9. Confirm `/api/setup/status` reports stock Beets reachable, the expected
-   version, and the `webmanager` integration plugin still compatible.
-10. Run read-only checks only: browse the library, review a few
-    albums/items.
-11. Run exactly one controlled operation against a single test/staging
-    item (not the full library) to confirm mutations still work end-to-end.
-12. Only after 8-11 all pass, re-enable normal Web Manager jobs.
+6. `docker compose pull && docker compose up -d`. This is the point of no
+   return described above.
+7. Verify: `curl -s http://127.0.0.1:8337/api/health` shows `"beets":
+   {"ok": true, ...}`, `docker compose exec -u <PUID>:<PGID>
+   beets-web-manager beet version` reports the expected version, and
+   `beet stats` reports the same album and item counts as before.
+8. Run read-only checks only: browse the library, review a few albums.
+9. Run exactly one controlled operation against a single test item to
+   confirm mutations still work end-to-end.
+10. Only after 7-9 pass, re-enable normal Web Manager jobs.
 
 ## Rollback
 
-If any step above fails, or a problem is discovered after cutover:
-
-1. Stop the new `beets` container. Do not delete it yet.
-2. If the new image ever opened the real database (step 7 onward), the
-   on-disk `musiclibrary.blb` has been migrated and is **not** safely
-   readable by the old Beets version. Restore `config.yaml` and
-   `musiclibrary.blb` from the pre-upgrade backup/snapshot taken above — do
-   not attempt to reuse the migrated file with the old version. If the new
-   image was never started against the real database (failure caught
-   before step 7), the original files are untouched and no restore is
-   needed.
-3. Re-pull/re-tag the previous `beets` image digest recorded above and
-   start it against the restored config/database.
-4. Verify: container health, `beet version` reports the old version,
-   `beet stats` reports the same item/album counts as the pre-upgrade
-   checklist.
-5. Confirm `/api/setup/status` reports the expected (old) version and
-   plugin state before re-enabling jobs.
-
-Rollback is only "restore the old image and restart" if the new image
-never actually opened the real database. Once it has, rollback requires
-restoring the database/config snapshot — the schema change is not
-something an older Beets binary can be expected to read.
+1. Stop Web Manager (`docker compose stop`).
+2. If the new image ever started against the real database, the on-disk
+   `musiclibrary.blb` may have been migrated and is **not** safely readable
+   by the old Beets. Restore `config.yaml` and `musiclibrary.blb` from the
+   snapshot or backup taken above. If the new image never started against
+   the real database, nothing needs restoring.
+3. Pin the previous Web Manager release in the `image:` line and
+   `docker compose up -d`.
+4. Verify as in step 7, with the old version and the pre-upgrade counts.

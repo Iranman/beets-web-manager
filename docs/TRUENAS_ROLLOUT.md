@@ -6,15 +6,33 @@ SQLite database left behind by pre-#64 installs. The tooling for this is
 `scripts/deploy_truenas_web_manager.sh` -- reusable across releases via its
 `VERSION` env var, not tied to one release in its filename.
 
-> **Embedded Beets.** This script and procedure are for the two-container
-> stack (a `beets` container next to `beets-web-manager`): the script resolves
-> the library from `docker inspect beets` and refuses to continue without it.
-> A stack running Beets inside Web Manager (`BEETS_ENGINE=embedded`, one
-> container) is not supported by the script yet; it is adapted at the Phase 2
-> cutover (`docs/adr/0006-embedded-beets.md`). Until then, move to or update an
-> embedded stack with the manual steps in `docs/INSTALLATION.md` ("Moving from
-> two containers to one", "Rolling back to two containers"), with a backup
-> and DB sha256 and album/item counts recorded before and after.
+> **Single container now.** Beets runs inside Web Manager; the separate
+> `beets` service is gone (`docs/adr/0006-embedded-beets.md`). The script
+> below still describes the two-container stack: it resolves the library from
+> `docker inspect beets`, takes its semantic snapshot through `docker exec`
+> into that container and restarts it after a plugin change, so it refuses a
+> single-container stack. Until it is adapted, deploy this release by hand:
+>
+> 1. Stop mutation jobs. Record the `musiclibrary.blb` sha256 and the album
+>    and item counts, and take the documented backup (`./backup.sh`).
+> 2. Stop and remove the old Beets service:
+>    `docker compose stop beets && docker compose rm -f beets`.
+> 3. Edit the stack's Compose file as in `docs/INSTALLATION.md`, "Upgrading
+>    from two containers": delete the `beets` service and any
+>    `depends_on: beets`, mount `/music` read-write in `beets-web-manager`,
+>    keep the same `/config` folder, check `MUSIC_ROOT` equals `directory:`
+>    and `plugins:` lists `musicbrainz`, remove `BEETS_ENGINE`,
+>    `BEETS_WEB_URL`, `BEETS_WEBMANAGER_API_KEY[_FILE]`, and use the
+>    `beets.ok` healthcheck.
+> 4. Pin the release's exact version in `image:` and
+>    `docker compose up -d --remove-orphans`.
+> 5. Check `/api/health` (`"beets": {"ok": true}`, no `library_created`, no
+>    `legacy_settings_ignored`, no `separate_beets_running`), then compare the
+>    counts with step 1 and explain every difference.
+>
+> Rollback is the previous image: stop Web Manager, restore the backup if
+> needed, put back the previous Compose file (with its `beets` service) and
+> the previous pinned release (`docs/INSTALLATION.md`, "Rolling back").
 
 ## Which version to deploy
 

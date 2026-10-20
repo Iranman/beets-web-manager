@@ -1,111 +1,49 @@
 # Beets Web Manager - Deployment Examples
 
-This document provides deployment examples for **Beets Web Manager**.
+This document provides deployment examples for **Beets Web Manager**. Beets runs inside the Web Manager container ([ADR 0006](adr/0006-embedded-beets.md)); there is no separate Beets container.
 
 ---
 
-## 1. Standard Unified Stack (Recommended)
-
-Run both Beets and Beets Web Manager together in the same Compose file sharing your library volumes:
+## 1. Standard Stack (Recommended)
 
 ```yaml
 services:
-  beets:
-    image: lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73
-    container_name: beets
+  beets-web-manager:
+    image: ghcr.io/iranman/beets-web-manager:latest
+    container_name: beets-web-manager
     restart: unless-stopped
+    ports:
+      - "8337:8337"
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
+      - MUSIC_ROOT=/music
+      - DOWNLOADS_ROOT=/downloads
+      - BEETS_CONFIG=/config/config.yaml
     volumes:
       - ./beets:/config
       - /path/to/music:/music
       - /path/to/downloads:/downloads
-    expose:
-      - "8337"
-    depends_on:
-      beets-web-manager:
-        condition: service_healthy
-
-  beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:latest
-    container_name: beets-web-manager
-    restart: unless-stopped
-    ports:
-      - "8337:8337"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
-      - BEETS_WEB_URL=http://beets:8337
-      - BEETS_OUTBOUND_ALLOWLIST=beets:8337
-    volumes:
-      - ./beets:/config
-      - /path/to/music:/music:ro
-      - /path/to/downloads:/downloads
       - ./web-manager:/web-manager-data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"]
+      # Unhealthy while Beets' self-test fails (beets.ok false).
+      test: ["CMD", "python", "-c", "import json, sys, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)); sys.exit(0 if d.get('beets', {}).get('ok') else 1)"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
 ```
+
+`./beets` holds Beets' `config.yaml` and `musiclibrary.blb` (an existing Beets `/config` folder works as is). `/music` is read-write: Beets moves, tags and imports files from inside this container. `MUSIC_ROOT` must equal `directory:` in `config.yaml`.
 
 ---
 
-## 2. External / Standalone Beets Example (e.g. TrueNAS)
+## 2. Adding Web Manager to an Existing Stack
 
-When connecting Beets Web Manager to an existing, separately-managed stock Beets instance instead of starting one from this Compose file (see [examples/docker-compose.external-beets.yml](../examples/docker-compose.external-beets.yml)):
+Add the service above to the Compose file that already holds your other services (Lidarr, slskd, Plex, ...), and mount the same host folders they use. If that stack ran a Beets container on the same library, remove it first ([Upgrading from two containers](INSTALLATION.md#upgrading-from-two-containers)): two programs must never write one library, and while one is detected Web Manager refuses library changes (`separate_beets_running`).
 
-```yaml
-services:
-  beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:latest
-    container_name: beets-web-manager
-    restart: unless-stopped
-    ports:
-      - "8337:8337"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
-      - BEETS_WEB_URL=http://192.168.1.50:8337
-      - BEETS_OUTBOUND_ALLOWLIST=192.168.1.50:8337
-    volumes:
-      - ./web-manager:/web-manager-data
-```
-
-### Connection Modes (Advanced / External deployments only)
-
-These only apply when pointing Beets Web Manager at a separately-managed stock Beets instance, as above — the standard stack in section 1 needs no extra connection configuration at all, since it starts its own `beets` service and defaults `BEETS_WEB_URL` to it.
-
-The remote Beets instance must already have its `web` and `webmanager` plugins enabled (see `config.yaml.example`) and the `webmanager` plugin's files provisioned into its own `/config/beetsplug` — Web Manager cannot provision a plugin into a filesystem it does not mount.
-
-#### Mode A: A remote stock Beets that happens to share a Compose project
-If a separately-managed stock Beets instance runs as a service named `beets` inside the same `docker-compose.yml`:
-
-```yaml
-BEETS_WEB_URL: http://beets:8337
-```
-
-You may optionally include `depends_on` inside the same project:
-```yaml
-depends_on:
-  beets:
-    condition: service_healthy
-```
-
-#### Mode B: Beets on a separate host or separate Compose stack
-If the remote Beets instance runs on another host or in a separate Compose project:
-
-```yaml
-BEETS_WEB_URL: http://192.168.1.50:8337
-```
-
-> [!NOTE]
-> Remove `depends_on: beets` when Beets runs outside the current Compose file. Docker Compose cannot validate dependencies across separate stack files or separate hosts.
+Beets on another server: Web Manager no longer connects to Beets over the network. Mount that server's Beets `/config` and music folders into this container instead, and stop the Beets there.
 
 ---
 
@@ -115,6 +53,7 @@ BEETS_WEB_URL: http://192.168.1.50:8337
 ```bash
 docker compose pull
 docker compose up -d beets-web-manager
+curl -s http://127.0.0.1:8337/api/health
 ```
 
 ### Upgrading
@@ -140,4 +79,4 @@ The shipped Compose files use `image: ghcr.io/iranman/beets-web-manager:latest`,
 docker compose pull beets-web-manager && docker compose up -d beets-web-manager
 ```
 
-To pin a release, or roll back to one, replace `latest` in the `image:` line with an exact version such as `0.1.49` (`ghcr.io/iranman/beets-web-manager:0.1.49`).
+To pin a release, or roll back to one, replace `latest` in the `image:` line with an exact version such as `0.8.1` (`ghcr.io/iranman/beets-web-manager:0.8.1`).
