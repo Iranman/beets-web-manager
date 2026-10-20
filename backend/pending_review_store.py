@@ -599,7 +599,9 @@ def _pending_review_has_path(folder_path: str, *, unknown: bool = False) -> bool
     if not key:
         return False
     try:
-        return key in _pending_review_path_set(_load_pending_reviews(strict=True))
+        # Strict load only for fail-closed callers; others keep the lenient
+        # load (rows still visible when saving the pruned queue fails).
+        return key in _pending_review_path_set(_load_pending_reviews(strict=unknown))
     except Exception:
         return unknown
 
