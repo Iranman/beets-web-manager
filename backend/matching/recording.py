@@ -611,6 +611,11 @@ def verify_audio_against_request(
       being the same song (title/artist/version) -> accept. Ties between
       duplicate MusicBrainz recordings of one song do not change which song
       the audio is.
+    * expected Recording ID at the top score (alone or tied with other
+      recordings, whatever their text) -> accept: the fingerprint names the
+      exact requested recording and nothing outranks it.
+    * expected Recording ID in the window but below a different song's
+      higher score -> review (not accepted).
     * expected Recording ID only below the top tier -> review (ambiguous).
     * expected Recording ID absent, top tier is the same song by text ->
       review (a different MusicBrainz recording of that song; never auto
@@ -670,6 +675,14 @@ def verify_audio_against_request(
             if all(_agrees(r) for r in others) and (not others or _agrees(chosen)):
                 return _out("accept", AcoustIDStatus.CONFIRMED, chosen,
                             "AcoustID fingerprint confirms the requested MusicBrainz recording ID.")
+            if _hit_score(chosen) >= top_score:
+                # The fingerprint is linked to the exact requested Recording
+                # ID at the best score. Other recordings AcoustID links to
+                # the same fingerprint (shared score, often mislinked
+                # submissions) do not outrank it, so they do not unprove it.
+                return _out("accept", AcoustIDStatus.CONFIRMED, chosen,
+                            "AcoustID's top match is the requested MusicBrainz recording ID "
+                            f"(also linked: {len(others)} other recording(s) at no higher score).")
             return _out("review", AcoustIDStatus.AMBIGUOUS, chosen,
                         "AcoustID also matches a different song at the same confidence.")
         if expected in {_hit_recording_id(r) for r in high}:
