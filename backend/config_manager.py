@@ -22,6 +22,7 @@ import stat
 import tempfile
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -74,7 +75,9 @@ class ConfigCodeExecutionEditRefused(ConfigError):
 # badfiles, duplicates.checksum, mbsubmit.picard_path, ...), so anything not
 # named here is refused. Plugins that may be ADDED: none runs an external
 # command or a user-written expression from config.yaml (checked against the
-# pinned Beets). Removing any plugin is allowed.
+# pinned Beets; chroma runs the fixed `fpcalc` helper, and fetchart's
+# `cover_art_url` source fetches URLs read from file tags, outside
+# provider_boundary). Removing any plugin is allowed.
 EMBEDDED_SAFE_PLUGINS = frozenset({
     "web", "webmanager", "discpath", "musicbrainz", "fetchart", "embedart", "scrub", "zero",
     "ftintitle", "fromfilename", "mbsync", "chroma", "lastgenre", "discogs", "deezer",
@@ -82,15 +85,20 @@ EMBEDDED_SAFE_PLUGINS = frozenset({
 })
 # Top-level keys whose whole subtree the browser may change...
 EMBEDDED_EDITABLE_KEYS = frozenset({
-    "import", "match", "paths", "replace", "ui", "ignore", "ignore_hidden", "threaded",
+    "import", "match", "paths", "ui", "ignore", "ignore_hidden", "threaded",
     "timeout", "per_disc_numbering", "original_date", "artist_credit", "va_name",
     "asciify_paths", "art_filename", "max_filename_length", "id3v23", "overwrite_null",
     "format_item", "format_album", "time_format", "sort_item", "sort_album",
     "sort_case_insensitive", "acoustid",
 }) | (EMBEDDED_SAFE_PLUGINS - {"web", "webmanager"})
 # ...except these: file paths Beets writes or reads, and outbound hosts.
+# #461: `import.set_fields` can set any field, `path` included, before the
+# import moves or copies the file. Top-level `replace` is not
+# editable either: its rules (`[\/]`, `^\.`) are what keep `paths` and
+# `art_filename` results inside `directory` (Beets 2.14.1 Item.destination,
+# Album.art_destination), and templates stay editable only while it is not.
 EMBEDDED_LOCKED_PATHS = (
-    ("import", "log"), ("musicbrainz", "host"), ("musicbrainz", "https"),
+    ("import", "log"), ("import", "set_fields"), ("musicbrainz", "host"), ("musicbrainz", "https"),
     ("lastgenre", "whitelist"), ("lastgenre", "canonical"), ("fetchart", "fallback"), ("lyrics", "lrcmux"),
     ("discogs", "tokenfile"), ("spotify", "tokenfile"),
 )
@@ -120,6 +128,15 @@ def _changed_paths(old: Any, new: Any, path: tuple = ()) -> list:
     return out
 
 
+def _new_aliases(old_text: str, new_text: str) -> Counter:
+    """#461 F3: YAML aliases the new text adds. Aliases load as shared
+    references, so a few lines can make _changed_paths (and ==) visit
+    exponentially many nodes under CONFIG_WRITE_LOCK."""
+    def aliases(text: str) -> Counter:
+        return Counter(t.value for t in yaml.scan(text or "") if isinstance(t, yaml.AliasToken))
+    return aliases(new_text) - aliases(old_text)
+
+
 def _edit_allowed(path: tuple) -> bool:
     if not path or not isinstance(path[0], str) or path[0] not in EMBEDDED_EDITABLE_KEYS:
         return False
@@ -137,7 +154,7 @@ def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
     def load(text: str) -> Dict[str, Any]:
         try:
             data = yaml.safe_load(text or "")
-        except yaml.YAMLError:
+        except (yaml.YAMLError, RecursionError):
             raise ConfigCodeExecutionEditRefused(["a config.yaml that does not parse"]) from None
         if data is None:
             return {}
@@ -145,6 +162,9 @@ def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
             raise ConfigCodeExecutionEditRefused(["a config.yaml that is not a mapping"])
         return data
     old, new = load(old_text), load(new_text)
+    added_aliases = _new_aliases(old_text, new_text)
+    if added_aliases:
+        raise ConfigCodeExecutionEditRefused(sorted(f"YAML alias *{a}" for a in added_aliases))
     refused = []
     for path in _changed_paths(old, new):
         if path == ("plugins",):
@@ -295,6 +315,8 @@ def validate_config_yaml(content: str) -> Tuple[bool, str]:
         if parsed is not None and not isinstance(parsed, dict):
             return False, "Configuration root must be a YAML mapping/dictionary"
         return True, ""
+    except RecursionError:
+        return False, "Invalid YAML: nested too deeply"
     except yaml.YAMLError as exc:
         return False, f"Invalid YAML syntax: {exc}"
 

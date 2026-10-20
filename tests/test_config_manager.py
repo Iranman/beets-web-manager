@@ -146,6 +146,32 @@ class TestEmbeddedCodeExecutionEditGuard(unittest.TestCase):
         self.assertIn("import.log", self._refused(self.BASE, self.BASE + "import:\n  log: /tmp/x\n"))
         self.assertIn("fetchart.fallback", self._refused(self.BASE, self.BASE + "fetchart:\n  fallback: /tmp/x\n"))
 
+    def test_refuses_import_set_fields_and_replace(self):
+        # #461 F1/F2: set_fields can set `path`; `replace` holds the rules that
+        # keep path templates inside `directory`.
+        self.assertIn("import.set_fields",
+                      self._refused(self.BASE, self.BASE + "import:\n  set_fields:\n    genre: Rock\n"))
+        self.assertIn("replace", self._refused(self.BASE, self.BASE + "replace:\n  'x': y\n"))
+        stored = self.BASE + "replace:\n  '^\\.': _\n"
+        self.assertIn("replace", self._refused(stored, self.BASE))
+
+    def test_path_templates_stay_editable(self):
+        self.assertTrue(self._save(self.BASE, self.BASE + "paths:\n  default: $albumartist/$album/$title\n"
+                                   "art_filename: folder\nimport:\n  move: yes\n")["ok"])
+
+    def test_refuses_new_yaml_aliases_but_keeps_existing_ones(self):
+        # #461 F3: aliases load as shared references; new ones are refused
+        # before the diff walk runs.
+        self.assertIn("YAML alias *m", self._refused(self.BASE, self.BASE + "match: &m {}\nui: *m\n"))
+        stored = self.BASE + "match: &m {}\nui: *m\n"
+        self.assertTrue(self._save(stored, stored + "va_name: VA\n")["ok"])
+
+    def test_deeply_nested_yaml_is_a_validation_error(self):
+        from backend.config_manager import validate_config_yaml
+        ok, msg = validate_config_yaml("a: " + "[" * 5000 + "]" * 5000 + "\n")
+        self.assertFalse(ok)
+        self.assertIn("nested too deeply", msg)
+
     def test_refuses_unparseable_or_non_mapping_text(self):
         from backend.config_manager import refuse_code_execution_edits
         for new in ("- just\n- a list\n", "a: [\n"):
