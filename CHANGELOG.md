@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+
+- webmanager plugin 1.18.2: the plugin's log messages now include their values. Beets creates the `beets.webmanager` logger as its own `str.format` logger when the plugin loads, so the plugin's `%s`-style messages (for example the warning about a dropped allowed mutation root) were logged as raw templates without their arguments. The plugin now logs through `beets.webmanager.ops`, a standard logger that Beets never replaces; records still reach `beets.webmanager` handlers. Restart the Beets container to load 1.18.2 (the rollout script does this when the plugin version changes).
+
 ### Development
 
 - The backend test suite now runs in parallel. `scripts/run_tests.py` runs the same tests as `python -m unittest discover` in one worker process per CPU, with the same summary and exit code. The test image and the `unit-tests` workflow use it. A full local run on 12 cores drops from about 21 minutes to about 4. `docs/DEVELOPMENT.md` has the commands and memory sizing.
