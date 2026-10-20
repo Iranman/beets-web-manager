@@ -4187,7 +4187,8 @@ def plugins_provision():
         return jsonify({"ok": False, "all_required_healthy": False, "error": CONFIG_PATH_ERROR_MESSAGE}), exc.status_code
     except Exception as exc:
         from backend.beets_plugins import BeetsConfigEditError
-        if isinstance(exc, BeetsConfigEditError):
+        from backend.config_manager import ConfigCodeExecutionEditRefused
+        if isinstance(exc, (BeetsConfigEditError, ConfigCodeExecutionEditRefused)):
             # Refused edit: config.yaml untouched; the setup warning says what to add.
             _invalidate_setup_status_cache()
             return _beets_config_edit_error(exc, "plugins_provision")
@@ -4238,9 +4239,21 @@ _BEETS_CONFIG_EDIT_REFUSED = (
 )
 
 
+_BEETS_CONFIG_EMBEDDED_REFUSED = (
+    "Beets runs inside Web Manager, so this change to config.yaml is refused from the browser "
+    "(see Embedded Beets in docs/CONFIGURATION.md). Edit config.yaml on the server and restart Web Manager."
+)
+
+
 def _beets_config_edit_error(exc: Exception, operation: str):
     from backend.beets_plugins import BeetsConfigEditError
-    from backend.config_manager import CONFIG_PATH_ERROR_MESSAGE, ConfigError, ConfigPathError
+    from backend.config_manager import (CONFIG_PATH_ERROR_MESSAGE, ConfigCodeExecutionEditRefused, ConfigError,
+                                        ConfigPathError)
+    if isinstance(exc, ConfigCodeExecutionEditRefused):
+        # Embedded engine: the planned edit is outside the browser allowlist
+        # (403). Fixed text, as below; the refused keys are in the server log.
+        app.logger.warning("%s refused: %s", operation, exc)
+        return jsonify({"ok": False, "error": _BEETS_CONFIG_EMBEDDED_REFUSED, "code": exc.error_code}), exc.status_code
     if isinstance(exc, ConfigPathError):
         # Path-policy refusal (BEETS_CONFIG outside BEETSDIR); fixed text.
         return jsonify({"ok": False, "error": CONFIG_PATH_ERROR_MESSAGE}), exc.status_code

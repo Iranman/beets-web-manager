@@ -56,15 +56,44 @@ class ConfigValidationError(ConfigError):
 
 
 class ConfigCodeExecutionEditRefused(ConfigError):
-    """ADR 0006: with Beets in-process, config.yaml keys that run code run it
-    inside Web Manager, so the browser editor may not change them."""
+    """ADR 0006: with Beets in-process, whatever config.yaml makes Beets run
+    runs inside Web Manager, so the browser may change only the allowlisted
+    settings below (EMBEDDED_EDITABLE_*)."""
 
     def __init__(self, keys: list):
+        shown = ", ".join(keys[:5]) + (f" and {len(keys) - 5} more" if len(keys) > 5 else "")
         super().__init__(
-            f"Changes to {', '.join(keys)} are refused from the web editor: Beets runs inside "
-            "Web Manager, so these settings run code in this process. Edit config.yaml "
-            "directly on the server and restart Web Manager.",
+            f"Refused from the web: {shown}. Beets runs inside Web Manager, so the browser may "
+            "change only the settings listed in docs/CONFIGURATION.md. Edit config.yaml directly "
+            "on the server and restart Web Manager.",
             error_code="CONFIG_CODE_EXECUTION_EDIT_REFUSED", status_code=403)
+
+
+# Fail-closed allowlist for embedded mode (S1 on #457). A denylist missed
+# `inline` expressions and plugin command options (convert, replaygain,
+# badfiles, duplicates.checksum, mbsubmit.picard_path, ...), so anything not
+# named here is refused. Plugins that may be ADDED: none runs an external
+# command or a user-written expression from config.yaml (checked against the
+# pinned Beets). Removing any plugin is allowed.
+EMBEDDED_SAFE_PLUGINS = frozenset({
+    "web", "webmanager", "discpath", "musicbrainz", "fetchart", "embedart", "scrub", "zero",
+    "ftintitle", "fromfilename", "mbsync", "chroma", "lastgenre", "discogs", "deezer",
+    "spotify", "listenbrainz", "lyrics", "parentwork",
+})
+# Top-level keys whose whole subtree the browser may change...
+EMBEDDED_EDITABLE_KEYS = frozenset({
+    "import", "match", "paths", "replace", "ui", "ignore", "ignore_hidden", "threaded",
+    "timeout", "per_disc_numbering", "original_date", "artist_credit", "va_name",
+    "asciify_paths", "art_filename", "max_filename_length", "id3v23", "overwrite_null",
+    "format_item", "format_album", "time_format", "sort_item", "sort_album",
+    "sort_case_insensitive", "acoustid",
+}) | (EMBEDDED_SAFE_PLUGINS - {"web", "webmanager"})
+# ...except these: file paths Beets writes or reads, and outbound hosts.
+EMBEDDED_LOCKED_PATHS = (
+    ("import", "log"), ("musicbrainz", "host"), ("musicbrainz", "https"),
+    ("lastgenre", "whitelist"), ("lastgenre", "canonical"),
+    ("discogs", "tokenfile"), ("spotify", "tokenfile"),
+)
 
 
 def _plugin_names(value: Any) -> set:
@@ -75,25 +104,56 @@ def _plugin_names(value: Any) -> set:
     return set()
 
 
+def _changed_paths(old: Any, new: Any, path: tuple = ()) -> list:
+    """Every path whose value differs. A dict on either side is walked key by
+    key (a missing or non-dict side counts as empty), so a whole new section
+    still reports each key inside it."""
+    if old == new:
+        return []
+    if not isinstance(old, dict) and not isinstance(new, dict):
+        return [path]
+    out = [path] if not (isinstance(old, dict) and isinstance(new, dict)) else []
+    a = old if isinstance(old, dict) else {}
+    b = new if isinstance(new, dict) else {}
+    for key in list(a) + [k for k in b if k not in a]:
+        out += _changed_paths(a.get(key), b.get(key), path + (key,))
+    return out
+
+
+def _edit_allowed(path: tuple) -> bool:
+    if not path or not isinstance(path[0], str) or path[0] not in EMBEDDED_EDITABLE_KEYS:
+        return False
+    return not any(path[:len(lock)] == lock for lock in EMBEDDED_LOCKED_PATHS)
+
+
 def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
-    """Raise ConfigCodeExecutionEditRefused when, with the embedded engine,
-    ``new_text`` changes `hook:`, `pluginpath:` or `include:`, or adds the
-    `hook` plugin. Unchanged values (a file that already has hooks) pass."""
+    """With the embedded engine, raise ConfigCodeExecutionEditRefused unless
+    every difference between ``old_text`` and ``new_text`` is an allowlisted
+    setting or the addition of an allowlisted plugin. Settings that do not
+    change (a file that already has hooks) pass. Unparseable YAML is refused."""
     from backend import beets_embedded
-    if not beets_embedded.enabled():
+    if not beets_embedded.enabled() or old_text == new_text:
         return
     def load(text: str) -> Dict[str, Any]:
         try:
             data = yaml.safe_load(text or "")
         except yaml.YAMLError:
+            raise ConfigCodeExecutionEditRefused(["a config.yaml that does not parse"]) from None
+        if data is None:
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            raise ConfigCodeExecutionEditRefused(["a config.yaml that is not a mapping"])
+        return data
     old, new = load(old_text), load(new_text)
-    changed = [k for k in ("hook", "pluginpath", "include") if old.get(k) != new.get(k)]
-    if "hook" in _plugin_names(new.get("plugins")) - _plugin_names(old.get("plugins")):
-        changed.append("the hook plugin in plugins")
-    if changed:
-        raise ConfigCodeExecutionEditRefused(changed)
+    refused = []
+    for path in _changed_paths(old, new):
+        if path == ("plugins",):
+            added = _plugin_names(new.get("plugins")) - _plugin_names(old.get("plugins"))
+            refused += sorted(f"the {p} plugin" for p in added - EMBEDDED_SAFE_PLUGINS)
+        elif not _edit_allowed(path):
+            refused.append(".".join(str(k) for k in path))
+    if refused:
+        raise ConfigCodeExecutionEditRefused(refused)
 
 
 # #324 F5: the revision is an HMAC under a per-process random key, not a bare

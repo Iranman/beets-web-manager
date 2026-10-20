@@ -24,7 +24,7 @@ With `BEETS_ENGINE=embedded`, Web Manager checks Beets once at startup. `GET /ap
 | `ffmpeg_missing` | warning | `ffmpeg` is not on `PATH`. | Use the published image, which includes it. |
 | `engine_start_failed` | error, stops Beets | Beets raised an unexpected error while starting. | See the log for the exception. |
 
-**The Config page refuses a save with `CONFIG_CODE_EXECUTION_EDIT_REFUSED`**: with embedded Beets, `hook:`, `pluginpath:` and `include:` and the `hook` plugin run code inside Web Manager, so they can only be changed by editing `config.yaml` on the server. Do that, then restart Web Manager.
+**The Config page refuses a save with `CONFIG_CODE_EXECUTION_EDIT_REFUSED`**: with embedded Beets, whatever `config.yaml` makes Beets run runs inside Web Manager, so the browser (the Config page and Setup's plugin fixes) may change only the allowlisted settings described under *Embedded Beets* in [CONFIGURATION.md](CONFIGURATION.md); the error names the refused keys. Make that change by editing `config.yaml` on the server, then restart Web Manager.
 
 ---
 

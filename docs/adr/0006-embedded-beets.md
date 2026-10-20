@@ -148,12 +148,14 @@ eviction in `on_import_task_created` covers it.
   `pluginpath` modules, the `hook` plugin's commands, and plugin-configured commands such as
   `convert`, `play` and `badfiles`. Before, they ran in the Beets container. `config.yaml` is
   therefore part of Web Manager's trusted configuration, as the image is. With the embedded
-  engine the browser config editor (`POST /api/config` and revert) refuses any change to
-  `hook:`, `pluginpath:` or `include:`, and adding the `hook` plugin, with
-  `CONFIG_CODE_EXECUTION_EDIT_REFUSED` (403). Those changes are made by editing the file on
-  the server. A file that already has them still loads and can still be edited elsewhere.
-  Other command-bearing plugin keys are not guarded by the editor; enabling those plugins is
-  already an operator decision.
+  engine every Web Manager writer of `config.yaml` reachable from HTTP (editor save and
+  revert, Setup's recommended-plugin and `web.include_paths` fixes, plugin provisioning) is
+  fail-closed: a change passes only if every changed key is on an allowlist of settings and
+  plugin names that run no external command and no user-written expression
+  (`backend/config_manager.py`, `EMBEDDED_*`); anything else gets
+  `CONFIG_CODE_EXECUTION_EDIT_REFUSED` (403). An earlier denylist (`hook`, `pluginpath`,
+  `include`) missed `inline` fields and plugin command options. Such changes are made by
+  editing the file on the server; a file that already has them still loads.
 - **Egress.** Beets plugins make their own outbound requests (MusicBrainz, AcoustID,
   Deezer, cover-art sources, Last.fm) with their own clients. That traffic does not go
   through `provider_boundary`, as it did not when it left the Beets container. It now leaves
