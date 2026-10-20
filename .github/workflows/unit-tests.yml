@@ -55,7 +55,9 @@ jobs:
       - name: Unit tests
         # -X faulthandler: the rare exit-139 segfault (#234) must leave a
         # Python traceback of every thread instead of a bare "core dumped".
-        run: python -X faulthandler -m unittest discover -s tests -p "test_*.py"
+        # scripts/run_tests.py: the same tests as `unittest discover`, spread
+        # over one worker process per runner CPU (docs/DEVELOPMENT.md).
+        run: python -X faulthandler scripts/run_tests.py
       - name: Root-, pwsh- and Docker-gated tests run instead of skipping (#355)
         # The runner user is not root, so the PUID/PGID chown tests skip in
         # the step above; run just those as root. pwsh ships on the runner;

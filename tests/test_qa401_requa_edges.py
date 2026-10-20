@@ -125,10 +125,14 @@ class NarrowedAutoResolve(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="qa401_store_"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.ids = mock.patch("backend.pending_review_store._library_album_ids_for_folder", return_value=[]).start()
-        self.resolved_album = mock.patch("backend.pending_review_store._review_album_is_resolved",
-                                         return_value=True).start()
-        self.addCleanup(mock.patch.stopall)
+        # Stop only these patchers: mock.patch.stopall would also stop the
+        # suite-wide env patcher that test_ai_batch_retry_race starts at import.
+        ids = mock.patch("backend.pending_review_store._library_album_ids_for_folder", return_value=[])
+        resolved = mock.patch("backend.pending_review_store._review_album_is_resolved", return_value=True)
+        self.ids = ids.start()
+        self.addCleanup(ids.stop)
+        self.resolved_album = resolved.start()
+        self.addCleanup(resolved.stop)
 
     def item(self, name, conflict, make=True):
         folder = self.tmp / name

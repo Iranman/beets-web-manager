@@ -17,5 +17,7 @@ ENV PYTHONFAULTHANDLER=1 \
 WORKDIR /src
 # Fake CI-only token, same value and reason as .github/workflows/unit-tests.yml
 # (set per run, not as an image ENV, so the image carries no token at all).
+# scripts/run_tests.py runs the same tests as `unittest discover`, spread over
+# one worker process per CPU (docs/DEVELOPMENT.md).
 CMD ["env", "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000", \
-     "python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
+     "python", "scripts/run_tests.py", "-v"]

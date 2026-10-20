@@ -464,8 +464,11 @@ class RouteTests(_Case):
         cls.routes = routes_library
 
     def setUp(self):
-        mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}).start()
-        self.addCleanup(mock.patch.stopall)
+        # Stop only this patcher: mock.patch.stopall would also stop the
+        # suite-wide env patcher that test_ai_batch_retry_race starts at import.
+        env = mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"})
+        env.start()
+        self.addCleanup(env.stop)
         from backend.app_runtime import jobs, transactions
         self.jobs = jobs
         old_root = transactions.root

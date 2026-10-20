@@ -694,9 +694,15 @@ class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
         # what this test measures (worker start count) and would make real
         # network calls. Replaced with a fast, recording stub.
         run_calls = []
+        # The stub stays busy until every request has answered. Otherwise a
+        # request delayed past the barrier (a loaded CPU) can arrive after the
+        # stub finished and released the batch, and correctly start a second
+        # worker: a sequential retry, not the simultaneous race tested here.
+        all_answered = threading.Event()
 
         def fake_run_ai_batch_import(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
             run_calls.append(batch_job_id)
+            all_answered.wait(timeout=10)
             return {"status": "completed_with_warnings"}
 
         barrier = threading.Barrier(6)
@@ -720,6 +726,7 @@ class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
                 t.start()
             for t in threads:
                 t.join(timeout=10)
+            all_answered.set()
 
             self.assertEqual(len(results), 6, f"not all concurrent requests completed: {results}")
             # Identify the winner directly by response shape: the one
