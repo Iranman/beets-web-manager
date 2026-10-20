@@ -318,7 +318,10 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         # /health/ready with 200 and no blocking reasons. Driven end to end
         # through the real app and the real embedded engine -- NOT a mocked
         # _beets_plugin_diagnostics (the mock is exactly what hid this).
-        out = self._run("readiness")
+        # BEETS_CONFIG points inside BEETSDIR (as the shipped compose does:
+        # /config/config.yaml in /config); the file itself does not exist.
+        cfg = os.path.join(self.config, "config.yaml")
+        out = self._run("readiness", extra_env={"BEETS_CONFIG": cfg})
         self.assertEqual(out["status_code"], 200, out["body"])
         self.assertEqual(out["body"]["blocking_reasons"], [], out["body"])
         self.assertEqual(out["body"]["status"], "ready")
@@ -327,7 +330,7 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
     def test_genuinely_broken_engine_is_not_ready(self):
         # D3 intent preserved: a genuinely broken Beets (version mismatch, so
         # the engine never starts) must FAIL readiness with a 503.
-        out = self._run("readiness_broken")
+        out = self._run("readiness_broken", extra_env={"BEETS_CONFIG": os.path.join(self.config, "config.yaml")})
         self.assertEqual(out["status_code"], 503, out["body"])
         self.assertIn("Beets engine unavailable", out["body"]["blocking_reasons"], out["body"])
 
