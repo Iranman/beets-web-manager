@@ -230,6 +230,38 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
         lib = [_item("Hello", "Adele")]
         self.assertMatches(lib, "Adele", "Hello", "Hello", artist_from_split=True)
 
+    # ── F1: stylized dotted version labels must not evade the guard ────────
+    def test_dotted_version_label_does_not_match_band(self):
+        # "L.I.V.E." normalizes to "live" under the scorer's _norm (which
+        # deletes dots), so it must be recognized as the "live" label and not
+        # reversed onto a band named "Live".
+        self.assertMissing([_item("Lightning Crashes", "Live")],
+                           "uploader", "Lightning Crashes-L.I.V.E.", uploader_artist=True)
+        self.assertMissing([_item("Lightning Crashes", "Official")],
+                           "uploader", "Lightning Crashes-O.F.F.I.C.I.A.L", uploader_artist=True)
+
+    # ── F3: a promoted artist is trusted; the title-only fallback must not
+    #     adopt a different library artist for the residual ─────────────────
+    def test_artist_less_promotion_does_not_title_only_adopt_other_artist(self):
+        # "Roxy Music - Hello" (artist-less) promotes artist="Roxy Music";
+        # the residual "Hello" must not be library-title-matched onto Adele.
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "", "Roxy Music - Hello")
+
+    # ── F5: a canonical (alias) promotion clears the raw-uploader flag so the
+    #     now-established artist's title is not later re-split ───────────────
+    def test_channel_alias_promotion_is_not_resplit(self):
+        # Uploader "StarBoy TV" (default alias -> Wizkid) with a compact-tail
+        # title: after the alias establishes "Wizkid", the tail must not be
+        # reversed onto Adele's "Hello".
+        self.assertMissing([_item("Hello", "Adele")],
+                           "StarBoy TV", "Hello-ADELE", uploader_artist=True)
+
+    def test_channel_alias_recall_still_matches(self):
+        # Recall: the alias still resolves and matches the present track.
+        self.assertMatches([_item("Essence", "Wizkid")],
+                           "StarBoy TV", "Essence", "Essence", uploader_artist=True)
+
 
 class PlaylistBuilderRowMatchTests(unittest.TestCase):
     """Representative producer rows into the matcher. The producer that sets

@@ -672,11 +672,17 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
         artist, title = split
         channelish = _playlist_artist_looks_like_channel(artist)
         split_source = "video-title"
-        # The artist was pulled from this title, so the title is now a
-        # residual: mark it so every return path (including the channelish
-        # fallback, which sets no canonical_source) tells the matcher not to
-        # re-split it. Rides through the `{**track}` in each return below.
-        track = {**track, "artist_from_split": True}
+        # The artist is now pulled from this title, so it IS established
+        # (F3: the trust gate below must fire for the promoted artist, e.g.
+        # "Roxy Music - Hello" -> artist "Roxy Music", so the artist-less
+        # title fallback cannot adopt a different library artist for "Hello").
+        established_artist = True
+        # Mark the residual so the matcher does not re-split it, and clear the
+        # raw-uploader flag now that a canonical artist is established (F5:
+        # otherwise `uploader_artist` without `artist_from_split` could let a
+        # later caller re-split an established artist).
+        track = {**{k: v for k, v in track.items() if k != "uploader_artist"},
+                 "artist_from_split": True}
 
     title_cleaned = variant_title_cleaned or title != _playlist_clean_video_text(track.get("title") or original_title)
     # Trust the artist (skip channel alias + the artist-less title fallback)
@@ -694,18 +700,25 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
             })
         return row
 
+    def _canonical_row(**over):
+        # A canonical artist is being established, so this is no longer a
+        # raw-uploader entry: drop uploader_artist (F5) so a later caller
+        # cannot re-split the now-established artist's title.
+        base = {k: v for k, v in track.items() if k != "uploader_artist"}
+        base.update(over)
+        return base
+
     aliases = _playlist_channel_artist_aliases()
     alias_artist = aliases.get(_norm(original_artist)) or aliases.get(_norm(artist))
     if alias_artist:
-        return {
-            **track,
-            "artist": alias_artist,
-            "title": title,
-            "source_artist": original_artist,
-            "source_title": original_title,
-            "canonicalized": True,
-            "canonical_source": "channel-alias",
-        }
+        return _canonical_row(
+            artist=alias_artist,
+            title=title,
+            source_artist=original_artist,
+            source_title=original_title,
+            canonicalized=True,
+            canonical_source="channel-alias",
+        )
 
     # If an artist was already pulled from this title (split_source), `title`
     # is a residual and must not be re-split here (f3: a channelish promoted
@@ -714,15 +727,14 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
     if library_title_match:
         item, score = library_title_match
         if float(score or 0) >= 0.93:
-            return {
-                **track,
-                "artist": _s(getattr(item, "artist", "")).strip(),
-                "title": _s(getattr(item, "title", "")).strip() or title,
-                "source_artist": original_artist,
-                "source_title": original_title,
-                "canonicalized": True,
-                "canonical_source": "library-title",
-            }
+            return _canonical_row(
+                artist=_s(getattr(item, "artist", "")).strip(),
+                title=_s(getattr(item, "title", "")).strip() or title,
+                source_artist=original_artist,
+                source_title=original_title,
+                canonicalized=True,
+                canonical_source="library-title",
+            )
 
     try:
         mb_title_cands = _mb_recording_search(title, "", limit=8) or []
@@ -736,15 +748,14 @@ def _playlist_canonicalize_track(track: Dict[str, Any]) -> Dict[str, Any]:
         mb_score = int(cand.get("score") or 0)
         title_score = _playlist_title_score(title, cand_title)
         if cand_artist and cand_title and mb_score >= 90 and title_score >= 0.92:
-            return {
-                **track,
-                "artist": cand_artist,
-                "title": cand_title,
-                "source_artist": original_artist,
-                "source_title": original_title,
-                "canonicalized": True,
-                "canonical_source": "musicbrainz-title",
-            }
+            return _canonical_row(
+                artist=cand_artist,
+                title=cand_title,
+                source_artist=original_artist,
+                source_title=original_title,
+                canonicalized=True,
+                canonical_source="musicbrainz-title",
+            )
     return {
         **track,
         "artist": artist,
@@ -861,11 +872,16 @@ def _playlist_artist_candidate_is_version_label(value) -> bool:
     text -- hyphens/underscores to spaces, other punctuation dropped,
     whitespace collapsed -- so punctuation or spacing cannot evade the
     anchored match. Linear-time character-class substitutions only."""
-    text = _s(value).lower()
-    text = re.sub(r"[._/\\-]+", " ", text)  # separators -> space (Official.Video)
-    text = re.sub(r"[^\w\s]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return bool(_PLAYLIST_VERSION_LABEL_RE.match(text))
+    lowered = _s(value).lower()
+    # Two readings, because the matcher's own _norm() DELETES "._/-" while a
+    # separated label needs them as spaces -- check both so neither spelling
+    # evades the guard: "Official.Video" -> "official video" (spaced), and a
+    # stylized dotted label "L.I.V.E." -> "live" (the exact _norm() form that
+    # would otherwise match the band "Live").
+    spaced = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", re.sub(r"[._/\\-]+", " ", lowered))).strip()
+    stripped = _norm(value)
+    return bool(_PLAYLIST_VERSION_LABEL_RE.match(spaced)
+                or _PLAYLIST_VERSION_LABEL_RE.match(stripped))
 
 
 def _playlist_query_match_variants(artist, title, allow_title_resplit: bool = True):
