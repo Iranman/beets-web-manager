@@ -9,6 +9,8 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - webmanager plugin 1.18.2: the plugin's log messages now include their values. Beets creates the `beets.webmanager` logger as its own `str.format` logger when the plugin loads, so the plugin's `%s`-style messages (for example the warning about a dropped allowed mutation root) were logged as raw templates without their arguments. The plugin now logs through `beets.webmanager.ops`, a standard logger that Beets never replaces; records still reach `beets.webmanager` handlers. Restart the Beets container to load 1.18.2 (the rollout script does this when the plugin version changes).
+- Missing-track downloads: a downloaded file is now accepted when AcoustID links its fingerprint to several MusicBrainz recordings and the requested recording has the top score (alone or tied). Before, any other song in the top tier made it "ambiguous" and the file was rejected. A requested recording below another song's higher score, a score under the floor, or no AcoustID result are still not accepted.
+- Missing-track downloads: one file that fails fingerprint verification no longer fails the whole batch. Verified tracks are imported, unverified files are removed from the staging folder, and their tracks are logged and returned (`undelivered_tracks`) as still missing. A Soulseek batch with undelivered tracks tries direct sources for them. The job still fails when no file verifies.
 
 ### Development
 
