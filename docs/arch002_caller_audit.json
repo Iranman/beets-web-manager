@@ -612,6 +612,10 @@
     "routes_import.py::_review_row_search_text": [
       "DISPLAY_ONLY",
       "Review Queue search haystack; confidence is matched as text, never compared or decided (#395)."
+    ],
+    "backend/playlist_service.py::_playlist_query_match_variants": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Builds (artist,title) query shapes (title split, dash-order variants) for playlist candidate scoring; makes no final decision and mutates no library data."
     ]
   }
 }

@@ -750,6 +750,13 @@ def _playlist_candidate_match_score(artist, title, cand_artist, cand_title,
             return None
         score = ts * 0.78 + as_ * 0.22
     else:
+        # Title-only acceptance is for entries with genuinely no artist. If the
+        # entry DID carry an artist that merely normalizes away (punctuation-
+        # only, e.g. "!!!"), we cannot verify it, so we must not silently map
+        # it onto a row that has a real artist -- that is how "!!! - Hello"
+        # wrongly matched Adele's "Hello".
+        if _s(artist).strip() and _norm(cand_artist):
+            return None
         if ts < 0.90:
             return None
         score = ts
@@ -803,6 +810,33 @@ def _playlist_library_match_candidates() -> Dict[str, Any]:
     return {"all": candidates, "by_title": by_title}
 
 
+# A dash with whitespace on both sides -- the unambiguous "Artist - Title"
+# shape. Bounded single-char classes only (no quantifier before a literal),
+# so it is linear-time, matching the ReDoS discipline of the other playlist
+# regexes. Mirrors the spaced-separator pass in _playlist_split_artist_title.
+_PLAYLIST_SPACED_DASH_RE = re.compile(r"\s[-–—]\s")
+
+# Tokens that are version/format labels, never an artist. Used ONLY to reject
+# a reversed-order (compact "Title-ARTIST") reading whose would-be artist is
+# really a suffix label ("Song-Live", "Song-Remix"). Anchored whole-string
+# match -> linear time.
+_PLAYLIST_VERSION_LABEL_RE = re.compile(
+    r"(?i)^(?:"
+    r"live|remix(?:es)?|acoustic|demo|audio|video|visualizer|instrumental|karaoke|cover|"
+    r"mix|edit|version|remaster(?:ed)?|extended|bonus|reprise|interlude|intro|outro|skit|"
+    r"lyrics?|lyric\s+video|official|official\s+(?:music\s+)?video|official\s+audio|"
+    r"radio\s+edit|album\s+version|single\s+version|slowed|reverb|sped\s+up|nightcore"
+    r")$"
+)
+
+
+def _playlist_artist_candidate_is_version_label(value) -> bool:
+    """A would-be artist token that is actually a version/format suffix
+    ("Live", "Remix", "Official Video", ...), which must never be treated as
+    an artist when reinterpreting a compact "Title-ARTIST" entry."""
+    return bool(_PLAYLIST_VERSION_LABEL_RE.match(_s(value).strip()))
+
+
 def _playlist_query_match_variants(artist, title):
     """(artist, title) query shapes to try against the library index.
 
@@ -815,13 +849,25 @@ def _playlist_query_match_variants(artist, title):
     *library* item's title/stem this way (`_playlist_item_text_variants`);
     this is the symmetric split on the *query* side.
 
-    Both dash orders are offered because SoundCloud/SpotiFLAC names are
-    frequently "Title-ARTIST". Safety is delegated to the unchanged dual
-    threshold in `_playlist_candidate_match_score` (title AND artist must
-    both clear their floors against a single library row), so an extra
-    variant can only ever add a match when both halves genuinely identify
-    one track -- it cannot mis-map a distinct track. Deterministic and
-    AcoustID/MusicBrainz-independent: no provider call, no outbound HTTP.
+    Precision rules (each variant is only an ADDITIONAL shape to score; the
+    dual threshold in `_playlist_candidate_match_score` still decides, but it
+    alone does not catch these, so they are enforced here):
+
+    * Both normalized halves must be non-empty. Otherwise a punctuation-only
+      side (e.g. "!!! - Hello", left normalizes to "") would fall into the
+      artist-less title-only branch and match a different track with no
+      artist check.
+    * The reversed order is offered ONLY for the compact "Title-ARTIST"
+      shape that genuinely needs it (SoundCloud/SpotiFLAC). For the spaced
+      "Artist - Title" shape the order is unambiguous, so reversing it (which
+      would make the title the artist, e.g. "Adele - Hello" -> artist
+      "Hello") is never offered.
+    * The reversed order is dropped when its would-be artist is a
+      version/format label ("Song-Live", "Song-Remix"), which is a suffix,
+      not an artist.
+
+    Deterministic and AcoustID/MusicBrainz-independent: no provider call, no
+    outbound HTTP.
     """
     artist = _s(artist).strip()
     title = _s(title).strip()
@@ -830,9 +876,15 @@ def _playlist_query_match_variants(artist, title):
     split = _playlist_split_artist_title(title)
     if split:
         left, right = split
-        for cand_artist, cand_title in ((left, right), (right, left)):
+        orders = [(left, right)]
+        # Compact "Title-ARTIST" is order-ambiguous; the spaced shape is not.
+        stripped = _playlist_strip_video_title_suffix(_playlist_strip_track_prefix(title))
+        spaced = bool(_PLAYLIST_SPACED_DASH_RE.search(stripped))
+        if not spaced and not _playlist_artist_candidate_is_version_label(right):
+            orders.append((right, left))
+        for cand_artist, cand_title in orders:
             key = (_norm(cand_artist), _norm(cand_title))
-            if key[1] and key not in seen:
+            if key[0] and key[1] and key not in seen:
                 seen.add(key)
                 variants.append((cand_artist, cand_title))
     return variants

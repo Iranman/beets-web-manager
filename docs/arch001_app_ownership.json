@@ -13689,6 +13689,55 @@
    ]
   },
   {
+   "name": "_playlist_artist_candidate_is_version_label",
+   "module": "backend/playlist_service.py",
+   "lines": [
+    833,
+    837
+   ],
+   "size": 5,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLAYLIST",
+   "desired_owner": "backend/playlist_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_playlist_query_match_variants"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_playlist_query_match_variants",
+   "module": "backend/playlist_service.py",
+   "lines": [
+    840,
+    890
+   ],
+   "size": 51,
+   "body_lines": 19,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLAYLIST",
+   "desired_owner": "backend/playlist_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_playlist_match_payload_from_candidates"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_norm",
+    "_playlist_artist_candidate_is_version_label",
+    "_playlist_split_artist_title",
+    "_playlist_strip_track_prefix",
+    "_playlist_strip_video_title_suffix",
+    "_s"
+   ]
+  },
+  {
    "name": "_playlist_match_payload_from_candidates",
    "module": "backend/playlist_service.py",
    "lines": [

@@ -125,7 +125,7 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
         lib = [_item("One Dance", "Drake")]
         self.assertMatches(lib, "Drake", "One Dance (feat. Wizkid & Kyla)", "One Dance")
 
-    # ── precision: distinct tracks must never be cross-mapped ─────────────
+    # ── precision: ABSENT track must not be invented ──────────────────────
     def test_dash_title_wrong_artist_stays_missing(self):
         # "Hello" is in the library by Adele; a "Hello - Goodbye" entry by a
         # different artist must NOT be mapped onto it via the title split.
@@ -139,6 +139,35 @@ class PlaylistYtScMatchingTests(unittest.TestCase):
     def test_swap_does_not_match_on_title_alone(self):
         lib = [_item("Hotline Bling", "Drake")]
         self.assertMissing(lib, "RandomUploader", "Hotline Bling - Ringtone Remix")
+
+    # ── precision: a PRESENT-but-wrong row must not be cross-mapped ────────
+    def test_punctuation_only_split_artist_does_not_title_only_match(self):
+        # "!!!" normalizes to empty; "!!! - Hello" must not fall into the
+        # artist-less title-only branch and map onto Adele's present "Hello".
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "someuploader", "!!! - Hello")
+
+    def test_punctuation_only_artist_with_blank_uploader_stays_missing(self):
+        # Same, when the uploader itself is blank (canonicalization promotes
+        # the "!!!" half to the artist before matching).
+        lib = [_item("Hello", "Adele")]
+        self.assertMissing(lib, "", "!!! - Hello")
+
+    def test_compact_version_label_is_not_treated_as_artist(self):
+        # "Lightning Crashes-Live": "Live" is a version suffix, not the artist,
+        # so the reversed order must not map onto a present row artist="Live".
+        lib = [_item("Lightning Crashes", "Live")]
+        self.assertMissing(lib, "uploader", "Lightning Crashes-Live")
+
+    def test_compact_remix_label_is_not_treated_as_artist(self):
+        lib = [_item("Humble", "Remix")]
+        self.assertMissing(lib, "uploader", "Humble-Remix")
+
+    def test_spaced_artist_title_is_not_reversed(self):
+        # Spaced "Adele - Hello" is unambiguous; it must NOT be reversed into
+        # artist="Hello"/title="Adele" and map onto a present swapped row.
+        lib = [_item("Adele", "Hello")]
+        self.assertMissing(lib, "uploader", "Adele - Hello")
 
 
 if __name__ == "__main__":
