@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Changed
+
+- **Playlist auto-sync is now opt-in (default OFF).** `PLAYLIST_AUTO_SYNC` defaults to off; set it to `1`/`true`/`yes`/`on` to enable the background scheduler. Manual/explicit playlist sync is unchanged. When enabled, the scheduler no longer does a ~30 s first wake (the old `min(30, interval)`); it honors `PLAYLIST_AUTO_SYNC_INTERVAL` (default `300`, minimum `60`) from the first run.
+
 ## v0.10.0 - 2026-10-21
 
 ### Added
