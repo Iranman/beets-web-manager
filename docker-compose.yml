@@ -1,39 +1,20 @@
-# Production Docker Compose file for Beets Web Manager stack.
-# Deploys the stock LinuxServer Beets image alongside Beets Web Manager
-# using published images. No builds, no custom Beets image, no control
-# agent, no Docker socket, no port 8338 -- Beets Web Manager talks to
-# stock Beets only over its own :8337 web/webmanager plugins.
+# Production Docker Compose file for Beets Web Manager.
 #
-# Usage:
+# One container. Beets runs inside Web Manager (ADR 0006): a pinned Beets
+# reads your Beets config.yaml from /config and opens the library and music
+# folder it names. There is no separate Beets container, no Beets URL and no
+# plugin to install.
+#
+# Usage, from the folder that holds this file (relative paths below resolve
+# next to it):
 #   docker compose up -d
+#
+# Coming from the two-container setup? Follow docs/INSTALLATION.md
+# ("Upgrading from two containers"): back up, then stop and REMOVE the old
+# `beets` service. Two programs must never write one library; Web Manager
+# refuses library changes while it detects the old service.
 
 services:
-  beets:
-    image: lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73
-    container_name: beets
-    restart: unless-stopped
-    environment:
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
-      - TZ=${TZ:-UTC}
-    volumes:
-      - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music
-      - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
-    expose:
-      - "8337"
-    # Web Manager provisions the webmanager plugin's files and config.yaml
-    # entries at its own process startup, before it opens its HTTP port
-    # (see app.py's _bootstrap_beets_plugins(), which runs at import time --
-    # strictly before Waitress binds). Waiting for that healthcheck here,
-    # rather than starting both containers in parallel, is what lets a
-    # brand new/empty config.yaml already have `plugins: ... webmanager`
-    # by the time stock Beets reads it on its own first boot -- with no
-    # third "wait for it" service and no Docker socket involved.
-    depends_on:
-      beets-web-manager:
-        condition: service_healthy
-
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:latest
     container_name: beets-web-manager
@@ -46,16 +27,9 @@ services:
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      # Stock Beets's web/webmanager plugins listen on :8337 inside the
-      # Docker network only -- Web Manager is the sole service that
-      # publishes a port to the host.
-      BEETS_WEB_URL: ${BEETS_WEB_URL:-http://beets:8337}
-      # Must include the host:port of BEETS_WEB_URL when you change it.
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337}
-
-      # Container-side paths. They must match the mount targets below and
-      # Beets' own `directory:` (see docs/CONFIGURATION.md). Change them only
-      # together with the matching volume target.
+      # Container-side paths. They must match the mount targets below, and
+      # MUSIC_ROOT must equal Beets' own `directory:` in config.yaml (see
+      # docs/CONFIGURATION.md). Change them only together.
       MUSIC_ROOT: /music
       DOWNLOADS_ROOT: /downloads
       BEETS_CONFIG: /config/config.yaml
@@ -99,17 +73,39 @@ services:
 
       DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
+      # Beets config.yaml and musiclibrary.blb (the folder the old Beets
+      # container mounted at /config).
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music:ro
+      # Read-write: Beets moves, tags and imports files from this container.
+      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music
       - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
       - ${WEB_MANAGER_DATA_PATH:-${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager}}:/web-manager-data
+
+    security_opt:
+      - no-new-privileges:true
+    # Drop everything, then add back only what the entrypoint's brief root
+    # phase needs: CHOWN to fix bind-mount ownership, SETUID/SETGID for gosu
+    # to drop to PUID:PGID. The app itself runs unprivileged.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
+      - /run:rw,nosuid,nodev,size=64m
+
+    # Unhealthy while Beets' self-test fails (beets.ok false): library
+    # changes are refused then (docs/TROUBLESHOOTING.md lists every code).
     healthcheck:
       test:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
+        - "import json, sys, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)); sys.exit(0 if d.get('beets', {}).get('ok') else 1)"
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s

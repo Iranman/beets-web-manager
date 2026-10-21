@@ -2,7 +2,7 @@
 
 Files that can hold secrets are created at mode 0600 (never at umask mode
 then chmod'ed), a failed chmod is logged, API responses and status text
-carry no BEETS_WEB_URL userinfo or absolute backup paths, and a bad
+carry no absolute backup paths, and a bad
 BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS no longer aborts startup.
 """
 
@@ -99,20 +99,6 @@ class SetupStatusRedactionTests(unittest.TestCase):
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
-        saved = os.environ.get("BEETS_WEB_URL")
-        os.environ["BEETS_WEB_URL"] = "http://alice:hunter2pw@beets:8337"
-        self.addCleanup(lambda: os.environ.pop("BEETS_WEB_URL", None) if saved is None
-                        else os.environ.__setitem__("BEETS_WEB_URL", saved))
-
-    def test_status_does_not_echo_beets_web_url_userinfo(self):
-        from backend.beets_adapter import beets_adapter
-        with mock.patch.object(beets_adapter, "get_plugin_status", side_effect=RuntimeError("down")):
-            response = self.client.get("/api/setup/status")
-        self.assertEqual(response.status_code, 200)
-        text = response.get_data(as_text=True)
-        self.assertIn("http://beets:8337", text)
-        self.assertNotIn("hunter2pw", text)
-        self.assertNotIn("alice", text)
 
     def test_redact_url_userinfo(self):
         self.assertEqual(cl.redact_url_userinfo("https://u:p@h:1/x?token=t#f"), "https://h:1/x")
@@ -131,46 +117,6 @@ class ContainerPathLogTests(unittest.TestCase):
             self.assertEqual(cl.container_path("MUSIC_ROOT", "/music", environ={"MUSIC_ROOT": "./private-share"}), "/music")
         self.assertNotIn("private-share", "\n".join(logs.output))
         self.assertIn("MUSIC_ROOT", "\n".join(logs.output))
-
-
-@unittest.skipUnless(POSIX, "file modes are POSIX-only")
-class LegacyConfigBackupModeTests(_PrivateFileCase):
-    def test_legacy_plugin_migration_backup_is_0600(self):
-        from backend import config_service
-        cfg = self.root / "config.yaml"
-        cfg.write_text("plugins: plexsync fetchart\nplex:\n  token: not-real\n", encoding="utf-8")
-        os.chmod(cfg, 0o644)
-        config_service._repair_legacy_beets_config(str(cfg))
-        backup = self.root / "config.yaml.bak-legacy-plugin-migration"
-        self.assertIn("plexsync", backup.read_text(encoding="utf-8"))
-        self.assertEqual(_mode(backup), 0o600)
-        self.assertNotIn("plexsync", cfg.read_text(encoding="utf-8"))
-
-
-    def _legacy_cfg(self):
-        cfg = self.root / "config.yaml"
-        cfg.write_text("plugins: plexsync fetchart" + NL, encoding="utf-8")
-        return cfg, self.root / "config.yaml.bak-legacy-plugin-migration"
-
-    def test_existing_legacy_backup_is_tightened_to_0600(self):
-        from backend import config_service
-        cfg, backup = self._legacy_cfg()
-        backup.write_text("old backup", encoding="utf-8")
-        os.chmod(backup, 0o644)
-        config_service._repair_legacy_beets_config(str(cfg))
-        self.assertEqual(_mode(backup), 0o600)
-        self.assertEqual(backup.read_text(encoding="utf-8"), "old backup")
-
-    def test_symlinked_legacy_backup_is_not_followed(self):
-        from backend import config_service
-        cfg, backup = self._legacy_cfg()
-        victim = self.root / "victim"
-        victim.write_text("x", encoding="utf-8")
-        os.chmod(victim, 0o644)
-        backup.symlink_to(victim)
-        config_service._repair_legacy_beets_config(str(cfg))
-        self.assertEqual(_mode(victim), 0o644)
-        self.assertEqual(victim.read_text(encoding="utf-8"), "x")
 
 
 class RuntimeDeadKeyTests(unittest.TestCase):

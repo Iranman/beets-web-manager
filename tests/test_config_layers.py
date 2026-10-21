@@ -76,7 +76,7 @@ class ClassificationTests(unittest.TestCase):
             self.assertFalse(cl.is_loadable(name), name)
             self.assertFalse(cl.is_saveable(name), name)
             self.assertEqual(cl.apply_mode(name) if cl.classify(name) != cl.LAYER_DEAD else "deploy", "deploy", name)
-        for name in ("AI_MODEL", "OPENAI_API_KEY", "PLEX_URL", "BEETS_WEB_URL", "BEETS_WEBMANAGER_API_KEY"):
+        for name in ("AI_MODEL", "OPENAI_API_KEY", "PLEX_URL"):
             self.assertTrue(cl.is_loadable(name), name)
 
 
@@ -85,7 +85,6 @@ class ContainerPathTests(unittest.TestCase):
         self.assertEqual(cl.music_root({}), "/music")
         self.assertEqual(cl.downloads_root({}), "/downloads")
         self.assertEqual(cl.beets_config_file({}), "/config/config.yaml")
-        self.assertEqual(cl.beets_web_url({}), "http://beets:8337")
 
     def test_relative_container_value_is_ignored(self):
         self.assertEqual(cl.downloads_root({"DOWNLOADS_ROOT": "./downloads"}), "/downloads")

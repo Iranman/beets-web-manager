@@ -1,13 +1,13 @@
 """WebManager integration plugin for Beets.
 
-Enables Beets Web Manager to communicate securely with stock Beets
-over HTTP for mutation operations, non-interactive confirmed imports,
-and metadata management.
+The library operations Beets Web Manager runs inside its own process
+(ADR 0006): mutations, non-interactive confirmed imports and metadata
+management, on stock Beets' web app, called in-process.
 """
 
 from beets.plugins import BeetsPlugin
 from .compat import register_webmanager_blueprint
-from .schemas import DEFAULT_API_KEY_FILE, DEFAULT_IMPORT_ROOTS
+from .schemas import DEFAULT_IMPORT_ROOTS
 from .version import PLUGIN_VERSION, PROTOCOL_VERSION
 
 __version__ = PLUGIN_VERSION
@@ -59,7 +59,6 @@ class WebManagerPlugin(BeetsPlugin):
         super().__init__()
         self.config.add(
             {
-                "api_key_file": DEFAULT_API_KEY_FILE,
                 # Empty means "derive from Beets": [directory] + import_roots
                 # (see operations.get_allowed_roots). An explicit list in
                 # config.yaml still wins.

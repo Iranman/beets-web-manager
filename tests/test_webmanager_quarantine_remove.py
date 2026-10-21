@@ -22,7 +22,7 @@ from beetsplug.web import app as beets_web_app
 import beetsplug.webmanager.operations as ops_mod
 import beetsplug.webmanager.replace_ops as replace_mod
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -48,11 +48,8 @@ class QuarantineRemoveItemsTests(unittest.TestCase):
         os.makedirs(os.path.join(self.music, "album"))
         os.makedirs(os.path.join(self.music, "loose"))
         self.lib = Library(os.path.join(self.td, "library.blb"), directory=self.music)
-        key_file = os.path.join(self.td, "key")
-        with open(key_file, "w", encoding="utf-8") as f:
-            f.write(TOKEN + "\n")
         self.plugin = WebManagerPlugin()
-        set_api_key_file(key_file)
+        set_api_key(TOKEN)
         ops_mod.set_allowed_roots([self.music])
         replace_mod.set_quarantine_root(self.quarantine)
         beets_web_app.config["lib"] = self.lib
@@ -77,7 +74,7 @@ class QuarantineRemoveItemsTests(unittest.TestCase):
     def tearDown(self):
         ops_mod.set_allowed_roots(None)
         replace_mod.set_quarantine_root(None)
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:

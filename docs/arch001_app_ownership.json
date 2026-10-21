@@ -5,8 +5,8 @@
    "name": "_get_or_create_flask_secret_key",
    "module": "app.py",
    "lines": [
-    108,
-    124
+    107,
+    123
    ],
    "size": 17,
    "body_lines": 16,
@@ -25,8 +25,8 @@
    "name": "_enforce_security_boundary",
    "module": "app.py",
    "lines": [
-    153,
-    198
+    146,
+    191
    ],
    "size": 46,
    "body_lines": 45,
@@ -58,8 +58,8 @@
    "name": "_compress_response",
    "module": "app.py",
    "lines": [
-    206,
-    254
+    199,
+    247
    ],
    "size": 49,
    "body_lines": 28,
@@ -76,8 +76,8 @@
    "name": "_set_security_headers",
    "module": "app.py",
    "lines": [
-    258,
-    272
+    251,
+    265
    ],
    "size": 15,
    "body_lines": 14,
@@ -96,8 +96,8 @@
    "name": "_safe_static_file",
    "module": "app.py",
    "lines": [
-    275,
-    291
+    268,
+    284
    ],
    "size": 17,
    "body_lines": 16,
@@ -119,8 +119,8 @@
    "name": "_handle_http_error",
    "module": "app.py",
    "lines": [
-    296,
-    297
+    289,
+    290
    ],
    "size": 2,
    "body_lines": 1,
@@ -137,8 +137,8 @@
    "name": "_handle_ai_batch_state_conflict",
    "module": "app.py",
    "lines": [
-    300,
-    311
+    293,
+    304
    ],
    "size": 12,
    "body_lines": 1,
@@ -155,8 +155,8 @@
    "name": "_handle_provider_unavailable",
    "module": "app.py",
    "lines": [
-    314,
-    320
+    307,
+    313
    ],
    "size": 7,
    "body_lines": 4,
@@ -173,8 +173,8 @@
    "name": "_handle_unexpected_error",
    "module": "app.py",
    "lines": [
-    323,
-    330
+    316,
+    323
    ],
    "size": 8,
    "body_lines": 7,
@@ -193,8 +193,8 @@
    "name": "index",
    "module": "app.py",
    "lines": [
-    336,
-    337
+    329,
+    330
    ],
    "size": 2,
    "body_lines": 1,
@@ -242,8 +242,8 @@
    "name": "react_assets",
    "module": "app.py",
    "lines": [
-    340,
-    346
+    333,
+    339
    ],
    "size": 7,
    "body_lines": 5,
@@ -265,8 +265,8 @@
    "name": "react_next_static",
    "module": "app.py",
    "lines": [
-    350,
-    355
+    343,
+    348
    ],
    "size": 6,
    "body_lines": 4,
@@ -288,8 +288,8 @@
    "name": "favicon",
    "module": "app.py",
    "lines": [
-    359,
-    367
+    352,
+    360
    ],
    "size": 9,
    "body_lines": 8,
@@ -309,8 +309,8 @@
    "name": "_health_checks",
    "module": "app.py",
    "lines": [
-    370,
-    396
+    363,
+    389
    ],
    "size": 27,
    "body_lines": 26,
@@ -329,11 +329,11 @@
    "name": "health",
    "module": "app.py",
    "lines": [
-    400,
-    407
+    393,
+    399
    ],
-   "size": 8,
-   "body_lines": 3,
+   "size": 7,
+   "body_lines": 1,
    "route": {
     "method": "GET",
     "path": "/api/health"
@@ -363,11 +363,11 @@
    "name": "health_detail",
    "module": "app.py",
    "lines": [
-    411,
-    418
+    403,
+    408
    ],
-   "size": 8,
-   "body_lines": 6,
+   "size": 6,
+   "body_lines": 4,
    "route": {
     "method": "GET",
     "path": "/api/health/detail"
@@ -386,8 +386,8 @@
    "name": "render_index",
    "module": "app.py",
    "lines": [
-    447,
-    458
+    433,
+    444
    ],
    "size": 12,
    "body_lines": 11,
@@ -406,8 +406,8 @@
    "name": "react_index_response",
    "module": "app.py",
    "lines": [
-    461,
-    466
+    447,
+    452
    ],
    "size": 6,
    "body_lines": 5,
@@ -429,8 +429,8 @@
    "name": "react_spa_fallback",
    "module": "app.py",
    "lines": [
-    470,
-    474
+    456,
+    460
    ],
    "size": 5,
    "body_lines": 3,
@@ -452,8 +452,8 @@
    "name": "__getattr__",
    "module": "app.py",
    "lines": [
-    521,
-    531
+    507,
+    517
    ],
    "size": 11,
    "body_lines": 10,
@@ -470,8 +470,8 @@
    "name": "_load_route_module",
    "module": "app.py",
    "lines": [
-    548,
-    561
+    534,
+    547
    ],
    "size": 14,
    "body_lines": 13,
@@ -2523,8 +2523,8 @@
    "name": "_install_optional_plugins",
    "module": "backend/config_service.py",
    "lines": [
-    20,
-    22
+    18,
+    20
    ],
    "size": 3,
    "body_lines": 1,
@@ -2541,8 +2541,8 @@
    "name": "_security_auth_configured",
    "module": "backend/config_service.py",
    "lines": [
-    25,
-    26
+    23,
+    24
    ],
    "size": 2,
    "body_lines": 1,
@@ -2563,47 +2563,11 @@
    ]
   },
   {
-   "name": "_repair_legacy_beets_config",
-   "module": "backend/config_service.py",
-   "lines": [
-    32,
-    107
-   ],
-   "size": 76,
-   "body_lines": 50,
-   "route": null,
-   "mutation_capable": false,
-   "domain": "CONFIG",
-   "desired_owner": "backend/config_service.py",
-   "migration_status": "EXTRACTED",
-   "callers": [],
-   "caller_count": 0,
-   "dependencies": []
-  },
-  {
-   "name": "_bootstrap_beets_plugins",
-   "module": "backend/config_service.py",
-   "lines": [
-    110,
-    146
-   ],
-   "size": 37,
-   "body_lines": 22,
-   "route": null,
-   "mutation_capable": false,
-   "domain": "CONFIG",
-   "desired_owner": "backend/config_service.py",
-   "migration_status": "EXTRACTED",
-   "callers": [],
-   "caller_count": 0,
-   "dependencies": []
-  },
-  {
    "name": "_config_secret_segments",
    "module": "backend/config_service.py",
    "lines": [
-    182,
-    252
+    60,
+    130
    ],
    "size": 71,
    "body_lines": 55,
@@ -2625,8 +2589,8 @@
    "name": "_is_empty_config_value",
    "module": "backend/config_service.py",
    "lines": [
-    255,
-    257
+    133,
+    135
    ],
    "size": 3,
    "body_lines": 2,
@@ -2646,8 +2610,8 @@
    "name": "_redact_config_content",
    "module": "backend/config_service.py",
    "lines": [
-    263,
-    283
+    141,
+    161
    ],
    "size": 21,
    "body_lines": 16,
@@ -2669,8 +2633,8 @@
    "name": "_config_path_label",
    "module": "backend/config_service.py",
    "lines": [
-    294,
-    295
+    172,
+    173
    ],
    "size": 2,
    "body_lines": 1,
@@ -2689,8 +2653,8 @@
    "name": "_restore_redacted_config_secrets",
    "module": "backend/config_service.py",
    "lines": [
-    298,
-    354
+    176,
+    232
    ],
    "size": 57,
    "body_lines": 45,
@@ -2712,8 +2676,8 @@
    "name": "_plugin_installed_map",
    "module": "backend/config_service.py",
    "lines": [
-    367,
-    372
+    245,
+    250
    ],
    "size": 6,
    "body_lines": 5,
@@ -2732,8 +2696,8 @@
    "name": "_plugin_status_payload",
    "module": "backend/config_service.py",
    "lines": [
-    375,
-    395
+    253,
+    273
    ],
    "size": 21,
    "body_lines": 20,
@@ -37281,7 +37245,7 @@
  "summary": {
   "BOOTSTRAP": {
    "functions": 18,
-   "lines": 216
+   "lines": 213
   },
   "AUTH": {
    "functions": 2,
@@ -37292,7 +37256,7 @@
    "lines": 11
   }
  },
- "app_py_lines": 591,
+ "app_py_lines": 578,
  "extracted_modules": [
   "backend/app_runtime.py",
   "backend/auth_service.py",

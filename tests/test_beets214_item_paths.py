@@ -47,7 +47,7 @@ class AdapterAbsolutePathTests(unittest.TestCase):
     library directory Beets reports."""
 
     def _adapter(self, responses, libdir="/music"):
-        ad = BeetsAdapter(base_url="http://beets:8337", api_key="k")
+        ad = BeetsAdapter()
         calls = []
 
         def fake(method, path, **_):
@@ -111,7 +111,7 @@ class FindItemByPathBackslashTests(unittest.TestCase):
     backslash is queried as another path and Beets' match cannot be trusted."""
 
     def _adapter(self, rows):
-        ad = BeetsAdapter(base_url="http://beets:8337", api_key="k")
+        ad = BeetsAdapter()
         ad._request = lambda method, path, **_: {"results": [dict(r) for r in rows]}
         return ad
 
@@ -138,7 +138,7 @@ class ArtworkPlacementRelativePathTests(unittest.TestCase):
             album_dir.mkdir(parents=True)
             src = Path(td, "src")
             src.mkdir()
-            ad = BeetsAdapter(base_url="http://beets:8337", api_key="k")
+            ad = BeetsAdapter()
             libdir = Path(td).as_posix()
 
             def fake(method, path, **_):

@@ -454,9 +454,6 @@ export function getPluginsStatus(): Promise<BeetsPluginsReport> {
   return apiJson<BeetsPluginsReport>('/api/plugins/status');
 }
 
-export function provisionPlugins(): Promise<BeetsPluginsReport> {
-  return apiJson<BeetsPluginsReport>('/api/plugins/provision', jsonRequest('POST'));
-}
 
 export function verifyPlugins(): Promise<BeetsPluginsReport> {
   return apiJson<BeetsPluginsReport>('/api/plugins/verify', jsonRequest('POST'));

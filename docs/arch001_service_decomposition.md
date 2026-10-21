@@ -6,8 +6,9 @@ it is recorded, with its domain and current module, in
 `docs/arch001_app_ownership.json` (`scripts/audit_arch001_ownership.py`
 regenerates and checks it; CI fails if domain code comes back into app.py).
 
-There is still exactly one Beets: stock `lscr.io/linuxserver/beets`, reached only
-through `backend.beets_adapter` / `backend.composite_workflows`. Nothing here
+There is still exactly one Beets: the pinned Beets embedded in Web Manager
+(ADR 0006), reached only through `backend.beets_adapter` /
+`backend.composite_workflows`. Nothing here
 reintroduces a custom engine, a control agent, port 8338, the Docker socket,
 direct SQLite access, local `beet` mutation, or arbitrary command execution.
 

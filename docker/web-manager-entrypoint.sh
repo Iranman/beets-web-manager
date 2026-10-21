@@ -22,9 +22,8 @@
 #    .flask_secret_key) even with no PUID/PGID override in play at all.
 #
 # /web-manager-data is exclusively Web Manager's own state (settings,
-# tokens, session keys, audit/transaction logs) and /config is shared only
-# with the beets sibling container's own equivalent PUID/PGID-driven
-# ownership fix -- both are small, so a full recursive chown is safe and
+# tokens, session keys, audit/transaction logs) and /config holds Beets'
+# config.yaml and library database -- both are small, so a full recursive chown is safe and
 # fast; it runs only when the top level is not already PUID:PGID (#282). /music and /downloads can be enormous real media
 # libraries: only the top-level directory's own ownership is fixed (so the
 # app can create new files/subdirectories there), never a recursive walk
@@ -88,9 +87,9 @@ own_tree() {
 }
 
 own_tree /web-manager-data
-# /config is only mounted in the bundled-Beets layout. In the external-Beets
-# layout it is the image's own directory on a read-only root filesystem, and
-# an unconditional chown aborted startup there (EROFS under `set -e`).
+# Without a /config mount it is the image's own directory on a read-only
+# root filesystem, and an unconditional chown aborted startup (EROFS under
+# `set -e`); Beets' self-test then reports the missing config instead.
 if awk '$5 == "/config" { found = 1 } END { exit !found }' /proc/self/mountinfo; then
     own_tree /config
 fi

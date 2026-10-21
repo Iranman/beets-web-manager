@@ -47,7 +47,7 @@ class _Engine(unittest.TestCase):
         from beetsplug.web import app as beets_web_app
         import beetsplug.webmanager.operations as ops_mod
         from beetsplug.webmanager import WebManagerPlugin
-        from beetsplug.webmanager.auth import set_api_key_file
+        from beetsplug.webmanager.auth import set_api_key
         from tests.test_webmanager_album_art import TOKEN, write_flac
 
         self.td = tempfile.mkdtemp()
@@ -56,11 +56,8 @@ class _Engine(unittest.TestCase):
         os.makedirs(self.music)
         os.makedirs(self.downloads)
         self.lib = Library(os.path.join(self.td, "lib.blb"), directory=self.music)
-        key = os.path.join(self.td, "key")
-        with open(key, "w", encoding="utf-8") as f:
-            f.write(TOKEN + "\n")
         WebManagerPlugin()
-        set_api_key_file(key)
+        set_api_key(TOKEN)
         ops_mod.set_allowed_roots([self.music, self.downloads])
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["INCLUDE_PATHS"] = True
@@ -83,12 +80,12 @@ class _Engine(unittest.TestCase):
                     "x", status_code=r.status_code, error_code=body.get("error_code") or "BEETS_NOT_FOUND")
             return body
 
-        self.ad = BeetsAdapter(base_url="http://beets.test:8337", api_key=TOKEN)
+        self.ad = BeetsAdapter()
         self.ad._request = bridge
 
         def cleanup():
             ops_mod.set_allowed_roots(None)
-            set_api_key_file(None)
+            set_api_key(None)
             resource_locks.set_locks(None)
             self.lib._connection().close()
             shutil.rmtree(self.td, ignore_errors=True)

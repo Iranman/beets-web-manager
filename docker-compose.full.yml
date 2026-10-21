@@ -1,43 +1,14 @@
 # ==============================================================================
-# [ADVANCED] Hardened stock-Beets stack, with the yt-dlp PO-token provider
+# [ADVANCED] Beets Web Manager with the yt-dlp PO-token provider
 # ==============================================================================
-# Same two-service stock-Beets architecture as the primary `docker-compose.yml`
-# (no build, no custom Beets image, no control agent, no port 8338) --
-# this variant additionally applies container security hardening
-# (read_only rootfs, cap_drop: ALL, no-new-privileges) to beets-web-manager
-# and starts the bgutil-ytdlp-pot-provider service some yt-dlp downloads need.
+# The primary `docker-compose.yml` (one container, Beets inside Web Manager,
+# ADR 0006), plus the bgutil-ytdlp-pot-provider service some yt-dlp downloads
+# need, and the web port bound to loopback by default.
 #
-# Usage:
+# Usage, from the folder that holds this file:
 #   docker compose -f docker-compose.full.yml up -d
 
 services:
-  beets:
-    image: lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73
-    container_name: beets
-    restart: unless-stopped
-    environment:
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
-      - TZ=${TZ:-UTC}
-    volumes:
-      - ${BEETS_CONFIG_PATH:-./config}:/config
-      - ${MUSIC_LIBRARY_PATH:-./data/music}:/music
-      - ${DOWNLOAD_PATH:-./data/downloads}:/downloads
-    expose:
-      - "8337"
-    # See the primary docker-compose.yml for why this depends on
-    # beets-web-manager's healthcheck rather than the other way around:
-    # Web Manager provisions the webmanager plugin into config.yaml at its
-    # own startup, before stock Beets ever reads that file.
-    depends_on:
-      beets-web-manager:
-        condition: service_healthy
-
-  # Included by default so yt-dlp YouTube downloads work out of the box
-  # (YouTube's PO token requirement). This service starts unconditionally
-  # and beets-web-manager's YTDLP_PO_PROVIDER_URL default points at it below
-  # -- it is not conditionally enabled. If you don't use the ytdlp
-  # acquisition method, remove this service and blank YTDLP_PO_PROVIDER_URL.
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno@sha256:addc137188b8f2be54b17bb0a919a3847cd417d143162e74d2fe9b410e586bcd
     container_name: bgutil-provider
@@ -57,8 +28,6 @@ services:
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      BEETS_WEB_URL: ${BEETS_WEB_URL:-http://beets:8337}
-
       BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
       BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
       WEB_MANAGER_DATA_DIR: /web-manager-data
@@ -67,7 +36,7 @@ services:
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337,bgutil-provider:4416}
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-bgutil-provider:4416}
 
       # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
       # the artist-folder-reconcile long controlled mutation only -- not a
@@ -101,9 +70,16 @@ services:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
 
+      # Container-side paths: must match the mounts below; MUSIC_ROOT must
+      # equal Beets' `directory:` in config.yaml.
+      MUSIC_ROOT: /music
+      DOWNLOADS_ROOT: /downloads
+      BEETS_CONFIG: /config/config.yaml
+
     volumes:
       - ${BEETS_CONFIG_PATH:-./config}:/config
-      - ${MUSIC_LIBRARY_PATH:-./data/music}:/music:ro
+      # Read-write: Beets moves, tags and imports files from this container.
+      - ${MUSIC_LIBRARY_PATH:-./data/music}:/music
       - ${DOWNLOAD_PATH:-./data/downloads}:/downloads
       - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
 
@@ -132,7 +108,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
+        - "import json, sys, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)); sys.exit(0 if d.get('beets', {}).get('ok') else 1)"
       interval: 30s
       timeout: 10s
       retries: 3

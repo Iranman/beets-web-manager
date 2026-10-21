@@ -1986,7 +1986,7 @@ def _qbit_login_cookie() -> str:
     if not QBIT_URL:
         raise RuntimeError(
             "qBittorrent is not configured. Set QBITTORRENT_URL or QBIT_URL "
-            "in the Beets container."
+            "in the Web Manager container."
         )
     if not QBIT_URL.startswith(("http://", "https://")):
         raise RuntimeError(f"qBittorrent URL must include http:// or https://: {QBIT_URL}")

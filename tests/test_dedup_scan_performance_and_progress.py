@@ -66,6 +66,15 @@ class MockBeetsLibrary:
 class LibraryCacheGenerationTests(unittest.TestCase):
     def setUp(self):
         library_cache.invalidate()
+        # These tests fake playlist_service.lib; _playlist_library_signature()
+        # otherwise reaches the real embedded Beets engine via
+        # beets_adapter.get_stats(), which is not set up here and can block on
+        # the shared engine's DB lock. Stub it the same way the other playlist
+        # tests do (tests/test_playlist_sync_in_place.py).
+        _stats = patch.object(playlist_service.beets_adapter, "get_stats",
+                              return_value={"items": 0, "albums": 0})
+        _stats.start()
+        self.addCleanup(_stats.stop)
 
     def test_cache_generation_is_stable_when_timestamp_is_zero(self):
         """Uninitialized cache (ts=0.0) must retain a stable generation and not rebuild on every call."""
@@ -105,6 +114,13 @@ class LibraryCacheGenerationTests(unittest.TestCase):
 class DedupScanPerformanceAndProgressTests(unittest.TestCase):
     def setUp(self):
         library_cache.invalidate()
+        # Keep the dedup scans (which build the playlist index off the faked
+        # lib) from reaching the real embedded engine for the library
+        # signature; see LibraryCacheGenerationTests.setUp.
+        _stats = patch.object(playlist_service.beets_adapter, "get_stats",
+                              return_value={"items": 0, "albums": 0})
+        _stats.start()
+        self.addCleanup(_stats.stop)
         # These scans patch pathlib.Path.stat globally; keep the job-hook
         # transaction store (a real directory owned by whichever test module
         # created it) out of that blast radius.

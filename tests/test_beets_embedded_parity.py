@@ -1,5 +1,5 @@
-"""ADR 0006 Phase 1 QA: the in-process transport matches the HTTP transport,
-and stays correct under the threaded Waitress/job model.
+"""ADR 0006: Beets inside Web Manager answers exactly as a stock `beet web`
+process does, and stays correct under the threaded Waitress/job model.
 
 Each driver runs in a fresh interpreter against a temporary BEETSDIR,
 library and music folder (Beets' config and plugin registry are
@@ -39,9 +39,9 @@ class EmbeddedParityTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr[-4000:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
-    def test_in_process_reads_errors_and_streams_match_the_http_transport(self):
-        # Same library, adapter switched between a real `beet web` process
-        # (BEETS_ENGINE=http) and the in-process engine (embedded).
+    def test_in_process_reads_errors_and_streams_match_a_real_beet_web(self):
+        # Every stock read the adapter makes in-process is replayed against a
+        # real `beet web` process on the same library: same status and body.
         out = self._run("golden_driver.py")
         diverged = {k: v for k, v in out.items() if not (v == "SAME" or (isinstance(v, list) and v[0] == "SAME"))}
         self.assertEqual(diverged, {})
@@ -62,8 +62,8 @@ class EmbeddedParityTests(unittest.TestCase):
         self.assertEqual(out["nested"]["marker"], "outer")
         self.assertFalse(out["nested"]["has_lib_on_outer_g"])
         self.assertGreater(out["nested"]["bytes"], 0)
-        # Default transport never imports Beets.
-        self.assertEqual(json.loads(out["http_default"]), {"beets_loaded": False, "enabled": False})
+        # Importing the backend does not start Beets.
+        self.assertEqual(json.loads(out["lazy_import"]), {"beets_loaded": False})
         # Rollback: the embedded-written DB has the stock `beet` schema and the CLI reads it.
         self.assertTrue(out["schema_equal"], out["schema_diff"])
         self.assertEqual(out["beet_cli_on_embedded_db"][0], 0)

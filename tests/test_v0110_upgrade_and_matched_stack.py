@@ -199,7 +199,7 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
         self.assertTrue(compat.get("compatible"))
         self.assertTrue(compat.get("restart_required"))
         self.assertEqual(compat.get("state"), "restart_required")
-        self.assertIn("Restart the Beets container", compat.get("message", ""))
+        self.assertIn("Restart Web Manager", compat.get("message", ""))
 
     def test_bundled_plugin_version_resolves_without_beets_installed(self):
         """The Web Manager image has no ``beets`` package; the bundled version must

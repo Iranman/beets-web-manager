@@ -155,7 +155,7 @@ def _parse_host_port(raw: str) -> Tuple[str, int]:
     return host, port
 
 
-DEFAULT_OUTBOUND_ALLOWLIST = "127.0.0.1:8337,localhost:8337,beets:8337"
+DEFAULT_OUTBOUND_ALLOWLIST = "127.0.0.1:8337,localhost:8337"
 
 # The local-network address floor. A service URL the operator configured
 # (PLEX_URL, LIDARR_URL, ...) is trusted only when every address it resolves

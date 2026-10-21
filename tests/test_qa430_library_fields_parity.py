@@ -18,7 +18,7 @@ from unittest import mock
 from beets.library import Album, Item, Library
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 
 import backend.library_service as ls
 from backend.beets_adapter import (BeetsAdapter, BeetsAdapterAuthError, BeetsAdapterError,
@@ -42,25 +42,23 @@ class LibraryFieldsParityTests(unittest.TestCase):
         root.mkdir()
         self.root = root
         self.lib = Library(os.path.join(self.td, "lib.blb"), directory=str(root))
-        key_file = os.path.join(self.td, ".key")
         self.token = "d" * 64
-        Path(key_file).write_text(self.token + "\n", encoding="utf-8")
         WebManagerPlugin()
-        set_api_key_file(key_file)
-        self.addCleanup(set_api_key_file, None)
+        set_api_key(self.token)
+        self.addCleanup(set_api_key, None)
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["TESTING"] = True
         self._fixture()
         self.client = beets_web_app.test_client()
-        self.adapter = BeetsAdapter(base_url="http://mock-beets:8337", api_key=self.token)
+        self.adapter = BeetsAdapter()
         self.calls = []
         self.adapter._request = self._request
 
     def _request(self, method, path, params=None, json_data=None, headers=None, timeout=None):
         self.calls.append(path)
         q = ("?" + urllib.parse.urlencode(params)) if params else ""
-        h = {"Authorization": f"Bearer {self.adapter.api_key}"} if path.startswith("/webmanager") else {}
+        h = {"Authorization": f"Bearer {self.token}"} if path.startswith("/webmanager") else {}
         resp = self.client.open(path + q, method=method, headers=h)
         if resp.status_code == 404:
             raise BeetsAdapterNotFoundError("nf", status_code=404)
@@ -207,7 +205,7 @@ class FieldsFallbackTests(unittest.TestCase):
     """Only a 404 (plugin before 1.18.0) falls back, and only that is remembered."""
 
     def _adapter(self, error):
-        adapter = BeetsAdapter(base_url="http://mock-beets:8337", api_key="k" * 64)
+        adapter = BeetsAdapter()
         calls = []
 
         def request(method, path, params=None, **kw):

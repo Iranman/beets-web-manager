@@ -218,7 +218,7 @@ class ReimportSourceTests(unittest.TestCase):
 
 class AdapterPayloadTests(unittest.TestCase):
     def test_native_options_only_sent_when_given(self):
-        ad = BeetsAdapter(base_url="http://beets:8337")
+        ad = BeetsAdapter()
         with mock.patch.object(ad, "_request", return_value={}) as req:
             ad.run_import("/downloads/A")
             self.assertNotIn("search_ids", req.call_args.kwargs["json_data"])

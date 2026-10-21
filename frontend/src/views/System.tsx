@@ -13,7 +13,6 @@ import {
   getConfigFile,
   getSetupEnv,
   getSetupStatus,
-  provisionPlugins,
   regenerateAuthToken,
   revealSetupEnvValue,
   revertConfigFile,
@@ -610,7 +609,6 @@ export default function System() {
   const [revealedToken, setRevealedToken] = useState<{ token: string; warning: string } | null>(null);
   const [pluginsReport, setPluginsReport] = useState<BeetsPluginsReport | null>(null);
   const [pluginsLoading, setPluginsLoading] = useState(false);
-  const [pluginsProvisioning, setPluginsProvisioning] = useState(false);
   const [pluginsMsg, setPluginsMsg] = useState('');
   const [pluginsError, setPluginsError] = useState('');
 
@@ -914,23 +912,6 @@ export default function System() {
     }
   };
 
-  const handleProvisionPlugins = async () => {
-    setPluginsProvisioning(true);
-    setPluginsMsg('');
-    setPluginsError('');
-    try {
-      const res = await provisionPlugins();
-      setPluginsReport(res);
-      setPluginsMsg(res.ok ? 'Provisioned bundled plugins and updated required plugins successfully.' : (res.message || 'Plugin provisioning completed.'));
-      await load();
-      await loadConfig();
-    } catch (err) {
-      setPluginsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPluginsProvisioning(false);
-    }
-  };
-
   const markComplete = async () => {
     setCompleting(true);
     setError('');
@@ -1087,17 +1068,9 @@ export default function System() {
                 variant="outlined"
                 size="small"
                 onClick={() => void handleVerifyPlugins()}
-                disabled={pluginsLoading || pluginsProvisioning}
+                disabled={pluginsLoading}
               >
                 {pluginsLoading ? 'Checking...' : 'Recheck plugins'}
-              </Button>
-              <Button
-                variant="contained"
-                size="small"
-                onClick={() => void handleProvisionPlugins()}
-                disabled={pluginsLoading || pluginsProvisioning}
-              >
-                {pluginsProvisioning ? 'Provisioning...' : 'Provision & repair plugins'}
               </Button>
             </div>
           </div>

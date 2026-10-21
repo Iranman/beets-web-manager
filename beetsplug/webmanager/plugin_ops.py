@@ -13,7 +13,7 @@ module, so it is easy to re-verify against a new Beets version and fails
 cleanly (PluginCapabilityError / PluginIncompatibleError) rather than being
 scattered across route handlers or silently returning a fake success. See
 tests/test_stock_beets_acceptance.py for the acceptance proof against the
-real, unmodified lscr.io/linuxserver/beets image pinned in docker-compose.yml.
+Beets pinned in requirements.txt.
 """
 
 import logging

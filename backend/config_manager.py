@@ -134,12 +134,11 @@ def _edit_allowed(path: tuple) -> bool:
 
 
 def refuse_code_execution_edits(old_text: str, new_text: str) -> None:
-    """With the embedded engine, raise ConfigCodeExecutionEditRefused unless
+    """Raise ConfigCodeExecutionEditRefused unless
     every difference between ``old_text`` and ``new_text`` is an allowlisted
     setting or the addition of an allowlisted plugin. Settings that do not
     change (a file that already has hooks) pass. Unparseable YAML is refused."""
-    from backend import beets_embedded
-    if not beets_embedded.enabled() or old_text == new_text:
+    if old_text == new_text:
         return
     def load(text: str) -> Dict[str, Any]:
         try:
