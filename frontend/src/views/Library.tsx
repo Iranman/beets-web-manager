@@ -1187,31 +1187,32 @@ export default function Library() {
     void loadLibrary();
   }, [loadLibrary]);
 
-  // The first /api/library response is the fast engine-only tree
-  // (`reconciled:false`) so the page paints immediately while the backend
-  // reconciles disk state in a background job. Poll (bounded, backing off) until
-  // the payload carries disk state -- disk-only albums + missing-on-disk flags --
-  // then stop. Polls run in the background so they never show the blocking spinner.
-  // A new engine tree (library_version change) restarts the poll budget.
+  // The page paints from whatever /api/library returns first, then polls in the
+  // background (bounded, backing off) while that payload is not yet fresh:
+  //   - the fast engine-only tree arrives as `reconciled:false` on a cold cache;
+  //   - a cache served past its TTL arrives with `reconciled:true` AND
+  //     `reconciling:true` -- it looks reconciled but still shows STALE disk
+  //     state while the backend refreshes it in a background job.
+  // Either case means the visible disk state is provisional, so keep polling
+  // until the payload is fresh (reconciled && !reconciling) -- at which point an
+  // advanced engine tree has landed -- then stop. Polls are background fetches so
+  // they never show the blocking spinner. The budget is NOT reset when
+  // library_version changes: a backend that churned the version on every poll
+  // would otherwise poll forever; instead it terminates at the stall/retry UI.
   const RECONCILE_POLL_BASE_MS = 2_000;
   const RECONCILE_POLL_MAX_MS = 15_000;
   const MAX_RECONCILE_POLLS = 15;
 
-  const reconciling = Boolean(data && data.reconciled === false);
-  const libraryVersionForPoll = data?.library_version;
+  const needsReconcile = Boolean(data && (data.reconciled === false || data.reconciling === true));
   const tracksIncludedForPoll = Boolean(data?.tracks_included);
   const [reconcilePolls, setReconcilePolls] = useState(0);
 
-  useEffect(() => {
-    setReconcilePolls(0);
-  }, [libraryVersionForPoll]);
-
   const reconcilePollDelay =
-    reconciling && reconcilePolls < MAX_RECONCILE_POLLS
+    needsReconcile && reconcilePolls < MAX_RECONCILE_POLLS
       ? Math.min(RECONCILE_POLL_BASE_MS * 2 ** reconcilePolls, RECONCILE_POLL_MAX_MS)
       : null;
   const reconcilePollActive = reconcilePollDelay !== null;
-  const reconcileStalled = reconciling && !reconcilePollActive;
+  const reconcileStalled = needsReconcile && !reconcilePollActive;
 
   useInterval(() => {
     setReconcilePolls((n) => n + 1);
