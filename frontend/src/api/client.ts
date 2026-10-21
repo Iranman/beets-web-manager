@@ -2,6 +2,11 @@ import type {
   UntrackedCandidatesResponse,
   UntrackedInventorySummaryResponse,
   UntrackedRecoveryPlanResponse,
+  RecoverProbeResponse,
+  RecoverRunsResponse,
+  RecoverFetchResponse,
+  RecoverRetryResponse,
+  RecoverImportResponse,
 } from './types';
 import type {
   AcquisitionDownloadAllActiveResponse,
@@ -382,6 +387,31 @@ export function getUntrackedCandidates(category: string, limit = 50, offset = 0)
 
 export function planUntrackedRecovery(action: string, paths: string[]): Promise<UntrackedRecoveryPlanResponse> {
   return apiJson<UntrackedRecoveryPlanResponse>('/api/library/untracked-recovery/plan', jsonRequest('POST', { action, paths }));
+}
+
+// ── Recover My Uploads ──────────────────────────────────────────────────────
+// Re-download a user's own YouTube/SoundCloud uploads. The backend owns every
+// decision; these just carry the request and return the backend's verdict.
+
+export function recoverProbe(url: string): Promise<RecoverProbeResponse> {
+  return apiJson<RecoverProbeResponse>('/api/recover/probe', jsonRequest('POST', { url }));
+}
+
+export function getRecoverRuns(limit = 50): Promise<RecoverRunsResponse> {
+  return apiJson<RecoverRunsResponse>(`/api/recover/runs?limit=${encodeURIComponent(limit)}`);
+}
+
+/** Start a fetch+stage job for one or more owner-authorized URLs. */
+export function startRecoverFetch(urls: string[]): Promise<RecoverFetchResponse> {
+  return apiJson<RecoverFetchResponse>('/api/recover/fetch', jsonRequest('POST', { urls }));
+}
+
+export function retryRecoverRun(runId: string): Promise<RecoverRetryResponse> {
+  return apiJson<RecoverRetryResponse>('/api/recover/retry', jsonRequest('POST', { run_id: runId }));
+}
+
+export function importRecoverRun(runId: string): Promise<RecoverImportResponse> {
+  return apiJson<RecoverImportResponse>('/api/recover/import', jsonRequest('POST', { run_id: runId }));
 }
 
 export function transactionExportUrl(transactionId: string, format: 'json' | 'csv' | 'markdown'): string {

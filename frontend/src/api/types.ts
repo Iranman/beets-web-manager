@@ -3470,3 +3470,173 @@ export interface UntrackedTransactionResponse extends ApiOkResponse {
   status?: string;
   verification_problems?: string[];
 }
+
+// ── Recover My Uploads ──────────────────────────────────────────────────────
+// Re-downloading a user's OWN YouTube/SoundCloud uploads through the guarded
+// yt-dlp path. The backend owns every decision (provenance_status / category);
+// the UI only maps those to labels and lists/filters/confirms.
+
+/** One of the backend provenance states, plus error categories. Kept open
+ * (`| string`) so an unknown value never breaks the UI — it falls through to
+ * the "Download failed" label. */
+export type RecoverProvenanceStatus =
+  | 'accessible'
+  | 'auth-needed'
+  | 'unsupported-format'
+  | 'genuinely-DRM'
+  | 'unavailable'
+  | 'recovered'
+  | 'verified'
+  | 'imported'
+  | 'rate-limited'
+  | 'access-restricted'
+  | 'expired-url'
+  | 'hls-assembly'
+  | 'format'
+  | 'misconfig'
+  | 'unknown'
+  | string;
+
+export interface RecoverFormat {
+  format_id?: string;
+  ext?: string;
+  acodec?: string;
+  vcodec?: string;
+  abr?: number | null;
+  tbr?: number | null;
+  asr?: number | null;
+  protocol?: string;
+  has_drm?: boolean;
+  filesize?: number | null;
+  format_note?: string;
+}
+
+/** Sanitized best-audio summary from the probe's stream diagnostics. */
+export interface RecoverBestAudioFormat {
+  format_id?: string;
+  ext?: string;
+  acodec?: string;
+  vcodec?: string;
+  protocol?: string;
+  transport?: string;
+  abr?: number | null;
+  asr?: number | null;
+  lossless?: boolean;
+  format_note?: string;
+}
+
+/** Read-only, already-sanitized stream diagnostics. The backend never puts
+ * content keys, license payloads, cookies, or tokens here; the UI additionally
+ * only renders the explicit fields below. */
+export interface RecoverStreamDiagnostics {
+  protocols?: string[];
+  manifest_types?: string[];
+  has_hls?: boolean;
+  has_dash?: boolean;
+  has_sabr?: boolean;
+  has_progressive?: boolean;
+  fragmented_format_count?: number;
+  total_format_count?: number;
+  audio_format_count?: number;
+  accessible_audio_format_count?: number;
+  drm_format_count?: number;
+  lossless_available?: boolean;
+  /** "none" | "partial" | "full" | ... — backend-owned. */
+  drm_status?: string;
+  eme_detected?: boolean;
+  /** DRM scheme names (e.g. "widevine"), never content keys. */
+  key_systems?: string[];
+  best_audio_format?: RecoverBestAudioFormat | null;
+}
+
+export interface RecoverAuthDiagnostics {
+  cookie_state?: 'none' | 'invalid' | 'rejected' | 'ok' | string;
+  configured?: boolean;
+  signature?: string | null;
+  authenticated_session_likely?: boolean;
+  auth_required_by_target?: boolean;
+  availability?: string;
+  session_status?: string;
+  message?: string;
+  remediation?: string;
+}
+
+export interface RecoverProbeResponse extends ApiOkResponse {
+  platform?: string;
+  title?: string;
+  uploader?: string;
+  duration?: number | null;
+  webpage_url?: string;
+  provenance_status?: RecoverProvenanceStatus;
+  category?: string;
+  is_collection?: boolean;
+  entry_count?: number;
+  formats?: RecoverFormat[];
+  selected_format?: string;
+  recommended_format?: string;
+  quality?: string;
+  lossless?: boolean;
+  authorized_access?: boolean;
+  stream_diagnostics?: RecoverStreamDiagnostics;
+  auth_diagnostics?: RecoverAuthDiagnostics;
+}
+
+/** A single URL's outcome inside a persisted run (recovered/failed/imported/…). */
+export interface RecoverRunItem {
+  url?: string;
+  title?: string;
+  uploader?: string;
+  status?: string;
+  recovered?: boolean;
+  provenance_status?: RecoverProvenanceStatus;
+  category?: string;
+  message?: string;
+  action?: string;
+}
+
+export interface RecoverRun {
+  run_id: string;
+  job_id?: string;
+  status?: string;
+  cookie_state?: string;
+  urls?: string[];
+  recovered_count?: number;
+  failed_count?: number;
+  imported_count?: number;
+  skipped_existing_count?: number;
+  import_failed_count?: number;
+  recovered?: RecoverRunItem[];
+  failed?: RecoverRunItem[];
+  imported?: RecoverRunItem[];
+  skipped_existing?: RecoverRunItem[];
+  import_failed?: RecoverRunItem[];
+  playlist_coverage?: Record<string, unknown>;
+  retry_of?: string;
+  retry_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RecoverRunsResponse extends ApiOkResponse {
+  total?: number;
+  runs?: RecoverRun[];
+}
+
+export interface RecoverFetchResponse extends ApiOkResponse {
+  run_id?: string;
+  job_id?: string;
+  retry_of?: string;
+  retry_count?: number;
+}
+
+export interface RecoverRetryResponse extends ApiOkResponse {
+  run_id?: string;
+  job_id?: string;
+  retry_of?: string;
+}
+
+export interface RecoverImportResponse extends ApiOkResponse {
+  run_id?: string;
+  job_id?: string;
+  status?: string;
+}
