@@ -828,7 +828,10 @@ class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
             "license_response": "eyJrZXlzIjpbXX0=",
             "pssh": "AAAANHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7Q==",
             "cookies": "SID=secret_cookie_value; SAPISID=secret_sapisid",
-            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----",
+            # Non-secret sentinel: sanitize_diagnostic_report redacts this by
+            # FIELD NAME ("private_key"), so the fixture needs no key-shaped
+            # value (and none belongs in the repo / its secret scanner).
+            "private_key": "SENTINEL_private_key_value_not_a_real_key",
             "note": "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret",
         }
         sanitized = recover_service.sanitize_diagnostic_report(raw_lab_report)
@@ -848,7 +851,8 @@ class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
         self.assertNotIn("deadbeefcafebabe0011223344556677", dumped)
         self.assertNotIn("eyJrZXlzIjpbXX0=", dumped)
         self.assertNotIn("secret_cookie_value", dumped)
-        self.assertNotIn("BEGIN RSA PRIVATE KEY", dumped)
+        self.assertNotIn("SENTINEL_private_key_value_not_a_real_key", dumped)
+        self.assertIn("private_key", sanitized["redacted_fields"])
         self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", dumped)
 
     def test_diagnostics_route_returns_sanitized_report(self):
