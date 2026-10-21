@@ -1159,6 +1159,11 @@ def recover_probe(url: str, *, ydl_module: Any = None,
         "uploader": _s(info.get("uploader") or info.get("channel") or info.get("uploader_id"))[:200],
         "duration": info.get("duration"),
         "webpage_url": _s(info.get("webpage_url") or url),
+        # Platform license metadata (independent evidence for an open_license
+        # claim). yt-dlp populates ``license`` for CC-flagged items, e.g.
+        # "Creative Commons Attribution license (reuse allowed)".
+        "license": _s(info.get("license"))[:300],
+        "license_url": _s(info.get("license_url"))[:300] if info.get("license_url") else "",
         "formats": formats,
         "selected_format": plan["format"],
         "recommended_format": plan.get("recommended_format"),
@@ -1265,10 +1270,18 @@ def _sanitize_persisted_url(url: Any) -> str:
 
 # ── authorization: the user's ASSERTED basis kept DISTINCT from independently
 #    VERIFIED evidence (an asserted claim is NEVER copied into a verified_* field) ──
-RECOVER_AUTH_BASES = frozenset({"original_creation", "own_account", "licensed_permission"})
+RECOVER_AUTH_BASES = frozenset({
+    "original_creation", "own_account", "licensed_permission", "open_license",
+})
 _RECOVER_AUTH_ERROR = (
     "authorization basis required "
-    "(original_creation, own_account, or licensed_permission)"
+    "(original_creation, own_account, licensed_permission, or open_license)"
+)
+# Platform license strings that denote public-domain / openly-licensed media.
+# Matched case-insensitively against the source's own yt-dlp ``license`` field
+# (independent evidence) — never against the user's asserted claim.
+_OPEN_LICENSE_PATTERNS = (
+    "creative commons", "cc-by", "cc0", "public domain", "reuse allowed",
 )
 
 
@@ -1304,13 +1317,16 @@ def evaluate_recover_authorization(
     uploader: str = "",
     channel: str = "",
     webpage_url: str = "",
+    source_license: str = "",
 ) -> Dict[str, Any]:
-    """Build the authorization record. Verification exists for ``own_account``
-    ONLY, and only when the probe's uploader/channel/webpage_url matches the
-    operator-configured ``RECOVER_OWNED_ACCOUNTS`` allowlist (case-insensitive
-    substring). ``original_creation`` and ``licensed_permission`` are
-    asserted-only (``verified=False``; no auto-verification mechanism exists).
-    verified_* fields are populated from independent evidence ONLY."""
+    """Build the authorization record. Verification exists for two bases only:
+    ``own_account`` (the probe's uploader/channel/webpage_url matches the
+    operator-configured ``RECOVER_OWNED_ACCOUNTS`` allowlist, case-insensitive
+    substring) and ``open_license`` (the source's own platform ``license``
+    metadata matches an open-license pattern). ``original_creation`` and
+    ``licensed_permission`` are asserted-only (``verified=False``; no
+    auto-verification mechanism exists). verified_* fields are populated from
+    independent evidence ONLY — never from the user's asserted claim."""
     asserted_basis = _s(basis).strip().lower()
     verified = False
     verified_basis: Optional[str] = None
@@ -1329,6 +1345,12 @@ def evaluate_recover_authorization(
                     f"source account matches owned-accounts allowlist entry '{entry}'"
                 )
                 break
+    elif asserted_basis == "open_license":
+        lic = _s(source_license).strip()
+        if lic and any(pat in lic.lower() for pat in _OPEN_LICENSE_PATTERNS):
+            verified = True
+            verified_basis = "open_license"
+            verified_evidence = _redact_security_text(lic)[:300]
     return {
         "asserted_basis": asserted_basis,
         "asserted_note": _s(note).strip()[:1000],
@@ -1658,6 +1680,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
         platform=platform,
         uploader=_s(probe.get("uploader")),
         webpage_url=_s(probe.get("webpage_url") or url),
+        source_license=_s(probe.get("license")),
     )
 
     plan = _recover_format_plan(host, probe)
@@ -1747,6 +1770,8 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "uploader": probe.get("uploader", ""),
             "title": probe.get("title", ""),
             "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source_license": _s(probe.get("license")),
+            "source_license_url": _s(probe.get("license_url")),
             "authorized_access": bool(auth),
             "quality": quality,
             "lossless": lossless,
@@ -1926,6 +1951,7 @@ def verify_and_match_staged_upload(
         platform=_s(sidecar.get("source_platform")),
         uploader=_s(sidecar.get("uploader")),
         webpage_url=_s(sidecar.get("source_url")),
+        source_license=_s(sidecar.get("source_license")),
     )
     if not authorization["verified"]:
         try:

@@ -1500,15 +1500,20 @@ class AuthorizationAndProvenance(unittest.TestCase):
 
     def _stage(self, tmp, *, platform="soundcloud", uploader="DJ Me",
                fname="t.flac", title="My Track",
-               source_url="https://soundcloud.com/me/my-track"):
+               source_url="https://soundcloud.com/me/my-track",
+               source_license=""):
+        import json as _json
         run_dir = Path(tmp) / "recovered" / platform / "run1"
         run_dir.mkdir(parents=True, exist_ok=True)
         audio = run_dir / fname
         audio.write_bytes(b"\x00" * 4096)
         Path(str(audio) + ".recover.json").write_text(
-            ('{"source_url": "%s", "source_platform": "%s", "uploader": "%s", '
-             '"title": "%s", "duration": 200.0, "codec": "flac", "quality": "original"}')
-            % (source_url, platform, uploader, title),
+            _json.dumps({
+                "source_url": source_url, "source_platform": platform,
+                "uploader": uploader, "title": title, "duration": 200.0,
+                "codec": "flac", "quality": "original",
+                "source_license": source_license,
+            }),
             encoding="utf-8",
         )
         return str(audio)
@@ -1540,6 +1545,12 @@ class AuthorizationAndProvenance(unittest.TestCase):
              "authorization": {"basis": "because_i_feel_like_it"}})
         self.assertFalse(f_bad["ok"])
         self.assertIn("authorization basis required", f_bad["error"])
+        # The error message enumerates all four accepted bases.
+        self.assertIn("open_license", f_none["error"])
+        self.assertEqual(
+            recover_service.RECOVER_AUTH_BASES,
+            {"original_creation", "own_account", "licensed_permission", "open_license"},
+        )
 
         i_none, s2 = recover_service.start_recover_import({"staged_files": ["/x/y.flac"]})
         self.assertEqual(s2, 200)
@@ -1617,6 +1628,55 @@ class AuthorizationAndProvenance(unittest.TestCase):
                 self.assertIsNone(out["authorization"]["verified_basis"], basis)
                 fake_adapter.run_import.assert_not_called()
 
+    # ── open_license WITH platform CC license -> verified -> auto-import ──
+    def test_open_license_with_cc_evidence_is_verified_and_auto_imports(self):
+        cc = "Creative Commons Attribution license (reuse allowed)"
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, uploader="Someone Else", source_license=cc)
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.side_effect = [
+                [],
+                [{"id": 11, "title": "My Track", "artist": "Someone Else",
+                  "path": "/music/Someone Else/My Track.flac"}],
+            ]
+            fake_adapter.run_import.return_value = {"ok": True, "success": True}
+            from backend.transaction_engine import TransactionStore
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            # No owned-accounts allowlist entry: verification must come ONLY from
+            # the platform license evidence, not the uploader.
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": ""}), \
+                 mock.patch("backend.app_runtime.transactions", tx_store):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="open_license",
+                    auth_note="it is public domain, trust me")
+            self.assertTrue(out["imported"], out)
+            self.assertEqual(out["status"], "imported")
+            fake_adapter.run_import.assert_called_once()
+            auth = out["authorization"]
+            self.assertEqual(auth["asserted_basis"], "open_license")
+            self.assertTrue(auth["verified"])
+            self.assertEqual(auth["verified_basis"], "open_license")
+            self.assertEqual(auth["verified_evidence"], cc)
+            # The asserted note is never promoted into the verified evidence.
+            self.assertNotIn("trust me", auth["verified_evidence"])
+
+    # ── open_license WITHOUT platform license evidence -> review, no import ──
+    def test_open_license_without_evidence_is_review_required_no_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, uploader="Someone Else", source_license="")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": ""}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="open_license")
+            self.assertFalse(out["imported"])
+            self.assertEqual(out["status"], "review_required")
+            self.assertFalse(out["authorization"]["verified"])
+            self.assertIsNone(out["authorization"]["verified_basis"])
+            fake_adapter.run_import.assert_not_called()
+
     # ── (5) DRM-protected is refused on fetch regardless of basis ──
     def test_drm_protected_fetch_is_refused_regardless_of_basis(self):
         drm_info = {
@@ -1675,6 +1735,30 @@ class AuthorizationAndProvenance(unittest.TestCase):
             self.assertFalse(auth["verified"])
             self.assertIsNone(auth["verified_basis"])
             self.assertIsNone(auth["verified_evidence"])
+
+    def test_fetch_captures_platform_license_and_verifies_open_license(self):
+        import json as _json
+        cc = "Creative Commons Attribution license (reuse allowed)"
+        info = {"title": "Freely", "uploader": "Rando", "duration": 200,
+                "webpage_url": "https://www.youtube.com/watch?v=cc1",
+                "license": cc, "license_url": "https://creativecommons.org/licenses/by/3.0/",
+                "formats": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": ""}):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=cc1", [], run_id="r",
+                    ydl_module=_make_fake(info=info, filename="freely.opus"),
+                    auth_basis="open_license", auth_note="CC licensed")
+            self.assertTrue(out["recovered"], out)
+            sidecar = _json.loads(Path(out["provenance"]).read_text(encoding="utf-8"))
+            # Platform license metadata captured as independent evidence.
+            self.assertEqual(sidecar["source_license"], cc)
+            auth = sidecar["authorization"]
+            self.assertEqual(auth["asserted_basis"], "open_license")
+            self.assertTrue(auth["verified"])
+            self.assertEqual(auth["verified_basis"], "open_license")
+            self.assertEqual(auth["verified_evidence"], cc)
 
 
 if __name__ == "__main__":

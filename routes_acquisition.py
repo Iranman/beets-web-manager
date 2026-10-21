@@ -663,8 +663,9 @@ def api_recover_fetch():
     """Start a background job to fetch + stage authorized uploads under
     DOWNLOADS_ROOT (with optional auto_import). Requires an ``authorization``
     object ``{basis, note}`` with a valid basis (original_creation / own_account
-    / licensed_permission); own_account is independently verified against
-    RECOVER_OWNED_ACCOUNTS, the others are asserted-only."""
+    / licensed_permission / open_license); own_account is independently verified
+    against RECOVER_OWNED_ACCOUNTS and open_license against the source's own
+    platform license metadata, the others are asserted-only."""
     body, status = start_recover_fetch(request.get_json(silent=True) or {})
     return json_route_result(body, status)
 
