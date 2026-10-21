@@ -1362,6 +1362,17 @@ def evaluate_recover_authorization(
     }
 
 
+def _scrub_authz_text(value: Any, limit: int) -> str:
+    """Redact an authorization free-text field before persistence. Applies the
+    generic ``key=value``/URL-credential redactor AND the inline-secret regex
+    (Bearer/Basic tokens, PEM blocks) that the whitelisted re-admit would
+    otherwise bypass (F3), then bounds the length."""
+    text = _redact_security_text(_s(value))
+    if _PEM_OR_SECRET_VALUE_RE.search(text[:4096]):
+        text = "[REDACTED]"
+    return text[:limit]
+
+
 def _sanitize_authorization_record(auth: Any) -> Optional[Dict[str, Any]]:
     """Whitelist an authorization record for persistence. The generic secret
     stripper removes any key named ``authorization`` (normally a Bearer
@@ -1377,10 +1388,10 @@ def _sanitize_authorization_record(auth: Any) -> Optional[Dict[str, Any]]:
     vev = auth.get("verified_evidence")
     return {
         "asserted_basis": basis,
-        "asserted_note": _redact_security_text(_s(auth.get("asserted_note")))[:1000],
+        "asserted_note": _scrub_authz_text(auth.get("asserted_note"), 1000),
         "verified": verified,
         "verified_basis": (vbasis or None) if verified else None,
-        "verified_evidence": (_redact_security_text(_s(vev))[:500] if vev else None) if verified else None,
+        "verified_evidence": (_scrub_authz_text(vev, 500) if vev else None) if verified else None,
         "platform": _s(auth.get("platform")).strip().lower()[:40],
         "recorded_at": _s(auth.get("recorded_at"))[:40],
     }
@@ -1771,7 +1782,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "title": probe.get("title", ""),
             "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source_license": _s(probe.get("license")),
-            "source_license_url": _s(probe.get("license_url")),
+            "source_license_url": _sanitize_persisted_url(_s(probe.get("license_url"))),
             "authorized_access": bool(auth),
             "quality": quality,
             "lossless": lossless,

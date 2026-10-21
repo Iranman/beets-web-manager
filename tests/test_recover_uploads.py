@@ -1532,6 +1532,27 @@ class AuthorizationAndProvenance(unittest.TestCase):
              mock.patch("helpers_mb._mb_recording_search", return_value=[]):
             yield
 
+    # ── secret-hygiene regressions (F3/F5) ──
+    def test_credential_in_authorization_note_is_redacted(self):
+        # F3: a Bearer/PEM/API-key pasted into the free-text note or evidence
+        # must not persist verbatim in the sanitized record.
+        rec = recover_service._sanitize_authorization_record({
+            "asserted_basis": "licensed_permission",
+            "asserted_note": "x Bearer abcdef0123456789ABCDEF0123456789 token",
+            "verified": True, "verified_basis": "open_license",
+            "verified_evidence": "Bearer ABCDEF0123456789abcdef0123 token",
+        })
+        self.assertNotIn("Bearer abcdef", rec["asserted_note"])
+        self.assertEqual(rec["asserted_note"], "[REDACTED]")
+        self.assertNotIn("Bearer ABCDEF0123456789", rec["verified_evidence"] or "")
+
+    def test_license_url_signed_params_stripped_from_sidecar(self):
+        # F5: a signed query param in the platform license_url must be sanitized.
+        u = recover_service._sanitize_persisted_url(
+            "https://cdn.example.com/lic?X-Amz-Signature=deadbeefSIGVALUE123&x=1")
+        self.assertNotIn("deadbeefSIGVALUE123", u)
+        self.assertNotIn("X-Amz-Signature", u)
+
     # ── (1) a valid basis is required; an invalid basis is rejected ──
     def test_fetch_and_import_require_a_valid_basis(self):
         f_none, s1 = recover_service.start_recover_fetch(
