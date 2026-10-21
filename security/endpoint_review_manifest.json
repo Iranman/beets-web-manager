@@ -4979,6 +4979,82 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
       ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_recover_runs",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "List or inspect persisted Recover My Uploads job runs from WEB_MANAGER_DATA_DIR/recover_runs.json without exposing credentials, cookies, or license payloads.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::RecoverJobPersistenceAndRetries::test_runs_route_and_retry_route",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_recover_retry",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Retry failed or auth-needed items from a persisted Recover My Uploads run through the unchanged allowlist/SSRF guard.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::RecoverJobPersistenceAndRetries::test_runs_route_and_retry_route",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_recover_import",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Verify staged own-upload audio files under DOWNLOADS_ROOT/recovered, perform AcoustID + MusicBrainz matching, safely import into Beets without overwriting existing library files, and refresh playlist coverage.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::SafeStagingAndBeetsImport::test_import_rejects_paths_outside_staging_root",
+        "tests/test_recover_uploads.py::SafeStagingAndBeetsImport::test_import_never_overwrites_existing_library_file",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_recover_diagnostics",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Normalize and sanitize an external streaming/EME diagnostic report (stripping any secret keys, license payloads, or credentials) and return provenance classification with decryption_supported=false.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_recover_uploads.py::Phase3ResearchDiagnosticCompatibility::test_sanitize_diagnostic_report_strips_keys_licenses_and_cookies",
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
     }
   ]
 }

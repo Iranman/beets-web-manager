@@ -525,7 +525,7 @@
     "_ai_batch_load_state",
     "_ai_batch_normalize_folder_outcome"
    ],
-   "caller_count": 638,
+   "caller_count": 639,
    "dependencies": []
   },
   {
@@ -3420,9 +3420,13 @@
    "callers": [
     "api_download_album",
     "api_recover_cookie_state",
+    "api_recover_diagnostics",
     "api_recover_enumerate",
     "api_recover_fetch",
+    "api_recover_import",
     "api_recover_probe",
+    "api_recover_retry",
+    "api_recover_runs",
     "dedup_cleanup",
     "dedup_scan",
     "fetch_missing_art",
@@ -3432,7 +3436,7 @@
     "playlist_parse",
     "reimport_disk"
    ],
-   "caller_count": 13,
+   "caller_count": 17,
    "dependencies": []
   },
   {
@@ -36376,8 +36380,8 @@
    "name": "ytdlp_status",
    "module": "routes_acquisition.py",
    "lines": [
-    28,
-    94
+    38,
+    104
    ],
    "size": 67,
    "body_lines": 66,
@@ -36415,8 +36419,8 @@
    "name": "ytdlp_test_youtube",
    "module": "routes_acquisition.py",
    "lines": [
-    98,
-    165
+    108,
+    175
    ],
    "size": 68,
    "body_lines": 67,
@@ -36446,8 +36450,8 @@
    "name": "api_download_album",
    "module": "routes_acquisition.py",
    "lines": [
-    169,
-    172
+    179,
+    182
    ],
    "size": 4,
    "body_lines": 2,
@@ -36470,8 +36474,8 @@
    "name": "_flag",
    "module": "routes_acquisition.py",
    "lines": [
-    179,
-    180
+    189,
+    190
    ],
    "size": 2,
    "body_lines": 1,
@@ -36492,8 +36496,8 @@
    "name": "_int_arg",
    "module": "routes_acquisition.py",
    "lines": [
-    183,
-    194
+    193,
+    204
    ],
    "size": 12,
    "body_lines": 10,
@@ -36512,8 +36516,8 @@
    "name": "acquisition_queue",
    "module": "routes_acquisition.py",
    "lines": [
-    198,
-    246
+    208,
+    256
    ],
    "size": 49,
    "body_lines": 45,
@@ -36541,8 +36545,8 @@
    "name": "acquisition_queue_refresh",
    "module": "routes_acquisition.py",
    "lines": [
-    250,
-    263
+    260,
+    273
    ],
    "size": 14,
    "body_lines": 9,
@@ -36564,8 +36568,8 @@
    "name": "acquisition_download_all",
    "module": "routes_acquisition.py",
    "lines": [
-    270,
-    457
+    280,
+    467
    ],
    "size": 188,
    "body_lines": 187,
@@ -36600,8 +36604,8 @@
    "name": "acquisition_download_all_active",
    "module": "routes_acquisition.py",
    "lines": [
-    461,
-    476
+    471,
+    486
    ],
    "size": 16,
    "body_lines": 15,
@@ -36623,8 +36627,8 @@
    "name": "qbit_status",
    "module": "routes_acquisition.py",
    "lines": [
-    480,
-    481
+    490,
+    491
    ],
    "size": 2,
    "body_lines": 1,
@@ -36646,8 +36650,8 @@
    "name": "qbit_hardlink_missing",
    "module": "routes_acquisition.py",
    "lines": [
-    485,
-    563
+    495,
+    573
    ],
    "size": 79,
    "body_lines": 78,
@@ -36671,8 +36675,8 @@
    "name": "music_format_replacement_statuses",
    "module": "routes_acquisition.py",
    "lines": [
-    567,
-    571
+    577,
+    581
    ],
    "size": 5,
    "body_lines": 4,
@@ -36692,8 +36696,8 @@
    "name": "start_music_format_library_scan",
    "module": "routes_acquisition.py",
    "lines": [
-    575,
-    587
+    585,
+    597
    ],
    "size": 13,
    "body_lines": 12,
@@ -36715,8 +36719,8 @@
    "name": "start_music_format_replacement_retry",
    "module": "routes_acquisition.py",
    "lines": [
-    591,
-    612
+    601,
+    622
    ],
    "size": 22,
    "body_lines": 21,
@@ -36739,8 +36743,8 @@
    "name": "api_recover_cookie_state",
    "module": "routes_acquisition.py",
    "lines": [
-    619,
-    622
+    629,
+    632
    ],
    "size": 4,
    "body_lines": 1,
@@ -36762,11 +36766,11 @@
    "name": "api_recover_probe",
    "module": "routes_acquisition.py",
    "lines": [
-    626,
-    631
+    636,
+    644
    ],
-   "size": 6,
-   "body_lines": 4,
+   "size": 9,
+   "body_lines": 6,
    "route": {
     "method": "POST",
     "path": "/api/recover/probe"
@@ -36786,8 +36790,8 @@
    "name": "api_recover_enumerate",
    "module": "routes_acquisition.py",
    "lines": [
-    635,
-    645
+    648,
+    658
    ],
    "size": 11,
    "body_lines": 9,
@@ -36810,14 +36814,107 @@
    "name": "api_recover_fetch",
    "module": "routes_acquisition.py",
    "lines": [
-    649,
-    653
+    662,
+    666
    ],
    "size": 5,
    "body_lines": 2,
    "route": {
     "method": "POST",
     "path": "/api/recover/fetch"
+   },
+   "mutation_capable": false,
+   "domain": "ROUTE_ONLY",
+   "desired_owner": "app.py (routes)",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "json_route_result"
+   ]
+  },
+  {
+   "name": "api_recover_runs",
+   "module": "routes_acquisition.py",
+   "lines": [
+    670,
+    682
+   ],
+   "size": 13,
+   "body_lines": 11,
+   "route": {
+    "method": "GET",
+    "path": "/api/recover/runs"
+   },
+   "mutation_capable": false,
+   "domain": "ROUTE_ONLY",
+   "desired_owner": "app.py (routes)",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_s",
+    "json_route_result"
+   ]
+  },
+  {
+   "name": "api_recover_retry",
+   "module": "routes_acquisition.py",
+   "lines": [
+    686,
+    690
+   ],
+   "size": 5,
+   "body_lines": 2,
+   "route": {
+    "method": "POST",
+    "path": "/api/recover/retry"
+   },
+   "mutation_capable": false,
+   "domain": "ROUTE_ONLY",
+   "desired_owner": "app.py (routes)",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "json_route_result"
+   ]
+  },
+  {
+   "name": "api_recover_import",
+   "module": "routes_acquisition.py",
+   "lines": [
+    694,
+    699
+   ],
+   "size": 6,
+   "body_lines": 2,
+   "route": {
+    "method": "POST",
+    "path": "/api/recover/import"
+   },
+   "mutation_capable": false,
+   "domain": "ROUTE_ONLY",
+   "desired_owner": "app.py (routes)",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "json_route_result"
+   ]
+  },
+  {
+   "name": "api_recover_diagnostics",
+   "module": "routes_acquisition.py",
+   "lines": [
+    703,
+    709
+   ],
+   "size": 7,
+   "body_lines": 3,
+   "route": {
+    "method": "POST",
+    "path": "/api/recover/diagnostics"
    },
    "mutation_capable": false,
    "domain": "ROUTE_ONLY",

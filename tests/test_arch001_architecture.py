@@ -285,6 +285,10 @@ class ApiContractTests(unittest.TestCase):
             ("/api/recover/probe", "api_recover_probe"),
             ("/api/recover/enumerate", "api_recover_enumerate"),
             ("/api/recover/fetch", "api_recover_fetch"),
+            ("/api/recover/runs", "api_recover_runs"),
+            ("/api/recover/retry", "api_recover_retry"),
+            ("/api/recover/import", "api_recover_import"),
+            ("/api/recover/diagnostics", "api_recover_diagnostics"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)

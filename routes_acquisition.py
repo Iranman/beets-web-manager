@@ -13,7 +13,17 @@ from backend.acquisition_service import _ACQ_QUEUE_SOURCES, _DOWNLOAD_METHODS, _
 from backend.app_runtime import QBIT_CATEGORY, QBIT_FILTER, QBIT_URL, YTDLP_ALLOW_BROWSER_COOKIES, _app_logger, _s, _ytdlp_ready, jobs
 from backend.job_service import ALBUM_DOWNLOAD_WAIT, _wait_for_child_job
 from backend.matching_service import _invalidate_lib_cache
-from backend.recover_service import recover_cookie_state, recover_enumerate, recover_probe, start_recover_fetch
+from backend.recover_service import (
+    recover_cookie_state,
+    recover_enumerate,
+    recover_get_run,
+    recover_list_runs,
+    recover_probe,
+    sanitize_diagnostic_report,
+    start_recover_fetch,
+    start_recover_import,
+    start_recover_retry,
+)
 from backend.replacement_service import _music_format_replace_rows, _music_format_scan_library
 from backend.serializers import json_route_result
 from backend.slskd_service import _normalise_download_method
@@ -612,7 +622,7 @@ def start_music_format_replacement_retry():
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
-# ── Recover My Uploads (increment 1): authorized FETCH + STAGE ──────────────
+# ── Recover My Uploads (increments 1 & 2): authorized FETCH, STAGE, VERIFY, IMPORT & DIAGNOSTICS ──
 # Added here (not a new routes_*.py) because app.py's ROUTE_MODULES is the only
 # registration path and app.py is out of scope for this change.
 @app.get("/api/recover/cookie-state")
@@ -624,11 +634,14 @@ def api_recover_cookie_state():
 
 @app.post("/api/recover/probe")
 def api_recover_probe():
-    """Probe metadata + available formats for one allowlisted URL. No download."""
-    url = _s((request.get_json(silent=True) or {}).get("url")).strip()
+    """Probe metadata + available formats + stream/DRM/auth diagnostics for one
+    allowlisted URL. No download."""
+    data = request.get_json(silent=True) or {}
+    url = _s(data.get("url")).strip()
     if not url:
         return json_route_result({"ok": False, "error": "url is required"}, 200)
-    return json_route_result(recover_probe(url), 200)
+    diag = data.get("diagnostic_report") if isinstance(data.get("diagnostic_report"), dict) else None
+    return json_route_result(recover_probe(url, diagnostic_report=diag), 200)
 
 
 @app.post("/api/recover/enumerate")
@@ -648,6 +661,49 @@ def api_recover_enumerate():
 @app.post("/api/recover/fetch")
 def api_recover_fetch():
     """Start a background job to fetch + stage authorized uploads under
-    DOWNLOADS_ROOT. Does NOT import into the library in this increment."""
+    DOWNLOADS_ROOT (with optional auto_import)."""
     body, status = start_recover_fetch(request.get_json(silent=True) or {})
     return json_route_result(body, status)
+
+
+@app.get("/api/recover/runs")
+def api_recover_runs():
+    """List persisted recovery runs (for status inspection and retries)."""
+    run_id = _s(request.args.get("run_id") or "").strip()
+    if run_id:
+        run_rec = recover_get_run(run_id)
+        if run_rec is None:
+            return json_route_result({"ok": False, "error": f"recovery run '{run_id}' not found"}, 200)
+        return json_route_result({"ok": True, "run": run_rec}, 200)
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    return json_route_result(recover_list_runs(limit=limit), 200)
+
+
+@app.post("/api/recover/retry")
+def api_recover_retry():
+    """Start a recovery job retrying the failed/unrecovered URLs from a
+    persisted recovery run."""
+    body, status = start_recover_retry(request.get_json(silent=True) or {})
+    return json_route_result(body, status)
+
+
+@app.post("/api/recover/import")
+def api_recover_import():
+    """Verify staged recovery files, run AcoustID/MusicBrainz matching, safely
+    import into Beets without overwriting existing library items, and refresh
+    playlist coverage."""
+    body, status = start_recover_import(request.get_json(silent=True) or {})
+    return json_route_result(body, status)
+
+
+@app.post("/api/recover/diagnostics")
+def api_recover_diagnostics():
+    """Consume an external or laboratory stream/EME observation report and
+    return a sanitized Beets diagnostic summary with all secret keys, cookies,
+    and license payloads stripped."""
+    payload = request.get_json(silent=True)
+    report_in = payload.get("report") if isinstance(payload, dict) and isinstance(payload.get("report"), dict) else payload
+    return json_route_result(sanitize_diagnostic_report(report_in), 200)

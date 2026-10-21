@@ -617,5 +617,864 @@ class IntegrityGateRealMedia(unittest.TestCase):
         self.assertIn("decode", res["reason"])
 
 
+class StreamingFormatAndManifestDiagnostics(unittest.TestCase):
+    """Phase 2 (1-3, 6): streaming-format detection, HLS/DASH/SABR manifest
+    diagnostics, DRM/EME detection, and highest-quality non-DRM selection."""
+
+    def test_hls_dash_sabr_and_progressive_manifest_diagnostics(self):
+        info = {
+            "formats": [
+                {
+                    "format_id": "hls-audio-128",
+                    "protocol": "m3u8_native",
+                    "manifest_url": "https://cf-hls-media.sndcdn.com/playlist.m3u8",
+                    "ext": "m4a",
+                    "acodec": "mp4a.40.2",
+                    "vcodec": "none",
+                    "abr": 128,
+                    "asr": 44100,
+                    "fragments": [{"url": "seg1.ts"}, {"url": "seg2.ts"}],
+                },
+                {
+                    "format_id": "dash-opus-160",
+                    "protocol": "http_dash_segments",
+                    "manifest_url": "https://manifest.googlevideo.com/api/manifest/dash/id/123.mpd",
+                    "ext": "webm",
+                    "acodec": "opus",
+                    "vcodec": "none",
+                    "abr": 160,
+                    "asr": 48000,
+                },
+                {
+                    "format_id": "251",
+                    "protocol": "https",
+                    "ext": "webm",
+                    "acodec": "opus",
+                    "vcodec": "none",
+                    "abr": 160,
+                    "asr": 48000,
+                },
+            ]
+        }
+        diag = recover_service.inspect_stream_diagnostics(info, platform="youtube")
+        self.assertTrue(diag["has_hls"])
+        self.assertTrue(diag["has_dash"])
+        self.assertTrue(diag["has_progressive"])
+        self.assertEqual(diag["fragmented_format_count"], 2)
+        self.assertEqual(diag["drm_status"], "none")
+        self.assertFalse(diag["eme_detected"])
+        self.assertEqual(diag["accessible_audio_format_count"], 3)
+        # Progressive 160k opus beats DASH 160k opus due to transport rank.
+        self.assertEqual(diag["best_audio_format"]["format_id"], "251")
+        self.assertEqual(diag["best_audio_format"]["transport"], "progressive")
+
+    def test_partial_vs_protected_drm_detection_and_key_systems(self):
+        partial_info = {
+            "formats": [
+                {
+                    "format_id": "drm-wv",
+                    "protocol": "http_dash_segments",
+                    "ext": "m4a",
+                    "acodec": "mp4a.40.2",
+                    "vcodec": "none",
+                    "has_drm": True,
+                    "drm": "widevine",
+                    "abr": 256,
+                },
+                {
+                    "format_id": "140",
+                    "protocol": "https",
+                    "ext": "m4a",
+                    "acodec": "mp4a.40.2",
+                    "vcodec": "none",
+                    "abr": 128,
+                },
+            ]
+        }
+        partial_diag = recover_service.inspect_stream_diagnostics(partial_info, platform="youtube")
+        self.assertEqual(partial_diag["drm_status"], "partial")
+        self.assertTrue(partial_diag["eme_detected"])
+        self.assertIn("widevine", partial_diag["key_systems"])
+        self.assertEqual(partial_diag["accessible_audio_format_count"], 1)
+        self.assertEqual(partial_diag["best_audio_format"]["format_id"], "140")
+
+        protected_info = {
+            "formats": [
+                {
+                    "format_id": "drm-only",
+                    "protocol": "http_dash_segments",
+                    "ext": "m4a",
+                    "acodec": "mp4a.40.2",
+                    "has_drm": True,
+                    "drm": "com.widevine.alpha",
+                }
+            ]
+        }
+        prot_diag = recover_service.inspect_stream_diagnostics(protected_info, platform="youtube")
+        self.assertEqual(prot_diag["drm_status"], "protected")
+        self.assertTrue(prot_diag["eme_detected"])
+        self.assertEqual(prot_diag["accessible_audio_format_count"], 0)
+        self.assertIsNone(prot_diag["best_audio_format"])
+
+    def test_fetch_one_refuses_genuinely_drm_protected_stream_before_download(self):
+        drm_info = {
+            "title": "Protected Track",
+            "uploader": "Me",
+            "duration": 180,
+            "webpage_url": "https://www.youtube.com/watch?v=drm1",
+            "formats": [
+                {
+                    "format_id": "wv-1",
+                    "protocol": "http_dash_segments",
+                    "ext": "m4a",
+                    "acodec": "mp4a.40.2",
+                    "has_drm": True,
+                    "drm": "widevine",
+                }
+            ],
+        }
+        fake_mod = _make_fake(info=drm_info)
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=drm1", [], run_id="r_drm",
+                    ydl_module=fake_mod)
+        self.assertFalse(out["recovered"])
+        self.assertEqual(out["category"], "genuinely-DRM")
+        self.assertEqual(out["provenance_status"], "genuinely-DRM")
+
+
+class ProviderAuthAndProvenanceDiagnostics(unittest.TestCase):
+    """Phase 2 (4-5) & Phase 3: provider auth diagnostics and 7-state provenance."""
+
+    def test_auth_diagnostics_never_expose_cookie_contents(self):
+        cookie_state = {
+            "state": "ok",
+            "configured": True,
+            "signature": "size=512:mtime=1700000000",
+            "message": "Cookies file present and passed smoke check.",
+        }
+        diag = recover_service.recover_auth_diagnostics(
+            info={"availability": "private"},
+            error_text="",
+            cookie_info=cookie_state,
+        )
+        self.assertEqual(diag["cookie_state"], "ok")
+        self.assertTrue(diag["authenticated_session_likely"])
+        self.assertTrue(diag["auth_required_by_target"])
+        self.assertEqual(diag["session_status"], "ready")
+        serialized = str(diag)
+        self.assertNotIn("SAPISID", serialized)
+        self.assertNotIn("oauth_token", serialized)
+
+    def test_provenance_distinguishes_all_required_states(self):
+        # 1. accessible
+        p_acc = recover_service.classify_media_provenance(
+            probe={"ok": True, "stream_diagnostics": {"drm_status": "none", "total_format_count": 2, "accessible_audio_format_count": 2}},
+        )
+        self.assertEqual(p_acc, "accessible")
+
+        # 2. auth-needed
+        p_auth = recover_service.classify_media_provenance(
+            error_category="auth-needed",
+        )
+        self.assertEqual(p_auth, "auth-needed")
+
+        # 3. unsupported-format
+        p_unsup = recover_service.classify_media_provenance(
+            probe={"ok": True, "stream_diagnostics": {"drm_status": "none", "total_format_count": 2, "accessible_audio_format_count": 0}},
+        )
+        self.assertEqual(p_unsup, "unsupported-format")
+
+        # 4. genuinely-DRM
+        p_drm = recover_service.classify_media_provenance(
+            probe={"ok": True, "stream_diagnostics": {"drm_status": "protected", "total_format_count": 1, "accessible_audio_format_count": 0}},
+        )
+        self.assertEqual(p_drm, "genuinely-DRM")
+
+        # 5. unavailable
+        p_unavail = recover_service.classify_media_provenance(
+            error_category="expired-url",
+        )
+        self.assertEqual(p_unavail, "unavailable")
+
+        # 6. recovered
+        p_rec = recover_service.classify_media_provenance(staged=True)
+        self.assertEqual(p_rec, "recovered")
+
+        # 7. imported
+        p_imp = recover_service.classify_media_provenance(staged=True, imported=True)
+        self.assertEqual(p_imp, "imported")
+
+
+class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
+    """Phase 3: consume diagnostic reports from Streaming Security Lab while
+    stripping all secret keys, license payloads, PEM blocks, and cookies, and
+    never treating ClearKey interception as Widevine decryptability."""
+
+    def test_sanitize_diagnostic_report_strips_keys_licenses_and_cookies(self):
+        raw_lab_report = {
+            "source_url": "https://www.youtube.com/watch?v=drm_test",
+            "source_platform": "youtube",
+            "key_systems": ["org.w3.clearkey", "com.widevine.alpha"],
+            "session_types": ["temporary"],
+            "message_types": ["license-request", "license-release"],
+            "key_statuses": ["usable", "expired", "malicious-status-injected"],
+            # Forbidden fields that MUST be stripped:
+            "recovered_keys": [
+                {"kid": "00112233445566778899aabbccddeeff", "k": "ffeeddccbbaa99887766554433221100"}
+            ],
+            "content_key": "deadbeefcafebabe0011223344556677",
+            "license_response": "eyJrZXlzIjpbXX0=",
+            "pssh": "AAAANHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7Q==",
+            "cookies": "SID=secret_cookie_value; SAPISID=secret_sapisid",
+            # Non-secret sentinel: sanitize_diagnostic_report redacts this by
+            # FIELD NAME ("private_key"), so the fixture needs no key-shaped
+            # value (and none belongs in the repo / its secret scanner).
+            "private_key": "SENTINEL_private_key_value_not_a_real_key",
+            "note": "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret",
+        }
+        sanitized = recover_service.sanitize_diagnostic_report(raw_lab_report)
+        self.assertTrue(sanitized["ok"])
+        self.assertEqual(sanitized["schema"], "beets.recover.diagnostic.v1")
+        self.assertFalse(sanitized["decryption_supported"])
+        self.assertFalse(sanitized["widevine_decryptable"])
+        self.assertTrue(len(sanitized["redacted_fields"]) > 0)
+        # Canonical ids only (raw key-system strings are never echoed back).
+        self.assertIn("clearkey", sanitized["key_systems"])
+        self.assertIn("widevine", sanitized["key_systems"])
+        self.assertNotIn("org.w3.clearkey", sanitized["key_systems"])
+
+        self.assertEqual(sanitized["key_statuses"], ["expired", "usable"])
+        self.assertEqual(sanitized["provenance_status"], "genuinely-DRM")
+
+        dumped = str(sanitized)
+        self.assertNotIn("00112233445566778899aabbccddeeff", dumped)
+        self.assertNotIn("ffeeddccbbaa99887766554433221100", dumped)
+        self.assertNotIn("deadbeefcafebabe0011223344556677", dumped)
+        self.assertNotIn("eyJrZXlzIjpbXX0=", dumped)
+        self.assertNotIn("secret_cookie_value", dumped)
+        self.assertNotIn("SENTINEL_private_key_value_not_a_real_key", dumped)
+        # private_key is redacted under the fixed "key_material" category (F3a).
+        self.assertIn("key_material", sanitized["redacted_fields"])
+        self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", dumped)
+
+    def test_sanitizer_does_not_leak_event_keysystem_or_url_tokens_and_tolerates_bad_types(self):
+        # F-3: a secret in an event keySystem must NOT be echoed into key_systems.
+        o = recover_service.sanitize_diagnostic_report({
+            "events": [{"keySystem": "bearer eyJsecret_in_event_leak"}],
+            "key_system": "com.widevine.alpha",
+        })
+        self.assertEqual(o["key_systems"], ["widevine"])
+        self.assertNotIn("bearer", str(o["key_systems"]).lower())
+        # F-5: a URL query token must be stripped from the echoed source_url.
+        o2 = recover_service.sanitize_diagnostic_report(
+            {"source_url": "https://x.com/watch?v=1&access_token=LEAKED_TOKEN123"})
+        self.assertNotIn("LEAKED_TOKEN123", str(o2))
+        # F-9: malformed field types must not crash the sanitizer.
+        for bad in ({"key_systems": 1}, {"message_types": 1}, {"session_types": 5},
+                    {"key_statuses": True}, {"events": [{"statuses": True}]},
+                    {"formats": 1}, {"drm_families": True}):  # F3b: also inside inspect_stream_diagnostics
+            self.assertTrue(recover_service.sanitize_diagnostic_report(bad)["ok"])
+        # F3a: redacted_fields must be FIXED categories, never raw field names.
+        o = recover_service.sanitize_diagnostic_report(
+            {"secretKID_LEAKED_0123456789ABCDEF": "x", "private_key_SECRETNAME_DEADBEEF": "y"})
+        self.assertNotIn("LEAKED", str(o))
+        self.assertNotIn("SECRETNAME", str(o))
+        self.assertTrue(set(o["redacted_fields"]) <= {
+            "cookie", "license", "credential", "secret", "key_material",
+            "inline_secret_value", "key_statuses.kid", "events.statuses.kid"}, o["redacted_fields"])
+
+    def test_validator_rejects_hardlinked_staged_file(self):
+        # Finding F-1 regression: a hard link under recovered/ (nlink>1) that could
+        # point at a library file must be refused before any in-place tag write.
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered = Path(tmp) / "recovered" / "yt" / "r1"
+            recovered.mkdir(parents=True, exist_ok=True)
+            target = recovered / "a.flac"
+            target.write_bytes(b"\x00" * 4096)
+            link = recovered / "b.flac"
+            try:
+                os.link(target, link)  # hard link -> nlink == 2
+            except OSError:
+                self.skipTest("hard links not supported on this filesystem")
+            Path(str(link) + ".recover.json").write_text('{"source_url": "https://x/y"}', encoding="utf-8")
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp):
+                resolved, sidecar, err = recover_service._validate_staged_recover_file(str(link))
+            self.assertIsNone(resolved)
+            self.assertIn("hard link", err)
+
+    def test_diagnostics_route_returns_sanitized_report(self):
+        client = app_module.app.test_client()
+        with mock.patch.object(app_module, "_security_auth_disabled", return_value=True):
+            resp = client.post(
+                "/api/recover/diagnostics",
+                json={
+                    "report": {
+                        "source_platform": "soundcloud",
+                        "formats": [{"format_id": "hls_mp3", "protocol": "m3u8_native", "acodec": "mp3"}],
+                        "recovered_keys": [{"k": "secret_key_material_must_not_survive"}],
+                    }
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["decryption_supported"])
+        self.assertFalse(data["widevine_decryptable"])
+        self.assertEqual(data["provenance_status"], "accessible")
+        self.assertNotIn("secret_key_material_must_not_survive", str(data))
+
+
+class RecoverJobPersistenceAndRetries(unittest.TestCase):
+    """Phase 2 (7): persistent recovery run history and retry of failed items."""
+
+    def test_persist_list_and_retry_recover_run(self):
+        from backend.web_manager_config_store import WebManagerConfigStore
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_store = WebManagerConfigStore(data_root=Path(tmp))
+            with mock.patch("backend.web_manager_config_store.get_config_store", return_value=fake_store):
+                recover_service._upsert_recover_run({
+                    "run_id": "run_101",
+                    "job_id": "job_101",
+                    "status": "partial",
+                    "urls": [
+                        "https://www.youtube.com/watch?v=ok1",
+                        "https://www.youtube.com/watch?v=fail_auth",
+                        "https://www.youtube.com/watch?v=drm_locked",
+                    ],
+                    "recovered": [
+                        {
+                            "url": "https://www.youtube.com/watch?v=ok1",
+                            "recovered": True,
+                            "provenance_status": "recovered",
+                        },
+                    ],
+                    "failed": [
+                        {
+                            "url": "https://www.youtube.com/watch?v=fail_auth",
+                            "recovered": False,
+                            "category": "auth-needed",
+                            "provenance_status": "auth-needed",
+                        },
+                        {
+                            "url": "https://www.youtube.com/watch?v=drm_locked",
+                            "recovered": False,
+                            "category": "genuinely-DRM",
+                            "provenance_status": "genuinely-DRM",
+                        },
+                    ],
+                })
+                listed = recover_service.recover_list_runs()
+                self.assertEqual(listed["total"], 1)
+                loaded = recover_service.recover_get_run("run_101")
+                self.assertIsNotNone(loaded)
+                self.assertEqual(loaded["run_id"], "run_101")
+
+                # Retry should pick up fail_auth (and skip ok1 + drm_locked).
+                with _allow_public(), \
+                     mock.patch.object(recover_service, "start_recover_fetch",
+                                       return_value=({"ok": True, "job_id": "job_retry_1", "run_id": "run_102"}, 200)) as mock_fetch:
+                    retry_body, status = recover_service.start_recover_retry({"run_id": "run_101"})
+                self.assertEqual(status, 200)
+                self.assertTrue(retry_body["ok"])
+                self.assertEqual(retry_body["retried_urls"], ["https://www.youtube.com/watch?v=fail_auth"])
+                mock_fetch.assert_called_once()
+
+    def test_runs_route_and_retry_route(self):
+        from backend.web_manager_config_store import WebManagerConfigStore
+        client = app_module.app.test_client()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_store = WebManagerConfigStore(data_root=Path(tmp))
+            with mock.patch("backend.web_manager_config_store.get_config_store", return_value=fake_store), \
+                 mock.patch.object(app_module, "_security_auth_disabled", return_value=True):
+                recover_service._upsert_recover_run({
+                    "run_id": "run_route_1",
+                    "status": "failed",
+                    "urls": ["https://soundcloud.com/me/private-track"],
+                    "recovered": [],
+                    "failed": [
+                        {"url": "https://soundcloud.com/me/private-track", "recovered": False, "category": "auth-needed"}
+                    ],
+                })
+                r_get = client.get("/api/recover/runs?run_id=run_route_1")
+                self.assertEqual(r_get.status_code, 200)
+                self.assertEqual(r_get.get_json()["run"]["run_id"], "run_route_1")
+
+                with _allow_public(), \
+                     mock.patch.object(recover_service, "start_recover_fetch",
+                                       return_value=({"ok": True, "job_id": "j_retry", "run_id": "run_route_2"}, 200)):
+                    r_retry = client.post(
+                        "/api/recover/retry",
+                        json={"run_id": "run_route_1"},
+                    )
+                self.assertEqual(r_retry.status_code, 200)
+                rdata = r_retry.get_json()
+                self.assertTrue(rdata["ok"])
+                self.assertEqual(rdata["retried_urls"], ["https://soundcloud.com/me/private-track"])
+
+
+class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
+    """Phase 2 (8): audio verification, AcoustID fingerprinting, MusicBrainz
+    matching, and singleton fallback for original/unreleased uploads."""
+
+    def _stage_with_sidecar(self, tmp_dir: str, fname: str = "track.flac") -> str:
+        stage_root = Path(tmp_dir) / "recovered"
+        run_dir = stage_root / "youtube" / "run1"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = run_dir / fname
+        audio_path.write_bytes(b"\x00" * 4096)
+        sidecar = Path(str(audio_path) + ".recover.json")
+        sidecar.write_text(
+            '{"source_url": "https://www.youtube.com/watch?v=abc", '
+            '"source_platform": "youtube", "uploader": "DJ Self", '
+            '"title": "My Unreleased VIP", "duration": 200.0, '
+            '"codec": "flac", "quality": "original"}',
+            encoding="utf-8",
+        )
+        return str(audio_path)
+
+    def test_acoustid_and_mb_match_selects_acoustid_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "matched",
+                     "acoustid_match_score": 0.96,
+                     "mb_recording_id_candidate": "rec-123",
+                     "mb_release_group_id_candidate": "rg-456",
+                     "candidates": [{"artist": "DJ Self", "title": "My Unreleased VIP", "album": "Self Released EP"}],
+                 }):
+                res = recover_service.verify_and_match_staged_upload(audio_path)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["match_source"], "acoustid")
+        self.assertEqual(res["mb_trackid"], "rec-123")
+        self.assertEqual(res["mb_releasegroupid"], "rg-456")
+        self.assertEqual(res["album"], "Self Released EP")
+
+    def test_unmatched_original_upload_uses_singleton_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     # REAL no-candidate decision shape from acoustid_service: a
+                     # genuinely-original upload returns conflicts=["no_acoustid_result"].
+                     # (Finding 2 regression — the old gate rejected on ANY conflicts.)
+                     "fingerprint_status": "no_result",
+                     "acoustid_status": "no_result",
+                     "metadata_agreement": "degraded",
+                     "conflicts": ["no_acoustid_result"],
+                     "acoustid_match_score": 0.0,
+                 }), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]) as mock_mb_search:
+                res = recover_service.verify_and_match_staged_upload(audio_path)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["match_source"], "upload_metadata_singleton")
+        self.assertEqual(res["mb_trackid"], "")
+        # Verify _mb_recording_search is called with (title, artist, limit=5)
+        mock_mb_search.assert_called_once_with("My Unreleased VIP", "DJ Self", limit=5)
+
+    def test_acoustid_reject_and_review_decisions_block_singleton_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            # 1. acoustid mismatch / final_action="reject" despite high raw score
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "mismatch",
+                     "identity_status": "conflict",
+                     "final_action": "reject",
+                     "acoustid_match_score": 0.95,
+                     "mb_recording_id_candidate": "wrong-rec-999",
+                     "conflicts": ["acoustid_artist_mismatch"],
+                 }):
+                res_reject = recover_service.verify_and_match_staged_upload(audio_path)
+            self.assertFalse(res_reject["ok"])
+            self.assertEqual(res_reject["status"], "identity_conflict")
+            self.assertEqual(res_reject["final_action"], "reject")
+
+            # 2. acoustid unavailable / final_action="review" blocks silent singleton fallback
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "unavailable",
+                     "identity_status": "unverified",
+                     "final_action": "review",
+                     "acoustid_match_score": 0.0,
+                 }):
+                res_review = recover_service.verify_and_match_staged_upload(audio_path)
+            self.assertFalse(res_review["ok"])
+            self.assertEqual(res_review["status"], "review_required")
+            self.assertEqual(res_review["final_action"], "review")
+
+    def test_genuinely_original_upload_real_producer_shape_imports(self):
+        # REAL _audio_identity_decision shape for a no-candidate original upload:
+        # final_action="review" + acoustid_status="no_result" (see
+        # acoustid_service._audio_identity_decision lines ~186-187/245-254). This
+        # must fall through to the singleton fallback, NOT get parked in review.
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "no_result",
+                     "identity_status": "review_required",
+                     "final_action": "review",
+                     "conflicts": ["no_acoustid_result"],
+                     "acoustid_match_score": 0.0,
+                 }), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                res = recover_service.verify_and_match_staged_upload(audio_path)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["match_source"], "upload_metadata_singleton")
+        self.assertEqual(res["mb_trackid"], "")
+
+    def test_provider_outage_routes_to_review_not_reject_or_import(self):
+        # Could-not-verify (AcoustID lookup failed): acoustid_ -PREFIXED conflict
+        # token + failed status. A provider outage must NOT auto-import unverified
+        # audio and must NOT hard-reject as an identity conflict -> review.
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "failed",
+                     "identity_status": "review_required",
+                     "final_action": "review",
+                     "conflicts": ["acoustid_lookup_failed"],
+                     "acoustid_match_score": 0.0,
+                 }):
+                res = recover_service.verify_and_match_staged_upload(audio_path)
+        self.assertFalse(res["ok"], res)
+        self.assertEqual(res["status"], "review_required")
+        self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
+
+    def test_acoustid_unconfigured_or_auth_failed_routes_to_review_not_reject(self):
+        # The producer emits not_configured (default when ACOUSTID_API_KEY unset)
+        # and auth_failed as could-not-verify. These must route to REVIEW, never a
+        # false identity_conflict — otherwise a fresh install rejects every upload.
+        for status in ("not_configured", "auth_failed"):
+            with tempfile.TemporaryDirectory() as tmp:
+                audio_path = self._stage_with_sidecar(tmp)
+                with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                     mock.patch.object(recover_service, "recover_integrity_check",
+                                       return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                     mock.patch.object(recover_service, "inspect_audio_file",
+                                       return_value={"ok": True, "codec": "flac"}), \
+                     mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                         "acoustid_status": status,
+                         "identity_status": "review_required",
+                         "final_action": "review",
+                         "conflicts": [f"acoustid_{status}"],
+                         "acoustid_match_score": 0.0,
+                     }):
+                    res = recover_service.verify_and_match_staged_upload(audio_path)
+            self.assertFalse(res["ok"], (status, res))
+            self.assertEqual(res["status"], "review_required", (status, res))
+            self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
+
+
+class SafeStagingAndBeetsImport(unittest.TestCase):
+    """Phase 2 (9-10): safe staging validation, non-destructive Beets import,
+    existing library file protection, and playlist coverage refresh."""
+
+    def test_import_rejects_paths_outside_staging_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside.flac"
+            outside.write_bytes(b"\x00" * 1024)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=os.path.join(tmp, "downloads")):
+                resolved, sidecar, err = recover_service._validate_staged_recover_file(str(outside))
+                self.assertIsNone(resolved)
+                self.assertIsNone(sidecar)
+                self.assertIn("DOWNLOADS_ROOT/recovered", err)
+
+    def test_import_never_overwrites_existing_library_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage_root = Path(tmp) / "recovered" / "youtube" / "run2"
+            stage_root.mkdir(parents=True, exist_ok=True)
+            staged = stage_root / "song.opus"
+            staged.write_bytes(b"\x00" * 4096)
+            Path(str(staged) + ".recover.json").write_text(
+                '{"source_url": "https://www.youtube.com/watch?v=dup1", '
+                '"source_platform": "youtube", "uploader": "Me", '
+                '"title": "Already In Library", "duration": 180.0}',
+                encoding="utf-8",
+            )
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = [
+                {
+                    "id": 42,
+                    "title": "Already In Library",
+                    "artist": "Me",
+                    "length": 180.2,
+                    "path": "/music/Me/Album/01 - Already In Library.opus",
+                }
+            ]
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 180.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "opus"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "no_match",
+                     "acoustid_match_score": 0.0,
+                 }), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter)
+
+            self.assertFalse(out["imported"])
+            self.assertEqual(out["status"], "skipped_existing")
+            self.assertEqual(out["existing_item_id"], 42)
+            # Crucial invariant: run_import was NEVER called and staged file remains untouched.
+            fake_adapter.run_import.assert_not_called()
+            self.assertTrue(staged.exists())
+
+    def test_safe_singleton_import_copies_without_moving_and_updates_playlists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage_root = Path(tmp) / "recovered" / "soundcloud" / "run3"
+            stage_root.mkdir(parents=True, exist_ok=True)
+            staged = stage_root / "my_track.flac"
+            staged.write_bytes(b"\x00" * 4096)
+            Path(str(staged) + ".recover.json").write_text(
+                '{"source_url": "https://soundcloud.com/me/my-track", '
+                '"source_platform": "soundcloud", "uploader": "DJ Me", '
+                '"title": "My Track", "duration": 210.0, '
+                '"codec": "flac", "quality": "original"}',
+                encoding="utf-8",
+            )
+            fake_adapter = mock.MagicMock()
+            # Pre-import conflict check returns empty; post-import read-back returns item #99.
+            fake_adapter.find_items_by_query.side_effect = [
+                [],
+                [{"id": 99, "title": "My Track", "artist": "DJ Me", "path": "/music/DJ Me/My Track.flac"}],
+            ]
+            fake_adapter.run_import.return_value = {
+                "ok": True, "success": True, "returncode": 0, "stdout": "imported", "stderr": ""
+            }
+
+            # Finding 1 regression: inject a REAL TransactionStore so the import
+            # must create a valid, audited transaction record. The old code called
+            # transactions.create()/update_status() with a signature the real store
+            # rejects (TypeError, swallowed) -> transaction_id stayed None.
+            from backend.transaction_engine import TransactionStore
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch("backend.app_runtime.transactions", tx_store), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 210.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "fingerprint_status": "no_result",
+                     "acoustid_status": "no_result",
+                     "metadata_agreement": "degraded",
+                     "conflicts": ["no_acoustid_result"],
+                     "acoustid_match_score": 0.0,
+                 }), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter)
+
+            self.assertTrue(out["imported"], out)
+            self.assertEqual(out["imported_item_id"], 99)
+            self.assertEqual(out["status"], "imported")
+            self.assertEqual(out["provenance_status"], "imported")
+            # Audited: a transaction record was created and marked Completed.
+            self.assertTrue(out.get("transaction_id"), "import must create a transaction record")
+            tx_rec = tx_store._read(out["transaction_id"])
+            self.assertEqual(tx_rec["operation_type"], "Import")
+            self.assertEqual(tx_rec["status"], "Completed")
+            # Verify copy=True, move=False, duplicate_action="skip", singletons=True,
+            # autotag=False, quiet_fallback="skip", search_ids=None
+            _, kwargs = fake_adapter.run_import.call_args
+            self.assertTrue(kwargs["copy"])
+            self.assertFalse(kwargs["move"])
+            self.assertFalse(kwargs["autotag"])
+            self.assertEqual(kwargs["quiet_fallback"], "skip")
+            self.assertIsNone(kwargs["search_ids"])
+            self.assertEqual(kwargs["duplicate_action"], "skip")
+            self.assertTrue(kwargs["singletons"])
+            # Staged file is preserved
+            self.assertTrue(staged.exists())
+
+            # Verify playlist coverage refresh matches playlist referencing recovered track
+            pl_dir = Path(tmp) / "playlists"
+            pl_dir.mkdir(parents=True, exist_ok=True)
+            pl_manifest_path = pl_dir / "my-sc-uploads.playlist.json"
+            pl_manifest_path.write_text('{"name": "My SC Uploads"}', encoding="utf-8")
+            fake_manifest = {
+                "name": "My SC Uploads",
+                "desired_tracks": [
+                    {"title": "My Track", "artist": "DJ Me", "source_url": "https://soundcloud.com/me/my-track"}
+                ],
+            }
+            updated_manifest = {
+                "name": "My SC Uploads",
+                "desired_tracks": [
+                    {"title": "My Track", "artist": "DJ Me", "source_url": "https://soundcloud.com/me/my-track", "state": "imported"}
+                ],
+            }
+            with mock.patch.object(recover_service, "PLAYLIST_MANIFESTS_DIR", pl_dir), \
+                 mock.patch("backend.matching_service._invalidate_lib_cache"), \
+                 mock.patch("backend.playlist_service._playlist_ensure_state_dirs"), \
+                 mock.patch("backend.playlist_service._playlist_manifest_name_from_file", return_value=("My SC Uploads", fake_manifest)), \
+                 mock.patch("backend.playlist_service._playlist_find_track_row", return_value=(0, fake_manifest["desired_tracks"][0])), \
+                 mock.patch("backend.playlist_service._playlist_store_track_state") as mock_store_state, \
+                 mock.patch("backend.playlist_service._playlist_read_manifest", return_value=updated_manifest) as mock_read_man, \
+                 mock.patch("backend.playlist_service._playlist_write_local_membership") as mock_write_mem:
+                cov = recover_service.refresh_playlists_for_recovered_tracks([out])
+            self.assertEqual(cov["playlists_updated"], ["My SC Uploads"])
+            self.assertEqual(cov["tracks_covered"], 1)
+            mock_store_state.assert_called_once()
+            mock_read_man.assert_called_once_with("My SC Uploads")
+            mock_write_mem.assert_called_once_with("My SC Uploads", updated_manifest)
+
+    def test_skipped_import_and_missing_readback_are_not_marked_imported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage_root = Path(tmp) / "recovered" / "soundcloud" / "run4"
+            stage_root.mkdir(parents=True, exist_ok=True)
+            staged = stage_root / "skip_track.flac"
+            staged.write_bytes(b"\x00" * 4096)
+            Path(str(staged) + ".recover.json").write_text(
+                '{"source_url": "https://soundcloud.com/me/skip-track", '
+                '"source_platform": "soundcloud", "uploader": "DJ Me", '
+                '"title": "Skip Track", "duration": 210.0}',
+                encoding="utf-8",
+            )
+            # Case A: Beets skips due to blank_identity -> status="import_failed", imported=False
+            fake_adapter_skip = mock.MagicMock()
+            fake_adapter_skip.find_items_by_query.return_value = []
+            fake_adapter_skip.run_import.return_value = {
+                "success": True,
+                "skipped_paths": [str(staged)],
+                "skipped": [{"path": str(staged), "reason": "blank_identity"}],
+            }
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 210.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={"acoustid_status": "no_match"}), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out_skip = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter_skip)
+            self.assertFalse(out_skip["imported"])
+            self.assertEqual(out_skip["status"], "import_failed")
+            self.assertIn("blank_identity", out_skip["error"])
+
+            # Case B: run_import succeeds without skip, but post-import readback finds nothing -> import_failed
+            fake_adapter_noread = mock.MagicMock()
+            fake_adapter_noread.find_items_by_query.return_value = []
+            fake_adapter_noread.run_import.return_value = {"success": True, "skipped_paths": [], "skipped": []}
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 210.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={"acoustid_status": "no_match"}), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out_noread = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter_noread)
+            self.assertFalse(out_noread["imported"])
+            self.assertEqual(out_noread["status"], "import_failed")
+            self.assertIn("without adding item to library", out_noread["error"])
+
+    def test_persisted_run_and_provenance_strip_url_query_tokens_and_nested_secrets(self):
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "song.m4a"
+            staged.write_bytes(b"\x00" * 128)
+            sidecar_path = recover_service._write_provenance(str(staged), {
+                "source_url": "https://user:pass@www.youtube.com/watch?v=abc123&token=SECRET_TOK&sig=DEAD",
+                "title": "Clean Song",
+                "nested": {"cookie": "SID=secret", "safe": "value"},
+            })
+            sidecar_text = Path(sidecar_path).read_text(encoding="utf-8")
+            self.assertNotIn("SECRET_TOK", sidecar_text)
+            self.assertNotIn("DEAD", sidecar_text)
+            self.assertNotIn("user:pass", sidecar_text)
+            self.assertNotIn("SID=secret", sidecar_text)
+            self.assertIn("v=abc123", sidecar_text)
+
+            clean_run = recover_service._sanitize_persisted_run({
+                "run_id": "r_sec",
+                "status": "failed",
+                "urls": ["https://soundcloud.com/me/track?oauth_token=SC_SECRET&keep=1"],
+                "failed": [
+                    {
+                        "url": "https://soundcloud.com/me/track?oauth_token=SC_SECRET",
+                        "message": "Forbidden: Cookie: SAPISID=12345",
+                        "secret_key": "deadbeef",
+                    }
+                ],
+                "unexpected_top_level_key": "should_be_dropped",
+            })
+            serialized = _json.dumps(clean_run)
+            self.assertNotIn("SC_SECRET", serialized)
+            self.assertNotIn("SAPISID=12345", serialized)
+            self.assertNotIn("deadbeef", serialized)
+            self.assertNotIn("unexpected_top_level_key", clean_run)
+            self.assertEqual(clean_run["urls"], ["https://soundcloud.com/me/track?keep=1"])
+
+    def test_auto_import_failure_updates_run_status_and_retry_recovers_from_staging(self):
+        from backend.web_manager_config_store import WebManagerConfigStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_store = WebManagerConfigStore(data_root=Path(tmp) / "cfg")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            fake_adapter.run_import.return_value = {"ok": False, "error": "engine busy"}
+
+            with _fetch_patches(tmp), \
+                 mock.patch("backend.web_manager_config_store.get_config_store", return_value=fake_store), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={"acoustid_status": "no_match"}), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                summary = recover_service.recover_fetch_job(
+                    ["https://www.youtube.com/watch?v=abc"],
+                    [],
+                    run_id="run_autoimp_fail",
+                    ydl_module=_make_fake(),
+                    auto_import=True,
+                    adapter=fake_adapter,
+                )
+                self.assertFalse(summary["ok"])
+                self.assertTrue(summary["partial"])
+                self.assertEqual(summary["import_failed_count"], 1)
+
+                persisted = recover_service.recover_get_run("run_autoimp_fail")
+                self.assertEqual(persisted["status"], "failed")
+                self.assertEqual(persisted["import_failed_count"], 1)
+
+                # Retry when all URLs were staged but import failed should retry from staging
+                with mock.patch.object(
+                    recover_service,
+                    "start_recover_import",
+                    return_value=({"ok": True, "job_id": "job_imp_retry", "run_id": "run_autoimp_fail"}, 200),
+                ) as mock_imp:
+                    retry_body, r_status = recover_service.start_recover_retry({"run_id": "run_autoimp_fail"})
+                self.assertEqual(r_status, 200)
+                self.assertTrue(retry_body["ok"])
+                self.assertEqual(len(retry_body["retried_staged_files"]), 1)
+                mock_imp.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

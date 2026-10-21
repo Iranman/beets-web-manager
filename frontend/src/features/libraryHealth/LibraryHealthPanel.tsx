@@ -17,6 +17,7 @@ import { CleanEmptyState, CleanMetricGrid, CleanPanelHeader, CleanSection } from
 import { JobStatusCard } from '../../components/JobStatusCard';
 import { useJobPoll } from '../../lib/hooks';
 import { UntrackedRecoverySection } from './UntrackedRecoverySection';
+import { RecoverUploadsSection } from './RecoverUploadsSection';
 
 interface TemplateTokenItem {
   path: string;
@@ -1383,6 +1384,8 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
           </CleanSection>
 
           <UntrackedRecoverySection />
+
+          <RecoverUploadsSection />
 
         </div>
       )}
