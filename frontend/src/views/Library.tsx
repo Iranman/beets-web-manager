@@ -7,6 +7,7 @@ import {
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
+import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
@@ -16,6 +17,7 @@ import { getAlbumTracks, getArtistImageUrl, getLibraryArtRepairReport } from '..
 import type { ArtRepairItem, ArtRepairReportResponse } from '../api/types';
 import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';
 import { apiGet } from '../lib/api';
+import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { AlbumCleanupModal } from '../components/AlbumCleanupModal';
 import { TrackReplacementModal } from '../components/TrackReplacementModal';
@@ -135,8 +137,9 @@ function artistArtUrl(artist: LibraryArtist, libraryVersion?: number) {
 // shared cap, all of them fired /api/artist-image-url simultaneously on
 // mount -- flooding both the browser's per-origin connection limit and the
 // backend's Waitress thread pool (WEBCONTROL_THREADS, default 8), badly
-// enough that even the already-fast, already-cached /api/library request
-// got stuck queued behind hundreds of rivals for 20+ seconds. This queue
+// enough that even the /api/library request (which serves the fast engine-only
+// tree immediately and reconciles disk state in a background job) got stuck
+// queued behind hundreds of rivals for 20+ seconds. This queue
 // caps how many of these run at once; everything past the cap waits its
 // turn instead of piling on all at once.
 const ARTIST_IMAGE_FETCH_CONCURRENCY = 4;
@@ -1162,23 +1165,58 @@ export default function Library() {
   const [cleanupTarget, setCleanupTarget] = useState<AlbumRow | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<LibraryTrack | null>(null);
 
-  const loadLibrary = useCallback(async (includeTracks = false) => {
-    setLoading(true);
-    setError('');
+  // `background` fetches (disk-reconciliation polling) must not toggle the
+  // blocking spinner or clear errors -- they silently swap in the richer tree.
+  const loadLibrary = useCallback(async (includeTracks = false, background = false) => {
+    if (!background) {
+      setLoading(true);
+      setError('');
+    }
     try {
       const suffix = includeTracks ? '&include_tracks=1' : '';
       const next = await apiGet<LibraryResponse>(`/api/library?include_disk_only=1${suffix}`);
       setData(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (!background) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
+
+  // The first /api/library response is the fast engine-only tree
+  // (`reconciled:false`) so the page paints immediately while the backend
+  // reconciles disk state in a background job. Poll (bounded, backing off) until
+  // the payload carries disk state -- disk-only albums + missing-on-disk flags --
+  // then stop. Polls run in the background so they never show the blocking spinner.
+  // A new engine tree (library_version change) restarts the poll budget.
+  const RECONCILE_POLL_BASE_MS = 2_000;
+  const RECONCILE_POLL_MAX_MS = 15_000;
+  const MAX_RECONCILE_POLLS = 15;
+
+  const reconciling = Boolean(data && data.reconciled === false);
+  const libraryVersionForPoll = data?.library_version;
+  const tracksIncludedForPoll = Boolean(data?.tracks_included);
+  const [reconcilePolls, setReconcilePolls] = useState(0);
+
+  useEffect(() => {
+    setReconcilePolls(0);
+  }, [libraryVersionForPoll]);
+
+  const reconcilePollDelay =
+    reconciling && reconcilePolls < MAX_RECONCILE_POLLS
+      ? Math.min(RECONCILE_POLL_BASE_MS * 2 ** reconcilePolls, RECONCILE_POLL_MAX_MS)
+      : null;
+  const reconcilePollActive = reconcilePollDelay !== null;
+  const reconcileStalled = reconciling && !reconcilePollActive;
+
+  useInterval(() => {
+    setReconcilePolls((n) => n + 1);
+    void loadLibrary(tracksIncludedForPoll, true);
+  }, reconcilePollDelay);
 
   useEffect(() => {
     let cancelled = false;
@@ -1402,6 +1440,23 @@ export default function Library() {
           </div>
           <div className="flex flex-col gap-1 text-xs text-zinc-500 lg:items-end lg:text-right">
             <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
+            {reconcilePollActive ? (
+              <span className="flex items-center gap-1 text-amber-400/80 lg:justify-end" aria-live="polite">
+                <CircularProgress size={12} color="inherit" />
+                Checking disk for missing &amp; not-imported files…
+              </span>
+            ) : reconcileStalled ? (
+              <span className="flex items-center gap-1 text-zinc-400 lg:justify-end" aria-live="polite">
+                Disk check incomplete
+                <button
+                  type="button"
+                  className="text-zinc-300 underline hover:text-zinc-100"
+                  onClick={() => setReconcilePolls(0)}
+                >
+                  retry
+                </button>
+              </span>
+            ) : null}
             <button type="button" className="text-zinc-300 underline hover:text-zinc-100" onClick={() => handleNavigate('/library/missing-ids')}>
               Missing MusicBrainz IDs
             </button>
