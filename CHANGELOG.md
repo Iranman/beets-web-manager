@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.11.0 - 2026-10-21
+
+### Upgrade Notes
+
+- **Playlist auto-sync no longer runs by default.** If you relied on the background playlist scheduler, it is now off after upgrade and manual/explicit syncs are unaffected. To restore automatic syncing, set `PLAYLIST_AUTO_SYNC=1` (accepts `1`/`true`/`yes`/`on`); tune the cadence with `PLAYLIST_AUTO_SYNC_INTERVAL` (default `300` s, minimum `60`). No migration or other operator action is required.
 
 ### Changed
 
