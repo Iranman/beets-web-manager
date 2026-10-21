@@ -289,6 +289,8 @@ class ApiContractTests(unittest.TestCase):
             ("/api/recover/retry", "api_recover_retry"),
             ("/api/recover/import", "api_recover_import"),
             ("/api/recover/diagnostics", "api_recover_diagnostics"),
+            ("/api/library/folder-placeholders/apply", "apply_folder_placeholders_job"),
+            ("/api/library/folder-placeholders/rollback", "rollback_folder_placeholders_job"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)

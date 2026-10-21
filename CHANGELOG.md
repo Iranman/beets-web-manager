@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- **Fix album folders whose template placeholder was never substituted.** A new controlled-mutation apply complements the existing folder-placeholder *scan* (`POST /api/library/folder-placeholders/scan`): `POST /api/library/folder-placeholders/apply` renames album folders literally named like `Hot & Wet (2003){Album MbId}` (or `{Track ArtistMbId}`) to their clean name `Hot & Wet (2003)`. It is a preview-first (`dry_run` defaults true; applying requires `confirmed: true`), cancellable, resumable `job_engine` job that goes entirely through the transaction engine — never an ad-hoc `os.rename`. Disk-only folders (not tracked by Beets) are renamed through the `folder_cleanup_v1` engine (confined to `MUSIC_ROOT`, symlinks and an existing target refused, folder identity re-checked at apply, recorded for rollback); DB-tracked folders (`db_item_count>0`) are relocated through Beets' own `Album.move()` so the DB item/album paths follow the files. Every row is re-verified live at apply time (source present, target still absent, tracked status) to avoid races with the background disk reconcile, and the 52-ish `target_exists` collision cases are never auto-fixed — they are surfaced for manual review. `POST /api/library/folder-placeholders/rollback` (by `job_id` or explicit `operations`) restores every renamed/relocated folder from the audit records in one call. Triggering the apply from the existing Cleanup/placeholder-scan UI is a follow-up (frontend); the endpoints are independently callable.
+
 ## v0.11.0 - 2026-10-21
 
 ### Upgrade Notes

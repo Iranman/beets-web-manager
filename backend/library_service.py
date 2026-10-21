@@ -3854,6 +3854,274 @@ def _scan_folder_name_placeholders(progress: Optional[Any] = None,
     return sorted_results
 
 
+def _placeholder_norm_path(p: Any) -> str:
+    """Case/sep-normalized absolute path, for matching a scan ``folder`` value
+    against item dirnames and against a resume checkpoint."""
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+
+
+def _placeholder_folder_db(adapter: Any = None) -> Dict[str, Dict[str, Any]]:
+    """dirname -> {album_ids, item_count} from the Beets item table, keyed by
+    normalized path. Mirrors the scan's DB map so apply routes DB-tracked
+    folders (db_item_count>0) to a Beets relocation instead of a bare rename."""
+    ad = adapter or beets_adapter
+    folder_db: Dict[str, Dict[str, Any]] = {}
+    try:
+        for row in ad.list_item_paths(details=True):
+            p = _s(row.get("path"))
+            d = os.path.dirname(p) if p else ""
+            if not d:
+                continue
+            key = _placeholder_norm_path(d)
+            slot = folder_db.setdefault(key, {"album_ids": set(), "item_count": 0})
+            if row.get("album_id"):
+                slot["album_ids"].add(int(row["album_id"]))
+            slot["item_count"] += 1
+    except Exception:
+        pass
+    return folder_db
+
+
+def _relocate_tracked_folder(album_ids: List[int], adapter: Any = None,
+                             store: Any = None) -> Dict[str, Any]:
+    """Fix a DB-tracked placeholder folder by relocating each album to where
+    Beets' path templates put it (Album.move(), not os.rename), so the DB item
+    and album paths follow the files. Returns operation ids for rollback."""
+    ops: List[Dict[str, Any]] = []
+    for aid in album_ids:
+        res = composite_workflows.relocate_album(int(aid), mode="rename", adapter=adapter, store=store)
+        if not res.get("ok"):
+            return {"ok": False, "code": res.get("code") or "relocate_failed",
+                    "error": res.get("error") or "Relocation failed",
+                    "operation_id": res.get("operation_id"), "operations": ops}
+        ops.append({"operation_id": res["operation_id"], "kind": "album", "album_id": int(aid)})
+    return {"ok": True, "operations": ops}
+
+
+def _apply_folder_name_placeholders(
+    folders: Optional[List[str]] = None,
+    *,
+    dry_run: bool = True,
+    approved_by: str = "operator (folder placeholder apply)",
+    cancel_event: Optional[Any] = None,
+    update_state: Optional[Any] = None,
+    resume_done: Optional[set] = None,
+    prior_operations: Optional[List[Dict[str, Any]]] = None,
+    batch_limit: int = 0,
+    adapter: Any = None,
+    store: Any = None,
+) -> Dict[str, Any]:
+    """Rename placeholder album folders to their clean names through the
+    canonical mutation engine. Preview (``dry_run``) never mutates.
+
+    ``folders`` is an explicit list of absolute folder paths (from the scan's
+    ``folder`` field). When omitted, every ``safe`` disk-only row of a fresh
+    scan is used (the 52 ``target_exists`` review cases are never auto-fixed).
+
+    Each row is RE-VERIFIED live at apply time (source present, target still
+    absent, DB-tracked status) to avoid races with the background reconcile:
+
+    * DB-tracked folder (db_item_count>0): relocated through Beets
+      (``Album.move()``) so the DB stays consistent -- never a bare rename.
+    * disk-only folder: renamed through folder_cleanup_v1 (plan -> approve ->
+      apply), which confines to MUSIC_ROOT, rejects symlinks and an existing
+      target, re-checks folder identity, and records the move for rollback.
+
+    Returns ``operations`` (operation ids + kind) so a single rollback can
+    restore every renamed folder from the transaction audit records.
+    """
+    from backend.cleanup_service import _canonical_folder_name
+    resume_done_originals = list(resume_done or [])
+    resume_done = {_placeholder_norm_path(f) for f in resume_done_originals}
+
+    if folders is None:
+        scan_rows = _scan_folder_name_placeholders(cancel_event=cancel_event)
+        folders = [r["folder"] for r in scan_rows
+                   if r.get("safe") and int(r.get("db_item_count") or 0) == 0]
+
+    folder_db = _placeholder_folder_db(adapter)
+
+    # Carry a resumed run's earlier ops forward so one rollback-by-job undoes
+    # the whole batch even if it was applied across several resumed jobs.
+    operations: List[Dict[str, Any]] = list(prior_operations or [])
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    done_folders: List[str] = list(resume_done_originals)
+    processed = 0
+    total = len(folders)
+
+    def _emit(current: Optional[str] = None, result: Optional[str] = None) -> None:
+        if not update_state:
+            return
+        update_state({
+            "category": "Cleanup",
+            "current_task": "Previewing placeholder folder renames" if dry_run
+                            else "Renaming placeholder folders",
+            "current_path": current,
+            "total_count": total,
+            "scanned_count": processed,
+            "remaining_count": max(0, total - processed),
+            "changed_count": len(applied),
+            "skipped_count": len(skipped),
+            "error_count": len(errors),
+            "current_result": result,
+            # Durable progress: resume reads this to skip finished folders, and
+            # rollback reads ``operations`` to undo the batch.
+            "checkpoint": {"done_folders": list(done_folders), "operations": list(operations)},
+        })
+
+    for folder in folders:
+        if cancel_event and cancel_event.is_set():
+            break
+        if batch_limit and processed >= batch_limit:
+            break
+        key = _placeholder_norm_path(folder)
+        if key in resume_done:
+            continue
+        processed += 1
+        source = Path(folder)
+        proposed = _canonical_folder_name(source)
+        slot = folder_db.get(key) or {}
+        album_ids = sorted(slot.get("album_ids") or [])
+        item_count = int(slot.get("item_count") or 0)
+        tracked = item_count > 0
+        record = {
+            "folder": str(source),
+            "proposed_folder": str(proposed) if proposed else None,
+            "db_item_count": item_count,
+            "db_album_ids": album_ids,
+            "mechanism": "album_relocation" if tracked else "folder_rename",
+        }
+
+        # Hard gates (re-verified live) -- never touch a collision or a no-op.
+        if proposed is None and not tracked:
+            skipped.append({**record, "reason": "no_clean_name"})
+            _emit(str(source), "skipped (no clean name)")
+            continue
+        if not tracked:
+            if not source.exists():
+                skipped.append({**record, "reason": "source_missing"})  # already done / resumed
+                done_folders.append(str(source))
+                _emit(str(source), "skipped (source already gone)")
+                continue
+            if proposed is not None and proposed.exists():
+                skipped.append({**record, "reason": "target_exists"})  # the 52 review cases
+                _emit(str(source), "skipped (target exists -- needs review)")
+                continue
+
+        if dry_run:
+            record["would"] = "relocate" if tracked else "rename"
+            applied.append(record)
+            _emit(str(source), f"would {record['would']}")
+            continue
+
+        if tracked:
+            res = _relocate_tracked_folder(album_ids, adapter=adapter, store=store)
+        else:
+            res = composite_workflows.safe_rename_library_folder(
+                str(source), str(proposed), approved_by, store=store)
+
+        if res.get("ok"):
+            new_ops = res.get("operations") or (
+                [{"operation_id": res["operation_id"], "kind": "folder"}]
+                if res.get("operation_id") else [])
+            operations.extend(new_ops)
+            done_folders.append(str(source))
+            applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), "relocated" if tracked else "renamed")
+        elif res.get("code") == "folder_cleanup_db_references":
+            # A disk-only row that gained Beets items under it since the scan
+            # (e.g. items in a disc subfolder). Never bare-renamed; surfaced
+            # for a manual relocation instead.
+            skipped.append({**record, "reason": "became_tracked_needs_relocation",
+                            "error": res.get("error")})
+            _emit(str(source), "skipped (now DB-tracked -- needs relocation)")
+        else:
+            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
+                           "operations": res.get("operations") or []})
+            operations.extend(res.get("operations") or [])
+            _emit(str(source), f"error: {res.get('code')}")
+
+    cancelled = bool(cancel_event and cancel_event.is_set())
+    summary = {
+        "dry_run": dry_run,
+        "total_selected": total,
+        "processed": processed,
+        "changed_count": len(applied) if not dry_run else 0,
+        "would_change_count": len(applied) if dry_run else 0,
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "remaining_count": max(0, total - processed),
+        "cancelled": cancelled,
+    }
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "operations": operations,
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors,
+        "done_folders": done_folders,
+        "final_summary": summary,
+    }
+
+
+def _rollback_folder_placeholder_apply(
+    operations: List[Dict[str, Any]],
+    *,
+    cancel_event: Optional[Any] = None,
+    update_state: Optional[Any] = None,
+    adapter: Any = None,
+    store: Any = None,
+) -> Dict[str, Any]:
+    """Undo a placeholder-folder apply from its transaction audit records:
+    folder renames through folder_cleanup_v1 rollback, DB-tracked relocations
+    through album-relocation rollback. Each leaves Beets to move files back and
+    refuses (changing nothing) if the folder changed since."""
+    rolled_back: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    # Undo in reverse so a folder renamed after another is restored first.
+    for op in reversed(list(operations or [])):
+        if cancel_event and cancel_event.is_set():
+            break
+        op_id = op.get("operation_id")
+        kind = op.get("kind") or "folder"
+        if not op_id:
+            continue
+        try:
+            if kind == "album":
+                res = composite_workflows.rollback_album_relocation(op_id, adapter=adapter, store=store)
+            else:
+                res = composite_workflows.rollback_folder_cleanup(op_id, store=store)
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append({"operation_id": op_id, "kind": kind, "error": type(exc).__name__})
+            continue
+        if res.get("ok"):
+            rolled_back.append({"operation_id": op_id, "kind": kind, "status": res.get("status")})
+        else:
+            errors.append({"operation_id": op_id, "kind": kind,
+                           "code": res.get("code"), "error": res.get("error")})
+        if update_state:
+            update_state({
+                "category": "Cleanup",
+                "current_task": "Rolling back placeholder folder renames",
+                "changed_count": len(rolled_back),
+                "error_count": len(errors),
+                "current_result": f"rolled back {len(rolled_back)} of {len(operations or [])}",
+            })
+    return {
+        "ok": not errors,
+        "rolled_back": rolled_back,
+        "errors": errors,
+        "final_summary": {
+            "requested": len(operations or []),
+            "rolled_back_count": len(rolled_back),
+            "error_count": len(errors),
+        },
+    }
+
+
 def _root_folder_repair_scan(root: Optional[Path] = None) -> Dict[str, Any]:
     """Find MUSIC_ROOT top-level entries that are actually album/singleton
     folders sitting one level too shallow, e.g. "/data/media/music/Aaliyah
