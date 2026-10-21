@@ -47,6 +47,24 @@ def _album(folder, artist, album, n=2):
 
 class PluginImportAutotagTests(unittest.TestCase):
     def setUp(self):
+        # Hermetic isolation (#466): this module documents "with no
+        # metadata-source plugin loaded Beets finds no candidates". Beets'
+        # plugin registry is process-global, and under the full suite a sibling
+        # in-process test can leave a metadata source (e.g. musicbrainz) in it;
+        # `beet import --search-id` would then find candidates and reach
+        # musicbrainz.org, turning the documented no_candidates outcome into
+        # no_strong_match (and hitting the network). Emptying beets.plugins.
+        # _instances is not enough -- beets reloads from config["plugins"] when
+        # the list is empty -- so pin Beets' single metadata-source lookup to
+        # none for this test. Auto-restored, and the sibling tests that patch
+        # this same function with their own sources simply nest inside it.
+        from unittest import mock as _mock
+        from beets import metadata_plugins as _metadata_plugins
+        _no_sources = _mock.patch.object(_metadata_plugins, "find_metadata_source_plugins",
+                                         return_value=[])
+        _no_sources.start()
+        self.addCleanup(_no_sources.stop)
+
         self.td = tempfile.mkdtemp()
         self.music = os.path.join(self.td, "music")
         self.downloads = os.path.join(self.td, "downloads")

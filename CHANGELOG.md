@@ -44,6 +44,7 @@ The project uses Semantic Versioning.
 ### Development
 
 - `scripts/run_tests.py` now fails the run, after dumping every worker's thread stacks, if no test unit finishes within `RUN_TESTS_STALL_TIMEOUT` seconds (default 900), so a wedged worker surfaces in minutes with evidence instead of blocking to GitHub's 6-hour job ceiling (#466).
+- `tests/test_plugin_import_autotag.py` now pins Beets' metadata-source lookup to none per test, so its documented "no metadata-source plugin loaded, so no candidates" path stays deterministic and offline even when a sibling in-process test leaves a metadata source (e.g. musicbrainz) in Beets' process-global plugin registry (#466).
 
 ### Security
 
