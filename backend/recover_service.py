@@ -1159,6 +1159,13 @@ def recover_probe(url: str, *, ydl_module: Any = None,
         "uploader": _s(info.get("uploader") or info.get("channel") or info.get("uploader_id"))[:200],
         "duration": info.get("duration"),
         "webpage_url": _s(info.get("webpage_url") or url),
+        # Immutable channel/uploader identifiers (independent evidence for an
+        # own_account claim). Captured from yt-dlp whichever it provides; these,
+        # NOT the mutable display uploader/channel name, verify ownership.
+        "channel_id": _s(info.get("channel_id"))[:200],
+        "uploader_id": _s(info.get("uploader_id"))[:200],
+        "channel_url": _s(info.get("channel_url"))[:300],
+        "uploader_url": _s(info.get("uploader_url"))[:300],
         # Platform license metadata (independent evidence for an open_license
         # claim). yt-dlp populates ``license`` for CC-flagged items, e.g.
         # "Creative Commons Attribution license (reuse allowed)".
@@ -1286,12 +1293,59 @@ _OPEN_LICENSE_PATTERNS = (
 
 
 def _recover_owned_accounts() -> List[str]:
-    """Operator-configured owned-account identifiers (channel/profile ids or URL
-    fragments), lower-cased, read at call time so a settings/env change takes
-    effect without a reimport. This is the ONLY independent evidence source for
-    an ``own_account`` claim."""
+    """Operator-configured owned-account identifiers, lower-cased, read at call
+    time so a settings/env change takes effect without a reimport. Each entry is
+    an immutable channel/uploader ID (e.g. ``UCxxxx``) or a canonical channel/
+    profile URL (e.g. ``youtube.com/@handle``) — never a mutable display name.
+    This is the ONLY independent evidence source for an ``own_account`` claim.
+    Entries shorter than 3 chars are dropped: too short to be a real identifier
+    and too easy to collide with an attacker-chosen value."""
     raw = _s(os.environ.get("RECOVER_OWNED_ACCOUNTS", "")).strip()
-    return [seg.strip().lower() for seg in raw.split(",") if seg.strip()]
+    return [
+        seg.strip().lower()
+        for seg in raw.split(",")
+        if len(seg.strip()) >= 3
+    ]
+
+
+def _canon_host(host: Any) -> str:
+    h = _s(host).strip().lower().rstrip(".")
+    return h[4:] if h.startswith("www.") else h
+
+
+def _identity_tokens(value: Any) -> set:
+    """Normalise an immutable channel/uploader identifier (a bare ID/handle or a
+    canonical URL) into a set of comparison tokens for own_account verification.
+
+    Matching is by EXACT token equality — never a substring of a free-text
+    display name. A URL yields its canonical ``host/path`` plus the specific
+    identity segment (``@handle``, or the id/name after ``/channel/`` or
+    ``/user/``); a bare value yields itself. The same function normalises both an
+    allowlist entry and a source identifier, so a match is a set intersection."""
+    v = _s(value).strip().lower().rstrip("/")
+    if not v:
+        return set()
+    toks: set = set()
+    if "://" in v:
+        try:
+            parts = urllib.parse.urlsplit(v)
+        except ValueError:
+            return {v}
+        host = _canon_host(parts.hostname or "")
+        path = (parts.path or "").rstrip("/")
+        if host and path:
+            toks.add(f"{host}{path}")
+        elif host:
+            toks.add(host)
+        segs = [s for s in path.split("/") if s]
+        if segs:
+            if segs[-1].startswith("@"):
+                toks.add(segs[-1])
+            if len(segs) >= 2 and segs[-2] in ("channel", "user"):
+                toks.add(segs[-1])
+        return toks
+    toks.add(v)
+    return toks
 
 
 def parse_recover_authorization(payload: Optional[Dict[str, Any]]) -> Tuple[str, str, str]:
@@ -1317,33 +1371,59 @@ def evaluate_recover_authorization(
     uploader: str = "",
     channel: str = "",
     webpage_url: str = "",
+    channel_id: str = "",
+    uploader_id: str = "",
+    channel_url: str = "",
+    uploader_url: str = "",
     source_license: str = "",
 ) -> Dict[str, Any]:
     """Build the authorization record. Verification exists for two bases only:
-    ``own_account`` (the probe's uploader/channel/webpage_url matches the
-    operator-configured ``RECOVER_OWNED_ACCOUNTS`` allowlist, case-insensitive
-    substring) and ``open_license`` (the source's own platform ``license``
-    metadata matches an open-license pattern). ``original_creation`` and
-    ``licensed_permission`` are asserted-only (``verified=False``; no
-    auto-verification mechanism exists). verified_* fields are populated from
-    independent evidence ONLY — never from the user's asserted claim."""
+    ``own_account`` and ``open_license``.
+
+    ``own_account`` is verified ONLY when an ``RECOVER_OWNED_ACCOUNTS`` entry
+    matches one of the source's IMMUTABLE identifiers — an exact (case-insensitive)
+    match of ``channel_id``/``uploader_id``, or a canonical-URL / path-boundary
+    match of ``channel_url``/``uploader_url`` (the entry equals the channel URL,
+    or exactly equals the ``@handle`` / ``/channel/<id>`` / ``/user/<name>`` path
+    segment). The mutable display ``uploader``/``channel`` name is NEVER evidence:
+    an impersonator whose display name contains the allowlist token but whose
+    stable id differs is not verified. ``open_license`` is verified when the
+    source's own platform ``license`` metadata matches an open-license pattern.
+    ``original_creation`` and ``licensed_permission`` are asserted-only
+    (``verified=False``). verified_* fields are populated from independent
+    evidence ONLY — never from the user's asserted claim (or a display name).
+
+    ``uploader``/``channel``/``webpage_url`` are retained for the record's
+    platform context only and are intentionally NOT used for own_account
+    verification."""
     asserted_basis = _s(basis).strip().lower()
     verified = False
     verified_basis: Optional[str] = None
     verified_evidence: Optional[str] = None
     if asserted_basis == "own_account":
-        candidates = [
-            _s(uploader).strip().lower(),
-            _s(channel).strip().lower(),
-            _s(webpage_url).strip().lower(),
+        # Independent evidence = immutable identifiers only, in priority order.
+        source_ids = [
+            raw for raw in (
+                _s(channel_id).strip(),
+                _s(uploader_id).strip(),
+                _s(channel_url).strip(),
+                _s(uploader_url).strip(),
+            ) if raw
         ]
+        source_token_map = [(raw, _identity_tokens(raw)) for raw in source_ids]
         for entry in _recover_owned_accounts():
-            if any(entry and entry in cand for cand in candidates):
+            entry_tokens = _identity_tokens(entry)
+            if not entry_tokens:
+                continue
+            matched_raw = next(
+                (raw for raw, stoks in source_token_map if entry_tokens & stoks),
+                None,
+            )
+            if matched_raw is not None:
                 verified = True
                 verified_basis = "own_account"
-                verified_evidence = (
-                    f"source account matches owned-accounts allowlist entry '{entry}'"
-                )
+                # Evidence is the matched STABLE id/url, scrubbed + bounded.
+                verified_evidence = _scrub_authz_text(matched_raw, 300)
                 break
     elif asserted_basis == "open_license":
         lic = _s(source_license).strip()
@@ -1632,22 +1712,26 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
                        auth_basis: str = "", auth_note: str = "") -> Dict[str, Any]:
     url = _s(url).strip()
     run_id = _s(run_id).strip() or uuid.uuid4().hex
+    host = _host_of(url)
+    platform = _platform_for_host(host)
+    # Asserted-only authorization so EVERY outcome carries the record, even ones
+    # that fail before the probe can supply the immutable identifiers that
+    # own_account verification needs (claim never dropped, F4).
+    asserted_auth = evaluate_recover_authorization(auth_basis, auth_note, platform=platform)
     try:
         check_ytdlp_target(url)
     except YtdlpTargetRejected as exc:
         log.append(f"  [recover] Rejected target: {exc}")
         return {"url": url, "recovered": False, "category": "misconfig",
-                "provenance_status": "unavailable",
+                "provenance_status": "unavailable", "authorization": asserted_auth,
                 "action": "Use an allowlisted public YouTube/SoundCloud URL.", "message": _s(exc)}
 
-    host = _host_of(url)
-    platform = _platform_for_host(host)
     if _is_youtube_host(host):
         try:
             _require_ytdlp_js_runtime()
         except RuntimeError as exc:
             fail_info = _fail_from(exc)
-            return {"url": url, "recovered": False,
+            return {"url": url, "recovered": False, "authorization": asserted_auth,
                     "provenance_status": classify_media_provenance(error_category=fail_info["category"]),
                     **fail_info}
 
@@ -1655,7 +1739,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     if not probe.get("ok"):
         cat = _s(probe.get("category") or "unknown")
         return {"url": url, "recovered": False,
-                "category": cat,
+                "category": cat, "authorization": asserted_auth,
                 "provenance_status": _s(probe.get("provenance_status")) or classify_media_provenance(error_category=cat),
                 "action": classify_recover_error(probe.get("error") or probe.get("message") or "").get("action", ""),
                 "message": _s(probe.get("error") or probe.get("message"))}
@@ -1665,7 +1749,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     if probe.get("is_collection"):
         log.append(f"  [recover] Refusing collection URL in fetch: {_sanitize_persisted_url(url) or url}")
         return {"url": url, "recovered": False, "category": "collection",
-                "provenance_status": "accessible",
+                "provenance_status": "accessible", "authorization": asserted_auth,
                 "action": "Enumerate this channel/playlist first, then fetch the individual item URLs.",
                 "message": f"URL is a collection of {probe.get('entry_count', 0)} item(s), not a single upload"}
 
@@ -1678,6 +1762,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "category": "genuinely-DRM",
             "provenance_status": "genuinely-DRM",
             "stream_diagnostics": stream_diag,
+            "authorization": asserted_auth,
             "action": "This item is DRM/EME protected; recover it from the account owner's own source, not here.",
             "message": "all available streams are DRM/EME protected",
         }
@@ -1691,6 +1776,10 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
         platform=platform,
         uploader=_s(probe.get("uploader")),
         webpage_url=_s(probe.get("webpage_url") or url),
+        channel_id=_s(probe.get("channel_id")),
+        uploader_id=_s(probe.get("uploader_id")),
+        channel_url=_s(probe.get("channel_url")),
+        uploader_url=_s(probe.get("uploader_url")),
         source_license=_s(probe.get("license")),
     )
 
@@ -1731,14 +1820,14 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             ydl.download([url])
     except YtdlpTargetRejected as exc:
         return {"url": url, "recovered": False, "category": "misconfig",
-                "provenance_status": "unavailable",
+                "provenance_status": "unavailable", "authorization": authorization,
                 "action": "Use an allowlisted public URL.", "message": _s(exc)}
     except Exception as exc:  # noqa: BLE001
         # A crash after a complete download but before provenance is retried
         # safely below: the isolated dir is re-scanned for a finished file.
         if not _audio_files_in(stage_dir):
             fail_info = _fail_from(exc)
-            return {"url": url, "recovered": False,
+            return {"url": url, "recovered": False, "authorization": authorization,
                     "provenance_status": classify_media_provenance(error_category=fail_info["category"]),
                     **fail_info}
         log.append(f"  [recover] Download reported an error but a staged file exists; validating it: {exc}")
@@ -1751,11 +1840,11 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     if not produced:
         if _has_partial_file(stage_dir):
             return {"url": url, "recovered": False, "category": "integrity",
-                    "provenance_status": "unavailable",
+                    "provenance_status": "unavailable", "authorization": authorization,
                     "action": "Re-fetch; only a partial (.part) download remains.",
                     "message": "only a leftover partial download (.part) is present"}
         return {"url": url, "recovered": False, "category": "format",
-                "provenance_status": "unsupported-format",
+                "provenance_status": "unsupported-format", "authorization": authorization,
                 "action": "No audio file was produced; check the requested format.",
                 "message": "no audio file produced"}
 
@@ -1779,6 +1868,13 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "source_platform": platform,
             "source_url": probe.get("webpage_url") or url,
             "uploader": probe.get("uploader", ""),
+            # Immutable identifiers persisted as the independent evidence an
+            # import re-derives own_account verification from (never a client
+            # value, never the mutable display name).
+            "channel_id": _s(probe.get("channel_id")),
+            "uploader_id": _s(probe.get("uploader_id")),
+            "channel_url": _sanitize_persisted_url(_s(probe.get("channel_url"))),
+            "uploader_url": _sanitize_persisted_url(_s(probe.get("uploader_url"))),
             "title": probe.get("title", ""),
             "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source_license": _s(probe.get("license")),
@@ -1821,7 +1917,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
 
     if not staged_ok:
         return {"url": url, "recovered": False, "category": "integrity",
-                "provenance_status": "unavailable",
+                "provenance_status": "unavailable", "authorization": authorization,
                 "action": "Re-fetch; the staged file was truncated, corrupt, or could not be recorded.",
                 "message": last_fail or "no valid audio file could be staged"}
 
@@ -1932,7 +2028,29 @@ def verify_and_match_staged_upload(
 
     resolved, sidecar, err = _validate_staged_recover_file(staged_path)
     if resolved is None or sidecar is None:
-        return {"ok": False, "error": err, "staged_file": _s(staged_path)}
+        # No trustworthy sidecar to verify against: still carry the asserted
+        # claim so the outcome is never claim-less (F4).
+        return {"ok": False, "error": err, "staged_file": _s(staged_path),
+                "authorization": evaluate_recover_authorization(auth_basis, auth_note)}
+
+    # Authorization: independent verification (own_account vs the owned-accounts
+    # allowlist, matched against the sidecar's recorded IMMUTABLE identifiers —
+    # channel_id/uploader_id/channel_url/uploader_url, never the mutable display
+    # name). An asserted-only authorization (verified==False) is NEVER
+    # auto-imported — it is forced to review_required. A verified==True claim
+    # proceeds through the existing AcoustID/MusicBrainz identity gate below.
+    # Computed up front so EVERY outcome below carries the record (F4).
+    authorization = evaluate_recover_authorization(
+        auth_basis, auth_note,
+        platform=_s(sidecar.get("source_platform")),
+        uploader=_s(sidecar.get("uploader")),
+        webpage_url=_s(sidecar.get("source_url")),
+        channel_id=_s(sidecar.get("channel_id")),
+        uploader_id=_s(sidecar.get("uploader_id")),
+        channel_url=_s(sidecar.get("channel_url")),
+        uploader_url=_s(sidecar.get("uploader_url")),
+        source_license=_s(sidecar.get("source_license")),
+    )
 
     expected_duration = sidecar.get("duration")
     integrity = recover_integrity_check(str(resolved), expected_duration)
@@ -1940,6 +2058,7 @@ def verify_and_match_staged_upload(
         return {
             "ok": False,
             "error": f"integrity check failed: {integrity.get('reason')}",
+            "authorization": authorization,
             "staged_file": str(resolved),
         }
 
@@ -1948,22 +2067,10 @@ def verify_and_match_staged_upload(
         return {
             "ok": False,
             "error": _s(media_info.get("error") or "audio inspection failed"),
+            "authorization": authorization,
             "staged_file": str(resolved),
         }
 
-    # Authorization gate: independent verification (own_account vs the
-    # owned-accounts allowlist, matched against the sidecar's recorded uploader /
-    # source_url). An asserted-only authorization (verified==False) is NEVER
-    # auto-imported — it is forced to review_required and the asserted claim is
-    # recorded on the sidecar for an operator to confirm. A verified==True claim
-    # proceeds through the existing AcoustID/MusicBrainz identity gate below.
-    authorization = evaluate_recover_authorization(
-        auth_basis, auth_note,
-        platform=_s(sidecar.get("source_platform")),
-        uploader=_s(sidecar.get("uploader")),
-        webpage_url=_s(sidecar.get("source_url")),
-        source_license=_s(sidecar.get("source_license")),
-    )
     if not authorization["verified"]:
         try:
             merged = dict(sidecar)
@@ -2059,6 +2166,7 @@ def verify_and_match_staged_upload(
             "identity_status": identity_status or "conflict",
             "acoustid_status": acoustid_status,
             "conflicts": blocking_conflicts,
+            "authorization": authorization,
             "error": f"audio fingerprint conflicts with expected upload identity ({reason})",
             "staged_file": str(resolved),
         }
@@ -2079,6 +2187,7 @@ def verify_and_match_staged_upload(
             "identity_status": identity_status or "unverified",
             "acoustid_status": acoustid_status,
             "conflicts": conflicts,
+            "authorization": authorization,
             "error": f"audio identity requires manual review (acoustid_status={acoustid_status})",
             "staged_file": str(resolved),
         }
@@ -2115,6 +2224,7 @@ def verify_and_match_staged_upload(
                 "final_action": "review",
                 "identity_status": "unverified",
                 "acoustid_status": acoustid_status,
+                "authorization": authorization,
                 "error": f"MusicBrainz provider unavailable during verification: {_s(exc)}",
                 "staged_file": str(resolved),
             }
@@ -2268,6 +2378,8 @@ def _recover_import_one(
     album = verified["album"]
     mb_trackid = verified["mb_trackid"]
     match_source = verified["match_source"]
+    # The verified authorization record travels onto EVERY outcome below (F4).
+    authorization = verified.get("authorization")
 
     # Always enforce existing-library conflict protection before importing.
     existing = _find_existing_library_conflict(artist, title, mb_trackid, adapter=adapter)
@@ -2289,6 +2401,7 @@ def _recover_import_one(
             "album": album,
             "mb_trackid": mb_trackid,
             "match_source": match_source,
+            "authorization": authorization,
         }
 
     _stamp_staged_identity_tags(
@@ -2372,6 +2485,7 @@ def _recover_import_one(
             "error": err_msg,
             "artist": artist,
             "title": title,
+            "authorization": authorization,
             "transaction_id": tx_id,
         }
 
@@ -2393,6 +2507,7 @@ def _recover_import_one(
             "error": err_msg,
             "artist": artist,
             "title": title,
+            "authorization": authorization,
             "transaction_id": tx_id,
         }
 
@@ -2425,6 +2540,7 @@ def _recover_import_one(
                     "album": album,
                     "mb_trackid": mb_trackid,
                     "match_source": match_source,
+                    "authorization": authorization,
                     "transaction_id": tx_id,
                 }
             err_msg = f"beets skipped file during import ({skip_reason})"
@@ -2463,6 +2579,7 @@ def _recover_import_one(
             "error": err_msg,
             "artist": artist,
             "title": title,
+            "authorization": authorization,
             "transaction_id": tx_id,
         }
 

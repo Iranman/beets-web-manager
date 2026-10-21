@@ -1020,10 +1020,11 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
     matching, and singleton fallback for original/unreleased uploads."""
 
     def setUp(self):
-        # The staged sidecar's uploader is "DJ Self"; an own_account claim is
-        # independently verified against this allowlist so these identity-gate
+        # The staged sidecar carries the immutable channel_id "UCdjself000"; an
+        # own_account claim is independently verified against this allowlist
+        # (a stable id, NOT the mutable display name) so these identity-gate
         # tests reach the AcoustID/MusicBrainz logic (verified==True).
-        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj self"})
+        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCdjself000"})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1037,6 +1038,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
         sidecar.write_text(
             '{"source_url": "https://www.youtube.com/watch?v=abc", '
             '"source_platform": "youtube", "uploader": "DJ Self", '
+            '"channel_id": "UCdjself000", '
             '"title": "My Unreleased VIP", "duration": 200.0, '
             '"codec": "flac", "quality": "original"}',
             encoding="utf-8",
@@ -1208,10 +1210,11 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
     existing library file protection, and playlist coverage refresh."""
 
     def setUp(self):
-        # Staged sidecars here use uploaders "Me" / "DJ Me"; own_account is
-        # verified against this allowlist so the import path proceeds to the
+        # Staged sidecars here carry the immutable channel_id "UCmine000";
+        # own_account is verified against this allowlist (a stable id, NOT the
+        # mutable display name) so the import path proceeds to the
         # existing-library / Beets-import logic under test (verified==True).
-        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "me,dj me"})
+        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCmine000"})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1234,6 +1237,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
             Path(str(staged) + ".recover.json").write_text(
                 '{"source_url": "https://www.youtube.com/watch?v=dup1", '
                 '"source_platform": "youtube", "uploader": "Me", '
+                '"channel_id": "UCmine000", '
                 '"title": "Already In Library", "duration": 180.0}',
                 encoding="utf-8",
             )
@@ -1275,6 +1279,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
             Path(str(staged) + ".recover.json").write_text(
                 '{"source_url": "https://soundcloud.com/me/my-track", '
                 '"source_platform": "soundcloud", "uploader": "DJ Me", '
+                '"channel_id": "UCmine000", '
                 '"title": "My Track", "duration": 210.0, '
                 '"codec": "flac", "quality": "original"}',
                 encoding="utf-8",
@@ -1374,6 +1379,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
             Path(str(staged) + ".recover.json").write_text(
                 '{"source_url": "https://soundcloud.com/me/skip-track", '
                 '"source_platform": "soundcloud", "uploader": "DJ Me", '
+                '"channel_id": "UCmine000", '
                 '"title": "Skip Track", "duration": 210.0}',
                 encoding="utf-8",
             )
@@ -1501,7 +1507,7 @@ class AuthorizationAndProvenance(unittest.TestCase):
     def _stage(self, tmp, *, platform="soundcloud", uploader="DJ Me",
                fname="t.flac", title="My Track",
                source_url="https://soundcloud.com/me/my-track",
-               source_license=""):
+               source_license="", channel_id="UCdjme000", uploader_url=""):
         import json as _json
         run_dir = Path(tmp) / "recovered" / platform / "run1"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1513,6 +1519,8 @@ class AuthorizationAndProvenance(unittest.TestCase):
                 "uploader": uploader, "title": title, "duration": 200.0,
                 "codec": "flac", "quality": "original",
                 "source_license": source_license,
+                # Immutable identifiers are the only own_account evidence.
+                "channel_id": channel_id, "uploader_url": uploader_url,
             }),
             encoding="utf-8",
         )
@@ -1596,7 +1604,7 @@ class AuthorizationAndProvenance(unittest.TestCase):
             from backend.transaction_engine import TransactionStore
             tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
             with self._import_patches(tmp), \
-                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCdjme000"}), \
                  mock.patch("backend.app_runtime.transactions", tx_store):
                 out = recover_service._recover_import_one(
                     staged, [], adapter=fake_adapter, auth_basis="own_account",
@@ -1611,18 +1619,21 @@ class AuthorizationAndProvenance(unittest.TestCase):
             self.assertEqual(auth["asserted_note"], "my soundcloud")
             self.assertTrue(auth["verified"])
             self.assertEqual(auth["verified_basis"], "own_account")
-            self.assertIn("allowlist", auth["verified_evidence"])
+            # Evidence is the matched IMMUTABLE identifier, not a display name.
+            self.assertEqual(auth["verified_evidence"], "UCdjme000")
             # The asserted note is never copied into the verified evidence.
             self.assertNotIn("my soundcloud", auth["verified_evidence"])
 
     # ── (3) own_account NOT on allowlist -> unverified -> review, no import ──
     def test_own_account_not_allowlisted_is_review_required_no_import(self):
         with tempfile.TemporaryDirectory() as tmp:
-            staged = self._stage(tmp, uploader="Someone Else")
+            # Staged channel_id "UCdjme000"; the allowlist holds a DIFFERENT
+            # stable id, so the stable-id evidence does not match -> unverified.
+            staged = self._stage(tmp, uploader="Someone Else", channel_id="UCdjme000")
             fake_adapter = mock.MagicMock()
             fake_adapter.find_items_by_query.return_value = []
             with self._import_patches(tmp), \
-                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCnotme111"}):
                 out = recover_service._recover_import_one(
                     staged, [], adapter=fake_adapter, auth_basis="own_account")
             self.assertFalse(out["imported"])
@@ -1720,23 +1731,29 @@ class AuthorizationAndProvenance(unittest.TestCase):
     # ── (6) provenance sidecar records asserted + verified distinctly ──
     def test_fetch_sidecar_records_asserted_and_verified_distinctly(self):
         import json as _json
+        # The probe captures the immutable channel_id; own_account verifies
+        # against the allowlisted stable id, never the display "uploader".
         info = {"title": "Mine", "uploader": "DJ Me", "duration": 200,
+                "channel_id": "UCdjme000",
+                "channel_url": "https://www.youtube.com/channel/UCdjme000",
                 "webpage_url": "https://www.youtube.com/watch?v=abc", "formats": []}
         with tempfile.TemporaryDirectory() as tmp:
             with _fetch_patches(tmp), \
-                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCdjme000"}):
                 out = recover_service._recover_fetch_one(
                     "https://www.youtube.com/watch?v=abc", [], run_id="r",
                     ydl_module=_make_fake(info=info, filename="mine.opus"),
                     auth_basis="own_account", auth_note="my channel upload")
             self.assertTrue(out["recovered"], out)
             sidecar = _json.loads(Path(out["provenance"]).read_text(encoding="utf-8"))
+            # The immutable identifiers are persisted as independent evidence.
+            self.assertEqual(sidecar["channel_id"], "UCdjme000")
             auth = sidecar["authorization"]
             self.assertEqual(auth["asserted_basis"], "own_account")
             self.assertEqual(auth["asserted_note"], "my channel upload")
             self.assertTrue(auth["verified"])
             self.assertEqual(auth["verified_basis"], "own_account")
-            self.assertIn("allowlist", auth["verified_evidence"])
+            self.assertEqual(auth["verified_evidence"], "UCdjme000")
             self.assertNotIn("my channel upload", auth["verified_evidence"])
 
     def test_asserted_only_fetch_sidecar_is_unverified(self):
@@ -1780,6 +1797,237 @@ class AuthorizationAndProvenance(unittest.TestCase):
             self.assertTrue(auth["verified"])
             self.assertEqual(auth["verified_basis"], "open_license")
             self.assertEqual(auth["verified_evidence"], cc)
+
+    # ── P1: impersonation via mutable display name must NOT verify ──
+    def test_impersonation_display_name_is_review_required_no_import(self):
+        # The allowlisted token appears INSIDE the mutable display uploader, but
+        # the immutable channel_id differs -> own_account is not verified, the
+        # item goes to review, and nothing is imported.
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(
+                tmp, uploader="realchannel Official (reupload)",
+                channel_id="UCimposter999")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "realchannel"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertFalse(out["imported"])
+            self.assertEqual(out["status"], "review_required")
+            self.assertFalse(out["authorization"]["verified"])
+            fake_adapter.run_import.assert_not_called()
+
+    # ── P1: a genuine stable channel-URL match DOES verify -> auto-import ──
+    def test_own_account_channel_url_match_is_verified_and_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # No channel_id; verification must come from the canonical profile URL
+            # (allowlist has www + trailing slash, sidecar does not -> canonicalized).
+            staged = self._stage(
+                tmp, uploader="Someone", channel_id="",
+                uploader_url="https://soundcloud.com/myprofile")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.side_effect = [
+                [],
+                [{"id": 21, "title": "My Track", "artist": "Someone",
+                  "path": "/music/Someone/My Track.flac"}],
+            ]
+            fake_adapter.run_import.return_value = {"ok": True, "success": True}
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ,
+                                 {"RECOVER_OWNED_ACCOUNTS": "https://soundcloud.com/myprofile/"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertTrue(out["imported"], out)
+            self.assertEqual(out["status"], "imported")
+            fake_adapter.run_import.assert_called_once()
+            auth = out["authorization"]
+            self.assertTrue(auth["verified"])
+            self.assertEqual(auth["verified_basis"], "own_account")
+            self.assertEqual(auth["verified_evidence"], "https://soundcloud.com/myprofile")
+
+    # ── P1: an allowlist entry shorter than 3 chars never verifies ──
+    def test_short_allowlist_entry_never_verifies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Even an exact-equal 2-char stable id is dropped from the allowlist.
+            staged = self._stage(tmp, uploader="Me", channel_id="ab")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "ab"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertFalse(out["imported"])
+            self.assertEqual(out["status"], "review_required")
+            self.assertFalse(out["authorization"]["verified"])
+            fake_adapter.run_import.assert_not_called()
+
+    # ── P3: authorization is attached to EVERY import outcome (F4) ──
+    def test_identity_gate_review_outcome_carries_authorization(self):
+        # own_account is VERIFIED, but the identity gate routes a could-not-verify
+        # AcoustID outage to review. The authorization record must still ride
+        # along (previously dropped on identity-gate returns, F4).
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, channel_id="UCdjme000")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            with self._import_patches(tmp, identity={
+                        "acoustid_status": "lookup_failed",
+                        "conflicts": ["acoustid_lookup_failed"]}), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCdjme000"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertEqual(out["status"], "review_required")
+            self.assertIsInstance(out["authorization"], dict)
+            self.assertEqual(out["authorization"]["asserted_basis"], "own_account")
+            self.assertTrue(out["authorization"]["verified"])
+            fake_adapter.run_import.assert_not_called()
+
+    def test_identity_gate_reject_outcome_carries_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, channel_id="UCdjme000")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            with self._import_patches(tmp, identity={
+                        "acoustid_status": "mismatch", "identity_status": "conflict",
+                        "final_action": "reject", "acoustid_match_score": 0.95,
+                        "mb_recording_id_candidate": "wrong-999",
+                        "conflicts": ["acoustid_artist_mismatch"]}), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCdjme000"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertEqual(out["status"], "identity_conflict")
+            self.assertIsInstance(out["authorization"], dict)
+            self.assertEqual(out["authorization"]["asserted_basis"], "own_account")
+
+    def test_import_failed_outcome_carries_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, channel_id="UCdjme000")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            fake_adapter.run_import.return_value = {"ok": False, "error": "engine busy"}
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCdjme000"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertEqual(out["status"], "import_failed")
+            self.assertIsInstance(out["authorization"], dict)
+            self.assertEqual(out["authorization"]["asserted_basis"], "own_account")
+
+    # ── P3: a fetch non-recovered outcome also carries authorization ──
+    def test_fetch_collection_refusal_carries_authorization(self):
+        info = {"_type": "playlist", "entries": [{}, {}],
+                "webpage_url": "https://www.youtube.com/@chan", "title": "chan"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": ""}):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/@chan", [], run_id="r",
+                    ydl_module=_make_fake(info=info),
+                    auth_basis="original_creation", auth_note="mine")
+        self.assertFalse(out["recovered"])
+        self.assertEqual(out["category"], "collection")
+        self.assertIsInstance(out["authorization"], dict)
+        self.assertEqual(out["authorization"]["asserted_basis"], "original_creation")
+
+    # ── P3: retry forwards the parent run's asserted authorization ──
+    def test_retry_forwards_parent_authorization(self):
+        captured = {}
+
+        def _fake_fetch(payload):
+            captured.update(payload)
+            return ({"ok": True, "job_id": "j", "run_id": "r2"}, 200)
+
+        parent = {
+            "run_id": "p1",
+            "urls": ["https://www.youtube.com/watch?v=x"],
+            "recovered": [],
+            "failed": [{"url": "https://www.youtube.com/watch?v=x",
+                        "category": "rate-limited"}],
+            "authorization": {"asserted_basis": "own_account",
+                              "asserted_note": "my channel"},
+        }
+        with mock.patch.object(recover_service, "recover_get_run", return_value=parent), \
+             mock.patch.object(recover_service, "start_recover_fetch", side_effect=_fake_fetch):
+            body, status = recover_service.start_recover_retry({"run_id": "p1"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        # The parent's asserted basis/note is forwarded verbatim, not dropped
+        # or replaced by a stale run-level record.
+        self.assertEqual(captured["authorization"],
+                         {"basis": "own_account", "note": "my channel"})
+
+
+class OwnAccountImmutableIdentityMatching(unittest.TestCase):
+    """P1: own_account verifies ONLY against immutable channel/uploader
+    identifiers, by exact token / canonical-URL match — never a substring of a
+    mutable display name."""
+
+    def _eval(self, allow, **kw):
+        with mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": allow}):
+            return recover_service.evaluate_recover_authorization("own_account", "", **kw)
+
+    def test_exact_channel_id_match_verifies(self):
+        r = self._eval("UCabc123xyz", channel_id="UCabc123xyz",
+                       uploader="A Totally Different Display Name")
+        self.assertTrue(r["verified"])
+        self.assertEqual(r["verified_basis"], "own_account")
+        self.assertEqual(r["verified_evidence"], "UCabc123xyz")
+
+    def test_exact_uploader_id_match_verifies(self):
+        r = self._eval("12345678", uploader_id="12345678")
+        self.assertTrue(r["verified"])
+
+    def test_display_name_substring_is_not_evidence(self):
+        # The allowlist token is a substring of the mutable display name, but the
+        # immutable channel_id differs -> impersonation must NOT verify.
+        r = self._eval("realchannel", channel_id="UCimposter999",
+                       uploader="realchannel official (reupload)",
+                       channel="realchannel official")
+        self.assertFalse(r["verified"])
+        self.assertIsNone(r["verified_basis"])
+        self.assertIsNone(r["verified_evidence"])
+
+    def test_display_uploader_exact_equal_is_never_evidence(self):
+        # Even an exact allowlist==display-name match must not verify (no stable
+        # identifier is present).
+        r = self._eval("my display name", uploader="My Display Name",
+                       channel="My Display Name")
+        self.assertFalse(r["verified"])
+
+    def test_channel_url_handle_boundary_match_verifies(self):
+        r = self._eval("https://www.youtube.com/@mychannel",
+                       channel_url="https://youtube.com/@mychannel")
+        self.assertTrue(r["verified"])
+
+    def test_bare_handle_matches_channel_url_segment(self):
+        r = self._eval("@mychannel", channel_url="https://www.youtube.com/@mychannel")
+        self.assertTrue(r["verified"])
+
+    def test_channel_path_id_segment_match(self):
+        r = self._eval("UCpathid000",
+                       channel_url="https://www.youtube.com/channel/UCpathid000")
+        self.assertTrue(r["verified"])
+
+    def test_soundcloud_profile_url_match(self):
+        r = self._eval("https://soundcloud.com/myprofile",
+                       uploader_url="https://soundcloud.com/myprofile")
+        self.assertTrue(r["verified"])
+
+    def test_prefix_of_stable_id_does_not_match(self):
+        # Token equality, not substring: a prefix of the real id must not verify.
+        r = self._eval("UCabc", channel_id="UCabc123")
+        self.assertFalse(r["verified"])
+
+    def test_entry_shorter_than_3_chars_never_verifies(self):
+        r = self._eval("ab", channel_id="ab", uploader_id="ab")
+        self.assertFalse(r["verified"])
+
+    def test_handle_boundary_not_substring(self):
+        # Allowlisted "@me" must not match a different handle "@melody" (the path
+        # segment is compared exactly, not as a substring).
+        r = self._eval("@me", channel_url="https://www.youtube.com/@melody")
+        self.assertFalse(r["verified"])
 
 
 if __name__ == "__main__":
