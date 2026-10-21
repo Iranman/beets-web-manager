@@ -1121,6 +1121,54 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
             self.assertEqual(res_review["status"], "review_required")
             self.assertEqual(res_review["final_action"], "review")
 
+    def test_genuinely_original_upload_real_producer_shape_imports(self):
+        # REAL _audio_identity_decision shape for a no-candidate original upload:
+        # final_action="review" + acoustid_status="no_result" (see
+        # acoustid_service._audio_identity_decision lines ~186-187/245-254). This
+        # must fall through to the singleton fallback, NOT get parked in review.
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "no_result",
+                     "identity_status": "review_required",
+                     "final_action": "review",
+                     "conflicts": ["no_acoustid_result"],
+                     "acoustid_match_score": 0.0,
+                 }), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                res = recover_service.verify_and_match_staged_upload(audio_path)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["match_source"], "upload_metadata_singleton")
+        self.assertEqual(res["mb_trackid"], "")
+
+    def test_provider_outage_routes_to_review_not_reject_or_import(self):
+        # Could-not-verify (AcoustID lookup failed): acoustid_ -PREFIXED conflict
+        # token + failed status. A provider outage must NOT auto-import unverified
+        # audio and must NOT hard-reject as an identity conflict -> review.
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = self._stage_with_sidecar(tmp)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "recover_integrity_check",
+                                   return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                 mock.patch.object(recover_service, "inspect_audio_file",
+                                   return_value={"ok": True, "codec": "flac"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                     "acoustid_status": "failed",
+                     "identity_status": "review_required",
+                     "final_action": "review",
+                     "conflicts": ["acoustid_lookup_failed"],
+                     "acoustid_match_score": 0.0,
+                 }):
+                res = recover_service.verify_and_match_staged_upload(audio_path)
+        self.assertFalse(res["ok"], res)
+        self.assertEqual(res["status"], "review_required")
+        self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
+
 
 class SafeStagingAndBeetsImport(unittest.TestCase):
     """Phase 2 (9-10): safe staging validation, non-destructive Beets import,

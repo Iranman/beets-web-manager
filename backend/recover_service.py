@@ -1806,15 +1806,35 @@ def verify_and_match_staged_upload(
     top_candidates = identity.get("candidates") if isinstance(identity.get("candidates"), list) else []
     top_cand = top_candidates[0] if top_candidates and isinstance(top_candidates[0], dict) else {}
 
-    # Markers that mean "no fingerprint identity was available" (a genuinely
-    # original / owner upload that is simply not in AcoustID/MusicBrainz) rather
-    # than a real contradiction. These must NOT block the singleton fallback;
-    # a true fingerprint-vs-metadata mismatch still rejects below.
-    benign = {"no_acoustid_result", "no_result", "no_fpcalc", "no_api_key", "not_attempted"}
-    blocking_conflicts = [c for c in conflicts if c.strip().lower() not in benign]
+    # Conflict/status token vocabularies. _audio_identity_decision emits
+    # acoustid_-PREFIXED tokens for provider/toolchain problems
+    # (acoustid_lookup_failed / acoustid_no_fpcalc / acoustid_no_api_key /
+    # acoustid_unavailable / acoustid_failed) but BARE tokens when no identity
+    # simply exists (no_acoustid_result / no_result / no_match). Normalise the
+    # prefix so both shapes classify the same way.
+    norm_conflicts = [c.strip().lower().removeprefix("acoustid_") for c in conflicts]
 
-    # Respect canonical reject/conflict and review decisions from _audio_identity_decision:
-    # never import or fall through to singleton when fingerprint contradicts upload metadata.
+    # "No fingerprint identity exists" -> genuinely original / owner upload.
+    # Benign: must fall through to the singleton fallback (never reject, never
+    # review).
+    no_match_tokens = {"no_acoustid_result", "no_result", "no_match"}
+    # "Could not verify" -> provider down / no fpcalc / no api key. Must route to
+    # REVIEW: never auto-import unverified audio, and never hard-reject on an
+    # outage (a provider outage is not evidence of a wrong identity).
+    unverifiable_tokens = {"lookup_failed", "no_fpcalc", "no_api_key", "unavailable", "not_attempted", "failed"}
+
+    # Only a genuine fingerprint-vs-metadata contradiction is a blocking conflict.
+    blocking_conflicts = [
+        c for c, n in zip(conflicts, norm_conflicts)
+        if n not in no_match_tokens and n not in unverifiable_tokens
+    ]
+    could_not_verify = (
+        acoustid_status in unverifiable_tokens
+        or any(n in unverifiable_tokens for n in norm_conflicts)
+    )
+
+    # Gate 1 (REJECT): respect a canonical reject/conflict decision or a genuine
+    # mismatch conflict token. A could-not-verify outage must NOT land here.
     if final_action == "reject" or identity_status == "conflict" or acoustid_status == "mismatch" or blocking_conflicts:
         reason = ", ".join(blocking_conflicts) if blocking_conflicts else (acoustid_status or "identity_conflict")
         return {
@@ -1828,9 +1848,14 @@ def verify_and_match_staged_upload(
             "staged_file": str(resolved),
         }
 
-    if acoustid_status in ("unavailable", "ambiguous", "candidate") or (
-        final_action == "review"
-        and acoustid_status not in ("", "not_attempted", "no_match", "no_fpcalc", "no_api_key")
+    # Gate 2 (REVIEW): could-not-verify, ambiguity, or a bare "review" verdict
+    # that is not one of the benign no-match statuses. "no_result"/"no_match" are
+    # benign here so a genuinely-original upload falls through to the singleton
+    # fallback below instead of being parked in review.
+    if (
+        acoustid_status in ("unavailable", "ambiguous", "candidate")
+        or could_not_verify
+        or (final_action == "review" and acoustid_status not in ("", "no_result", "no_match", "no_acoustid_result"))
     ):
         return {
             "ok": False,
