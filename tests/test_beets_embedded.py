@@ -47,6 +47,23 @@ if scenario not in ("readiness", "readiness_broken"):
 
 a = BeetsAdapter()
 
+# #466: the stock beets web app (and its config["lib"]) is process-global.
+# Another caller in the process can overwrite config["lib"] with its own --
+# possibly closed -- Library. The engine must re-assert its own Library on
+# every dispatch; otherwise a transaction on the foreign closed connection
+# strands Beets' per-database lock and every later call deadlocks (a hang).
+if scenario == "poisoned_global_lib":
+    out = {"stats0": a.get_stats()}
+    from beetsplug.web import app as _web_app
+    from beets.library import Library as _Library
+    bad = _Library(":memory:")
+    bad._connection().close()          # a closed connection, like a torn-down test's lib
+    _web_app.config["lib"] = bad       # another caller overwrites the shared global
+    out["stats_after_poison"] = a.get_stats()          # must NOT touch `bad`
+    out["rebound_to_engine_lib"] = _web_app.config["lib"] is beets_embedded.engine().lib
+    print(json.dumps(out, default=str))
+    sys.exit(0)
+
 # Readiness probe end to end through the real app and the real embedded
 # engine (no mocking of _beets_plugin_diagnostics): a fresh config-less
 # install must be ready; a genuinely broken engine must not.
@@ -190,6 +207,18 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
     @staticmethod
     def _failed(status):
         return {c["code"]: c["severity"] for c in status["checks"] if not c["ok"]}
+
+    def test_engine_survives_global_lib_being_overwritten_with_a_closed_library(self):
+        # #466 regression: the engine must re-bind its own Library onto the
+        # process-global beets web app before each dispatch. Otherwise a
+        # closed Library left in config["lib"] by another caller strands
+        # Beets' per-database lock and every later Beets call deadlocks --
+        # the 6h CI hang this guards against.
+        self._write_config()
+        self._precreate_library()
+        out = self._run("poisoned_global_lib")
+        self.assertEqual(out["stats_after_poison"], out["stats0"])
+        self.assertTrue(out["rebound_to_engine_lib"])
 
     def test_reads_import_modify_and_stream_in_process_without_network(self):
         stale = os.path.join(self.td, "stale")

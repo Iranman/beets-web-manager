@@ -47,6 +47,40 @@ class SplitModuleKeepsRunTestOnlyClassesTests(unittest.TestCase):
         self.assertIn(f"{MODULE}.RunTestOnly", out.getvalue())
 
 
+HANG_MODULE = "_bwm_runtest_hang_probe"
+HANG_SOURCE = '''import time, unittest
+
+class Hang(unittest.TestCase):
+    def test_hang(self):
+        time.sleep(3600)  # wedge a worker, like the #466 Beets db-lock deadlock
+'''
+
+
+class StallWatchdogFailsInsteadOfHangingTests(unittest.TestCase):
+    """#466: a wedged worker must fail the run within the stall timeout, not
+    block to GitHub's 6h job ceiling. run_tests calls os._exit on a stall, so
+    this runs it in a subprocess."""
+
+    @unittest.skipUnless(sys.platform != "win32", "watchdog SIGABRT dump is POSIX-only")
+    def test_a_hung_unit_trips_the_watchdog(self):
+        import os
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, True))
+        Path(tmp, HANG_MODULE + ".py").write_text(HANG_SOURCE, encoding="utf-8")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join([tmp, str(ROOT / "scripts"), env.get("PYTHONPATH", "")])
+        env["RUN_TESTS_STALL_TIMEOUT"] = "20"  # > worker startup (imports app.py), < the 3600s hang
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             f"import sys, run_tests; sys.exit(run_tests.main(['-j','1','--slowest','0','{HANG_MODULE}']))"],
+            env=env, capture_output=True, text=True, timeout=180,
+        )
+        self.assertEqual(proc.returncode, 1, (proc.stdout + proc.stderr)[-3000:])
+        self.assertIn("wedged", proc.stderr)
+        self.assertIn(HANG_MODULE, proc.stderr)
+
+
 class SuiteEnvSurvivesTests(unittest.TestCase):
     def test_no_test_module_calls_patch_stopall(self):
         # stopall also stops the suite-wide env patcher test_ai_batch_retry_race

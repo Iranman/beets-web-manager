@@ -209,22 +209,40 @@ class EmbeddedBeets:
                severity="warning")
 
         from beetsplug.web import app as web_app
-        from beetsplug.webmanager import auth as ops_auth
-        web_app.config["lib"] = lib
-        web_app.config["INCLUDE_PATHS"] = True
-        web_app.config["READONLY"] = True  # stock web's write routes are never used
-        web_app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
         self._key = secrets.token_hex(32)  # never leaves this process
-        ops_auth.set_api_key(self._key)
-        plugins.send("library_opened", lib=lib)
+        # beetsplug.web.app is a module-global Flask app whose config (and the
+        # webmanager auth key) are process-wide: anything else in this process
+        # that imports it can overwrite config["lib"] with its own Library.
+        # The engine owns these, so it re-asserts them before every dispatch
+        # (see _bind / call); otherwise a stale/closed Library left in the
+        # global config would be used, and a transaction on a closed
+        # connection strands Beets' per-database lock forever (a hang, not an
+        # error). In production nothing else touches the global, so this is a
+        # no-op; it matters when other code (e.g. the test suite) shares it.
+        self._web_config = {
+            "lib": lib,
+            "INCLUDE_PATHS": True,
+            "READONLY": True,  # stock web's write routes are never used
+            "JSONIFY_PRETTYPRINT_REGULAR": False,
+        }
 
         self.lib = lib
         self.app = web_app
+        self._bind()
+        plugins.send("library_opened", lib=lib)
         self.status = _summary(checks, beets_version=version, loaded_plugins=loaded,
                                library_path=dbpath, library_directory=directory)
         for c in checks + second_writers():
             if not c["ok"]:
                 (log.error if c["severity"] == "error" else log.warning)("Beets self-test %s: %s", c["code"], c["message"])
+
+    def _bind(self) -> None:
+        """Re-assert this engine's Library, web config and auth key onto the
+        process-global beets web app, so a dispatch always runs against this
+        engine's own (open) Library even if other code overwrote the global."""
+        from beetsplug.webmanager import auth as ops_auth
+        self.app.config.update(self._web_config)
+        ops_auth.set_api_key(self._key)
 
     def current_status(self) -> Dict[str, Any]:
         """The startup self-test plus the live second-writer checks."""
@@ -242,6 +260,7 @@ class EmbeddedBeets:
             st = self.current_status()
             if not st["ok"]:
                 raise EmbeddedBeetsUnavailable(st)
+        self._bind()  # the global app's lib/key may have been overwritten since the last call
         hdrs = dict(headers or {})
         if path.startswith("/webmanager"):
             hdrs.setdefault("Authorization", f"Bearer {self._key}")

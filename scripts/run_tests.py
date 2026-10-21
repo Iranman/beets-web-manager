@@ -90,6 +90,21 @@ def _run(name: str, verbosity: int) -> dict:
     }
 
 
+def _dump_worker_stacks(pool) -> None:
+    """SIGABRT every pool worker so `python -X faulthandler` prints each one's
+    thread stacks to stderr -- the evidence for why a worker is wedged."""
+    import signal
+    sigabrt = getattr(signal, "SIGABRT", None)
+    if sigabrt is None or os.name != "posix":
+        return
+    for pid in list(getattr(pool, "_processes", {}) or {}):
+        try:
+            os.kill(pid, sigabrt)
+        except OSError:
+            pass
+    time.sleep(5)  # let the faulthandler output reach stderr before we exit
+
+
 def _modules() -> list[str]:
     return sorted(
         f[:-3] for f in os.listdir(TESTS)
@@ -131,13 +146,31 @@ def main(argv: list[str] | None = None) -> int:
                 if classes:
                     share = units.pop(m) / len(classes)
                     units.update({c: share for c in classes})
-            futures = [pool.submit(_run, u, verbosity) for u in sorted(units, key=units.get, reverse=True)]
-            for fut in cf.as_completed(futures):
-                res = fut.result()
-                results.append(res)
-                if args.verbose or not res["ok"]:
-                    sys.stdout.write(f"\n===== {res['name']} =====\n{res['output']}")
+            futures = {pool.submit(_run, u, verbosity): u for u in sorted(units, key=units.get, reverse=True)}
+            # Watchdog: no single test unit may wedge the whole run. If no
+            # unit finishes within RUN_TESTS_STALL_TIMEOUT seconds a worker is
+            # hung (e.g. a deadlock), so dump every worker's thread stacks and
+            # fail, instead of blocking to the 6h CI job ceiling (#466). The
+            # window resets whenever any unit finishes, so a legitimately slow
+            # unit is fine as long as the run keeps making progress.
+            stall = float(os.environ.get("RUN_TESTS_STALL_TIMEOUT", "900"))
+            pending = set(futures)
+            while pending:
+                done, pending = cf.wait(pending, timeout=stall, return_when=cf.FIRST_COMPLETED)
+                if not done:
+                    stuck = sorted(futures[f] for f in pending)
+                    print(f"\nrun_tests: no test unit finished in {stall:.0f}s -- a worker is "
+                          f"wedged. Still running ({len(stuck)}): {' '.join(stuck)}", file=sys.stderr)
+                    _dump_worker_stacks(pool)
                     sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(1)  # the worker is deadlocked; a clean shutdown would join it forever
+                for fut in done:
+                    res = fut.result()
+                    results.append(res)
+                    if args.verbose or not res["ok"]:
+                        sys.stdout.write(f"\n===== {res['name']} =====\n{res['output']}")
+                        sys.stdout.flush()
         except cf.process.BrokenProcessPool:
             done = {r["name"] for r in results}
             lost = sorted(set(units) - done)
