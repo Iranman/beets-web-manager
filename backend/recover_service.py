@@ -369,7 +369,7 @@ def inspect_stream_diagnostics(
     binary blobs.
     """
     data = info if isinstance(info, dict) else {}
-    raw_formats = [f for f in (data.get("formats") or []) if isinstance(f, dict)]
+    raw_formats = [f for f in _as_list(data.get("formats")) if isinstance(f, dict)]
     plat = _s(platform or _platform_for_host(_host_of(_s(data.get("webpage_url") or "")))).lower()
 
     protocols = set()
@@ -388,7 +388,7 @@ def inspect_stream_diagnostics(
     )
     if isinstance(top_drm, str):
         key_systems.update(_detect_key_systems_from_text(top_drm))
-    for fam in (data.get("drm_families") or []):
+    for fam in _as_list(data.get("drm_families")):
         key_systems.update(_detect_key_systems_from_text(_s(fam)))
 
     for fmt in raw_formats:
@@ -680,9 +680,23 @@ def classify_media_provenance(
 _PEM_OR_SECRET_VALUE_RE = re.compile(
     r"(-----BEGIN [A-Z0-9 ]+-----|"
     r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}|"
-    r"^\s*#?\s*HttpOnly_)",
+    r"^\s*#?HttpOnly_)",
     re.IGNORECASE,
 )
+
+
+def _redaction_category(key_low: str) -> str:
+    """F3a: a fixed label for redacted_fields so an attacker-chosen field
+    NAME is never echoed back in the sanitized output."""
+    if "cookie" in key_low:
+        return "cookie"
+    if "license" in key_low:
+        return "license"
+    if "token" in key_low or "bearer" in key_low or "authorization" in key_low or "password" in key_low:
+        return "credential"
+    if "secret" in key_low:
+        return "secret"
+    return "key_material"
 
 
 def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str = "") -> Any:
@@ -702,7 +716,7 @@ def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str =
                 or "license_response" in key_low
                 or "license_request" in key_low
             ):
-                redacted.add(key_str)
+                redacted.add(_redaction_category(key_low))
                 continue
             cleaned[key_str] = _strip_secret_fields_recursive(v, redacted, parent_key=key_low)
         return cleaned
@@ -712,7 +726,7 @@ def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str =
         # Bound the scan length before matching (a secret marker appears at the
         # start of a value); avoids pathological backtracking on huge inputs.
         if _PEM_OR_SECRET_VALUE_RE.search(obj[:4096]):
-            redacted.add(parent_key or "inline_secret_value")
+            redacted.add("inline_secret_value")
             return "[REDACTED]"
         return _redact_security_text(obj)[:500]
     if isinstance(obj, (int, float, bool)) or obj is None:
@@ -1234,7 +1248,7 @@ def _sanitize_persisted_url(url: Any) -> str:
         parts = urlsplit(raw)
         if not parts.scheme or not parts.netloc:
             return _redact_security_text(raw)[:500]
-        netloc = parts.netloc.split("@", 1)[-1]
+        netloc = parts.netloc.rsplit("@", 1)[-1]
         clean_params = []
         for k, v in parse_qsl(parts.query, keep_blank_values=True):
             kl = k.strip().lower()
@@ -1495,7 +1509,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     # path: enumerate it first, then fetch each item URL, so every child is
     # guard-checked and individually integrity/provenance-gated (F3).
     if probe.get("is_collection"):
-        log.append(f"  [recover] Refusing collection URL in fetch: {url}")
+        log.append(f"  [recover] Refusing collection URL in fetch: {_sanitize_persisted_url(url) or url}")
         return {"url": url, "recovered": False, "category": "collection",
                 "provenance_status": "accessible",
                 "action": "Enumerate this channel/playlist first, then fetch the individual item URLs.",
@@ -1503,7 +1517,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
 
     stream_diag = probe.get("stream_diagnostics") if isinstance(probe.get("stream_diagnostics"), dict) else {}
     if stream_diag.get("drm_status") == "protected":
-        log.append(f"  [recover] Refusing DRM-protected stream ({', '.join(stream_diag.get('key_systems') or ['DRM'])}): {url}")
+        log.append(f"  [recover] Refusing DRM-protected stream ({', '.join(stream_diag.get('key_systems') or ['DRM'])}): {_sanitize_persisted_url(url) or url}")
         return {
             "url": url,
             "recovered": False,
@@ -1544,7 +1558,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     _ytdlp_apply_source_network_options(opts, "ytdlp" if _is_youtube_host(host) else "", log)
     auth = _recover_apply_owner_cookies(opts, log)
 
-    log.append(f"  [recover] Fetching {url} ({plan['note']})")
+    log.append(f"  [recover] Fetching {_sanitize_persisted_url(url) or url} ({plan['note']})")
     try:
         yt_dlp = _yt_dlp_module(ydl_module)
         with yt_dlp.YoutubeDL(ytdlp_guarded_options(opts, [url])) as ydl:

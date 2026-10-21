@@ -855,7 +855,8 @@ class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
         self.assertNotIn("eyJrZXlzIjpbXX0=", dumped)
         self.assertNotIn("secret_cookie_value", dumped)
         self.assertNotIn("SENTINEL_private_key_value_not_a_real_key", dumped)
-        self.assertIn("private_key", sanitized["redacted_fields"])
+        # private_key is redacted under the fixed "key_material" category (F3a).
+        self.assertIn("key_material", sanitized["redacted_fields"])
         self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", dumped)
 
     def test_sanitizer_does_not_leak_event_keysystem_or_url_tokens_and_tolerates_bad_types(self):
@@ -872,8 +873,36 @@ class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
         self.assertNotIn("LEAKED_TOKEN123", str(o2))
         # F-9: malformed field types must not crash the sanitizer.
         for bad in ({"key_systems": 1}, {"message_types": 1}, {"session_types": 5},
-                    {"key_statuses": True}, {"events": [{"statuses": True}]}):
+                    {"key_statuses": True}, {"events": [{"statuses": True}]},
+                    {"formats": 1}, {"drm_families": True}):  # F3b: also inside inspect_stream_diagnostics
             self.assertTrue(recover_service.sanitize_diagnostic_report(bad)["ok"])
+        # F3a: redacted_fields must be FIXED categories, never raw field names.
+        o = recover_service.sanitize_diagnostic_report(
+            {"secretKID_LEAKED_0123456789ABCDEF": "x", "private_key_SECRETNAME_DEADBEEF": "y"})
+        self.assertNotIn("LEAKED", str(o))
+        self.assertNotIn("SECRETNAME", str(o))
+        self.assertTrue(set(o["redacted_fields"]) <= {
+            "cookie", "license", "credential", "secret", "key_material",
+            "inline_secret_value", "key_statuses.kid", "events.statuses.kid"}, o["redacted_fields"])
+
+    def test_validator_rejects_hardlinked_staged_file(self):
+        # Finding F-1 regression: a hard link under recovered/ (nlink>1) that could
+        # point at a library file must be refused before any in-place tag write.
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered = Path(tmp) / "recovered" / "yt" / "r1"
+            recovered.mkdir(parents=True, exist_ok=True)
+            target = recovered / "a.flac"
+            target.write_bytes(b"\x00" * 4096)
+            link = recovered / "b.flac"
+            try:
+                os.link(target, link)  # hard link -> nlink == 2
+            except OSError:
+                self.skipTest("hard links not supported on this filesystem")
+            Path(str(link) + ".recover.json").write_text('{"source_url": "https://x/y"}', encoding="utf-8")
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp):
+                resolved, sidecar, err = recover_service._validate_staged_recover_file(str(link))
+            self.assertIsNone(resolved)
+            self.assertIn("hard link", err)
 
     def test_diagnostics_route_returns_sanitized_report(self):
         client = app_module.app.test_client()
