@@ -1612,6 +1612,28 @@ class AuthorizationAndProvenance(unittest.TestCase):
         self.assertNotIn("EVIDENCESIG555", rec["verified_evidence"] or "")
         self.assertNotIn("TKN888", rec["verified_evidence"] or "")
 
+    def test_signed_param_name_cannot_defang_bearer_pem_redaction(self):
+        # F-1 regression: the signed-param redactor must not consume a Bearer/PEM
+        # marker as a param "value" and leave the secret. The inline-secret
+        # full-redact runs FIRST, so `<signedname>=Bearer <token>` fully redacts.
+        for note in ("sig=Bearer SECRETTOKEN12345ABCDEF",
+                     "auth=Bearer SECRETTOKEN12345ABCDEF",
+                     "key=Bearer SECRETTOKEN12345ABCDEF"):
+            rec = recover_service._sanitize_authorization_record({
+                "asserted_basis": "licensed_permission", "asserted_note": note,
+                "verified": False,
+            })
+            self.assertEqual(rec["asserted_note"], "[REDACTED]", note)
+            self.assertNotIn("SECRETTOKEN12345", rec["asserted_note"])
+        # and the legitimate F5 signed-param stripping still works; prose untouched
+        rec2 = recover_service._sanitize_authorization_record({
+            "asserted_basis": "open_license",
+            "asserted_note": "see //cdn/p?X-Amz-Signature=PLAINSIG999 the key to success",
+            "verified": False,
+        })
+        self.assertNotIn("PLAINSIG999", rec2["asserted_note"])
+        self.assertIn("the key to success", rec2["asserted_note"])
+
     # ── (1) a valid basis is required; an invalid basis is rejected ──
     def test_fetch_and_import_require_a_valid_basis(self):
         f_none, s1 = recover_service.start_recover_fetch(

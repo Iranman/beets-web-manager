@@ -1509,9 +1509,13 @@ def _scrub_authz_text(value: Any, limit: int) -> str:
     whitelisted re-admit would otherwise bypass (F3), then bounds the length."""
     text = _redact_security_text(_s(value))
     text = _URL_IN_TEXT_RE.sub(lambda m: _sanitize_persisted_url(m.group(0)), text)
-    text = _SIGNED_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
+    # Full-redact inline secrets (Bearer/Basic tokens, PEM blocks) BEFORE the
+    # signed-param sub. The signed-param sub's value class would otherwise
+    # consume the `Bearer`/`-----BEGIN` marker as a param "value" and defang
+    # this check, letting a `<signedname>=Bearer <token>` secret persist (F-1).
     if _PEM_OR_SECRET_VALUE_RE.search(text[:4096]):
         text = "[REDACTED]"
+    text = _SIGNED_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
     return text[:limit]
 
 
