@@ -159,6 +159,11 @@ _FORBIDDEN_DIAGNOSTIC_KEYS = frozenset({
 })
 
 
+def _as_list(value):
+    """F-9: tolerate malformed diagnostic fields — only real lists/tuples iterate."""
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 def _codec_is_lossless(codec: Any, ext: Any) -> bool:
     c = _s(codec).strip().lower()
     e = _s(ext).strip().lower()
@@ -704,7 +709,9 @@ def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str =
     if isinstance(obj, list):
         return [_strip_secret_fields_recursive(item, redacted, parent_key=parent_key) for item in obj[:100]]
     if isinstance(obj, str):
-        if _PEM_OR_SECRET_VALUE_RE.search(obj):
+        # Bound the scan length before matching (a secret marker appears at the
+        # start of a value); avoids pathological backtracking on huge inputs.
+        if _PEM_OR_SECRET_VALUE_RE.search(obj[:4096]):
             redacted.add(parent_key or "inline_secret_value")
             return "[REDACTED]"
         return _redact_security_text(obj)[:500]
@@ -736,29 +743,28 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
     redacted: set = set()
     cleaned = _strip_secret_fields_recursive(raw_report, redacted)
 
-    source_url = _s(cleaned.get("source_url") or cleaned.get("webpage_url") or cleaned.get("url") or "").strip()
+    source_url = _sanitize_persisted_url(
+        _s(cleaned.get("source_url") or cleaned.get("webpage_url") or cleaned.get("url") or "").strip()
+    )
     host = _host_of(source_url)
     platform = _s(cleaned.get("source_platform") or cleaned.get("platform") or _platform_for_host(host)).lower()
 
+    # Only CANONICAL key-system ids are ever emitted (never the raw string), so
+    # an attacker-controlled value in key_systems/keySystem cannot leak out.
     key_systems = set()
-    for ks in (cleaned.get("key_systems") or cleaned.get("keySystems") or []):
-        ks_text = _s(ks).strip().lower()
-        if ks_text:
-            key_systems.add(ks_text)
-            key_systems.update(_detect_key_systems_from_text(ks_text))
-    ks_single = _s(cleaned.get("key_system") or cleaned.get("keySystem") or "").strip().lower()
-    if ks_single:
-        key_systems.add(ks_single)
-        key_systems.update(_detect_key_systems_from_text(ks_single))
+    for ks in _as_list(cleaned.get("key_systems") or cleaned.get("keySystems")):
+        key_systems.update(_detect_key_systems_from_text(_s(ks)))
+    key_systems.update(
+        _detect_key_systems_from_text(_s(cleaned.get("key_system") or cleaned.get("keySystem") or "")))
 
     session_types = set()
-    for st in (cleaned.get("session_types") or cleaned.get("sessionTypes") or []):
+    for st in _as_list(cleaned.get("session_types") or cleaned.get("sessionTypes")):
         st_text = _s(st).strip().lower()
         if st_text in ("temporary", "persistent-license", "persistent-usage-record"):
             session_types.add(st_text)
 
     message_types = set()
-    for mt in (cleaned.get("message_types") or cleaned.get("messageTypes") or []):
+    for mt in _as_list(cleaned.get("message_types") or cleaned.get("messageTypes")):
         mt_text = _s(mt).strip().lower()
         if mt_text in ("license-request", "license-renewal", "license-release", "individualization-request"):
             message_types.add(mt_text)
@@ -780,32 +786,24 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
             if status_val in _ALLOWED_EME_KEY_STATUSES:
                 key_statuses.add(status_val)
 
-    # Also inspect EME lifecycle events if provided in lab observation format
-    events = raw_report.get("events") if isinstance(raw_report.get("events"), list) else []
-    for ev in events[:200]:
+    # EME lifecycle events are read from the CLEANED report (secrets already
+    # stripped by field name); only canonical key-system ids and allowlisted
+    # status/message tokens are kept, never raw event strings.
+    for ev in _as_list(cleaned.get("events"))[:200]:
         if not isinstance(ev, dict):
             continue
-        ev_type = _s(ev.get("type") or ev.get("event") or "").strip().lower()
-        ks_ev = _s(ev.get("keySystem") or ev.get("key_system") or "").strip().lower()
-        if ks_ev:
-            key_systems.add(ks_ev)
-            key_systems.update(_detect_key_systems_from_text(ks_ev))
+        key_systems.update(
+            _detect_key_systems_from_text(_s(ev.get("keySystem") or ev.get("key_system") or "")))
         msg_type = _s(ev.get("messageType") or ev.get("message_type") or "").strip().lower()
         if msg_type in ("license-request", "license-renewal", "license-release", "individualization-request"):
             message_types.add(msg_type)
-        for st_val in (ev.get("statuses") or ev.get("keyStatuses") or []):
+        for st_val in _as_list(ev.get("statuses") or ev.get("keyStatuses")):
             if isinstance(st_val, dict):
-                if any(k in st_val for k in ("kid", "key", "k")):
-                    redacted.add("events.statuses.kid")
                 s_name = _s(st_val.get("status") or "").strip().lower()
             else:
                 s_name = _s(st_val).strip().lower()
             if s_name in _ALLOWED_EME_KEY_STATUSES:
                 key_statuses.add(s_name)
-        if ev_type in ("update", "message", "generate_request", "generaterequest"):
-            for secret_f in ("license", "message", "initData", "init_data", "keys", "recovered_keys"):
-                if secret_f in ev:
-                    redacted.add(f"events.{secret_f}")
 
     stream_diag = inspect_stream_diagnostics(cleaned, platform=platform)
     for ks in stream_diag.get("key_systems") or []:
@@ -819,10 +817,7 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         or key_statuses
     )
 
-    non_clearkey_drm = any(
-        ks in ("widevine", "playready", "fairplay", "com.widevine.alpha", "com.microsoft.playready")
-        for ks in key_systems
-    )
+    non_clearkey_drm = any(ks in ("widevine", "playready", "fairplay") for ks in key_systems)
     raw_prov = _s(cleaned.get("provenance_status") or "").strip()
     if raw_prov in RECOVER_PROVENANCE_STATES:
         provenance_status = raw_prov
@@ -1261,8 +1256,17 @@ def _write_provenance(staged_file: str, record: Dict[str, Any]) -> str:
     if isinstance(clean_rec, dict) and clean_rec.get("source_url"):
         clean_rec["source_url"] = _sanitize_persisted_url(clean_rec.get("source_url"))
     sidecar = str(Path(staged_file).with_suffix(Path(staged_file).suffix + ".recover.json"))
+    data = json.dumps(clean_rec, ensure_ascii=False, indent=2).encode("utf-8")
+    # O_NOFOLLOW: refuse to write THROUGH a symlink that may have been swapped in
+    # for the sidecar (TOCTOU), so provenance can never clobber a file outside
+    # staging. (No-op flag on platforms without it; the deploy target is Linux.)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     try:
-        Path(sidecar).write_text(json.dumps(clean_rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        fd = os.open(sidecar, flags, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
     except OSError:
         return ""
     return sidecar
@@ -1688,6 +1692,16 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
     if not resolved.is_file() or resolved.suffix.lower() not in _RECOVER_AUDIO_EXT:
         return None, None, "staged path is not a supported audio file"
 
+    # Reject hard links: a freshly staged recovery file has a single link. A
+    # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
+    # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
+    # it would mutate the library file in place, outside the transaction engine.
+    try:
+        if resolved.stat().st_nlink > 1:
+            return None, None, "refusing staged file with multiple hard links"
+    except OSError:
+        return None, None, "cannot stat staged audio file"
+
     try:
         music_root = Path(MUSIC_ROOT).resolve()
         if resolved == music_root or music_root in resolved.parents:
@@ -1778,17 +1792,24 @@ def verify_and_match_staged_upload(
     top_candidates = identity.get("candidates") if isinstance(identity.get("candidates"), list) else []
     top_cand = top_candidates[0] if top_candidates and isinstance(top_candidates[0], dict) else {}
 
+    # Markers that mean "no fingerprint identity was available" (a genuinely
+    # original / owner upload that is simply not in AcoustID/MusicBrainz) rather
+    # than a real contradiction. These must NOT block the singleton fallback;
+    # a true fingerprint-vs-metadata mismatch still rejects below.
+    benign = {"no_acoustid_result", "no_result", "no_fpcalc", "no_api_key", "not_attempted"}
+    blocking_conflicts = [c for c in conflicts if c.strip().lower() not in benign]
+
     # Respect canonical reject/conflict and review decisions from _audio_identity_decision:
     # never import or fall through to singleton when fingerprint contradicts upload metadata.
-    if final_action == "reject" or identity_status == "conflict" or acoustid_status == "mismatch" or conflicts:
-        reason = ", ".join(conflicts) if conflicts else (acoustid_status or "identity_conflict")
+    if final_action == "reject" or identity_status == "conflict" or acoustid_status == "mismatch" or blocking_conflicts:
+        reason = ", ".join(blocking_conflicts) if blocking_conflicts else (acoustid_status or "identity_conflict")
         return {
             "ok": False,
             "status": "identity_conflict",
             "final_action": "reject",
             "identity_status": identity_status or "conflict",
             "acoustid_status": acoustid_status,
-            "conflicts": conflicts,
+            "conflicts": blocking_conflicts,
             "error": f"audio fingerprint conflicts with expected upload identity ({reason})",
             "staged_file": str(resolved),
         }
@@ -2031,11 +2052,10 @@ def _recover_import_one(
     tx_id: Optional[str] = None
     try:
         tx = transactions.create(
-            "Import",
-            title,
-            artist,
-            track_count=1,
+            operation_type="Import",
             status="Running",
+            source="recover_upload_singleton",
+            summary=f"{artist} - {title}",
             metadata={
                 "workflow": "recover_upload_singleton",
                 "staged_file": resolved_file,
@@ -2079,7 +2099,7 @@ def _recover_import_one(
         err_msg = _redact_security_text(_s(exc))[:400]
         if tx_id:
             try:
-                transactions.update_status(tx_id, "Failed", error=err_msg)
+                transactions.update(tx_id, status="Failed", metadata={"error": err_msg})
             except Exception:
                 pass
         log.append(f"  [recover-import] Beets import failed for {Path(resolved_file).name}: {err_msg}")
@@ -2100,7 +2120,7 @@ def _recover_import_one(
         err_msg = _redact_security_text(_s(import_res.get("error") or "beets import returned failure"))[:400]
         if tx_id:
             try:
-                transactions.update_status(tx_id, "Failed", error=err_msg)
+                transactions.update(tx_id, status="Failed", metadata={"error": err_msg})
             except Exception:
                 pass
         log.append(f"  [recover-import] Beets refused import for {Path(resolved_file).name}: {err_msg}")
@@ -2125,10 +2145,10 @@ def _recover_import_one(
             if skip_reason == "duplicate":
                 if tx_id:
                     try:
-                        transactions.update_status(
+                        transactions.update(
                             tx_id,
-                            "Completed",
-                            engine_result={"skipped_duplicate": True, "staged_file": resolved_file},
+                            status="Completed",
+                            metadata={"engine_result": {"skipped_duplicate": True, "staged_file": resolved_file}},
                         )
                     except Exception:
                         pass
@@ -2149,7 +2169,7 @@ def _recover_import_one(
             err_msg = f"beets skipped file during import ({skip_reason})"
             if tx_id:
                 try:
-                    transactions.update_status(tx_id, "Failed", error=err_msg)
+                    transactions.update(tx_id, status="Failed", metadata={"error": err_msg})
                 except Exception:
                     pass
             log.append(f"  [recover-import] Beets skipped {Path(resolved_file).name}: {err_msg}")
@@ -2170,7 +2190,7 @@ def _recover_import_one(
         err_msg = "beets import completed without adding item to library"
         if tx_id:
             try:
-                transactions.update_status(tx_id, "Failed", error=err_msg)
+                transactions.update(tx_id, status="Failed", metadata={"error": err_msg})
             except Exception:
                 pass
         log.append(f"  [recover-import] Post-import library read-back failed for {artist} - {title}")
@@ -2188,13 +2208,13 @@ def _recover_import_one(
     imported_item_id = imported_item.get("id")
     if tx_id:
         try:
-            transactions.update_status(
+            transactions.update(
                 tx_id,
-                "Completed",
-                engine_result={
+                status="Completed",
+                metadata={"engine_result": {
                     "item_ids": [imported_item_id] if imported_item_id is not None else [],
                     "staged_file": resolved_file,
-                },
+                }},
             )
         except Exception:
             pass

@@ -840,8 +840,11 @@ class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
         self.assertFalse(sanitized["decryption_supported"])
         self.assertFalse(sanitized["widevine_decryptable"])
         self.assertTrue(len(sanitized["redacted_fields"]) > 0)
-        self.assertIn("org.w3.clearkey", sanitized["key_systems"])
-        self.assertIn("com.widevine.alpha", sanitized["key_systems"])
+        # Canonical ids only (raw key-system strings are never echoed back).
+        self.assertIn("clearkey", sanitized["key_systems"])
+        self.assertIn("widevine", sanitized["key_systems"])
+        self.assertNotIn("org.w3.clearkey", sanitized["key_systems"])
+
         self.assertEqual(sanitized["key_statuses"], ["expired", "usable"])
         self.assertEqual(sanitized["provenance_status"], "genuinely-DRM")
 
@@ -854,6 +857,23 @@ class Phase3ResearchDiagnosticCompatibility(unittest.TestCase):
         self.assertNotIn("SENTINEL_private_key_value_not_a_real_key", dumped)
         self.assertIn("private_key", sanitized["redacted_fields"])
         self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", dumped)
+
+    def test_sanitizer_does_not_leak_event_keysystem_or_url_tokens_and_tolerates_bad_types(self):
+        # F-3: a secret in an event keySystem must NOT be echoed into key_systems.
+        o = recover_service.sanitize_diagnostic_report({
+            "events": [{"keySystem": "bearer eyJsecret_in_event_leak"}],
+            "key_system": "com.widevine.alpha",
+        })
+        self.assertEqual(o["key_systems"], ["widevine"])
+        self.assertNotIn("bearer", str(o["key_systems"]).lower())
+        # F-5: a URL query token must be stripped from the echoed source_url.
+        o2 = recover_service.sanitize_diagnostic_report(
+            {"source_url": "https://x.com/watch?v=1&access_token=LEAKED_TOKEN123"})
+        self.assertNotIn("LEAKED_TOKEN123", str(o2))
+        # F-9: malformed field types must not crash the sanitizer.
+        for bad in ({"key_systems": 1}, {"message_types": 1}, {"session_types": 5},
+                    {"key_statuses": True}, {"events": [{"statuses": True}]}):
+            self.assertTrue(recover_service.sanitize_diagnostic_report(bad)["ok"])
 
     def test_diagnostics_route_returns_sanitized_report(self):
         client = app_module.app.test_client()
@@ -1016,7 +1036,13 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                  mock.patch.object(recover_service, "inspect_audio_file",
                                    return_value={"ok": True, "codec": "flac"}), \
                  mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
-                     "acoustid_status": "no_match",
+                     # REAL no-candidate decision shape from acoustid_service: a
+                     # genuinely-original upload returns conflicts=["no_acoustid_result"].
+                     # (Finding 2 regression — the old gate rejected on ANY conflicts.)
+                     "fingerprint_status": "no_result",
+                     "acoustid_status": "no_result",
+                     "metadata_agreement": "degraded",
+                     "conflicts": ["no_acoustid_result"],
                      "acoustid_match_score": 0.0,
                  }), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]) as mock_mb_search:
@@ -1145,13 +1171,23 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                 "ok": True, "success": True, "returncode": 0, "stdout": "imported", "stderr": ""
             }
 
+            # Finding 1 regression: inject a REAL TransactionStore so the import
+            # must create a valid, audited transaction record. The old code called
+            # transactions.create()/update_status() with a signature the real store
+            # rejects (TypeError, swallowed) -> transaction_id stayed None.
+            from backend.transaction_engine import TransactionStore
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
             with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch("backend.app_runtime.transactions", tx_store), \
                  mock.patch.object(recover_service, "recover_integrity_check",
                                    return_value={"ok": True, "duration": 210.0, "duration_verified": True}), \
                  mock.patch.object(recover_service, "inspect_audio_file",
                                    return_value={"ok": True, "codec": "flac"}), \
                  mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
-                     "acoustid_status": "no_match",
+                     "fingerprint_status": "no_result",
+                     "acoustid_status": "no_result",
+                     "metadata_agreement": "degraded",
+                     "conflicts": ["no_acoustid_result"],
                      "acoustid_match_score": 0.0,
                  }), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]):
@@ -1161,6 +1197,11 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
             self.assertEqual(out["imported_item_id"], 99)
             self.assertEqual(out["status"], "imported")
             self.assertEqual(out["provenance_status"], "imported")
+            # Audited: a transaction record was created and marked Completed.
+            self.assertTrue(out.get("transaction_id"), "import must create a transaction record")
+            tx_rec = tx_store._read(out["transaction_id"])
+            self.assertEqual(tx_rec["operation_type"], "Import")
+            self.assertEqual(tx_rec["status"], "Completed")
             # Verify copy=True, move=False, duplicate_action="skip", singletons=True,
             # autotag=False, quiet_fallback="skip", search_ids=None
             _, kwargs = fake_adapter.run_import.call_args
