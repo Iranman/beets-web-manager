@@ -502,7 +502,7 @@ def qbit_hardlink_missing():
             "ok": False,
             "error": (
                 "qBittorrent is not configured. Set QBITTORRENT_URL or QBIT_URL "
-                "for the Beets container."
+                "for the Web Manager container."
             ),
             "status": _qbit_status_payload(),
         }), 400

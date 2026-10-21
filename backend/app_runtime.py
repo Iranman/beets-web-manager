@@ -953,7 +953,7 @@ def _db(path=None, *, text_factory=None, row_factory=None):
 
 
 # Imported last, after the boot environment above is loaded: backend.beets_adapter
-# builds its module-level client from BEETS_WEB_URL / API-key settings at import.
+# reads its settings at import.
 from backend.beets_adapter import (  # noqa: E402
     BeetsAuthError, BeetsBadRequestError, BeetsError, BeetsNotFoundError, BeetsUnavailableError,
 )

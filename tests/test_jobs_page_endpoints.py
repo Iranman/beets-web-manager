@@ -4,7 +4,7 @@ and return clean error payloads when unauthenticated or when Beets control agent
 """
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 try:  # ARCH-001: patch app.py and the modules extracted from it
     from _app_family import patch_app_family  # noqa: E402
 except ImportError:  # pragma: no cover
@@ -178,14 +178,19 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('error_code'), 'ENGINE_AUTH_FAILED')
             self.assertEqual(data.get('error'), 'Beets engine authentication failed.')
 
-    def test_beets_client_http_500_raises_beets_error_not_unavailable(self):
-        import urllib.error
-        from io import BytesIO
+    @staticmethod
+    def _engine_answering(status, body):
+        from flask import Response
         from backend.beets_adapter import BeetsAdapter
-        client = BeetsAdapter(base_url="http://localhost:8337")
+        engine = MagicMock()
+        engine.call.side_effect = lambda *a, **k: Response(body, status=status, content_type="application/json")
+        return patch.object(BeetsAdapter, "_engine", return_value=engine)
+
+    def test_beets_client_http_500_raises_beets_error_not_unavailable(self):
+        from backend.beets_adapter import BeetsAdapter
+        client = BeetsAdapter()
         body_bytes = b'{"ok": false, "error": "Internal database query error", "error_code": "DB_QUERY_FAILED"}'
-        err = urllib.error.HTTPError("http://localhost:8337/stats", 500, "Server Error", {}, BytesIO(body_bytes))
-        with patch('urllib.request.urlopen', side_effect=err):
+        with self._engine_answering(500, body_bytes):
             with self.assertRaises(BeetsError) as ctx:
                 client.get_stats()
             self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
@@ -193,13 +198,10 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(ctx.exception.error_code, 'DB_QUERY_FAILED')
 
     def test_beets_client_http_401_raises_beets_auth_error(self):
-        import urllib.error
-        from io import BytesIO
         from backend.beets_adapter import BeetsAdapter, BeetsAuthError
-        client = BeetsAdapter(base_url="http://localhost:8337")
+        client = BeetsAdapter()
         body_bytes = b'{"ok": false, "error": "Unauthorized token", "error_code": "ENGINE_AUTH_FAILED"}'
-        err = urllib.error.HTTPError("http://localhost:8337/webmanager/status", 401, "Unauthorized", {}, BytesIO(body_bytes))
-        with patch('urllib.request.urlopen', side_effect=err):
+        with self._engine_answering(401, body_bytes):
             with self.assertRaises(BeetsAuthError) as ctx:
                 client.get_plugin_status()
             self.assertEqual(ctx.exception.status_code, 401)

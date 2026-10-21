@@ -189,7 +189,7 @@ class ConfigBackupPruneTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
         self.cfg = self.dir / "config.yaml"
-        self.cfg.write_text("library: /config/l.blb\n", encoding="utf-8")
+        self.cfg.write_text("va_name: l\n", encoding="utf-8")
 
     def test_timestamped_backups_are_pruned(self):
         """#324 N-2: every save left another copy of the secrets, forever."""
@@ -197,7 +197,7 @@ class ConfigBackupPruneTests(unittest.TestCase):
             (self.dir / f"config.yaml.bak.{1000 + n}").write_text("old\n", encoding="utf-8")
         (self.dir / "config.yaml.bak.1000-1").write_text("old\n", encoding="utf-8")
         (self.dir / "config.yaml.bak.notes").write_text("keep\n", encoding="utf-8")
-        cm.save_config("library: /config/new.blb\n", config_path=self.cfg)
+        cm.save_config("va_name: new\n", config_path=self.cfg)
         stamped = sorted(p.name for p in self.dir.iterdir() if p.name.startswith("config.yaml.bak.")
                          and p.name != "config.yaml.bak.notes")
         self.assertEqual(len(stamped), cm.KEEP_TIMESTAMPED_BACKUPS)
@@ -206,16 +206,16 @@ class ConfigBackupPruneTests(unittest.TestCase):
         self.assertTrue((self.dir / "config.yaml.bak.notes").exists())
         self.assertTrue((self.dir / "config.yaml.bak").exists())  # the revert source stays
         newest = max(stamped, key=lambda n: int(n.rsplit(".", 1)[1].split("-")[0]))
-        self.assertEqual((self.dir / newest).read_text(encoding="utf-8"), "library: /config/l.blb\n")
+        self.assertEqual((self.dir / newest).read_text(encoding="utf-8"), "va_name: l\n")
 
     def test_crlf_file_keeps_crlf(self):
         """#324 N-3: saving no longer rewrites a CRLF file to LF."""
-        self.cfg.write_bytes(b"library: /config/l.blb\r\ndirectory: /music\r\n")
+        self.cfg.write_bytes(b"va_name: l\r\ndirectory: /music\r\n")
         current = cm.get_config(self.cfg)
-        self.assertEqual(current["content"], "library: /config/l.blb\ndirectory: /music\n")
-        res = cm.save_config("library: /config/x.blb\ndirectory: /music\n",
+        self.assertEqual(current["content"], "va_name: l\ndirectory: /music\n")
+        res = cm.save_config("va_name: x\ndirectory: /music\n",
                              expected_revision=current["revision"], config_path=self.cfg)
-        self.assertEqual(self.cfg.read_bytes(), b"library: /config/x.blb\r\ndirectory: /music\r\n")
+        self.assertEqual(self.cfg.read_bytes(), b"va_name: x\r\ndirectory: /music\r\n")
         self.assertEqual(res["revision"], cm.get_config(self.cfg)["revision"])
 
 

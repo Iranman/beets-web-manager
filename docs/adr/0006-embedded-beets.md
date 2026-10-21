@@ -9,6 +9,12 @@ Accepted. Supersedes the "stock `lscr.io/linuxserver/beets` container, HTTP only
 (Beets is the library backend and the source of library mutations; no parallel library
 database) still holds. Beets now runs inside the Web Manager process.
 
+Phase 2 cutover done, with Phase 5's removal folded in: embedded Beets is the only engine.
+There is no `BEETS_ENGINE` setting, no HTTP transport, no bearer key and no plugin
+provisioning, and the shipped Compose files run one container. Stock
+`lscr.io/linuxserver/beets` is no longer part of the architecture. Rollback is the previous
+Web Manager image (see Rollback).
+
 ## Context
 
 Web Manager has stopped working with Beets three times. Each time the cause was the
@@ -181,10 +187,13 @@ eviction in `on_import_task_created` covers it.
 
 ## Concurrency
 
-- **One process writes.** After cutover, Web Manager is the only process that opens the
-  library for writing. The Beets container must be stopped, and the Phase 2 self-test refuses
-  to start the embedded engine for writes while a `webmanager` plugin still answers at
-  `BEETS_WEB_URL`. Two processes on one SQLite file are safe at the SQLite level, but not for
+- **One process writes.** Web Manager is the only process that opens the library for
+  writing. Three checks enforce it: an exclusive `flock` on `<library>.webmanager.lock` next
+  to the database (a second Web Manager gets `library_locked` and refuses writes); a live probe
+  of the old `beets` service (`BEETS_WEB_URL` if still set, else `http://beets:8337`, cached
+  30 s: `separate_beets_running`); and a `/proc` scan for a mutating `beet` command in the
+  container (`beet_command_running`). While either live check fails, writes are refused with
+  `BEETS_EMBEDDED_DEGRADED`; they resume without a restart once it clears. Two processes on one SQLite file are safe at the SQLite level, but not for
   the plugin's process-local `mutation_lock` and durable registries.
 - **SQLite.** Beets gives each thread its own connection, with Beets' `timeout` setting as
   the busy timeout. Writes go through `lib.transaction()`. The plugin's `mutation_lock`
@@ -200,40 +209,33 @@ eviction in `on_import_task_created` covers it.
 
 - **Dockerfile.** `ffmpeg` and `libchromaprint-tools` (`fpcalc`) are already installed. The
   only change is the Python dependencies.
-- **Compose (Phase 2).** The `beets` service is removed. `beets-web-manager` mounts
-  `/config` (rw), `/music` (rw, was `:ro`), `/downloads` and `/web-manager-data`, and sets
-  `BEETS_ENGINE=embedded`. `BEETS_WEB_URL`, `BEETS_OUTBOUND_ALLOWLIST=beets:8337` and the
-  `depends_on` ordering go away. Migration for an operator:
+- **Compose.** The `beets` service is removed. `beets-web-manager` mounts `/config` (rw),
+  `/music` (rw, was `:ro`), `/downloads` and `/web-manager-data`. `BEETS_WEB_URL`, the API key,
+  `BEETS_OUTBOUND_ALLOWLIST=beets:8337` and the `depends_on` ordering are gone. The healthcheck
+  fails while `beets.ok` is false. Migration for an operator (`docs/INSTALLATION.md`,
+  "Upgrading from two containers"):
   1. Back up `musiclibrary.blb` and `config.yaml`, and record the sha256 and album/item counts.
-  2. Run `docker compose stop beets`.
+  2. `docker compose stop beets && docker compose rm -f beets`.
   3. Pull the new image and switch to the new Compose file.
   4. Check `/api/health` (`beets.ok`) and that the counts match.
   The same PUID/PGID as the Beets container keeps file ownership unchanged.
 
-## Migration setting
+## No engine setting
 
-`BEETS_ENGINE=http|embedded`.
-
-- **Phase 1 (default `http`).** Embedded is opt-in, so the shipped stack and every test keep
-  working while the engine is validated.
-- **Phase 2 (default `embedded`).** The shipped Compose sets embedded. An operator can fall
-  back to the Beets container without changing image by setting `BEETS_ENGINE=http` and
-  starting the old `beets` service.
-- **Phase 5 (removed).** The setting is deleted with the HTTP transport, which leaves a
-  single code path.
-
-This setting is justified only by rollback during the transition. It is not a long-term
-choice.
+The planned `BEETS_ENGINE=http|embedded` transition setting was dropped at the cutover: there
+is one engine and no choice. A leftover `BEETS_ENGINE`, `BEETS_WEB_URL`,
+`BEETS_WEBMANAGER_API_KEY` or `BEETS_WEBMANAGER_API_KEY_FILE` never stops startup; the
+self-test reports `legacy_settings_ignored` (warning) naming it, and Beets starts normally.
 
 ## Rollback
 
 - **Neither the schema nor the files change.** Web Manager adds no tables and runs the same Beets
   version (2.14.1) as the live container, so the database is never migrated by the switch.
-  Rollback is:
+  Rollback is the previous image:
   1. Stop Web Manager.
-  2. Start the old Beets container and the previous Web Manager image (or set
-     `BEETS_ENGINE=http`).
-  3. Check the counts.
+  2. Put back the previous Compose file (with its `beets` service and `:/music:ro`) and pin
+     the previous Web Manager release.
+  3. Start it and check the counts.
 - **Exception.** If a later PR bumps the Beets pin, Beets may migrate the schema on first open,
   and that is not reversible. `docs/BEETS_ENGINE_MIGRATION.md`'s backup/snapshot rule applies
   unchanged: rollback then means restoring the snapshot.
@@ -369,10 +371,10 @@ else is built.
 |---|---|---|
 | 0 | This ADR; ARCHITECTURE rules updated | Committed |
 | 1 | `backend/beets_embedded.py`, the adapter's in-process transport behind `BEETS_ENGINE=embedded`, the self-test (4) in `/api/health`, and the Beets pin in `requirements.txt` | Tests on a temporary library cover reads, an import and a mutation through the adapter, plus the improvement 4 acceptance tests. The full suite passes. |
-| 2 | Cutover: Compose without the `beets` service and with `/music` rw, `BEETS_ENGINE=embedded` by default, setup and diagnostics from the self-test, second-writer guard, direct reads (5, reads), docs, an `embedded-acceptance` CI job, and a MINOR release | A fresh install and an upgrade from the two-container stack pass acceptance, and counts and checksum are unchanged on a copy of a real library. Embedded autotag and MusicBrainz tests run on recorded provider fixtures, including a refused match and a provider-down case. A second writer is detected by a lock or marker file in the Beets config folder (not only by probing `BEETS_WEB_URL`), and writes are refused while it is held by another process. |
+| 2 (done, with 5) | Cutover: Compose without the `beets` service and with `/music` rw, embedded as the only engine, setup and diagnostics from the self-test, second-writer guard, direct reads (5, reads; deferred), docs, an `embedded-acceptance` CI job, and a MINOR release | A fresh install and an upgrade from the two-container stack pass acceptance, and counts and checksum are unchanged on a copy of a real library. Embedded autotag and MusicBrainz tests run on recorded provider fixtures, including a refused match and a provider-down case. A second writer is detected by a lock or marker file in the Beets config folder (not only by probing `BEETS_WEB_URL`), and writes are refused while it is held by another process. |
 | 3 | Improvements 1 and 2 | Their acceptance tests pass |
 | 4 | Improvements 3, 5 (fingerprints) and 6 | Their acceptance tests pass. No request thread calls a long synchronous adapter operation (import, mbsync, fetchart, relocation): those callers use the async or job path, enforced by a test. |
-| 5 | Remove the HTTP transport, `BEETS_WEB_URL`, the API key, provisioning (`beets_plugins.py` provisioning, `_bootstrap_beets_plugins`), the stock-Beets Compose pin and `stock-beets-acceptance`. Handlers become plain functions. | A single code path remains. `BEETS_ENGINE` is gone. |
+| 5 (done in 2) | Remove the HTTP transport, `BEETS_WEB_URL`, the API key, provisioning (`beets_plugins.py` provisioning, `_bootstrap_beets_plugins`), the stock-Beets Compose pin and `stock-beets-acceptance`. Handlers become plain functions. | A single code path remains. `BEETS_ENGINE` is gone. |
 
 ## Docs, tests and CI that change
 
@@ -392,9 +394,13 @@ else is built.
   - `tests/test_arch003_boundary_enforcement.py` keeps the adapter free of filesystem calls.
     The engine module is the only `beets.library` importer under `backend/`; this is enforced
     by a new AST test in Phase 1.
-- **CI.**
-  - `stock-beets-acceptance` stays until Phase 5, because it covers the rollback transport.
-  - `embedded-acceptance` (Phase 2) runs the production image with no Beets container against
-    a disposable library and does import, modify and relocate with rollback.
-  - `production-docker-acceptance` switches to the single-service Compose.
+- **CI** (as done at the cutover; job names kept, because they are required checks).
+  - `stock-beets-acceptance` now runs the embedded-engine acceptance against the pinned
+    upstream Beets (self-test, the webmanager plugin on Beets' own web app, recorded-fixture
+    autotag imports) instead of a stock Beets container; it plays the planned
+    `embedded-acceptance` role.
+    It runs on the runner's Python, not inside the production image; import, modify and
+    relocate-with-rollback inside the production image are not yet covered.
+  - `production-docker-acceptance` runs the single-service `docker-compose.yml`, and
+    `compose-verification` refuses any Compose file with a separate Beets service.
   - `beets-latest-canary.yml` tests the next Beets as a pip pin instead of an image tag.

@@ -3,7 +3,6 @@
 import os
 from typing import List, Set, Optional
 
-DEFAULT_API_KEY_FILE = "/config/.webmanager_api_key"
 # Last-resort fallback only. Since plugin 1.6.0 the effective default is
 # derived from Beets itself -- [config "directory"] + import_roots -- so a
 # library mounted somewhere other than /music works without extra config

@@ -1,32 +1,11 @@
-# Source Development Docker Compose file for Beets Web Manager stack.
-# Builds the Web Manager service locally from the current source tree,
-# running alongside the stock LinuxServer Beets container.
+# Source Development Docker Compose file for Beets Web Manager.
+# Builds Web Manager (with Beets inside it, ADR 0006) from the current
+# source tree.
 #
-# Usage:
+# Usage, from the repository root:
 #   docker compose -f docker-compose.dev.yml up -d --build
 
 services:
-  beets:
-    image: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.14.1-ls356@sha256:ae076820ec34ea5e9ec05a22931e98ab555e9c25e784c5fb001c84f411119c73}
-    container_name: beets-dev
-    restart: unless-stopped
-    environment:
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
-      - TZ=${TZ:-UTC}
-    volumes:
-      - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music
-      - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
-    expose:
-      - "8337"
-    # See the primary docker-compose.yml: Web Manager provisions the
-    # webmanager plugin into config.yaml at its own startup, before this
-    # dev build of stock Beets ever reads that file.
-    depends_on:
-      beets-web-manager:
-        condition: service_healthy
-
   beets-web-manager:
     build:
       context: .
@@ -48,13 +27,9 @@ services:
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      BEETS_WEB_URL: ${BEETS_WEB_URL:-http://beets:8337}
-      # Must include the host:port of BEETS_WEB_URL when you change it.
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8337}
-
-      # Container-side paths. They must match the mount targets below and
-      # Beets' own `directory:` (see docs/CONFIGURATION.md). Change them only
-      # together with the matching volume target.
+      # Container-side paths. They must match the mount targets below, and
+      # MUSIC_ROOT must equal Beets' own `directory:` (see
+      # docs/CONFIGURATION.md). Change them only together.
       MUSIC_ROOT: /music
       DOWNLOADS_ROOT: /downloads
       BEETS_CONFIG: /config/config.yaml
@@ -93,7 +68,7 @@ services:
       DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
       - ${BEETS_CONFIG_PATH:-./beets}:/config
-      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music:ro
+      - ${MUSIC_PATH:-${MUSIC_LIBRARY_PATH:-./music}}:/music
       - ${DOWNLOADS_PATH:-${DOWNLOAD_PATH:-./downloads}}:/downloads
       - ${WEB_MANAGER_DATA_PATH:-${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager}}:/web-manager-data
     healthcheck:
@@ -101,7 +76,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
+        - "import json, sys, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)); sys.exit(0 if d.get('beets', {}).get('ok') else 1)"
       interval: 10s
       timeout: 5s
       retries: 5

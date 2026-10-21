@@ -1,60 +1,28 @@
 """Beets Adapter — the one interface to Beets (beetsplug.web + beetsplug.webmanager).
 
-With ``BEETS_ENGINE=embedded`` (docs/adr/0006-embedded-beets.md) every call is
-dispatched in-process to the same handlers through ``backend.beets_embedded``.
-Otherwise (the migration-time default) it communicates over HTTP with the
-stock LinuxServer Beets container:
-- Native reads via beetsplug.web REST endpoints (/stats, /artist/, /item/, /album/)
-- Authenticated mutations via beetsplug.webmanager (/webmanager/*)
+Beets runs inside Web Manager (docs/adr/0006-embedded-beets.md): every call is
+dispatched in-process, through ``backend.beets_embedded``, to stock
+``beetsplug.web`` reads and the ``beetsplug.webmanager`` operations, with one
+request/response and error contract. There is no other transport.
 """
 
 import base64
 import hashlib
-import http.client
 import os
 import posixpath
-from pathlib import Path
 import json
 import logging
 import re
 import threading
 import time
-import urllib.request
 import urllib.parse
-import urllib.error
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from backend import beets_embedded
-from backend.config_layers import redact_url_userinfo, url_has_userinfo
-
-try:
-    from backend.security import OutboundPolicyError
-except ImportError:
-    class OutboundPolicyError(Exception):
-        pass
 
 log = logging.getLogger("beets.adapter")
 
-DEFAULT_BEETS_WEB_URL = "http://beets:8337"
 _IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")  # the plugin's own rule (#308)
-
-# #208: a BEETS_WEB_URL with userinfo (user:pass@) never worked -- urllib
-# sends no Basic header and parses "u:pw@host" as the host -- and the
-# /webmanager routes authenticate with the Bearer key anyway. Such a URL is
-# refused (fail closed); the message never echoes the credentials.
-BEETS_WEB_URL_USERINFO_CODE = "beets_web_url_userinfo"
-BEETS_WEB_URL_USERINFO_MESSAGE = (
-    "BEETS_WEB_URL contains a user name or password (user:pass@host). Web Manager does not "
-    "send URL credentials to Beets; remove them from BEETS_WEB_URL (for example "
-    "http://beets:8337) and restart Web Manager."
-)
-
-
-def beets_web_url_has_userinfo(url: str) -> bool:
-    """True for a URL that carries userinfo. Any "@" counts, also %40 and
-    NFKC forms such as U+FF20: a base URL has no other use for it, and a
-    password holding "/" or "?" hides the "@" from urlsplit's netloc."""
-    return url_has_userinfo(url)
 
 
 class BeetsAdapterError(Exception):
@@ -137,8 +105,8 @@ class BeetsAdapterPathsUnavailableError(BeetsAdapterError):
     def __init__(
         self,
         message: str = (
-            "Beets returned items without paths. Set web.include_paths: true in the "
-            "Beets config.yaml (Setup offers a one-click fix) and restart the Beets container."
+            "Beets returned items without paths. Web Manager turns on web.include_paths "
+            "at startup; restart Web Manager."
         ),
         status_code: int = 503,
         response_data: Optional[Any] = None,
@@ -271,38 +239,11 @@ class _StreamedResponse:
 
 
 class BeetsAdapter:
-    """Client for Stock Beets Web & WebManager Plugin APIs."""
+    """Client for Beets' web reads and the webmanager operations, in-process."""
 
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        api_key_file: Optional[str] = None,
-        timeout: float = 30.0,
-    ):
-        # One default everywhere: the stock Beets Compose service. The old
-        # fallback (http://127.0.0.1:8337) pointed at Web Manager itself.
-        raw_url = (
-            base_url
-            or (os.environ.get("BEETS_WEB_URL") or "").strip()
-            or DEFAULT_BEETS_WEB_URL
-        )
-        raw_url = raw_url.rstrip("/")
-        # #208: every log line and error message uses this redacted form.
-        self._display_url = redact_url_userinfo(raw_url)
-        # A userinfo URL is refused here, at construction: no request is ever
-        # sent with it and base_url (also used by get_item_file_url /
-        # get_album_art_url) never holds the credentials. The module-level
-        # adapter is built at import, so this is a refused state rather than
-        # an exception that would stop Web Manager (and its setup page).
-        self.config_error_code = BEETS_WEB_URL_USERINFO_CODE if beets_web_url_has_userinfo(raw_url) else ""
-        self.base_url = self._display_url if self.config_error_code else raw_url
-        self._api_key = api_key or os.environ.get("BEETS_WEBMANAGER_API_KEY")
-        self._api_key_file = (
-            api_key_file
-            or os.environ.get("BEETS_WEBMANAGER_API_KEY_FILE")
-            or "/config/.webmanager_api_key"
-        )
+    def __init__(self, timeout: float = 30.0):
+        # ponytail: timeout is accepted but not enforced in-process (N8,
+        # ADR 0006 Phase 4: job-level cancellation).
         self.timeout = timeout
         self._libdir = ""
 
@@ -313,50 +254,9 @@ class BeetsAdapter:
         self._items_page_cache_ts: float = 0.0
         self._items_page_cache_lock = threading.Lock()
 
-    @property
-    def api_key(self) -> str:
-        """Resolve current API key from memory, env, or file."""
-        if self._api_key:
-            return self._api_key
-        env_key = os.environ.get("BEETS_WEBMANAGER_API_KEY", "").strip()
-        if env_key:
-            return env_key
-
-        candidate_files = []
-        if self._api_key_file:
-            candidate_files.append(Path(self._api_key_file))
-        if os.environ.get("BEETS_WEBMANAGER_API_KEY_FILE"):
-            candidate_files.append(Path(os.environ["BEETS_WEBMANAGER_API_KEY_FILE"]))
-        if os.environ.get("BEETS_CONFIG"):
-            candidate_files.append(Path(os.environ["BEETS_CONFIG"]).parent / ".webmanager_api_key")
-        if os.environ.get("BEETSDIR"):
-            candidate_files.append(Path(os.environ["BEETSDIR"]) / ".webmanager_api_key")
-        candidate_files.append(Path("/config/.webmanager_api_key"))
-
-        for p in candidate_files:
-            try:
-                if p.is_file() and not p.is_symlink():
-                    content = p.read_text(encoding="utf-8").strip()
-                    if content:
-                        return content
-            except Exception as ex:
-                log.debug("Could not read API key from %s: %s", p, ex)
-        return ""
-
-    def _refuse_if_misconfigured(self) -> None:
-        if self.config_error_code:
-            raise BeetsAdapterConnectionError(
-                BEETS_WEB_URL_USERINFO_MESSAGE, error_code=self.config_error_code.upper()
-            )
-
-    def _build_url(self, path: str) -> str:
-        if not path.startswith("/"):
-            path = "/" + path
-        return f"{self.base_url}{path}"
-
     @staticmethod
     def _raise_upstream(status: int, path: str, raw_body: bytes) -> None:
-        """Map an error status from Beets (HTTP or in-process) to the adapter's exceptions."""
+        """Map an error status from Beets to the adapter's exceptions."""
         err_body = raw_body.decode("utf-8", errors="replace")
         try:
             err_json = json.loads(err_body)
@@ -402,21 +302,31 @@ class BeetsAdapter:
         )
 
     @staticmethod
-    def _embedded_engine():
-        """The in-process engine (ADR 0006), or the self-test's reason as a
-        connection error, so callers' "Beets unavailable" handling applies."""
+    def _engine():
+        """The in-process engine, or the self-test's reason as a connection
+        error, so callers' "Beets unavailable" handling applies."""
         try:
             return beets_embedded.engine()
         except beets_embedded.EmbeddedBeetsUnavailable as ex:
             raise BeetsAdapterConnectionError(str(ex), error_code="BEETS_EMBEDDED_UNAVAILABLE") from None
 
-    def _embedded_request(self, method, path, params, json_data, headers) -> Any:
-        """``_request`` over the in-process engine: same handlers, same
-        status/error contract, no socket."""
-        engine = self._embedded_engine()
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """One call to Beets: same handlers and status/error contract as
+        Beets' web API, no socket. ``timeout`` is not enforced (see __init__)."""
+        engine = self._engine()
         req_headers = {"Accept": "application/json", **(headers or {})}
         key = req_headers.get("Idempotency-Key")
         if key and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+            # The plugin accepts only short plain keys (#308); a caller-supplied
+            # key is mapped deterministically, so its retries still collapse.
             req_headers["Idempotency-Key"] = "k-" + hashlib.sha256(key.encode("utf-8")).hexdigest()
         try:
             resp = engine.call(method, path, params=params, json_data=json_data, headers=req_headers)
@@ -424,7 +334,7 @@ class BeetsAdapter:
             raise BeetsAdapterError(f"Beets changes are refused until this is fixed: {ex}",
                                     status_code=503, error_code="BEETS_EMBEDDED_DEGRADED") from None
         except Exception as ex:  # a handler bug must not escape as a bare exception
-            log.exception("Embedded Beets call %s %s failed", method, path)
+            log.exception("Beets call %s %s failed", method, path)
             raise BeetsAdapterError(f"Beets request failed on {path} ({type(ex).__name__})",
                                     status_code=500, error_code="BEETS_UPSTREAM_ERROR") from ex
         if resp.status_code >= 400:
@@ -437,10 +347,9 @@ class BeetsAdapter:
                                         error_code="MALFORMED_RESPONSE") from json_err
         return resp.get_data()
 
-    def _embedded_open(self, path: str, what: str):
-        """Stream a file route in-process (item audio, album art)."""
-        engine = self._embedded_engine()
-        resp = engine.call("GET", path, stream=True)
+    def _open(self, path: str, what: str):
+        """Stream a file route (item audio, album art)."""
+        resp = self._engine().call("GET", path, stream=True)
         if resp.status_code == 404:
             resp.close()
             raise BeetsAdapterNotFoundError(f"{what} not found", status_code=404)
@@ -449,100 +358,6 @@ class BeetsAdapter:
             raise BeetsAdapterError(f"Error retrieving {what}", status_code=resp.status_code,
                                     error_code="BEETS_UPSTREAM_ERROR")
         return _StreamedResponse(resp)
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        timeout: Optional[float] = None,
-    ) -> Any:
-        if beets_embedded.enabled():
-            return self._embedded_request(method, path, params, json_data, headers)
-        self._refuse_if_misconfigured()
-        url = self._build_url(path)
-        if params:
-            query_string = urllib.parse.urlencode(
-                {k: v for k, v in params.items() if v is not None}
-            )
-            if query_string:
-                url = f"{url}?{query_string}"
-
-        req_headers = {"Accept": "application/json"}
-        if headers:
-            req_headers.update(headers)
-        key = req_headers.get("Idempotency-Key")
-        if key and not _IDEMPOTENCY_KEY_RE.fullmatch(key):
-            # The plugin accepts only short plain keys (#308); a caller-supplied
-            # key is mapped deterministically, so its retries still collapse.
-            req_headers["Idempotency-Key"] = "k-" + hashlib.sha256(key.encode("utf-8")).hexdigest()
-
-        body = None
-        if json_data is not None:
-            body = json.dumps(json_data).encode("utf-8")
-            req_headers["Content-Type"] = "application/json"
-
-        # WebManager routes require Authorization Bearer token
-        if path.startswith("/webmanager") or "/webmanager/" in path:
-            token = self.api_key
-            if token and "Authorization" not in req_headers:
-                req_headers["Authorization"] = f"Bearer {token}"
-            elif not token and "Authorization" not in req_headers:
-                log.warning("No WebManager API key available when requesting %s", path)
-
-        try:
-            # Inside the try: Request() parses the URL and its ValueError
-            # can quote it (#208).
-            req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                content_type = resp.headers.get("Content-Type", "")
-                data = resp.read()
-                if "application/json" in content_type:
-                    try:
-                        return json.loads(data.decode("utf-8"))
-                    except Exception as json_err:
-                        raise BeetsAdapterError(
-                            f"Malformed JSON response from Beets server at {redact_url_userinfo(url)}: {json_err}",
-                            error_code="MALFORMED_RESPONSE",
-                        ) from json_err
-                return data
-        except urllib.error.HTTPError as ex:
-            self._raise_upstream(ex.code, path, ex.read())
-        except TimeoutError as ex:
-            log.warning("Timeout connecting to Beets server at %s (%s): %s", self._display_url, path, ex)
-            raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self._display_url}"
-            ) from ex
-        except urllib.error.URLError as ex:
-            reason = getattr(ex, "reason", None)
-            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, ex)
-            if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
-                raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self._display_url}"
-                ) from ex
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from ex
-        except (OutboundPolicyError, ConnectionError, OSError) as ex:
-            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, ex)
-            if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
-                raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self._display_url}"
-                ) from ex
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from ex
-        except (http.client.HTTPException, ValueError) as ex:
-            # After OutboundPolicyError (a ValueError subclass with fixed,
-            # loggable reasons).
-            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
-            # log or raise str(ex); it can hold part of the URL.
-            log.warning("Beets connection error at %s (%s): %s", self._display_url, path, type(ex).__name__)
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from None
 
     # -------------------------------------------------------------------------
     # Native Upstream Read Endpoints (beetsplug.web)
@@ -703,119 +518,13 @@ class BeetsAdapter:
             return res.get("values") or []
         return []
 
-    def get_item_file_url(self, item_id: int) -> str:
-        """Get the URL for streaming/downloading an item audio file."""
-        return self._build_url(f"/item/{int(item_id)}/file")
-
-    def get_album_art_url(self, album_id: int) -> str:
-        """Get the URL for album cover art."""
-        return self._build_url(f"/album/{int(album_id)}/art")
-
     def open_item_file(self, item_id: int):
-        """Open raw HTTP response stream for an item audio file."""
-        if beets_embedded.enabled():
-            return self._embedded_open(f"/item/{int(item_id)}/file", f"Audio file for item {item_id}")
-        self._refuse_if_misconfigured()
-        url = self._build_url(f"/item/{int(item_id)}/file")
-        try:
-            req = urllib.request.Request(url)  # inside the try (#208)
-            return urllib.request.urlopen(req, timeout=self.timeout)
-        except urllib.error.HTTPError as ex:
-            if ex.code == 404:
-                raise BeetsAdapterNotFoundError(
-                    f"Audio file for item {item_id} not found", status_code=404
-                ) from ex
-            raise BeetsAdapterError(
-                f"Error retrieving audio file for item {item_id}",
-                status_code=ex.code,
-                error_code="BEETS_UPSTREAM_ERROR",
-            ) from ex
-        except TimeoutError as ex:
-            log.warning("Timeout streaming item %s file from %s: %s", item_id, self._display_url, ex)
-            raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self._display_url}"
-            ) from ex
-        except urllib.error.URLError as ex:
-            reason = getattr(ex, "reason", None)
-            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, ex)
-            if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
-                raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self._display_url}"
-                ) from ex
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from ex
-        except (OutboundPolicyError, ConnectionError, OSError) as ex:
-            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, ex)
-            if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
-                raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self._display_url}"
-                ) from ex
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from ex
-        except (http.client.HTTPException, ValueError) as ex:
-            # After OutboundPolicyError (a ValueError subclass with fixed,
-            # loggable reasons).
-            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
-            # log or raise str(ex); it can hold part of the URL.
-            log.warning("Connection error streaming item %s file from %s: %s", item_id, self._display_url, type(ex).__name__)
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from None
+        """Stream an item's audio file."""
+        return self._open(f"/item/{int(item_id)}/file", f"Audio file for item {item_id}")
 
     def open_album_art(self, album_id: int):
-        """Open raw HTTP response stream for an album cover art."""
-        if beets_embedded.enabled():
-            return self._embedded_open(f"/album/{int(album_id)}/art", f"Art for album {album_id}")
-        self._refuse_if_misconfigured()
-        url = self._build_url(f"/album/{int(album_id)}/art")
-        try:
-            req = urllib.request.Request(url)  # inside the try (#208)
-            return urllib.request.urlopen(req, timeout=self.timeout)
-        except urllib.error.HTTPError as ex:
-            if ex.code == 404:
-                raise BeetsAdapterNotFoundError(
-                    f"Art for album {album_id} not found", status_code=404
-                ) from ex
-            raise BeetsAdapterError(
-                f"Error retrieving art for album {album_id}",
-                status_code=ex.code,
-                error_code="BEETS_UPSTREAM_ERROR",
-            ) from ex
-        except TimeoutError as ex:
-            log.warning("Timeout streaming album %s art from %s: %s", album_id, self._display_url, ex)
-            raise BeetsAdapterTimeoutError(
-                f"Timeout connecting to Beets server at {self._display_url}"
-            ) from ex
-        except urllib.error.URLError as ex:
-            reason = getattr(ex, "reason", None)
-            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, ex)
-            if isinstance(reason, TimeoutError) or "timed out" in str(ex).lower():
-                raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self._display_url}"
-                ) from ex
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from ex
-        except (OutboundPolicyError, ConnectionError, OSError) as ex:
-            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, ex)
-            if isinstance(ex, TimeoutError) or "timed out" in str(ex).lower():
-                raise BeetsAdapterTimeoutError(
-                    f"Timeout connecting to Beets server at {self._display_url}"
-                ) from ex
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from ex
-        except (http.client.HTTPException, ValueError) as ex:
-            # After OutboundPolicyError (a ValueError subclass with fixed,
-            # loggable reasons).
-            # #208: e.g. InvalidURL("nonnumeric port: '<pw>@host'"). Never
-            # log or raise str(ex); it can hold part of the URL.
-            log.warning("Connection error streaming album %s art from %s: %s", album_id, self._display_url, type(ex).__name__)
-            raise BeetsAdapterConnectionError(
-                f"Cannot connect to Beets server at {self._display_url}"
-            ) from None
+        """Stream an album's cover art."""
+        return self._open(f"/album/{int(album_id)}/art", f"Art for album {album_id}")
 
     # -------------------------------------------------------------------------
     # Integration Plugin Mutation Endpoints (/webmanager/*)

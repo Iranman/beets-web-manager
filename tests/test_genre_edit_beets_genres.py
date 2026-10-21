@@ -25,7 +25,7 @@ from beets import config as beets_config
 from beets.library import Album, Item, Library, WriteError
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 from beetsplug.webmanager import schemas
 import beetsplug.webmanager.operations as ops_mod
 
@@ -59,7 +59,7 @@ def _file_genres(path):
 
 class _Bridge(BeetsAdapter):
     def __init__(self, client):
-        super().__init__(base_url="http://beets:8337", api_key=TOKEN)
+        super().__init__()
         self._client = client
 
     def _request(self, method, path, params=None, json_data=None, headers=None, timeout=None):
@@ -79,11 +79,8 @@ class GenreEditTests(unittest.TestCase):
         self._dir = beets_config["directory"].get()
         beets_config["directory"] = self.music
         self.lib = Library(os.path.join(self.td, "lib.blb"), directory=self.music)
-        key = os.path.join(self.td, ".key")
-        with open(key, "w", encoding="utf-8") as f:
-            f.write(TOKEN + "\n")
         WebManagerPlugin()
-        set_api_key_file(key)
+        set_api_key(TOKEN)
         ops_mod.set_allowed_roots([self.music])
         beets_web_app.config["lib"] = self.lib
         # Item rows must carry their paths, or the plugin has no file to tag.
@@ -102,7 +99,7 @@ class GenreEditTests(unittest.TestCase):
     def tearDown(self):
         beets_config["directory"] = self._dir
         ops_mod.set_allowed_roots(None)
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:

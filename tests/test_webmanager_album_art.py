@@ -27,7 +27,7 @@ from PIL import Image
 import beetsplug.webmanager.art_ops as art_mod
 import beetsplug.webmanager.operations as ops_mod
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 from beetsplug.webmanager.engine_common import set_quarantine_root
 
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -60,11 +60,8 @@ class AlbumArtEngineTests(unittest.TestCase):
         self.quarantine = os.path.join(self.td, "quarantine")
         os.makedirs(os.path.join(self.music, "Artist", "Album"))
         self.lib = Library(os.path.join(self.td, "library.blb"), directory=self.music)
-        key_file = os.path.join(self.td, "key")
-        with open(key_file, "w", encoding="utf-8") as f:
-            f.write(TOKEN + "\n")
         self.plugin = WebManagerPlugin()
-        set_api_key_file(key_file)
+        set_api_key(TOKEN)
         ops_mod.set_allowed_roots([self.music])
         set_quarantine_root(self.quarantine)
         beets_web_app.config["lib"] = self.lib
@@ -91,7 +88,7 @@ class AlbumArtEngineTests(unittest.TestCase):
         BeetsPlugin.listeners["art_set"][:] = self._listeners_before
         ops_mod.set_allowed_roots(None)
         set_quarantine_root(None)
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:

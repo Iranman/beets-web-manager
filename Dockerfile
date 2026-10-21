@@ -97,8 +97,10 @@ ENV WEBCONTROL_PORT=8337 \
 
 EXPOSE 8337
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,sys,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"WEBCONTROL_PORT\",\"8337\")}/api/health', timeout=4).read(); sys.exit(0)" || exit 1
+# Unhealthy while Beets' self-test fails (beets.ok false; library changes are
+# refused then): docs/TROUBLESHOOTING.md lists every code.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import json,urllib.request,sys,os; d=json.load(urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"WEBCONTROL_PORT\",\"8337\")}/api/health', timeout=4)); sys.exit(0 if d.get('beets',{}).get('ok') else 1)" || exit 1
 
 COPY docker/web-manager-entrypoint.sh /usr/local/bin/web-manager-entrypoint.sh
 RUN chmod +x /usr/local/bin/web-manager-entrypoint.sh

@@ -1,0 +1,1810 @@
+{
+ "aliases": [],
+ "artist-credit": [
+  {
+   "artist": {
+    "aliases": [
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Biork",
+      "primary": null,
+      "sort-name": "Biork",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Bj rk",
+      "primary": null,
+      "sort-name": "Bj rk",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "en",
+      "name": "Bjork",
+      "primary": false,
+      "sort-name": "Bjork",
+      "type": "Artist name",
+      "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "BjÃ¶rk",
+      "primary": null,
+      "sort-name": "BjÃ¶rk",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Bjõrk",
+      "primary": null,
+      "sort-name": "Bjõrk",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Björk Gudmudsdóttir",
+      "primary": null,
+      "sort-name": "Björk Gudmudsdóttir",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Björk Gudmundsdottir",
+      "primary": null,
+      "sort-name": "Björk Gudmundsdottir",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": "1965-11-21",
+      "end": null,
+      "ended": false,
+      "locale": "is",
+      "name": "Björk Guðmundsdóttir",
+      "primary": false,
+      "sort-name": "Guðmundsdóttir, Björk",
+      "type": "Legal name",
+      "type-id": "d4dcd0c0-b341-3612-a332-c0ce797b25cf"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Bjørk",
+      "primary": null,
+      "sort-name": "Bjørk",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Bjцrk",
+      "primary": null,
+      "sort-name": "Bjцrk",
+      "type": "Search hint",
+      "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "B󠀱j󠀱ör󠀱k",
+      "primary": null,
+      "sort-name": "B󠀱j󠀱ör󠀱k",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Βjörk",
+      "primary": null,
+      "sort-name": "Βjörk",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "ja",
+      "name": "ビョーク",
+      "primary": true,
+      "sort-name": "Björk",
+      "type": "Artist name",
+      "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+     }
+    ],
+    "country": "IS",
+    "disambiguation": "",
+    "id": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb",
+    "name": "Björk",
+    "sort-name": "Björk",
+    "type": "Person",
+    "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+   },
+   "joinphrase": "",
+   "name": "Björk"
+  }
+ ],
+ "asin": null,
+ "barcode": null,
+ "country": null,
+ "cover-art-archive": {
+  "artwork": true,
+  "back": false,
+  "count": 1,
+  "darkened": false,
+  "front": false
+ },
+ "date": "2004-07",
+ "disambiguation": "",
+ "id": "169bf2aa-1b2a-4506-b872-3aebfa52a5dc",
+ "label-info": [
+  {
+   "catalog-number": "JOGA 1",
+   "label": {
+    "aliases": [
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "1381607 Records DK",
+      "primary": null,
+      "sort-name": "1381607 Records DK",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "3596945 Recordings DK",
+      "primary": null,
+      "sort-name": "3596945 Recordings DK",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "5511289 Records DK",
+      "primary": null,
+      "sort-name": "5511289 Records DK",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Agorazein distributed by Altafonte",
+      "primary": null,
+      "sort-name": "Agorazein distributed by Altafonte",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Allison under exclusive distribution by Altafonte",
+      "primary": null,
+      "sort-name": "Allison under exclusive distribution by Altafonte",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Anne-Kathrin Dern",
+      "primary": null,
+      "sort-name": "Anne-Kathrin Dern",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Auto production",
+      "primary": null,
+      "sort-name": "Auto production",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Auto-Edición",
+      "primary": null,
+      "sort-name": "Auto-Edición",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Auto-Product",
+      "primary": null,
+      "sort-name": "Auto-Product",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Autoedición",
+      "primary": null,
+      "sort-name": "Autoedición",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Autoeditado",
+      "primary": null,
+      "sort-name": "Autoeditado",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Autoproduit",
+      "primary": null,
+      "sort-name": "Autoproduit",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Bloody Tyrant 暴君",
+      "primary": null,
+      "sort-name": "Bloody Tyrant 暴君",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Brent Morgan",
+      "primary": null,
+      "sort-name": "Brent Morgan",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "D.I.Y.",
+      "primary": null,
+      "sort-name": "D.I.Y.",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Demo",
+      "primary": null,
+      "sort-name": "Demo",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "DistroKid",
+      "primary": null,
+      "sort-name": "DistroKid",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Drew Jacobs",
+      "primary": null,
+      "sort-name": "Drew Jacobs",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "ECHOHIME",
+      "primary": null,
+      "sort-name": "ECHOHIME",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Eigenverlag",
+      "primary": null,
+      "sort-name": "Eigenverlag",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Eigenvertrieb",
+      "primary": null,
+      "sort-name": "Eigenvertrieb",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "INDIPENDANT",
+      "primary": null,
+      "sort-name": "INDIPENDANT",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Indepandant",
+      "primary": null,
+      "sort-name": "Indepandant",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Independant release",
+      "primary": null,
+      "sort-name": "Independant release",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Independent",
+      "primary": null,
+      "sort-name": "Independent",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Independente",
+      "primary": null,
+      "sort-name": "Independente",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Independiente",
+      "primary": null,
+      "sort-name": "Independiente",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Indie",
+      "primary": null,
+      "sort-name": "Indie",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Kidwild",
+      "primary": null,
+      "sort-name": "Kidwild",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Kimbra",
+      "primary": null,
+      "sort-name": "Kimbra",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Lavoisier",
+      "primary": null,
+      "sort-name": "Lavoisier",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "N/A",
+      "primary": null,
+      "sort-name": "N/A",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "NAZVA",
+      "primary": null,
+      "sort-name": "NAZVA",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "No Label",
+      "primary": null,
+      "sort-name": "No Label",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "No One Label",
+      "primary": null,
+      "sort-name": "No One Label",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "None",
+      "primary": null,
+      "sort-name": "None",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Not On A Lebel",
+      "primary": null,
+      "sort-name": "Not On A Lebel",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Not On Label",
+      "primary": null,
+      "sort-name": "Not On Label",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Not On Label (Scheisse Self-released)",
+      "primary": null,
+      "sort-name": "Not On Label (Scheisse Self-released)",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Not On Label (Self-released)",
+      "primary": null,
+      "sort-name": "Not On Label (Self-released)",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2019",
+      "primary": null,
+      "sort-name": "P2019",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2020",
+      "primary": null,
+      "sort-name": "P2020",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2021",
+      "primary": null,
+      "sort-name": "P2021",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2022",
+      "primary": null,
+      "sort-name": "P2022",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2023",
+      "primary": null,
+      "sort-name": "P2023",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2024",
+      "primary": null,
+      "sort-name": "P2024",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2025",
+      "primary": null,
+      "sort-name": "P2025",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "P2026",
+      "primary": null,
+      "sort-name": "P2026",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Records DK",
+      "primary": null,
+      "sort-name": "Records DK",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "RecordsDK",
+      "primary": null,
+      "sort-name": "RecordsDK",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Rihanna",
+      "primary": null,
+      "sort-name": "Rihanna",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Self Digital",
+      "primary": null,
+      "sort-name": "Self Digital",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Self Release",
+      "primary": null,
+      "sort-name": "Self Release",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Self Released",
+      "primary": null,
+      "sort-name": "Self Released",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Self-release",
+      "primary": null,
+      "sort-name": "Self-release",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Self-released",
+      "primary": null,
+      "sort-name": "Self-released",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Smash Into Pieces",
+      "primary": null,
+      "sort-name": "Smash Into Pieces",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Son Lux",
+      "primary": null,
+      "sort-name": "Son Lux",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Suichu Spica",
+      "primary": null,
+      "sort-name": "Suichu Spica",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "TIEP. Records",
+      "primary": null,
+      "sort-name": "TIEP. Records",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "The Devil Makes Three",
+      "primary": null,
+      "sort-name": "The Devil Makes Three",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Thomas Mac",
+      "primary": null,
+      "sort-name": "Thomas Mac",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Tomislav Roso",
+      "primary": null,
+      "sort-name": "Tomislav Roso",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Tony Yayo",
+      "primary": null,
+      "sort-name": "Tony Yayo",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Trey Lewis",
+      "primary": null,
+      "sort-name": "Trey Lewis",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Unsigned",
+      "primary": null,
+      "sort-name": "Unsigned",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Versvs",
+      "primary": null,
+      "sort-name": "Versvs",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "Y U QT",
+      "primary": null,
+      "sort-name": "Y U QT",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "fi",
+      "name": "[ei levymerkkiä]",
+      "primary": true,
+      "sort-name": "ei levymerkkiä",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "nl",
+      "name": "[geen platenmaatschappij]",
+      "primary": true,
+      "sort-name": "[geen platenmaatschappij]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "et",
+      "name": "[ilma plaadifirmata]",
+      "primary": false,
+      "sort-name": "[ilma plaadifirmata]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "es",
+      "name": "[nada]",
+      "primary": true,
+      "sort-name": "[nada]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "en",
+      "name": "[no label]",
+      "primary": true,
+      "sort-name": "[no label]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "[nolabel]",
+      "primary": null,
+      "sort-name": "[nolabel]",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "[none]",
+      "primary": null,
+      "sort-name": "[none]",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "lt",
+      "name": "[nėra leidybinės kompanijos]",
+      "primary": false,
+      "sort-name": "[nėra leidybinės kompanijos]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "lt",
+      "name": "[nėra leidyklos]",
+      "primary": false,
+      "sort-name": "[nėra leidyklos]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "lt",
+      "name": "[nėra įrašų kompanijos]",
+      "primary": true,
+      "sort-name": "[nėra įrašų kompanijos]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "et",
+      "name": "[puudub]",
+      "primary": false,
+      "sort-name": "[puudub]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "ru",
+      "name": "[самиздат]",
+      "primary": true,
+      "sort-name": "samizdat",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "ja",
+      "name": "[レーベルなし]",
+      "primary": true,
+      "sort-name": "[レーベルなし]",
+      "type": "Label name",
+      "type-id": "3a1a0c48-d885-3b89-87b2-9e8a483c5675"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "auto-release",
+      "primary": null,
+      "sort-name": "auto-release",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "autoprod.",
+      "primary": null,
+      "sort-name": "autoprod.",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "blank",
+      "primary": null,
+      "sort-name": "blank",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "charlie IV",
+      "primary": null,
+      "sort-name": "charlie IV",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "independent release",
+      "primary": null,
+      "sort-name": "independent release",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "oh ok",
+      "primary": null,
+      "sort-name": "oh ok",
+      "type": null,
+      "type-id": null
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "self",
+      "primary": null,
+      "sort-name": "self",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "self issued",
+      "primary": null,
+      "sort-name": "self issued",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "self-issued",
+      "primary": null,
+      "sort-name": "self-issued",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "white label",
+      "primary": null,
+      "sort-name": "white label",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     },
+     {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": null,
+      "name": "но лабел",
+      "primary": null,
+      "sort-name": "но лабел",
+      "type": "Search hint",
+      "type-id": "829662f2-a781-3ec8-8b46-fbcea6196f81"
+     }
+    ],
+    "disambiguation": "Special purpose label – white labels, self-published releases and other “no label” releases",
+    "id": "157afde4-4bf5-4039-8ad2-5a15acc85176",
+    "label-code": null,
+    "name": "[no label]",
+    "sort-name": "[no label]",
+    "type": "Production",
+    "type-id": "a2426aab-2dd4-339c-b47d-b4923a241678"
+   }
+  }
+ ],
+ "media": [
+  {
+   "format": "12\" Vinyl",
+   "format-id": "3e9080b0-5e6c-34ab-bd15-f526b6306a64",
+   "id": "b9798e81-51b0-3a4c-abd0-5e20bff8048c",
+   "position": 1,
+   "title": "",
+   "track-count": 2,
+   "track-offset": 0,
+   "tracks": [
+    {
+     "artist-credit": [
+      {
+       "artist": {
+        "aliases": [
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Biork",
+          "primary": null,
+          "sort-name": "Biork",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bj rk",
+          "primary": null,
+          "sort-name": "Bj rk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": "en",
+          "name": "Bjork",
+          "primary": false,
+          "sort-name": "Bjork",
+          "type": "Artist name",
+          "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "BjÃ¶rk",
+          "primary": null,
+          "sort-name": "BjÃ¶rk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bjõrk",
+          "primary": null,
+          "sort-name": "Bjõrk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Björk Gudmudsdóttir",
+          "primary": null,
+          "sort-name": "Björk Gudmudsdóttir",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Björk Gudmundsdottir",
+          "primary": null,
+          "sort-name": "Björk Gudmundsdottir",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": "1965-11-21",
+          "end": null,
+          "ended": false,
+          "locale": "is",
+          "name": "Björk Guðmundsdóttir",
+          "primary": false,
+          "sort-name": "Guðmundsdóttir, Björk",
+          "type": "Legal name",
+          "type-id": "d4dcd0c0-b341-3612-a332-c0ce797b25cf"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bjørk",
+          "primary": null,
+          "sort-name": "Bjørk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bjцrk",
+          "primary": null,
+          "sort-name": "Bjцrk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "B󠀱j󠀱ör󠀱k",
+          "primary": null,
+          "sort-name": "B󠀱j󠀱ör󠀱k",
+          "type": null,
+          "type-id": null
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Βjörk",
+          "primary": null,
+          "sort-name": "Βjörk",
+          "type": null,
+          "type-id": null
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": "ja",
+          "name": "ビョーク",
+          "primary": true,
+          "sort-name": "Björk",
+          "type": "Artist name",
+          "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+         }
+        ],
+        "country": "IS",
+        "disambiguation": "",
+        "id": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb",
+        "name": "Björk",
+        "sort-name": "Björk",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+       },
+       "joinphrase": "",
+       "name": "Björk"
+      }
+     ],
+     "id": "e953aaa8-6caa-450e-8584-f702031d0e67",
+     "length": 641000,
+     "number": "A",
+     "position": 1,
+     "recording": {
+      "aliases": [],
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "IS",
+         "disambiguation": "",
+         "id": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb",
+         "name": "Björk",
+         "sort-name": "Björk",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Björk"
+       }
+      ],
+      "disambiguation": "",
+      "first-release-date": "2004-07",
+      "id": "846b5995-88f2-4d18-ae6d-fdc971615fd0",
+      "isrcs": [],
+      "length": 641000,
+      "relations": [],
+      "title": "Jóga (Introvert Breaks mix)",
+      "video": false
+     },
+     "title": "Jóga (Introvert Breaks mix)"
+    },
+    {
+     "artist-credit": [
+      {
+       "artist": {
+        "aliases": [
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Biork",
+          "primary": null,
+          "sort-name": "Biork",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bj rk",
+          "primary": null,
+          "sort-name": "Bj rk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": "en",
+          "name": "Bjork",
+          "primary": false,
+          "sort-name": "Bjork",
+          "type": "Artist name",
+          "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "BjÃ¶rk",
+          "primary": null,
+          "sort-name": "BjÃ¶rk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bjõrk",
+          "primary": null,
+          "sort-name": "Bjõrk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Björk Gudmudsdóttir",
+          "primary": null,
+          "sort-name": "Björk Gudmudsdóttir",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Björk Gudmundsdottir",
+          "primary": null,
+          "sort-name": "Björk Gudmundsdottir",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": "1965-11-21",
+          "end": null,
+          "ended": false,
+          "locale": "is",
+          "name": "Björk Guðmundsdóttir",
+          "primary": false,
+          "sort-name": "Guðmundsdóttir, Björk",
+          "type": "Legal name",
+          "type-id": "d4dcd0c0-b341-3612-a332-c0ce797b25cf"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bjørk",
+          "primary": null,
+          "sort-name": "Bjørk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Bjцrk",
+          "primary": null,
+          "sort-name": "Bjцrk",
+          "type": "Search hint",
+          "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "B󠀱j󠀱ör󠀱k",
+          "primary": null,
+          "sort-name": "B󠀱j󠀱ör󠀱k",
+          "type": null,
+          "type-id": null
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": null,
+          "name": "Βjörk",
+          "primary": null,
+          "sort-name": "Βjörk",
+          "type": null,
+          "type-id": null
+         },
+         {
+          "begin": null,
+          "end": null,
+          "ended": false,
+          "locale": "ja",
+          "name": "ビョーク",
+          "primary": true,
+          "sort-name": "Björk",
+          "type": "Artist name",
+          "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+         }
+        ],
+        "country": "IS",
+        "disambiguation": "",
+        "id": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb",
+        "name": "Björk",
+        "sort-name": "Björk",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+       },
+       "joinphrase": "",
+       "name": "Björk"
+      }
+     ],
+     "id": "f615d86f-56a8-4e76-811a-53e2d3bf12c9",
+     "length": 534000,
+     "number": "B",
+     "position": 2,
+     "recording": {
+      "aliases": [],
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "IS",
+         "disambiguation": "",
+         "id": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb",
+         "name": "Björk",
+         "sort-name": "Björk",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Björk"
+       }
+      ],
+      "disambiguation": "",
+      "first-release-date": "2004-07",
+      "id": "06191ccf-303d-4a51-82dd-db04e860576f",
+      "isrcs": [],
+      "length": 534000,
+      "relations": [],
+      "title": "Jóga (Introvert 4/4 mix)",
+      "video": false
+     },
+     "title": "Jóga (Introvert 4/4 mix)"
+    }
+   ]
+  }
+ ],
+ "packaging": null,
+ "packaging-id": null,
+ "quality": "normal",
+ "relations": [
+  {
+   "attribute-ids": {},
+   "attribute-values": {},
+   "attributes": [],
+   "begin": null,
+   "direction": "forward",
+   "end": null,
+   "ended": false,
+   "source-credit": "",
+   "target-credit": "",
+   "target-type": "url",
+   "type": "discogs",
+   "type-id": "4a78823c-1c53-4176-a5f3-58026c76f2bc",
+   "url": {
+    "id": "62223478-1e4e-4472-8d21-233e36ac8df5",
+    "resource": "https://www.discogs.com/release/322664"
+   }
+  }
+ ],
+ "release-events": [
+  {
+   "area": null,
+   "date": "2004-07"
+  }
+ ],
+ "release-group": {
+  "aliases": [],
+  "artist-credit": [
+   {
+    "artist": {
+     "aliases": [
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Biork",
+       "primary": null,
+       "sort-name": "Biork",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Bj rk",
+       "primary": null,
+       "sort-name": "Bj rk",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": "en",
+       "name": "Bjork",
+       "primary": false,
+       "sort-name": "Bjork",
+       "type": "Artist name",
+       "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "BjÃ¶rk",
+       "primary": null,
+       "sort-name": "BjÃ¶rk",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Bjõrk",
+       "primary": null,
+       "sort-name": "Bjõrk",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Björk Gudmudsdóttir",
+       "primary": null,
+       "sort-name": "Björk Gudmudsdóttir",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Björk Gudmundsdottir",
+       "primary": null,
+       "sort-name": "Björk Gudmundsdottir",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": "1965-11-21",
+       "end": null,
+       "ended": false,
+       "locale": "is",
+       "name": "Björk Guðmundsdóttir",
+       "primary": false,
+       "sort-name": "Guðmundsdóttir, Björk",
+       "type": "Legal name",
+       "type-id": "d4dcd0c0-b341-3612-a332-c0ce797b25cf"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Bjørk",
+       "primary": null,
+       "sort-name": "Bjørk",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Bjцrk",
+       "primary": null,
+       "sort-name": "Bjцrk",
+       "type": "Search hint",
+       "type-id": "1937e404-b981-3cb7-8151-4c86ebfc8d8e"
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "B󠀱j󠀱ör󠀱k",
+       "primary": null,
+       "sort-name": "B󠀱j󠀱ör󠀱k",
+       "type": null,
+       "type-id": null
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": null,
+       "name": "Βjörk",
+       "primary": null,
+       "sort-name": "Βjörk",
+       "type": null,
+       "type-id": null
+      },
+      {
+       "begin": null,
+       "end": null,
+       "ended": false,
+       "locale": "ja",
+       "name": "ビョーク",
+       "primary": true,
+       "sort-name": "Björk",
+       "type": "Artist name",
+       "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+      }
+     ],
+     "country": "IS",
+     "disambiguation": "",
+     "id": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb",
+     "name": "Björk",
+     "sort-name": "Björk",
+     "type": "Person",
+     "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+    },
+    "joinphrase": "",
+    "name": "Björk"
+   }
+  ],
+  "disambiguation": "",
+  "first-release-date": "1997-05",
+  "id": "ecb0a296-2813-36cb-9470-dae14b44fda3",
+  "primary-type": "Single",
+  "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+  "secondary-type-ids": [],
+  "secondary-types": [],
+  "title": "Jóga"
+ },
+ "status": "Bootleg",
+ "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+ "text-representation": {
+  "language": "eng",
+  "script": "Latn"
+ },
+ "title": "Jóga"
+}

@@ -1,87 +1,83 @@
-"""Tests verifying fail-closed behavior when Beets Control Agent is unavailable.
+"""Fail-closed adapter errors when Beets (in-process, ADR 0006) cannot answer.
 
-Proves that:
-1. BeetsClient raises BeetsUnavailableError or BeetsAuthError on transport failures (connection refused, timeout, 401 auth failure, 500 error, malformed JSON).
-2. Production callers in app.py fail closed without local filesystem or DB mutations.
-3. app.py does not fall back to local transaction_engine or TransactionStore.
+1. Beets could not start: every call raises BeetsUnavailableError.
+2. Writes refused by the self-test: a 503 BEETS_EMBEDDED_DEGRADED error, not
+   "unavailable", so reads keep working.
+3. Error statuses keep their typed errors; a body that is not JSON is
+   reported without its text.
+4. The adapter has no local transaction-engine fallback.
 """
 
-import os
-import sqlite3
-import tempfile
 import unittest
 from unittest import mock
-import urllib.error
 
-from backend.beets_adapter import BeetsAdapter, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsAdapterError
+from flask import Response
+
+from backend import beets_embedded
+from backend.beets_adapter import BeetsAdapter, BeetsAdapterError, BeetsAuthError, BeetsError, BeetsUnavailableError
+
+
+def _status(code):
+    return {"checks": [{"code": code, "ok": False, "severity": "error", "message": f"{code} message"}]}
 
 
 class TestEngineUnavailableFailures(unittest.TestCase):
     def setUp(self):
-        self.client = BeetsAdapter(base_url="http://127.0.0.1:59999", timeout=1.0)
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.root = self.tmpdir.name
+        self.client = BeetsAdapter()
 
-    def tearDown(self):
-        self.tmpdir.cleanup()
+    def _answer(self, status, body, content_type="application/json"):
+        engine = mock.Mock()
+        engine.call.side_effect = lambda *a, **k: Response(body, status=status, content_type=content_type)
+        return mock.patch.object(BeetsAdapter, "_engine", return_value=engine)
 
-    def test_connection_refused_raises_beets_unavailable_error(self):
-        with self.assertRaises(BeetsUnavailableError) as ctx:
-            self.client.get_items("test")
-        self.assertIn("beets server", str(ctx.exception).lower())
-
-    def test_timeout_raises_beets_unavailable_error(self):
-        def timeout_handler(*args, **kwargs):
-            raise TimeoutError("connection timed out")
-
-        with mock.patch("urllib.request.urlopen", side_effect=timeout_handler):
+    def test_engine_that_could_not_start_raises_beets_unavailable_error(self):
+        down = beets_embedded.EmbeddedBeetsUnavailable(_status("library_open_failed"))
+        with mock.patch.object(beets_embedded, "engine", side_effect=down):
             with self.assertRaises(BeetsUnavailableError) as ctx:
-                self.client.get_album(1)
-            self.assertIn("timeout", str(ctx.exception).lower())
+                self.client.get_items("test")
+        self.assertEqual(ctx.exception.error_code, "BEETS_EMBEDDED_UNAVAILABLE")
+        self.assertIn("library_open_failed message", str(ctx.exception))
+
+    def test_refused_write_is_degraded_not_unavailable(self):
+        engine = mock.Mock()
+        engine.call.side_effect = beets_embedded.EmbeddedBeetsUnavailable(_status("library_locked"))
+        with mock.patch.object(BeetsAdapter, "_engine", return_value=engine):
+            with self.assertRaises(BeetsError) as ctx:
+                self.client._request("POST", "/webmanager/modify", json_data={})
+        self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
+        self.assertEqual((ctx.exception.status_code, ctx.exception.error_code), (503, "BEETS_EMBEDDED_DEGRADED"))
 
     def test_auth_failure_401_raises_beets_auth_error(self):
-        class MockHTTPError(urllib.error.HTTPError):
-            def __init__(self):
-                super().__init__("http://127.0.0.1:59999/test", 401, "Unauthorized", {}, None)
-
-        with mock.patch("urllib.request.urlopen", side_effect=MockHTTPError()):
+        with self._answer(401, b'{"error": "nope", "error_code": "UNAUTHORIZED"}'):
             with self.assertRaises(BeetsAuthError) as ctx:
                 self.client.get_album(1)
-            self.assertEqual(ctx.exception.status_code, 401)
+        self.assertEqual(ctx.exception.status_code, 401)
 
     def test_server_error_500_raises_beets_error_not_unavailable(self):
-        class MockHTTP500(urllib.error.HTTPError):
-            def __init__(self):
-                super().__init__("http://127.0.0.1:59999/test", 500, "Internal Server Error", {}, None)
-
-            def read(self):
-                return b'{"error": "Internal database lock error", "error_code": "db_locked"}'
-
-        with mock.patch("urllib.request.urlopen", side_effect=MockHTTP500()):
+        with self._answer(500, b'{"error": "Internal database lock error", "error_code": "db_locked"}'):
             with self.assertRaises(BeetsError) as ctx:
                 self.client.get_album(1)
-            self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
-            self.assertEqual(ctx.exception.status_code, 500)
+        self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
+        self.assertEqual(ctx.exception.status_code, 500)
 
-    def test_malformed_json_raises_beets_unavailable_error(self):
-        class MockResponse:
-            def __init__(self):
-                self.headers = {"Content-Type": "application/json"}
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                pass
-            def read(self):
-                return b"<html>502 Bad Gateway</html>"
-
-        with mock.patch("urllib.request.urlopen", return_value=MockResponse()):
+    def test_malformed_json_is_reported_without_its_text(self):
+        with self._answer(200, b"{not json <html>502</html>"):
             with self.assertRaises(BeetsAdapterError) as ctx:
-                self.client.get_album(1)
-            self.assertIn("json", str(ctx.exception).lower())
+                self.client.get_stats()
+        self.assertEqual(ctx.exception.error_code, "MALFORMED_RESPONSE")
+        self.assertNotIn("not json", str(ctx.exception))
+
+    def test_handler_exception_text_is_not_reported(self):
+        engine = mock.Mock()
+        engine.call.side_effect = RuntimeError("/private/path secret-detail")
+        with mock.patch.object(BeetsAdapter, "_engine", return_value=engine), \
+                self.assertLogs("beets.adapter", level="ERROR"):
+            with self.assertRaises(BeetsAdapterError) as ctx:
+                self.client.get_stats()
+        self.assertEqual(ctx.exception.error_code, "BEETS_UPSTREAM_ERROR")
+        self.assertNotIn("secret-detail", str(ctx.exception))
 
     def test_beets_adapter_does_not_import_transaction_engine(self):
-        import sys
-        # Ensure backend.beets_adapter module has no imports of backend.transaction_engine
         import backend.beets_adapter as client_mod
         self.assertNotIn("TransactionStore", dir(client_mod))
         self.assertNotIn("transaction_engine", dir(client_mod))

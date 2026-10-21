@@ -1,4 +1,4 @@
-"""In-process Beets engine (docs/adr/0006-embedded-beets.md, Phase 1).
+"""In-process Beets engine (docs/adr/0006-embedded-beets.md).
 
 Each scenario runs in a fresh interpreter: Beets' config, plugin registry and
 the stock web app are process-global, so a shared test process would leak
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DRIVER = r'''
 import json, os, socket, sys
 scenario, src = sys.argv[1], sys.argv[2]
-if scenario == "version_mismatch":
+if scenario in ("version_mismatch", "readiness_broken"):
     import beets
     beets.__version__ = "0.0.0"
 if scenario == "shadowed":  # a stale copy that resolved before the image's own
@@ -35,12 +35,45 @@ if scenario == "shadowed":  # a stale copy that resolved before the image's own
     sys.modules["beetsplug.discpath"] = stale
 from backend import beets_embedded
 from backend.beets_adapter import BeetsAdapter, BeetsAdapterError
+# The live second-writer probes see the whole test container (other tests run
+# `beet` and listeners in parallel); each scenario sets what they find.
+beets_embedded._separate_beets_address = lambda: "beets:8337" if scenario == "writer_service" else ""
+beets_embedded._beet_commands = lambda: [4242] if scenario == "writer_beet" else []
 
 def no_network(*a, **k):
     raise AssertionError("the embedded engine opened a socket")
-socket.socket = no_network
+if scenario not in ("readiness", "readiness_broken"):
+    socket.socket.connect = socket.socket.connect_ex = no_network
 
 a = BeetsAdapter()
+
+# #466: the stock beets web app (and its config["lib"]) is process-global.
+# Another caller in the process can overwrite config["lib"] with its own --
+# possibly closed -- Library. The engine must re-assert its own Library on
+# every dispatch; otherwise a transaction on the foreign closed connection
+# strands Beets' per-database lock and every later call deadlocks (a hang).
+if scenario == "poisoned_global_lib":
+    out = {"stats0": a.get_stats()}
+    from beetsplug.web import app as _web_app
+    from beets.library import Library as _Library
+    bad = _Library(":memory:")
+    bad._connection().close()          # a closed connection, like a torn-down test's lib
+    _web_app.config["lib"] = bad       # another caller overwrites the shared global
+    out["stats_after_poison"] = a.get_stats()          # must NOT touch `bad`
+    out["rebound_to_engine_lib"] = _web_app.config["lib"] is beets_embedded.engine().lib
+    print(json.dumps(out, default=str))
+    sys.exit(0)
+
+# Readiness probe end to end through the real app and the real embedded
+# engine (no mocking of _beets_plugin_diagnostics): a fresh config-less
+# install must be ready; a genuinely broken engine must not.
+if scenario in ("readiness", "readiness_broken"):
+    from app import app as flask_app
+    client = flask_app.test_client()
+    r = client.get("/health/ready")
+    print(json.dumps({"status_code": r.status_code, "body": r.get_json()}, default=str))
+    sys.exit(0)
+
 out = {"status": beets_embedded.status(), "public": beets_embedded.public_status()}
 if scenario != "happy":
     try:
@@ -152,10 +185,10 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         import sqlite3
         sqlite3.connect(self.dbpath).close()  # an existing (empty) file; Beets creates the schema
 
-    def _run(self, scenario, path_env=None):
+    def _run(self, scenario, path_env=None, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("BEETS_", "BEETSDIR"))}
         env.update({
-            "BEETSDIR": self.config, "BEETS_ENGINE": "embedded", "HOME": self.td,
+            "BEETSDIR": self.config, "HOME": self.td,
             "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1",
             "WEB_MANAGER_DATA_DIR": os.path.join(self.td, "wm"),
             "BEETS_TRANSACTION_DIR": os.path.join(self.td, "wm", "transactions"),
@@ -165,6 +198,7 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         })
         if path_env is not None:
             env["PATH"] = path_env
+        env.update(extra_env or {})
         proc = subprocess.run([sys.executable, "-c", DRIVER, scenario, self.src], cwd=str(ROOT), env=env,
                               capture_output=True, text=True, timeout=180)
         self.assertEqual(proc.returncode, 0, proc.stderr[-4000:])
@@ -173,6 +207,18 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
     @staticmethod
     def _failed(status):
         return {c["code"]: c["severity"] for c in status["checks"] if not c["ok"]}
+
+    def test_engine_survives_global_lib_being_overwritten_with_a_closed_library(self):
+        # #466 regression: the engine must re-bind its own Library onto the
+        # process-global beets web app before each dispatch. Otherwise a
+        # closed Library left in config["lib"] by another caller strands
+        # Beets' per-database lock and every later Beets call deadlocks --
+        # the 6h CI hang this guards against.
+        self._write_config()
+        self._precreate_library()
+        out = self._run("poisoned_global_lib")
+        self.assertEqual(out["stats_after_poison"], out["stats0"])
+        self.assertTrue(out["rebound_to_engine_lib"])
 
     def test_reads_import_modify_and_stream_in_process_without_network(self):
         stale = os.path.join(self.td, "stale")
@@ -265,11 +311,69 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual(out["stats_error"][1], "BEETS_EMBEDDED_UNAVAILABLE")
         self.assertIn("discpath", out["stats_error"][2])
 
-    def test_missing_config_and_library_dir_are_reported(self):
-        out = self._run("no_config")  # no config.yaml: Beets defaults, ~/Music missing
+    @unittest.skipUnless(
+        shutil.which("ffmpeg"),
+        "config.yaml.example enables replaygain with the ffmpeg backend, which needs "
+        "ffmpeg on PATH to load; ffmpeg ships in the published image (and in "
+        "Dockerfile.test / the acceptance jobs) but is absent on a bare CI runner "
+        "(the self-test's ffmpeg_missing check), where replaygain legitimately cannot "
+        "load. The shipped config is validated where it actually runs -- the image.")
+    def test_shipped_example_config_loads_every_plugin(self):
+        # config.yaml.example is what the install docs tell users to start
+        # from; every plugin it lists must load inside Web Manager.
+        text = (ROOT / "config.yaml.example").read_text(encoding="utf-8")
+        for container, local in (("/config", self.config), ("/music", self.music),
+                                 ("/downloads", self.downloads), ("/web-manager-data", self.td)):
+            text = text.replace(container + "/", local + "/").replace(container + "\n", local + "\n")
+        with open(os.path.join(self.config, "config.yaml"), "w", encoding="utf-8") as f:
+            f.write(text)
+        out = self._run("new_library")
+        failed = self._failed(out["status"])
+        self.assertNotIn("plugins_failed", failed, out["status"])
+        self.assertNotIn("config_invalid", failed)
+        self.assertNotIn("library_dir_mismatch", failed)
+        import yaml
+        listed = set(yaml.safe_load(text)["plugins"].split())
+        self.assertTrue(listed <= set(out["status"]["loaded_plugins"]), listed - set(out["status"]["loaded_plugins"]))
+
+    def test_fresh_install_without_config_uses_the_stock_layout(self):
+        # No config.yaml: library beside it, MUSIC_ROOT as `directory:`, as
+        # the stock Beets container laid it out; nothing is written.
+        out = self._run("no_config")
         failed = self._failed(out["status"])
         self.assertEqual(failed.get("config_missing"), "warning")
-        self.assertEqual(failed.get("library_dir_missing"), "error")
+        self.assertEqual(failed.get("library_created"), "warning")
+        self.assertTrue(out["status"]["ok"], out["status"])
+        self.assertEqual(out["status"]["library_path"], self.dbpath)
+        self.assertEqual(out["status"]["library_directory"], self.music)
+        self.assertFalse(os.path.exists(os.path.join(self.config, "config.yaml")))
+        self.assertNotEqual((out["mutate_error"] or [None, None])[1], "BEETS_EMBEDDED_DEGRADED")
+
+    def test_fresh_install_without_config_is_ready(self):
+        # Regression (PR #466): a fresh config-less install must answer
+        # /health/ready with 200 and no blocking reasons. Driven end to end
+        # through the real app and the real embedded engine -- NOT a mocked
+        # _beets_plugin_diagnostics (the mock is exactly what hid this).
+        # BEETS_CONFIG points inside BEETSDIR (as the shipped compose does:
+        # /config/config.yaml in /config); the file itself does not exist.
+        cfg = os.path.join(self.config, "config.yaml")
+        out = self._run("readiness", extra_env={"BEETS_CONFIG": cfg})
+        self.assertEqual(out["status_code"], 200, out["body"])
+        self.assertEqual(out["body"]["blocking_reasons"], [], out["body"])
+        self.assertEqual(out["body"]["status"], "ready")
+        self.assertTrue(out["body"]["beets"]["plugin_loader_ok"], out["body"])
+
+    def test_genuinely_broken_engine_is_not_ready(self):
+        # D3 intent preserved: a genuinely broken Beets (version mismatch, so
+        # the engine never starts) must FAIL readiness with a 503.
+        out = self._run("readiness_broken", extra_env={"BEETS_CONFIG": os.path.join(self.config, "config.yaml")})
+        self.assertEqual(out["status_code"], 503, out["body"])
+        self.assertIn("Beets engine unavailable", out["body"]["blocking_reasons"], out["body"])
+
+    def test_missing_library_dir_is_an_error(self):
+        missing = os.path.join(self.td, "nowhere")
+        out = self._run("no_config", extra_env={"MUSIC_ROOT": missing})
+        self.assertEqual(self._failed(out["status"]).get("library_dir_missing"), "error")
         self.assertFalse(out["status"]["ok"])
 
     def test_unopenable_library_fails_with_code(self):
@@ -317,12 +421,85 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertFalse(out["status"]["ok"])
         self.assertEqual(self._failed(out["status"]).get("library_dir_not_writable"), "error")
 
-    def test_version_mismatch_is_reported(self):
+    def test_version_mismatch_stops_before_the_library_is_opened(self):
+        # #459 N-a: another Beets version could migrate the schema on open.
+        self._write_config()
+        out = self._run("version_mismatch")
+        self.assertEqual(self._failed(out["status"]), {"beets_version_mismatch": "error"})
+        self.assertFalse(out["status"]["ok"])
+        self.assertEqual(out["stats_error"][1], "BEETS_EMBEDDED_UNAVAILABLE")
+        self.assertFalse(os.path.exists(self.dbpath))
+
+    def test_disabled_plugins_cannot_remove_the_required_plugins(self):
+        # #459 N-b
+        self._write_config(extra="disabled_plugins: [web, webmanager]\n")
+        self._precreate_library()
+        out = self._run("new_library")
+        self.assertTrue(out["status"]["ok"], out["status"])
+        self.assertTrue({"web", "webmanager"} <= set(out["status"]["loaded_plugins"]))
+        self.assertIsNone(out["stats_error"])
+
+    def test_leftover_two_container_settings_are_a_warning_not_a_stop(self):
         self._write_config()
         self._precreate_library()
-        out = self._run("version_mismatch")
-        self.assertEqual(self._failed(out["status"]).get("beets_version_mismatch"), "error")
-        self.assertFalse(out["status"]["ok"])
+        out = self._run("new_library", extra_env={
+            "BEETS_ENGINE": "http", "BEETS_WEB_URL": "http://beets:8337",
+            "BEETS_WEBMANAGER_API_KEY": "0" * 64})
+        self.assertTrue(out["status"]["ok"], out["status"])
+        self.assertEqual(self._failed(out["status"]).get("legacy_settings_ignored"), "warning")
+        msg = next(c["message"] for c in out["status"]["checks"] if c["code"] == "legacy_settings_ignored")
+        self.assertIn("BEETS_ENGINE, BEETS_WEB_URL, BEETS_WEBMANAGER_API_KEY", msg)
+        self.assertNotIn("0" * 64, json.dumps(out))
+        self.assertIsNone(out["stats_error"])
+
+    def test_music_root_that_is_not_beets_directory_refuses_changes(self):
+        self._write_config()
+        self._precreate_library()
+        out = self._run("dir_mismatch", extra_env={"MUSIC_ROOT": self.downloads})
+        self.assertEqual(self._failed(out["status"]).get("library_dir_mismatch"), "error")
+        self.assertIsNone(out["stats_error"])
+        self.assertEqual(out["mutate_error"][1], "BEETS_EMBEDDED_DEGRADED")
+
+    @unittest.skipIf(os.name == "nt", "flock")
+    def test_second_web_manager_on_one_library_refuses_changes(self):
+        import fcntl
+        self._write_config()
+        self._precreate_library()
+        fd = os.open(self.dbpath + ".webmanager.lock", os.O_RDWR | os.O_CREAT, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.write(fd, b"host other-host, pid 1")
+        out = self._run("locked")
+        self.assertEqual(self._failed(out["status"]).get("library_locked"), "error")
+        msg = next(c["message"] for c in out["status"]["checks"] if c["code"] == "library_locked")
+        self.assertIn("host other-host, pid 1", msg)
+        self.assertIsNone(out["stats_error"])
+        self.assertEqual(out["mutate_error"][1], "BEETS_EMBEDDED_DEGRADED")
+
+    @unittest.skipIf(os.name == "nt", "flock")
+    def test_the_lock_is_released_when_the_process_ends(self):
+        self._write_config()
+        self._precreate_library()
+        self.assertNotIn("library_locked", self._failed(self._run("new_library")["status"]))
+        self.assertNotIn("library_locked", self._failed(self._run("new_library")["status"]))
+
+    def test_old_beets_service_still_running_refuses_changes(self):
+        self._write_config()
+        self._precreate_library()
+        out = self._run("writer_service")
+        self.assertEqual(self._failed(out["status"]).get("separate_beets_running"), "error")
+        self.assertIn("separate_beets_running", out["public"]["codes"])
+        self.assertIsNone(out["stats_error"])
+        self.assertEqual(out["mutate_error"][1:4:2], ["BEETS_EMBEDDED_DEGRADED", 503])
+        self.assertIn("beets:8337", out["mutate_error"][2])
+
+    def test_writing_beet_command_refuses_changes(self):
+        self._write_config()
+        self._precreate_library()
+        out = self._run("writer_beet")
+        self.assertEqual(self._failed(out["status"]).get("beet_command_running"), "error")
+        self.assertEqual(out["mutate_error"][1], "BEETS_EMBEDDED_DEGRADED")
+        self.assertIn("4242", out["mutate_error"][2])
 
     def test_public_status_carries_codes_but_no_paths_or_messages(self):
         self._write_config(plugins="[doesnotexist]")
@@ -349,15 +526,78 @@ class EmbeddedBeetsStructure(unittest.TestCase):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [])
 
-    def test_engine_is_opt_in_during_migration(self):
-        from backend import beets_embedded
-        old = os.environ.pop("BEETS_ENGINE", None)
-        try:
-            self.assertFalse(beets_embedded.enabled())
-            self.assertEqual(beets_embedded.status(), {"engine": "http", "ok": True, "checks": []})
-        finally:
-            if old is not None:
-                os.environ["BEETS_ENGINE"] = old
+    def test_beet_subcommand_parsing(self):
+        from backend.beets_embedded import _beet_subcommand
+        cases = {
+            ("/usr/bin/beet", "ls", "x"): "ls",
+            ("beet", "-c", "/config/x.yaml", "import", "/downloads"): "import",
+            ("beet", "-v", "--library", "l.blb", "stats"): "stats",
+            ("/usr/bin/python3", "-m", "beets", "modify", "x"): "modify",
+            ("/usr/bin/python3", "/usr/bin/beet", "web"): "web",
+            ("beet",): "",
+            ("python", "app.py"): None,
+            ("/usr/bin/beetsplug-thing", "import"): None,
+        }
+        for argv, want in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(_beet_subcommand(list(argv)), want)
+
+    def test_only_writing_beet_commands_count(self):
+        from unittest import mock
+        from backend.beets_embedded import _beet_commands
+        proc = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, proc, True)
+        for pid, argv in {"11": [b"beet", b"ls"], "12": [b"beet", b"import", b"/d"],
+                          "13": [b"python3", b"-m", b"beets", b"web"], "14": [b"python3", b"app.py"],
+                          "self": [b"beet", b"import"]}.items():
+            os.makedirs(os.path.join(proc, pid))
+            with open(os.path.join(proc, pid, "cmdline"), "wb") as f:
+                f.write(b"\0".join(argv) + b"\0")
+        # Pin getpid outside the fake set: in a low-PID container a test
+        # worker's real PID can collide with a fake pid dir and be skipped by
+        # the (correct) self-skip in _beet_commands.
+        with mock.patch("backend.beets_embedded.os.getpid", return_value=999999):
+            self.assertEqual(_beet_commands(proc), [12, 13])
+            self.assertEqual(_beet_commands(os.path.join(proc, "missing")), [])
+
+    @unittest.skipIf(os.name == "nt", "flock/symlink")
+    def test_lock_refuses_a_symlinked_lock_path_without_following_it(self):
+        from backend import beets_embedded as be
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        dbpath = os.path.join(d, "musiclibrary.blb")
+        target = os.path.join(d, "victim")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("precious")
+        os.symlink(target, dbpath + be.LOCK_SUFFIX)  # planted symlink at the lock path
+        self.addCleanup(setattr, be, "_lock_fd", be._lock_fd)
+        be._lock_fd = None
+        holder = be._acquire_library_lock(dbpath)
+        self.assertIsNotNone(holder)  # fail safe: refuses instead of following
+        self.assertEqual(open(target, encoding="utf-8").read(), "precious")  # target untouched
+        self.assertIsNone(be._lock_fd)
+
+    def test_old_service_probe_finds_a_listener_and_skips_this_container(self):
+        import socket
+        from unittest import mock
+        from backend import beets_embedded as be
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        port = srv.getsockname()[1]
+        with mock.patch.dict(os.environ, {"BEETS_WEB_URL": f"http://u:pw@127.0.0.1:{port}"}):
+            with mock.patch.object(be, "_own_addresses", return_value=set()):
+                self.assertEqual(be._separate_beets_address(), f"127.0.0.1:{port}")
+            self.assertEqual(be._separate_beets_address(), "")  # 127.0.0.1 is this container
+        srv.close()
+        with mock.patch.dict(os.environ, {"BEETS_WEB_URL": f"http://127.0.0.1:{port}"}), \
+                mock.patch.object(be, "_own_addresses", return_value=set()):
+            self.assertEqual(be._separate_beets_address(), "")  # nothing listening
+        with mock.patch.dict(os.environ, {"BEETS_WEB_URL": "http://no-such-host.invalid:8337"}):
+            self.assertEqual(be._separate_beets_address(), "")
+        with mock.patch.dict(os.environ, {"BEETS_WEB_URL": "not a url"}):
+            self.assertEqual(be._separate_beets_address(), "")
 
     def test_pin_matches_requirements(self):
         from backend.beets_embedded import PINNED_BEETS_VERSION

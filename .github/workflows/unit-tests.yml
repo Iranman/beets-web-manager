@@ -12,27 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read  # authenticated stock-Beets pull (#234)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
-      - name: Install real Beets for engine-side native path-formatting tests
-        # backend/transaction_engine.py's album_relocation_v1 /
-        # album_metadata_repair_v1 families ask the REAL installed Beets
-        # for path/tag decisions (Wave 24 final review section 7/8/28) --
-        # deliberately not a hand-rolled duplicate formatter. That code
-        # only runs where `beets` is genuinely importable.
-        # requirements.txt intentionally omits the full `beets` package to
-        # keep the Web Manager image itself dependency-light (only
-        # `mediafile`, its tag-I/O component, is a real dependency there);
-        # this step is CI-test-only, pinned to the same version
-        # requirements-dev.txt uses for local test fixtures, so this suite
-        # exercises the real native-Beets code path instead of only ever
-        # hitting its explicit, fail-closed "unavailable" branch.
-        run: pip install beets==2.14.1
       - name: Set a fake CI-only web auth token
         # Prevents _bootstrap_auth_token_if_missing() from generating and
         # attempting to persist a token to the (unwritable, non-container)
@@ -46,30 +31,23 @@ jobs:
         # check.
         run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
       - run: python -m py_compile app.py helpers_mb.py job_engine.py routes_*.py backend/*.py scripts/security_secret_scan.py scripts/validate_compose_security.py
-      - name: Pull the pinned stock Beets image from docker-compose.yml (authenticated, #234)
-        # One authenticated ghcr.io pull; the script exports its ghcr.io name
-        # as STOCK_BEETS_IMAGE, which the Docker tests boot without pulling again.
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/ci_pull_stock_beets.sh
       - name: Unit tests
         # -X faulthandler: the rare exit-139 segfault (#234) must leave a
         # Python traceback of every thread instead of a bare "core dumped".
         # scripts/run_tests.py: the same tests as `unittest discover`, spread
         # over one worker process per runner CPU (docs/DEVELOPMENT.md).
         run: python -X faulthandler scripts/run_tests.py
-      - name: Root-, pwsh- and Docker-gated tests run instead of skipping (#355)
+      - name: Root- and pwsh-gated tests run instead of skipping (#355)
         # The runner user is not root, so the PUID/PGID chown tests skip in
         # the step above; run just those as root. pwsh ships on the runner;
-        # fail if its setup.ps1 test or the stock-Beets fresh-install smoke
-        # (Docker, image pulled above) ever skips here.
+        # fail if its setup.ps1 test ever skips here. (Every plugin in
+        # config.yaml.example loading is now tests.test_beets_embedded, in
+        # the step above and in docker-build's stock-beets-acceptance.)
         run: |
           set -o pipefail
           python -X faulthandler -m unittest -v \
-            tests.test_fresh_install_token_generation.SetupPs1TokenGenerationTests \
-            tests.test_beets_fresh_install_plugins.BeetsFreshInstallStockDockerSmokeTests 2>&1 | tee gated.log
+            tests.test_fresh_install_token_generation.SetupPs1TokenGenerationTests 2>&1 | tee gated.log
           sudo -E env "PATH=$PATH" python -X faulthandler -m unittest -v \
-            tests.test_api_key_provisioning.ApiKeyProvisioningTests.test_applies_puid_pgid_ownership_when_configured \
             tests.test_backup_restore_scripts.BackupRestoreRoundTripTests.test_restored_files_keep_the_owner_of_what_they_replace \
             2>&1 | tee -a gated.log
           if grep -Eq ' \.\.\. skipped|skipped=' gated.log; then echo "::error::a gated test skipped"; exit 1; fi

@@ -1,12 +1,12 @@
 """Architecture Invariant Validator.
 
-Verifies that Beets Web Manager adheres strictly to the single-authoritative-Beets
-architecture with stock LinuxServer Beets (lscr.io/linuxserver/beets):
+Verifies the single-engine architecture (ADR 0006: Beets runs inside Web
+Manager, pinned in requirements.txt):
 1. No Docker socket mounts (/var/run/docker.sock)
 2. No direct SQLite access to musiclibrary.blb from Web Manager
-3. Beets Web Manager container communicates only via HTTP to Beets
-4. Stock Beets container runs unmodified upstream Beets image
-5. Minimal integration plugin only handles authenticated mutations
+3. No compose file runs a separate Beets container (two writers on one library)
+4. No legacy control-agent references in production modules
+5. The webmanager plugin, which every Beets call goes through, is complete
 """
 
 import sys
@@ -46,18 +46,15 @@ def check_no_direct_sqlite_library_access():
     return True
 
 
-def check_stock_beets_image():
-    """Verify docker-compose references stock linuxserver/beets image."""
-    print("Checking docker-compose for stock linuxserver/beets image...")
-    compose_file = ROOT / "docker-compose.yml"
-    if not compose_file.exists():
-        print("FAILED: docker-compose.yml missing", file=sys.stderr)
-        return False
-    content = compose_file.read_text(encoding="utf-8")
-    if "lscr.io/linuxserver/beets" not in content and "linuxserver/beets" not in content:
-        print("FAILED: docker-compose.yml does not use stock LinuxServer Beets image", file=sys.stderr)
-        return False
-    print("  [PASS] docker-compose.yml uses stock LinuxServer Beets image.")
+def check_no_separate_beets_container():
+    """No compose file runs the old stock Beets image beside Web Manager."""
+    print("Checking docker-compose files for a separate Beets container...")
+    for cf in sorted(ROOT.glob("docker-compose*.yml")):
+        for line in cf.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("image:") and "linuxserver/beets" in line:
+                print(f"FAILED: {cf.name} runs a separate Beets container: {line.strip()}", file=sys.stderr)
+                return False
+    print("  [PASS] No compose file runs a separate Beets container.")
     return True
 
 
@@ -139,7 +136,7 @@ def main():
     checks = [
         check_no_docker_socket_mounts,
         check_no_direct_sqlite_library_access,
-        check_stock_beets_image,
+        check_no_separate_beets_container,
         check_no_production_legacy_beets_references,
         check_plugin_structure,
     ]

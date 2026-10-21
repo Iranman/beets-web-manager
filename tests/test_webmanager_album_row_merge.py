@@ -23,7 +23,7 @@ from beetsplug.web import app as beets_web_app
 import beetsplug.webmanager.merge_ops as merge_mod
 import beetsplug.webmanager.operations as ops_mod
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
 
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 RG = "ef4b6576-ac7c-4f72-bee6-e7a6b6cf019d"
@@ -54,11 +54,8 @@ class AlbumRowMergeTests(unittest.TestCase):
         self.td = tempfile.mkdtemp()
         self.music = os.path.join(self.td, "music")
         self.lib = Library(os.path.join(self.td, "library.blb"), directory=self.music)
-        key_file = os.path.join(self.td, "key")
-        with open(key_file, "w", encoding="utf-8") as f:
-            f.write(TOKEN + "\n")
         self.plugin = WebManagerPlugin()
-        set_api_key_file(key_file)
+        set_api_key(TOKEN)
         ops_mod.set_allowed_roots([self.music])
         merge_mod.set_merge_root(os.path.join(self.td, "merges"))
         beets_web_app.config["lib"] = self.lib
@@ -72,7 +69,7 @@ class AlbumRowMergeTests(unittest.TestCase):
     def tearDown(self):
         ops_mod.set_allowed_roots(None)
         merge_mod.set_merge_root(None)
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:

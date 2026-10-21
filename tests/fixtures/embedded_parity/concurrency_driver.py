@@ -22,7 +22,7 @@ for a in range(4):
 db = os.path.join(cfg, "musiclibrary.blb")
 open(os.path.join(cfg, "config.yaml"), "w").write(
     f"directory: {music}\nlibrary: {db}\nplugins: []\nwebmanager:\n  import_roots: [{dl}]\n  allowed_roots: [{music}, {dl}]\n")
-os.environ.update({"BEETSDIR": cfg, "BEETS_ENGINE": "embedded", "HOME": td,
+os.environ.update({"BEETSDIR": cfg, "HOME": td,
                    "WEB_MANAGER_DATA_DIR": os.path.join(td, "wm"), "MUSIC_ROOT": music, "DOWNLOADS_ROOT": dl,
                    "BEETS_TRANSACTION_DIR": os.path.join(td, "wm", "tx")})
 res = {}
@@ -86,12 +86,12 @@ def x():
     return {"marker": getattr(g, "marker", None), "n_items": len(items), "bytes": n, "has_lib_on_outer_g": hasattr(g, "lib")}
 res["nested"] = outer.test_client().get("/x").get_json()
 
-# 3) Default-path isolation: fresh interpreter, engine unset -> beets never imported.
-code = ("import os,sys; os.environ.pop('BEETS_ENGINE',None); from backend import beets_adapter, config_service, beets_embedded;"
-        "print(json.dumps({'beets_loaded': any(m=='beets' or m.startswith('beets.') for m in sys.modules), 'enabled': beets_embedded.enabled()}))")
-env = {k: v for k, v in os.environ.items() if k != "BEETS_ENGINE"}
+# 3) Lazy start: importing the backend modules does not load Beets (it starts on first use).
+code = ("import sys; from backend import beets_adapter, config_service, beets_embedded;"
+        "print(json.dumps({'beets_loaded': any(m=='beets' or m.startswith('beets.') for m in sys.modules)}))")
+env = dict(os.environ)
 p = subprocess.run([sys.executable, "-c", "import json;" + code], env=env, capture_output=True, text=True, cwd=ROOT)
-res["http_default"] = p.stdout.strip() or p.stderr[-500:]
+res["lazy_import"] = p.stdout.strip() or p.stderr[-500:]
 
 # 4) Rollback compatibility: tables in the embedded-written DB vs a DB created by the `beet` CLI.
 import sqlite3

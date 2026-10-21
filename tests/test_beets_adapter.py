@@ -6,7 +6,8 @@ import unittest.mock
 from beets.library import Library, Item, Album
 from beetsplug.web import app as beets_web_app
 from beetsplug.webmanager import WebManagerPlugin
-from beetsplug.webmanager.auth import set_api_key_file
+from beetsplug.webmanager.auth import set_api_key
+from backend import beets_embedded
 from backend.beets_adapter import (
     BeetsAdapter,
     BeetsAdapterError,
@@ -28,14 +29,9 @@ class BeetsAdapterTests(unittest.TestCase):
         self.dbpath = os.path.join(self.td, "musiclibrary.blb")
         self.lib = Library(self.dbpath, directory=self.td)
 
-        self.key_file = os.path.join(self.td, ".webmanager_api_key")
         self.token = "b" * 64
-        with open(self.key_file, "w", encoding="utf-8") as f:
-            f.write(self.token + "\n")
-        # Setup Beets web plugin. Its first registration in a process sets the
-        # key file from its own config, so point it at the test key after.
         self.plugin = WebManagerPlugin()
-        set_api_key_file(self.key_file)
+        set_api_key(self.token)
         beets_web_app.config["lib"] = self.lib
         beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["TESTING"] = True
@@ -103,18 +99,18 @@ class BeetsAdapterTests(unittest.TestCase):
 
         self.client = beets_web_app.test_client()
 
-        # Create BeetsAdapter wired to test client using mock opener
-        self.adapter = BeetsAdapter(base_url="http://mock-beets:8337", api_key=self.token)
+        # BeetsAdapter wired to the test client (the engine's own dispatch is
+        # covered by tests/test_beets_embedded.py).
+        self.adapter = BeetsAdapter()
 
         # Patch adapter._request to delegate to Flask test client
-        adapter_ref = self.adapter
         client_ref = self.client
+        token = self.token
 
         def mock_request(method, path, params=None, json_data=None, headers=None, timeout=None):
             h = headers or {}
             if path.startswith("/webmanager") or "/webmanager/" in path:
-                if "Authorization" not in h and adapter_ref.api_key:
-                    h["Authorization"] = f"Bearer {adapter_ref.api_key}"
+                h.setdefault("Authorization", f"Bearer {token}")
 
             query_str = ""
             if params:
@@ -146,7 +142,7 @@ class BeetsAdapterTests(unittest.TestCase):
         self.stock_lib = StockBeetsLibrary(self.adapter)
 
     def tearDown(self):
-        set_api_key_file(None)
+        set_api_key(None)
         try:
             self.lib._connection().close()
         except Exception:
@@ -413,7 +409,7 @@ class BeetsAdapterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error_code, "CAPABILITY_UNAVAILABLE")
 
     def test_adapter_auth_failure(self):
-        self.adapter._api_key = "invalid_bad_token"
+        set_api_key("c" * 64)  # the plugin now expects another key
         with self.assertRaises(BeetsAdapterAuthError):
             self.adapter.get_plugin_status()
 
@@ -422,18 +418,18 @@ class BeetsAdapterTests(unittest.TestCase):
         self.assertIsNone(self.adapter.get_album(999999))
 
     def test_adapter_connection_failure_fails_closed(self):
-        """When stock Beets is down, adapter must fail closed without fallback to legacy engine."""
-        broken_adapter = BeetsAdapter(base_url="http://127.0.0.1:59999", timeout=0.1)
+        """When Beets could not start, the adapter fails closed, with no fallback."""
+        broken_adapter = BeetsAdapter()
         broken_lib = StockBeetsLibrary(broken_adapter)
-
-        with self.assertRaises(BeetsAdapterConnectionError):
-            broken_adapter.get_stats()
-
-        with self.assertRaises(BeetsAdapterConnectionError):
-            broken_lib.get_item(1)
-
-        with self.assertRaises(BeetsAdapterConnectionError):
-            broken_lib.items()
+        down = beets_embedded.EmbeddedBeetsUnavailable(
+            {"checks": [{"code": "library_open_failed", "ok": False, "severity": "error", "message": "down"}]})
+        with unittest.mock.patch.object(beets_embedded, "engine", side_effect=down):
+            with self.assertRaises(BeetsAdapterConnectionError):
+                broken_adapter.get_stats()
+            with self.assertRaises(BeetsAdapterConnectionError):
+                broken_lib.get_item(1)
+            with self.assertRaises(BeetsAdapterConnectionError):
+                broken_lib.items()
 
 
 class BeetsAdapterPaginationCacheTests(unittest.TestCase):
@@ -443,7 +439,7 @@ class BeetsAdapterPaginationCacheTests(unittest.TestCase):
     short TTL, using a realistically sized synthetic library."""
 
     def setUp(self):
-        self.adapter = BeetsAdapter(base_url="http://mock-beets:8337")
+        self.adapter = BeetsAdapter()
         self._synthetic_items = [
             {"id": i, "title": f"Track {i}", "album_id": (i % 50) + 1, "path": f"/music/track{i}.mp3"}
             for i in range(1, 2001)
@@ -488,17 +484,12 @@ class BeetsAdapterErrorSanitizationTests(unittest.TestCase):
     """A4: BeetsAdapter exceptions must never leak raw upstream HTTP bodies,
     HTML, or stack traces into str(ex) -- only stable sanitized fields."""
 
-    def _http_error(self, status: int, body: bytes):
-        import io
-        import urllib.error
-
-        return urllib.error.HTTPError(
-            url="http://mock-beets:8337/item/1",
-            code=status,
-            msg="error",
-            hdrs=None,
-            fp=io.BytesIO(body),
-        )
+    def _answer(self, status: int, body: bytes):
+        """Patch the engine so every call answers ``status`` with ``body``."""
+        from flask import Response
+        engine = unittest.mock.Mock()
+        engine.call.side_effect = lambda *a, **k: Response(body, status=status)
+        return unittest.mock.patch.object(BeetsAdapter, "_engine", return_value=engine)
 
     def test_raw_html_body_never_in_exception_message(self):
         sensitive = (
@@ -506,10 +497,8 @@ class BeetsAdapterErrorSanitizationTests(unittest.TestCase):
             b"  File \"/config/secret_internal_path.py\", line 42\n"
             b"KeyError: 'SUPER_SECRET_TOKEN_VALUE'</body></html>"
         )
-        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
-        with unittest.mock.patch(
-            "urllib.request.urlopen", side_effect=self._http_error(500, sensitive)
-        ):
+        adapter = BeetsAdapter()
+        with self._answer(500, sensitive):
             with self.assertRaises(BeetsAdapterError) as ctx:
                 adapter.get_stats()
 
@@ -523,10 +512,8 @@ class BeetsAdapterErrorSanitizationTests(unittest.TestCase):
 
     def test_bad_request_error_sanitized_with_stable_error_code(self):
         body = b'{"error": "Source path must be a strict child of an import root", "error_code": "PATH_NOT_ALLOWED"}'
-        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
-        with unittest.mock.patch(
-            "urllib.request.urlopen", side_effect=self._http_error(400, body)
-        ):
+        adapter = BeetsAdapter()
+        with self._answer(400, body):
             with self.assertRaises(BeetsAdapterBadRequestError) as ctx:
                 adapter._request("POST", "/webmanager/import", json_data={})
 
@@ -537,31 +524,26 @@ class BeetsAdapterErrorSanitizationTests(unittest.TestCase):
         self.assertNotIn("strict child", str(ctx.exception))
 
     def test_auth_error_sanitized(self):
-        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
-        with unittest.mock.patch(
-            "urllib.request.urlopen", side_effect=self._http_error(401, b'{"error": "nope"}')
-        ):
+        adapter = BeetsAdapter()
+        with self._answer(401, b'{"error": "nope"}'):
             with self.assertRaises(BeetsAdapterAuthError) as ctx:
                 adapter.get_plugin_status()
         self.assertEqual(ctx.exception.status_code, 401)
         self.assertNotIn("nope", str(ctx.exception))
 
     def test_connection_error_message_excludes_raw_os_error_text(self):
-        adapter = BeetsAdapter(base_url="http://mock-beets:8337", timeout=0.1)
-        with unittest.mock.patch(
-            "urllib.request.urlopen",
-            side_effect=OSError("some very specific internal socket detail xyz123"),
-        ):
-            with self.assertRaises(BeetsAdapterConnectionError) as ctx:
+        adapter = BeetsAdapter()
+        engine = unittest.mock.Mock()
+        engine.call.side_effect = OSError("some very specific internal socket detail xyz123")
+        with unittest.mock.patch.object(BeetsAdapter, "_engine", return_value=engine):
+            with self.assertRaises(BeetsAdapterError) as ctx:
                 adapter.get_stats()
         self.assertNotIn("xyz123", str(ctx.exception))
 
     def test_to_public_dict_has_stable_sanitized_fields(self):
         body = b'{"error": "boom"}'
-        adapter = BeetsAdapter(base_url="http://mock-beets:8337")
-        with unittest.mock.patch(
-            "urllib.request.urlopen", side_effect=self._http_error(404, body)
-        ):
+        adapter = BeetsAdapter()
+        with self._answer(404, body):
             with self.assertRaises(BeetsAdapterNotFoundError) as ctx:
                 adapter.get_stats()
         public = ctx.exception.to_public_dict()

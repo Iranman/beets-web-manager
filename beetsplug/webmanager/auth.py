@@ -1,85 +1,37 @@
-"""Authentication helpers for WebManager plugin endpoints."""
+"""Authentication for the webmanager operations.
+
+Beets runs inside Web Manager (ADR 0006): the engine (backend/beets_embedded.py)
+creates a per-process key with ``set_api_key`` and sends it on every in-process
+call. The key exists only in memory; there is no key file and no environment
+variable. Without a key every request is refused (fail closed).
+"""
 
 import hmac
-import os
 import re
 from typing import Optional
 from flask import request, jsonify
 
 _HEX_KEY_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
-_KEY_FILE_PATH: Optional[str] = None
 _IN_MEMORY_KEY: Optional[str] = None
 
 
 def _is_valid_key_format(key: str) -> bool:
-    """Validate that the API key has at least 256 bits entropy (64 hex characters)."""
+    """At least 256 bits of entropy (64 hex characters)."""
     return bool(key and _HEX_KEY_PATTERN.match(key))
 
 
-def set_api_key_file(path: str):
-    """Set the API key file path configured for this plugin."""
-    global _KEY_FILE_PATH
-    _KEY_FILE_PATH = path
-
-
 def set_api_key(key: Optional[str]) -> None:
-    """In-process engine (ADR 0006): a per-process key held only in memory.
-    It wins over the env and the key file; ``None`` clears it."""
+    """Set this process' key (64 hex characters); ``None`` clears it."""
     global _IN_MEMORY_KEY
     _IN_MEMORY_KEY = key if key and _is_valid_key_format(key) else None
 
 
 def get_expected_api_key() -> str:
-    """Read API key from configured file or environment variable.
-
-    Fails closed if the key file is a symlink, missing, empty, or not 64 hex characters.
-    Reads directly from the file to eliminate cache staleness on key rotation.
-    """
-    global _KEY_FILE_PATH
-
-    if _IN_MEMORY_KEY:
-        return _IN_MEMORY_KEY
-
-    env_key = os.environ.get("BEETS_WEBMANAGER_API_KEY", "").strip()
-    if env_key:
-        return env_key if _is_valid_key_format(env_key) else ""
-
-    if _KEY_FILE_PATH:
-        if not os.path.isfile(_KEY_FILE_PATH) or os.path.islink(_KEY_FILE_PATH):
-            return ""
-        try:
-            with open(_KEY_FILE_PATH, "r", encoding="utf-8") as f:
-                key = f.read().strip()
-            if _is_valid_key_format(key):
-                return key
-        except Exception:
-            pass
-        return ""
-
-    candidates = []
-    if os.environ.get("BEETS_WEBMANAGER_API_KEY_FILE"):
-        candidates.append(os.environ["BEETS_WEBMANAGER_API_KEY_FILE"])
-    if os.environ.get("BEETS_CONFIG"):
-        candidates.append(os.path.join(os.path.dirname(os.environ["BEETS_CONFIG"]), ".webmanager_api_key"))
-    if os.environ.get("BEETSDIR"):
-        candidates.append(os.path.join(os.environ["BEETSDIR"], ".webmanager_api_key"))
-    candidates.append("/config/.webmanager_api_key")
-
-    for file_path in candidates:
-        if not file_path or not os.path.isfile(file_path) or os.path.islink(file_path):
-            continue
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                key = f.read().strip()
-            if _is_valid_key_format(key):
-                return key
-        except Exception:
-            pass
-    return ""
+    return _IN_MEMORY_KEY or ""
 
 
 def verify_token(token: str) -> bool:
-    """Verify provided bearer token against expected API key using constant-time comparison."""
+    """Constant-time comparison of a bearer token with this process' key."""
     expected = get_expected_api_key()
     if not expected or not token or not _is_valid_key_format(token):
         return False
@@ -93,12 +45,11 @@ def require_webmanager_auth():
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
 
-    expected = get_expected_api_key()
-    if not expected:
+    if not get_expected_api_key():
         return (
             jsonify(
                 {
-                    "error": "WebManager API key is not configured or invalid on Beets server",
+                    "error": "WebManager API key is not configured",
                     "error_code": "AUTH_NOT_CONFIGURED",
                 }
             ),

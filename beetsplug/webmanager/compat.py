@@ -1,4 +1,4 @@
-"""Compatibility and safe Flask blueprint registration guard for stock Beets."""
+"""Registers the webmanager blueprint on stock Beets' web app (served in-process)."""
 
 import logging
 from typing import Any
@@ -29,16 +29,8 @@ def register_webmanager_blueprint(plugin: Any) -> bool:
             )
             return False
 
-        from .auth import require_webmanager_auth, set_api_key_file
+        from .auth import require_webmanager_auth
         from .operations import webmanager_bp
-
-        # Configure API key file path if specified in plugin config
-        if hasattr(plugin, "config") and "api_key_file" in plugin.config:
-            try:
-                key_path = plugin.config["api_key_file"].as_filename()
-                set_api_key_file(key_path)
-            except Exception:
-                pass
 
         # Attach auth guard to blueprint
         webmanager_bp.before_request(require_webmanager_auth)
