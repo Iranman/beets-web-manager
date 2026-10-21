@@ -92,6 +92,30 @@ _LOSSLESS_EXTS = frozenset({
     ".dsf", ".dff",
 })
 
+# Containers Beets/MediaFile adds NO item from, even when the audio codec is
+# itself importable. yt-dlp bestaudio commonly stages opus/vorbis inside a
+# .webm (matroska) container; MediaFile skips it so the Beets import "completes
+# without adding an item". Detected by the ACTUAL ffprobe container, not the
+# extension, so a mislabeled .webm is still caught. The identical audio remuxed
+# to its native container (.opus/.ogg/.m4a) imports fine.
+_BEETS_UNIMPORTABLE_CONTAINERS = frozenset({"webm", "matroska"})
+# Lossless-remux target container per audio codec (ffmpeg -c:a copy, no
+# re-encode). Opus/Vorbis -> Ogg, AAC/ALAC -> MP4/M4A, etc.
+_REMUX_TARGET_EXT = {
+    "opus": ".opus",
+    "vorbis": ".ogg",
+    "aac": ".m4a",
+    "alac": ".m4a",
+    "mp3": ".mp3",
+    "flac": ".flac",
+}
+# Marker in a converted copy's stem so it is distinguishable from the preserved
+# original that shares its staged dir.
+_RECOVER_CONVERTED_MARKER = ".beetsfix"
+# A remux copies packets verbatim, so the converted duration must match the
+# original almost exactly — a tighter band than the fetch integrity gate.
+_RECOVER_CONVERT_DURATION_TOLERANCE = 0.05
+
 # Provenance status vocabulary shared across probe, fetch, import, and Phase 3
 # diagnostic report sanitization.
 RECOVER_PROVENANCE_STATES = frozenset({
@@ -2332,6 +2356,181 @@ def _stamp_staged_identity_tags(
         pass
 
 
+def _probe_container_format(path: str) -> str:
+    """Lower-cased ffprobe container ``format_name`` of a local file ("" on
+    error). Detection is by actual container, not extension, so a .webm carrying
+    an audio extension is still recognised. Local-file-only input (SEC-13)."""
+    import shutil
+    import subprocess
+    ffprobe = shutil.which("ffprobe") or "/usr/bin/ffprobe"
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=format_name",
+             "-of", "json", ffmpeg_file_input(path)],
+            timeout=int(os.environ.get("AUDIO_FFPROBE_TIMEOUT", "20") or "20"),
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return ""
+    return _s((data.get("format") or {}).get("format_name")).strip().lower()
+
+
+def _container_tokens(format_name: str) -> set:
+    return {t.strip() for t in _s(format_name).split(",") if t.strip()}
+
+
+def _unique_convert_target(src: Path, target_ext: str) -> Optional[Path]:
+    """A never-overwriting, NUL/slash-free sibling path (under ``src``'s already
+    validated staged dir) for the converted copy, or None if none is free."""
+    parent = src.parent
+    base = src.stem + _RECOVER_CONVERTED_MARKER
+    for n in range(0, 1000):
+        name = f"{base}{target_ext}" if n == 0 else f"{base}.{n}{target_ext}"
+        if "\x00" in name or "/" in name or "\\" in name:
+            return None
+        cand = parent / name
+        # exists() follows symlinks; is_symlink() catches a dangling one. ffmpeg
+        # -n is the final never-overwrite guard against a TOCTOU swap.
+        if not cand.exists() and not cand.is_symlink():
+            return cand
+    return None
+
+
+def _verify_converted_audio(path: str, reference_duration: Optional[float]) -> Dict[str, Any]:
+    """Converted-file gate BEFORE import: nonzero size, ffprobe-decodable, has an
+    audio stream, and a decoded duration within a small tolerance of the
+    original. Any failure means the file is NOT imported."""
+    p = Path(path)
+    try:
+        if p.stat().st_size <= 0:
+            return {"ok": False, "error": "converted file is zero bytes"}
+    except OSError:
+        return {"ok": False, "error": "converted file is missing"}
+    media = inspect_audio_file(path)
+    codec = _s(media.get("codec")).strip().lower()
+    if not media.get("ok") or not codec or codec == "unknown":
+        return {"ok": False, "error": "converted file has no decodable audio stream"}
+    actual = _probe_file_duration(path)
+    if actual is None:
+        return {"ok": False, "error": "converted file could not be decoded by ffprobe"}
+    try:
+        ref = float(reference_duration) if reference_duration is not None else 0.0
+    except (TypeError, ValueError):
+        ref = 0.0
+    if ref > 0 and not _duration_within_tolerance(actual, ref, _RECOVER_CONVERT_DURATION_TOLERANCE):
+        return {"ok": False,
+                "error": f"converted duration {actual:.1f}s differs from original {ref:.1f}s"}
+    return {"ok": True, "duration": actual}
+
+
+def _convert_staged_for_beets(
+    resolved_file: str,
+    *,
+    codec: str,
+    reference_duration: Optional[float],
+    log: list,
+) -> Dict[str, Any]:
+    """If ``resolved_file`` sits in a container Beets adds no item from (e.g. a
+    .webm/opus yt-dlp bestaudio), produce a VERIFIED importable copy under the
+    same staged dir, preferring a LOSSLESS remux (``ffmpeg -c:a copy``). A
+    transcode is used only when a remux cannot yield an importable file. The
+    ORIGINAL staged file is never modified.
+
+    Returns one of:
+      ``{"converted": False}``                       -> import the original as-is
+      ``{"converted": True, "path", "original_container",
+         "converted_container", "lossless", "method"}``
+      ``{"ok": False, "error"}``                      -> conversion/verification failed
+    """
+    import shutil
+    import subprocess
+
+    src = Path(resolved_file)
+    original_container = _probe_container_format(resolved_file)
+    if not (_container_tokens(original_container) & _BEETS_UNIMPORTABLE_CONTAINERS):
+        return {"converted": False}
+
+    # Confinement: the converted copy must stay under DOWNLOADS_ROOT/recovered
+    # (the staged file was already validated there; re-check its parent).
+    try:
+        dl_root = Path(validated_downloads_root()).resolve()
+        recovered_root = (dl_root / "recovered").resolve()
+        parent = src.parent.resolve()
+        if parent != recovered_root and recovered_root not in parent.parents:
+            return {"ok": False, "error": "staged file is not under DOWNLOADS_ROOT/recovered"}
+    except Exception as exc:
+        return {"ok": False, "error": f"staging-root validation failed: {_redact_security_text(_s(exc))[:200]}"}
+
+    ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    timeout = int(os.environ.get("AUDIO_FFMPEG_TIMEOUT", "180") or "180")
+    codec_l = _s(codec).strip().lower()
+
+    # (method, target_ext, codec_args). Remux first (lossless, preserves the
+    # original audio); a high-quality transcode is the last resort only.
+    attempts: List[Tuple[str, str, List[str]]] = []
+    remux_ext = _REMUX_TARGET_EXT.get(codec_l)
+    if remux_ext:
+        attempts.append(("remux", remux_ext, ["-vn", "-map", "0:a:0", "-c:a", "copy"]))
+    attempts.append(("transcode", ".mp3",
+                     ["-vn", "-map", "0:a:0", "-c:a", "libmp3lame", "-q:a", "0"]))
+
+    last_err = "staged audio could not be converted to an importable container"
+    for method, target_ext, codec_args in attempts:
+        target = _unique_convert_target(src, target_ext)
+        if target is None:
+            last_err = "could not allocate a safe converted-file name"
+            continue
+        # -n: never overwrite (defence-in-depth with the unique-name search).
+        cmd = [ffmpeg, "-nostdin", "-n", "-i", ffmpeg_file_input(resolved_file),
+               *codec_args, ffmpeg_file_input(str(target))]
+        try:
+            proc = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
+        except Exception as exc:
+            last_err = f"ffmpeg {method} could not run"
+            log.append(f"  [recover-import] ffmpeg {method} error: {_redact_security_text(_s(exc))[:200]}")
+            continue
+        if proc.returncode != 0 or not target.exists():
+            last_err = f"ffmpeg {method} exited non-zero"
+            log.append(f"  [recover-import] ffmpeg {method} rc={proc.returncode}: "
+                       f"{_redact_security_text(_s(proc.stderr))[:200]}")
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+            continue
+
+        verify = _verify_converted_audio(str(target), reference_duration)
+        if not verify.get("ok"):
+            last_err = _s(verify.get("error") or f"{method} output failed verification")
+            log.append(f"  [recover-import] Converted file rejected: {last_err}")
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            continue
+
+        log.append(f"  [recover-import] Converted {src.name} "
+                   f"({original_container or '?'}) -> {target.name} ({method})")
+        return {
+            "converted": True,
+            "path": str(target),
+            "original_container": original_container or "unknown",
+            "converted_container": target_ext.lstrip("."),
+            "lossless": method == "remux",
+            "method": method,
+        }
+
+    return {"ok": False, "error": last_err}
+
+
 def _recover_import_one(
     staged_path: str,
     log: list,
@@ -2404,8 +2603,46 @@ def _recover_import_one(
             "authorization": authorization,
         }
 
-    _stamp_staged_identity_tags(
+    # yt-dlp bestaudio frequently stages opus/vorbis inside a .webm container
+    # Beets adds NO item from (the identical audio imports fine as .opus/.ogg).
+    # Remux (lossless, no re-encode) into an importable container BEFORE import;
+    # the ORIGINAL staged file is preserved untouched and the CONVERTED copy is
+    # what Beets imports. A non-webm container returns {"converted": False} and
+    # the original is imported unchanged.
+    import_file = resolved_file
+    conversion: Dict[str, Any] = {}
+    conv = _convert_staged_for_beets(
         resolved_file,
+        codec=_s(verified.get("codec")),
+        reference_duration=verified.get("duration"),
+        log=log,
+    )
+    if conv.get("ok") is False:
+        err_msg = _s(conv.get("error") or "staged audio could not be converted for import")
+        log.append(f"  [recover-import] Conversion refused {Path(resolved_file).name}: {err_msg}")
+        return {
+            "staged_file": resolved_file,
+            "imported": False,
+            "status": "import_failed",
+            "provenance_status": "recovered",
+            "error": err_msg,
+            "artist": artist,
+            "title": title,
+            "authorization": authorization,
+        }
+    if conv.get("converted"):
+        import_file = conv["path"]
+        conversion = {
+            "converted": True,
+            "import_file": import_file,
+            "original_container": conv.get("original_container"),
+            "converted_container": conv.get("converted_container"),
+            "lossless_remux": bool(conv.get("lossless")),
+            "method": conv.get("method"),
+        }
+
+    _stamp_staged_identity_tags(
+        import_file,
         artist=artist,
         title=title,
         album=album,
@@ -2432,6 +2669,8 @@ def _recover_import_one(
             metadata={
                 "workflow": "recover_upload_singleton",
                 "staged_file": resolved_file,
+                "import_file": import_file,
+                "conversion": conversion,
                 "source_url": _sanitize_persisted_url(verified.get("source_url") or ""),
                 "match_source": match_source,
                 "authorization": _sanitize_authorization_record(verified.get("authorization")) or {},
@@ -2445,7 +2684,7 @@ def _recover_import_one(
     try:
         if adapter is None:
             import_res = beets_adapter.run_import(
-                paths=[resolved_file],
+                paths=[import_file],
                 autotag=False,
                 duplicate_action="skip",
                 copy=True,
@@ -2458,7 +2697,7 @@ def _recover_import_one(
             )
         else:
             import_res = adapter.run_import(
-                paths=[resolved_file],
+                paths=[import_file],
                 autotag=False,
                 duplicate_action="skip",
                 copy=True,
@@ -2615,6 +2854,9 @@ def _recover_import_one(
             "match_source": match_source,
             "authorization": verified.get("authorization"),
         })
+        if conversion:
+            sidecar_data["conversion"] = conversion
+        # The sidecar belongs to the ORIGINAL staged file, which is preserved.
         _write_provenance(resolved_file, sidecar_data)
 
     log.append(
@@ -2637,6 +2879,7 @@ def _recover_import_one(
         "source_platform": verified.get("source_platform") or "",
         "authorization": verified.get("authorization"),
         "transaction_id": tx_id,
+        "conversion": conversion,
         "beets": import_res if isinstance(import_res, dict) else {},
     }
 

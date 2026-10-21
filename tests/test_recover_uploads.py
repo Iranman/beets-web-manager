@@ -7,6 +7,7 @@ are built through the unchanged guard, cookie-state messages, the integrity
 gate, and the error taxonomy (a format/HLS/auth failure is never labelled DRM).
 """
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -2028,6 +2029,198 @@ class OwnAccountImmutableIdentityMatching(unittest.TestCase):
         # segment is compared exactly, not as a substring).
         r = self._eval("@me", channel_url="https://www.youtube.com/@melody")
         self.assertFalse(r["verified"])
+
+
+def _ffmpeg_has_encoder(name: str) -> bool:
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=30)
+        return name in (out.stdout or "")
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(
+    shutil.which("ffmpeg") and shutil.which("ffprobe") and _ffmpeg_has_encoder("libopus"),
+    "ffmpeg + ffprobe + libopus required for real-webm remux tests")
+class WebmRemuxBeforeBeetsImport(unittest.TestCase):
+    """A YouTube bestaudio opus-in-.webm stages fine but Beets adds NO item from
+    it; the identical audio as .opus imports. _recover_import_one must remux the
+    .webm (lossless) to an importable container BEFORE run_import, verify the
+    converted audio, import the CONVERTED path, and preserve the ORIGINAL."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCtest000"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _gen_opus_webm(self, path, duration=5):
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+             "-i", f"sine=frequency=440:duration={duration}",
+             "-c:a", "libopus", "-b:a", "96k", str(path)],
+            check=True, capture_output=True, timeout=60)
+
+    def _gen_flac(self, path, duration=5):
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+             "-i", f"sine=frequency=440:duration={duration}",
+             "-c:a", "flac", str(path)],
+            check=True, capture_output=True, timeout=60)
+
+    def _stage(self, tmp, fname, duration=5.0, codec="opus"):
+        run_dir = Path(tmp) / "recovered" / "youtube" / "runwebm"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        audio = run_dir / fname
+        Path(str(audio) + ".recover.json").write_text(
+            '{"source_url": "https://www.youtube.com/watch?v=abc", '
+            '"source_platform": "youtube", "uploader": "Me", '
+            '"channel_id": "UCtest000", '
+            f'"title": "Webm Upload", "duration": {duration}, '
+            f'"codec": "{codec}", "quality": "lossy"}}',
+            encoding="utf-8")
+        return audio
+
+    def _singleton_identity(self):
+        return {
+            "fingerprint_status": "no_result",
+            "acoustid_status": "no_result",
+            "metadata_agreement": "degraded",
+            "conflicts": ["no_acoustid_result"],
+            "acoustid_match_score": 0.0,
+        }
+
+    def test_webm_opus_is_remuxed_verified_and_imported_from_converted_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, "upload.webm")
+            self._gen_opus_webm(staged, duration=5)
+
+            fake_adapter = mock.MagicMock()
+            # Pre-import conflict check -> empty; post-import read-back -> item #7.
+            fake_adapter.find_items_by_query.side_effect = [
+                [],
+                [{"id": 7, "title": "Webm Upload", "artist": "Me",
+                  "path": "/music/Me/Webm Upload.opus"}],
+            ]
+            fake_adapter.run_import.return_value = {"ok": True, "success": True}
+
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision",
+                            return_value=self._singleton_identity()), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out = recover_service._recover_import_one(
+                    str(staged), [], adapter=fake_adapter, auth_basis="own_account")
+
+            self.assertTrue(out["imported"], out)
+            self.assertEqual(out["status"], "imported")
+            self.assertNotEqual(out.get("error"), "beets import completed without adding item to library")
+            # run_import received the CONVERTED path, not the .webm.
+            _, kwargs = fake_adapter.run_import.call_args
+            import_path = kwargs["paths"][0]
+            self.assertFalse(import_path.endswith(".webm"), import_path)
+            self.assertTrue(import_path.endswith(".opus"), import_path)
+            self.assertNotEqual(import_path, str(staged))
+            # Conversion is recorded on the outcome: lossless remux, webm->opus.
+            conv = out["conversion"]
+            self.assertTrue(conv["converted"])
+            self.assertTrue(conv["lossless_remux"])
+            self.assertIn("webm", conv["original_container"])
+            self.assertEqual(conv["converted_container"], "opus")
+            # Recorded in provenance too (sidecar of the preserved original).
+            sidecar = json.loads(Path(str(staged) + ".recover.json").read_text(encoding="utf-8"))
+            self.assertTrue(sidecar.get("conversion", {}).get("converted"))
+
+    def test_original_webm_is_preserved_after_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, "keepme.webm")
+            self._gen_opus_webm(staged, duration=5)
+            before = staged.read_bytes()
+
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.side_effect = [
+                [], [{"id": 8, "title": "Webm Upload", "artist": "Me",
+                      "path": "/music/Me/Webm Upload.opus"}]]
+            fake_adapter.run_import.return_value = {"ok": True, "success": True}
+
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision",
+                            return_value=self._singleton_identity()), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out = recover_service._recover_import_one(
+                    str(staged), [], adapter=fake_adapter, auth_basis="own_account")
+
+            self.assertTrue(out["imported"], out)
+            # The ORIGINAL .webm is untouched (exists, byte-identical).
+            self.assertTrue(staged.exists())
+            self.assertEqual(staged.read_bytes(), before)
+
+    def test_already_opus_or_flac_is_not_converted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # A real .flac (container "flac") and a real .opus (container "ogg")
+            # are both importable — neither is touched by the converter.
+            flac = Path(tmp) / "recovered" / "youtube" / "runwebm"
+            flac.mkdir(parents=True, exist_ok=True)
+            flac_file = flac / "song.flac"
+            self._gen_flac(flac_file, duration=5)
+            res_flac = recover_service._convert_staged_for_beets(
+                str(flac_file), codec="flac", reference_duration=5.0, log=[])
+            self.assertEqual(res_flac, {"converted": False})
+
+            opus_file = flac / "song.opus"
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+                 "-i", "sine=frequency=440:duration=5", "-c:a", "libopus", str(opus_file)],
+                check=True, capture_output=True, timeout=60)
+            res_opus = recover_service._convert_staged_for_beets(
+                str(opus_file), codec="opus", reference_duration=5.0, log=[])
+            self.assertEqual(res_opus, {"converted": False})
+
+    def test_verify_converted_audio_rejects_undecodable_and_wrong_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junk = Path(tmp) / "garbage.opus"
+            junk.write_bytes(b"not audio at all" * 64)
+            bad = recover_service._verify_converted_audio(str(junk), 5.0)
+            self.assertFalse(bad["ok"])
+
+            good = Path(tmp) / "good.opus"
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+                 "-i", "sine=frequency=440:duration=5", "-c:a", "libopus", str(good)],
+                check=True, capture_output=True, timeout=60)
+            # Real 5s audio claimed to be 30s: duration check rejects it.
+            wrong = recover_service._verify_converted_audio(str(good), 30.0)
+            self.assertFalse(wrong["ok"])
+            self.assertIn("duration", wrong["error"])
+            ok = recover_service._verify_converted_audio(str(good), 5.0)
+            self.assertTrue(ok["ok"], ok)
+
+    def test_corrupt_conversion_is_rejected_import_failed_original_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, "bad.webm")
+            self._gen_opus_webm(staged, duration=5)
+            before = staged.read_bytes()
+
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+
+            # Simulate a conversion whose output fails verification (corrupt/
+            # undecodable): the item must NOT be imported and the original kept.
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "_verify_converted_audio",
+                                   return_value={"ok": False, "error": "converted file could not be decoded by ffprobe"}), \
+                 mock.patch("backend.acoustid_service._audio_identity_decision",
+                            return_value=self._singleton_identity()), \
+                 mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+                out = recover_service._recover_import_one(
+                    str(staged), [], adapter=fake_adapter, auth_basis="own_account")
+
+            self.assertFalse(out["imported"])
+            self.assertEqual(out["status"], "import_failed")
+            self.assertIn("decode", out["error"].lower())
+            fake_adapter.run_import.assert_not_called()
+            # Original .webm preserved, byte-identical.
+            self.assertTrue(staged.exists())
+            self.assertEqual(staged.read_bytes(), before)
 
 
 if __name__ == "__main__":
