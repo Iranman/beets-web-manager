@@ -3549,6 +3549,33 @@ export interface RecoverStreamDiagnostics {
   best_audio_format?: RecoverBestAudioFormat | null;
 }
 
+/** User-asserted legal basis for recovering an upload. The backend validates it;
+ * an asserted basis is a claim, never independently confirmed by this value. */
+export type RecoverAuthorizationBasis =
+  | 'original_creation'
+  | 'own_account'
+  | 'licensed_permission'
+  | 'open_license';
+
+/** What the UI sends with a fetch/import request. */
+export interface RecoverAuthorizationInput {
+  basis: RecoverAuthorizationBasis;
+  note?: string;
+}
+
+/** The recorded authorization carried on a sanitized diagnostic/run/item.
+ * asserted_* is the user's claim; verified_* is independent evidence ONLY.
+ * Never fabricate `verified` client-side — render only what the backend sends. */
+export interface RecoverAuthorization {
+  asserted_basis?: RecoverAuthorizationBasis | string;
+  asserted_note?: string;
+  verified?: boolean;
+  verified_basis?: string | null;
+  verified_evidence?: string | null;
+  platform?: string | null;
+  recorded_at?: string | null;
+}
+
 export interface RecoverAuthDiagnostics {
   cookie_state?: 'none' | 'invalid' | 'rejected' | 'ok' | string;
   configured?: boolean;
@@ -3579,6 +3606,7 @@ export interface RecoverProbeResponse extends ApiOkResponse {
   authorized_access?: boolean;
   stream_diagnostics?: RecoverStreamDiagnostics;
   auth_diagnostics?: RecoverAuthDiagnostics;
+  authorization?: RecoverAuthorization;
 }
 
 /** A single URL's outcome inside a persisted run (recovered/failed/imported/…). */
@@ -3592,6 +3620,7 @@ export interface RecoverRunItem {
   category?: string;
   message?: string;
   action?: string;
+  authorization?: RecoverAuthorization;
 }
 
 export interface RecoverRun {
@@ -3615,6 +3644,7 @@ export interface RecoverRun {
   retry_count?: number;
   created_at?: string;
   updated_at?: string;
+  authorization?: RecoverAuthorization;
 }
 
 export interface RecoverRunsResponse extends ApiOkResponse {
