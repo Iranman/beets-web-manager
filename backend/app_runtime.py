@@ -273,7 +273,9 @@ PLAYLIST_PATH_ROOT_ALIASES = [
 ]
 
 
-PLAYLIST_AUTO_SYNC_ENABLED = os.environ.get("PLAYLIST_AUTO_SYNC", "1").strip().lower() not in {"0", "false", "no", "off"}
+# Opt-in: playlist auto-sync is OFF by default. Manual/explicit sync is
+# unaffected. Set PLAYLIST_AUTO_SYNC=1 to enable the background scheduler.
+PLAYLIST_AUTO_SYNC_ENABLED = os.environ.get("PLAYLIST_AUTO_SYNC", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 PLAYLIST_AUTO_SYNC_INTERVAL = max(60, int(os.environ.get("PLAYLIST_AUTO_SYNC_INTERVAL", "300") or "300"))

@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+
+- **Playlist auto-sync is now opt-in (default OFF).** `PLAYLIST_AUTO_SYNC` defaults to off; set it to `1`/`true`/`yes`/`on` to enable the background scheduler. Manual/explicit playlist sync is unchanged. When enabled, the scheduler no longer does a ~30 s first wake (the old `min(30, interval)`); it honors `PLAYLIST_AUTO_SYNC_INTERVAL` (default `300`, minimum `60`) from the first run.
+
 ### Fixed
 
 - **Library view paints instantly and fills in disk state in the background.** The Library screen now renders from the first (possibly `reconciled:false`) `/api/library` response without a blocking spinner, shows a subtle non-blocking "checking disk" indicator while the backend reconciles disk state, and polls `/api/library` with a bounded backing-off cadence until `reconciled` becomes true (or the `library_version` changes) to pick up disk-only and missing-on-disk items. Polling stops once reconciled or after a bounded budget (a stalled check offers a manual retry instead of spinning). The heavy `include_tracks=1` pull is still fetched lazily (on track search / album expand), not on first paint.
