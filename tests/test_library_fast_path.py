@@ -14,8 +14,55 @@ import unittest
 from unittest import mock
 
 import backend.library_service as ls
-from backend.beets_adapter import RemoteAlbum, RemoteItem, BeetsUnavailableError
+from backend.beets_adapter import (
+    RemoteAlbum, RemoteItem, BeetsUnavailableError, BeetsAdapterBadRequestError,
+    StockBeetsLibrary,
+)
+from beetsplug.webmanager.read_ops import READ_FIELDS
 from job_engine import DuplicateJobError
+
+
+_ITEMS = [
+    {"id": 1, "album_id": 10, "path": "Artist A/Album One/01.flac", "title": "One",
+     "track": 1, "disc": 1, "tracktotal": 2, "albumartist": "Artist A", "artist": "Artist A",
+     "album": "Album One", "year": 2001, "mb_trackid": "t1"},
+    {"id": 2, "album_id": 10, "path": "Artist A/Album One/02.flac", "title": "Two",
+     "track": 2, "disc": 1, "tracktotal": 2, "albumartist": "Artist A", "artist": "Artist A",
+     "album": "Album One", "year": 2001, "mb_trackid": "t2"},
+    {"id": 3, "album_id": 0, "path": "Artist B/loose.flac", "title": "Loose",
+     "track": 0, "disc": 1, "tracktotal": 0, "albumartist": "Artist B", "artist": "Artist B",
+     "album": "", "year": 0, "mb_trackid": ""},
+]
+_ALBUMS = [
+    {"id": 10, "albumartist": "Artist A", "album": "Album One", "year": 2001,
+     "mb_albumid": "a10", "mb_releasegroupid": "rg10", "albumtype": "album"},
+]
+
+
+class _AllowlistAdapter:
+    """Adapter that enforces the REAL webmanager field allowlist, so the fast
+    builder runs through StockBeetsLibrary.albums(fields=...) exactly as it does
+    against the live plugin: a field the plugin's allowlist lacks (e.g. album
+    "year") returns HTTP 400, which get_fields' 404-only fallback does NOT catch.
+    A mock lib that ignores `fields` masked bug B1 (every album silently dropped).
+    """
+
+    def __init__(self, items, albums):
+        self._items, self._albums = items, albums
+
+    def get_fields(self, entity, fields):
+        unknown = set(fields) - set(READ_FIELDS[entity])
+        if unknown:
+            raise BeetsAdapterBadRequestError(
+                "field(s) not readable here", error_code="INVALID_FIELD")
+        rows = self._items if entity == "item" else self._albums
+        keep = set(fields) | {"id"}
+        return [{k: v for k, v in r.items() if k in keep} for r in rows]
+
+
+def _real_fields_lib():
+    return StockBeetsLibrary(_AllowlistAdapter([dict(r) for r in _ITEMS],
+                                               [dict(r) for r in _ALBUMS]))
 
 
 def _fake_lib():
@@ -178,6 +225,83 @@ class EngineOfflineTests(unittest.TestCase):
              mock.patch.object(ls, "_schedule_library_reconcile"):
             with self.assertRaises(BeetsUnavailableError):
                 ls.get_library_payload(block=False)
+
+
+class RealPluginFieldsPathTests(unittest.TestCase):
+    """QA R2 B1: against the real plugin field allowlist the cold fast tree must
+    still contain real album rows, not just singletons."""
+
+    def setUp(self):
+        ls.library_cache.invalidate()
+        self.addCleanup(ls.library_cache.invalidate)
+        for p in (mock.patch.object(ls, "lib", _real_fields_lib()),
+                  mock.patch.object(ls, "_attach_artist_image_cache_urls", lambda artists: None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_album_query_asks_only_for_allowlisted_fields(self):
+        # year is in the item set, never the album set -- asking for it 400s.
+        self.assertEqual(set(ls._LIBRARY_ALBUM_FIELDS) - set(READ_FIELDS["album"]), set())
+        self.assertNotIn("year", READ_FIELDS["album"])
+
+    def test_real_album_rows_survive_the_fields_read(self):
+        payload = ls._build_library_payload_fast()
+        artists = {a["name"]: a for a in payload["artists"]}
+        self.assertIn("Artist A", artists)          # the album artist, not only the singleton
+        albums = artists["Artist A"]["albums"]
+        self.assertEqual(len(albums), 1)
+        album = albums[0]
+        self.assertEqual(album["album"], "Album One")
+        self.assertEqual(album["album_id"], 10)
+        self.assertEqual(album["mb_releasegroupid"], "rg10")
+        # Year is derived from the item rows, not read off the album record.
+        self.assertEqual(album["year"], 2001)
+        # Accurate counts (singletons count as tracks, not albums) come from
+        # _library_payload_for_response, same as the full builder.
+        self.assertEqual(ls._library_payload_for_response(payload, False, True)["stats"]["albums"], 1)
+
+
+class LibraryVersionStabilityTests(unittest.TestCase):
+    """QA R2 B2: the cold fast path must emit a stable library_version so the
+    frontend does not reset its poll budget on every 2 s cold response."""
+
+    def setUp(self):
+        ls.library_cache.invalidate()
+        self.addCleanup(ls.library_cache.invalidate)
+        for p in (mock.patch.object(ls, "lib", _real_fields_lib()),
+                  mock.patch.object(ls, "_attach_artist_image_cache_urls", lambda artists: None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_cold_version_is_stable_then_changes_once_reconciled(self):
+        v1 = ls._build_library_payload_fast()["library_version"]
+        v2 = ls._build_library_payload_fast()["library_version"]
+        self.assertEqual(v1, v2)                               # stable while cold
+        self.assertEqual(v1, ls.library_cache.generation)      # not a fresh time.time()
+        # Real reconciled data lands in the cache -> version must change so the
+        # frontend picks it up and stops polling.
+        ls.library_cache.store({"ok": True, "artists": [],
+                                "stats": {"artists": 0, "albums": 0, "tracks": 0}})
+        self.assertNotEqual(v1, ls._build_library_payload_fast()["library_version"])
+
+
+class ColdReconcileSchedulingTests(unittest.TestCase):
+    """QA R2 N3: an offline engine must not queue a doomed reconcile job behind
+    every failed cold page load -- schedule only after a successful fast build."""
+
+    def setUp(self):
+        ls.library_cache.invalidate()
+        self.addCleanup(ls.library_cache.invalidate)
+
+    def test_offline_cold_load_does_not_schedule_reconcile(self):
+        offline = mock.Mock()
+        offline.items.side_effect = BeetsUnavailableError("engine down")
+        offline.albums.side_effect = BeetsUnavailableError("engine down")
+        with mock.patch.object(ls, "lib", offline), \
+             mock.patch.object(ls, "_schedule_library_reconcile") as sched:
+            with self.assertRaises(BeetsUnavailableError):
+                ls.get_library_payload(block=False)
+        sched.assert_not_called()
 
 
 if __name__ == "__main__":
