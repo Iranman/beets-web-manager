@@ -364,11 +364,14 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_spotiflac_download_url": ("STAGING_ONLY", "staging_v1", "spotiflac-download-staging-dir"),
     "_remove_new_symlinks": ("STAGING_ONLY", "staging_v1", "spotiflac-staging-symlink-confinement"),
     "create_unmatched_draft": ("STAGING_ONLY", "staging_v1", "unmatched-draft-submission-state"),
-    # Recover My Uploads (increment 1): fetch + stage under DOWNLOADS_ROOT, no
-    # library mutation. ffprobe is a read-only decode/duration probe.
+    # Recover My Uploads (increment 1 & 2): fetch + stage under DOWNLOADS_ROOT,
+    # and verified singleton import via beets_adapter.run_import under a
+    # tracked TransactionStore record.
     "_probe_file_duration": ("READ_ONLY_FALSE_POSITIVE", "none", "recover-ffprobe-read-only-duration"),
     "_write_provenance": ("STAGING_ONLY", "staging_v1", "recover-provenance-sidecar-in-downloads"),
     "_recover_fetch_one": ("STAGING_ONLY", "staging_v1", "recover-download-staging-dir-and-corrupt-cleanup"),
+    "_stamp_staged_identity_tags": ("STAGING_ONLY", "staging_v1", "recover-staging-identity-tag-stamp"),
+    "_recover_import_one": ("ENGINE_NATIVE_BEETS", "", "recover-verified-singleton-import"),
     "render_index": ("READ_ONLY_FALSE_POSITIVE", "none", "in-memory-template-string-replace"),
     "_prune_empty_review_dirs": ("NON_MEDIA_FILESYSTEM", "infra_v1", "prune-empty-review-staging-dirs"),
     "_delete_no_audio_folders": ("NON_MEDIA_FILESYSTEM", "infra_v1", "delete-no-audio-staging-folders"),
@@ -545,6 +548,13 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             if sink.kind == "sql":
                 return "APP_STATE", "", "ai-batch-state-store-sqlite"
             return "APP_STATE", "", "ai-batch-state-store-filesystem"
+        if file == "backend/recover_service.py":
+            if func == "_probe_file_duration":
+                return "READ_ONLY_FALSE_POSITIVE", "none", "recover-ffprobe-read-only-duration"
+            if func == "_write_provenance":
+                return "STAGING_ONLY", "staging_v1", "recover-provenance-sidecar-in-downloads"
+            if func == "_recover_fetch_one":
+                return "STAGING_ONLY", "staging_v1", "recover-download-staging-dir-and-corrupt-cleanup"
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)
