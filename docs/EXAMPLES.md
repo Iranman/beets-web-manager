@@ -79,4 +79,4 @@ The shipped Compose files use `image: ghcr.io/iranman/beets-web-manager:latest`,
 docker compose pull beets-web-manager && docker compose up -d beets-web-manager
 ```
 
-To pin a release, or roll back to one, replace `latest` in the `image:` line with an exact version such as `0.8.1` (`ghcr.io/iranman/beets-web-manager:0.8.1`).
+To pin a release, or roll back to one, replace `latest` in the `image:` line with an exact version such as `0.9.0` (`ghcr.io/iranman/beets-web-manager:0.9.0`).

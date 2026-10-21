@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.9.0 - 2026-10-21
+
 ### Upgrade Notes
 
 - **Breaking: Beets runs only inside Web Manager.** Embedded Beets is the only engine ([ADR 0006](docs/adr/0006-embedded-beets.md), Phase 2 cutover with the Phase 5 removal). The separate `beets` container, the HTTP transport to it, `BEETS_ENGINE` and the plugin provisioning into `/config/beetsplug` are gone. Before you pull this release, follow [Upgrading from two containers](docs/INSTALLATION.md#upgrading-from-two-containers): back up, `docker compose stop beets && docker compose rm -f beets`, delete the `beets` service, mount `/music` read-write in `beets-web-manager`, make sure `plugins:` in `config.yaml` lists `musicbrainz` (nothing adds it any more), remove the legacy settings, and `docker compose up -d --remove-orphans`. Your `config.yaml`, `musiclibrary.blb` and music folder are used as they are, with the same Beets 2.14.1.

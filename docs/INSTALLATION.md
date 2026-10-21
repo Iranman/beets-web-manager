@@ -59,7 +59,7 @@ The repository's [`docker-compose.yml`](../docker-compose.yml) is the full file,
 > - `/music` is mounted **read-write**: Beets moves, tags and imports files from inside this container.
 > - Change only the **left** side of each volume (the host folder). The right side (`/music`, `/downloads`, `/config`) is the path inside the container; `MUSIC_ROOT`/`DOWNLOADS_ROOT`/`BEETS_CONFIG` and Beets' own `directory:` refer to it. If you change a right side, set the matching variable too (see `docs/CONFIGURATION.md`, "Configuration layers").
 > - `config.yaml` plugins, `pluginpath` modules and hook commands run inside the Web Manager container. The Config page refuses changes to `hook:`, `pluginpath:` and `include:` for that reason; edit those in the file and restart.
-> - The image is `ghcr.io/iranman/beets-web-manager:latest`; `docker compose pull` updates it. To pin or roll back, replace `latest` with an exact version such as `0.8.1`. To see the running version, use `curl -s http://127.0.0.1:8337/health/live` or the image's `org.opencontainers.image.version` label.
+> - The image is `ghcr.io/iranman/beets-web-manager:latest`; `docker compose pull` updates it. To pin or roll back, replace `latest` with an exact version such as `0.9.0`. To see the running version, use `curl -s http://127.0.0.1:8337/health/live` or the image's `org.opencontainers.image.version` label.
 
 ### Step 3: Start and check Beets
 
