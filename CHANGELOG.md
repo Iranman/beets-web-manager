@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Library listing no longer blocks on a synchronous NFS disk walk.** `GET /api/library` (without a `limit`) used to build its artists/albums tree by walking the whole music tree on disk on the request thread whenever the shared cache was cold or stale — and the cache was only kept warm by the opt-in legacy local scan, so on deployments with that scan disabled every page load paid for the full walk (measured ~120s to time out on a 411-album NFS library). The request path now serves the cached disk-reconciled payload when warm, otherwise an engine-only *fast tree* built with no disk access, and runs the disk reconciliation (files missing on disk shown red, plus disk-only/not-imported files) as a deduped background `job_engine` job that warms the cache for later loads. The disk-missing/disk-only feature is preserved, just moved off the page-load critical path. The response carries a `reconciled` flag (`true` once the served payload includes disk state). `?refresh=1` now schedules a background rebuild instead of blocking the request. In-process callers that need the full disk-reconciled tree synchronously (the acquisition-queue build job, which already runs in the background) pass `block=True` and keep the previous behavior. Cold-cache loads when the engine is offline return the existing `ENGINE_OFFLINE` 503 instead of a 500.
+
 ## v0.10.0 - 2026-10-21
 
 ### Added

@@ -2720,9 +2720,15 @@ def library_missing_mb_ids_batch_apply():
 
 @app.get("/api/library")
 def library_full():
-    """Walk /data/media/music on disk + inject library items whose files are missing (shown in red).
-    Results are cached for _LIB_CACHE_TTL seconds; pass ?refresh=1 to force a rebuild.
-    Supports ?limit=N&offset=M for fast paginated queries directly from the engine.
+    """Library listing, served without a synchronous NFS disk walk on the request.
+
+    With ?limit=N(&offset=M): fast paginated flat item rows straight from the engine.
+    Without a limit: the artists/albums tree from the shared cache if warm, else an
+    engine-only fast tree built with no disk access; either way the disk reconciliation
+    (files missing on disk -> red, disk-only/not-imported files) runs as a background
+    job_engine job and warms the cache for subsequent loads. The response's
+    ``reconciled`` flag is True once the served payload includes that disk state.
+    ?refresh=1 schedules a background rebuild (it no longer blocks the request).
     """
     limit_arg = request.args.get("limit")
     if limit_arg is not None:
@@ -2758,14 +2764,23 @@ def library_full():
                 }), 503
             raise
 
-    return jsonify(get_library_payload(
-        force=request.args.get("refresh", "0") == "1",
-        include_tracks=request.args.get("include_tracks", "0") == "1",
-        include_disk_only=(
-            request.args.get("include_disk_only", "0") == "1"
-            or request.path.startswith("/api/acquisition")
-        ),
-    ))
+    try:
+        return jsonify(get_library_payload(
+            force=request.args.get("refresh", "0") == "1",
+            include_tracks=request.args.get("include_tracks", "0") == "1",
+            include_disk_only=(
+                request.args.get("include_disk_only", "0") == "1"
+                or request.path.startswith("/api/acquisition")
+            ),
+            block=False,  # page load: serve cache/fast tree, reconcile disk in the background
+        ))
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError, TimeoutError) as ex:
+        _app_logger.warning("library payload unavailable: %s: %s", type(ex).__name__, ex)
+        return jsonify({
+            "error": "Beets library is unavailable.",
+            "error_code": "ENGINE_OFFLINE",
+            "status": "unavailable",
+        }), 503
 
 
 @app.post("/api/albums/<int:aid>/ai-suggest")
