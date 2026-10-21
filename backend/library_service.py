@@ -28,6 +28,7 @@ from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
+from job_engine import DuplicateJobError
 from backend.musicbrainz_service import _artist_album_index, _artist_folder_key, _mb_artist_lookup_by_id, _mb_artist_search_one, _mb_canonical_for_artist_entries, _mb_release_has_tracks, _mb_release_search_by_folder_tracks
 from backend.serializers import _DOWNLOADS_ROOTS, _format_duration, _import_review_path_text_error, _leaked_db_paths_summary, _resolve_import_review_source_path, _review_origin_payload
 from backend.plex_service import _trigger_plex_refresh
@@ -1846,20 +1847,252 @@ def _library_track_dict(item) -> Dict[str, Any]:
     }
 
 
-def get_library_payload(*, force: bool = False, include_tracks: bool = False,
-                        include_disk_only: bool = False) -> Dict[str, Any]:
-    """Library page payload from the shared cache, rebuilt when stale or forced.
-
-    Request-free service behind GET /api/library (ARCH-001)."""
-    now   = time.time()
-    cached_payload, cached_ts = library_cache.snapshot()
-    if not force and cached_payload and (now - cached_ts) < _LIB_CACHE_TTL:
-        return _library_payload_for_response(
-            cached_payload, include_tracks, include_disk_only)
-
+def _library_reconcile_job(log, cancel_event=None) -> dict:
+    """Background job body: rebuild the full disk-reconciled library payload
+    (the NFS tree walk in _build_library_payload) and store it in the shared
+    cache. Kept off the page-load request path -- a page load serves the cache
+    or the engine-only fast tree and schedules this instead of walking the
+    disk synchronously (the confirmed cause of the 120s /api/library load)."""
+    log.append("Reconciling the library tree with files on disk...")
     payload = _refresh_library_cache()
-    return _library_payload_for_response(
-        payload, include_tracks, include_disk_only)
+    stats = payload.get("stats") or {}
+    log.append(
+        f"Reconciled {stats.get('artists', 0)} artists / {stats.get('albums', 0)} albums / "
+        f"{stats.get('tracks', 0)} tracks on disk."
+    )
+    return payload
+
+
+def _schedule_library_reconcile() -> None:
+    """Start the disk-reconciliation job via job_engine, deduped so N
+    concurrent page loads on a cold/stale cache start at most one NFS walk.
+    A DuplicateJobError just means one is already running -- its result warms
+    the cache for the next load, so nothing more to do here."""
+    try:
+        jobs.start_python(
+            _library_reconcile_job,
+            label="Library disk reconciliation",
+            metadata={"type": "library-reconcile", "mutating": False,
+                      "dedupe_key": "library-reconcile"},
+        )
+    except DuplicateJobError:
+        pass
+    except Exception as ex:  # scheduling must never break a page load
+        _app_logger.warning("Library reconcile could not be scheduled: %s", ex)
+
+
+def _build_library_payload_fast() -> dict:
+    """Engine-only Library tree built with no music-tree/NFS disk walk.
+
+    (It never scans or walks the music tree directories. It still reads the
+    small local artist-image cache via _attach_artist_image_cache_urls; that
+    touches only the cache dir, never the NFS music tree.)
+
+    Served on a cold cache so the page loads immediately instead of blocking on
+    the NFS tree walk in _build_library_payload(). Disk-derived facts -- files
+    missing on disk (shown red) and disk-only/not-imported files -- are not
+    known here; the background reconciliation job (_library_reconcile_job) fills
+    them in and stores the full payload in library_cache, which later loads
+    serve. Until then every imported item is reported optimistically as present
+    (ok/imported) and every album as fully imported (missing=0, not_imported=0).
+    Request-free: safe to call with no Flask request context.
+    """
+    _MROOT = str(MUSIC_ROOT)
+    _TYPE_ORDER = {"album": 0, "ep": 1, "mixtape": 2, "single": 3,
+                   "broadcast": 4, "other": 5, "": 6}
+
+    # Album metadata by Beets DB id (the same fields the full builder reads).
+    # Note: "year" is NOT in the album field allowlist (beetsplug/webmanager
+    # read_ops READ_FIELDS["album"]); requesting it returns HTTP 400 and the
+    # adapter only falls back on 404, so album year is derived from the item
+    # rows below (which do carry "year"), as the full builder also works.
+    album_meta: Dict[int, dict] = {}
+    try:
+        for ba in lib.albums([], fields=_LIBRARY_ALBUM_FIELDS):
+            try:
+                album_meta[int(ba.id)] = {
+                    "id":                 int(ba.id),
+                    "album":              _s(getattr(ba, "album", "") or ""),
+                    "albumartist":        _s(getattr(ba, "albumartist", "") or getattr(ba, "artist", "") or ""),
+                    "albumartist_credit": _s(getattr(ba, "albumartist_credit", "") or ""),
+                    "albumartists":       _s(getattr(ba, "albumartists", "") or ""),
+                    "albumartists_credit": _s(getattr(ba, "albumartists_credit", "") or ""),
+                    "mb_albumartistid":   _s(getattr(ba, "mb_albumartistid", "") or ""),
+                    "mb_albumartistids":  _s(getattr(ba, "mb_albumartistids", "") or ""),
+                    "mb_albumid":         _s(getattr(ba, "mb_albumid", "") or ""),
+                    "mb_releasegroupid":  _s(getattr(ba, "mb_releasegroupid", "") or ""),
+                    "albumtype":          _s(getattr(ba, "albumtype", "") or "").lower(),
+                    "albumtypes":         _s(getattr(ba, "albumtypes", "") or "").lower(),
+                    "artpath":            _s(getattr(ba, "artpath", "") or ""),
+                }
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    def _track(item) -> dict:
+        p = _s(item.path)
+        abs_p = (_MROOT + "/" + p) if (p and not p.startswith("/")) else p
+        return {
+            "id":         int(getattr(item, "id", 0) or 0),
+            "album_id":   int(getattr(item, "album_id", 0) or 0),
+            "path":       abs_p or p,
+            "title":      _s(getattr(item, "title", "") or (Path(p).stem if p else "")),
+            "track":      int(getattr(item, "track", 0) or 0),
+            "disc":       int(getattr(item, "disc", 0) or 1) or 1,
+            "tracktotal":  int(getattr(item, "tracktotal", 0) or 0),
+            "ok":         True,
+            "missing":    False,
+            "imported":   True,
+            "disk_only":  False,
+            "status":     "imported",
+            "mb_trackid": _s(getattr(item, "mb_trackid", "") or ""),
+        }
+
+    # Group items by album id; album_id 0 are singletons bucketed per artist.
+    tracks_by_album: Dict[int, list] = defaultdict(list)
+    years_by_album: Dict[int, Counter] = defaultdict(Counter)
+    singletons_by_artist: Dict[str, list] = defaultdict(list)
+    for item in lib.items([], fields=_LIBRARY_ITEM_FIELDS):
+        aid = int(getattr(item, "album_id", 0) or 0)
+        if aid > 0:
+            tracks_by_album[aid].append(_track(item))
+            y = int(getattr(item, "year", 0) or 0)
+            if y:
+                years_by_album[aid][y] += 1
+        else:
+            artist = _s(getattr(item, "albumartist", "") or getattr(item, "artist", "") or "Unknown Artist")
+            singletons_by_artist[artist].append(_track(item))
+
+    def _card(album_name, year, tracks, meta) -> dict:
+        tracks = sorted(tracks, key=lambda t: t["track"] or 999)
+        expected = _expected_track_count_from_library_rows(tracks)
+        card = {
+            "album":              album_name,
+            "year":               year,
+            "tracks":             tracks,
+            "track_count":        len(tracks),
+            "expected_track_count": expected,
+            "not_imported":       0,
+            "not_imported_is_extra": False,
+            "pending_review":     False,
+            "missing":            0,
+            "album_id":           int(meta.get("id") or 0),
+            "albumartist":        meta.get("albumartist", ""),
+            "albumartist_credit": meta.get("albumartist_credit", ""),
+            "albumartists":       meta.get("albumartists", ""),
+            "albumartists_credit": meta.get("albumartists_credit", ""),
+            "mb_albumartistid":   meta.get("mb_albumartistid", ""),
+            "mb_albumartistids":  meta.get("mb_albumartistids", ""),
+            "artpath":            meta.get("artpath", ""),
+            "disk_art":           "",
+            "aldir":              "",
+            "mb_albumid":         meta.get("mb_albumid", ""),
+            "mb_releasegroupid":  meta.get("mb_releasegroupid", ""),
+            "albumtype":          meta.get("albumtype", ""),
+            "albumtypes":         meta.get("albumtypes", ""),
+        }
+        card.update(_fast_album_mb_health_fields(tracks, expected, 0))
+        return card
+
+    albums_by_artist: Dict[str, list] = defaultdict(list)
+    for aid, meta in album_meta.items():
+        tracks = tracks_by_album.get(aid)
+        if not tracks:
+            continue  # album row with no items in this engine snapshot
+        # Album year from the item rows (the album field allowlist has no
+        # "year"): the most common non-zero item year, else 0.
+        yc = years_by_album.get(aid)
+        year = yc.most_common(1)[0][0] if yc else 0
+        display = _artist_folder_name_without_mbid(meta.get("albumartist") or "Unknown Artist")
+        albums_by_artist[display].append(_card(meta.get("album", ""), year, tracks, meta))
+
+    for artist, tracks in singletons_by_artist.items():
+        display = _artist_folder_name_without_mbid(artist)
+        albums_by_artist[display].append(_card("(Singles)", 0, tracks, {"albumartist": artist}))
+
+    result = []
+    for display_name, albums in albums_by_artist.items():
+        albums.sort(key=lambda a: (
+            _TYPE_ORDER.get(a.get("albumtype", ""), 6),
+            a["year"] or 0,
+            a["album"].lower(),
+        ))
+        total = sum(int(a.get("track_count") or 0) for a in albums)
+        result.append({
+            "name":                display_name,
+            "albums":              albums,
+            "total":               total,
+            "imported":            total,
+            "not_imported":        0,
+            "missing":             0,
+            "empty_artist_folder": not albums,
+            "path":                "",
+        })
+
+    _apply_collaboration_album_views(result)
+    _attach_artist_image_cache_urls(result)
+    result.sort(key=lambda a: a["name"].lower())
+
+    total_artists = len(result)
+    total_albums  = sum(1 for a in result for al in a.get("albums", [])
+                        if not al.get("virtual_appearance"))
+    total_tracks  = sum(int(al.get("track_count") or len(al.get("tracks", [])))
+                        for a in result for al in a.get("albums", [])
+                        if not al.get("virtual_appearance"))
+    return {
+        "ok":          True,
+        "artists":     result,
+        "stats":       {"artists": total_artists, "albums": total_albums, "tracks": total_tracks},
+        # Stable while the cache is cold: generation only advances on store()/
+        # invalidate(), so repeated cold fast-tree responses carry the SAME
+        # version (the frontend keeps its poll budget) and it changes once the
+        # reconcile stores real data. Do not use library_cache.ts here -- it is
+        # 0.0 while cold, which fell through to a fresh time.time() every call.
+        "library_version": library_cache.generation,
+        "reconciled":  False,   # disk state (missing/disk-only) not merged yet
+        "reconciling": True,    # a background reconciliation is being scheduled
+    }
+
+
+def get_library_payload(*, force: bool = False, include_tracks: bool = False,
+                        include_disk_only: bool = False, block: bool = True) -> Dict[str, Any]:
+    """Library page payload (ARCH-001). Request-free service behind GET /api/library.
+
+    block=True (the default, pre-existing synchronous behavior): serve a fresh
+    cache, else build the full disk-walked payload inline. In-process callers
+    that need disk-reconciled data and already run off the page-load path (e.g.
+    the acquisition-queue build job) keep this default untouched.
+
+    block=False (the GET /api/library page-load path): never walks the NFS music
+    tree on the request thread. Serves the cached full payload if present (even
+    if stale), otherwise an engine-only fast tree, and schedules the disk
+    reconciliation as a background job_engine job when the cache is cold, stale,
+    or force-refreshed. The response carries ``reconciled``: True once the served
+    payload includes disk state (missing/disk-only), False while only the fast
+    tree is available."""
+    now = time.time()
+    cached_payload, cached_ts = library_cache.snapshot()
+    fresh = bool(cached_payload) and (now - cached_ts) < _LIB_CACHE_TTL
+
+    if block:
+        if force or not fresh:
+            cached_payload = _refresh_library_cache()
+        return _library_payload_for_response(cached_payload, include_tracks, include_disk_only)
+
+    if cached_payload is not None:
+        if force or not fresh:
+            _schedule_library_reconcile()
+        out = _library_payload_for_response(cached_payload, include_tracks, include_disk_only)
+        out["reconciled"] = True
+        out["reconciling"] = bool(force or not fresh)
+        return out
+    # Cold cache: build the engine-only tree FIRST, then schedule the disk
+    # reconcile. If the engine is offline the fast build raises (-> 503), so we
+    # must not leave a doomed reconcile job queued behind every failed load.
+    fast = _build_library_payload_fast()
+    _schedule_library_reconcile()
+    return _library_payload_for_response(fast, include_tracks, include_disk_only)
 
 
 def _refresh_library_cache() -> dict:

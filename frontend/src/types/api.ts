@@ -292,6 +292,13 @@ export interface LibraryResponse {
   };
   library_version: number;
   tracks_included?: boolean;
+  /** True once the payload includes disk state: missing-on-disk flags plus
+   * disk-only/not-imported items. False when only the fast engine-only tree is
+   * served (cold cache) while a background disk reconciliation runs. */
+  reconciled?: boolean;
+  /** True when a background disk reconciliation was just scheduled; the client
+   * should keep polling /api/library until `reconciled` becomes true. */
+  reconciling?: boolean;
 }
 
 // ── AI suggest ────────────────────────────────────────────────────────────────

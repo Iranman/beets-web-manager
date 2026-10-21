@@ -80,13 +80,36 @@ class LibraryPayloadExtractionTests(unittest.TestCase):
         self.assertIn("library_cache.store(payload)", fn)
         self.assertIn("return payload", fn)
 
-    def test_route_delegates_to_refresh_helper_instead_of_building_inline(self):
+    def test_page_load_path_never_walks_disk_synchronously(self):
+        # The page-load path (block=False) must not build the full disk-walked
+        # payload inline: it serves the cache or an engine-only fast tree and
+        # schedules the NFS reconciliation as a background job. A synchronous
+        # _build_library_payload()/_refresh_library_cache() on this path was the
+        # confirmed cause of the ~120s /api/library load on NFS.
         fn = _function_source(APP_SOURCE, "def get_library_payload(", "\n\ndef _refresh_library_cache")
-        self.assertIn("payload = _refresh_library_cache()", fn)
-        # The route itself must not still contain the disk-walk build logic
-        # inline -- that would mean the extraction duplicated instead of
-        # moved it.
+        self.assertIn("_schedule_library_reconcile()", fn)
+        self.assertIn("_build_library_payload_fast()", fn)
+        # It must not contain the inline disk-walk build logic.
         self.assertNotIn("path_to_id:   Dict[str, int] = {}", fn)
+        # The synchronous full rebuild stays available only under block=True
+        # (in-process callers off the page-load path, e.g. acquisition).
+        self.assertIn("if block:", fn)
+        self.assertIn("_refresh_library_cache()", fn)
+
+    def test_reconcile_runs_as_a_deduped_background_job(self):
+        fn = _function_source(
+            APP_SOURCE, "def _schedule_library_reconcile() -> None:", "\n\ndef _build_library_payload_fast"
+        )
+        self.assertIn("jobs.start_python(", fn)
+        self.assertIn('"dedupe_key": "library-reconcile"', fn)
+        self.assertIn("except DuplicateJobError:", fn)
+
+    def test_fast_builder_does_no_disk_access(self):
+        fn = _function_source(
+            APP_SOURCE, "def _build_library_payload_fast() -> dict:", "\n\ndef get_library_payload("
+        )
+        for forbidden in ("os.scandir", "os.walk", ".exists()", "os.stat", "request."):
+            self.assertNotIn(forbidden, fn)
 
     def test_builder_does_not_reference_flask_request_object(self):
         # Must be safe to call with no Flask request context (from the

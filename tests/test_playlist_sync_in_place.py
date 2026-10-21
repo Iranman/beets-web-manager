@@ -505,6 +505,33 @@ class AutoSyncSchedulerTests(unittest.TestCase):
             ps._playlist_auto_sync_scheduler(stop)
         self.assertEqual(len(calls), 2)
 
+    def test_scheduler_first_tick_honors_full_interval(self):
+        # Regression: an earlier min(30, interval) made the first wake ~30s,
+        # so auto-sync appeared to run "every 30s". The first wait must be the
+        # configured interval, never 30.
+        waits = []
+        stop = mock.Mock()
+        stop.wait.side_effect = lambda s: (waits.append(s), True)[1]
+        with mock.patch.object(ps, "PLAYLIST_AUTO_SYNC_INTERVAL", 300):
+            ps._playlist_auto_sync_scheduler(stop)
+        self.assertEqual(waits, [300])
+
+    def test_auto_sync_defaults_off(self):
+        # Opt-in: with PLAYLIST_AUTO_SYNC unset the scheduler must stay off.
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parents[1]
+        env = {k: v for k, v in os.environ.items() if k != "PLAYLIST_AUTO_SYNC"}
+        code = ("from backend.app_runtime import PLAYLIST_AUTO_SYNC_ENABLED\n"
+                "print('ON' if PLAYLIST_AUTO_SYNC_ENABLED else 'OFF')\n")
+        out = subprocess.check_output([sys.executable, "-c", code], cwd=str(root),
+                                      env=env, text=True, stderr=subprocess.DEVNULL).strip()
+        self.assertEqual(out, "OFF")
+        env["PLAYLIST_AUTO_SYNC"] = "1"
+        out_on = subprocess.check_output([sys.executable, "-c", code], cwd=str(root),
+                                         env=env, text=True, stderr=subprocess.DEVNULL).strip()
+        self.assertEqual(out_on, "ON")
+
 
 class SyncRouteTests(tir._RouteCase):
     def test_second_start_while_running_is_409(self):
