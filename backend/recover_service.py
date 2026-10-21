@@ -1480,16 +1480,36 @@ def evaluate_recover_authorization(
 #: stripped before the note/evidence is persisted (F5).
 _URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"'()]+", re.IGNORECASE)
 
+#: Signed/secret query parameters as they appear in ANY text form -- a full
+#: http(s) URL, a scheme-relative ``//host/…`` URL, or a parenthesised URL that
+#: ``_URL_IN_TEXT_RE`` stops short of (it ends at ``(`` and ignores URLs with no
+#: scheme). Matching the ``name=value`` token directly, independent of URL
+#: structure, closes the F5 gap where a signature survived because the URL regex
+#: ended early or the URL had no scheme. Longer names precede their prefixes so
+#: the value is fully consumed. Linear-time: a fixed name alternation plus a
+#: single greedy character class with no nested quantifier (no ReDoS).
+_SIGNED_QUERY_PARAM_RE = re.compile(
+    r"(?i)\b("
+    r"x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|"
+    r"signature|access_token|refresh_token|id_token|oauth_token|api_key|apikey|"
+    r"credentials|credential|password|session_id|cookies|cookie|policy|secret|"
+    r"token|session|hdnea|hdnts|expires|auth|pass|sig|key"
+    r")=[^\s&#]+",
+    re.IGNORECASE,
+)
+
 
 def _scrub_authz_text(value: Any, limit: int) -> str:
     """Redact an authorization free-text field before persistence. Applies the
     generic ``key=value``/URL-credential redactor, strips signed query params
     (``?X-Amz-Signature=…`` etc.) from any embedded URL via
-    ``_sanitize_persisted_url`` (F5), AND the inline-secret regex (Bearer/Basic
-    tokens, PEM blocks) that the whitelisted re-admit would otherwise bypass
-    (F3), then bounds the length."""
+    ``_sanitize_persisted_url`` AND, regardless of URL form (parenthesised or
+    scheme-relative), from any surviving ``name=value`` signed/secret token
+    (F5), AND the inline-secret regex (Bearer/Basic tokens, PEM blocks) that the
+    whitelisted re-admit would otherwise bypass (F3), then bounds the length."""
     text = _redact_security_text(_s(value))
     text = _URL_IN_TEXT_RE.sub(lambda m: _sanitize_persisted_url(m.group(0)), text)
+    text = _SIGNED_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
     if _PEM_OR_SECRET_VALUE_RE.search(text[:4096]):
         text = "[REDACTED]"
     return text[:limit]
@@ -2374,9 +2394,13 @@ def _find_recovered_item_by_token(
     exact = [row for row in rows if _s(row.get("webmanager_recover_token")).strip() == tok]
     if exact:
         return exact[0] if len(exact) == 1 else None
-    # Only when no returned row carries the field at all do we trust the
-    # server-side token query that already narrowed to a single row.
-    return rows[0] if len(rows) == 1 else None
+    # Fail closed: only trust the server-side token query's single row when that
+    # row carries NO token field at all (an adapter that doesn't echo the
+    # flexattr back). A lone row with a DIFFERENT non-empty token is NOT this
+    # import's item -- returning it would bind rollback to the wrong file.
+    if len(rows) == 1 and not _s(rows[0].get("webmanager_recover_token")).strip():
+        return rows[0]
+    return None
 
 
 def _stamp_staged_identity_tags(

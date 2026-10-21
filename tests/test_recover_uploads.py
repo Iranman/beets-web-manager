@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -1583,6 +1584,34 @@ class AuthorizationAndProvenance(unittest.TestCase):
         self.assertIn("thanks", rec["asserted_note"])
         self.assertNotIn("SECRETSIGVALUE999", rec["verified_evidence"] or "")
 
+    def test_parenthesised_signed_url_in_note_is_stripped(self):
+        # F5: the URL-shaped scrubber stops at "(", so a parenthesised URL left
+        # the signature behind. The name=value redactor strips it regardless of
+        # URL shape.
+        rec = recover_service._sanitize_authorization_record({
+            "asserted_basis": "licensed_permission",
+            "asserted_note": "see https://cdn.example.com/lic(v2)?X-Amz-Signature=deadbeefSIGVAL123&ok=1 end",
+            "verified": False,
+        })
+        self.assertNotIn("deadbeefSIGVAL123", rec["asserted_note"])
+        self.assertNotIn("X-Amz-Signature=deadbeef", rec["asserted_note"])
+        self.assertIn("end", rec["asserted_note"])
+
+    def test_scheme_relative_signed_url_in_note_is_stripped(self):
+        # F5: a scheme-relative "//host/..." URL has no scheme, so the http(s)
+        # URL scrubber never matched it. The name=value redactor still strips the
+        # signature.
+        rec = recover_service._sanitize_authorization_record({
+            "asserted_basis": "licensed_permission",
+            "asserted_note": "proof //host/p?X-Amz-Signature=SCHEMELESSSIG777&a=b done",
+            "verified": True, "verified_basis": "own_account",
+            "verified_evidence": "//cdn/v?sig=EVIDENCESIG555&token=TKN888",
+        })
+        self.assertNotIn("SCHEMELESSSIG777", rec["asserted_note"])
+        self.assertIn("done", rec["asserted_note"])
+        self.assertNotIn("EVIDENCESIG555", rec["verified_evidence"] or "")
+        self.assertNotIn("TKN888", rec["verified_evidence"] or "")
+
     # ── (1) a valid basis is required; an invalid basis is rejected ──
     def test_fetch_and_import_require_a_valid_basis(self):
         f_none, s1 = recover_service.start_recover_fetch(
@@ -2327,6 +2356,81 @@ class _FakeRecoverLib:
         return {"success": True, "removed_items": removed}
 
 
+class _PluginAllowlistRecoverLib(_FakeRecoverLib):
+    """Faithful to the REAL Beets boundary: run_import passes set_fields through
+    the webmanager plugin's validate_fields (as operations.run_import does)
+    BEFORE any field reaches the item, and persists every surviving flexattr.
+    The plain _FakeRecoverLib skips validate_fields, which is why the earlier
+    tests missed #1 -- a provenance token the allowlist drops still 'survived'
+    in the fake and the read-back falsely passed."""
+
+    def run_import(self, paths=None, set_fields=None, **kw):
+        from beetsplug.webmanager.schemas import validate_fields
+        sf = validate_fields(set_fields or {}, is_album=False)
+        res = super().run_import(paths=paths, set_fields=sf, **kw)
+        if self.items:  # persist ALL surviving flexattrs, as a real import does
+            self.items[max(self.items)].update(sf)
+        return res
+
+
+class RecoverProvenanceAllowlistTests(unittest.TestCase):
+    """#1 regression (BLOCKING): the recover provenance flexattrs must survive
+    the plugin's validate_fields allowlist so the post-import token read-back
+    binds the created item. Dropping them made a real import falsely report
+    failure and record no rollback. Exercises the REAL validate_fields."""
+
+    def test_provenance_fields_survive_real_validate_fields(self):
+        from beetsplug.webmanager.schemas import validate_fields
+        tok = uuid.uuid4().hex
+        safe = validate_fields({
+            "artist": "A", "albumartist": "A", "title": "T", "album": "Alb",
+            "source_platform": "soundcloud", "webmanager_recover_token": tok,
+        }, is_album=False)
+        self.assertEqual(safe.get("webmanager_recover_token"), tok)
+        self.assertEqual(safe.get("source_platform"), "soundcloud")
+
+    def test_token_readback_binds_created_item_through_plugin_allowlist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _PluginAllowlistRecoverLib(music_root)
+            src = os.path.join(tmp, "s.flac")
+            with open(src, "wb") as fh:
+                fh.write(b"\x00" * 4096)
+            tok = uuid.uuid4().hex
+            res = fake.run_import(paths=[src], set_fields={
+                "artist": "A", "albumartist": "A", "title": "T", "album": "Alb",
+                "source_platform": "soundcloud", "webmanager_recover_token": tok,
+            })
+            self.assertTrue(res["ok"], res)
+            found = recover_service._find_recovered_item_by_token(tok, adapter=fake)
+            self.assertIsNotNone(found)
+            self.assertEqual(found["webmanager_recover_token"], tok)
+            self.assertEqual(found["id"], 1)  # exactly the created item
+            self.assertEqual(found["source_platform"], "soundcloud")
+
+    def test_lookup_fails_closed_on_single_row_with_a_different_token(self):
+        # #2: a single returned row carrying a DIFFERENT non-empty token is NOT
+        # this import's item -- fail closed (never a fuzzy single-row fallback).
+        class _OneWrongRow:
+            def find_items_by_query(self, query):
+                return [{"id": 7, "webmanager_recover_token": "some-other-token",
+                         "path": "/music/x.flac"}]
+        self.assertIsNone(
+            recover_service._find_recovered_item_by_token("the-real-token", adapter=_OneWrongRow()))
+
+    def test_lookup_trusts_single_row_with_no_token_field(self):
+        # The fail-closed change must NOT over-reject: a single row with no token
+        # field at all (an adapter that doesn't echo the flexattr) is still
+        # trusted -- the server-side query already narrowed to one row.
+        class _OneNoToken:
+            def find_items_by_query(self, query):
+                return [{"id": 9, "path": "/music/y.flac"}]
+        found = recover_service._find_recovered_item_by_token("tok", adapter=_OneNoToken())
+        self.assertIsNotNone(found)
+        self.assertEqual(found["id"], 9)
+
+
 class RecoverImportRollbackTests(unittest.TestCase):
     """Safe, audited rollback of a newly-imported recovery singleton, with hard
     safeguards against touching any pre-existing library content."""
@@ -2605,6 +2709,38 @@ class RecoverImportRollbackTests(unittest.TestCase):
             self.assertEqual(res["status"], "Rolled Back")
             self.assertFalse(os.path.exists(imported_path))
             self.assertEqual(tx_store._read(tx_id)["status"], "Rolled Back")
+
+    def test_rollback_refuses_missing_row_on_a_completed_transaction(self):
+        # F7 hardening: a missing Beets row is inferred to be a crash mid-rollback
+        # ONLY from a resume status. On a Completed transaction no rollback ever
+        # started, so a vanished row is unexplained -- guard B must REFUSE rather
+        # than infer crash-resume and proceed to unlink the file.
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Completed Missing", uploader="DJ Me", fname="cm.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            iid = out["imported_item_id"]
+            imported_path = tx_store._read(tx_id)["rollback"]["operations"][0]["path"]
+
+            # Row vanished, but the transaction is still Completed (no rollback
+            # ever ran, db_removed stays False).
+            fake.items.pop(int(iid), None)
+            self.assertEqual(tx_store._read(tx_id)["status"], "Completed")
+            self.assertFalse(tx_store._read(tx_id)["rollback"]["operations"][0]["progress"]["db_removed"])
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertFalse(res["ok"], res)
+            self.assertEqual(res["code"], "recover_rollback_item_missing")
+            self.assertFalse(res["mutated"])
+            # File left intact; transaction unchanged.
+            self.assertTrue(os.path.isfile(imported_path))
+            self.assertEqual(tx_store._read(tx_id)["status"], "Completed")
 
     def test_rollback_refuses_when_music_root_changed(self):
         # F2: the recorded op["music_root"] never widens the trust boundary. When

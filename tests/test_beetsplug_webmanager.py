@@ -125,6 +125,18 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertNotIn("malicious_sql_field", validated)
         self.assertNotIn("__class__", validated)
 
+    def test_recover_provenance_fields_are_allowlisted(self):
+        # Recover-import rollback provenance flexattrs MUST pass validate_fields
+        # so run_import's set_fields round-trip (otherwise the post-import token
+        # read-back fails and a real import falsely reports failure).
+        self.assertIn("webmanager_recover_token", ALLOWED_ITEM_FIELDS)
+        self.assertIn("source_platform", ALLOWED_ITEM_FIELDS)
+        tok = "f" * 32
+        validated = validate_fields(
+            {"webmanager_recover_token": tok, "source_platform": "soundcloud"}, is_album=False)
+        self.assertEqual(validated.get("webmanager_recover_token"), tok)
+        self.assertEqual(validated.get("source_platform"), "soundcloud")
+
     def test_auth_rejection(self):
         # No auth header
         res = self.client.get("/webmanager/status")
@@ -147,7 +159,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.18.4")
+        self.assertEqual(data["plugin_version"], "1.18.5")
         self.assertIn("library_fields", data["capabilities"])
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
@@ -161,7 +173,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.18.4")
+        self.assertEqual(PLUGIN_VERSION, "1.18.5")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(

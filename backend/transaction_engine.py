@@ -2516,6 +2516,13 @@ RECOVER_IMPORT_FAMILY = "recover_import_v1"
 #: mid-rollback resume where it left off.
 _RECOVER_ROLLBACK_FROM = frozenset({"Completed", "Running", "Recovery Required", "Partially Rolled Back"})
 
+#: Of those, only these are a rollback already in flight that a crash could have
+#: interrupted. A missing Beets row is inferred to be a crash mid-rollback ONLY
+#: from one of these -- on a Completed transaction (no rollback ever started) a
+#: missing row is unexplained, so guard B refuses rather than proceeding to the
+#: file unlink.
+_RECOVER_ROLLBACK_RESUME = frozenset({"Running", "Recovery Required", "Partially Rolled Back"})
+
 _SHA_CHUNK = 1024 * 1024
 
 
@@ -2691,17 +2698,26 @@ def rollback_recover_import(
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "code": "recover_rollback_lookup_failed", "operation_id": operation_id,
                         "mutated": False, "error": f"Could not read item {item_id} from Beets: {_s(exc)}"}
-            if not item:
+            if not item and status in _RECOVER_ROLLBACK_RESUME:
                 # F7 crash-resume: the row is already gone. A crash between
                 # adapter.remove and the progress persist leaves db_removed
                 # False yet the DB row removed; treat the row as already gone
                 # and continue -- there is nothing to remove, and the content
                 # hash (guard C) still gates the file unlink. This never
                 # fabricates a removal: if the file no longer matches, guard C
-                # below still refuses.
+                # below still refuses. Restricted to resume statuses: a missing
+                # row on a Completed transaction means no rollback ever started,
+                # so the row vanished for an unknown reason -- refuse (below).
                 db_removed = True
                 op["progress"] = {"db_removed": True,
                                   "file_deleted": bool((op.get("progress") or {}).get("file_deleted"))}
+            elif not item:
+                # Completed transaction with the recorded row gone: unexplained.
+                # Keep guard B -- refuse rather than infer a crash and unlink.
+                return {"ok": False, "code": "recover_rollback_item_missing", "operation_id": operation_id,
+                        "mutated": False,
+                        "error": f"Item {item_id} is no longer in Beets but no rollback was in progress; "
+                                 "refusing."}
             elif _norm_path(item.get("path")) != _norm_path(rec_path):
                 return {"ok": False, "code": "recover_rollback_item_moved", "operation_id": operation_id,
                         "mutated": False,

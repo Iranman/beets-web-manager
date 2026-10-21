@@ -56,6 +56,15 @@ ALLOWED_ITEM_FIELDS: Set[str] = {
     "bitdepth",
     "bitrate",
     "samplerate",
+    # Recover-import provenance flexattrs. These carry no file tag and no fixed
+    # Beets column -- they land as flexible attributes -- but they MUST survive
+    # validate_fields so run_import's set_fields round-trip: recover_service
+    # stamps a unique webmanager_recover_token to re-identify the created item
+    # for audited rollback, and source_platform records the recovery origin.
+    # Dropping them silently broke rollback provenance (the post-import token
+    # read-back returned None and the import falsely reported failure).
+    "webmanager_recover_token",
+    "source_platform",
 }
 
 ALLOWED_ALBUM_FIELDS: Set[str] = {
