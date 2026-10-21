@@ -873,5 +873,69 @@ class RollbackEligibilityTableTests(_RouteEnvBase):
         self.assertEqual((rows[ok]["allowed"], rows[no]["allowed_code"]), (True, "not_applied"))
 
 
+class RecoverImportRollbackRouteTests(_RouteEnvBase):
+    """#475 F4: an authenticated operator rolling back a recover_import_v1
+    transaction through POST /api/transactions/<id>/rollback removes exactly
+    that one item + file and ends Rolled Back. It is never automatic -- it runs
+    only from this explicit operator action."""
+
+    def _recover_tx(self, music_root, *, content=b"RECOVERED-AUDIO" * 300):
+        from tests.test_recover_uploads import _FakeRecoverLib
+        os.makedirs(os.path.join(music_root, "DJ Me"), exist_ok=True)
+        path = os.path.join(music_root, "DJ Me", "Recovered.flac")
+        with open(path, "wb") as fh:
+            fh.write(content)
+        fake = _FakeRecoverLib(music_root)
+        fake.items[1] = {"id": 1, "artist": "DJ Me", "albumartist": "DJ Me",
+                         "title": "Recovered", "mb_trackid": "", "path": path,
+                         "webmanager_recover_token": "tok"}
+        fake._next = 2
+        tx = self.store.create(operation_type="Import", status="Completed",
+                               source="recover_upload_singleton", summary="DJ Me - Recovered")["id"]
+        op = te.record_recover_import_rollback(self.store, tx, item_id=1,
+                                               file_path=path, music_root=music_root)
+        self.assertIsNotNone(op)
+        return tx, fake, path
+
+    def test_operator_rollback_removes_only_that_item_and_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            music_root = os.path.join(tmp, "music")
+            tx, fake, path = self._recover_tx(music_root)
+            # A second, pre-existing library item + file must be left untouched.
+            os.makedirs(os.path.join(music_root, "Other"), exist_ok=True)
+            other_path = os.path.join(music_root, "Other", "Keep.flac")
+            with open(other_path, "wb") as fh:
+                fh.write(b"KEEP" * 100)
+            fake.items[2] = {"id": 2, "artist": "Other", "title": "Keep", "path": other_path}
+
+            with mock.patch("backend.beets_adapter.beets_adapter", fake), \
+                 mock.patch("backend.config_layers.music_root", return_value=music_root):
+                resp = self.client.post(f"/api/transactions/{tx}/rollback")
+            body = resp.get_json() or {}
+            self.assertEqual(resp.status_code, 200, body)
+            self.assertTrue(body.get("ok"), body)
+            self.assertEqual(body.get("status"), "Rolled Back")
+            # Exactly the recorded item + file gone; the other item untouched.
+            self.assertIsNone(fake.get_item(1))
+            self.assertFalse(os.path.exists(path))
+            self.assertIsNotNone(fake.get_item(2))
+            self.assertTrue(os.path.isfile(other_path))
+            # Beets was never asked to delete files (the guard deletes it itself).
+            self.assertTrue(all(c["delete_files"] is False for c in fake.remove_calls))
+            self.assertEqual(self.store.get(tx)["status"], "Rolled Back")
+
+    def test_second_rollback_is_refused_already_rolled_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            music_root = os.path.join(tmp, "music")
+            tx, fake, path = self._recover_tx(music_root)
+            with mock.patch("backend.beets_adapter.beets_adapter", fake), \
+                 mock.patch("backend.config_layers.music_root", return_value=music_root):
+                first = self.client.post(f"/api/transactions/{tx}/rollback")
+                self.assertEqual(first.status_code, 200, first.get_json())
+                second = self.client.post(f"/api/transactions/{tx}/rollback")
+            self.assertEqual(second.status_code, 409, second.get_json())
+            self.assertFalse((second.get_json() or {}).get("ok"))
+
+
 if __name__ == "__main__":
     unittest.main()

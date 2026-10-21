@@ -1365,8 +1365,18 @@ def _identity_tokens(value: Any) -> set:
         if segs:
             if segs[-1].startswith("@"):
                 toks.add(segs[-1])
-            if len(segs) >= 2 and segs[-2] in ("channel", "user"):
+            if len(segs) >= 2 and segs[-2] == "channel":
+                # A /channel/<id> segment is a platform-global immutable id
+                # (e.g. a YouTube UCxxxx): kept as a bare token so a configured
+                # bare channel_id still matches its channel URL (channel_id
+                # behaviour preserved).
                 toks.add(segs[-1])
+            elif host and len(segs) >= 2 and segs[-2] == "user":
+                # F3: a /user/<name> segment is a WEAK, reusable username. Emit
+                # it ONLY host-namespaced, so an allowlisted youtube.com/user/alice
+                # can never verify a different platform's source whose bare
+                # uploader_id happens to be "alice".
+                toks.add(f"{host}/user/{segs[-1]}")
         return toks
     toks.add(v)
     return toks
@@ -1466,12 +1476,20 @@ def evaluate_recover_authorization(
     }
 
 
+#: Any http(s) URL embedded in free text, so its signed query params can be
+#: stripped before the note/evidence is persisted (F5).
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"'()]+", re.IGNORECASE)
+
+
 def _scrub_authz_text(value: Any, limit: int) -> str:
     """Redact an authorization free-text field before persistence. Applies the
-    generic ``key=value``/URL-credential redactor AND the inline-secret regex
-    (Bearer/Basic tokens, PEM blocks) that the whitelisted re-admit would
-    otherwise bypass (F3), then bounds the length."""
+    generic ``key=value``/URL-credential redactor, strips signed query params
+    (``?X-Amz-Signature=…`` etc.) from any embedded URL via
+    ``_sanitize_persisted_url`` (F5), AND the inline-secret regex (Bearer/Basic
+    tokens, PEM blocks) that the whitelisted re-admit would otherwise bypass
+    (F3), then bounds the length."""
     text = _redact_security_text(_s(value))
+    text = _URL_IN_TEXT_RE.sub(lambda m: _sanitize_persisted_url(m.group(0)), text)
     if _PEM_OR_SECRET_VALUE_RE.search(text[:4096]):
         text = "[REDACTED]"
     return text[:limit]
@@ -2330,6 +2348,37 @@ def _find_existing_library_conflict(
     return None
 
 
+def _find_recovered_item_by_token(
+    token: str,
+    *,
+    adapter: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the single library item this import created, identified by the
+    unique ``webmanager_recover_token`` flexattr stamped into its set_fields
+    (F1). Authoritative provenance for rollback: a uuid4 token cannot collide
+    with another import, so two concurrent imports of the same track each find
+    exactly their own item. Returns None unless EXACTLY one item carries the
+    exact token (a substring query match whose field differs is rejected)."""
+    tok = _s(token).strip()
+    if not tok:
+        return None
+    ad = adapter or beets_adapter
+    try:
+        rows = ad.find_items_by_query(f"webmanager_recover_token:{tok}") or []
+    except Exception:
+        return None
+    rows = [row for row in rows if isinstance(row, dict) and row.get("id") is not None]
+    # Prefer an EXACT token match: real Beets serialises the flexattr, so the
+    # row this import created always carries it -- that is the authoritative
+    # provenance and it cannot be confused with a concurrent import's item.
+    exact = [row for row in rows if _s(row.get("webmanager_recover_token")).strip() == tok]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    # Only when no returned row carries the field at all do we trust the
+    # server-side token query that already narrowed to a single row.
+    return rows[0] if len(rows) == 1 else None
+
+
 def _stamp_staged_identity_tags(
     resolved_file: str,
     *,
@@ -2649,12 +2698,18 @@ def _recover_import_one(
         mb_trackid=mb_trackid,
     )
 
+    # F1: a unique per-import token stamped as a flexattr so the CREATED item is
+    # identified authoritatively after import -- never by a fuzzy (artist,title)
+    # re-query, which could cross-record a concurrent import of the same track
+    # and let rollback delete the wrong item's file.
+    recover_token = uuid.uuid4().hex
     set_fields: Dict[str, Any] = {
         "artist": artist,
         "albumartist": artist,
         "title": title,
         "album": album,
         "source_platform": verified.get("source_platform") or "",
+        "webmanager_recover_token": recover_token,
     }
     if mb_trackid:
         set_fields["mb_trackid"] = mb_trackid
@@ -2797,11 +2852,14 @@ def _recover_import_one(
                 "error": err_msg,
                 "artist": artist,
                 "title": title,
+                "authorization": authorization,
                 "transaction_id": tx_id,
             }
 
-    # Post-import library read-back: verify the imported item actually exists in Beets.
-    imported_item = _find_existing_library_conflict(artist, title, mb_trackid, adapter=adapter)
+    # Post-import library read-back: find THIS import's item by its unique token
+    # (F1), never by a fuzzy (artist,title) re-query. This both confirms the
+    # import added the item and yields the authoritative id+path for rollback.
+    imported_item = _find_recovered_item_by_token(recover_token, adapter=adapter)
     if imported_item is None:
         err_msg = "beets import completed without adding item to library"
         if tx_id:

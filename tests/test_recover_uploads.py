@@ -1403,6 +1403,10 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
             self.assertFalse(out_skip["imported"])
             self.assertEqual(out_skip["status"], "import_failed")
             self.assertIn("blank_identity", out_skip["error"])
+            # F9: the non-duplicate Beets-skip outcome carries the authorization
+            # record too, like every other outcome.
+            self.assertIn("authorization", out_skip)
+            self.assertEqual(out_skip["authorization"]["asserted_basis"], "own_account")
 
             # Case B: run_import succeeds without skip, but post-import readback finds nothing -> import_failed
             fake_adapter_noread = mock.MagicMock()
@@ -1561,6 +1565,23 @@ class AuthorizationAndProvenance(unittest.TestCase):
             "https://cdn.example.com/lic?X-Amz-Signature=deadbeefSIGVALUE123&x=1")
         self.assertNotIn("deadbeefSIGVALUE123", u)
         self.assertNotIn("X-Amz-Signature", u)
+
+    def test_signed_url_in_authorization_note_is_stripped(self):
+        # F5: a signed URL pasted inside the free-text authorization note must
+        # have its signature params stripped before persistence (the note runs
+        # through _sanitize_persisted_url, not only the key=value redactor).
+        rec = recover_service._sanitize_authorization_record({
+            "asserted_basis": "licensed_permission",
+            "asserted_note": "proof: https://cdn.example.com/lic?X-Amz-Signature=deadbeefSIGVALUE123&ok=1 thanks",
+            "verified": True, "verified_basis": "own_account",
+            "verified_evidence": "https://youtube.com/channel/UCx?X-Amz-Signature=SECRETSIGVALUE999",
+        })
+        self.assertNotIn("X-Amz-Signature", rec["asserted_note"])
+        self.assertNotIn("deadbeefSIGVALUE123", rec["asserted_note"])
+        # The non-signed remainder of the note survives.
+        self.assertIn("cdn.example.com/lic", rec["asserted_note"])
+        self.assertIn("thanks", rec["asserted_note"])
+        self.assertNotIn("SECRETSIGVALUE999", rec["verified_evidence"] or "")
 
     # ── (1) a valid basis is required; an invalid basis is rejected ──
     def test_fetch_and_import_require_a_valid_basis(self):
@@ -1975,6 +1996,19 @@ class OwnAccountImmutableIdentityMatching(unittest.TestCase):
         self.assertEqual(r["verified_basis"], "own_account")
         self.assertEqual(r["verified_evidence"], "UCabc123xyz")
 
+    def test_user_path_segment_does_not_verify_across_platforms(self):
+        # F3: an allowlisted youtube.com/user/alice must NEVER verify a DIFFERENT
+        # platform's source whose bare uploader_id happens to be "alice" -- the
+        # /user/<name> path segment is host-namespaced, not emitted bare.
+        r = self._eval("https://youtube.com/user/alice",
+                       uploader_id="alice", channel_id="UCotherplatform000")
+        self.assertFalse(r["verified"])
+        self.assertIsNone(r["verified_basis"])
+        # The same uploader on the SAME platform URL still verifies.
+        ok = self._eval("https://youtube.com/user/alice",
+                        channel_url="https://www.youtube.com/user/alice")
+        self.assertTrue(ok["verified"])
+
     def test_exact_uploader_id_match_verifies(self):
         r = self._eval("12345678", uploader_id="12345678")
         self.assertTrue(r["verified"])
@@ -2245,6 +2279,8 @@ class _FakeRecoverLib:
         return [dict(it) for it in self.items.values()]
 
     def find_items_by_query(self, query):
+        # Models stock Beets: a flexattr query may return extra rows; the caller
+        # (_find_recovered_item_by_token) filters by exact token equality.
         return self._rows()
 
     def find_all_items_by_mbid(self, mbid):
@@ -2261,13 +2297,17 @@ class _FakeRecoverLib:
         title = sf.get("title") or "Unknown"
         dest_dir = os.path.join(self.music_root, artist)
         os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(dest_dir, title + os.path.splitext(src)[1])
-        shutil.copy2(src, dest)
         iid = self._next
         self._next += 1
+        # Unique per item so two imports of the SAME artist/title still produce
+        # two distinct files (a real singleton import never collides them).
+        dest = os.path.join(dest_dir, f"{title} [{iid}]" + os.path.splitext(src)[1])
+        shutil.copy2(src, dest)
         self.items[iid] = {
             "id": iid, "artist": artist, "albumartist": artist, "title": title,
             "mb_trackid": sf.get("mb_trackid", ""), "path": dest,
+            # The unique provenance token stamped by set_fields (F1).
+            "webmanager_recover_token": sf.get("webmanager_recover_token", ""),
         }
         return {"ok": True, "success": True}
 
@@ -2494,6 +2534,104 @@ class RecoverImportRollbackTests(unittest.TestCase):
             self.assertTrue(res["ok"], res)
             self.assertEqual(res["status"], "Rolled Back")
             self.assertFalse(os.path.exists(imported_path))
+
+    def test_concurrent_same_title_imports_record_distinct_items(self):
+        # F1: provenance for rollback is captured authoritatively (by a unique
+        # per-import token), never by a fuzzy (artist,title) re-query. Even under
+        # the concurrency window the guard normally blocks -- here forced by
+        # stubbing the pre-import conflict check to None -- two imports of the
+        # SAME (artist,title) each bind their OWN created item, so rolling one
+        # back can never delete the other's file.
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+            with mock.patch.object(recover_service, "_find_existing_library_conflict", return_value=None):
+                tx_a, out_a, _ = self._import_one(
+                    tmp, fake, title="Same Title", uploader="DJ Me", fname="a.flac", run="A")
+                tx_b, out_b, _ = self._import_one(
+                    tmp, fake, title="Same Title", uploader="DJ Me", fname="b.flac", run="B")
+            self.assertTrue(out_a["imported"] and out_b["imported"], (out_a, out_b))
+            ida, idb = out_a["imported_item_id"], out_b["imported_item_id"]
+            self.assertNotEqual(ida, idb)
+            path_a = tx_a._read(out_a["transaction_id"])["rollback"]["operations"][0]["path"]
+            path_b = tx_b._read(out_b["transaction_id"])["rollback"]["operations"][0]["path"]
+            self.assertNotEqual(path_a, path_b)
+            self.assertTrue(os.path.isfile(path_a) and os.path.isfile(path_b))
+
+            # Roll back A: only A's item + file go; B is wholly untouched.
+            res = txe.rollback_recover_import(tx_a, out_a["transaction_id"], adapter=fake, music_root=music_root)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["removed_item_id"], ida)
+            self.assertIsNone(fake.get_item(ida))
+            self.assertFalse(os.path.exists(path_a))
+            self.assertIsNotNone(fake.get_item(idb))
+            self.assertTrue(os.path.isfile(path_b))
+
+            # Roll back B independently: only now does B's item + file go.
+            res_b = txe.rollback_recover_import(tx_b, out_b["transaction_id"], adapter=fake, music_root=music_root)
+            self.assertTrue(res_b["ok"], res_b)
+            self.assertEqual(res_b["removed_item_id"], idb)
+            self.assertFalse(os.path.exists(path_b))
+
+    def test_rollback_resumes_when_crash_left_progress_unpersisted(self):
+        # F7: a crash BETWEEN adapter.remove and the progress persist leaves the
+        # Beets row gone but op.progress.db_removed still False. Resume must still
+        # complete -- guard B treats the missing row as already-removed and the
+        # content hash still gates the unlink.
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Crash Unpersisted", uploader="DJ Me", fname="cu.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            iid = out["imported_item_id"]
+            imported_path = tx_store._read(tx_id)["rollback"]["operations"][0]["path"]
+
+            # Crash: row already removed, progress NOT persisted (db_removed stays
+            # False), transaction left Running.
+            fake.items.pop(int(iid), None)
+            tx_store.update(tx_id, status="Running")
+            self.assertFalse(tx_store._read(tx_id)["rollback"]["operations"][0]["progress"]["db_removed"])
+            self.assertTrue(os.path.isfile(imported_path))
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["status"], "Rolled Back")
+            self.assertFalse(os.path.exists(imported_path))
+            self.assertEqual(tx_store._read(tx_id)["status"], "Rolled Back")
+
+    def test_rollback_refuses_when_music_root_changed(self):
+        # F2: the recorded op["music_root"] never widens the trust boundary. When
+        # MUSIC_ROOT changed so the recorded path is no longer under the CURRENT
+        # root, rollback is refused rather than trusting the recorded root.
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Root Track", uploader="DJ Me", fname="r.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            imported_path = tx_store._read(tx_id)["rollback"]["operations"][0]["path"]
+
+            new_root = os.path.join(tmp, "music_new")
+            os.makedirs(new_root, exist_ok=True)
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=new_root)
+            self.assertFalse(res["ok"], res)
+            self.assertEqual(res["code"], "recover_rollback_path_unsafe")
+            # Nothing removed; recorded file + item still present; still Completed.
+            self.assertEqual(fake.item_count(), 1)
+            self.assertTrue(os.path.isfile(imported_path))
+            self.assertEqual(fake.remove_calls, [])
+            self.assertEqual(tx_store._read(tx_id)["status"], "Completed")
 
 
 if __name__ == "__main__":

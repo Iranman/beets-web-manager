@@ -2658,22 +2658,26 @@ def rollback_recover_import(
         rec_path = _s(op.get("path"))
         rec_sha = _s(op.get("sha256"))
         rec_size = op.get("size")
-        rec_root = _s(op.get("music_root"))
         try:
             item_id = int(op.get("item_id"))
         except (TypeError, ValueError):
             return {"ok": False, "code": "recover_rollback_bad_item", "operation_id": operation_id,
                     "mutated": False, "error": "Recorded item id is not an integer; refusing."}
 
-        # Guard A: the recorded path is under MUSIC_ROOT (recorded + current),
-        # has no symlinked component, and is EXACTLY the recorded path (never a
-        # glob). validate_path_under_allowed_roots fails closed.
-        roots = [r for r in (_s(music_root) or _cfg_music_root(), rec_root) if r]
-        safe = validate_path_under_allowed_roots(rec_path, roots, reject_symlinks=True)
+        # Guard A: the recorded path is under the CURRENT MUSIC_ROOT only (F2).
+        # The recorded op["music_root"] is audit metadata and is NEVER trusted to
+        # widen the allowed roots: if MUSIC_ROOT changed since import so the
+        # recorded path is no longer inside it, REFUSE rather than delete a file
+        # outside the live library. Containment is exact (never a glob), with no
+        # symlinked component; validate_path_under_allowed_roots fails closed.
+        current_root = _s(music_root) or _cfg_music_root()
+        roots = [current_root] if current_root else []
+        safe = validate_path_under_allowed_roots(rec_path, roots, reject_symlinks=True) if roots else None
         if safe is None or _norm_path(safe) != _norm_path(rec_path):
             return {"ok": False, "code": "recover_rollback_path_unsafe", "operation_id": operation_id,
                     "mutated": False,
-                    "error": "Recorded file is not under MUSIC_ROOT or no longer matches the recorded path; refusing."}
+                    "error": "Recorded file is not under the current MUSIC_ROOT or no longer matches the "
+                             "recorded path (MUSIC_ROOT may have changed since import); refusing."}
 
         ad = _recover_adapter(adapter)
         db_removed = bool((op.get("progress") or {}).get("db_removed"))
@@ -2688,10 +2692,17 @@ def rollback_recover_import(
                 return {"ok": False, "code": "recover_rollback_lookup_failed", "operation_id": operation_id,
                         "mutated": False, "error": f"Could not read item {item_id} from Beets: {_s(exc)}"}
             if not item:
-                return {"ok": False, "code": "recover_rollback_item_missing", "operation_id": operation_id,
-                        "mutated": False,
-                        "error": f"Item {item_id} is no longer in the library; refusing (it may have changed since import)."}
-            if _norm_path(item.get("path")) != _norm_path(rec_path):
+                # F7 crash-resume: the row is already gone. A crash between
+                # adapter.remove and the progress persist leaves db_removed
+                # False yet the DB row removed; treat the row as already gone
+                # and continue -- there is nothing to remove, and the content
+                # hash (guard C) still gates the file unlink. This never
+                # fabricates a removal: if the file no longer matches, guard C
+                # below still refuses.
+                db_removed = True
+                op["progress"] = {"db_removed": True,
+                                  "file_deleted": bool((op.get("progress") or {}).get("file_deleted"))}
+            elif _norm_path(item.get("path")) != _norm_path(rec_path):
                 return {"ok": False, "code": "recover_rollback_item_moved", "operation_id": operation_id,
                         "mutated": False,
                         "error": f"Item {item_id} no longer maps to the recorded path; refusing."}
