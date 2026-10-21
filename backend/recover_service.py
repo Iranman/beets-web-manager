@@ -1821,7 +1821,14 @@ def verify_and_match_staged_upload(
     # "Could not verify" -> provider down / no fpcalc / no api key. Must route to
     # REVIEW: never auto-import unverified audio, and never hard-reject on an
     # outage (a provider outage is not evidence of a wrong identity).
-    unverifiable_tokens = {"lookup_failed", "no_fpcalc", "no_api_key", "unavailable", "not_attempted", "failed"}
+    # Could-not-verify statuses the AcoustID producer actually emits
+    # (acoustid_service.ACOUSTID_FAILURE_MESSAGES: not_configured/auth_failed/
+    # lookup_failed) route to REVIEW, never a hard identity_conflict. In
+    # particular not_configured is the default when ACOUSTID_API_KEY is unset,
+    # so a fresh install must not reject every original upload.
+    unverifiable_tokens = {"lookup_failed", "not_configured", "auth_failed",
+                           "unavailable", "not_attempted", "failed",
+                           "no_fpcalc", "no_api_key"}
 
     # Only a genuine fingerprint-vs-metadata contradiction is a blocking conflict.
     blocking_conflicts = [

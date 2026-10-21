@@ -1169,6 +1169,30 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
         self.assertEqual(res["status"], "review_required")
         self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
 
+    def test_acoustid_unconfigured_or_auth_failed_routes_to_review_not_reject(self):
+        # The producer emits not_configured (default when ACOUSTID_API_KEY unset)
+        # and auth_failed as could-not-verify. These must route to REVIEW, never a
+        # false identity_conflict — otherwise a fresh install rejects every upload.
+        for status in ("not_configured", "auth_failed"):
+            with tempfile.TemporaryDirectory() as tmp:
+                audio_path = self._stage_with_sidecar(tmp)
+                with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                     mock.patch.object(recover_service, "recover_integrity_check",
+                                       return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+                     mock.patch.object(recover_service, "inspect_audio_file",
+                                       return_value={"ok": True, "codec": "flac"}), \
+                     mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
+                         "acoustid_status": status,
+                         "identity_status": "review_required",
+                         "final_action": "review",
+                         "conflicts": [f"acoustid_{status}"],
+                         "acoustid_match_score": 0.0,
+                     }):
+                    res = recover_service.verify_and_match_staged_upload(audio_path)
+            self.assertFalse(res["ok"], (status, res))
+            self.assertEqual(res["status"], "review_required", (status, res))
+            self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
+
 
 class SafeStagingAndBeetsImport(unittest.TestCase):
     """Phase 2 (9-10): safe staging validation, non-destructive Beets import,
