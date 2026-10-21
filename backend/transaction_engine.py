@@ -713,14 +713,18 @@ class TransactionStore:
     def rollback(self, transaction_id: str) -> Dict[str, Any]:
         with self._lock:
             tx = self._read(transaction_id)
-            rollback = tx.get("rollback") or {}
-            operations = rollback.get("operations") or []
-            if not rollback.get("available") or not operations:
-                raise ValueError(rollback.get("reason") or "Rollback unavailable.")
-            # Operation execution is intentionally conservative. Existing
-            # workflows must add explicit reversible operations before rollback
-            # becomes active for them.
-            raise ValueError("Rollback operations are recorded but no executor is registered for this transaction.")
+        # Dispatch by mutation family to that family's registered executor.
+        # (recover_import_v1 undoes a Recover My Uploads singleton import.)
+        if (tx.get("metadata") or {}).get("mutation_family") == RECOVER_IMPORT_FAMILY:
+            return rollback_recover_import(self, transaction_id)
+        rollback = tx.get("rollback") or {}
+        operations = rollback.get("operations") or []
+        if not rollback.get("available") or not operations:
+            raise ValueError(rollback.get("reason") or "Rollback unavailable.")
+        # Operation execution is intentionally conservative. Existing
+        # workflows must add explicit reversible operations before rollback
+        # becomes active for them.
+        raise ValueError("Rollback operations are recorded but no executor is registered for this transaction.")
 
     def export_json(self, transaction_id: str) -> str:
         return json.dumps(self.get(transaction_id), indent=2, sort_keys=True)
@@ -2496,3 +2500,264 @@ def rollback_folder_cleanup(
                     "mutated": bool(files_restored or dirs_restored),
                     "files_restored": files_restored, "dirs_restored": dirs_restored,
                     "files_failed": files_failed, "dirs_failed": dirs_failed}
+
+
+# ── recover_import_v1: undo a Recover My Uploads singleton import ────────────
+# A recovery import (recover_service._recover_import_one) copies ONE file into
+# MUSIC_ROOT and adds ONE Beets item. Its undo removes exactly that item and
+# that one file -- never a glob, never anything this transaction did not
+# record, and only after proving (by content hash + size) the file on disk is
+# still the one THIS import created. The staged original under DOWNLOADS_ROOT
+# is a different file in a different root and is never touched here.
+RECOVER_IMPORT_FAMILY = "recover_import_v1"
+
+#: Statuses a recover-import rollback may start from. Completed is the normal
+#: case; Running / Recovery Required / Partially Rolled Back let a crash
+#: mid-rollback resume where it left off.
+_RECOVER_ROLLBACK_FROM = frozenset({"Completed", "Running", "Recovery Required", "Partially Rolled Back"})
+
+_SHA_CHUNK = 1024 * 1024
+
+
+def _sha256_file(path: str) -> Optional[str]:
+    """Streaming sha256 of a local file, or None if it cannot be read."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(_SHA_CHUNK), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _recover_adapter(adapter: Any = None) -> Any:
+    if adapter is not None:
+        return adapter
+    from backend import beets_adapter as _beets_adapter  # at call time (no import cycle)
+    return _beets_adapter.beets_adapter
+
+
+def _norm_path(value: Any) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "surrogateescape")
+    text = _s(value)
+    return os.path.normcase(os.path.normpath(text)) if text else ""
+
+
+def record_recover_import_rollback(
+    store: "TransactionStore",
+    operation_id: str,
+    *,
+    item_id: Any,
+    file_path: str,
+    music_root: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Capture the minimal, verifiable undo for a recovery singleton import on
+    its Import transaction: the single added Beets item id and the single file
+    it created under MUSIC_ROOT, with a content hash + size so rollback can
+    prove the file is still the one this import created. Sets
+    rollback_available=True only when all of that is captured; otherwise leaves
+    rollback unavailable. Best-effort -- never raises into the import path."""
+    if not operation_id or item_id is None:
+        return None
+    root = _s(music_root) or _cfg_music_root()
+    safe = validate_path_under_allowed_roots(file_path, [root], reject_symlinks=True)
+    if safe is None:
+        # Not provably under MUSIC_ROOT (or a symlinked component): no undo.
+        try:
+            store.update(
+                operation_id,
+                metadata={"mutation_family": RECOVER_IMPORT_FAMILY},
+                rollback={"available": False, "operations": [],
+                          "reason": "Rollback unavailable: imported file is not provably under MUSIC_ROOT."},
+            )
+        except Exception:
+            pass
+        return None
+    try:
+        size = os.stat(str(safe)).st_size
+    except OSError:
+        return None
+    sha = _sha256_file(str(safe))
+    if sha is None:
+        return None
+    op = {
+        "type": "remove_recovered_item",
+        "item_id": item_id,
+        "path": str(safe),
+        "sha256": sha,
+        "size": size,
+        "music_root": os.path.abspath(os.path.normpath(root)),
+        "progress": {"db_removed": False, "file_deleted": False},
+    }
+    try:
+        store.update(
+            operation_id,
+            metadata={"mutation_family": RECOVER_IMPORT_FAMILY},
+            rollback={"available": True, "reason": "", "operations": [op]},
+        )
+    except Exception:
+        return None
+    return op
+
+
+def rollback_recover_import(
+    store: "TransactionStore",
+    operation_id: str,
+    *,
+    adapter: Any = None,
+    music_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Undo a recover_import_v1 singleton import: remove ONLY the recorded Beets
+    item (through the adapter -- no raw sqlite) and the single recorded file
+    under MUSIC_ROOT, and ONLY when every guard holds:
+
+      * the recorded path is under MUSIC_ROOT and is exactly the recorded path
+        (never a glob), with no symlinked component;
+      * the recorded item id still maps to that path;
+      * the file's current content hash + size still match what was recorded at
+        import (proof it is the file THIS import created);
+      * the operation set is exactly this transaction's single recorded undo.
+
+    Any guard failure REFUSES the rollback and leaves the item and file in
+    place. The staged original under DOWNLOADS_ROOT is never touched."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "recover_rollback_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "recover_rollback_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != RECOVER_IMPORT_FAMILY:
+            return {"ok": False, "error": "Transaction is not a recover_import_v1 operation",
+                    "code": "recover_rollback_family_mismatch"}
+
+        rb = tx.get("rollback") or {}
+        ops = rb.get("operations") or []
+        # The operation set must be exactly this transaction's single undo op.
+        if not rb.get("available") or len(ops) != 1 or not isinstance(ops[0], dict) \
+                or ops[0].get("type") != "remove_recovered_item":
+            return {"ok": False, "code": "recover_rollback_unavailable", "operation_id": operation_id,
+                    "mutated": False,
+                    "error": rb.get("reason") or "Rollback data has not been captured for this transaction."}
+        op = dict(ops[0])
+
+        status = tx.get("status")
+        if status == "Rolled Back":
+            return {"ok": False, "code": "recover_rollback_already", "status": status, "operation_id": operation_id,
+                    "mutated": False, "error": "Transaction is already rolled back."}
+        if status not in _RECOVER_ROLLBACK_FROM:
+            return {"ok": False, "code": "rollback_not_eligible", "status": status, "operation_id": operation_id,
+                    "mutated": False,
+                    "error": f"Only an applied transaction can be rolled back (status is {status})."}
+
+        rec_path = _s(op.get("path"))
+        rec_sha = _s(op.get("sha256"))
+        rec_size = op.get("size")
+        rec_root = _s(op.get("music_root"))
+        try:
+            item_id = int(op.get("item_id"))
+        except (TypeError, ValueError):
+            return {"ok": False, "code": "recover_rollback_bad_item", "operation_id": operation_id,
+                    "mutated": False, "error": "Recorded item id is not an integer; refusing."}
+
+        # Guard A: the recorded path is under MUSIC_ROOT (recorded + current),
+        # has no symlinked component, and is EXACTLY the recorded path (never a
+        # glob). validate_path_under_allowed_roots fails closed.
+        roots = [r for r in (_s(music_root) or _cfg_music_root(), rec_root) if r]
+        safe = validate_path_under_allowed_roots(rec_path, roots, reject_symlinks=True)
+        if safe is None or _norm_path(safe) != _norm_path(rec_path):
+            return {"ok": False, "code": "recover_rollback_path_unsafe", "operation_id": operation_id,
+                    "mutated": False,
+                    "error": "Recorded file is not under MUSIC_ROOT or no longer matches the recorded path; refusing."}
+
+        ad = _recover_adapter(adapter)
+        db_removed = bool((op.get("progress") or {}).get("db_removed"))
+
+        # Guard B: the item id still maps to the recorded path. Checked while the
+        # DB row is present; a resume after it was already removed skips this --
+        # the content-hash guard (C) still proves the file is this import's.
+        if not db_removed:
+            try:
+                item = ad.get_item(item_id)
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "code": "recover_rollback_lookup_failed", "operation_id": operation_id,
+                        "mutated": False, "error": f"Could not read item {item_id} from Beets: {_s(exc)}"}
+            if not item:
+                return {"ok": False, "code": "recover_rollback_item_missing", "operation_id": operation_id,
+                        "mutated": False,
+                        "error": f"Item {item_id} is no longer in the library; refusing (it may have changed since import)."}
+            if _norm_path(item.get("path")) != _norm_path(rec_path):
+                return {"ok": False, "code": "recover_rollback_item_moved", "operation_id": operation_id,
+                        "mutated": False,
+                        "error": f"Item {item_id} no longer maps to the recorded path; refusing."}
+
+        # Guard C: the file on disk is still the one THIS import created (content
+        # hash + size). A missing file is acceptable ONLY as a crash resume
+        # (the DB row was already removed by a prior attempt).
+        file_present = os.path.isfile(str(safe)) and not os.path.islink(str(safe))
+        if file_present:
+            try:
+                cur_size = os.stat(str(safe)).st_size
+            except OSError:
+                cur_size = None
+            cur_sha = _sha256_file(str(safe))
+            if cur_sha is None or cur_size != rec_size or cur_sha != rec_sha:
+                return {"ok": False, "code": "recover_rollback_tampered", "operation_id": operation_id,
+                        "mutated": False,
+                        "error": "Recorded file changed since import (hash/size mismatch); refusing to delete it."}
+        elif not db_removed:
+            return {"ok": False, "code": "recover_rollback_file_missing", "operation_id": operation_id,
+                    "mutated": False,
+                    "error": "Recorded file is missing or is a symlink; refusing."}
+
+        # ── all guards passed; claim Running and execute the recorded undo ──
+        if status != "Running" and store.transition(operation_id, str(status), "Running") is None:
+            now = store.get(operation_id).get("status")
+            return {"ok": False, "code": "rollback_not_eligible", "status": now, "operation_id": operation_id,
+                    "mutated": False,
+                    "error": f"Only an applied transaction can be rolled back (status is {now})."}
+
+        log: List[str] = []
+        try:
+            # 1) Remove ONLY the recorded item from Beets (no file delete here).
+            if not db_removed:
+                res = ad.remove(item_ids=[item_id], delete_files=False)
+                if isinstance(res, dict) and (res.get("ok") is False or res.get("success") is False):
+                    raise RuntimeError(_s(res.get("error") or "Beets remove failed"))
+                op["progress"] = {"db_removed": True,
+                                  "file_deleted": bool((op.get("progress") or {}).get("file_deleted"))}
+                store.update(operation_id, rollback={"operations": [op]})
+                log.append(f"Removed Beets item {item_id} from the library.")
+
+            # 2) Delete ONLY the single recorded file, re-verified immediately
+            #    before the unlink (TOCTOU): still contained, still the exact
+            #    recorded path, still the recorded content.
+            if os.path.isfile(str(safe)) and not os.path.islink(str(safe)):
+                safe2 = validate_path_under_allowed_roots(str(safe), roots, reject_symlinks=True)
+                if safe2 is None or _norm_path(safe2) != _norm_path(rec_path):
+                    raise RuntimeError("recorded path failed its final containment check")
+                if _sha256_file(str(safe2)) != rec_sha:
+                    raise RuntimeError("recorded file changed just before deletion")
+                os.unlink(str(safe2))
+                log.append(f"Deleted recovered file {safe2}.")
+            op["progress"] = {"db_removed": True, "file_deleted": True}
+        except Exception as exc:  # noqa: BLE001
+            store.transition(operation_id, "Running", "Recovery Required",
+                             rollback={"operations": [op]},
+                             logs=list(tx.get("logs") or []) + log + [f"Rollback stopped: {_s(exc)}"])
+            return {"ok": False, "code": "recover_rollback_failed", "operation_id": operation_id,
+                    "status": "Recovery Required", "mutated": True, "error": _s(exc), "log": log}
+
+        store.transition(
+            operation_id, "Running", "Rolled Back",
+            applied_at=_now(),
+            rollback={"available": False, "reason": "", "operations": [op]},
+            logs=list(tx.get("logs") or []) + log,
+        )
+        return {"ok": True, "status": "Rolled Back", "operation_id": operation_id, "mutated": True,
+                "removed_item_id": item_id, "removed_path": str(safe), "log": log}

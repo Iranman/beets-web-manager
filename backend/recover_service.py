@@ -2835,6 +2835,22 @@ def _recover_import_one(
             )
         except Exception:
             pass
+        # Capture the minimal, verifiable undo (added item id + the single file
+        # copied under MUSIC_ROOT + its content hash/size) on this audited
+        # Import transaction so the import can be rolled back safely later.
+        # Best-effort: a failure here never fails the import -- it only leaves
+        # rollback unavailable for this record.
+        if imported_item_id is not None:
+            try:
+                from backend import transaction_engine as _txe
+                _txe.record_recover_import_rollback(
+                    transactions,
+                    tx_id,
+                    item_id=imported_item_id,
+                    file_path=_s(imported_item.get("path") or ""),
+                )
+            except Exception:
+                pass
 
     # Update the .recover.json sidecar with import provenance
     try:

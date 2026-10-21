@@ -2223,5 +2223,278 @@ class WebmRemuxBeforeBeetsImport(unittest.TestCase):
             self.assertEqual(staged.read_bytes(), before)
 
 
+class _FakeRecoverLib:
+    """Minimal in-memory Beets library for recover-import rollback tests.
+
+    run_import copies the staged file into MUSIC_ROOT and adds exactly one
+    item (what a real singleton import does); remove() drops only the named
+    rows and deletes a file only when delete_files=True (the rollback never
+    asks for that -- it deletes the recorded file itself, under guard).
+    """
+
+    def __init__(self, music_root):
+        self.music_root = str(music_root)
+        self.items = {}
+        self._next = 1
+        self.remove_calls = []
+
+    def item_count(self):
+        return len(self.items)
+
+    def _rows(self):
+        return [dict(it) for it in self.items.values()]
+
+    def find_items_by_query(self, query):
+        return self._rows()
+
+    def find_all_items_by_mbid(self, mbid):
+        return [dict(it) for it in self.items.values() if it.get("mb_trackid") == mbid]
+
+    def get_item(self, iid):
+        it = self.items.get(int(iid))
+        return dict(it) if it else None
+
+    def run_import(self, paths=None, set_fields=None, **kw):
+        sf = set_fields or {}
+        src = (list(paths) if not isinstance(paths, str) else [paths])[0]
+        artist = sf.get("artist") or "Unknown"
+        title = sf.get("title") or "Unknown"
+        dest_dir = os.path.join(self.music_root, artist)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, title + os.path.splitext(src)[1])
+        shutil.copy2(src, dest)
+        iid = self._next
+        self._next += 1
+        self.items[iid] = {
+            "id": iid, "artist": artist, "albumartist": artist, "title": title,
+            "mb_trackid": sf.get("mb_trackid", ""), "path": dest,
+        }
+        return {"ok": True, "success": True}
+
+    def remove(self, item_ids=None, album_ids=None, delete_files=False):
+        self.remove_calls.append({"item_ids": list(item_ids or []), "delete_files": delete_files})
+        removed = 0
+        for iid in item_ids or []:
+            it = self.items.pop(int(iid), None)
+            if it is None:
+                continue
+            removed += 1
+            if delete_files:
+                try:
+                    os.unlink(it["path"])
+                except OSError:
+                    pass
+        return {"success": True, "removed_items": removed}
+
+
+class RecoverImportRollbackTests(unittest.TestCase):
+    """Safe, audited rollback of a newly-imported recovery singleton, with hard
+    safeguards against touching any pre-existing library content."""
+
+    _IDENTITY = {
+        "fingerprint_status": "no_result",
+        "acoustid_status": "no_result",
+        "metadata_agreement": "degraded",
+        "conflicts": ["no_acoustid_result"],
+        "acoustid_match_score": 0.0,
+    }
+
+    def setUp(self):
+        # own_account is only independently verified when the sidecar's
+        # immutable channel_id is a configured owned account (UCmine000).
+        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "UCmine000"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _import_one(self, tmp, fake, *, title, uploader, fname, run="run"):
+        stage_root = Path(tmp) / "recovered" / "soundcloud" / run
+        stage_root.mkdir(parents=True, exist_ok=True)
+        staged = stage_root / fname
+        staged.write_bytes(b"\x00" * 4096)
+        Path(str(staged) + ".recover.json").write_text(json.dumps({
+            "source_url": f"https://soundcloud.com/me/{run}",
+            "source_platform": "soundcloud", "uploader": uploader,
+            "channel_id": "UCmine000", "title": title, "duration": 210.0,
+            "codec": "flac", "quality": "original",
+        }), encoding="utf-8")
+        from backend.transaction_engine import TransactionStore
+        tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+        with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+             mock.patch("backend.app_runtime.transactions", tx_store), \
+             mock.patch("backend.config_layers.music_root", return_value=fake.music_root), \
+             mock.patch.object(recover_service, "recover_integrity_check",
+                               return_value={"ok": True, "duration": 210.0, "duration_verified": True}), \
+             mock.patch.object(recover_service, "inspect_audio_file", return_value={"ok": True, "codec": "flac"}), \
+             mock.patch("backend.acoustid_service._audio_identity_decision", return_value=dict(self._IDENTITY)), \
+             mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+            out = recover_service._recover_import_one(
+                str(staged), [], adapter=fake, auth_basis="own_account")
+        return tx_store, out, staged
+
+    def test_rollback_removes_only_the_recorded_item_and_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            before_items = fake.item_count()
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="My Track", uploader="DJ Me", fname="my_track.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            after_items = fake.item_count()
+
+            # Rollback data was captured on the audited Import transaction.
+            rec = tx_store._read(tx_id)
+            self.assertEqual(rec["operation_type"], "Import")
+            self.assertEqual(rec["status"], "Completed")
+            self.assertEqual(rec["metadata"]["mutation_family"], "recover_import_v1")
+            self.assertTrue(rec["rollback"]["available"])
+            ops = rec["rollback"]["operations"]
+            self.assertEqual(len(ops), 1)
+            self.assertEqual(ops[0]["type"], "remove_recovered_item")
+            self.assertEqual(ops[0]["item_id"], out["imported_item_id"])
+            self.assertTrue(ops[0]["sha256"] and ops[0]["size"] > 0)
+            imported_path = ops[0]["path"]
+            self.assertTrue(os.path.isfile(imported_path))
+
+            # Counts: before=0, after import=1.
+            self.assertEqual(before_items, 0)
+            self.assertEqual(after_items, 1)
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["status"], "Rolled Back")
+            self.assertEqual(res["removed_item_id"], out["imported_item_id"])
+
+            # Item row gone, imported file gone, counts back to pre-import.
+            self.assertEqual(fake.item_count(), before_items)
+            self.assertIsNone(fake.get_item(out["imported_item_id"]))
+            self.assertFalse(os.path.exists(imported_path))
+            # delete_files was NEVER requested of Beets (file handled under guard).
+            self.assertTrue(all(c["delete_files"] is False for c in fake.remove_calls))
+            # Audited terminal state.
+            rec2 = tx_store._read(tx_id)
+            self.assertEqual(rec2["status"], "Rolled Back")
+            self.assertFalse(rec2["rollback"]["available"])
+            self.assertTrue(any("Removed Beets item" in m for m in rec2["logs"]))
+            # Staged original under DOWNLOADS_ROOT is preserved through rollback.
+            self.assertTrue(staged.exists())
+            self.assertEqual(staged.read_bytes(), b"\x00" * 4096)
+
+    def test_rollback_never_touches_preexisting_library_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            # A PRE-EXISTING library item and its real file, present before the
+            # recovery import (different identity so no import-time conflict).
+            pre_dir = os.path.join(music_root, "Existing Artist")
+            os.makedirs(pre_dir, exist_ok=True)
+            pre_path = os.path.join(pre_dir, "Old Song.flac")
+            pre_bytes = b"PREEXISTING-CONTENT" * 64
+            with open(pre_path, "wb") as fh:
+                fh.write(pre_bytes)
+            fake.items[500] = {"id": 500, "artist": "Existing Artist", "albumartist": "Existing Artist",
+                               "title": "Old Song", "mb_trackid": "", "path": pre_path}
+            fake._next = 501
+
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Recovered Track", uploader="New Uploader", fname="rec.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            self.assertEqual(fake.item_count(), 2)
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertTrue(res["ok"], res)
+
+            # Pre-existing item + file UNTOUCHED; only the recovered one removed.
+            self.assertEqual(fake.item_count(), 1)
+            self.assertIsNotNone(fake.get_item(500))
+            self.assertTrue(os.path.isfile(pre_path))
+            with open(pre_path, "rb") as fh:
+                self.assertEqual(fh.read(), pre_bytes)
+
+    def test_rollback_refuses_when_recorded_file_was_tampered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Tamper Track", uploader="DJ Me", fname="t.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            imported_path = tx_store._read(tx_id)["rollback"]["operations"][0]["path"]
+
+            # The recorded file is changed/replaced after import (someone added
+            # to or modified it): hash/size no longer match what was recorded.
+            with open(imported_path, "ab") as fh:
+                fh.write(b"EXTRA-BYTES-ADDED-LATER")
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertFalse(res["ok"], res)
+            self.assertEqual(res["code"], "recover_rollback_tampered")
+
+            # Nothing removed: item + (tampered) file both still present.
+            self.assertEqual(fake.item_count(), 1)
+            self.assertIsNotNone(fake.get_item(out["imported_item_id"]))
+            self.assertTrue(os.path.isfile(imported_path))
+            self.assertEqual(fake.remove_calls, [])
+            self.assertEqual(tx_store._read(tx_id)["status"], "Completed")
+
+    def test_rollback_resumes_after_crash_between_db_and_file_removal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Crash Track", uploader="DJ Me", fname="c.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+            iid = out["imported_item_id"]
+            imported_path = tx_store._read(tx_id)["rollback"]["operations"][0]["path"]
+
+            # Simulate a crash mid-rollback: the Beets row was already removed
+            # and progress persisted, but the file delete had not happened yet,
+            # and the transaction was left Running.
+            fake.items.pop(int(iid), None)
+            rec = tx_store._read(tx_id)
+            op = rec["rollback"]["operations"][0]
+            op["progress"] = {"db_removed": True, "file_deleted": False}
+            tx_store.update(tx_id, status="Running", rollback={"operations": [op]})
+            self.assertTrue(os.path.isfile(imported_path))
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["status"], "Rolled Back")
+            self.assertFalse(os.path.exists(imported_path))
+            self.assertEqual(tx_store._read(tx_id)["status"], "Rolled Back")
+
+    def test_store_rollback_dispatches_to_recover_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Dispatch Track", uploader="DJ Me", fname="d.flac")
+            tx_id = out["transaction_id"]
+            imported_path = tx_store._read(tx_id)["rollback"]["operations"][0]["path"]
+            # The generic store entry point must route to the family executor
+            # (it uses the default adapter, so point it at the fake lib).
+            with mock.patch("backend.beets_adapter.beets_adapter", fake), \
+                 mock.patch("backend.config_layers.music_root", return_value=music_root):
+                res = tx_store.rollback(tx_id)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["status"], "Rolled Back")
+            self.assertFalse(os.path.exists(imported_path))
+
+
 if __name__ == "__main__":
     unittest.main()
