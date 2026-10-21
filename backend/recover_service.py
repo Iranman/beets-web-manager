@@ -1263,10 +1263,116 @@ def _sanitize_persisted_url(url: Any) -> str:
         return _redact_security_text(raw)[:500]
 
 
+# ── authorization: the user's ASSERTED basis kept DISTINCT from independently
+#    VERIFIED evidence (an asserted claim is NEVER copied into a verified_* field) ──
+RECOVER_AUTH_BASES = frozenset({"original_creation", "own_account", "licensed_permission"})
+_RECOVER_AUTH_ERROR = (
+    "authorization basis required "
+    "(original_creation, own_account, or licensed_permission)"
+)
+
+
+def _recover_owned_accounts() -> List[str]:
+    """Operator-configured owned-account identifiers (channel/profile ids or URL
+    fragments), lower-cased, read at call time so a settings/env change takes
+    effect without a reimport. This is the ONLY independent evidence source for
+    an ``own_account`` claim."""
+    raw = _s(os.environ.get("RECOVER_OWNED_ACCOUNTS", "")).strip()
+    return [seg.strip().lower() for seg in raw.split(",") if seg.strip()]
+
+
+def parse_recover_authorization(payload: Optional[Dict[str, Any]]) -> Tuple[str, str, str]:
+    """Extract and validate the asserted ``authorization`` from a fetch/import
+    request body. Returns ``(basis, note, error)``; ``error`` is non-empty when
+    the basis is missing or not one of the three allowed values. Probe does not
+    call this (diagnostics stay open)."""
+    auth = (payload or {}).get("authorization")
+    if not isinstance(auth, dict):
+        return "", "", _RECOVER_AUTH_ERROR
+    basis = _s(auth.get("basis")).strip().lower()
+    note = _s(auth.get("note")).strip()[:1000]
+    if basis not in RECOVER_AUTH_BASES:
+        return "", note, _RECOVER_AUTH_ERROR
+    return basis, note, ""
+
+
+def evaluate_recover_authorization(
+    basis: str,
+    note: str,
+    *,
+    platform: str = "",
+    uploader: str = "",
+    channel: str = "",
+    webpage_url: str = "",
+) -> Dict[str, Any]:
+    """Build the authorization record. Verification exists for ``own_account``
+    ONLY, and only when the probe's uploader/channel/webpage_url matches the
+    operator-configured ``RECOVER_OWNED_ACCOUNTS`` allowlist (case-insensitive
+    substring). ``original_creation`` and ``licensed_permission`` are
+    asserted-only (``verified=False``; no auto-verification mechanism exists).
+    verified_* fields are populated from independent evidence ONLY."""
+    asserted_basis = _s(basis).strip().lower()
+    verified = False
+    verified_basis: Optional[str] = None
+    verified_evidence: Optional[str] = None
+    if asserted_basis == "own_account":
+        candidates = [
+            _s(uploader).strip().lower(),
+            _s(channel).strip().lower(),
+            _s(webpage_url).strip().lower(),
+        ]
+        for entry in _recover_owned_accounts():
+            if any(entry and entry in cand for cand in candidates):
+                verified = True
+                verified_basis = "own_account"
+                verified_evidence = (
+                    f"source account matches owned-accounts allowlist entry '{entry}'"
+                )
+                break
+    return {
+        "asserted_basis": asserted_basis,
+        "asserted_note": _s(note).strip()[:1000],
+        "verified": verified,
+        "verified_basis": verified_basis,
+        "verified_evidence": verified_evidence,
+        "platform": _s(platform).strip().lower()[:40],
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def _sanitize_authorization_record(auth: Any) -> Optional[Dict[str, Any]]:
+    """Whitelist an authorization record for persistence. The generic secret
+    stripper removes any key named ``authorization`` (normally a Bearer
+    credential); this re-admits ONLY our structured, type-checked record with a
+    valid asserted basis and keeps verified_* independent of the asserted claim."""
+    if not isinstance(auth, dict):
+        return None
+    basis = _s(auth.get("asserted_basis")).strip().lower()
+    if basis not in RECOVER_AUTH_BASES:
+        return None
+    verified = bool(auth.get("verified"))
+    vbasis = _s(auth.get("verified_basis")).strip().lower()
+    vev = auth.get("verified_evidence")
+    return {
+        "asserted_basis": basis,
+        "asserted_note": _redact_security_text(_s(auth.get("asserted_note")))[:1000],
+        "verified": verified,
+        "verified_basis": (vbasis or None) if verified else None,
+        "verified_evidence": (_redact_security_text(_s(vev))[:500] if vev else None) if verified else None,
+        "platform": _s(auth.get("platform")).strip().lower()[:40],
+        "recorded_at": _s(auth.get("recorded_at"))[:40],
+    }
+
+
 def _write_provenance(staged_file: str, record: Dict[str, Any]) -> str:
     """Persist provenance next to the staged file for a later import to consume.
     Never contains cookie contents, secret keys, or URL query tokens."""
     clean_rec = _strip_secret_fields_recursive(dict(record or {}), set())
+    # Re-admit the whitelisted authorization record (the generic stripper drops
+    # the 'authorization' key as if it were a Bearer credential).
+    auth_rec = _sanitize_authorization_record((record or {}).get("authorization"))
+    if auth_rec is not None and isinstance(clean_rec, dict):
+        clean_rec["authorization"] = auth_rec
     if isinstance(clean_rec, dict) and clean_rec.get("source_url"):
         clean_rec["source_url"] = _sanitize_persisted_url(clean_rec.get("source_url"))
     sidecar = str(Path(staged_file).with_suffix(Path(staged_file).suffix + ".recover.json"))
@@ -1307,6 +1413,7 @@ _ALLOWED_PERSISTED_RUN_KEYS = frozenset({
     "skipped_existing",
     "import_failed",
     "playlist_coverage",
+    "authorization",
     "retry_of",
     "retry_count",
     "created_at",
@@ -1323,6 +1430,11 @@ def _sanitize_persisted_run(run_record: Dict[str, Any]) -> Dict[str, Any]:
     rec: Dict[str, Any] = {
         k: v for k, v in raw.items() if k in _ALLOWED_PERSISTED_RUN_KEYS
     }
+    # Re-admit the run-level authorization record (stripped by the generic
+    # secret stripper above, which removes any key named 'authorization').
+    top_auth = _sanitize_authorization_record((run_record or {}).get("authorization"))
+    if top_auth is not None:
+        rec["authorization"] = top_auth
     if isinstance(rec.get("urls"), list):
         rec["urls"] = [
             _sanitize_persisted_url(u)
@@ -1333,8 +1445,12 @@ def _sanitize_persisted_run(run_record: Dict[str, Any]) -> Dict[str, Any]:
         items = rec.get(list_key)
         if not isinstance(items, list):
             continue
+        # Originals (index-aligned with the stripped list) so per-item
+        # authorization can be re-admitted after the generic strip removed it.
+        orig_items = (run_record or {}).get(list_key)
+        orig_items = orig_items if isinstance(orig_items, list) else []
         cleaned_items: List[Dict[str, Any]] = []
-        for item in items:
+        for i, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
             c_item = dict(item)
@@ -1344,6 +1460,10 @@ def _sanitize_persisted_run(run_record: Dict[str, Any]) -> Dict[str, Any]:
             for text_field in ("message", "error", "action"):
                 if text_field in c_item and c_item[text_field]:
                     c_item[text_field] = _redact_security_text(_s(c_item[text_field]))[:400]
+            orig = orig_items[i] if i < len(orig_items) and isinstance(orig_items[i], dict) else {}
+            item_auth = _sanitize_authorization_record(orig.get("authorization"))
+            if item_auth is not None:
+                c_item["authorization"] = item_auth
             cleaned_items.append(c_item)
         rec[list_key] = cleaned_items
     return rec
@@ -1475,7 +1595,8 @@ def _has_partial_file(dest_dir: str) -> bool:
 
 
 def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
-                       ydl_module: Any = None) -> Dict[str, Any]:
+                       ydl_module: Any = None,
+                       auth_basis: str = "", auth_note: str = "") -> Dict[str, Any]:
     url = _s(url).strip()
     run_id = _s(run_id).strip() or uuid.uuid4().hex
     try:
@@ -1527,6 +1648,17 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "action": "This item is DRM/EME protected; recover it from the account owner's own source, not here.",
             "message": "all available streams are DRM/EME protected",
         }
+
+    # Authorization: the user's asserted basis, with independent verification for
+    # own_account against the owned-accounts allowlist (the probe's uploader /
+    # webpage_url is the independent evidence). Recorded distinctly on the
+    # provenance sidecar; never gates the fetch itself (DRM refusal stays above).
+    authorization = evaluate_recover_authorization(
+        auth_basis, auth_note,
+        platform=platform,
+        uploader=_s(probe.get("uploader")),
+        webpage_url=_s(probe.get("webpage_url") or url),
+    )
 
     plan = _recover_format_plan(host, probe)
     expected_duration = probe.get("duration")
@@ -1622,6 +1754,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "duration": integrity.get("duration"),
             "run_id": run_id,
             "provenance_status": "recovered",
+            "authorization": authorization,
             "stream_diagnostics": {
                 "protocols": stream_diag.get("protocols") or [],
                 "manifest_types": stream_diag.get("manifest_types") or [],
@@ -1670,6 +1803,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
         "title": first.get("title", ""),
         "uploader": first.get("uploader", ""),
         "authorized_access": bool(auth),
+        "authorization": authorization,
     }
 
 
@@ -1749,6 +1883,8 @@ def verify_and_match_staged_upload(
     artist_hint: str = "",
     title_hint: str = "",
     album_hint: str = "",
+    auth_basis: str = "",
+    auth_note: str = "",
 ) -> Dict[str, Any]:
     """Verify a staged upload's provenance sidecar and audio integrity, then
     resolve identity via AcoustID fingerprinting + MusicBrainz search with a
@@ -1776,6 +1912,41 @@ def verify_and_match_staged_upload(
         return {
             "ok": False,
             "error": _s(media_info.get("error") or "audio inspection failed"),
+            "staged_file": str(resolved),
+        }
+
+    # Authorization gate: independent verification (own_account vs the
+    # owned-accounts allowlist, matched against the sidecar's recorded uploader /
+    # source_url). An asserted-only authorization (verified==False) is NEVER
+    # auto-imported — it is forced to review_required and the asserted claim is
+    # recorded on the sidecar for an operator to confirm. A verified==True claim
+    # proceeds through the existing AcoustID/MusicBrainz identity gate below.
+    authorization = evaluate_recover_authorization(
+        auth_basis, auth_note,
+        platform=_s(sidecar.get("source_platform")),
+        uploader=_s(sidecar.get("uploader")),
+        webpage_url=_s(sidecar.get("source_url")),
+    )
+    if not authorization["verified"]:
+        try:
+            merged = dict(sidecar)
+            merged["authorization"] = authorization
+            merged["provenance_status"] = "recovered"
+            _write_provenance(str(resolved), merged)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "status": "review_required",
+            "final_action": "review",
+            "identity_status": "unverified",
+            "acoustid_status": "not_attempted",
+            "authorization": authorization,
+            "error": (
+                "authorization not independently verified "
+                f"(asserted basis '{authorization['asserted_basis'] or 'none'}'); "
+                "operator confirmation required before import"
+            ),
             "staged_file": str(resolved),
         }
 
@@ -1935,6 +2106,7 @@ def verify_and_match_staged_upload(
         "source_url": _s(sidecar.get("source_url")),
         "source_platform": _s(sidecar.get("source_platform")),
         "authorized_access": bool(sidecar.get("authorized_access")),
+        "authorization": authorization,
         "duration": integrity.get("duration"),
         "codec": _s(media_info.get("codec") or sidecar.get("codec")),
         "lossless": lossless,
@@ -2022,6 +2194,8 @@ def _recover_import_one(
     album_hint: str = "",
     skip_existing: bool = True,
     adapter: Any = None,
+    auth_basis: str = "",
+    auth_note: str = "",
 ) -> Dict[str, Any]:
     """Verify one staged recovery file and import it into Beets as a singleton
     via ``beets_adapter.run_import`` with ``autotag=False``,
@@ -2034,6 +2208,8 @@ def _recover_import_one(
         artist_hint=artist_hint,
         title_hint=title_hint,
         album_hint=album_hint,
+        auth_basis=auth_basis,
+        auth_note=auth_note,
     )
     if not verified.get("ok"):
         err = _s(verified.get("error") or "verification failed")
@@ -2045,6 +2221,7 @@ def _recover_import_one(
             "status": ver_status,
             "final_action": _s(verified.get("final_action") or "reject"),
             "provenance_status": "recovered" if ver_status in ("identity_conflict", "review_required") else "unavailable",
+            "authorization": verified.get("authorization"),
             "error": err,
         }
 
@@ -2107,6 +2284,7 @@ def _recover_import_one(
                 "staged_file": resolved_file,
                 "source_url": _sanitize_persisted_url(verified.get("source_url") or ""),
                 "match_source": match_source,
+                "authorization": _sanitize_authorization_record(verified.get("authorization")) or {},
             },
         )
         if isinstance(tx, dict):
@@ -2281,6 +2459,7 @@ def _recover_import_one(
             "album": album,
             "mb_trackid": mb_trackid,
             "match_source": match_source,
+            "authorization": verified.get("authorization"),
         })
         _write_provenance(resolved_file, sidecar_data)
 
@@ -2302,6 +2481,7 @@ def _recover_import_one(
         "match_source": match_source,
         "source_url": _sanitize_persisted_url(verified.get("source_url") or ""),
         "source_platform": verified.get("source_platform") or "",
+        "authorization": verified.get("authorization"),
         "transaction_id": tx_id,
         "beets": import_res if isinstance(import_res, dict) else {},
     }
@@ -2406,6 +2586,8 @@ def recover_import_job(
     metadata_by_file: Optional[Dict[str, Dict[str, Any]]] = None,
     skip_existing: bool = True,
     adapter: Any = None,
+    auth_basis: str = "",
+    auth_note: str = "",
 ) -> Dict[str, Any]:
     """Verify and import staged recovery files into Beets, update persisted run
     records, and refresh playlist coverage."""
@@ -2427,6 +2609,8 @@ def recover_import_job(
             album_hint=_s(hints.get("album") or ""),
             skip_existing=True,
             adapter=adapter,
+            auth_basis=auth_basis,
+            auth_note=auth_note,
         )
         if res.get("imported"):
             imported.append(res)
@@ -2471,7 +2655,8 @@ def recover_import_job(
 def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
                       *, run_id: str = "", ydl_module: Any = None,
                       auto_import: bool = False, retry_of: str = "",
-                      retry_count: int = 0, adapter: Any = None) -> Dict[str, Any]:
+                      retry_count: int = 0, adapter: Any = None,
+                      auth_basis: str = "", auth_note: str = "") -> Dict[str, Any]:
     """Fetch + stage each URL under DOWNLOADS_ROOT. Optionally imports verified
     staged files when ``auto_import=True``. Persists run state in
     ``recover_runs.json`` for retry support."""
@@ -2482,6 +2667,10 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
     if cookie_state.get("state") != "ok":
         log.append(f"  [recover] Cookie state: {cookie_state.get('state')} — {cookie_state.get('message')}")
 
+    # Run-level authorization: the asserted claim for this request (per-item
+    # independent verification lives on each recovered item and sidecar).
+    run_authorization = evaluate_recover_authorization(auth_basis, auth_note)
+
     _upsert_recover_run({
         "run_id": run_id,
         "status": "running",
@@ -2489,6 +2678,7 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
         "urls": list(urls),
         "recovered": [],
         "failed": [],
+        "authorization": run_authorization,
         "retry_of": _s(retry_of),
         "retry_count": int(retry_count or 0),
     })
@@ -2498,7 +2688,8 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
             raise RuntimeError("cancelled")
         log.append(f"[recover] [{idx}/{len(urls)}] {_sanitize_persisted_url(url) or url}")
         # Per-item sub-run id keeps multiple items in one job isolated too.
-        result = _recover_fetch_one(url, log, run_id=f"{run_id}-{idx}", ydl_module=ydl_module)
+        result = _recover_fetch_one(url, log, run_id=f"{run_id}-{idx}", ydl_module=ydl_module,
+                                    auth_basis=auth_basis, auth_note=auth_note)
         if result.get("recovered"):
             recovered.append(result)
         else:
@@ -2543,6 +2734,8 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
                 cancel_event,
                 run_id=run_id,
                 adapter=adapter,
+                auth_basis=auth_basis,
+                auth_note=auth_note,
             )
             summary["import_summary"] = import_summary
             import_failed_items = list(import_summary.get("failed") or [])
@@ -2581,6 +2774,7 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
         "skipped_existing": skipped_existing_items,
         "import_failed": import_failed_items,
         "playlist_coverage": (summary.get("import_summary") or {}).get("playlist_coverage") or {},
+        "authorization": run_authorization,
         "retry_of": _s(retry_of),
         "retry_count": int(retry_count or 0),
     })
@@ -2606,6 +2800,11 @@ def start_recover_fetch(payload_in: Dict[str, Any]) -> Any:
     urls = [u for u in urls if not (u in seen or seen.add(u))]
     if not urls:
         return {"ok": False, "error": "one or more URLs are required"}, 200
+
+    # Authorization basis is required for fetch (diagnostics/probe stay open).
+    auth_basis, auth_note, auth_err = parse_recover_authorization(data)
+    if auth_err:
+        return {"ok": False, "error": auth_err}, 200
 
     # Validate the allowlist/SSRF guard up front, before any job exists.
     for url in urls:
@@ -2640,6 +2839,8 @@ def start_recover_fetch(payload_in: Dict[str, Any]) -> Any:
             auto_import=auto_import,
             retry_of=retry_of,
             retry_count=retry_count,
+            auth_basis=auth_basis,
+            auth_note=auth_note,
         )
 
     label = f"Recover uploads: {len(urls)} item(s)" + (" (retry)" if retry_of else "")
@@ -2674,6 +2875,18 @@ def start_recover_retry(payload_in: Dict[str, Any]) -> Any:
     parent = recover_get_run(parent_run_id)
     if not isinstance(parent, dict):
         return {"ok": False, "error": f"recovery run '{parent_run_id}' not found"}, 200
+
+    # Carry authorization forward: the retry payload's own basis, else the parent
+    # run's recorded asserted basis. The downstream fetch/import services enforce
+    # that a valid basis is present (they reject otherwise with the clear error).
+    retry_auth = data.get("authorization")
+    if not isinstance(retry_auth, dict):
+        parent_auth = parent.get("authorization") if isinstance(parent.get("authorization"), dict) else {}
+        if _s(parent_auth.get("asserted_basis")).strip():
+            retry_auth = {
+                "basis": parent_auth.get("asserted_basis"),
+                "note": parent_auth.get("asserted_note") or "",
+            }
 
     include_drm = bool(data.get("include_drm", False))
     recovered_urls = {
@@ -2717,6 +2930,7 @@ def start_recover_retry(payload_in: Dict[str, Any]) -> Any:
             imp_body, imp_status = start_recover_import({
                 "run_id": parent_run_id,
                 "staged_files": import_failed_files,
+                "authorization": retry_auth,
             })
             if isinstance(imp_body, dict) and imp_body.get("ok"):
                 imp_body["retried_staged_files"] = list(import_failed_files)
@@ -2730,6 +2944,7 @@ def start_recover_retry(payload_in: Dict[str, Any]) -> Any:
         "auto_import": bool(data.get("auto_import", False)),
         "retry_of": parent_run_id,
         "retry_count": next_retry_count,
+        "authorization": retry_auth,
     })
     if isinstance(body, dict) and body.get("ok"):
         body["retried_urls"] = list(retry_urls)
@@ -2744,6 +2959,12 @@ def start_recover_import(payload_in: Dict[str, Any]) -> Any:
     from backend.app_runtime import jobs
 
     data = payload_in or {}
+
+    # Authorization basis is required for import, exactly as for fetch.
+    auth_basis, auth_note, auth_err = parse_recover_authorization(data)
+    if auth_err:
+        return {"ok": False, "error": auth_err}, 200
+
     run_id = _s(data.get("run_id") or "").strip()
     staged_files: List[str] = []
     metadata_by_file: Dict[str, Dict[str, Any]] = {}
@@ -2805,6 +3026,8 @@ def start_recover_import(payload_in: Dict[str, Any]) -> Any:
             run_id=run_id,
             metadata_by_file=metadata_by_file,
             skip_existing=skip_existing,
+            auth_basis=auth_basis,
+            auth_note=auth_note,
         )
 
     label = f"Import recovered uploads: {len(validated_paths)} item(s)"

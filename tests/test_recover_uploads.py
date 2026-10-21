@@ -119,7 +119,8 @@ class GuardStillRejectsOnRecoverEntry(unittest.TestCase):
 
     def test_fetch_rejects_bad_url_before_job(self):
         body, status = recover_service.start_recover_fetch(
-            {"urls": ["https://attacker.example/x", "file:///etc/passwd"]})
+            {"urls": ["https://attacker.example/x", "file:///etc/passwd"],
+             "authorization": {"basis": "original_creation", "note": "mine"}})
         self.assertEqual(status, 200)
         self.assertFalse(body["ok"])
 
@@ -1018,6 +1019,14 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
     """Phase 2 (8): audio verification, AcoustID fingerprinting, MusicBrainz
     matching, and singleton fallback for original/unreleased uploads."""
 
+    def setUp(self):
+        # The staged sidecar's uploader is "DJ Self"; an own_account claim is
+        # independently verified against this allowlist so these identity-gate
+        # tests reach the AcoustID/MusicBrainz logic (verified==True).
+        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj self"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _stage_with_sidecar(self, tmp_dir: str, fname: str = "track.flac") -> str:
         stage_root = Path(tmp_dir) / "recovered"
         run_dir = stage_root / "youtube" / "run1"
@@ -1049,7 +1058,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                      "mb_release_group_id_candidate": "rg-456",
                      "candidates": [{"artist": "DJ Self", "title": "My Unreleased VIP", "album": "Self Released EP"}],
                  }):
-                res = recover_service.verify_and_match_staged_upload(audio_path)
+                res = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["match_source"], "acoustid")
         self.assertEqual(res["mb_trackid"], "rec-123")
@@ -1075,7 +1084,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                      "acoustid_match_score": 0.0,
                  }), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]) as mock_mb_search:
-                res = recover_service.verify_and_match_staged_upload(audio_path)
+                res = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["match_source"], "upload_metadata_singleton")
         self.assertEqual(res["mb_trackid"], "")
@@ -1099,7 +1108,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                      "mb_recording_id_candidate": "wrong-rec-999",
                      "conflicts": ["acoustid_artist_mismatch"],
                  }):
-                res_reject = recover_service.verify_and_match_staged_upload(audio_path)
+                res_reject = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
             self.assertFalse(res_reject["ok"])
             self.assertEqual(res_reject["status"], "identity_conflict")
             self.assertEqual(res_reject["final_action"], "reject")
@@ -1116,7 +1125,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                      "final_action": "review",
                      "acoustid_match_score": 0.0,
                  }):
-                res_review = recover_service.verify_and_match_staged_upload(audio_path)
+                res_review = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
             self.assertFalse(res_review["ok"])
             self.assertEqual(res_review["status"], "review_required")
             self.assertEqual(res_review["final_action"], "review")
@@ -1141,7 +1150,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                      "acoustid_match_score": 0.0,
                  }), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]):
-                res = recover_service.verify_and_match_staged_upload(audio_path)
+                res = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["match_source"], "upload_metadata_singleton")
         self.assertEqual(res["mb_trackid"], "")
@@ -1164,7 +1173,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                      "conflicts": ["acoustid_lookup_failed"],
                      "acoustid_match_score": 0.0,
                  }):
-                res = recover_service.verify_and_match_staged_upload(audio_path)
+                res = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
         self.assertFalse(res["ok"], res)
         self.assertEqual(res["status"], "review_required")
         self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
@@ -1188,7 +1197,7 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
                          "conflicts": [f"acoustid_{status}"],
                          "acoustid_match_score": 0.0,
                      }):
-                    res = recover_service.verify_and_match_staged_upload(audio_path)
+                    res = recover_service.verify_and_match_staged_upload(audio_path, auth_basis="own_account")
             self.assertFalse(res["ok"], (status, res))
             self.assertEqual(res["status"], "review_required", (status, res))
             self.assertNotEqual(res.get("match_source"), "upload_metadata_singleton")
@@ -1197,6 +1206,14 @@ class AudioVerificationFingerprintingAndMatching(unittest.TestCase):
 class SafeStagingAndBeetsImport(unittest.TestCase):
     """Phase 2 (9-10): safe staging validation, non-destructive Beets import,
     existing library file protection, and playlist coverage refresh."""
+
+    def setUp(self):
+        # Staged sidecars here use uploaders "Me" / "DJ Me"; own_account is
+        # verified against this allowlist so the import path proceeds to the
+        # existing-library / Beets-import logic under test (verified==True).
+        patcher = mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "me,dj me"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_import_rejects_paths_outside_staging_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1240,7 +1257,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                      "acoustid_match_score": 0.0,
                  }), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]):
-                out = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter)
+                out = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter, auth_basis="own_account")
 
             self.assertFalse(out["imported"])
             self.assertEqual(out["status"], "skipped_existing")
@@ -1292,7 +1309,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                      "acoustid_match_score": 0.0,
                  }), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]):
-                out = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter)
+                out = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter, auth_basis="own_account")
 
             self.assertTrue(out["imported"], out)
             self.assertEqual(out["imported_item_id"], 99)
@@ -1375,7 +1392,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                                    return_value={"ok": True, "codec": "flac"}), \
                  mock.patch("backend.acoustid_service._audio_identity_decision", return_value={"acoustid_status": "no_match"}), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]):
-                out_skip = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter_skip)
+                out_skip = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter_skip, auth_basis="own_account")
             self.assertFalse(out_skip["imported"])
             self.assertEqual(out_skip["status"], "import_failed")
             self.assertIn("blank_identity", out_skip["error"])
@@ -1391,7 +1408,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                                    return_value={"ok": True, "codec": "flac"}), \
                  mock.patch("backend.acoustid_service._audio_identity_decision", return_value={"acoustid_status": "no_match"}), \
                  mock.patch("helpers_mb._mb_recording_search", return_value=[]):
-                out_noread = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter_noread)
+                out_noread = recover_service._recover_import_one(str(staged), [], adapter=fake_adapter_noread, auth_basis="own_account")
             self.assertFalse(out_noread["imported"])
             self.assertEqual(out_noread["status"], "import_failed")
             self.assertIn("without adding item to library", out_noread["error"])
@@ -1454,6 +1471,7 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                     ydl_module=_make_fake(),
                     auto_import=True,
                     adapter=fake_adapter,
+                    auth_basis="own_account",
                 )
                 self.assertFalse(summary["ok"])
                 self.assertTrue(summary["partial"])
@@ -1474,6 +1492,189 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
                 self.assertTrue(retry_body["ok"])
                 self.assertEqual(len(retry_body["retried_staged_files"]), 1)
                 mock_imp.assert_called_once()
+
+
+class AuthorizationAndProvenance(unittest.TestCase):
+    """Authorization + provenance workflow: a required, validated asserted basis
+    kept DISTINCT from independently verified evidence, gating import."""
+
+    def _stage(self, tmp, *, platform="soundcloud", uploader="DJ Me",
+               fname="t.flac", title="My Track",
+               source_url="https://soundcloud.com/me/my-track"):
+        run_dir = Path(tmp) / "recovered" / platform / "run1"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        audio = run_dir / fname
+        audio.write_bytes(b"\x00" * 4096)
+        Path(str(audio) + ".recover.json").write_text(
+            ('{"source_url": "%s", "source_platform": "%s", "uploader": "%s", '
+             '"title": "%s", "duration": 200.0, "codec": "flac", "quality": "original"}')
+            % (source_url, platform, uploader, title),
+            encoding="utf-8",
+        )
+        return str(audio)
+
+    @contextlib.contextmanager
+    def _import_patches(self, tmp, *, identity=None):
+        identity = identity or {"acoustid_status": "no_result",
+                                "conflicts": ["no_acoustid_result"],
+                                "acoustid_match_score": 0.0}
+        with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+             mock.patch.object(recover_service, "recover_integrity_check",
+                               return_value={"ok": True, "duration": 200.0, "duration_verified": True}), \
+             mock.patch.object(recover_service, "inspect_audio_file",
+                               return_value={"ok": True, "codec": "flac"}), \
+             mock.patch("backend.acoustid_service._audio_identity_decision", return_value=identity), \
+             mock.patch("helpers_mb._mb_recording_search", return_value=[]):
+            yield
+
+    # ── (1) a valid basis is required; an invalid basis is rejected ──
+    def test_fetch_and_import_require_a_valid_basis(self):
+        f_none, s1 = recover_service.start_recover_fetch(
+            {"urls": ["https://www.youtube.com/watch?v=x"]})
+        self.assertEqual(s1, 200)
+        self.assertFalse(f_none["ok"])
+        self.assertIn("authorization basis required", f_none["error"])
+
+        f_bad, _ = recover_service.start_recover_fetch(
+            {"urls": ["https://www.youtube.com/watch?v=x"],
+             "authorization": {"basis": "because_i_feel_like_it"}})
+        self.assertFalse(f_bad["ok"])
+        self.assertIn("authorization basis required", f_bad["error"])
+
+        i_none, s2 = recover_service.start_recover_import({"staged_files": ["/x/y.flac"]})
+        self.assertEqual(s2, 200)
+        self.assertFalse(i_none["ok"])
+        self.assertIn("authorization basis required", i_none["error"])
+
+        i_bad, _ = recover_service.start_recover_import(
+            {"staged_files": ["/x/y.flac"], "authorization": {"basis": "nope"}})
+        self.assertFalse(i_bad["ok"])
+        self.assertIn("authorization basis required", i_bad["error"])
+
+    # ── (2) own_account WITH allowlisted account -> verified -> auto-import ──
+    def test_own_account_allowlisted_is_verified_and_auto_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, uploader="DJ Me")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.side_effect = [
+                [],
+                [{"id": 7, "title": "My Track", "artist": "DJ Me", "path": "/music/DJ Me/My Track.flac"}],
+            ]
+            fake_adapter.run_import.return_value = {"ok": True, "success": True}
+            from backend.transaction_engine import TransactionStore
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}), \
+                 mock.patch("backend.app_runtime.transactions", tx_store):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account",
+                    auth_note="my soundcloud")
+            self.assertTrue(out["imported"], out)
+            self.assertEqual(out["status"], "imported")
+            fake_adapter.run_import.assert_called_once()
+            # (6) transaction metadata records asserted + verified distinctly.
+            tx_rec = tx_store._read(out["transaction_id"])
+            auth = tx_rec["metadata"]["authorization"]
+            self.assertEqual(auth["asserted_basis"], "own_account")
+            self.assertEqual(auth["asserted_note"], "my soundcloud")
+            self.assertTrue(auth["verified"])
+            self.assertEqual(auth["verified_basis"], "own_account")
+            self.assertIn("allowlist", auth["verified_evidence"])
+            # The asserted note is never copied into the verified evidence.
+            self.assertNotIn("my soundcloud", auth["verified_evidence"])
+
+    # ── (3) own_account NOT on allowlist -> unverified -> review, no import ──
+    def test_own_account_not_allowlisted_is_review_required_no_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = self._stage(tmp, uploader="Someone Else")
+            fake_adapter = mock.MagicMock()
+            fake_adapter.find_items_by_query.return_value = []
+            with self._import_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                out = recover_service._recover_import_one(
+                    staged, [], adapter=fake_adapter, auth_basis="own_account")
+            self.assertFalse(out["imported"])
+            self.assertEqual(out["status"], "review_required")
+            self.assertFalse(out["authorization"]["verified"])
+            fake_adapter.run_import.assert_not_called()
+
+    # ── (4) original_creation / licensed_permission are asserted-only -> review ──
+    def test_asserted_only_bases_are_review_required_no_import(self):
+        for basis in ("original_creation", "licensed_permission"):
+            with tempfile.TemporaryDirectory() as tmp:
+                staged = self._stage(tmp, uploader="DJ Me")
+                fake_adapter = mock.MagicMock()
+                fake_adapter.find_items_by_query.return_value = []
+                # Even with the uploader on the allowlist, these never verify.
+                with self._import_patches(tmp), \
+                     mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                    out = recover_service._recover_import_one(
+                        staged, [], adapter=fake_adapter, auth_basis=basis)
+                self.assertFalse(out["imported"], basis)
+                self.assertEqual(out["status"], "review_required", basis)
+                self.assertFalse(out["authorization"]["verified"], basis)
+                self.assertEqual(out["authorization"]["asserted_basis"], basis)
+                self.assertIsNone(out["authorization"]["verified_basis"], basis)
+                fake_adapter.run_import.assert_not_called()
+
+    # ── (5) DRM-protected is refused on fetch regardless of basis ──
+    def test_drm_protected_fetch_is_refused_regardless_of_basis(self):
+        drm_info = {
+            "title": "Protected", "uploader": "DJ Me", "duration": 180,
+            "webpage_url": "https://www.youtube.com/watch?v=drm",
+            "formats": [{"format_id": "wv", "protocol": "http_dash_segments",
+                         "ext": "m4a", "acodec": "mp4a.40.2",
+                         "has_drm": True, "drm": "widevine"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=drm", [], run_id="r",
+                    ydl_module=_make_fake(info=drm_info),
+                    auth_basis="own_account")
+        self.assertFalse(out["recovered"])
+        self.assertEqual(out["category"], "genuinely-DRM")
+
+    # ── (6) provenance sidecar records asserted + verified distinctly ──
+    def test_fetch_sidecar_records_asserted_and_verified_distinctly(self):
+        import json as _json
+        info = {"title": "Mine", "uploader": "DJ Me", "duration": 200,
+                "webpage_url": "https://www.youtube.com/watch?v=abc", "formats": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=abc", [], run_id="r",
+                    ydl_module=_make_fake(info=info, filename="mine.opus"),
+                    auth_basis="own_account", auth_note="my channel upload")
+            self.assertTrue(out["recovered"], out)
+            sidecar = _json.loads(Path(out["provenance"]).read_text(encoding="utf-8"))
+            auth = sidecar["authorization"]
+            self.assertEqual(auth["asserted_basis"], "own_account")
+            self.assertEqual(auth["asserted_note"], "my channel upload")
+            self.assertTrue(auth["verified"])
+            self.assertEqual(auth["verified_basis"], "own_account")
+            self.assertIn("allowlist", auth["verified_evidence"])
+            self.assertNotIn("my channel upload", auth["verified_evidence"])
+
+    def test_asserted_only_fetch_sidecar_is_unverified(self):
+        import json as _json
+        info = {"title": "Mine", "uploader": "DJ Me", "duration": 200,
+                "webpage_url": "https://www.youtube.com/watch?v=abc", "formats": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            with _fetch_patches(tmp), \
+                 mock.patch.dict(os.environ, {"RECOVER_OWNED_ACCOUNTS": "dj me"}):
+                out = recover_service._recover_fetch_one(
+                    "https://www.youtube.com/watch?v=abc", [], run_id="r",
+                    ydl_module=_make_fake(info=info, filename="mine.opus"),
+                    auth_basis="original_creation", auth_note="I made this")
+            sidecar = _json.loads(Path(out["provenance"]).read_text(encoding="utf-8"))
+            auth = sidecar["authorization"]
+            self.assertEqual(auth["asserted_basis"], "original_creation")
+            self.assertFalse(auth["verified"])
+            self.assertIsNone(auth["verified_basis"])
+            self.assertIsNone(auth["verified_evidence"])
 
 
 if __name__ == "__main__":

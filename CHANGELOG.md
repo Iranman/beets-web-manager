@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- **Recover My Uploads — authorization + provenance.** Recover fetch and import now require an `authorization` object `{basis, note}` on the request. `basis` must be one of `original_creation`, `own_account`, or `licensed_permission`; a missing or invalid basis is refused with `authorization basis required (...)` (the probe/diagnostics routes stay open). The user's **asserted** claim is recorded separately from **independently verified** evidence on all three of the provenance sidecar, the recovery run record, and the import transaction metadata, as `authorization: {asserted_basis, asserted_note, verified, verified_basis, verified_evidence, platform, recorded_at}`; an asserted claim is never copied into a `verified_*` field. Only `own_account` can be verified, and only when the source account (the probe's uploader/channel/webpage URL) matches the new operator-configured `RECOVER_OWNED_ACCOUNTS` allowlist (case-insensitive); `original_creation` and `licensed_permission` are asserted-only. The import gate uses this: a verified upload proceeds through the existing AcoustID/MusicBrainz identity gate unchanged, while an asserted-only (unverified) upload is forced to `review_required` and is never auto-imported, so an operator can confirm it. DRM refusal, staged-root confinement, the never-overwrite-a-library-item rule, the identity gate, and the yt-dlp host-allowlist/SSRF guard are all unchanged. New config `RECOVER_OWNED_ACCOUNTS` (see `docs/CONFIGURATION.md`).
+
 ## v0.10.0 - 2026-10-21
 
 ### Added
