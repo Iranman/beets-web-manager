@@ -45,6 +45,7 @@ The project uses Semantic Versioning.
 
 - `scripts/run_tests.py` now fails the run, after dumping every worker's thread stacks, if no test unit finishes within `RUN_TESTS_STALL_TIMEOUT` seconds (default 900), so a wedged worker surfaces in minutes with evidence instead of blocking to GitHub's 6-hour job ceiling (#466).
 - `tests/test_plugin_import_autotag.py` now pins Beets' metadata-source lookup to none per test, so its documented "no metadata-source plugin loaded, so no candidates" path stays deterministic and offline even when a sibling in-process test leaves a metadata source (e.g. musicbrainz) in Beets' process-global plugin registry (#466).
+- `test_shipped_example_config_loads_every_plugin` is skipped (with reason) when `ffmpeg` is not on PATH, and runs its full assertion otherwise. config.yaml.example enables `replaygain` with the ffmpeg backend, which needs `ffmpeg` to load; it ships in the published image (where the acceptance jobs validate the shipped config) but is absent on the bare CI runner, where that one plugin legitimately cannot load (#466).
 
 ### Security
 

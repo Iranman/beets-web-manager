@@ -311,6 +311,13 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual(out["stats_error"][1], "BEETS_EMBEDDED_UNAVAILABLE")
         self.assertIn("discpath", out["stats_error"][2])
 
+    @unittest.skipUnless(
+        shutil.which("ffmpeg"),
+        "config.yaml.example enables replaygain with the ffmpeg backend, which needs "
+        "ffmpeg on PATH to load; ffmpeg ships in the published image (and in "
+        "Dockerfile.test / the acceptance jobs) but is absent on a bare CI runner "
+        "(the self-test's ffmpeg_missing check), where replaygain legitimately cannot "
+        "load. The shipped config is validated where it actually runs -- the image.")
     def test_shipped_example_config_loads_every_plugin(self):
         # config.yaml.example is what the install docs tell users to start
         # from; every plugin it lists must load inside Web Manager.
