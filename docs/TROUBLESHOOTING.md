@@ -38,7 +38,7 @@ Beets runs inside Web Manager, which checks it at startup. `GET /api/health` lis
 ### 1. `pull access denied for beets-web-manager`
 * **Cause**: Incorrect image tag or registry name.
 * **Fix**:
-  1. For standard deployments: Use the production `docker-compose.yml` with the published image `ghcr.io/iranman/beets-web-manager:latest` (replace `latest` with an exact version such as `0.8.1` to pin).
+  1. For standard deployments: Use the production `docker-compose.yml` with the published image `ghcr.io/iranman/beets-web-manager:latest` (replace `latest` with an exact version such as `0.9.0` to pin).
   2. For development builds from source: Run `docker compose -f docker-compose.dev.yml up -d --build`.
 
 ---
