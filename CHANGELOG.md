@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.13.1 - 2026-10-22
+
+### Security
+
+- **Frontend `next` bumped `16.4.0 → 16.4.2` to clear a CRITICAL RCE and a HIGH DoS advisory** flagged by the `security` frontend-audit step. Dependency bump only; no application behaviour or configuration change.
 
 ### Fixed
 
