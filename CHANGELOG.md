@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Starting a fresh AI-batch source scan (e.g. of `/downloads`) no longer fails immediately with "ERROR: expected_revision is required to update existing batch …".** `_start_ai_batch_job` creates — and bumps the revision of — the batch's durable store row before it unblocks the worker thread, but on a fresh (non-recover) run the worker's `_run_ai_batch_import` built a brand-new `_ai_batch_initial_state`, which carries no `revision`. Its first `_ai_batch_commit` therefore attempted an *un-revisioned* update of the already-existing row, which the ARCH-010 optimistic-concurrency (CAS) contract correctly rejects. The worker now loads the persisted row first (for the non-recover path too) and threads its current revision through every commit, so the scan proceeds and the stale-writer guard stays fully intact. The CAS contract itself is unchanged — an un-revisioned update of an existing batch is still refused; the fix is in the caller, which now passes the revision the state was last read at. Regression test: `tests/test_ai_batch_retry_race.py::FreshBatchSourceScanRevisionTests`.
+
 ## v0.13.2 - 2026-10-22
 
 ### Security
