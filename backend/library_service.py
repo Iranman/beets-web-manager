@@ -3882,6 +3882,27 @@ def _placeholder_folder_db(adapter: Any = None) -> Dict[str, Dict[str, Any]]:
     return folder_db
 
 
+def _placeholder_folder_tracked(folder_db: Dict[str, Dict[str, Any]], key: str) -> Tuple[List[int], int]:
+    """Descendant-aware (not immediate-dirname-only) tracked lookup for the
+    apply/preview top gate, so a DB-tracked album whose tracks live under a
+    DISC SUBFOLDER is HELD identically in preview and apply (C6) -- matching
+    the engine's refusal, which is descendant-aware (``_library_refs_under``
+    uses ``startswith``). Returns (album_ids, item_count) summed over the
+    folder itself and every folder beneath it.
+
+    ponytail: O(candidates x dirnames) scan; the candidate list is the small
+    placeholder subset and this is a cleanup path, not hot. Key by ancestor if
+    it ever shows up hot."""
+    prefix = key.rstrip(os.sep) + os.sep
+    album_ids: set = set()
+    item_count = 0
+    for dk, slot in folder_db.items():
+        if dk == key or dk.startswith(prefix):
+            album_ids |= set(slot.get("album_ids") or ())
+            item_count += int(slot.get("item_count") or 0)
+    return sorted(album_ids), item_count
+
+
 def _ops_cover_source(operations: List[Dict[str, Any]], source: Any) -> bool:
     """True when ``operations`` already carries a write-ahead marker for this
     source folder (so resume need not re-recover it)."""
@@ -3895,12 +3916,17 @@ def _find_applied_folder_op(source: Any, store: Any = None) -> Optional[Dict[str
     rollback record, to recover an apply that crashed after the physical
     rename but before its op reached the job checkpoint (F2). Returns the most
     recent matching ``{operation_id, kind}`` or ``None`` when nothing applied."""
-    # ponytail: full store scan via list(query=...); recovery is a rare
-    # post-crash path, so an index isn't worth it. Add one if it shows up hot.
+    # C8: scan rows and match the STRUCTURED source (moved_records below), NOT
+    # query=str(source) -- the query does a substring match on JSON-serialized
+    # fields, so a folder name with a double-quote or backslash never matches
+    # its escaped form (silent recovery miss).
+    # ponytail: newest 500 rows (st.list caps there); recovery is the resume
+    # right after the crash, so the op we want is always recent. Paginate if a
+    # deployment ever buries it under 500 newer transactions.
     st = store or composite_workflows.get_default_store()
     key = _placeholder_norm_path(source)
     try:
-        rows, _total = st.list(query=str(source), limit=500)
+        rows, _total = st.list(limit=500)
     except Exception:
         return None
     for row in rows:  # newest first
@@ -4010,9 +4036,9 @@ def _apply_folder_name_placeholders(
         processed += 1
         source = Path(folder)
         proposed = _canonical_folder_name(source)
-        slot = folder_db.get(key) or {}
-        album_ids = sorted(slot.get("album_ids") or [])
-        item_count = int(slot.get("item_count") or 0)
+        # C6: descendant-aware, matching the engine's DB-reference refusal, so a
+        # disc-subfolder album is held in preview and apply alike (preview==apply).
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, key)
         tracked = item_count > 0
         record = {
             "folder": str(source),
@@ -4044,7 +4070,13 @@ def _apply_folder_name_placeholders(
             # Preview never emits ops, so recovery is apply-only.
             if not dry_run and not _ops_cover_source(operations, source):
                 recovered = _find_applied_folder_op(source, store)
-                if recovered:
+                # C4: dedupe by operation_id. Carried prior_operations and
+                # F1-captured failure ops have no "source" key, so
+                # _ops_cover_source can't see them; without this, a resume
+                # re-recovers an op already present, which then rolls back
+                # twice and reports rollback_not_eligible on the second pass.
+                if recovered and not any(
+                        o.get("operation_id") == recovered["operation_id"] for o in operations):
                     operations.append(recovered)
             skipped.append({**record, "reason": "source_missing"})
             done_folders.append(str(source))
@@ -4094,9 +4126,14 @@ def _apply_folder_name_placeholders(
             applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
             _emit(str(source), "renamed")
         elif res.get("code") == "folder_cleanup_db_references":
-            # A disk-only row that gained Beets items under it since the scan
-            # (e.g. items in a disc subfolder). Never bare-renamed; surfaced
-            # for a manual relocation instead.
+            # A disk-only row that gained Beets items under it since the
+            # folder_db snapshot (a genuine race; the common disc-subfolder
+            # case is now held at the top gate, C6). Never bare-renamed;
+            # surfaced for a manual relocation instead.
+            # C5: nothing mutated, so refund the batch budget -- only rows that
+            # actually mutated count against batch_limit, else a persistent
+            # became_tracked skip consumes the budget and resume stalls.
+            attempted -= 1
             skipped.append({**record, "reason": "became_tracked_needs_relocation",
                             "error": res.get("error")})
             _emit(str(source), "skipped (now DB-tracked -- needs relocation)")
@@ -4181,6 +4218,14 @@ def _rollback_folder_placeholder_apply(
             continue
         if res.get("ok"):
             rolled_back.append({"operation_id": op_id, "kind": kind, "status": res.get("status")})
+        elif res.get("code") == "rollback_not_eligible":
+            # C7: the op provably wrote nothing (an unapplied status: a failed
+            # safe_rename that returned an operation_id but mutated nothing --
+            # not_approved/already_applied), or it is already Rolled Back. Either
+            # way the folder is already in its original state, so this is a
+            # rollback no-op, not a failure of rollback-by-job.
+            rolled_back.append({"operation_id": op_id, "kind": kind,
+                                "status": res.get("status"), "noop": True})
         else:
             errors.append({"operation_id": op_id, "kind": kind,
                            "code": res.get("code"), "error": res.get("error")})

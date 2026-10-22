@@ -225,6 +225,69 @@ class _DiskOnly(_Env):
         self.assertEqual(res["skipped"][0]["reason"], "no_clean_name")
         self.assertTrue(src.exists())
 
+    def test_resume_after_partial_failure_no_dup_and_rollback_ok(self):
+        # C4: a resume of a partially-failed apply must not duplicate the failed
+        # row's op (which rolled back twice -> rollback_not_eligible) and
+        # rollback-by-job must report ok when the restore completes.
+        a = self.make_folder("A/One (2001){Album MbId}")
+        b = self.make_folder("B/Two (2002){Album MbId}")
+        real = cw.safe_rename_library_folder
+        def rename_then_fail(src, tgt, *a_, **kw):
+            out = real(src, tgt, *a_, **kw)
+            if "Two (2002)" in src:
+                return {"ok": False, "code": "folder_cleanup_move_failed", "error": "x", "operation_id": out["operation_id"]}
+            return out
+        with mock.patch.object(cw, "safe_rename_library_folder", rename_then_fail):
+            first = self.apply([a, b])
+        self.assertFalse(first["ok"]); self.assertEqual(first["done_folders"], [str(a)])
+        second = self.apply([a, b], resume_done=set(first["done_folders"]), prior_operations=list(first["operations"]))
+        ids = [o.get("operation_id") for o in second["operations"]]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        rb = ls._rollback_folder_placeholder_apply(second["operations"], store=self.store)
+        self.assertTrue(rb["ok"], rb["errors"])
+        self.assertTrue(a.exists() and b.exists())
+
+    def test_unapplied_failed_op_is_rollback_noop(self):
+        # C7: a failure that carries an operation_id but mutated nothing (an
+        # unapplied Preview tx) must be a rollback no-op, not a rollback failure.
+        from backend.transaction_engine import create_folder_cleanup_plan
+        a = self.make_folder(f"A/One (2001){PH}")
+        def fail_unapplied(src, tgt, *a_, **kw):
+            plan = create_folder_cleanup_plan(self.store, {"action": "safe_rename", "source": src, "target": tgt})
+            return {"ok": False, "code": "not_approved", "error": "not approved",
+                    "operation_id": plan["operation_id"]}
+        with mock.patch.object(cw, "safe_rename_library_folder", fail_unapplied):
+            res = self.apply([a])
+        self.assertFalse(res["ok"], res)                         # F4: run with an error
+        self.assertEqual(len(res["operations"]), 1, res["operations"])
+        self.assertTrue(a.exists())                              # never renamed
+        rb = ls._rollback_folder_placeholder_apply(res["operations"], store=self.store)
+        self.assertTrue(rb["ok"], rb)                            # proven-unapplied op = no-op
+        self.assertTrue(a.exists())
+
+    def test_held_tracked_row_does_not_consume_batch_budget(self):
+        # C5: a leading HELD (DB-tracked) row -- here a disc-subfolder album the
+        # top gate now catches descendant-aware (C6) -- must NOT consume
+        # batch_limit, else the next actionable row is never reached and a
+        # batched resume stalls. Pre-fix the held row ate the budget.
+        leading = self.make_folder(f"A/Disc (2001){PH}")      # album folder
+        (leading / "CD1").mkdir()                             # tracks live in a disc subfolder
+        (leading / "CD1" / "01 track.flac").write_bytes(b"audio")
+        plain = self.make_folder(f"B/Plain (2002){PH}")        # disk-only, actionable
+        # The adapter reports the one Beets item under leading/CD1 (a descendant
+        # of leading), nothing under plain.
+        tracked = FakeAdapter(items={1: {"id": 1, "album_id": 1,
+                                         "path": str(leading / "CD1" / "01 track.flac")}})
+        with mock.patch.object(cw, "beets_adapter", tracked):
+            res = ls._apply_folder_name_placeholders(
+                [str(leading), str(plain)], dry_run=False, batch_limit=1,
+                adapter=tracked, store=self.store)
+        self.assertEqual(res["final_summary"]["changed_count"], 1, res)  # plain renamed within budget
+        self.assertTrue(leading.exists())                                # held, untouched
+        self.assertFalse(plain.exists())                                 # renamed
+        self.assertTrue((self.music / "B/Plain (2002)").is_dir())
+        self.assertIn("tracked_needs_relocation", {s["reason"] for s in res["skipped"]}, res)
+
 
 class TrackedFolderHeldTests(unittest.TestCase):
     """F5 decision: a DB-tracked placeholder folder is NOT relocated by this
@@ -267,6 +330,26 @@ class TrackedFolderHeldTests(unittest.TestCase):
         self.assertEqual(apply["skipped"][0]["reason"], "tracked_needs_relocation", apply)
         self.assertEqual(preview["final_summary"]["would_change_count"], 0, preview)
         self.assertEqual(apply["final_summary"]["changed_count"], 0, apply)
+
+    def test_disc_subfolder_album_held_preview_equals_apply(self):
+        # C6: a DB-tracked album whose tracks live under a DISC SUBFOLDER must be
+        # HELD (tracked_needs_relocation) identically in preview and apply.
+        # Pre-fix the top gate counted only immediate-dirname items, so preview
+        # said "would rename" while apply refused (folder_cleanup_db_references).
+        eng = self.eng
+        album_folder = os.path.join(eng.music, "A", f"B{PH}")
+        eng.make_album(os.path.join(album_folder, "CD1"))  # items under a disc subfolder
+        with mock.patch.object(cw, "beets_adapter", eng.ad):
+            preview = ls._apply_folder_name_placeholders(
+                [album_folder], dry_run=True, adapter=eng.ad, store=eng.store)
+            apply = ls._apply_folder_name_placeholders(
+                [album_folder], dry_run=False, adapter=eng.ad, store=eng.store)
+        self.assertEqual(preview["skipped"][0]["reason"], "tracked_needs_relocation", preview)
+        self.assertEqual(apply["skipped"][0]["reason"], "tracked_needs_relocation", apply)
+        self.assertEqual(preview["final_summary"]["would_change_count"], 0, preview)
+        self.assertEqual(apply["final_summary"]["changed_count"], 0, apply)
+        self.assertEqual(apply["operations"], [], apply)
+        self.assertTrue(os.path.exists(album_folder))  # untouched
 
 
 class _FakeJob:

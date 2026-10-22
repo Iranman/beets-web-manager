@@ -23567,11 +23567,31 @@
    ]
   },
   {
-   "name": "_ops_cover_source",
+   "name": "_placeholder_folder_tracked",
    "module": "backend/library_service.py",
    "lines": [
     3885,
-    3890
+    3903
+   ],
+   "size": 19,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_apply_folder_name_placeholders"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_ops_cover_source",
+   "module": "backend/library_service.py",
+   "lines": [
+    3906,
+    3911
    ],
    "size": 6,
    "body_lines": 3,
@@ -23592,10 +23612,10 @@
    "name": "_find_applied_folder_op",
    "module": "backend/library_service.py",
    "lines": [
-    3893,
-    3916
+    3914,
+    3942
    ],
-   "size": 24,
+   "size": 29,
    "body_lines": 17,
    "route": null,
    "mutation_capable": false,
@@ -23615,11 +23635,11 @@
    "name": "_apply_folder_name_placeholders",
    "module": "backend/library_service.py",
    "lines": [
-    3919,
-    4138
+    3945,
+    4175
    ],
-   "size": 220,
-   "body_lines": 179,
+   "size": 231,
+   "body_lines": 190,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
@@ -23634,6 +23654,7 @@
     "_find_applied_folder_op",
     "_ops_cover_source",
     "_placeholder_folder_db",
+    "_placeholder_folder_tracked",
     "_placeholder_norm_path",
     "_scan_folder_name_placeholders"
    ]
@@ -23642,11 +23663,11 @@
    "name": "_rollback_folder_placeholder_apply",
    "module": "backend/library_service.py",
    "lines": [
-    4141,
-    4204
+    4178,
+    4249
    ],
-   "size": 64,
-   "body_lines": 46,
+   "size": 72,
+   "body_lines": 54,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
@@ -23664,8 +23685,8 @@
    "name": "_root_folder_repair_scan",
    "module": "backend/library_service.py",
    "lines": [
-    4207,
-    4299
+    4252,
+    4344
    ],
    "size": 93,
    "body_lines": 84,
@@ -23687,8 +23708,8 @@
    "name": "_root_folder_repair_apply_safe",
    "module": "backend/library_service.py",
    "lines": [
-    4302,
-    4435
+    4347,
+    4480
    ],
    "size": 134,
    "body_lines": 125,
@@ -23713,8 +23734,8 @@
    "name": "_album_cleanup_duplicate_file_choice",
    "module": "backend/library_service.py",
    "lines": [
-    4438,
-    4445
+    4483,
+    4490
    ],
    "size": 8,
    "body_lines": 5,
@@ -23735,8 +23756,8 @@
    "name": "_root_folder_repair_save_report",
    "module": "backend/library_service.py",
    "lines": [
-    4448,
-    4458
+    4493,
+    4503
    ],
    "size": 11,
    "body_lines": 10,
@@ -23757,8 +23778,8 @@
    "name": "_merge_artist_dir_contents",
    "module": "backend/library_service.py",
    "lines": [
-    4461,
-    4520
+    4506,
+    4565
    ],
    "size": 60,
    "body_lines": 51,
@@ -23783,8 +23804,8 @@
    "name": "_artist_folder_repair_root",
    "module": "backend/library_service.py",
    "lines": [
-    4523,
-    4561
+    4568,
+    4606
    ],
    "size": 39,
    "body_lines": 25,
@@ -23809,8 +23830,8 @@
    "name": "_apply_artist_folder_groups",
    "module": "backend/library_service.py",
    "lines": [
-    4564,
-    4698
+    4609,
+    4743
    ],
    "size": 135,
    "body_lines": 132,
@@ -23839,8 +23860,8 @@
    "name": "_artist_folder_mbid_from_name",
    "module": "backend/library_service.py",
    "lines": [
-    4707,
-    4709
+    4752,
+    4754
    ],
    "size": 3,
    "body_lines": 2,
@@ -23861,8 +23882,8 @@
    "name": "_artist_folder_canonical_name",
    "module": "backend/library_service.py",
    "lines": [
-    4712,
-    4718
+    4757,
+    4763
    ],
    "size": 7,
    "body_lines": 5,
@@ -23884,8 +23905,8 @@
    "name": "_stamp_db_path_prefix_pairs",
    "module": "backend/library_service.py",
    "lines": [
-    4721,
-    4725
+    4766,
+    4770
    ],
    "size": 5,
    "body_lines": 4,
@@ -23902,8 +23923,8 @@
    "name": "_stamp_artist_folder_scan",
    "module": "backend/library_service.py",
    "lines": [
-    4728,
-    4988
+    4773,
+    5033
    ],
    "size": 261,
    "body_lines": 252,
@@ -23936,8 +23957,8 @@
    "name": "_stamp_artist_folder_candidates",
    "module": "backend/library_service.py",
    "lines": [
-    4991,
-    4992
+    5036,
+    5037
    ],
    "size": 2,
    "body_lines": 1,
@@ -23956,8 +23977,8 @@
    "name": "_append_stamp_candidate_log",
    "module": "backend/library_service.py",
    "lines": [
-    4995,
-    5007
+    5040,
+    5052
    ],
    "size": 13,
    "body_lines": 12,
@@ -23976,8 +23997,8 @@
    "name": "_append_stamp_skipped_log",
    "module": "backend/library_service.py",
    "lines": [
-    5010,
-    5028
+    5055,
+    5073
    ],
    "size": 19,
    "body_lines": 12,
@@ -23997,8 +24018,8 @@
    "name": "item_dict",
    "module": "backend/library_service.py",
    "lines": [
-    5031,
-    5044
+    5076,
+    5089
    ],
    "size": 14,
    "body_lines": 13,
@@ -24022,8 +24043,8 @@
    "name": "item_dict_full",
    "module": "backend/library_service.py",
    "lines": [
-    5047,
-    5055
+    5092,
+    5100
    ],
    "size": 9,
    "body_lines": 8,
@@ -24045,8 +24066,8 @@
    "name": "album_dict",
    "module": "backend/library_service.py",
    "lines": [
-    5058,
-    5068
+    5103,
+    5113
    ],
    "size": 11,
    "body_lines": 10,
@@ -24070,8 +24091,8 @@
    "name": "start_fetch_missing_art",
    "module": "backend/library_service.py",
    "lines": [
-    5073,
-    5144
+    5118,
+    5189
    ],
    "size": 72,
    "body_lines": 70,
@@ -24097,8 +24118,8 @@
    "name": "_missing_mb_album_row",
    "module": "backend/library_service.py",
    "lines": [
-    5160,
-    5188
+    5205,
+    5233
    ],
    "size": 29,
    "body_lines": 28,
@@ -24120,8 +24141,8 @@
    "name": "_missing_mb_item_row",
    "module": "backend/library_service.py",
    "lines": [
-    5191,
-    5248
+    5236,
+    5293
    ],
    "size": 58,
    "body_lines": 57,
@@ -24143,8 +24164,8 @@
    "name": "_missing_mb_rows",
    "module": "backend/library_service.py",
    "lines": [
-    5259,
-    5304
+    5304,
+    5349
    ],
    "size": 46,
    "body_lines": 43,
@@ -24170,8 +24191,8 @@
    "name": "library_missing_mb_payload",
    "module": "backend/library_service.py",
    "lines": [
-    5307,
-    5328
+    5352,
+    5373
    ],
    "size": 22,
    "body_lines": 12,
