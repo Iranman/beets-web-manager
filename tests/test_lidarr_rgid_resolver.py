@@ -114,36 +114,127 @@ class UnresolvedReasonTests(unittest.TestCase):
         self.assertEqual(out, {"status": "unresolved", "reason": resolver.LIDARR_MISSING_RGID})
 
 
-# -- tie-breakers ---------------------------------------------------------------
+# -- tie-breakers (only among editions of ONE release group) --------------------
 
 class TieBreakerTests(unittest.TestCase):
+    """Tie-breakers pick *which edition's id* to report when several editions
+    share a single release-group MBID. They never choose across distinct
+    RGIDs (see StrictRgidTests) -- that would guess a canonical identity."""
+
     def test_year_is_the_first_tie_breaker(self):
         # Direct check of the year step: among same-title candidates of
-        # differing years, the one matching the folder year wins. (In the
-        # tier flow an exact title+year match resolves at Tier B; the year
-        # tie-breaker is what settles a multi-candidate set.)
+        # differing years, the one matching the folder year wins.
         a2016 = album(1, ARTIST_A, "Live", rgid=RGID_1, year="2016")
-        a2000 = album(2, ARTIST_A, "Live", rgid=RGID_2, year="2000")
+        a2000 = album(2, ARTIST_A, "Live", rgid=RGID_1, year="2000")
         self.assertIs(resolver._tie_break([a2000, a2016], "2016"), a2016)
         self.assertIs(resolver._tie_break([a2000, a2016], "2000"), a2000)
 
-    def test_album_type_breaks_the_tie(self):
+    def test_album_type_picks_edition_within_one_rgid(self):
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", album_type="Album"),
+                    album(2, ARTIST_A, "Dup", rgid=RGID_1, year="2016", album_type="Single"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
+        self.assertEqual((out["status"], out["release_group_mbid"], out["lidarr_album_id"]),
+                         ("resolved", RGID_1, 1))
+
+    def test_monitored_picks_edition_within_one_rgid(self):
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", monitored=False),
+                    album(2, ARTIST_A, "Dup", rgid=RGID_1, year="2016", monitored=True))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
+        self.assertEqual((out["status"], out["release_group_mbid"], out["lidarr_album_id"]),
+                         ("resolved", RGID_1, 2))
+
+    def test_track_file_count_picks_edition_within_one_rgid(self):
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", track_files=0),
+                    album(2, ARTIST_A, "Dup", rgid=RGID_1, year="2016", track_files=3))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
+        self.assertEqual((out["status"], out["release_group_mbid"], out["lidarr_album_id"]),
+                         ("resolved", RGID_1, 2))
+
+
+# -- strict RGID identity: never tie-break across distinct release groups --------
+
+class StrictRgidTests(unittest.TestCase):
+    """finding-7: the resolver must never bake a guessed identity into a folder.
+    Distinct release groups under the same title are held for review, no matter
+    how cleanly year / albumType / monitored / trackFileCount would have broken
+    the tie before. Several editions of ONE release group still resolve."""
+
+    def test_two_editions_one_rgid_resolve_at_title_year(self):
+        # Deluxe + standard edition, same RGID, same title+year -> that RGID.
+        idx = index(album(1, ARTIST_A, "The Album", rgid=RGID_1, year="2016", album_type="Album"),
+                    album(2, ARTIST_A, "The Album", rgid=RGID_1, year="2016", album_type="EP"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="The Album", album_year="2016")
+        self.assertEqual((out["status"], out["matched_tier"], out["release_group_mbid"]),
+                         ("resolved", "title_year", RGID_1))
+
+    def test_distinct_rgids_same_title_year_held(self):
+        # Identical title+year, DIFFERENT release groups -> HOLD (ambiguous).
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016"),
+                    album(2, ARTIST_A, "Dup", rgid=RGID_2, year="2016"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
+
+    def test_distinct_rgids_held_even_when_albumtype_would_break_tie(self):
         idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", album_type="Album"),
                     album(2, ARTIST_A, "Dup", rgid=RGID_2, year="2016", album_type="Single"))
         out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
-        self.assertEqual((out["status"], out["lidarr_album_id"]), ("resolved", 1))
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
 
-    def test_monitored_breaks_the_tie(self):
+    def test_distinct_rgids_held_even_when_monitored_would_break_tie(self):
         idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", monitored=False),
                     album(2, ARTIST_A, "Dup", rgid=RGID_2, year="2016", monitored=True))
         out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
-        self.assertEqual((out["status"], out["lidarr_album_id"]), ("resolved", 2))
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
 
-    def test_track_file_count_breaks_the_tie(self):
+    def test_distinct_rgids_held_even_when_trackcount_would_break_tie(self):
         idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", track_files=0),
-                    album(2, ARTIST_A, "Dup", rgid=RGID_2, year="2016", track_files=3))
+                    album(2, ARTIST_A, "Dup", rgid=RGID_2, year="2016", track_files=9))
         out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
-        self.assertEqual((out["status"], out["lidarr_album_id"]), ("resolved", 2))
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
+
+    def test_tier_c_single_distinct_rgid_resolves(self):
+        # Title-only (folder year matches neither edition), both one RGID.
+        idx = index(album(1, ARTIST_A, "Live", rgid=RGID_1, year="1999"),
+                    album(2, ARTIST_A, "Live", rgid=RGID_1, year="2005"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Live", album_year="2016")
+        self.assertEqual((out["status"], out["matched_tier"], out["release_group_mbid"]),
+                         ("resolved", "title_only", RGID_1))
+
+    def test_tier_c_multiple_distinct_rgids_held(self):
+        # Title-only spanning two release groups -> HOLD, never tie-break.
+        idx = index(album(1, ARTIST_A, "Live", rgid=RGID_1, year="1999"),
+                    album(2, ARTIST_A, "Live", rgid=RGID_2, year="2005"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Live", album_year="2016")
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
+
+    def test_tier_a_distinct_rgids_fall_through_to_title(self):
+        # Two basename matches with distinct RGIDs: Tier A does not guess; the
+        # title tier then holds them (not terminal at A, but still no guess).
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016",
+                          path="/music/Artist/Dup (2016)"),
+                    album(2, ARTIST_A, "Dup", rgid=RGID_2, year="2016",
+                          path="/music/Artist/Dup (2016)"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup",
+                               album_year="2016", album_basename="Dup (2016)")
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
+
+    def test_tier_a_single_rgid_editions_resolve(self):
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016", album_type="Album",
+                          path="/music/Artist/Dup (2016)"),
+                    album(2, ARTIST_A, "Dup", rgid=RGID_1, year="2016", album_type="Single",
+                          path="/music/Artist/Dup (2016)"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="irrelevant",
+                               album_basename="Dup (2016)")
+        self.assertEqual((out["status"], out["matched_tier"], out["release_group_mbid"]),
+                         ("resolved", "path_exact", RGID_1))
+
+    def test_distinct_rgid_mixed_with_missing_is_held(self):
+        # One valid RGID + one missing under same title -> not a single shared
+        # RGID -> held ambiguous, never resolved to the lone stamp.
+        idx = index(album(1, ARTIST_A, "Dup", rgid=RGID_1, year="2016"),
+                    album(2, ARTIST_A, "Dup", rgid="", year="2016"))
+        out = resolver.resolve(idx, artist_mbid=ARTIST_A, album_title="Dup", album_year="2016")
+        self.assertEqual(out, {"status": "unresolved", "reason": resolver.AMBIGUOUS_MULTIPLE_ALBUMS})
 
 
 # -- the snapshot index ---------------------------------------------------------
