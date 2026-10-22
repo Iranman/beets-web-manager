@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Lidarr now registers its operator-configured URL with the provider boundary, so a private LAN `LIDARR_URL` is trusted for Lidarr's own outbound calls (like Plex already is).** The folder MBID-name resolver's Lidarr call was rejected by the outbound URL policy (`ProviderOutcome.REJECTED`, "blocked by outbound URL policy") whenever `LIDARR_URL` resolved to a private/RFC-1918 address (e.g. `192.168.0.250:8686`): the boundary only grants a provider implicit trust of its own configured URL once that provider registers a resolver, and only Plex did. `routes_lidarr` (a startup route module) now calls `provider_boundary.register_configured_url("lidarr", ...)` at import time, reading the same live `backend.app_runtime.LIDARR_URL` the resolver uses (env, then the `LIDARR_URL_FILE` fallback and default). Trust stays scoped to exactly that one configured scheme/host/port for Lidarr's own calls; the SSRF guard is unchanged for every other address and provider.
+
 ## v0.13.1 - 2026-10-22
 
 ### Security
