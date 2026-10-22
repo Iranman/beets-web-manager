@@ -133,5 +133,53 @@ class LidarrTrustRealBootTests(unittest.TestCase):
         self.assertEqual(net.connected[0][:2], (PRIVATE_IP, 8686))
 
 
+class RejectionDiagnosticTests(unittest.TestCase):
+    """The TEMPORARY v0.13.3 diagnostic logs one WARNING only when the Lidarr
+    call is REJECTED by the outbound policy, and never logs the API key."""
+
+    API_KEY = "diagnostic-test-secret-key-DO-NOT-LOG-abc123"
+
+    def setUp(self):
+        from backend import lidarr_rgid_resolver as rr
+        self.rr = rr
+        rr._rejection_diagnostic_logged = False  # reset the one-shot guard
+        self.addCleanup(setattr, rr, "_rejection_diagnostic_logged", False)
+        for name, val in (("LIDARR_URL", PRIVATE_URL), ("LIDARR_KEY", self.API_KEY)):
+            p = mock.patch.object(app_runtime, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_logs_one_warning_on_rejection_without_secret(self):
+        from backend.security import OutboundPolicyError
+        with mock.patch.object(self.rr.provider_boundary, "opened",
+                               side_effect=OutboundPolicyError("blocked")):
+            with self.assertLogs("app", level="WARNING") as cm:
+                with self.assertRaises(provider_boundary.ProviderError):
+                    self.rr._lidarr_get_list("/api/v1/artist", timeout=5)
+        line = "\n".join(cm.output)
+        self.assertIn("LIDARR TRUST DIAGNOSTIC", line)
+        self.assertIn("configured_url(lidarr)", line)
+        self.assertNotIn(self.API_KEY, line)        # never the API key
+        self.assertNotIn("DO-NOT-LOG", line)
+
+    def test_only_fires_once(self):
+        from backend.security import OutboundPolicyError
+        with mock.patch.object(self.rr.provider_boundary, "opened",
+                               side_effect=OutboundPolicyError("blocked")):
+            with self.assertLogs("app", level="WARNING") as cm:
+                for _ in range(3):
+                    with self.assertRaises(provider_boundary.ProviderError):
+                        self.rr._lidarr_get_list("/api/v1/artist", timeout=5)
+        self.assertEqual(sum("LIDARR TRUST DIAGNOSTIC" in m for m in cm.output), 1)
+
+    def test_does_not_fire_on_non_rejected_outcome(self):
+        with mock.patch.object(self.rr.provider_boundary, "opened",
+                               side_effect=TimeoutError("slow")):  # -> TRANSIENT_ERROR, not REJECTED
+            with mock.patch.object(app_runtime._app_logger, "warning") as warn:
+                with self.assertRaises(provider_boundary.ProviderError):
+                    self.rr._lidarr_get_list("/api/v1/artist", timeout=5)
+                self.assertFalse(any("LIDARR TRUST DIAGNOSTIC" in str(c) for c in warn.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()
