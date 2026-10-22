@@ -4328,10 +4328,13 @@ def _apply_folder_mbid_names(
     the Lidarr resolver, through the canonical mutation engine. Preview
     (``dry_run``) never mutates.
 
-    ONE bulk Lidarr snapshot is taken per run (``LidarrRgidResolver.from_lidarr``);
-    a ``provider_boundary.ProviderError`` from it ABORTS the run, touching
-    nothing -- a provider failure is never downgraded to an "unresolved" row.
-    ``resolver`` may be injected (tests); otherwise it is built here.
+    The Lidarr fetch is SCOPED to the distinct artist MBIDs of the selected
+    folders (``LidarrRgidResolver.from_lidarr(artist_mbids=...)``): one
+    ``GET /api/v1/artist`` plus one ``GET /api/v1/album?artistId=`` per artist,
+    never the full 37k-album list. A ``provider_boundary.ProviderError`` from it
+    ABORTS the run, touching nothing -- a provider failure is never downgraded
+    to an "unresolved" row. ``resolver`` may be injected (tests); otherwise it
+    is built here.
 
     Per album folder, with the resolver's verdict and a live tracked-status
     re-check (descendant-aware, matching the engine's DB-reference refusal):
@@ -4355,15 +4358,24 @@ def _apply_folder_mbid_names(
     from backend.lidarr_rgid_resolver import LidarrRgidResolver
 
     st = store if store is not None else composite_workflows.get_default_store()
-    # One bulk snapshot per run; a provider failure propagates and aborts.
-    if resolver is None:
-        resolver = LidarrRgidResolver.from_lidarr(timeout=resolver_timeout)
 
     resume_done_originals = list(resume_done or [])
     resume_done = {_placeholder_norm_path(f) for f in resume_done_originals}
 
     if folders is None:
         folders = [str(d) for d in _iter_album_folders(cancel_event=cancel_event)]
+
+    # Scope the Lidarr fetch to the artists actually present on disk instead of
+    # pulling Lidarr's ENTIRE album DB (37k+ albums / ~315 MB, which times out on
+    # a large Lidarr). The rename loop below already derives one artist MBID per
+    # folder; collect the DISTINCT set and fetch only those artists' albums. A
+    # provider failure still propagates and aborts the run. (library-transaction
+    # owns this module; scoping this resolver call is the only change here.)
+    if resolver is None:
+        needed_artist_mbids = {_artist_mbid_from_folder(Path(f).parent.name) for f in folders}
+        needed_artist_mbids.discard("")
+        resolver = LidarrRgidResolver.from_lidarr(
+            artist_mbids=needed_artist_mbids, timeout=resolver_timeout)
 
     folder_db = _placeholder_folder_db(adapter)
 

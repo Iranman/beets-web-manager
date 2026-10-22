@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Lidarr release-group-MBID resolver scopes its fetch to the library's artists (no longer pulls Lidarr's entire album DB).** The folder MBID-name dry-run fetched the full `GET /api/v1/album` (all albums) in one call; on a large Lidarr (37,749 albums ≈ 315 MB JSON) that times out at ~30 s and aborts the whole run, even though the library only spans ~149 distinct artists. `LidarrRgidResolver.from_lidarr` now takes the set of artist MBIDs actually present on disk (collected from the selected album folders) and fetches only those: one `GET /api/v1/artist` maps each needed `foreignArtistId` to Lidarr's internal `artist.id`, then one `GET /api/v1/album?artistId=<id>` per needed artist pulls just that artist's albums (small payloads). The in-memory artist-MBID→albums index and all matching/tie-break/strict-RGID logic are unchanged (each per-artist album still carries `artist.foreignArtistId`). Per-run Lidarr calls drop from one 315 MB request to `1 + (#distinct artists)` small requests (~150 on the reported library). Artist-MBID lookups are deduped and cached for the run; an artist MBID Lidarr does not know is skipped (no album call) and still resolves to `artist_not_in_lidarr`. Every call still goes through the provider boundary (`lidarr`) and any provider failure (timeout, auth, rate limit, unavailable, malformed) still **raises and aborts the run** — never downgraded to "unresolved".
+
 ## v0.13.0 - 2026-10-22
 
 ### Fixed
