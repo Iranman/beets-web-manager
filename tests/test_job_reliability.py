@@ -421,7 +421,7 @@ class AdHocThreadInventoryTests(unittest.TestCase):
     job engine instead, or justify it here)."""
 
     ALLOWED = {
-        "job_engine.py": 4,                    # the infrastructure: job threads, heartbeat, schedules
+        "job_engine.py": 5,                    # the infrastructure: job threads, heartbeat, schedules, bounded-startup tail recovery
         "backend/job_contract.py": 1,          # lock heartbeat inside a running job, joined
         "backend/resource_locks.py": 1,        # lock heartbeat, joined
         "backend/transaction_recovery.py": 1,  # startup recovery sweep (library-transaction)

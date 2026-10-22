@@ -55,10 +55,32 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 TERMINAL_STATUSES = ("success", "failed", "cancelled", "recovery_required")
+#: Terminal statuses safe to auto-prune. ``recovery_required`` is excluded:
+#: the operator must still see and resolve it (BA-10).
+PRUNABLE_STATUSES = ("success", "failed", "cancelled")
 PERSIST_INTERVAL_SECONDS = 2.0
 HEARTBEAT_SECONDS = 15.0
 LOG_TAIL_PERSISTED = 500
 RESULT_PERSIST_LIMIT_BYTES = 1_000_000
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, "")).strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+#: Bounded cold start (ARCH-004): startup reads at most this many of the most
+#: recent job files synchronously. Older records stay on disk and load lazily
+#: by id (``get()``), so history and rollback-by-job still resolve. ``<= 0``
+#: loads everything (the pre-bounding behaviour). Default keeps a restart fast
+#: and bounded regardless of how much job history has accumulated.
+JOB_STARTUP_LOAD_LIMIT = _env_int("JOB_STARTUP_LOAD_LIMIT", 200)
+#: Terminal (``PRUNABLE_STATUSES``) job records older than this are pruned from
+#: disk during the background startup sweep, so the jobs directory stays
+#: bounded. ``recovery_required`` is never auto-pruned.
+JOB_RETENTION_DAYS = _env_int("JOB_RETENTION_DAYS", 7)
 
 #: Job types that never mutate the library or files: after an interrupted
 #: run they are simply failed (safe to start again).
@@ -510,6 +532,7 @@ class JobStore:
         self.recovered: List[Dict[str, Any]] = []
         self._closed = threading.Event()
         self._heartbeat: Optional[threading.Thread] = None
+        self._recover_thread: Optional[threading.Thread] = None
         # Every started job thread, also after clear/prune drops its job:
         # close() must join a thread whose final write is still in flight.
         self._threads: List[threading.Thread] = []
@@ -558,40 +581,107 @@ class JobStore:
                 pass
 
     def _recover(self) -> None:
-        """Load persisted jobs; resolve those this process never finished."""
+        """Load persisted jobs with a bounded synchronous cost (ARCH-004).
+
+        Startup is O(``JOB_STARTUP_LOAD_LIMIT``), not O(all jobs): only the
+        most recent records are read+parsed before this returns, so a restart
+        stays fast regardless of accumulated history. Interrupted ``running``
+        jobs are written most recently (persist/heartbeat), so they fall in
+        that window and are resolved here. Older records stay on disk and load
+        lazily by id (``get()``) -- rollback-by-job and resume still resolve
+        any non-pruned job -- while the long tail (straggler recovery + pruning
+        terminal records past ``JOB_RETENTION_DAYS``) is handled off the
+        startup/healthcheck critical path by a background thread.
+        """
         now = time.time()
-        for path in sorted(self.root.glob("*.json")):
+        try:
+            entries = []
+            for path in self.root.glob("*.json"):
+                try:
+                    entries.append((path.stat().st_mtime, path))
+                except OSError:
+                    continue
+        except OSError:
+            return
+        entries.sort(key=lambda e: e[0], reverse=True)  # newest first
+        limit = JOB_STARTUP_LOAD_LIMIT if JOB_STARTUP_LOAD_LIMIT > 0 else len(entries)
+        for _mtime, path in entries[:limit]:
+            self._load_path(path, now)
+        tail = [path for _mtime, path in entries[limit:]]
+        if tail:
+            self._recover_thread = threading.Thread(
+                target=self._recover_tail, args=(tail, now),
+                daemon=True, name="job-recover-tail")
+            self._recover_thread.start()
+
+    def _load_path(self, path: Path, now: float) -> Optional["PythonJob"]:
+        """Load one persisted record, resolving it if this process never
+        finished it. Thread-safe: callable from startup, the background tail
+        sweep, and lazy ``get()``."""
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+            job = PythonJob.from_record(rec)
+        except Exception:
+            return None
+        job._persist = self._write
+        with self._lock:
+            existing = self._jobs.get(job.job_id)
+            if existing is not None:
+                return existing
+            self._jobs[job.job_id] = job
+        if rec.get("status") == "running":
+            # A record persisted as running has no live thread in this process,
+            # so it was interrupted by the restart.
+            self._resolve_interrupted(job, rec, now)
+        return job
+
+    def _resolve_interrupted(self, job: "PythonJob", rec: Dict[str, Any], now: float) -> None:
+        read_only = is_read_only_job(job.metadata)
+        job._terminal = "failed" if read_only else "recovery_required"
+        job.finished_at = job.finished_at or now
+        job.returncode = 1
+        job.recovery = {
+            "interrupted_at": now,
+            "last_heartbeat_at": rec.get("heartbeat_at"),
+            "checkpoint": (rec.get("state") or {}).get("checkpoint"),
+            "resolution": ("failed: read-only job, safe to start again" if read_only else
+                           "recovery_required: the process stopped before this job finished; "
+                           "it is not re-run automatically"),
+        }
+        job.log.append(f"[{job._terminal}: the Web Manager process restarted while this job ran]")
+        workflow_lock = (rec.get("state") or {}).get("workflow_lock")
+        if workflow_lock:  # NB-1: its durable lock dies with it, not a ttl later
+            try:
+                from backend.job_contract import release_interrupted  # stdlib-only; lazy like redact
+                job.recovery["released_locks"] = release_interrupted(workflow_lock)
+            except Exception:
+                pass  # the lock is still reclaimed on heartbeat expiry
+        self._write(job)
+        with self._lock:
+            self.recovered.append({"job_id": job.job_id, "status": job._terminal,
+                                   "type": job.metadata.get("type")})
+
+    def _recover_tail(self, paths: List[Path], now: float) -> None:
+        """Background catch-up for records beyond the startup window: resolve
+        any interrupted ``running`` straggler, and prune terminal records older
+        than ``JOB_RETENTION_DAYS`` from disk. Recent terminal records are left
+        on disk for lazy ``get()``; nothing is held in memory unless it needed
+        resolving, so this does not re-grow the in-memory set."""
+        cutoff = now - max(0, JOB_RETENTION_DAYS) * 86400.0
+        for path in paths:
+            if self._closed.is_set():
+                return
             try:
                 rec = json.loads(path.read_text(encoding="utf-8"))
-                job = PythonJob.from_record(rec)
             except Exception:
                 continue
-            job._persist = self._write
-            self._jobs[job.job_id] = job
-            if rec.get("status") == "running":
-                read_only = is_read_only_job(job.metadata)
-                job._terminal = "failed" if read_only else "recovery_required"
-                job.finished_at = job.finished_at or now
-                job.returncode = 1
-                job.recovery = {
-                    "interrupted_at": now,
-                    "last_heartbeat_at": rec.get("heartbeat_at"),
-                    "checkpoint": (rec.get("state") or {}).get("checkpoint"),
-                    "resolution": ("failed: read-only job, safe to start again" if read_only else
-                                   "recovery_required: the process stopped before this job finished; "
-                                   "it is not re-run automatically"),
-                }
-                job.log.append(f"[{job._terminal}: the Web Manager process restarted while this job ran]")
-                workflow_lock = (rec.get("state") or {}).get("workflow_lock")
-                if workflow_lock:  # NB-1: its durable lock dies with it, not a ttl later
-                    try:
-                        from backend.job_contract import release_interrupted  # stdlib-only; lazy like redact
-                        job.recovery["released_locks"] = release_interrupted(workflow_lock)
-                    except Exception:
-                        pass  # the lock is still reclaimed on heartbeat expiry
-                self._write(job)
-                self.recovered.append({"job_id": job.job_id, "status": job._terminal,
-                                       "type": job.metadata.get("type")})
+            status = rec.get("status")
+            if status == "running":
+                self._load_path(path, now)  # loads + resolves + keeps the straggler
+            elif status in PRUNABLE_STATUSES:
+                finished_at = rec.get("finished_at") or rec.get("created_at") or 0
+                if finished_at and finished_at < cutoff:
+                    self._delete(rec.get("job_id") or path.stem)
 
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(HEARTBEAT_SECONDS):
@@ -724,14 +814,31 @@ class JobStore:
         self._closed.set()
         deadline = time.monotonic() + timeout
         with self._lock:
-            threads = [self._heartbeat] + list(self._schedules.values()) + list(self._threads)
+            threads = ([self._heartbeat, self._recover_thread]
+                       + list(self._schedules.values()) + list(self._threads))
         for thread in threads:
             if thread is not None and thread is not threading.current_thread():
                 thread.join(max(0.0, deadline - time.monotonic()))
         return not any(t is not None and t.is_alive() for t in threads)
 
     def get(self, jid) -> Optional["PythonJob"]:
-        return self._jobs.get(jid)
+        job = self._jobs.get(jid)
+        if job is not None or self.root is None or not jid:
+            return job
+        # Lazy-load history beyond the startup window by id (O(1)) so
+        # rollback-by-job and resume resolve any non-pruned record. jid feeds a
+        # filesystem path and comes from request bodies, so reject anything
+        # that is not a bare record name before touching the disk.
+        jid = str(jid)
+        if any(c in jid for c in ("/", "\\", "\x00")) or jid in (".", ".."):
+            return None
+        path = self.root / f"{jid}.json"
+        try:
+            if path.parent != self.root or not path.is_file():
+                return None
+        except OSError:
+            return None
+        return self._load_path(path, time.time())
 
     def all(self) -> List["PythonJob"]:
         return sorted(list(self._jobs.values()), key=lambda j: j.created_at, reverse=True)

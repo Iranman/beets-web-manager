@@ -164,6 +164,8 @@ APP_KEYS = frozenset({
     "SPOTIFLAC_SERVICES",
     "SPOTIFLAC_AUTO_INSTALL",
     "RECOVER_OWNED_ACCOUNTS",  # read live via os.environ on each recover call
+    "JOB_STARTUP_LOAD_LIMIT",  # read once at job_engine import (restart)
+    "JOB_RETENTION_DAYS",      # read once at job_engine import (restart)
 })
 
 SECRET_KEYS = frozenset({
@@ -214,6 +216,8 @@ _RESTART_APP_KEYS = frozenset({
     "YTDLP_COOKIE_FILE",
     "YTDLP_ALLOW_BROWSER_COOKIES",
     "YTDLP_NETRC_FILE",
+    "JOB_STARTUP_LOAD_LIMIT",
+    "JOB_RETENTION_DAYS",
 })
 
 

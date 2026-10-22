@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Durable-job cold start is now fast and bounded regardless of accumulated job history.** On a long-lived instance the jobs directory (`WEB_MANAGER_DATA_DIR/jobs`) had grown to ~2,796 records (~34 MB), and `JobStore` read and parsed **every** file synchronously at startup (`_recover` globbed and `json.loads`'d all of them before the import that constructs the store returned). Over ZFS/NFS this made cold start take ~3 minutes with the process stuck in disk-sleep, so the container stayed `unhealthy` the whole time — which looked like a hang and triggered an unnecessary deploy rollback. Startup now reads only the most recent `JOB_STARTUP_LOAD_LIMIT` records (default `200`, newest by mtime) on the critical path; the long tail is handled off-path by a background thread that recovers any interrupted job and prunes terminal records older than `JOB_RETENTION_DAYS` (default `7`) from disk. `JobStore.get()` lazily loads any record by id, so the Jobs API, rollback-by-job and resume still resolve any non-pruned job even when it is outside the startup window. `recovery_required` records and running jobs are never auto-pruned, and the lazy id lookup rejects path-traversal input. New env knobs `JOB_STARTUP_LOAD_LIMIT` and `JOB_RETENTION_DAYS` (see `docs/CONFIGURATION.md` / `.env.example`); `0` or less for the load limit restores the old read-everything behaviour.
+
 ## v0.13.1 - 2026-10-22
 
 ### Security
