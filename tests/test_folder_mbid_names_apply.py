@@ -99,6 +99,29 @@ class _DiskOnly(_Env):
         self.assertEqual(res["operations"], [])
         self.assertTrue(src.exists())  # untouched
 
+    def test_yearless_folder_is_idempotent_across_reruns(self):
+        # Regression: a folder with no parseable year must stabilize. The old bug
+        # emitted a bare "()" so each run grew the name
+        # (Album {rgid} -> Album () {rgid} -> ...); over ~9k resumeable folders
+        # that never settles. First run fills the MBID (no "()"); second run must
+        # be a pure already_correct skip with the name unchanged.
+        resolver = FakeResolver({"Album": _resolved()})
+        src = self.make_folder(f"Artist ({ARTIST_MBID})/Album")
+        res1 = self.apply([src], resolver=resolver)
+        self.assertTrue(res1["ok"], res1)
+        self.assertEqual(res1["final_summary"]["changed_count"], 1, res1)
+        renamed = src.parent / f"Album {{{RGID}}}"
+        self.assertTrue(renamed.is_dir(), res1)
+        self.assertFalse(src.exists())
+
+        res2 = self.apply([renamed], resolver=resolver)
+        self.assertTrue(res2["ok"], res2)
+        self.assertEqual(res2["final_summary"]["changed_count"], 0, res2)
+        self.assertEqual(res2["final_summary"]["already_correct_count"], 1, res2)
+        self.assertEqual(res2["operations"], [])
+        self.assertTrue(renamed.is_dir())  # name did NOT grow
+        self.assertFalse((src.parent / f"Album () {{{RGID}}}").exists())
+
     def test_wrong_mbid_token_is_corrected(self):
         src = self.make_folder(f"Artist ({ARTIST_MBID})/Album (2003) {{{RGID2}}}")
         res = self.apply([src])
